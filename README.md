@@ -5,280 +5,60 @@
 <h1 align="center">Culvert</h1>
 
 <p align="center">
-  <strong>Enterprise-grade open-source forward proxy</strong><br/>
-  HTTP &middot; HTTPS &middot; SOCKS5 &middot; WebSocket<br/>
-  Single binary &middot; Zero dependencies &middot; Written in Go
+  <strong>Self-hosted Secure Web Gateway &amp; identity-aware forward proxy</strong><br/>
+  HTTP &middot; HTTPS &middot; SOCKS5 &middot; WebSocket &nbsp;|&nbsp; Single Go binary &middot; No runtime service dependencies
 </p>
 
 <p align="center">
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/codeql.yml/badge.svg" alt="CodeQL" /></a>
   <a href="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml"><img src="https://github.com/KidCarmi/Culvert/actions/workflows/security-release-gate.yml/badge.svg" alt="Security Gate" /></a>
-  <a href="https://github.com/KidCarmi/Dependency-Obituary"><img src="https://img.shields.io/badge/deps-Dependency%20Obituary-blueviolet" alt="Dependency Obituary" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <img src="https://img.shields.io/badge/PQC-ML--KEM--768-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDFMMyA1djZjMCA1LjU1IDMuODQgMTAuNzQgOSAxMiA1LjE2LTEuMjYgOS02LjQ1IDktMTJWNWwtOS00eiIvPjwvc3ZnPg==" alt="Post-Quantum Ready" />
   <a href="https://goreportcard.com/report/github.com/KidCarmi/Culvert"><img src="https://goreportcard.com/badge/github.com/KidCarmi/Culvert" alt="Go Report Card" /></a>
 </p>
 
 ---
 
-## Why Culvert?
+## What is Culvert?
 
-Most forward proxies force you to choose: commercial appliance with vendor lock-in, or a minimal open-source tool you have to build around. Culvert is neither. It ships as a **single Go binary** with everything built in - SSL inspection, identity-aware policy, antivirus scanning, threat feeds, a full admin UI, and enterprise auth (OIDC, SAML, LDAP) - all without plugins, agents, or runtime dependencies.
+Culvert is a **Secure Web Gateway (SWG)** — a policy-enforcing forward proxy that sits between your users and the internet, deciding what traffic is allowed, inspecting it, and recording it. It delivers the capabilities enterprises buy from commercial appliances — TLS inspection, identity-aware policy, malware scanning, threat intelligence, SSO, and centralized management — as a **single Go binary** you run yourself.
 
-Deploy it with `docker-compose up -d` and you get a production-ready proxy with zero-trust default-deny, real-time dashboards, Prometheus metrics, and a 10-check CI security pipeline. Scale it out with the built-in gRPC Control Plane for multi-node deployments. Extend it with the plugin API when you need custom logic.
+There is no agent to install, no plugin marketplace to assemble, and no external database or message bus to operate. The binary is statically linked (no CGO); the only optional runtime companion is a ClamAV sidecar if you enable antivirus scanning.
+
+**Who it's for:** security teams that need egress control and DLP-style inspection; network and platform teams that need a manageable forward proxy with SSO; and operators who want the transparency and cost profile of open source without giving up an admin console, metrics, and a control plane.
+
+```bash
+docker compose up -d          # a working proxy + admin UI, no config required
+```
 
 ---
 
-## Features
+## Core Capabilities
 
-### Proxy & Protocols
+| Domain | What you get |
+|---|---|
+| **Proxy** | HTTP/HTTPS forward proxy, full CONNECT tunneling, SOCKS5 (RFC 1928/1929, CONNECT), WebSocket relay, PAC auto-config, upstream proxy chaining |
+| **TLS inspection** | Opt-in MITM with on-the-fly ECDSA P-256 leaf certs, per-host bypass, bounded leaf cache (10k entries / 1h TTL) |
+| **Policy** | Priority-ordered, first-match rules across 8 condition types; default-deny (Zero Trust); Allow / Drop / Block Page / Redirect actions; per-rule TLS inspect-or-bypass |
+| **Identity** | Local (bcrypt), OIDC (Auth-Code + PKCE), SAML 2.0, LDAP/AD; multi-IdP with email-domain routing; TOTP 2FA; admin RBAC (admin/operator/viewer) |
+| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, CDR |
+| **Observability** | Prometheus metrics, live SSE dashboard, structured JSON logs, syslog forwarding (RFC 3164/5424), signed webhook alerts, tamper-evident audit trail |
+| **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
+| **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
 
-- **HTTP / HTTPS** forward proxy with full CONNECT tunnel support
-- **SSL/TLS inspection** - on-the-fly MITM certs (ECDSA P-256), per-host bypass, LRU cert cache (10k entries, 1h TTL)
-- **SOCKS5** proxy (RFC 1928/1929) with username/password auth
-- **WebSocket** tunneling through CONNECT
-- **PAC file** auto-generation for browser auto-configuration
-- **Upstream proxy chaining** with round-robin, health checks, and automatic failover
-- **Circuit breaker** - stops forwarding to hung upstream proxies after consecutive failures
-
-### Policy Engine (Zero Trust)
-
-- **Default deny** - unmatched traffic is blocked
-- **Priority-based rules** - first match wins across 8 condition types:
-  - Source IP / CIDR
-  - Authenticated identity
-  - IdP group membership
-  - Auth source (OIDC, SAML, LDAP, local)
-  - Destination FQDN (exact + wildcard)
-  - URL category (Social, Streaming, Gambling, News, Malicious, Adult, ...)
-  - Destination country (GeoIP, fail-closed on cache miss)
-  - Time schedule (day of week + time window + timezone)
-- **Actions**: Allow, Drop, Block Page, Redirect
-- **Per-rule SSL action**: Inspect (full MITM) or Bypass (transparent tunnel)
-- **Policy conflict detection** - warns on overlapping rules at same priority
-- **Per-rule Prometheus metrics** with cardinality cap
-
-### Authentication & Identity
-
-- **Local auth** with bcrypt hashes and first-run setup wizard
-- **OIDC** Authorization Code + PKCE (Okta, Azure AD, Google, Auth0, Keycloak)
-- **SAML 2.0** SP-initiated SSO (Okta, Azure AD, ADFS)
-- **LDAP** bind + search with group resolution (Active Directory, OpenLDAP, FreeIPA)
-- **Multi-IdP** - simultaneous providers with email-domain routing
-- **TOTP 2FA** (RFC 6238, inline stdlib implementation) with backup codes for admin accounts
-- **RBAC** - admin / operator / viewer roles
-
-### Content Security
-
-- **ClamAV** antivirus (INSTREAM protocol, concurrency-limited scanning, auto-detection)
-- **YARA rules** - pure-Go engine (no libyara), runtime reload, ReDoS-safe (5s timeout)
-- **Threat feeds** - URLhaus + OpenPhish with hourly sync, dynamic domain allowlist for hosting platforms (GitHub, Google Drive, etc.)
-- **DPI** - regex content scanning on decrypted HTTPS responses
-- **File-type blocking** - 5 named profiles (Executables, Archives, Documents, Media, Strict)
-- **Domain blocklist** with wildcard matching and allow-list mode
-- **URL category database** (UT1) with background sync
-- **SHA-256 scan cache** with configurable size + TTL
-- **Remote scan sidecar** - process-isolated ClamAV/YARA scanning via remote microservice
-- **Blocklist feed syncer** - auto-sync domain blocklists from remote URLs
-
-### Admin Web UI
-
-Single-page application with real-time updates:
-
-| Panel | Description |
-|-------|-------------|
-| Dashboard | Live stats, timeseries chart, top domains, country traffic map |
-| Live Feed | Real-time request log with per-status badges, filtering, CSV/JSON export |
-| Blocklist | Domain entries with wildcards; allow-list / deny-list toggle |
-| Policy | Visual PBAC rule editor with all 8 condition types |
-| Policy Tester | Dry-run evaluation against any host/user/IP |
-| Security | IP filter, rate limiting, connection limits, block page editor, scanner status |
-| File Block | File-type blocking profile selector |
-| Rewrite | Per-host header rewrite rules (request + response) |
-| Upstream Proxies | Parent proxy chaining with health checks and circuit breaker |
-| IdP Providers | Step-by-step wizard for OIDC, SAML, LDAP |
-| SSL / TLS | Root CA viewer, custom TLS upload, SSL bypass patterns |
-| CA Management | CA lifecycle, PEM download, cache stats, OCSP toggle, force rotation |
-| Cluster Nodes | Multi-node role display, DP node metrics, enrollment command generator |
-| Node Groups | Label-based node grouping with geo-aware auto-labeling |
-| Bandwidth / QoS | Per-group bandwidth policies with token bucket rate limiting |
-| Config Versions | Auto-snapshot history, side-by-side diff, one-click rollback |
-| PAC | PAC file generator with custom exclusions |
-| Audit Log | Tamper-evident JSONL trail of all admin actions |
-| Diagnostics | Operator contract — storage, policy load, root CA, session HMAC, CDR, cluster TLS posture, release-management health, config-version health, risky-but-allowed warnings |
-| Governance | Read-only control-plane visibility — route inventory, C2/C2c/C4 counters, derived health, parity-test catalog (admin-only) |
-| Users | User management with RBAC role assignment |
-| Settings | Session timeout, UI access control, syslog, config export/import |
-
-### Observability & SIEM
-
-- **Prometheus metrics** - requests, blocks, auth failures, AV scans, YARA matches, bytes transferred, latency histogram, per-rule counters
-- **Real-time SSE** dashboard feed
-- **Structured logging** - text or JSON with `req_id`, `identity`, `rule`, `action` fields
-- **Rotating log files** with configurable size threshold
-- **Syslog forwarding** (UDP/TCP, RFC 3164 + RFC 5424) for Splunk, Elastic, QRadar
-- **JSONL audit trail** with actor identity enrichment
-- **Webhook alerts** - HMAC-SHA256 signed notifications for threats, blocks, lockouts
-- **Request tracing** - auto-generated X-Request-ID for end-to-end correlation
-
-### Release Management & Updates
-
-- **Release catalog** - catalog loader with fail-closed validation, manifest hash binding, ed25519 signature verification (enforce-by-default when trust roots are present), freshness (`expires_at`) and rollback (`catalog_version`) protection, and channel pointers for recommended/LTS/critical releases
-- **Pinned-image dispatch** - Control Plane dispatches only immutable `repo@sha256:<digest>` image refs; mutable tags are refused before the maintenance agent is called
-- **Maintenance-agent flow** - release dispatch uses the agent's existing `/v1/status`, `/v1/upgrades/apply`, and `/v1/operations/{op_id}` endpoints, then verifies success from `running_image.repo_digests`
-- **Resume API** - accepted operations expose their op id, idempotency key, and target digest for explicit status/resume calls while the Control Plane process is running
-- **Single-flight guard** - one active release dispatch per agent; concurrent requests are rejected instead of queued or duplicated
-- **Digest verification gate** - an agent-reported success is not trusted until the running digest matches the catalog-pinned digest
-- **Legacy Docker updater retained** - the Docker update sidecar is still present for compatibility while the catalog + dispatch + maintenance-agent path is proven in production
-- **Local repository allowlist** - dispatch is limited to the configured release repository; publish catalogs against that same repository until repo-rewrite wiring is enabled
-
-### Resilience & Operations
-
-- **Hot config reload** - `SIGHUP` reloads blocklist, policy, rewrite, rate limit, upstream pool
-- **Graceful shutdown** - lifecycle context + 15s drain window for active tunnels
-- **CA auto-rotation** - daily expiry check, auto-rotates 30 days before expiry
-- **OCSP/CRL checking** on upstream TLS certificates (fail-closed)
-- **Per-IP connection limiting** (configurable, default 1024) with runtime admin API
-- **Brute-force lockout** - 5 failures triggers 15-min IP + user lock
-- **Admin API rate limiting** - 60 req/min per IP on mutating endpoints
-- **Atomic file writes** for CA bundle and config persistence
-- **PBKDF2 600k iterations** (NIST SP 800-132 2024) for CA key encryption
-- **Post-Quantum Cryptography** - ML-KEM-768 hybrid key exchange (Go 1.25), protects against "Harvest Now, Decrypt Later" attacks
-- **Password complexity** - enforces 8+ characters, mixed case, digit requirement
-- **Log levels** - runtime DEBUG/INFO/WARN/ERROR with admin API control
-
-### Distributed Architecture
-
-- **Control Plane / Data Plane** - gRPC config sync with mTLS, per-node metrics aggregation
-- **Cluster dashboard** - connected node list, health, request counts, enrollment wizard
-- **Node groups** - label-based selectors with auto GeoIP labeling on enrollment
-- **Bandwidth / QoS** - per-group token bucket rate limiting with admin UI
-- **Config versioning** - automatic snapshots on every mutation, side-by-side diff, one-click rollback (50 versions)
-- **Rolling upgrades** - orchestrated cluster updates with drain, canary, HA sync
-- **PAC / threat feed / secrets sync** - full config snapshot pushed to data plane nodes
-- **Bootstrap generator** - one-line curl|bash enrollment scripts and docker-compose templates for DP nodes
-- **Exponential backoff** on connection failures (2s–60s)
-- **Client mTLS** for upstream proxy authentication
-- See **[Deployment Guide](docs/deployment-guide.md)** for single-node, multi-node, and upstream chaining setup
-
-### Extensibility
-
-- **Plugin API** - `Middleware` interface for custom request/response inspection
-- **HSM/KMS integration** - `KeyProvider` interface (AWS KMS, Azure Key Vault, PKCS#11)
-
----
-
-## Sizing Guide
-
-Culvert is lightweight by design - a single Go binary with no runtime dependencies. Resource requirements scale with traffic volume, SSL inspection depth, and whether antivirus scanning is enabled.
-
-All benchmarks below are based on **x86_64 (AMD64)** processors. ARM64 (AWS Graviton, Apple Silicon) typically achieves 10-20% better throughput per vCPU due to Go's efficient ARM code generation. If deploying on ARM, you can conservatively use the same numbers or reduce vCPU count by one tier.
-
-### Deployment Profiles
-
-| Profile | Users | Requests/sec | Max throughput | Concurrent conns | SSL Inspection | ClamAV | YARA |
-|---|---|---|---|---|---|---|---|
-| **Home Lab** | 1-5 | < 50 | ~100 Mbps | < 100 | Optional | Off | Off |
-| **Small Office** | 10-50 | 50-500 | ~500 Mbps | 100-1000 | Recommended | Optional | Optional |
-| **Enterprise (single node)** | 100-500 | 500-2000 | ~1 Gbps | 1000-5000 | Yes | Yes | Yes |
-| **Enterprise (cluster)** | 500-5000+ | 2000-10000+ | ~10 Gbps (multi-DP) | 5000+ | Yes | Yes | Yes |
-
-> **When to cluster:** A single node with SSL inspection + ClamAV handles ~500 concurrent users comfortably. Beyond 500 users or 1 Gbps sustained throughput, deploy a Control Plane + Data Plane cluster and add DP nodes horizontally.
-
-### Resource Requirements
-
-| Resource | Home Lab | Small Office | Enterprise |
-|---|---|---|---|
-| **CPU** | 1 vCPU | 2 vCPU | 4+ vCPU |
-| **RAM (proxy only)** | 128 MB | 256 MB | 512 MB - 1 GB |
-| **RAM (with ClamAV)** | 512 MB | 1 GB | 2 GB |
-| **RAM per connection** | ~10 KB idle / ~138 KB active | same | same |
-| **Storage (base)** | 50 MB (binary + config) | 50 MB | 50 MB |
-| **Storage (ClamAV DB)** | - | 300 MB | 300 MB |
-| **Storage (GeoIP DB)** | 5 MB | 5 MB | 5 MB |
-| **Storage (UT1 category feed)** | 150 MB | 150 MB | 150 MB |
-| **Storage (logs)** | 100 MB - 1 GB | 1 - 5 GB | 5 - 50 GB |
-| **Storage (admin settings)** | < 10 KB | < 10 KB | < 10 KB |
-| **Disk type** | Any (HDD OK) | SSD recommended | SSD required |
-
-### Connection Memory Breakdown
-
-Each proxied connection consumes memory proportional to its state:
-
-| State | RAM per connection | Notes |
-|---|---|---|
-| Idle (keepalive) | ~10 KB | Go net/http conn + buffers |
-| Active HTTP forward | ~70 KB | Request/response buffers (32 KB each) |
-| SSL-inspected tunnel | ~138 KB | 2x 32 KB relay buffers (pooled) + TLS state |
-| Body scanning (ClamAV/YARA) | +64 KB - 4 MB | Buffered body up to scan limit, then freed |
-| WebSocket relay | ~138 KB | Same as tunnel (bidirectional relay) |
-
-At 5000 concurrent SSL-inspected connections: ~670 MB for connection buffers alone. Plan RAM accordingly for high-concurrency environments.
-
-### Notes
-
-- **ClamAV** is the largest resource consumer. It downloads ~300 MB of virus signatures on first boot and keeps them in memory (~500 MB RSS). If you don't need antivirus scanning, disable it to save ~500 MB RAM. ClamAV signature reloads (freshclam updates, typically every 4 hours) cause a brief CPU spike (~2-5 seconds) but do **not** block proxy traffic - the reload happens in the ClamAV sidecar process, not in Culvert itself. No over-provisioning needed.
-- **SSL inspection** adds ~1 KB RAM per cached leaf certificate (LRU cache, 10K max = ~10 MB). CPU impact is ~0.5ms per **new** TLS handshake using **ECDSA P-256 signing** (Culvert's default). RSA 2048 would be ~5x slower per signing operation, but Culvert exclusively uses ECDSA P-256 for its internal CA - no RSA path exists. Cached certificates (cache hit) have zero signing overhead.
-- **Log rotation** is automatic. Request logs rotate at 100 MB (configurable via `-request-log-max-mb`), audit logs at 50 MB, system logs at 50 MB. **Storage I/O:** log writes are append-only and sequential - HDD is adequate for Home Lab. For Small Office+ with SSL inspection (high request volume), SSD is recommended to avoid I/O wait impacting proxy latency.
-- **Threat feeds** (URLhaus + OpenPhish) add ~5-20 MB RAM depending on feed size.
-- **UT1 category feed** (University of Toulouse) downloads a ~50 MB tarball on first sync, stored in BadgerDB at ~150 MB on disk + ~50-100 MB RAM for the index. Provides millions of categorized domains (Adult, Gambling, Malicious, etc.) auto-synced hourly. The SaaS category feed (AI, Marketing, etc.) adds negligible storage (< 100 KB JSON).
-- **Prometheus metrics** are stateless - scraped externally, no local storage.
-- **Post-quantum (ML-KEM-768)** adds ~1 KB to initial TLS handshakes. No ongoing RAM/CPU impact.
-- **Docker image size:** ~30 MB (distroless base + static Go binary).
-
-### Minimum Requirements
-
-For a functional deployment with all features enabled:
-
-```
-2 vCPU | 1.5 GB RAM | 2.5 GB disk (SSD recommended)
-```
-
-For proxy-only (no AV, no SSL inspection):
-
-```
-1 vCPU | 128 MB RAM | 100 MB disk (any)
-```
-
-### Cluster Deployments (Control Plane / Data Plane)
-
-| Component | CPU | RAM | Storage | Notes |
-|---|---|---|---|---|
-| **Control Plane** | 2 vCPU | 512 MB | 500 MB | No proxy traffic - config sync, enrollment, dashboard only |
-| **Control Plane (HA pair)** | 2 vCPU each | 512 MB each | 500 MB each | Leader + standby with automatic failover |
-| **Data Plane node** | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic, receives config from CP |
-| **Data Plane + ClamAV** | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
-
-**Scale reference:**
-
-| Setup | Nodes | Total resources | Throughput | Handles |
-|---|---|---|---|---|
-| **Small cluster** | 1 CP + 2 DP | 6 vCPU, 2.5 GB RAM | ~2 Gbps | ~1000 concurrent users |
-| **Medium cluster** | 1 CP (HA) + 5 DP | 12 vCPU, 6 GB RAM | ~5 Gbps | ~5000 concurrent users |
-| **Large cluster** | 1 CP (HA) + 10 DP | 22 vCPU, 11 GB RAM | ~10 Gbps | ~10000+ concurrent users |
-
-- **CP is lightweight** - it only serves gRPC config sync, node enrollment, and the admin dashboard. No proxy traffic flows through it.
-- **DP nodes are stateless** - they receive their entire config from the CP on connect. Lose a DP, spin up a new one, it auto-enrolls and gets the full config in seconds.
-- **Bandwidth/QoS** policies are enforced per-DP, so rate limits scale linearly with node count.
-- **Network:** CP to DP communication uses gRPC over mTLS. Typical bandwidth: < 1 KB/s per node (config sync + heartbeat every 30s).
-- **Horizontal scaling:** each DP node adds ~1 Gbps throughput capacity (with SSL inspection). Scale is linear - no shared state between DP nodes.
+See the interactive **[architecture overview](docs/architecture.md)** and the panel-by-panel **[admin UI reference](docs/UI_REFACTOR_AUDIT.md)** for detail.
 
 ---
 
 ## Quick Start
 
-### One-Line Install (recommended)
+### One-line install (Linux)
 
-Works on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
-Runs anywhere Linux runs: AWS EC2, Azure VM, GCP Compute, DigitalOcean, Hetzner, bare metal.
-Installs Docker, clones the repo, pulls the pre-built images and starts everything:
+Installs Docker, pulls the pre-built images, and starts the stack. Tested on Ubuntu, Debian, RHEL, CentOS, Rocky, Alma, Fedora, Amazon Linux, and Arch.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
 ```
-
-The script handles all Docker installation quirks (snap removal, compose v2, distro packages) so you don't have to.
 
 ### Docker (manual)
 
@@ -289,165 +69,76 @@ docker build -t culvert/proxy:pinned .   # seed the local-only image tag the com
 docker compose up -d
 ```
 
-No configuration required - the setup wizard creates your admin account on first visit.
+No configuration is required — the setup wizard creates your first admin account on first visit.
 
-> **`pull access denied for culvert/proxy`?** The compose file resolves the
-> local-only tag `culvert/proxy:pinned` (a security measure — the proxy image
-> is pinned at the sudo boundary, never pulled by name from a registry). Seed
-> it with the `docker build` line above, or:
+> **`pull access denied for culvert/proxy`?** The compose file intentionally resolves the
+> local-only tag `culvert/proxy:pinned` (the proxy image is pinned at the sudo boundary and
+> never pulled by name). Seed it with the `docker build` line above, or:
 > `docker pull ghcr.io/kidcarmi/culvert:latest && docker tag ghcr.io/kidcarmi/culvert:latest culvert/proxy:pinned`
 
+### Endpoints
+
 | Endpoint | URL | Notes |
-|----------|-----|-------|
-| HTTP/HTTPS Proxy | `http://localhost:8080` | Configure browser/PAC to point here |
-| SOCKS5 Proxy | `socks5://localhost:1080` | Disabled by default, enable via config |
-| PAC File | `http://localhost:8080/proxy.pac` | Auto-config for browsers |
-| Admin Web UI | `https://localhost:9090` | Accept the self-signed cert on first visit |
-| Health Check | `http://localhost:8080/health` | `{"status":"ok",…}` |
-| Prometheus Metrics | `http://localhost:8080/metrics` | Optional bearer token protection |
+|---|---|---|
+| HTTP/HTTPS proxy | `http://localhost:8080` | Point your browser / PAC here |
+| SOCKS5 proxy | `socks5://localhost:1080` | Disabled by default (`socks5_port: 0`); enable in config |
+| PAC file | `http://localhost:8080/proxy.pac` | Browser auto-config |
+| Admin UI | `https://localhost:9090` | Accept the self-signed cert on first visit |
+| Health (liveness) | `http://localhost:8080/health` | `{"status":"ok", ...}` |
+| Readiness | `http://localhost:8080/ready` | `200 {"status":"ready","checks":{…}}` or `503 not_ready` |
+| Prometheus metrics | `http://localhost:8080/metrics` | Optional bearer-token protection |
+
+> Note: `/health`, `/ready`, and `/metrics` are served on the **proxy** port (`8080`), not the admin-UI port.
 
 ```bash
-# Verify it works
 curl http://localhost:8080/health
 curl -x http://localhost:8080 https://example.com
 ```
 
-### After it's running
+### First-run checklist
 
-Three things to do once the containers are up:
+1. **Setup wizard** — open `https://<host>:9090`, accept the cert, create the first admin. Required before any other API call.
+2. **Verify readiness** — `curl http://<host>:8080/ready` should return `200`; see [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks map.
+3. **Review Diagnostics** — Admin UI → **Infrastructure → Diagnostics** surfaces the operator contract (storage, policy load, root CA, session key, cluster TLS posture, release-management and config-version health). Resolve any `fail` rows before taking traffic.
+4. **Enforce Zero Trust** — a fresh install with **no policy rules** starts in passthrough so you can't lock yourself out. Set `default_action: deny` (or add rules) to enforce default-deny from boot. See [Policy Model](#policy-model).
 
-1. **Setup wizard** — open `https://<host>:9090` in a browser, accept the self-signed cert, and create the first admin account. This step is required before any other API call.
-2. **Verify readiness** — confirm Culvert is fit to take traffic:
-   ```bash
-   curl http://<host>:8080/ready
-   ```
-   Returns `200` with `{"status":"ready", "checks":{...}}` when ready, `503` with `"status":"not_ready"` when a gating check fails. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for the full checks-map reference.
-3. **Open Diagnostics** — Admin UI → **Infrastructure → Diagnostics**. The page surfaces the operator contract: storage path, policy load, root CA, session HMAC, CDR, cluster TLS posture, release-management health, config-version health, and any active risky-but-allowed warnings (`cluster-insecure`, unauth mode). Resolve any `fail` rows before exposing the proxy to clients.
-
-#### Release catalog updates
-
-The catalog-driven release path is being rolled out as the future default (the legacy Docker updater remains the supported fallback until at least one production catalog-driven update succeeds — see [`docs/operator/enterprise-release-catalog-plan.md`](docs/operator/enterprise-release-catalog-plan.md)). The Control Plane loads a trusted release catalog, resolves the requested release or channel to an immutable `repo@sha256:<digest>` image ref, dispatches that ref to the local maintenance agent, polls the operation, and verifies the final running digest before reporting success.
-
-The quick-start installer attempts to wire the local maintenance agent automatically over its Unix-domain socket. It never mounts `/var/run/docker.sock` into the proxy. If Docker is rootless, userns-remapped, customized, or the validation checks fail, the installer leaves Release Management disabled and prints the custom-wiring path instead.
-
-Operator-facing API flow:
-
-```bash
-curl -k https://<host>:9090/api/releases
-curl -k "https://<host>:9090/api/releases/current?agent=local"
-curl -k -X POST https://<host>:9090/api/releases/dispatch \
-  -H 'Content-Type: application/json' \
-  -d '{"agent":"local","channel":"recommended"}'
-curl -k "https://<host>:9090/api/releases/dispatch/status?agent=local"
-```
-
-The catalog lives under the configured data directory at `release_catalog/`. Signature verification is **enforce-by-default**: whenever a trust root is present (a baked-in official key, or operator keys via `CULVERT_RELEASE_CATALOG_TRUST_KEYS`), catalogs must be validly signed, unexpired (`expires_at`), and at or above the highest accepted `catalog_version` (rollback protection). With no trust roots configured, Release Management stays disabled and `/api/releases` reports `available:false` — an unsigned catalog is **never** auto-trusted. Configure only **public** trust roots in `CULVERT_RELEASE_CATALOG_TRUST_KEYS`; never put private signing keys or registry credentials there. `CULVERT_RELEASE_CATALOG_VERIFY=permissive|disabled` is a deliberate, logged **break-glass** override (e.g. local dev with an unsigned catalog) — leave it unset in production. Optionally set `CULVERT_RELEASE_CATALOG_URL` to a signed-catalog origin: when it is set **and** trust roots are present, the Control Plane fetches and verifies that catalog at startup (signature + freshness + rollback) and atomically installs it into `release_catalog/`, so a clean install reaches `available:true` with no manual file placement — anything wrong leaves the existing catalog untouched and reports `available:false`. Verification happens in the binary; the installer never bakes a default URL, and auto-seed runs only in enforce mode (an unsigned catalog is never auto-downloaded). The legacy Docker updater remains available for compatibility, but release catalog dispatch does not call its APIs or Docker socket path.
-
-> **Backup & restore.** For the supported Docker Compose backup, restore, and cleanup commands, see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
-
-#### With custom config
-
-```bash
-cp config.example.yaml config.yaml   # edit as needed
-# Uncomment the config.yaml volume mount in docker-compose.yml, then:
-docker compose up -d
-```
-
-#### With monitoring stack (Prometheus + Grafana)
+### Monitoring stack (optional)
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
-# Grafana → http://localhost:3000  (admin / culvert)
+# Grafana → http://localhost:3000  (user: admin, password: $GF_ADMIN_PASSWORD, default "changeme")
 ```
 
-The **Culvert Overview** dashboard (12 panels: traffic, latency, security blocks, top policy rules) is auto-provisioned from `deploy/grafana/dashboards/culvert-overview.json` - no manual import needed.
-
-### Binary
-
-```bash
-# Download the latest release, then:
-./culvert                                  # proxy :8080, admin UI :9090
-./culvert -port 3128 -socks5-port 1080
-./culvert -config config.yaml
-```
-
----
-
-## Proxy Usage
-
-### HTTP / HTTPS
-
-```bash
-curl -x http://localhost:8080 https://example.com
-
-# With credentials
-curl -x http://alice:secret@localhost:8080 https://example.com
-
-# Via environment variable
-export http_proxy=http://localhost:8080
-export https_proxy=http://localhost:8080
-
-# PAC file (auto-configure browsers)
-# Point your browser to: http://localhost:8080/proxy.pac
-```
-
-### SOCKS5
-
-```bash
-curl --proxy socks5://localhost:1080 https://example.com
-
-# SSH tunneling through SOCKS5
-ssh -o ProxyCommand="nc -X 5 -x localhost:1080 %h %p" user@remote
-```
-
-### SSL Inspection
-
-When SSL inspection is enabled, import the Root CA into your browser/OS trust store:
-
-```bash
-# Download CA from Admin UI → Certificates, or:
-curl -k https://localhost:9090/api/ca-cert > culvert-ca.crt
-
-# Linux
-sudo cp culvert-ca.crt /usr/local/share/ca-certificates/
-sudo update-ca-certificates
-
-# macOS
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain culvert-ca.crt
-
-# Windows (PowerShell as Admin)
-Import-Certificate -FilePath culvert-ca.crt -CertStoreLocation Cert:\LocalMachine\Root
-```
+The 12-panel **Culvert Overview** dashboard is auto-provisioned from `deploy/grafana/dashboards/culvert-overview.json`.
 
 ---
 
 ## Configuration
 
-Culvert works out of the box with sensible defaults. All settings can be managed through the Admin Web UI, a YAML config file, CLI flags, or a combination. See [`config.example.yaml`](config.example.yaml) for full documentation of all 70+ fields.
+Culvert runs with sensible defaults and can be driven by the Admin UI, a YAML file, CLI flags, or any combination. See [`config.example.yaml`](config.example.yaml) for all documented fields.
 
-### config.yaml (optional)
+### Minimal `config.yaml`
 
 ```yaml
 proxy:
   port: 8080
   ui_port: 9090
-  socks5_port: 1080      # 0 = disabled
+  socks5_port: 1080        # 0 = disabled
 
-default_action: block     # allow | block | drop
+default_action: deny       # allow (passthrough) | deny (zero-trust). Auto-detected if empty.
 
-auth:
-  ldap:
-    url: ldaps://ldap.corp.com:636
-    bind_dn: "cn=svc-culvert,ou=Services,dc=corp,dc=com"
-    base_dn: "ou=Users,dc=corp,dc=com"
-    required_group: "proxy-users"
+# LDAP is a TOP-LEVEL block (a sibling of `auth:`), not nested under it.
+ldap:
+  url: ldaps://ldap.corp.com:636
+  bind_dn: "cn=svc-culvert,ou=Services,dc=corp,dc=com"
+  base_dn: "ou=Users,dc=corp,dc=com"
+  required_group: "proxy-users"
 
 security:
-  ip_filter_mode: allow   # allow | block | "" (off)
+  ip_filter_mode: allow    # allow | block | "" (off)
   ip_list:
     - 192.168.1.0/24
-  rate_limit: 60          # requests/min per IP
+  rate_limit: 60           # requests/min per IP
   max_conns_per_ip: 256
 
 upstream:
@@ -464,250 +155,152 @@ rewrite:
       X-Forwarded-By: Culvert
     resp_remove:
       - Server
-      - X-Powered-By
 ```
 
-### CLI Flags
+### Key CLI flags
 
 ```
-Core:
-  -port int              Proxy listening port (default 8080)
-  -ui-port int           Admin Web UI port (default 9090)
-  -socks5-port int       SOCKS5 proxy port (0 = disabled)
-  -config string         Path to config.yaml
-
-TLS:
-  -ca-path string        Root CA bundle persistence path (/data/ca.bundle)
-  -tls-cert string       Custom TLS certificate for Web UI
-  -tls-key string        Custom TLS key for Web UI
-  -ui-no-tls             Serve Web UI over plain HTTP (not recommended)
-
-Auth & Access:
-  -ui-users-file string  Persistent admin user database (/data/ui_users.json)
-  -ui-allow-ip string    Comma-separated CIDRs allowed to access the Web UI
-  -session-timeout int   Admin session lifetime in hours (default 8)
-
-Rules & Filtering:
-  -blocklist string      Domain/IP blocklist file path
-  -policy string         Policy rules JSON file path
-  -geoip-db string       MaxMind GeoLite2-Country.mmdb path
-
-Security Scanning:
-  -clamav-addr string    ClamAV address - tcp:host:port or unix:/path/to/clamd.sock
-  -yara-rules-dir string Directory containing .yar / .yara rule files
-  -threat-feed-db string Threat feed local database path
-
-Logging:
-  -logfile string        Request log file (rotated at -log-max-mb)
-  -log-max-mb int        Log rotation threshold in MB (default 50)
-  -audit-log string      Persistent JSONL audit log path
-  -syslog string         Remote syslog - udp://host:514 or tcp://host:601
-
-Metrics:
-  -metrics-token string  Bearer token protecting /metrics (empty = open)
-  -rate-limit int        Max requests/min per source IP (0 = off)
-
-Distributed (Control Plane):
-  -cp-grpc-addr string   Control Plane gRPC listen address (e.g. :50051)
-  -cp-grpc-cert string   Control Plane gRPC TLS certificate
-  -cp-grpc-key string    Control Plane gRPC TLS key
-  -cp-grpc-ca string     Control Plane gRPC CA for mTLS client validation
-
-Distributed (Data Plane):
-  -dp-cp-addr string     ControlPlane gRPC address to connect to (e.g. cp.corp:50051)
-  -dp-node-id string     Unique node identifier (default: hostname)
-  -dp-cert string        Data Plane gRPC client TLS certificate
-  -dp-key string         Data Plane gRPC client TLS key
-  -dp-ca string          Data Plane gRPC CA certificate
+Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
+TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
+Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
+Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
+Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
+Metrics     -metrics-token  -rate-limit
+Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
+Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
 
-> See **[docs/deployment-guide.md](docs/deployment-guide.md)** for complete single-node, multi-node, and upstream chaining examples.
+> In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
-### Environment Variables
+### Environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `CULVERT_CA_PASSPHRASE` | CA private key encryption passphrase (required for SSL inspection) |
-| `CULVERT_C2_ENFORCE` | C2 metadata-driven admin RBAC enforcement mode. Default = `enforce` (fail-closed). Set to `false`/`0`/`no`/`off` to revert to shadow (log-only) mode without rebuild. Read once at startup. |
-| `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch. Defaults to `ghcr.io/kidcarmi/culvert`; do not include a tag or digest. |
-| `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint for release dispatch. Defaults to the Unix socket path `/run/culvert-maint/culvert-maint.sock`; `http://` and `https://` endpoints are also supported for controlled deployments. |
-| `CULVERT_RELEASE_CATALOG_TRUST_KEYS` | JSON array of public Ed25519 catalog trust roots. Public keys only; never place private signing keys or credentials here. |
+| Variable | Purpose |
+|---|---|
+| `CULVERT_CA_PASSPHRASE` | CA private-key encryption passphrase (**required** for TLS inspection) |
+| `CULVERT_C2_ENFORCE` | Admin RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
+| `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
+| `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |
+| `CULVERT_RELEASE_CATALOG_TRUST_KEYS` | JSON array of **public** Ed25519 catalog trust roots. Public keys only. |
+| `CULVERT_RELEASE_CATALOG_VERIFY` | Signature mode: enforce (default when a trust root is present), `permissive`, or `disabled`. **Break-glass only** — leave unset in production. |
+| `CULVERT_RELEASE_CATALOG_URL` | Optional signed-catalog origin for verified auto-seed at startup (enforce mode only). |
+| `CULVERT_RELEASE_SIGSTORE_IDENTITY` / `_TRUSTED_ROOT` | Optional overrides for the keyless (Sigstore-identity) release-trust policy. Public material only. |
 
 ---
 
-## Prometheus Metrics
+## Policy Model
 
-Available at `GET http://localhost:8080/metrics`:
+The policy engine evaluates rules in **priority order and stops at the first match** (`policy.go`). Each rule combines any of **8 condition types**:
+
+1. **Source IP / CIDR**
+2. **Authenticated identity**
+3. **IdP group membership**
+4. **Auth source** (OIDC / SAML / LDAP / local)
+5. **Destination FQDN** — exact + wildcard
+6. **URL category** (UT1 + curated: Social, Streaming, Gambling, Malicious, Adult, …)
+7. **Destination country** (GeoIP; **fail-closed** — unknown country does not match)
+8. **Time schedule** — day-of-week + time window + IANA timezone
+
+**Actions:** `Allow`, `Drop`, `Block Page`, `Redirect`. Every rule also carries a **TLS action** — `Inspect` (full MITM) or `Bypass` (transparent tunnel).
+
+**Default-deny (Zero Trust):** once any rule exists or `default_action: deny` is set, unmatched traffic is blocked. A fresh install with **zero rules and no explicit `default_action`** starts in passthrough by design, so you can't lock yourself out — enforce deny explicitly for production.
+
+**Conflict detection:** overlapping rules with the same priority but different actions are surfaced as warnings at load and in the UI. **Policy Tester** dry-runs any host/user/IP against the live ruleset. Per-rule hit counters are exported to Prometheus (cardinality-capped at 200 series).
+
+---
+
+## Security Model
+
+Culvert is built defense-in-depth. Every claim below is enforced in code.
+
+| Area | Implementation |
+|---|---|
+| **Zero Trust** | Default-deny policy engine (see [Policy Model](#policy-model)) |
+| **SSRF prevention** | `isPrivateHost()` resolves DNS and rejects private/loopback/metadata IPs before every outbound dial, **and re-checks the resolved IP at connect time** to close the DNS-rebinding TOCTOU window |
+| **Log injection (CWE-117)** | `sanitizeLog()` strips CR/LF/TAB and C0 controls; `%q` formatting; internally generated request IDs are safe by construction |
+| **Open redirect** | `isSafeRedirectURL()` requires absolute URL, http/https scheme, and non-private resolvable host |
+| **Brute-force** | IP + user lockout after 5 failures (15-min cooldown), plus a 20-failure account-wide tier over a 10-min window |
+| **Admin API rate limiting** | 60 req/min per IP on mutating (`POST`/`PUT`/`DELETE`) `/api/` endpoints |
+| **Slowloris** | 60s read deadline on TLS-inspected client connections, re-armed per read |
+| **CSRF** | Origin-based same-origin enforcement on mutating requests + `X-Frame-Options: DENY` and CSP |
+| **Session security** | HMAC-SHA256 signed cookies, per-session 128-bit `jti`, dynamic `Secure` flag, fresh token per login, disk-persisted revocation list synced across the cluster via the control plane |
+| **CA key protection** | AES-256-GCM with PBKDF2-SHA256 (600,000 iterations, NIST SP 800-132) at rest; atomic bundle writes |
+| **Certificate revocation** | Upstream OCSP checking (fail-closed when a published responder is unreachable). CRL checking is **not yet implemented** — see [Limitations](#limitations--known-gaps) |
+| **Hop-by-hop stripping** | RFC 7230-compliant — parses the `Connection` header for dynamically listed hop-by-hop names |
+| **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
+| **Password complexity** | 8+ chars, mixed case, and a digit required |
+| **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
+
+### Post-Quantum key exchange
+
+Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it — protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
+
+### Supply-chain integrity
+
+- **Signed release catalog** — the Control Plane loads a catalog validated with fail-closed manifest-hash binding and **Ed25519 signatures (enforce-by-default when trust roots are present)**, plus a second **Sigstore keyless (identity-pinned)** scheme; freshness (`expires_at`) and rollback (`catalog_version`) protection are enforced in enforce mode. An unsigned catalog is never auto-trusted.
+- **Digest-pinned dispatch** — releases resolve to an immutable `repo@sha256:<digest>` ref; the image is pinned at the sudo boundary and retagged locally, so a compromised maintenance user can only run a digest of the one configured repo.
+- **Provenance & signing** — releases ship **SLSA Level 3** provenance and **Cosign keyless** signatures on images, binaries, SBOMs, and the catalog itself.
+
+---
+
+## Observability
+
+### Prometheus metrics (`GET /metrics`, proxy port)
 
 | Metric | Type | Description |
-|--------|------|-------------|
+|---|---|---|
 | `culvert_requests_total` | counter | All proxy requests |
 | `culvert_requests_allowed` | counter | Forwarded requests |
 | `culvert_requests_blocked` | counter | Blocked requests (all reasons) |
 | `culvert_requests_auth_fail` | counter | Authentication failures |
-| `culvert_bytes_sent_total` | counter | Total bytes sent to clients |
-| `culvert_bytes_recv_total` | counter | Total bytes received from upstream |
+| `culvert_bytes_sent_total` / `culvert_bytes_recv_total` | counter | Bytes to client / from upstream |
 | `culvert_request_duration_seconds` | histogram | Request latency (11 buckets, 5ms–10s) |
-| `culvert_rule_hits_total{rule="..."}` | counter | Per-rule hit counter |
-| `culvert_av_scans_total` | counter | ClamAV scans performed |
-| `culvert_av_detections_total` | counter | Malware detections |
-| `culvert_yara_matches_total` | counter | YARA rule matches |
-| `culvert_threat_feed_blocks_total` | counter | Threat feed blocks |
+| `culvert_policy_rule_hits_total{rule="..."}` | counter | Per-rule hit counter (capped) |
+| `culvert_clamav_blocked_total` | counter | ClamAV blocks |
+| `culvert_yara_blocked_total` | counter | YARA blocks |
+| `culvert_threat_feed_blocked_total` | counter | Threat-feed blocks |
 | `culvert_blocklist_size` | gauge | Blocklist entry count |
-| `culvert_policy_rules` | gauge | Active PBAC rule count |
 | `culvert_uptime_seconds` | gauge | Proxy uptime |
 
----
+> Metric names are authoritative as of `metrics.go`. Run `curl -s localhost:8080/metrics | grep culvert_` against your build for the full current set.
 
-## Plugin API
+### Logging & SIEM
 
-Implement the `Middleware` interface to add custom request inspection:
-
-```go
-package main
-
-import "net/http"
-
-type MyPlugin struct{}
-
-func (p *MyPlugin) Name() string { return "my-plugin" }
-
-func (p *MyPlugin) OnRequest(clientIP, method, host string) Decision {
-    if host == "ads.example.com" {
-        return DecisionBlock
-    }
-    return DecisionAllow
-}
-
-func (p *MyPlugin) OnResponse(resp *http.Response) {
-    resp.Header.Del("Server")
-}
-
-func init() { RegisterPlugin(&MyPlugin{}) }
-```
-
-Plugins run before every other check and can short-circuit the chain.
+- **Structured logging** — text or JSON, with rotating files (configurable size thresholds).
+- **Syslog forwarding** — UDP/TCP, RFC 3164 and RFC 5424, for Splunk / Elastic / QRadar.
+- **Live SSE feed** — the Admin UI dashboard streams request activity in real time.
+- **Signed webhook alerts** — HMAC-SHA256 (`X-Culvert-Signature`) for threats, blocks, and lockouts.
+- **Tamper-evident audit trail** — JSONL of every admin action, enriched with the authenticated actor.
 
 ---
 
-## Security
+## Deployment
 
-Culvert follows a defence-in-depth approach:
+### Single node
 
-| Area | Implementation |
-|------|---------------|
-| **Zero Trust** | Default-deny policy engine; unmatched traffic is blocked |
-| **SSRF prevention** | `isPrivateHost()` resolves DNS and rejects private/loopback IPs before every outbound dial |
-| **Log injection (CWE-117)** | `sanitizeLog()` strips `\n`, `\r`, `\t`; `%q` format verb; X-Request-ID sanitized at source |
-| **Open redirect** | `isSafeRedirectURL()` validates scheme + non-private host |
-| **Brute-force** | IP + user lockout after 5 failures (15 min cooldown) |
-| **Admin API rate limiting** | 60 req/min per IP on mutating endpoints |
-| **Slowloris** | 60s read deadline on SSL-inspected connections |
-| **Session security** | HMAC-SHA256 signed cookies with per-session 128-bit Jti; dynamic `Secure` flag; fixation prevention; revocation list with disk persistence and gRPC gossip |
-| **Admin RBAC defense-in-depth** | Metadata-driven C2 enforcement layer in addition to per-handler `requireRole`; report-only audit-completion (C2c) and role-divergence (C4) detectors; governance health surface at `/api/governance/control-plane` |
-| **CA key protection** | AES-256-GCM + PBKDF2-SHA256 (600k iterations) at rest |
-| **OCSP/CRL** | Upstream certificate revocation checking (fail-closed) |
-| **Hop-by-hop** | RFC 7230 compliant - parses `Connection` header for dynamic names |
-| **GeoIP** | Fail-closed on cache miss (unknown country = no match) |
-| **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, removes `X-User-Identity` |
-| **Post-Quantum (PQC)** | ML-KEM-768 hybrid key exchange via Go 1.25 - quantum-resistant on all TLS connections |
-
-### Post-Quantum Cryptography (PQC)
-
-Culvert is **quantum-resistant by default**. Go 1.25's `crypto/tls` automatically negotiates ML-KEM-768 (formerly Kyber) hybrid key exchange on all TLS connections when the peer supports it. This protects against "Harvest Now, Decrypt Later" attacks where an adversary records encrypted traffic today and decrypts it with a future quantum computer.
-
-| Connection | PQC Key Exchange | Notes |
-|---|---|---|
-| Browser to Admin UI | Auto-negotiated | Chrome 124+, Firefox 128+, Edge 124+ |
-| Proxy to upstream servers | Auto-negotiated | When upstream supports ML-KEM |
-| Control Plane to Data Plane (gRPC mTLS) | Always active | Both sides run Go 1.25 |
-| SSL-inspected client connections | Auto-negotiated | When client browser supports ML-KEM |
-
-**What's quantum-resistant today:** All key exchanges (TLS handshakes) use hybrid X25519 + ML-KEM-768, meaning traffic confidentiality is protected even against quantum computers.
-
-**What's still classical:** Certificate signing uses ECDSA P-256. PQC signature algorithms (ML-DSA / Dilithium) are not yet in Go's standard library. Culvert will adopt PQC signing when Go adds native support (expected Go 1.26+). This is a lower risk - signatures prove identity at connection time and cannot be "harvested" for future decryption.
-
-No configuration required - PQC is enabled automatically. No performance impact - the ML-KEM handshake adds ~1ms to the initial TLS connection.
-
-### CI Security Pipeline
-
-Every push runs a **10-check security gate**:
-
-1. **gosec** - Go security linter
-2. **govulncheck** - reachable CVE detection
-3. **trivy** - filesystem + Docker image vulnerability scan
-4. **gitleaks** - secret scanning on PR diffs
-5. **staticcheck** - advanced static analysis
-6. **hadolint** - Dockerfile best practices
-7. **Race tests** - `-race` flag on full test suite
-8. **Coverage gate** - minimum 55% statement coverage
-9. **License compliance** - no GPL/AGPL/LGPL/CPAL dependencies
-10. **SBOM generation** - CycloneDX JSON via Syft
-
-Plus: **CodeQL** semantic SAST, **Dependency Obituary** dependency health scoring, **Cosign** keyless signing, and **SLSA Level 3** provenance on all releases.
-
----
-
-## Architecture
+A single node with TLS inspection + ClamAV comfortably serves ~500 concurrent users. Minimum footprint for a full-feature deployment:
 
 ```
-main.go            - Entrypoint, CLI flags, graceful shutdown, hot reload (SIGHUP)
-proxy.go           - HTTP/HTTPS/WebSocket handler, SSL inspection, structured logging
-socks5.go          - SOCKS5 server (RFC 1928/1929)
-policy.go          - PBAC engine: rule evaluation, conflict detection, GeoIP fail-closed
-session.go         - HMAC-SHA256 signed cookies, revocation, dynamic Secure flag
-ui.go              - Admin Web UI bootstrap; routes are registered via register*Routes helpers and tracked in uiRoutes (see CLAUDE.md for the canonical inventory and C2/C2c/C4 governance machinery)
-store.go           - Config, blocklist, request log, time-series, audit log
-security.go        - IP filter, rate limiter, SSRF guard, DNS cache
-security_scan.go   - ClamAV + YARA + threat feed scan coordinator
-clam.go            - ClamAV INSTREAM client with connection pooling
-yara_scan.go       - Pure-Go YARA engine with ReDoS timeout
-threatfeed.go      - URLhaus + OpenPhish sync, domain allowlist
-feedsync.go        - UT1 URL category syncer
-geoip.go           - MaxMind GeoLite2 with background cache
-upstream.go        - Proxy chaining, failover, circuit breaker, health checks
-ocsp.go            - OCSP/CRL revocation checking
-ca.go              - Root CA, MITM certs, AES-GCM encryption, LRU cache, auto-rotation
-auth.go            - Auth provider interface
-auth_ldap.go       - LDAP bind + search + group resolution
-auth_oidc_flow.go  - OIDC Authorization Code + PKCE
-auth_saml.go       - SAML 2.0 SP-initiated SSO
-auth_idp.go        - Multi-IdP registry with domain routing
-identity.go        - Identity model (Sub, Groups, Source, Provider)
-totp.go            - TOTP 2FA (RFC 6238, stdlib HMAC-SHA1)
-lockout.go         - Brute-force + API rate limiting
-connlimit.go       - Per-IP connection limiter, X-Request-ID
-metrics.go         - Prometheus metrics (per-rule, latency, bytes)
-logger.go          - Structured text/JSON logging with rotation
-syslog.go          - RFC 3164/5424 syslog forwarding
-alerts.go          - HMAC-SHA256 signed webhook alerts
-events.go          - SSE live dashboard stream
-config.go          - YAML config loading + validation (goccy/go-yaml)
-rewrite.go         - Per-host header rewrite engine
-fileblock.go       - File extension/MIME blocking
-pac.go             - PAC file generation
-blockpage.go       - Block page HTML template
-hashcache.go       - SHA-256 scan cache with TTL
-controlplane.go    - gRPC Control Plane / Data Plane
-plugin.go          - Middleware plugin chain
-catdb.go           - URL category database
-release_catalog.go - Release catalog validation, manifest hash binding, and digest indexing
-release_wiring.go  - Release management startup wiring and local maintenance-agent resolver
-release_api.go     - /api/releases catalog/current/dispatch/status/resume endpoints
-release_dispatch.go - Catalog-pinned release planning and repo rewrite checks
-release_dispatch_exec.go - Maintenance-agent apply, op polling, and digest verification
-release_dispatch_service.go - Dispatch orchestration, single-flight, audit, alert, and resume
-update.go          - Self-update system (binary + Docker)
-update_cluster.go  - Rolling cluster update orchestrator (canary, drain, HA sync)
-scan_remote.go     - Remote scan sidecar client for process-isolated scanning
-blocklist_feed.go  - Domain blocklist URL feed syncer
-bootstrap.go       - Bootstrap script/compose generators for node enrollment
-static/            - Embedded SPA (vanilla JS, Chart.js)
-updater/           - Legacy Docker update sidecar (retained for compatibility)
-scripts/           - Install script (multi-distro), CI runner setup
-deploy/            - Prometheus + Grafana stack
-yara/              - Starter YARA detection rules
+2 vCPU | 1.5 GB RAM | 2.5 GB disk (SSD recommended)
 ```
+
+Proxy-only (no AV, no inspection): `1 vCPU | 128 MB RAM | 100 MB disk`.
+
+### Control Plane / Data Plane cluster
+
+Beyond ~500 users or ~1 Gbps sustained, scale horizontally with a gRPC Control Plane and stateless Data Plane nodes.
+
+| Component | CPU | RAM | Storage | Role |
+|---|---|---|---|---|
+| Control Plane | 2 vCPU | 512 MB | 500 MB | Config sync, enrollment, dashboard — **no proxy traffic** |
+| Data Plane node | 2 vCPU | 1 GB | 1 GB | Handles proxy traffic; receives full config from CP on connect |
+| DP + ClamAV | 2 vCPU | 2 GB | 1.5 GB | Add ~1 GB RAM + 300 MB disk for AV |
+
+- **DP nodes are stateless** — they receive their entire config (policy, blocklist, PAC, threat feeds, session key, bandwidth policies, node groups) from the CP over mTLS gRPC. Lose one, spin up a replacement, it auto-enrolls in seconds.
+- **HA fencing** — optional etcd fencing lease (`-ha-etcd-*`) provides fail-closed leader election with epoch-based fencing; without it, the legacy leader/standby model applies. See [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
+- **Config versioning** — every mutation snapshots automatically (50-version history) with side-by-side diff and one-click rollback.
+- **Backup / restore** — via the profile-gated `cli` compose service; see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
+
+Detailed single-node, multi-node, and upstream-chaining topologies are in the **[Deployment Guide](docs/deployment-guide.md)**. Full sizing tables (per-connection memory, cluster throughput) are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 ---
 
@@ -716,41 +309,49 @@ yara/              - Starter YARA detection rules
 Requires **Go 1.25+**.
 
 ```bash
-go build -o culvert .                       # build
-go test -v -race ./...                      # full suite with race detector
-go test -coverprofile=cover.out ./...       # coverage report
-go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz SSRF guard
+go build -o culvert .                        # build
+go test -race ./...                          # full suite with race detector
+go test -coverprofile=cover.out ./...        # coverage
+go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-### Fuzz Targets
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in ~48 packages under `internal/`. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
-| Target | Coverage |
-|--------|----------|
-| `FuzzIsPrivateHost` | SSRF guard (DNS + private IP) |
-| `FuzzIsSafeRedirectURL` | Open redirect prevention |
-| `FuzzParseClamResponse` | ClamAV response parser |
-| `FuzzNormaliseFeedURL` | Threat feed URL normalisation |
-| `FuzzMatchDest` | Policy destination matching |
-| `FuzzParseYARALiteralString` | YARA rule string parser |
+**Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
-### Docker Build
+### CI & security pipeline
 
-```bash
-docker build -t culvert:dev .
-docker run -p 8080:8080 -p 9090:9090 culvert:dev
-```
+Pull requests are gated by two required checks — **Fast PR Gate** and **Deep PR Gate** — covering fmt/vet/build, diff-scoped `golangci-lint` (22 linters), the full `-race` suite with a 55% coverage floor, `govulncheck`, `gosec`, `gitleaks`, Trivy, and image/compose validation.
+
+The main/tag security-release gate adds **9 blocking checks** — gosec, govulncheck, Trivy (filesystem + image), gitleaks, staticcheck, hadolint, `-race` tests, the coverage floor, and license compliance (blocks GPL/AGPL/LGPL) — plus **CodeQL** SAST, an informational **CycloneDX SBOM** (Syft), **Cosign** keyless signing, and **SLSA L3** provenance on releases.
+
+---
+
+## Limitations & Known Gaps
+
+Stated plainly, because a security product should be honest about its edges:
+
+- **Revocation:** OCSP only — **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
+- **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
+- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.25); certificate signing remains classical ECDSA P-256.
+- **SOCKS5:** CONNECT only — UDP ASSOCIATE is rejected.
+- **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
+- **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks — validate against your own workload before capacity planning.
+
+---
+
+## Roadmap
+
+Development phases, production-readiness items, and the engineering governance model are tracked under [`roadmap/`](roadmap/) and [`docs/engineering/`](docs/engineering/). Near-term focus: CRL support, GUI parity for the remaining startup-scoped HA settings, and completing the catalog-driven release path as the default update mechanism.
 
 ---
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Run tests (`go test -race ./...`)
-4. Commit your changes
-5. Open a Pull Request
-
-All PRs are validated by the full CI pipeline including CodeQL, the security gate, and golangci-lint with 18 linters.
+1. Fork and branch (`git checkout -b feature/my-feature`)
+2. `go test -race ./...`
+3. Keep the admin-API route-metadata and config-surface parity tests green (see [`CLAUDE.md`](CLAUDE.md))
+4. Open a PR — the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
 
 ---
 
