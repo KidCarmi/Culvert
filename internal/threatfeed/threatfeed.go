@@ -49,9 +49,16 @@ type entry struct {
 
 // feedDB is the on-disk persistence format.
 type feedDB struct {
-	LastSync time.Time        `json:"last_sync"`
-	URLs     map[string]entry `json:"urls"`
-	Domains  map[string]entry `json:"domains"`
+	LastSync time.Time `json:"last_sync"`
+	// LastSuccess and LastSyncErr persist the SyncStatus fields across
+	// restarts. Both are omitempty so a DB written before these fields
+	// existed loads as zero/"" — loadFromDisk treats that legacy shape as
+	// "LastSync was itself a success" (matching the pre-SyncStatus
+	// behavior, where a successful sync was the only thing ever recorded).
+	LastSuccess time.Time        `json:"last_success,omitempty"`
+	LastSyncErr string           `json:"last_sync_err,omitempty"`
+	URLs        map[string]entry `json:"urls"`
+	Domains     map[string]entry `json:"domains"`
 	// DomainAllowlist persists the admin-managed allowlist. Tag has NO
 	// `omitempty` so an admin-cleared (zero-entry) allowlist serializes
 	// as `"domain_allowlist": []` and round-trips through loadFromDisk
@@ -448,6 +455,16 @@ func (tf *Feed) loadFromDisk(path string) error {
 	tf.urls = db.URLs
 	tf.domains = db.Domains
 	tf.lastSync = db.LastSync
+	tf.lastSyncErr = db.LastSyncErr
+	switch {
+	case !db.LastSuccess.IsZero():
+		tf.lastSuccess = db.LastSuccess
+	case db.LastSyncErr == "":
+		// Legacy DB (saved before LastSuccess existed) or a DB saved by a
+		// clean sync before this field was ever set: LastSync IS the last
+		// success, so back-fill it rather than reporting "never synced".
+		tf.lastSuccess = db.LastSync
+	}
 	// Restore the persisted allowlist. The guard keys on nil, not
 	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
 	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
@@ -480,6 +497,8 @@ func (tf *Feed) saveToDisk() error {
 	sort.Strings(allowlist)
 	db := feedDB{
 		LastSync:        tf.lastSync,
+		LastSuccess:     tf.lastSuccess,
+		LastSyncErr:     tf.lastSyncErr,
 		URLs:            tf.urls,
 		Domains:         tf.domains,
 		DomainAllowlist: allowlist,
