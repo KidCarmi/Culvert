@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -393,6 +394,30 @@ var mitmClientTLSConfig = &tls.Config{
 	GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) { return certMgr.GetCert(chi) },
 	MinVersion:     tls.VersionTLS12,
 	NextProtos:     []string{"http/1.1"},
+}
+
+// rotateMITMTicketKeys installs a fresh random session-ticket key on the shared
+// client-facing config, invalidating every outstanding TLS session ticket. It
+// is wired to ca.CAChangedObserver so a Root-CA change (auto-rotation, manual
+// force-rotate, or custom-CA upload) ends the resumption epoch: the next
+// reconnect can no longer take the TLS 1.3 PSK path (which never re-runs
+// GetCertificate) and must full-handshake, re-presenting a leaf signed by the
+// NEW CA. Within one CA epoch the key is stable, which is what lets clients
+// resume (perf F2); the pinned-key exposure is bounded — a client only offers
+// tickets up to the stdlib's ~7-day max age, and TLS 1.3's per-session ECDHE
+// keeps session data forward-secret even if a ticket key leaks.
+// SetSessionTicketKeys is safe to call concurrently with live handshakes on the
+// shared config (the stdlib guards ticket-key state internally).
+func rotateMITMTicketKeys() {
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		// Extremely unlikely; leave the existing keys in place rather than
+		// zeroing them. A failed rotation only means the old epoch's tickets
+		// stay valid until age-expiry — no worse than before this hook.
+		logWarnf("MITM ticket-key rotation: rand read failed: %v", err)
+		return
+	}
+	mitmClientTLSConfig.SetSessionTicketKeys([][32]byte{key})
 }
 
 // upstreamInspectTLSConfig builds the tls.Config for the upstream leg of an

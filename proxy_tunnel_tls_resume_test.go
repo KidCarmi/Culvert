@@ -105,6 +105,47 @@ func TestMITMClientResumption(t *testing.T) {
 	})
 }
 
+// TestMITMResumptionEndsOnCAChange proves the CA-epoch fix for the Codex P2:
+// once the Root CA changes, an outstanding TLS session ticket can no longer
+// resume (ca.CAChangedObserver → rotateMITMTicketKeys flushes the shared
+// config's ticket keys), so the client is forced to full-handshake and
+// re-present a leaf under the NEW CA. Resumption then re-establishes within the
+// new epoch. Without the flush, step 3 would resume under the old-CA session.
+func TestMITMResumptionEndsOnCAChange(t *testing.T) {
+	pool1 := installBenchCA(t) // certMgr = CA #1; also flushes ticket keys via InitCA
+	cache := tls.NewLRUClientSessionCache(8)
+
+	// Epoch 1: prime a resumable session under CA #1.
+	if mitmHandshake(t, mitmClientTLSConfig, pool1, cache) {
+		t.Fatal("first handshake must NOT resume (cold cache)")
+	}
+	if !mitmHandshake(t, mitmClientTLSConfig, pool1, cache) {
+		t.Fatal("second handshake under CA #1 MUST resume")
+	}
+
+	// Rotate the Root CA. InitCA fires ca.CAChangedObserver, which flushes the
+	// MITM ticket keys, ending epoch 1. Rebuild the client trust pool for CA #2
+	// so the full handshake can still verify (we are isolating resumption, not
+	// trust).
+	if err := certMgr.InitCA(); err != nil {
+		t.Fatalf("rotate InitCA: %v", err)
+	}
+	pool2 := x509.NewCertPool()
+	if !pool2.AppendCertsFromPEM(certMgr.CACertPEM()) {
+		t.Fatal("append CA #2 PEM")
+	}
+
+	// Epoch 2, first handshake: the client still offers its stale CA #1 ticket,
+	// but the flushed ticket keys can't decrypt it → full handshake, no resume.
+	if mitmHandshake(t, mitmClientTLSConfig, pool2, cache) {
+		t.Fatal("P2 regression: resumed a session across a CA change — ticket keys were not flushed")
+	}
+	// Resumption works again within epoch 2.
+	if !mitmHandshake(t, mitmClientTLSConfig, pool2, cache) {
+		t.Fatal("handshake under CA #2 MUST resume once the new epoch is primed")
+	}
+}
+
 // BenchmarkMITMClientHandshake_Shared measures the steady-state client-facing
 // handshake with the shared config: after a warm-up connection, every handshake
 // resumes (skips ECDHE + cert send + signature).
