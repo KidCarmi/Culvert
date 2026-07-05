@@ -8,8 +8,14 @@ Single binary, zero runtime dependencies.
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
 internal/     — 48 packages (ADR-0002 decomposition, COMPLETE): 43 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
-main.go       — Entrypoint, flag parsing, signal handling, graceful shutdown
-proxy.go      — HTTP/CONNECT/WebSocket handlers, tunnel relay, upstream transport, sanitizeLog
+main.go       — Composition root: entrypoint, flag parsing, the 24 init* startup shims, proxy-server wiring, signal handling (DEBT-003 split; the file is the startup orchestrator only)
+main_shutdown.go — Graceful-shutdown sequence: runShutdownSequence, shutdown-order constants, registerEarly/LateShutdownHooks, drainActiveTunnels
+healthcheck.go — /healthz + /readyz handlers: handleHealth, handleReady, configSnapshotValidatorOK
+dp_enrollment.go — DP-side node enrollment client + cert lifecycle: enroll flow (CSR/RPC/CA-fingerprint/persist), startDataPlane, DP cert-renewal loop (distinct from the CP-side enrollment.go)
+proxy.go      — Request-dispatch pipeline (handleRequest + DEBT-002 helpers), policy-action state, scrubForwardedHeaders, sanitizeLog (DEBT-003 split; the file is now the composition root only)
+proxy_tunnel.go — CONNECT/WebSocket/tunnel relay: relayBufPool, relayCounted/bidiRelayCounted, handleTunnel(Bypass/Inspect), handleWebSocket, applyUpstreamProxy, hop-by-hop stripping
+proxy_http.go — Plain-HTTP forward path: handleHTTP, request-body limits, SSL-inspect stall detection
+proxy_portal.go — Captive/SSO portal resolution, proxy-auth parsing, safe-redirect validation
 socks5.go     — SOCKS5 protocol handler (RFC 1928/1929)
 policy.go     — Policy engine: rule evaluation, FQDN/category/GeoIP/schedule matching (URL-category store → internal/urlcat, SSL-bypass matcher → internal/sslbypass, FQDN glob → hostutil.MatchFQDN per ADR-0002; two-tier matchCategory/lookupHostCategory fusion stays here)
 store.go      — Composition root: stats/ts counters, auth Config, recordRequest* fan-out (blocklist → internal/blocklist, audit → internal/audit, request log → internal/reqlog per ADR-0002; shims/aliases in blocklist_vars.go + the audit/request-log sections)
@@ -36,7 +42,7 @@ security_scan.go — Scan-orchestrator shim: adapters + wrappers over internal/s
 fileblock.go  — File extension/MIME blocking profiles
 fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)
 geoip.go      — MaxMind GeoLite2 country lookup with background cache
-controlplane.go — gRPC-based Control Plane / Data Plane distributed architecture
+controlplane.go — CP/DP distributed architecture, split across cohesive same-package files (DEBT-003): controlplane.go (service def + CP aggregators + enroll rate-limit), controlplane_snapshot.go (ConfigSnapshot/ConfigStore + applyConfigSnapshot lifecycle), controlplane_server.go (CP gRPC server + RPC handlers), controlplane_client.go (DP gRPC client + loops), controlplane_tls.go (mTLS + cert-pool)
 enrollment.go — Token-based node enrollment, ClusterStore, cluster CA, heartbeat monitor
 upstream.go   — Upstream-pool shim: aliases + singleton over internal/upstream (ADR-0002; pool/circuit-breaker/health-loop engine lives in the package; main keeps applyUpstreamProxy transport wiring)
 ocsp.go       — OCSP shim: transport wiring over internal/ocsp (ADR-0002)
@@ -146,7 +152,7 @@ fully on main pushes (and the Security gate on tags + weekly cron).
 - **SSL inspect**: MITM via on-the-fly leaf certs signed by internal CA (ECDSA P-256)
 - **Cert cache**: LRU eviction at 10k entries, 1h TTL
 - **Hop-by-hop**: Dynamic stripping per RFC 7230 (parses Connection header for additional hop-by-hop names)
-- **Relay pattern**: All tunnel relays (CONNECT, WebSocket, SOCKS5) wait for BOTH goroutines; CloseWrite unblocks peers. Shared `relayCounted`/`bidiRelayCounted` (proxy.go) do the byte-counted bridge for the WS + CONNECT-bypass paths.
+- **Relay pattern**: All tunnel relays (CONNECT, WebSocket, SOCKS5) wait for BOTH goroutines; CloseWrite unblocks peers. Shared `relayCounted`/`bidiRelayCounted` (proxy_tunnel.go) do the byte-counted bridge for the WS + CONNECT-bypass paths.
 - **Raw-tunnel accounting**: WebSocket, CONNECT-bypass, SOCKS5, and the SSL-inspect non-TLS fallback relays emit a `TUNNEL_CLOSED` request-log entry (INFO level) at close — per-connection `BytesSent`/`BytesRecv` + `DurationMs` (new `Entry` field), matched rule, and identity. The bytes/log split is deliberate: `recordTunnelBytes` folds the relayed bytes into `statBytesSent`/`statBytesRecv` **always** (raw tunnels were previously invisible in the bytes dashboard), while `persistTunnelClose` writes the feed entry. `recordTunnelCloseGated` (store.go) counts bytes unconditionally then gates ONLY the feed entry on the per-rule "log traffic" flag — a quiet rule suppresses the entry but still counts bytes. `recordTunnelClose` (SOCKS5 + tests) does both unconditionally. Log-only for stats (the connection was stats-counted at allow time; re-running the fan-out would double-count statTotal/topHosts). `handleWebSocket` also runs `scrubForwardedHeaders` before forwarding (it re-writes the request via `r.Write`, so `X-User-Identity` must be stripped like every other forward path).
 - **GeoIP policy**: Fails closed on cache miss (unknown country = rule does not match)
 - **Admin RBAC**: Three roles — admin (full), operator (write), viewer (read-only)
