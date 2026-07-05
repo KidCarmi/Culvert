@@ -55,7 +55,6 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 
 func (cr *countingReader) Close() error { return cr.r.Close() }
 
-//nolint:gocognit,cyclop,funlen // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -103,99 +102,15 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	rewriter.ApplyResponse(host, resp) // response-side rewrite rules
 	removeHopHeaders(resp.Header)
 
-	// File block — check Content-Disposition for blocked download extensions.
-	// This catches downloads that use a generic URL but declare the real
-	// file extension in the response header (e.g. /download?id=123 →
-	// Content-Disposition: attachment; filename="setup.exe").
-	if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
-		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		atomic.AddInt64(&statFileBlocked, 1)
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
-		logger.Printf("FILE_BLOCKED (resp cd) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
-		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+	// Response-header file blocking (Content-Disposition filename + Content-Type
+	// MIME). Catches downloads whose URL hides the real type.
+	if blockedByResponseHeaders(w, r, resp) {
 		return
 	}
 
-	// File block — check Content-Type MIME for dangerous types.
-	// Catches renamed executables (e.g. malware.exe → malware.txt) where the
-	// server still reports the true MIME type in the Content-Type header.
-	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
-		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		atomic.AddInt64(&statFileBlocked, 1)
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
-		logger.Printf("FILE_BLOCKED (resp ct) %s -> %q%q (ext=%q)", cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
-		serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+	// Security body scan (magic/polyglot + ClamAV/YARA) for non-tunnel responses.
+	if scanHTTPResponseBody(w, r, resp) {
 		return
-	}
-
-	// Security body scan (ClamAV + YARA) for non-tunnel HTTP responses.
-	// Skip buffering if Content-Length signals the response exceeds the
-	// scan limit — avoids wasting memory and I/O on oversized bodies.
-	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
-	// Tier 3.3: admin-managed host allowlist short-circuits the whole pipeline
-	// so known-good hosts (e.g. internal content mirrors) aren't buffered.
-	if scanActive && globalScanExclusions.IsHostExcluded(r.Host) {
-		scanActive = false
-	}
-	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
-		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
-		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
-	}
-	//nolint:nestif // DEBT-003: relocated verbatim from proxy.go; pre-existing complexity, refactor deferred (TECHNICAL-DEBT-REGISTER)
-	if scanActive && (resp.ContentLength < 0 || resp.ContentLength <= globalSecScanner.MaxBytes()) {
-		buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
-		if readErr == nil {
-			// 1.1 fix: decompress gzip/deflate bodies before scanning so
-			// ClamAV/YARA signatures match the actual content.
-			scanData := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
-
-			// F4: Archive magic byte detection — block archives even if
-			// the URL/Content-Disposition doesn't reveal the true format.
-			if archType := IsBlockedArchive(scanData); archType != "" {
-				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
-				atomic.AddInt64(&statFileBlocked, 1)
-				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip3, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"), "inspect")
-				logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip3, sanitizeLog(r.Host), archType)
-				serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
-				return
-			}
-
-			// F5: Polyglot detection — block files whose Content-Type
-			// doesn't match their actual magic bytes (disguised executables).
-			if reason := CheckMagicVsContentType(scanData, resp.Header.Get("Content-Type")); reason != "" {
-				cip3, _, _ := net.SplitHostPort(r.RemoteAddr)
-				atomic.AddInt64(&statFileBlocked, 1)
-				atomic.AddInt64(&statBlocked, 1)
-				recordRequest(cip3, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"), "inspect")
-				logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip3, sanitizeLog(r.Host), sanitizeLog(reason))
-				serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
-				return
-			}
-
-			scanResult := safeScanBodyWithCT(scanData, resp.Header.Get("Content-Type"))
-			if scanResult != nil {
-				cip2, _, _ := net.SplitHostPort(r.RemoteAddr)
-				atomic.AddInt64(&statBlocked, 1)
-				// Fire scan_timeout alert for infrastructure monitoring (Finding 8.3).
-				if scanResult.Source == "timeout" {
-					go fireAlert("scan_timeout", AlertPayload{
-						Actor:  cip2,
-						Host:   r.Host,
-						Detail: scanResult.Reason,
-						Source: "scan_timeout",
-					})
-				}
-				recordRequest(cip2, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"), "inspect")
-				logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip2, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
-				scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
-				return
-			}
-			// Reassemble: buffered prefix + any remaining bytes beyond the limit.
-			resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), resp.Body))
-		}
 	}
 
 	copyHeaders(w.Header(), resp.Header)
@@ -208,4 +123,107 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Track bytes transferred for data exfiltration detection.
 	atomic.AddInt64(&statBytesSent, reqCounter.count)
 	atomic.AddInt64(&statBytesRecv, respBytes)
+}
+
+// serveHTTPFileBlock records a response-header file block and serves the block
+// page. source is the short tag used in the log line ("resp cd"/"resp ct").
+func serveHTTPFileBlock(w http.ResponseWriter, r *http.Request, ext, source string) {
+	cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	atomic.AddInt64(&statFileBlocked, 1)
+	atomic.AddInt64(&statBlocked, 1)
+	recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", r.Header.Get("X-User-Identity"), "inspect")
+	logger.Printf("FILE_BLOCKED (%s) %s -> %q%q (ext=%q)", source, cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+	serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
+}
+
+// blockedByResponseHeaders checks the response Content-Disposition (blocked
+// download extensions) and Content-Type (dangerous MIME types — catches renamed
+// executables). Returns true if the response was blocked (block page served;
+// caller must return).
+func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http.Response) bool {
+	if ext := fileBlocker.CheckContentDisposition(resp.Header.Get("Content-Disposition")); ext != "" {
+		serveHTTPFileBlock(w, r, ext, "resp cd")
+		return true
+	}
+	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
+		serveHTTPFileBlock(w, r, ext, "resp ct")
+		return true
+	}
+	return false
+}
+
+// scanHTTPResponseBody runs the security body-scan pipeline (archive magic,
+// polyglot, ClamAV/YARA) over a plain-HTTP response. It returns true if the
+// response was blocked (block page served; caller must return). On a clean scan
+// it reassembles resp.Body (buffered prefix + any bytes beyond the scan limit)
+// so the caller streams it unchanged; when scanning does not apply — or the
+// body cannot be read — it leaves resp.Body as-is and returns false.
+func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Response) bool {
+	// Skip buffering if Content-Length signals the response exceeds the scan
+	// limit — avoids wasting memory and I/O on oversized bodies.
+	scanActive := globalRemoteScanner.Enabled() || globalSecScanner.BodyScanEnabled()
+	// Tier 3.3: admin-managed host allowlist short-circuits the whole pipeline
+	// so known-good hosts (e.g. internal content mirrors) aren't buffered.
+	if scanActive && globalScanExclusions.IsHostExcluded(r.Host) {
+		scanActive = false
+	}
+	if scanActive && resp.ContentLength > globalSecScanner.MaxBytes() {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		logScanLimitExceeded(r.Host, cip, globalSecScanner.MaxBytes())
+	}
+	if !scanActive || (resp.ContentLength >= 0 && resp.ContentLength > globalSecScanner.MaxBytes()) {
+		return false
+	}
+
+	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
+	if readErr != nil {
+		return false
+	}
+	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
+	// signatures match the actual content.
+	scanData := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
+
+	// F4: Archive magic byte detection — block archives even if the
+	// URL/Content-Disposition doesn't reveal the true format.
+	if archType := IsBlockedArchive(scanData); archType != "" {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequest(cip, r.Method, r.Host, "FILE_BLOCKED", "magic:"+archType, "", r.Header.Get("X-User-Identity"), "inspect")
+		logger.Printf("FILE_BLOCKED (magic) %s -> %q (type=%s)", cip, sanitizeLog(r.Host), archType)
+		serveBlockPage(w, r.Host+r.URL.Path, "File Block", "magic:"+archType)
+		return true
+	}
+	// F5: Polyglot detection — block files whose Content-Type doesn't match
+	// their actual magic bytes (disguised executables).
+	if reason := CheckMagicVsContentType(scanData, resp.Header.Get("Content-Type")); reason != "" {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statFileBlocked, 1)
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequest(cip, r.Method, r.Host, "POLYGLOT_BLOCKED", reason, "", r.Header.Get("X-User-Identity"), "inspect")
+		logger.Printf("POLYGLOT_BLOCKED %s -> %q (%s)", cip, sanitizeLog(r.Host), sanitizeLog(reason))
+		serveBlockPage(w, r.Host+r.URL.Path, "Polyglot Detection", reason)
+		return true
+	}
+
+	if scanResult := safeScanBodyWithCT(scanData, resp.Header.Get("Content-Type")); scanResult != nil {
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statBlocked, 1)
+		// Fire scan_timeout alert for infrastructure monitoring (Finding 8.3).
+		if scanResult.Source == "timeout" {
+			go fireAlert("scan_timeout", AlertPayload{
+				Actor:  cip,
+				Host:   r.Host,
+				Detail: scanResult.Reason,
+				Source: "scan_timeout",
+			})
+		}
+		recordRequest(cip, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, r.Header.Get("X-User-Identity"), "inspect")
+		logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))
+		scanBlock(w, r.Host, scanResult.Reason, scanResult.Source)
+		return true
+	}
+	// Reassemble: buffered prefix + any remaining bytes beyond the limit.
+	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buffered), resp.Body))
+	return false
 }
