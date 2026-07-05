@@ -85,6 +85,36 @@ func BenchmarkPolicyEvaluate_MatchLast(b *testing.B) {
 	}
 }
 
+// BenchmarkPolicyEvaluate_MatchConditions measures the per-match cost for a
+// rule with several configured conditions — the common production shape (every
+// allowed request pays this). Before the precomputed-matchedConds optimization
+// the MatchedConditions summary was rebuilt per request (slice growth + one
+// string concat per condition + join); it is now computed once per rule
+// mutation in sortLocked, leaving only the per-request host normalization and
+// the PolicyMatch itself.
+func BenchmarkPolicyEvaluate_MatchConditions(b *testing.B) {
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{
+		Priority:       1,
+		Name:           "multi-cond",
+		SourceIP:       "203.0.113.7",
+		SourceIdentity: "alice",
+		SourceGroup:    "engineering",
+		AuthSource:     "local",
+		DestFQDN:       "*.example.com",
+		Action:         ActionAllow,
+	}})
+	groups := []string{"engineering", "vpn-users"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m := ps.Evaluate("203.0.113.7", "alice", "local", "target.example.com", groups)
+		if m == nil || m.Rule.Name != "multi-cond" {
+			b.Fatalf("expected multi-cond match, got %v", m)
+		}
+	}
+}
+
 // BenchmarkScrubForwardedHeaders measures the per-request header-scrub hot path
 // (X-Forwarded-For / X-Real-IP private-IP stripping + X-User-Identity removal),
 // run for every forwarded HTTP request.

@@ -124,6 +124,15 @@ type PolicyRule struct {
 	// normFQDN) falls back to the allocating path, so correctness never depends
 	// on it being populated.
 	normFQDN string
+
+	// matchedConds is the buildMatchedConditions summary, precomputed by
+	// sortLocked() alongside normFQDN. The summary depends ONLY on rule fields,
+	// yet was rebuilt (slice append + string concats + join) on EVERY matched
+	// request — the remaining per-match allocations on the Evaluate hot path.
+	// Same fallback contract as normFQDN: buildMatchedConditions never returns
+	// "" (no-condition rules yield "any"), so an empty value means "not
+	// precomputed" and Evaluate falls back to building it per-request.
+	matchedConds string
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -558,9 +567,9 @@ func (ps *PolicyStore) sortLocked() {
 	sort.Slice(ps.rules, func(i, j int) bool {
 		return ps.rules[i].Priority < ps.rules[j].Priority
 	})
-	// Precompute the normalized FQDN once per mutation so Evaluate never has to
-	// normalize a rule's pattern on the per-request hot path. Index-based range
-	// avoids copying the rule pointer's target.
+	// Precompute the normalized FQDN and the matched-conditions summary once
+	// per mutation so Evaluate never rebuilds either on the per-request hot
+	// path. Index-based range avoids copying the rule pointer's target.
 	for i := range ps.rules {
 		r := ps.rules[i]
 		if r.DestFQDN != "" {
@@ -568,6 +577,7 @@ func (ps *PolicyStore) sortLocked() {
 		} else {
 			r.normFQDN = ""
 		}
+		r.matchedConds = buildMatchedConditions(r)
 	}
 }
 
@@ -620,7 +630,13 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
-		conds := buildMatchedConditions(rule)
+		// Precomputed by sortLocked(); fall back to building it per-request for
+		// rules that reached the store outside the mutators (same contract as
+		// normFQDN — buildMatchedConditions never returns "").
+		conds := rule.matchedConds
+		if conds == "" {
+			conds = buildMatchedConditions(rule)
+		}
 		return &PolicyMatch{
 			Rule:              rule,
 			Action:            rule.Action,

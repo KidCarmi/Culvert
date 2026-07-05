@@ -51,6 +51,44 @@ func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_PolicyEvalMatchAllocs locks in the constant-allocation MATCH
+// path — the common production case (every allowed request). Before the
+// precomputed-matchedConds optimization, Evaluate rebuilt the MatchedConditions
+// summary on every match: 11 allocs/op for a five-condition rule (slice growth
+// + one concat per condition + join). It is now precomputed in sortLocked, so
+// the steady state is the per-request host normalization + the PolicyMatch —
+// independent of how many conditions the rule configures.
+func TestBenchGate_PolicyEvalMatchAllocs(t *testing.T) {
+	const maxAllocs int64 = 5 // steady state 3; pre-fix 11 for a 5-condition rule
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{
+		Priority:       1,
+		Name:           "multi-cond",
+		SourceIP:       "203.0.113.7",
+		SourceIdentity: "alice",
+		SourceGroup:    "engineering",
+		AuthSource:     "local",
+		DestFQDN:       "*.example.com",
+		Action:         ActionAllow,
+	}})
+	groups := []string{"engineering", "vpn-users"}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if m := ps.Evaluate("203.0.113.7", "alice", "local", "target.example.com", groups); m == nil {
+				b.Fatal("expected multi-cond match")
+			}
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("Evaluate match (5-condition rule): %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: Evaluate match path allocates %d/op, exceeds constant bound %d — "+
+			"per-match condition-summary building has returned to the policy hot path "+
+			"(buildMatchedConditions per request instead of precomputed matchedConds?)", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_UpstreamInspectTLSConfigAllocs locks in the shared-root-pool
 // contract on the SSL-inspect upstream leg. Before the optimization every
 // inspected CONNECT tunnel called x509.SystemCertPool(), which clones the
