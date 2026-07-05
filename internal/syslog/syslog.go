@@ -114,6 +114,12 @@ func (s *Writer) formatMsg(pri int, msg string) string {
 	}
 }
 
+// writeTimeout bounds each conn write: a TCP collector that accepts but stops
+// draining (SIEM overload, half-open peer) would otherwise fill the kernel
+// send buffer and block fmt.Fprint forever — while holding s.mu, stalling
+// every request/audit-log caller proxy-wide.
+const writeTimeout = 5 * time.Second
+
 func (s *Writer) writeMsg(pri int, msg string) {
 	line := s.formatMsg(pri, msg)
 
@@ -130,6 +136,7 @@ func (s *Writer) writeMsg(pri int, msg string) {
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
+	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
 	if _, err := fmt.Fprint(s.conn, line); err != nil {
 		s.conn.Close()
 		s.conn = nil
@@ -137,7 +144,8 @@ func (s *Writer) writeMsg(pri int, msg string) {
 			return
 		}
 		if err2 := s.connect(); err2 == nil {
-			fmt.Fprint(s.conn, line) //nolint:errcheck // best-effort reconnect retry; syslog must never block the proxy
+			s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
+			fmt.Fprint(s.conn, line)                              //nolint:errcheck // best-effort reconnect retry; syslog must never block the proxy
 			s.lastReconnErr = time.Time{}
 		} else {
 			s.lastReconnErr = time.Now()

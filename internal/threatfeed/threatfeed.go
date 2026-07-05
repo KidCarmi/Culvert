@@ -161,11 +161,13 @@ func (tf *Feed) Sync() {
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
 	var failures []string
+	failedSources := make(map[string]bool, 2)
 
 	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
 		failures = append(failures, fmt.Sprintf("URLhaus: %v", err))
+		failedSources["urlhaus"] = true
 	} else {
 		obs.Printf("ThreatFeed: URLhaus %d entries", n)
 	}
@@ -174,12 +176,47 @@ func (tf *Feed) Sync() {
 	if err != nil {
 		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
 		failures = append(failures, fmt.Sprintf("OpenPhish: %v", err))
+		failedSources["openphish"] = true
 	} else {
 		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
 	}
 
-	now := time.Now()
+	tf.applySync(newURLs, newDomains, failures, failedSources, time.Now())
+
+	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
+
+	if tf.dbPath != "" {
+		if err := tf.saveToDisk(); err != nil {
+			obs.Printf("ThreatFeed: save to disk failed: %v", err)
+		}
+	}
+}
+
+// applySync installs freshly-fetched feed tables. A feed whose fetch failed
+// contributed nothing to the fresh maps, so its previous entries are carried
+// forward (last-known-good) instead of being replaced with nothing — otherwise
+// one sync with both feeds unreachable would wipe the entire threat DB in
+// memory AND on disk (Sync persists right after), silently disabling
+// threat-feed blocking until the next successful sync. A feed that fetched
+// cleanly is always fully replaced, so stale entries still age out.
+func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, failedSources map[string]bool, now time.Time) {
 	tf.mu.Lock()
+	if len(failedSources) > 0 {
+		for u, e := range tf.urls {
+			if failedSources[e.Source] {
+				if _, ok := newURLs[u]; !ok {
+					newURLs[u] = e
+				}
+			}
+		}
+		for d, e := range tf.domains {
+			if failedSources[e.Source] {
+				if _, ok := newDomains[d]; !ok {
+					newDomains[d] = e
+				}
+			}
+		}
+	}
 	tf.urls = newURLs
 	tf.domains = newDomains
 	tf.lastSync = now
@@ -191,14 +228,6 @@ func (tf *Feed) Sync() {
 	}
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
-
-	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
-
-	if tf.dbPath != "" {
-		if err := tf.saveToDisk(); err != nil {
-			obs.Printf("ThreatFeed: save to disk failed: %v", err)
-		}
-	}
 }
 
 // CheckURL looks up a full URL against the threat feed.

@@ -1,0 +1,110 @@
+package threatfeed
+
+// applySync last-known-good carry-forward tests: a feed whose fetch failed
+// must keep its previous entries instead of being replaced with nothing.
+// Pre-fix, one sync with both feeds unreachable wiped the entire threat DB
+// in memory and (via the saveToDisk right after) on disk — silently
+// disabling threat-feed blocking until the next successful sync, durably
+// across restarts.
+
+import (
+	"testing"
+	"time"
+)
+
+func seedFeed() *Feed {
+	tf := New()
+	tf.enabled = true
+	tf.urls = map[string]entry{
+		"http://evil.example/mal.exe":  {Source: "urlhaus"},
+		"http://phish.example/login":   {Source: "openphish"},
+		"http://phish.example/verify2": {Source: "openphish"},
+	}
+	tf.domains = map[string]entry{
+		"evil.example":  {Source: "urlhaus"},
+		"phish.example": {Source: "openphish"},
+	}
+	tf.totalEntries.Store(3)
+	return tf
+}
+
+func TestApplySync_AllFeedsFailed_KeepsLastKnownGood(t *testing.T) {
+	tf := seedFeed()
+
+	tf.applySync(
+		make(map[string]entry), make(map[string]entry),
+		[]string{"URLhaus: dial timeout", "OpenPhish: dial timeout"},
+		map[string]bool{"urlhaus": true, "openphish": true},
+		time.Now(),
+	)
+
+	if got, _, _ := tf.Stats(); got != 3 {
+		t.Fatalf("totalEntries = %d, want 3 (last-known-good preserved)", got)
+	}
+	if mal, src := tf.CheckURL("http://evil.example/mal.exe"); !mal || src != "urlhaus" {
+		t.Errorf("CheckURL after failed sync = (%v, %q), want (true, urlhaus)", mal, src)
+	}
+	if mal, _ := tf.CheckDomain("phish.example"); !mal {
+		t.Error("CheckDomain after failed sync = false, want true (entry wiped)")
+	}
+	if ok, _, errSummary := tf.SyncStatus(); ok || errSummary == "" {
+		t.Errorf("SyncStatus after failed sync = (ok=%v, err=%q), want failure recorded", ok, errSummary)
+	}
+}
+
+func TestApplySync_OneFeedFailed_CarriesForwardOnlyThatFeed(t *testing.T) {
+	tf := seedFeed()
+
+	// OpenPhish fetched cleanly (with a fresh, smaller set); URLhaus failed.
+	fresh := map[string]entry{
+		"http://phish.example/new": {Source: "openphish"},
+	}
+	freshDomains := map[string]entry{
+		"newphish.example": {Source: "openphish"},
+	}
+	tf.applySync(fresh, freshDomains,
+		[]string{"URLhaus: HTTP 503"},
+		map[string]bool{"urlhaus": true},
+		time.Now(),
+	)
+
+	// URLhaus entries carried forward.
+	if mal, _ := tf.CheckURL("http://evil.example/mal.exe"); !mal {
+		t.Error("failed feed's URL entry was wiped; want carry-forward")
+	}
+	if mal, _ := tf.CheckDomain("evil.example"); !mal {
+		t.Error("failed feed's domain entry was wiped; want carry-forward")
+	}
+	// Succeeded feed fully replaced: stale entries age out.
+	if mal, _ := tf.CheckURL("http://phish.example/login"); mal {
+		t.Error("succeeded feed's stale URL entry survived; want full replace")
+	}
+	if mal, _ := tf.CheckURL("http://phish.example/new"); !mal {
+		t.Error("succeeded feed's fresh URL entry missing")
+	}
+	if mal, _ := tf.CheckDomain("newphish.example"); !mal {
+		t.Error("succeeded feed's fresh domain entry missing")
+	}
+}
+
+func TestApplySync_CleanSync_FullyReplaces(t *testing.T) {
+	tf := seedFeed()
+	before := time.Now().Add(-time.Second)
+
+	tf.applySync(
+		map[string]entry{"http://fresh.example/x": {Source: "urlhaus"}},
+		map[string]entry{"fresh.example": {Source: "urlhaus"}},
+		nil, map[string]bool{},
+		time.Now(),
+	)
+
+	if got, _, _ := tf.Stats(); got != 1 {
+		t.Fatalf("totalEntries = %d, want 1 (clean sync fully replaces)", got)
+	}
+	if mal, _ := tf.CheckURL("http://evil.example/mal.exe"); mal {
+		t.Error("stale entry survived a clean sync; want full replace")
+	}
+	if ok, lastSuccess, errSummary := tf.SyncStatus(); !ok || errSummary != "" || !lastSuccess.After(before) {
+		t.Errorf("SyncStatus after clean sync = (ok=%v, lastSuccess=%v, err=%q), want success", ok, lastSuccess, errSummary)
+	}
+}

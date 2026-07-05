@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
@@ -756,11 +757,11 @@ func (c *Config) SaveUIUsersFile() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// AtomicWrite (unique temp + fsync) rather than a fixed ".tmp" +
+	// rename: concurrent admin mutations save from separate handler
+	// goroutines, and a shared temp name lets two writers interleave into
+	// the same file before one renames the torn result over the roster.
+	return fileutil.AtomicWrite(path, data, 0o600)
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns

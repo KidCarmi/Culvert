@@ -577,10 +577,24 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 	return sslAction, tlsSkipVerify
 }
 
+// geoTrackSem bounds concurrent destination-country trackers. Each tracker
+// can block in uncached DNS resolution (resolveHost → net.LookupHost) for the
+// full resolver timeout, and handleRequest fires one per proxied request —
+// without a bound, a resolver brownout piles up one DNS-blocked goroutine per
+// request with no backpressure, exactly when the proxy is already stressed.
+var geoTrackSem = make(chan struct{}, 256)
+
 // trackDestinationCountry records the destination country for the live
 // dashboard. Runs in its own goroutine (fire-and-forget); extracted from
-// handleRequest (DEBT-002).
+// handleRequest (DEBT-002). Dashboard stats are best-effort: when the tracker
+// pool is saturated the sample is dropped rather than queued.
 func trackDestinationCountry(host string) {
+	select {
+	case geoTrackSem <- struct{}{}:
+	default:
+		return
+	}
+	defer func() { <-geoTrackSem }()
 	code, name := geo.LookupFull(host)
 	if code != "" {
 		countryTraffic.Record(code, name)
