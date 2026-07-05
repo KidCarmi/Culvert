@@ -352,6 +352,49 @@ var upstreamVerifyRoots = sync.OnceValue(func() *x509.CertPool {
 	return systemRoots
 })
 
+// upstreamSessionCache lets the upstream leg of inspected tunnels RESUME TLS
+// instead of paying a full handshake (ECDHE + cert-chain verify + signature) on
+// every reconnect to the same host — the dominant per-connection CPU cost for a
+// browsing mix (perf F1). It is shared across all per-tunnel configs; the stdlib
+// keys the client cache on ServerName (the port-stripped origin host set on
+// every verifying config), so a ticket minted for one origin can only be
+// offered back to that same origin — a foreign server can't decrypt it and the
+// handshake safely falls back to a full verified one. A session is only cached
+// AFTER a successful verified handshake, so a resumption inherits that
+// handshake's verification (no security change); the one accepted tradeoff is
+// the universal TLS-resumption semantics — a session cached while the origin
+// cert was valid can resume without re-checking that cert until the ticket
+// expires. The cache is attached ONLY to the verifying config below — the
+// per-rule skip-verify path stays fully isolated (no cache, always a fresh
+// handshake), so an unverified session can never be stored or resumed.
+var upstreamSessionCache = tls.NewLRUClientSessionCache(4096)
+
+// mitmClientTLSConfig is the shared client-facing (forged-leaf) TLS config for
+// inspected tunnels (perf F2). Hoisting it to ONE instance keeps the
+// session-ticket keys stable across connections — enabling TLS 1.3 client
+// resumption (a per-connection config rotated keys, giving ~0% resumption and a
+// re-presented forged leaf on every reconnect) and removing a tls.Config
+// allocation per inspected connection. GetCertificate indirects through the
+// certMgr global on every call so CA rotation and test reassignment are
+// respected (previously `certMgr.GetCert` was bound per-connection). The config
+// is read-only after init; tls.Server never mutates the passed config and the
+// stdlib locks ticket-key rotation internally, so concurrent handshakes are
+// safe.
+//
+//   - MinVersion floor: never present legacy TLS to clients. Matches Go's
+//     current default but is pinned so a toolchain/refactor change can't
+//     silently weaken the client-facing posture (asserted by
+//     TestMITM_ForgedLeafTLSPosture).
+//   - NextProtos http/1.1 only: the inner request loop uses http.ReadRequest
+//     (HTTP/1.x). Without this, browsers negotiate HTTP/2 via ALPN and the
+//     parser can't read H2 frames, silently falling back to raw relay with zero
+//     file-blocking/DPI/scanning.
+var mitmClientTLSConfig = &tls.Config{
+	GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) { return certMgr.GetCert(chi) },
+	MinVersion:     tls.VersionTLS12,
+	NextProtos:     []string{"http/1.1"},
+}
+
 // upstreamInspectTLSConfig builds the tls.Config for the upstream leg of an
 // SSL-inspected tunnel. The default path verifies against the shared
 // upstreamVerifyRoots pool; tlsSkipVerify (admin-configured per-rule) disables
@@ -367,9 +410,10 @@ func upstreamInspectTLSConfig(hostOnly string, tlsSkipVerify bool) *tls.Config {
 		}
 	}
 	return &tls.Config{
-		ServerName: hostOnly,
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    upstreamVerifyRoots(),
+		ServerName:         hostOnly,
+		MinVersion:         tls.VersionTLS12,
+		RootCAs:            upstreamVerifyRoots(),
+		ClientSessionCache: upstreamSessionCache,
 	}
 }
 
@@ -491,20 +535,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 
 	// 4. Perform TLS handshake with the client using a dynamically-signed cert.
 	// Wrap rawClient with the peek buffer so the already-peeked byte isn't lost.
-	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, &tls.Config{
-		GetCertificate: certMgr.GetCert,
-		// Explicit floor for the client-facing (forged-leaf) side of an
-		// inspected tunnel: never present legacy TLS to clients. Matches Go's
-		// current default but is pinned so a toolchain default change or a
-		// refactor can't silently weaken the posture the SWG offers clients.
-		// Asserted by TestMITM_ForgedLeafTLSPosture.
-		MinVersion: tls.VersionTLS12,
-		// Force HTTP/1.1 — the inner request loop uses http.ReadRequest which
-		// is HTTP/1.x only. Without this, browsers negotiate HTTP/2 via ALPN
-		// and the parser can't read H2 frames, causing a silent fallback to
-		// raw relay with zero file-blocking/DPI/scanning checks.
-		NextProtos: []string{"http/1.1"},
-	})
+	// Uses the shared mitmClientTLSConfig (perf F2) so session-ticket keys are
+	// stable across connections and clients can resume.
+	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, mitmClientTLSConfig)
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
 		clientTLS.Close()   //nolint:errcheck // best-effort cleanup on handshake failure
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on handshake failure
