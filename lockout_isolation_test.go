@@ -8,7 +8,7 @@ package main
 // Pre-fix, running `go test -count=N -run TestAPIAuthLogin_InvalidCreds
 // ./...` with N >= 6 produced this failure pattern:
 //
-//   iter 1: 401 OK   (loginLimiter.entries["logintest"].attempts = 1)
+//   iter 1: 401 OK   (the "logintest" pair gains attempts = 1)
 //   iter 2: 401 OK   (.attempts = 2)
 //   iter 3: 401 OK   (.attempts = 3)
 //   iter 4: 401 OK   (.attempts = 4)
@@ -102,14 +102,14 @@ func TestAPIAuthLogin_InvalidCreds_DeterministicUnderPollution(t *testing.T) {
 	// the polluted state on cleanup — so this test proves the helper
 	// actually isolates iteration from external state.
 	for i := 0; i < lockoutMaxAttempts; i++ {
-		loginLimiter.RecordFailure("logintest")
+		loginLimiter.RecordFailure("127.0.0.1", "logintest")
 	}
 	// Manual restore for THIS test's pre-pollution (the snapshot
 	// helper's restore will overwrite it back to the polluted state,
 	// which we then clean here on a second t.Cleanup so we don't
 	// leak the pollution into OTHER tests if this test is shuffled
 	// to run before them).
-	t.Cleanup(func() { loginLimiter.RecordSuccess("logintest") })
+	t.Cleanup(func() { loginLimiter.ResetUser("logintest") })
 
 	// Now apply the snapshot helper — captures polluted state,
 	// installs fresh empty map for the test body.
