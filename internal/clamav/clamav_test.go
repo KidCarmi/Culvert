@@ -1,12 +1,106 @@
 package clamav
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
 )
+
+// fakeClamd listens on an ephemeral TCP port, plays the CLAMD INSTREAM server
+// side (reads the command + length-prefixed chunks until the zero terminator,
+// reassembles the payload), replies with resp, then hands the reassembled bytes
+// back on the returned channel. Used to prove INSTREAM framing over multiple
+// chunks after the 64 KiB + net.Buffers change.
+func fakeClamd(t *testing.T, resp string) (addr string, received <-chan []byte) {
+	t.Helper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	ch := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r := bufio.NewReader(conn)
+		if _, err := r.ReadString(0); err != nil { // consume "zINSTREAM\0"
+			return
+		}
+		var payload []byte
+		for {
+			var lenBuf [4]byte
+			if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+				return
+			}
+			n := binary.BigEndian.Uint32(lenBuf[:])
+			if n == 0 { // zero-length terminator
+				break
+			}
+			chunk := make([]byte, n)
+			if _, err := io.ReadFull(r, chunk); err != nil {
+				return
+			}
+			payload = append(payload, chunk...)
+		}
+		_, _ = conn.Write([]byte(resp))
+		ch <- payload
+	}()
+	return "tcp:" + ln.Addr().String(), ch
+}
+
+// TestClient_ScanMultiChunkFraming sends a body several INSTREAM chunks long and
+// asserts the daemon reassembles it byte-for-byte and the OK response parses as
+// clean — guarding the 64 KiB chunk + net.Buffers (writev) framing change.
+func TestClient_ScanMultiChunkFraming(t *testing.T) {
+	addr, received := fakeClamd(t, "stream: OK\x00")
+	c := New(addr)
+	c.timeout = 5 * time.Second
+
+	// ~150 KiB → spans multiple 64 KiB chunks plus a short final chunk.
+	body := bytes.Repeat([]byte("clamav-instream-framing-check "), 5120)
+	virus, malicious, err := c.Scan(body)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if malicious {
+		t.Fatalf("clean body reported malicious: %q", virus)
+	}
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, body) {
+			t.Fatalf("daemon reassembled %d bytes, want %d — INSTREAM framing corrupted", len(got), len(body))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon never received the full payload")
+	}
+}
+
+// TestClient_ScanMultiChunkFindsVirus confirms a FOUND verdict still surfaces
+// after the framing change, on a multi-chunk body.
+func TestClient_ScanMultiChunkFindsVirus(t *testing.T) {
+	addr, _ := fakeClamd(t, "stream: Eicar-Test-Signature FOUND\x00")
+	c := New(addr)
+	c.timeout = 5 * time.Second
+
+	body := bytes.Repeat([]byte("x"), 130*1024)
+	virus, malicious, err := c.Scan(body)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if !malicious || virus != "Eicar-Test-Signature" {
+		t.Fatalf("got (%q, %v), want (Eicar-Test-Signature, true)", virus, malicious)
+	}
+}
 
 func TestParseClamResponse_OK(t *testing.T) {
 	name, found, err := parseClamResponse("stream: OK")
