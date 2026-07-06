@@ -290,9 +290,10 @@ func validateComposeFilenames(composeFile, overrideFile string) error {
 	}
 	// It becomes a sudoers literal AND an argv token, so reject whitespace and
 	// control chars (whitespace would split the sudo arg match → no matching rule
-	// → sudo denial) and shell metacharacters — parity with the installer's
-	// reject_unsafe, so a post-install hand-edit can't produce a config the Go
-	// binary accepts but sudo refuses.
+	// → sudo denial) and shell metacharacters. The char set is kept byte-identical
+	// to config.validate AND to the installer's compose_override_file checks
+	// (reject_unsafe + its metachar case), so a post-install hand-edit can't
+	// produce a config the installer accepts but the agent/sudo then refuses.
 	for _, r := range overrideFile {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {
 			return fmt.Errorf("runner: ComposeOverrideFile must not contain whitespace or control characters, got %q", overrideFile)

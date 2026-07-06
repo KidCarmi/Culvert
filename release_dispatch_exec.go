@@ -64,17 +64,24 @@ const detailAnchorReadFailed = "anchor_read_failed"
 // detailAgentUnreachableAfterUpdate prefixes the Detail when an apply the agent
 // reported as SUCCEEDED is immediately followed by a TRANSPORT failure on the
 // post-verify /v1/status read — while the pre-apply anchor read had succeeded.
-// That differential is a strong HINT (not proof) that the recreate dropped the
-// CP↔agent socket (e.g. no compose_override_file → the single-`-f` recreate
-// stripped the maintenance-socket mount). It is deliberately a HEURISTIC: a
-// benign blip in the brief post-recreate settling window can also produce it,
-// and a slow-hanging drop that surfaces as context.DeadlineExceeded (which
-// isTransientAgentErr treats as non-transient) will fall back to the generic
-// detail. Either way the terminal is FAILED_NEEDS_ATTN, so the operator is
-// correctly alerted; this label only refines the description. A future CP/GUI
-// consumer SHOULD cross-check the agent's compose_override_configured flag (in
-// op params / on /v1/status) before prescribing "wire the override", rather than
-// treating this detail as a definitive diagnosis.
+// That differential is a HINT (not proof) that the recreate dropped the CP↔agent
+// socket. It is a HEURISTIC: a benign blip in the post-recreate settling window
+// can also produce it, and a slow-hanging drop surfacing as context.DeadlineExceeded
+// (non-transient per isTransientAgentErr) falls back to the generic detail.
+//
+// REACHABILITY (important): for a CP-LOCAL agent — the common single-node case,
+// where CULVERT_MAINT_AGENT_URL is a unix socket mounted into the SAME proxy
+// container that runs this dispatcher — a real recreate SIGKILLs this process
+// mid-Execute, so classifyTerminal never runs; recovery goes through Resume()
+// (which reports the generic post_verify_read_failed). This distinct label
+// therefore mostly fires for a REMOTE agent (network transport, dispatcher not
+// co-recreated) or when the restart did not recreate this container. The durable
+// prevention is the structural override-carry (the socket survives by
+// construction); the more reachable proactive signal is the agent's
+// compose_override_configured flag (op params / /v1/status), which a future GUI
+// consumer should surface pre-dispatch rather than relying on this post-facto
+// label. Either way the terminal stays FAILED_NEEDS_ATTN, so the operator is
+// alerted regardless.
 const detailAgentUnreachableAfterUpdate = "agent_unreachable_after_update"
 
 // errStaleAlreadyCurrent is returned when a plan's already-current determination
