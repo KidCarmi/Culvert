@@ -19,7 +19,7 @@ package main
 //     malformed envelope, wrong KEK, or corrupted ciphertext/tag (the GCM tag
 //     check in decryptBundle covers wrong-KEK and tamper).
 //   - Encrypted files and the local KEK file are written 0600 via
-//     atomicWriteFile.
+//     fileutil.AtomicWrite.
 //   - Key material is never logged, audited, or exposed in metrics.
 
 import (
@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // kekLen is the size of a key-encryption key in bytes (256-bit). The KEK is
@@ -102,13 +103,13 @@ func decryptWithKEK(data []byte, p KEKProvider) ([]byte, error) {
 }
 
 // writeEncryptedFile encrypts plaintext under the provider's KEK and writes the
-// resulting envelope to path with 0600 permissions via atomicWriteFile.
+// resulting envelope to path with 0600 permissions via fileutil.AtomicWrite.
 func writeEncryptedFile(path string, plaintext []byte, p KEKProvider) error {
 	enc, err := encryptWithKEK(plaintext, p)
 	if err != nil {
 		return err
 	}
-	if err := atomicWriteFile(filepath.Clean(path), enc, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(filepath.Clean(path), enc, 0o600); err != nil {
 		return fmt.Errorf("kek: write encrypted file: %w", err)
 	}
 	return nil
@@ -190,7 +191,7 @@ func (p *fileKEKProvider) load() ([]byte, error) {
 
 // generate creates a fresh random KEK and persists it 0600.
 //
-// It deliberately does NOT use atomicWriteFile: that helper renames over the
+// It deliberately does NOT use fileutil.AtomicWrite: that helper renames over the
 // destination unconditionally, so two callers racing on first use (two
 // goroutines, or two processes sharing the data dir) could each generate a
 // different KEK and the later rename would orphan the earlier caller's
