@@ -43,19 +43,28 @@ Secret plaintext never crosses the package boundary as an exported `[]byte`:
 
 ```go
 type Sealed struct{ b []byte }              // no String(), no exported accessor
-func Seal(plaintext []byte, p KEKProvider) ([]byte, error)
-func Open(envelope []byte, p KEKProvider) (*Sealed, error)
+type Provider struct{ src kekSource }       // OPAQUE; kekSource.kek() is unexported
+func ResolveProvider(cfg ProviderConfig) (*Provider, error) // + FileProvider/EnvProvider
+func Seal(plaintext []byte, p *Provider) ([]byte, error)
+func Open(envelope []byte, p *Provider) (*Sealed, error)
 func (s *Sealed) WithPlaintext(fn func([]byte) error) error   // zeroize after
 func (s *Sealed) Destroy()
-func ValidateProvider(p KEKProvider) error  // availability check, no bytes
+func ValidateProvider(p *Provider) error    // availability check, no bytes
 ```
 
-`KEKProvider` moves into the package; `main` keeps `type KEKProvider =
-secret.KEKProvider` (the established `CertManager`/`Session` alias pattern).
-`KEK() []byte` stays on the interface but is internal-use only (consumed by
-`Seal`/`Open` inside the package). Stdlib callers that require `[]byte`
-(`pem.Decode`, `x509.ParseECPrivateKey`, `tls.X509KeyPair`) use the scoped
-`WithPlaintext` escape hatch, which zeroizes on return.
+The provider is an **opaque `*Provider` handle**, not an aliased interface with an
+exported byte method. The KEK source is an *unexported* method (`kek() ([]byte,
+error)`) reachable only from inside `internal/secret`, so a `package main` file
+holding a `*Provider` has **no compile-legal path** to the raw KEK — `Seal`/`Open`
+consume it internally. `main` builds providers only through the exported resolvers
+(`ResolveProvider`/`FileProvider`/`EnvProvider`); it keeps **no `KEKProvider`
+alias**. An earlier sketch of this ADR proposed `type KEKProvider =
+secret.KEKProvider` with an exported `KEK()` method — that would have left
+`p.KEK()` callable from every root file (Go hides only *unexported* identifiers),
+defeating the boundary; the opaque-handle + unexported-method design is what makes
+"no raw KEK in `main`" a compile error rather than a convention. Stdlib callers
+that require `[]byte` (`pem.Decode`, `x509.ParseECPrivateKey`, `tls.X509KeyPair`)
+use the scoped `WithPlaintext` escape hatch, which zeroizes on return.
 
 Execution is strangler-fig (see the plan): PR-0 de-risks inside `main` (kill the
 `atomicWriteFile` dep, consolidate the 3 families, introduce `WithPlaintext` first);

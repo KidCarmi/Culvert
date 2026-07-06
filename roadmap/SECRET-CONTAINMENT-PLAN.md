@@ -50,26 +50,43 @@ package secret
 // Sealed holds plaintext secret bytes. No String(), no exported accessor.
 type Sealed struct{ b []byte }
 
+// Provider is an OPAQUE handle to KEK material. It exposes NO exported method
+// that returns the KEK — the raw-byte source is an unexported interface method
+// (kek()), reachable only from inside internal/secret. `main` holds *Provider
+// values but has no compile-legal path to the bytes.
+type Provider struct{ src kekSource } // kekSource: unexported iface { kek() ([]byte, error); Name() string }
+
+// Resolvers/constructors — the ONLY way main obtains a Provider.
+func ResolveProvider(cfg ProviderConfig) (*Provider, error) // env→file precedence
+func FileProvider(path string) (*Provider, error)
+func EnvProvider(name string) (*Provider, error)
+
 // Seal encrypts plaintext under the provider's KEK → at-rest envelope bytes.
-func Seal(plaintext []byte, p KEKProvider) ([]byte, error)
+func Seal(plaintext []byte, p *Provider) ([]byte, error)
 
 // Open decrypts an at-rest envelope → an opaque handle (never raw bytes).
-func Open(envelope []byte, p KEKProvider) (*Sealed, error)
+func Open(envelope []byte, p *Provider) (*Sealed, error)
 
 // WithPlaintext runs fn with the plaintext, then zeroizes. The []byte is
 // invalid once fn returns; fn MUST NOT retain it.
 func (s *Sealed) WithPlaintext(fn func([]byte) error) error
 func (s *Sealed) Destroy() // explicit zeroize
 
-// ValidateProvider checks KEK availability WITHOUT returning bytes
-// (replaces diagnostics' direct p.KEK() call).
-func ValidateProvider(p KEKProvider) error
+// ValidateProvider checks KEK availability WITHOUT returning bytes.
+func ValidateProvider(p *Provider) error
 ```
 
-`KEKProvider` moves into the package; `main` keeps `type KEKProvider =
-secret.KEKProvider` (mirrors the existing `CertManager`/`Session` alias pattern).
-`KEK() []byte` stays on the interface but is **internal-use only** — called by
-`Seal`/`Open` inside the package; no external caller sees bytes.
+**Provider is opaque, not an exported byte-returning interface.** The KEK source
+is an *unexported* method (`kek() ([]byte, error)`) that only `internal/secret`
+can call, so a `package main` file holding a `*Provider` has no compile-legal way
+to read the KEK — `Seal`/`Open` consume it internally. `main` constructs providers
+only via the exported resolvers (`ResolveProvider`/`FileProvider`/`EnvProvider`),
+and `resolveKEKProvider` in `main` becomes a one-line call into
+`secret.ResolveProvider`. **No `type KEKProvider = secret.KEKProvider` alias** —
+main never names the raw-byte source. (An exported `KEK() []byte` on an aliased
+interface would leave `p.KEK()` callable from every root file, defeating the whole
+boundary; the unexported-method design is what makes "no raw KEK in main" a
+compile error rather than a convention.)
 
 Canonical consumer rewrite (parse-and-drop):
 
@@ -97,11 +114,15 @@ Behavior-identical prep.
 - Gate: `go build`, `go test -race -count=1 ./...`, coverage floors.
 
 ### PR-1 — Create `internal/secret`; lift the primitive layer
-- Move in: `Sealed`, `Seal`/`Open`/`WithPlaintext`/`Destroy`/`ValidateProvider`,
-  `KEKProvider` + `fileKEKProvider`/`envKEKProvider` + constructors,
-  `encrypt/decrypt/read/writeEncryptedFile`, `kekLen`/`errKEKMissing`/`kekEqual`.
-- `main` keeps: `type KEKProvider = secret.KEKProvider` + `resolveKEKProvider`
-  one-line shim.
+- Move in: `Sealed`, the opaque `Provider` + unexported `kekSource`/`kek()`, the
+  exported `ResolveProvider`/`FileProvider`/`EnvProvider`, `Seal`/`Open`/
+  `WithPlaintext`/`Destroy`/`ValidateProvider`, the `fileKEKProvider`/
+  `envKEKProvider` impls, `encrypt/decrypt/read/writeEncryptedFile`,
+  `kekLen`/`errKEKMissing`/`kekEqual`.
+- `main` keeps: `resolveKEKProvider` as a one-line wrapper over
+  `secret.ResolveProvider` (**no `KEKProvider` alias** — main never names the
+  raw-byte source, so `p.KEK()` is not a compile-legal expression anywhere in
+  `main`).
 - Move `kek_test.go` → `internal/secret` as `package secret` (whitebox). Raw-byte
   assertions keep working against the unexported field. **Landmine defused.**
 - Add a fitness-function test asserting `internal/secret` exports **no**
@@ -123,7 +144,7 @@ Remove transitional accessors; land ADR-0007; update CLAUDE.md (fix the stale
 
 | Site | Class | Action |
 |---|---|---|
-| `encryptWithKEK`, `writeEncryptedFile`, provider `KEK()` impls, `ca.Encrypt/DecryptBundle` | **LIFT** (~4) | Move as-is |
+| `encryptWithKEK`, `writeEncryptedFile`, provider `kek()` impls (was exported `KEK()`), `ca.Encrypt/DecryptBundle` | **LIFT** (~4) | Move as-is; demote `KEK()`→unexported `kek()` |
 | `decryptWithKEK`, `readEncryptedFile`, `decrypt{ClusterCA,DPNode,CDRClient}Key`, `verifyEncrypted*` ×3 | **WRAP** (~7) | Route through `Open`+`WithPlaintext` |
 | `clusterCA` key/enrollment split, `CAKeyPEM()`→HA transport | **REFACTOR / out of scope** (~2) | Leave in main; future `internal/clusterca` |
 
