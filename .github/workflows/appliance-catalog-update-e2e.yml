@@ -1,0 +1,481 @@
+name: Appliance Install → Catalog Update E2E (Day-2 Ops)
+
+# The FULL Day-2 operator journey that no other workflow proves end to end:
+#   install a fresh appliance on v1  →  publish a new version through the SIGNED
+#   release catalog  →  update it by DISPATCHING from the catalog  →  verify the
+#   running container actually flipped versions, then reconcile the appliance's
+#   own self-update and prove the safety rails.
+#
+# Why this exists (the gap it closes):
+#   • catalog-e2e.yml proves the signed-catalog trust chain but ONLY over
+#     GET /api/releases — read-only, nothing ever dispatches or flips.
+#   • maint-agent-update-e2e.yml flips a container but drives the agent socket
+#     DIRECTLY, bypassing the Control Plane + /api/releases/dispatch + the catalog.
+#   • install-lifecycle-e2e.yml installs + bumps v1→v2 with a MANUAL `docker tag`.
+#   None exercise: fresh appliance → catalog publish → /api/releases/dispatch →
+#   maint agent → real digest flip → verify + reconcile + rollback + refusal.
+#
+# Faithful topology (this is the whole point): the Control Plane that serves
+#   /api/releases/dispatch runs INSIDE the proxy container the agent recreates.
+#   So a catalog-driven dispatch SIGKILLs its own dispatcher mid-flight — exactly
+#   what a self-updating appliance does. We therefore (a) capture the op_id from
+#   the 202 BEFORE the recreate, (b) verify the flip OUT-OF-BAND via docker
+#   inspect + the host-side agent's own op record, then (c) reconcile the freshly
+#   recreated CP via POST /api/releases/dispatch/resume.
+#
+# Everything is LOCAL (a TLS registry:2 on 127.0.0.1:5000, three locally-built
+# images, a per-run ed25519 catalog key) so the run is deterministic and needs
+# no ghcr / OIDC / external network. Advisory (non-blocking): it does a full
+# install + image builds + a deliberate health-fail window, so it runs nightly +
+# on PRs that touch the surfaces it exercises, never on the fast PR gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "release_*.go"
+      - "cmd/culvert-maint/**"
+      - "packaging/**"
+      - "scripts/install.sh"
+      - "test/e2e/**"
+      - "docker-compose*.yml"
+      - "Dockerfile*"
+      - ".github/workflows/appliance-catalog-update-e2e.yml"
+  schedule:
+    - cron: "0 3 * * *" # nightly 03:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: appliance-catalog-update-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Install fresh → update via catalog
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      REGISTRY: 127.0.0.1:5000
+      REPO: 127.0.0.1:5000/culvert
+      PINNED_TAG: culvert/proxy:pinned
+      MAINT_DIR: test/e2e/maint-agent
+      E2E_DIR: test/e2e/catalog-update
+      ADMIN: http://127.0.0.1:9090
+      HEALTH: http://127.0.0.1:8080
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      # ── Layout: derive all runtime paths once and export them so every later
+      # step (separate shells) references the same dirs. The host-side agent is a
+      # nohup process that survives step boundaries (same pattern as maint-agent).
+      - name: Prepare layout
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/appliance-e2e"
+          mkdir -p "$ROOT/compose" "$ROOT/data/release_catalog" "$ROOT/sock" "$ROOT/state"
+          {
+            echo "E2E_ROOT=$ROOT"
+            echo "PROJECT_DIR=$ROOT/compose"
+            echo "DATA_DIR=$ROOT/data"
+            echo "SOCK_DIR=$ROOT/sock"
+            echo "STATE_DIR=$ROOT/state"
+            echo "SOCK=$ROOT/sock/culvert-maint.sock"
+            echo "KEYS=$ROOT/keys.json"
+            echo "PRIV=$ROOT/priv.seed"
+            echo "CONFIG=$ROOT/config.toml"
+            echo "AGENT_BIN=$ROOT/culvert-maint"
+            echo "AGENT_LOG=$ROOT/agent.log"
+            echo "STATE_FILE=$ROOT/data/release_catalog_state.json"
+          } >> "$GITHUB_ENV"
+
+      # ── TLS registry trusted by BOTH the daemon (pull/push via
+      # /etc/docker/certs.d) AND the CLI/curl (system CA). Verbatim from the
+      # maint-agent E2E: the agent's resolve_target runs `docker manifest inspect`
+      # with no --insecure, so a plain-HTTP registry would fail there.
+      - name: Start TLS local registry (trusted by daemon + CLI)
+        run: |
+          set -euxo pipefail
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "FATAL: TLS registry did not come up"; docker logs registry 2>&1 | tail -50 || true; exit 1; }
+
+      # ── Three genuinely-distinct, pullable images in ONE repo:
+      #   v1  — the shipped/installed version (real culvert build)
+      #   v2  — the healthy upgrade target  (real culvert build, distinct digest)
+      #   bad — a deliberately-unhealthy image (never binds :8080) for the
+      #         rollback-on-failed-health phase.
+      # We push each and capture the repo-bound pushed digest from RepoDigests.
+      - name: Build, push, and capture v1 + v2 + badhealth digests
+        id: images
+        run: |
+          set -euxo pipefail
+          build_push_variant() { # <dockerfile> <build-arg or ""> <tag>
+            local df="$1" arg="$2" tag="$REPO:$3"
+            if [ -n "$arg" ]; then
+              docker build -f "$df" --build-arg "$arg" -t "$tag" . 1>&2
+            else
+              docker build -f "$df" -t "$tag" . 1>&2
+            fi
+            docker push "$tag" 1>&2
+            docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" \
+              | grep "^${REPO}@sha256:" | head -n1
+          }
+
+          D1_REF="$(build_push_variant "$MAINT_DIR/Dockerfile.e2e" "BUILD_VARIANT=v1" v1)"
+          D2_REF="$(build_push_variant "$MAINT_DIR/Dockerfile.e2e" "BUILD_VARIANT=v2" v2)"
+          DBAD_REF="$(build_push_variant "$E2E_DIR/Dockerfile.badhealth" "" badhealth)"
+
+          D1="${D1_REF#${REPO}@}"; D2="${D2_REF#${REPO}@}"; DBAD="${DBAD_REF#${REPO}@}"
+          echo "v1=$D1_REF"; echo "v2=$D2_REF"; echo "bad=$DBAD_REF"
+          if [ "$D1" = "$D2" ] || [ "$D1" = "$DBAD" ] || [ "$D2" = "$DBAD" ]; then
+            echo "FATAL: image digests are not all distinct (flip/rollback would be unobservable)"; exit 1
+          fi
+          {
+            echo "D1=$D1"; echo "D2=$D2"; echo "DBAD=$DBAD"
+            echo "D1_REF=$D1_REF"; echo "D2_REF=$D2_REF"; echo "DBAD_REF=$DBAD_REF"
+          } >> "$GITHUB_ENV"
+
+      # ── Seed the FIXED local tag to v1 (what the installer does before the
+      # first `up`; the agent later retags it to a pulled digest).
+      - name: Seed culvert/proxy:pinned = v1
+        run: |
+          set -euxo pipefail
+          docker tag "$D1_REF" "$PINNED_TAG"
+
+      - name: Build the maintenance agent
+        run: |
+          set -euxo pipefail
+          ( cd cmd/culvert-maint && go build -o "$AGENT_BIN" . )
+          "$AGENT_BIN" -version || true
+
+      # ── Mint the per-run catalog signing key (writes keys.json + priv.seed,
+      # reused for every later seed so the CP trusts every version) and render the
+      # compose project: config.toml (agent) + .env (compose interpolation). The
+      # agent's env is allowlisted and does NOT inherit our shell env, so .env is
+      # the only reliable channel for the trust keys / uid / repo.
+      - name: Render compose project + agent config + trust key
+        run: |
+          set -euxo pipefail
+          # Mint the key into a throwaway dir; DATA_DIR/release_catalog stays empty
+          # until we deliberately seed a version.
+          MINT="$RUNNER_TEMP/keymint"; mkdir -p "$MINT"
+          CULVERT_E2E_SEED_OUT="$MINT" CULVERT_E2E_SEED_KEYS="$KEYS" CULVERT_E2E_SEED_PRIV="$PRIV" \
+            go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+
+          cp "$E2E_DIR/docker-compose.catalog-e2e.yml" "$PROJECT_DIR/docker-compose.catalog-e2e.yml"
+
+          # .env consumed by `docker compose` in PROJECT_DIR (auto-loaded).
+          {
+            echo "E2E_UID=$(id -u)"
+            echo "E2E_GID=$(id -g)"
+            echo "E2E_DATA=$DATA_DIR"
+            echo "E2E_SOCK_DIR=$SOCK_DIR"
+            echo "E2E_PROXY_REPO=$REPO"
+            printf 'E2E_TRUST_KEYS=%s\n' "$(cat "$KEYS")"
+          } > "$PROJECT_DIR/.env"
+
+          sed \
+            -e "s|@@PROJECT_DIR@@|$PROJECT_DIR|g" \
+            -e "s|@@SOCK_PATH@@|$SOCK|g" \
+            -e "s|@@STATE_DIR@@|$STATE_DIR|g" \
+            -e "s|@@RUNNER_UID@@|$(id -u)|g" \
+            "$E2E_DIR/config.toml.tmpl" > "$CONFIG"
+
+          echo "----- .env -----"; cat "$PROJECT_DIR/.env"
+          echo "----- config.toml -----"; cat "$CONFIG"
+
+      # ── P1: fresh install on v1 + a catalog that advertises v1 as current.
+      # Prove the appliance is up, running v1, and the release subsystem is wired.
+      - name: "P1 — install fresh appliance on v1"
+        run: |
+          set -euxo pipefail
+          seed() { # version version_id digest [expires]
+            local expires="${4:-2099-01-01T00:00:00Z}"
+            CULVERT_E2E_SEED_OUT="$DATA_DIR/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" \
+            CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" \
+            CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_IMAGE_REPO="$REPO" \
+            CULVERT_E2E_SEED_IMAGE_DIGEST="$3" CULVERT_E2E_SEED_EXPIRES="$expires" \
+              go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
+          }
+          # Catalog v1: recommended == the running image (no upgrade pending yet).
+          seed 1 1.0.0 "$D1"
+
+          docker compose -f "$PROJECT_DIR/docker-compose.catalog-e2e.yml" --project-directory "$PROJECT_DIR" up -d
+
+          ok=""
+          for i in $(seq 1 60); do
+            curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2
+          done
+          [ -n "$ok" ] || { echo "FATAL: proxy /health did not come up on v1"; docker logs culvert-e2e-proxy 2>&1 | tail -200 || true; exit 1; }
+          curl -fsS "$HEALTH/ready" >/dev/null && echo "/ready OK on v1"
+
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          [ "$RUNNING_REF" = "$D1_REF" ] || { echo "FATAL: not running v1 ($RUNNING_REF != $D1_REF)"; exit 1; }
+
+          # Release subsystem wired + serving the v1 catalog.
+          B="$(curl -fsS "$ADMIN/api/releases")"; echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FATAL P1: release subsystem not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":1' || { echo "FATAL P1: catalog not v1"; exit 1; }
+          echo "$B" | grep -q 'culvert-1.0.0'        || { echo "FATAL P1: wrong release"; exit 1; }
+
+          # Durability sentinel (must survive the catalog-driven flip + a rollback).
+          echo "installed-$(cat "$DATA_DIR/release_catalog/index.json" | head -c 16)" > "$DATA_DIR/e2e_sentinel.txt"
+          echo "P1 OK: fresh appliance up on v1, catalog subsystem wired."
+
+      - name: "P1b — start the host maintenance agent"
+        run: |
+          set -euxo pipefail
+          nohup "$AGENT_BIN" -config "$CONFIG" >"$AGENT_LOG" 2>&1 &
+          echo "$!" > "$E2E_ROOT/agent.pid"
+          ok=""
+          for i in $(seq 1 60); do
+            if [ -S "$SOCK" ] && curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "FATAL: agent socket/health did not come up"; cat "$AGENT_LOG" || true; exit 1; }
+          echo "----- agent /v1/health -----"; curl -fsS --unix-socket "$SOCK" http://localhost/v1/health; echo
+
+      # ── P2: publish v2 into the catalog (the trusted channel), matching the
+      # REAL pushed v2 digest so dispatch's verify-by-digest can bind (MUST #4).
+      - name: "P2 — publish v2 to the signed catalog"
+        run: |
+          set -euxo pipefail
+          seed() { local expires="${4:-2099-01-01T00:00:00Z}"; CULVERT_E2E_SEED_OUT="$DATA_DIR/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_IMAGE_REPO="$REPO" CULVERT_E2E_SEED_IMAGE_DIGEST="$3" CULVERT_E2E_SEED_EXPIRES="$expires" go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null; }
+          seed 2 2.0.0 "$D2"
+          # Reload the catalog on the running (still-v1) CP.
+          docker restart culvert-e2e-proxy >/dev/null
+          ok=""; for i in $(seq 1 40); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ -n "$ok" ] || { echo "FATAL: CP did not come back after reload"; exit 1; }
+
+          B="$(curl -fsS "$ADMIN/api/releases")"; echo "$B"
+          echo "$B" | grep -q '"available":true'    || { echo "FATAL P2: not available"; exit 1; }
+          echo "$B" | grep -q '"catalog_version":2' || { echo "FATAL P2: did not pick up v2"; exit 1; }
+          echo "$B" | grep -q 'culvert-2.0.0'        || { echo "FATAL P2: wrong release"; exit 1; }
+          grep -q '"highest_accepted_version":2' "$STATE_FILE" || { echo "FATAL P2: anti-rollback floor did not rise to 2"; exit 1; }
+          echo "P2 OK: v2 published + accepted (floor→2), still running v1."
+
+      # ── P3: DISPATCH the update from the catalog. The CP is inside the container
+      # that gets recreated, so we capture op_id from the 202, then verify the flip
+      # OUT-OF-BAND (docker inspect + the host agent's own op record). (MUST #1)
+      - name: "P3 — dispatch catalog update, verify flip out-of-band"
+        run: |
+          set -euxo pipefail
+          BEFORE_REF="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy | xargs -I{} docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' {} | grep "^${REPO}@" | head -n1 || true)"
+          echo "running before dispatch: $BEFORE_REF (expect v1)"
+
+          # POST dispatch → 202 as soon as the op is durably recorded on the agent,
+          # which happens well before the restart stage kills this very CP.
+          CODE="$(curl -sS -o "$RUNNER_TEMP/disp.json" -w '%{http_code}' \
+            -H 'Content-Type: application/json' -X POST \
+            -d '{"agent":"local","channel":"recommended"}' \
+            "$ADMIN/api/releases/dispatch" || true)"
+          echo "dispatch HTTP $CODE"; cat "$RUNNER_TEMP/disp.json"; echo
+          [ "$CODE" = "202" ] || { echo "FATAL P3: dispatch was not accepted (HTTP $CODE)"; exit 1; }
+          OP_ID="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1])).get("op_id",""))' "$RUNNER_TEMP/disp.json")"
+          # Fallback: if the 202 body raced the recreate, recover the op from the agent.
+          if [ -z "$OP_ID" ]; then
+            OP_ID="$(curl -fsS --unix-socket "$SOCK" http://localhost/v1/status | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("lock_held_by") or {}).get("op_id","") or d.get("last_operation_op_id",""))' 2>/dev/null || true)"
+          fi
+          [ -n "$OP_ID" ] || { echo "FATAL P3: no op_id captured"; exit 1; }
+          echo "OP_ID=$OP_ID" >> "$GITHUB_ENV"
+          echo "captured op_id=$OP_ID"
+
+          # Ground truth #1 — the host agent (survives the recreate) drives the op
+          # to terminal succeeded.
+          STATE=""; for i in $(seq 1 150); do
+            STATE="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+            echo "agent op $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break ;; esac; sleep 2
+          done
+          curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" || true
+          [ "$STATE" = "succeeded" ] || { echo "FATAL P3: agent op did not succeed (state=$STATE)"; exit 1; }
+
+          # Ground truth #2 — the running container's digest flipped v1→v2.
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running after dispatch: $RUNNING_REF (expect v2)"
+          [ "$RUNNING_REF" = "$D2_REF" ] || { echo "FATAL P3: container did not flip to v2 ($RUNNING_REF != $D2_REF)"; exit 1; }
+
+          # Ground truth #3 — health + state durability across the flip.
+          ok=""; for i in $(seq 1 30); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ -n "$ok" ] || { echo "FATAL P3: /health failed after the flip"; exit 1; }
+          grep -q '^installed-' "$DATA_DIR/e2e_sentinel.txt" || { echo "FATAL P3: /data sentinel lost across the flip"; exit 1; }
+          echo "P3 OK: catalog dispatch flipped the appliance v1→v2, healthy, /data preserved."
+
+      # ── P4: reconcile the appliance's OWN self-update. The dispatching CP was
+      # killed mid-flight; the freshly-recreated v2 CP has no memory of the op.
+      # Drive resume with the captured op_id + target ref → it re-polls the agent
+      # op and classifies succeeded via verify-by-digest. (MUST #1, reconciliation)
+      - name: "P4 — reconcile via /api/releases/dispatch/resume"
+        run: |
+          set -euxo pipefail
+          # Wait for the recreated (v2) CP to serve the admin API again.
+          ok=""; for i in $(seq 1 40); do curl -fsS "$ADMIN/api/releases" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ -n "$ok" ] || { echo "FATAL P4: recreated CP admin API not reachable"; exit 1; }
+
+          BODY="$(OP_ID="$OP_ID" D2_REF="$D2_REF" python3 -c 'import json,os;print(json.dumps({"agent":"local","resume_context":{"OpID":os.environ["OP_ID"],"TargetPinnedRef":os.environ["D2_REF"],"ReleaseID":"culvert-2.0.0"}}))')"
+          CODE="$(curl -sS -o "$RUNNER_TEMP/resume.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d "$BODY" "$ADMIN/api/releases/dispatch/resume" || true)"
+          echo "resume HTTP $CODE"; cat "$RUNNER_TEMP/resume.json"; echo
+          [ "$CODE" = "202" ] || { echo "FATAL P4: resume not accepted (HTTP $CODE)"; exit 1; }
+
+          PHASE=""; TERMINAL=""; VERIFIED=""
+          for i in $(seq 1 60); do
+            S="$(curl -fsS "$ADMIN/api/releases/dispatch/status?agent=local")"
+            PHASE="$(echo "$S" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("phase",""))')"
+            TERMINAL="$(echo "$S" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("terminal",""))')"
+            VERIFIED="$(echo "$S" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("verified",""))')"
+            echo "resume status $i: phase=$PHASE terminal=$TERMINAL verified=$VERIFIED"
+            [ "$PHASE" = "terminal" ] && break; sleep 2
+          done
+          [ "$TERMINAL" = "succeeded" ] && [ "$VERIFIED" = "True" ] || { echo "FATAL P4: CP did not reconcile its self-update (terminal=$TERMINAL verified=$VERIFIED)"; exit 1; }
+          echo "P4 OK: the recreated Control Plane reconciled its own catalog-driven self-update."
+
+      # ── P5: rollback-on-failed-health — the Sev-1 safety property. Publish a
+      # higher catalog version pointing at the deliberately-unhealthy image;
+      # dispatching it must trip the agent's health gate and inline-rollback to v2.
+      # (MUST #2)
+      - name: "P5 — rollback on a failed-health upgrade"
+        run: |
+          set -euxo pipefail
+          seed() { local expires="${4:-2099-01-01T00:00:00Z}"; CULVERT_E2E_SEED_OUT="$DATA_DIR/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_IMAGE_REPO="$REPO" CULVERT_E2E_SEED_IMAGE_DIGEST="$3" CULVERT_E2E_SEED_EXPIRES="$expires" go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null; }
+          # v3 recommends the badhealth image. (The floor legitimately rises to 3
+          # on ACCEPTANCE of this valid catalog — the floor tracks catalog version,
+          # not update success; the failed apply below does not un-raise it.)
+          seed 3 3.0.0 "$DBAD"
+          docker restart culvert-e2e-proxy >/dev/null
+          ok=""; for i in $(seq 1 40); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ -n "$ok" ] || { echo "FATAL P5: CP not back after reload"; exit 1; }
+          curl -fsS "$ADMIN/api/releases" | grep -q 'culvert-3.0.0' || { echo "FATAL P5: v3 not served"; exit 1; }
+
+          CODE="$(curl -sS -o "$RUNNER_TEMP/disp5.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"agent":"local","channel":"recommended"}' "$ADMIN/api/releases/dispatch" || true)"
+          echo "dispatch(bad) HTTP $CODE"; cat "$RUNNER_TEMP/disp5.json"; echo
+          [ "$CODE" = "202" ] || { echo "FATAL P5: bad-upgrade dispatch not accepted (HTTP $CODE)"; exit 1; }
+          OP5="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1])).get("op_id",""))' "$RUNNER_TEMP/disp5.json")"
+          if [ -z "$OP5" ]; then OP5="$(curl -fsS --unix-socket "$SOCK" http://localhost/v1/status | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("lock_held_by") or {}).get("op_id","") or d.get("last_operation_op_id",""))' 2>/dev/null || true)"; fi
+          [ -n "$OP5" ] || { echo "FATAL P5: no op_id for the bad upgrade"; exit 1; }
+
+          # The health gate fails, then inline auto-rollback restores v2. Drive the
+          # agent op to terminal (host process survives the churn), then assert the
+          # GROUND TRUTH: the running image was RESTORED to v2 and is healthy.
+          STATE=""; for i in $(seq 1 180); do
+            STATE="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP5" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"
+            echo "bad-op $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break ;; esac; sleep 2
+          done
+          curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP5/logs" || true
+
+          ok=""; for i in $(seq 1 40); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          [ -n "$ok" ] || { echo "FATAL P5: /health never recovered after rollback"; docker logs culvert-e2e-proxy 2>&1 | tail -100 || true; exit 1; }
+          RUNNING_IMG="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy)"
+          RUNNING_REF="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RUNNING_IMG" | grep "^${REPO}@sha256:" | head -n1 || true)"
+          echo "running after failed upgrade: $RUNNING_REF (expect v2 restored)"
+          [ "$RUNNING_REF" = "$D2_REF" ] || { echo "FATAL P5: appliance did NOT roll back to v2 (got $RUNNING_REF) — Sev-1 safety failure"; exit 1; }
+          [ "$RUNNING_REF" != "$DBAD_REF" ] || { echo "FATAL P5: appliance is stuck on the unhealthy image"; exit 1; }
+          grep -q '^installed-' "$DATA_DIR/e2e_sentinel.txt" || { echo "FATAL P5: /data sentinel lost across the rollback"; exit 1; }
+          echo "P5 OK: a failed-health upgrade auto-rolled-back to v2, healthy, state intact."
+
+      # ── P6: refuse tampered / expired / below-floor catalogs ON THE LIVE
+      # DISPATCH PATH (not just the read API). For each, the only catalog present
+      # is the bad one → the CP loads no catalog → dispatch is REFUSED (no 202) and
+      # the running image never changes. (MUST #3)
+      - name: "P6 — live-dispatch refuses tampered / expired / below-floor catalogs"
+        run: |
+          set -euxo pipefail
+          seed() { local expires="${4:-2099-01-01T00:00:00Z}"; CULVERT_E2E_SEED_OUT="$DATA_DIR/release_catalog" CULVERT_E2E_SEED_KEYS="$KEYS" CULVERT_E2E_SEED_PRIV="$PRIV" CULVERT_E2E_SEED_VERSION="$1" CULVERT_E2E_SEED_VERSION_ID="$2" CULVERT_E2E_SEED_IMAGE_REPO="$REPO" CULVERT_E2E_SEED_IMAGE_DIGEST="$3" CULVERT_E2E_SEED_EXPIRES="$expires" go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null; }
+
+          assert_refused_no_flip() { # <label>
+            docker restart culvert-e2e-proxy >/dev/null
+            local ok=""; for i in $(seq 1 40); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+            [ -n "$ok" ] || { echo "FATAL P6/$1: CP not back after reload"; exit 1; }
+            # The read path already refuses: no usable catalog is served.
+            local rel; rel="$(curl -sS "$ADMIN/api/releases" || true)"
+            echo "$rel" | grep -q '"available":true' && { echo "FATAL P6/$1: a bad catalog was served as available: $rel"; exit 1; } || true
+            # The dispatch must be refused *specifically by the catalog gate* — a
+            # pre-apply RefusedNoCatalog → HTTP 503 with kind "no_catalog". Asserting
+            # only "!= 202" would let a setup error (admin API down, agent busy)
+            # masquerade as a catalog refusal; require the real refusal shape.
+            local code
+            code="$(curl -sS -o "$RUNNER_TEMP/neg.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"agent":"local","channel":"recommended"}' "$ADMIN/api/releases/dispatch" || true)"
+            echo "P6/$1 dispatch HTTP $code:"; cat "$RUNNER_TEMP/neg.json"; echo
+            [ "$code" = "503" ] || { echo "FATAL P6/$1: expected a 503 catalog refusal, got HTTP $code"; exit 1; }
+            grep -q 'no_catalog' "$RUNNER_TEMP/neg.json" || { echo "FATAL P6/$1: refusal was not the catalog gate (no 'no_catalog' in body)"; exit 1; }
+            local ref; ref="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy | xargs -I{} docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' {} | grep "^${REPO}@" | head -n1 || true)"
+            [ "$ref" = "$D2_REF" ] || { echo "FATAL P6/$1: image changed on a refused dispatch ($ref != v2)"; exit 1; }
+            echo "P6/$1 OK: catalog gate refused dispatch (HTTP 503 no_catalog), appliance still on v2."
+          }
+
+          echo "── expired ──"
+          # expires_at must be AFTER generated_at (2026-01-01, else generation is
+          # rejected by validateGenTimestamps) but in the PAST relative to now, so
+          # the load-time freshness gate rejects it. "2 days ago" satisfies both.
+          EXP_PAST="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          rm -rf "$DATA_DIR"/release_catalog/*; seed 4 4.0.0 "$D2" "$EXP_PAST"
+          assert_refused_no_flip expired
+
+          echo "── tampered ──"
+          rm -rf "$DATA_DIR"/release_catalog/*; seed 4 4.0.0 "$D2"
+          printf ' ' >> "$DATA_DIR/release_catalog/index.json"   # mutate after signing
+          assert_refused_no_flip tampered
+
+          echo "── below-floor (v2 < floor 3) ──"
+          rm -rf "$DATA_DIR"/release_catalog/*; seed 2 2.0.0 "$D2"
+          assert_refused_no_flip below-floor
+
+          echo "P6 OK: tampered, expired, and below-floor catalogs are all refused on the live dispatch path."
+          echo "ALL PHASES PASSED: install → publish → dispatch → verify → reconcile → rollback → refuse."
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          echo "===== agent log ====="; cat "$AGENT_LOG" 2>/dev/null
+          echo "===== agent /v1/status ====="; curl -fsS --unix-socket "$SOCK" http://localhost/v1/status 2>/dev/null; echo
+          echo "===== agent /v1/audit ====="; curl -fsS --unix-socket "$SOCK" "http://localhost/v1/audit?limit=50" 2>/dev/null; echo
+          echo "===== /api/releases ====="; curl -fsS "$ADMIN/api/releases" 2>/dev/null; echo
+          echo "===== release_catalog_state.json ====="; cat "$STATE_FILE" 2>/dev/null; echo
+          echo "===== compose ps ====="; docker compose -f "$PROJECT_DIR/docker-compose.catalog-e2e.yml" --project-directory "$PROJECT_DIR" ps 2>/dev/null
+          echo "===== proxy docker logs (tail) ====="; docker logs culvert-e2e-proxy 2>&1 | tail -200
+          echo "===== images ====="; docker image ls | grep -E 'culvert|registry' 2>/dev/null
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          [ -f "$E2E_ROOT/agent.pid" ] && kill "$(cat "$E2E_ROOT/agent.pid")" 2>/dev/null
+          docker compose -f "$PROJECT_DIR/docker-compose.catalog-e2e.yml" --project-directory "$PROJECT_DIR" down -v 2>/dev/null
+          docker rm -f culvert-e2e-proxy registry 2>/dev/null
+          exit 0

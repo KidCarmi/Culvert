@@ -30,6 +30,15 @@ import (
 //	                            lower it (below the persisted floor) to test rollback
 //	CULVERT_E2E_SEED_VERSION_ID release version_id (default 9.9.9)
 //	CULVERT_E2E_SEED_EXPIRES    expires_at RFC3339 (default 2099-01-01T00:00:00Z)
+//	CULVERT_E2E_SEED_IMAGE_REPO   image.repo baked into the manifest (default
+//	                              ghcr.io/kidcarmi/culvert). Set it to a LOCAL
+//	                              registry repo so a real dispatch → maint-agent
+//	                              pull resolves against the seeded digest.
+//	CULVERT_E2E_SEED_IMAGE_DIGEST image.list_digest baked into the manifest
+//	                              ("sha256:<64hex>", default a synthetic aaaa…
+//	                              digest). Set it to the REAL pushed manifest-list
+//	                              digest so dispatch's verify-by-digest matches the
+//	                              running container after the flip.
 func TestE2ESeedSignedCatalog(t *testing.T) {
 	outDir := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_OUT"))
 	keysFile := strings.TrimSpace(os.Getenv("CULVERT_E2E_SEED_KEYS"))
@@ -40,6 +49,11 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 	version := envIntOr(t, "CULVERT_E2E_SEED_VERSION", 1)
 	versionID := envOr("CULVERT_E2E_SEED_VERSION_ID", "9.9.9")
 	expires := envOr("CULVERT_E2E_SEED_EXPIRES", "2099-01-01T00:00:00Z")
+	// Image binding — defaults keep the historical (read-only catalog-e2e.yml)
+	// behaviour; the appliance-catalog-update E2E overrides both so the catalog
+	// points at a real, pullable registry digest.
+	imageRepo := envOr("CULVERT_E2E_SEED_IMAGE_REPO", "ghcr.io/kidcarmi/culvert")
+	imageDigest := envOr("CULVERT_E2E_SEED_IMAGE_DIGEST", "sha256:"+strings.Repeat("a", 64))
 
 	spec := releaseCatalogSpec{
 		GeneratedAt:    "2026-01-01T00:00:00Z",
@@ -49,8 +63,8 @@ func TestE2ESeedSignedCatalog(t *testing.T) {
 			ReleaseID:  "culvert-" + versionID,
 			VersionID:  versionID,
 			Severity:   "normal",
-			Repo:       "ghcr.io/kidcarmi/culvert",
-			ListDigest: "sha256:" + strings.Repeat("a", 64),
+			Repo:       imageRepo,
+			ListDigest: imageDigest,
 			Platforms:  []string{"linux/amd64", "linux/arm64"},
 			CreatedAt:  "2026-01-01T00:00:00Z",
 			Channels:   []Channel{ChannelRecommended},
