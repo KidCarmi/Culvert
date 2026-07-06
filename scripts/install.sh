@@ -1027,7 +1027,16 @@ wire_release_agent_for_compose() {
     # spaced sed does not replace it, leaving the stale value — the socket would
     # then be dropped on the next update, the exact failure this persists against.
     sudo sed -i '/^[[:space:]]*compose_override_file[[:space:]]*=/d' "$cfg"
-    printf '\ncompose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
+    # Ensure the file ends in a newline BEFORE appending — but only add one when
+    # it does not already (tail -c1 is empty iff the last byte is a newline, since
+    # $() strips a trailing newline). This is idempotent (no blank-line buildup on
+    # re-runs) AND safe against a hand-edited config.toml whose last line lacks a
+    # trailing newline (without this, the key would glue onto that line and the
+    # maint installer would not render the two-`-f` sudoers rule).
+    if [[ -n "$(tail -c1 "$cfg" 2>/dev/null)" ]]; then
+      printf '\n' | sudo tee -a "$cfg" >/dev/null
+    fi
+    printf 'compose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
     info "Maintenance agent will carry docker-compose.maint-agent.yml on recreate (socket survives updates)."
   fi
 

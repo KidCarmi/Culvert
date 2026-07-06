@@ -238,8 +238,10 @@ func validate(raw *rawConfig) (*Config, error) {
 		}
 		// It becomes a sudoers literal + argv token: reject internal whitespace /
 		// control chars (whitespace would split the sudo arg match) and shell
-		// metacharacters — parity with the installer's reject_unsafe and the
-		// runner's validateComposeFilenames.
+		// metacharacters. This char set is kept byte-identical to the runner's
+		// validateComposeFilenames AND to the installer's compose_override_file
+		// checks (reject_unsafe + its metachar case), so a value that installs
+		// also starts the agent.
 		for _, r := range of {
 			if unicode.IsSpace(r) || unicode.IsControl(r) {
 				return nil, fmt.Errorf("config: compose_override_file must not contain whitespace or control characters, got %q", of)

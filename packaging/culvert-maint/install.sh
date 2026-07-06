@@ -386,6 +386,15 @@ if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     [ "$COMPOSE_OVERRIDE_FILE" != "$COMPOSE_FILE" ] || \
         die "compose_override_file must differ from compose_file, got '$COMPOSE_OVERRIDE_FILE'"
     reject_unsafe "compose_override_file" "$COMPOSE_OVERRIDE_FILE"
+    # reject_unsafe covers whitespace/quotes/pipe/control; the override name also
+    # becomes a sudoers literal + an argv token, so reject the remaining shell
+    # metacharacters too. This matches the Go agent's config.Load/runner.New set
+    # exactly, so a value that installs here also starts the agent (fail FAST at
+    # install rather than at agent startup).
+    case "$COMPOSE_OVERRIDE_FILE" in
+        *';'* | *'&'* | *'$'* | *'`'* | *'<'* | *'>'* | *'*'* | *'?'* | *'('* | *')'* | *'{'* | *'}'* )
+            die "compose_override_file must not contain shell metacharacters, got '$COMPOSE_OVERRIDE_FILE'" ;;
+    esac
     # The override FILE must exist in the project dir. If it is configured but
     # absent, every agent-driven recreate runs `docker compose -f <base> -f
     # <missing> up -d`, which docker rejects with "no such file or directory" —
@@ -404,7 +413,7 @@ if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     # agent-driven recreate hard-fail. The ${VAR:?} colon form also trips on an
     # EMPTY value, so check for the KEY, not just the file. Warn loudly; the
     # operator owns the .env.
-    if [ ! -f "$PROJECT_DIR/.env" ] || ! grep -q '^CULVERT_MAINT_GID=' "$PROJECT_DIR/.env" 2>/dev/null; then
+    if [ ! -f "$PROJECT_DIR/.env" ] || ! grep -Eq '^CULVERT_MAINT_GID=.+' "$PROJECT_DIR/.env" 2>/dev/null; then
         warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but CULVERT_MAINT_GID"
         warn "is not present in $PROJECT_DIR/.env. The agent runs compose with a scrubbed"
         warn "env, so the socket override's \${CULVERT_MAINT_GID:?...} must be in that .env"
