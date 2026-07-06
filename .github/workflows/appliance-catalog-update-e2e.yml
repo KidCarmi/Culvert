@@ -422,18 +422,28 @@ jobs:
             local ok=""; for i in $(seq 1 40); do curl -fsS "$HEALTH/health" >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
             [ -n "$ok" ] || { echo "FATAL P6/$1: CP not back after reload"; exit 1; }
             # The read path already refuses: no usable catalog is served.
-            curl -fsS "$ADMIN/api/releases" | grep -q '"available":true' && { echo "FATAL P6/$1: a bad catalog was served as available"; exit 1; } || true
+            local rel; rel="$(curl -sS "$ADMIN/api/releases" || true)"
+            echo "$rel" | grep -q '"available":true' && { echo "FATAL P6/$1: a bad catalog was served as available: $rel"; exit 1; } || true
+            # The dispatch must be refused *specifically by the catalog gate* — a
+            # pre-apply RefusedNoCatalog → HTTP 503 with kind "no_catalog". Asserting
+            # only "!= 202" would let a setup error (admin API down, agent busy)
+            # masquerade as a catalog refusal; require the real refusal shape.
             local code
             code="$(curl -sS -o "$RUNNER_TEMP/neg.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST -d '{"agent":"local","channel":"recommended"}' "$ADMIN/api/releases/dispatch" || true)"
             echo "P6/$1 dispatch HTTP $code:"; cat "$RUNNER_TEMP/neg.json"; echo
-            [ "$code" != "202" ] || { echo "FATAL P6/$1: a bad catalog was DISPATCHED (HTTP 202)"; exit 1; }
+            [ "$code" = "503" ] || { echo "FATAL P6/$1: expected a 503 catalog refusal, got HTTP $code"; exit 1; }
+            grep -q 'no_catalog' "$RUNNER_TEMP/neg.json" || { echo "FATAL P6/$1: refusal was not the catalog gate (no 'no_catalog' in body)"; exit 1; }
             local ref; ref="$(docker inspect --format '{{.Image}}' culvert-e2e-proxy | xargs -I{} docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' {} | grep "^${REPO}@" | head -n1 || true)"
             [ "$ref" = "$D2_REF" ] || { echo "FATAL P6/$1: image changed on a refused dispatch ($ref != v2)"; exit 1; }
-            echo "P6/$1 OK: refused (HTTP $code), appliance still on v2."
+            echo "P6/$1 OK: catalog gate refused dispatch (HTTP 503 no_catalog), appliance still on v2."
           }
 
           echo "── expired ──"
-          rm -rf "$DATA_DIR"/release_catalog/*; seed 4 4.0.0 "$D2" 2000-01-01T00:00:00Z
+          # expires_at must be AFTER generated_at (2026-01-01, else generation is
+          # rejected by validateGenTimestamps) but in the PAST relative to now, so
+          # the load-time freshness gate rejects it. "2 days ago" satisfies both.
+          EXP_PAST="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          rm -rf "$DATA_DIR"/release_catalog/*; seed 4 4.0.0 "$D2" "$EXP_PAST"
           assert_refused_no_flip expired
 
           echo "── tampered ──"
