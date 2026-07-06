@@ -1,0 +1,22 @@
+# Deliberately-unhealthy proxy image for the rollback-on-failed-health phase of
+# the appliance-catalog-update E2E.
+#
+# It is a VALID, pullable image in the same registry repo (127.0.0.1:5000/culvert)
+# with a DISTINCT digest, but it never binds :8080 — so the maintenance agent's
+# health gate (http://127.0.0.1:8080/health) can never pass. Dispatching this
+# release must drive the agent's inline auto-rollback: retag the pinned tag back
+# to the prior good digest, `docker compose up -d`, health gate green again. The
+# workflow then asserts the running digest was RESTORED to the good version and
+# /health is 200 — the Sev-1 safety property of a self-updating appliance.
+#
+# Kept as a tiny standalone image (no Go build) so it is cheap to build + push.
+FROM alpine:3.22
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
+# A marker file makes the content (and therefore the registry digest) distinct
+# from any other alpine-based image in the repo.
+RUN echo "culvert-e2e-badhealth" > /BADHEALTH
+# EXPOSE documents intent only; nothing ever listens on 8080, so the agent's
+# health probe fails and the upgrade is rolled back.
+EXPOSE 8080 9090
+# Stay alive (so the container "runs") but serve nothing — the health gate fails.
+ENTRYPOINT ["sh", "-c", "echo 'badhealth image: no listener on :8080 (intentional)'; sleep 3600"]
