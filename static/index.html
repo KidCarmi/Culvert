@@ -5009,13 +5009,33 @@ async function diffConfigVersions(from, to) {
     }
     let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
     data.changes.forEach(c => {
-      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${escHtml(String(c.from))}</td><td style="color:var(--green)">${escHtml(String(c.to))}</td></tr>`;
+      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${fmtDiffCell(c.from)}</td><td style="color:var(--green)">${fmtDiffCell(c.to)}</td></tr>`;
     });
     html += '</tbody></table></div>';
     el.innerHTML = html;
   } catch (err) {
     el.innerHTML = `<em style="color:var(--red)">Diff failed: ${escHtml(err.message)}</em>`;
   }
+}
+
+// fmtDiffCell renders one side of a config-diff cell. Scalar fields
+// (default_action, blocklist_mode, rate_limit_rpm, …) arrive as plain
+// strings/numbers; list & struct fields (file_block_extensions, blocklist,
+// policy_rules, category_groups, …) arrive as objects shaped
+// {count, added?, removed?, changed?} from diffStringList/diffPolicyRules/
+// diffCategoryGroups/diffURLCategories (configversion.go). A naive String()
+// on those objects prints "[object Object]"; unpack them into a readable
+// "N items · added/removed/changed: …" summary instead. Returns HTML-safe
+// text (element values are individually escaped).
+function fmtDiffCell(v) {
+  if (v === null || v === undefined) return '<span style="color:var(--muted)">—</span>';
+  if (typeof v !== 'object') return escHtml(String(v));
+  const bits = [];
+  if (typeof v.count === 'number') bits.push(`${v.count} item${v.count === 1 ? '' : 's'}`);
+  if (Array.isArray(v.added)   && v.added.length)   bits.push(`added: ${v.added.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.removed) && v.removed.length) bits.push(`removed: ${v.removed.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.changed) && v.changed.length) bits.push(`changed: ${v.changed.map(escHtml).join(', ')}`);
+  return bits.length ? bits.join(' · ') : escHtml(JSON.stringify(v));
 }
 
 async function rollbackConfigVersion(version) {
