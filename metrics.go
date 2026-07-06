@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
@@ -72,13 +73,8 @@ func saveHitCounters(path string) {
 		logger.Printf("HitCounters: marshal error: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(path, b, 0o600); err != nil {
 		logger.Printf("HitCounters: write error: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		logger.Printf("HitCounters: rename error: %v", err)
 	}
 }
 

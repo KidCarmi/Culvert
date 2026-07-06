@@ -27,6 +27,8 @@ import (
 	"time"
 
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // ─── Rule shape ─────────────────────────────────────────────────────────────
@@ -192,12 +194,8 @@ func (s *CDRPolicyStore) Save() error {
 	if err != nil {
 		return fmt.Errorf("cdr policies: marshal: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("cdr policies: write %q: %w", sanitizeLog(tmp), err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("cdr policies: rename: %w", err)
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		return fmt.Errorf("cdr policies: %w", err)
 	}
 	return nil
 }

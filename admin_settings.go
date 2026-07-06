@@ -14,6 +14,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // AdminSettings holds every admin-configurable value that needs to survive
@@ -421,13 +423,11 @@ func SaveAdminSettings() {
 		logger.Printf("AdminSettings: marshal error: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// AtomicWrite (unique temp + fsync): adminSettingsSave spawns this in a
+	// goroutine per API mutation, so a fixed ".tmp" name lets concurrent
+	// saves interleave into the same temp file and publish a torn result.
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		logger.Printf("AdminSettings: write error: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		logger.Printf("AdminSettings: rename error: %v", err)
 	}
 }
 

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -356,16 +357,10 @@ func (y *RuleSet) WriteRule(name, src string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return warnings, fmt.Errorf("create rules dir: %w", err)
 	}
-	tmp := path + ".tmp"
-	// #nosec G304,G306,G703 -- tmp is derived from a path validated by
-	// resolveRulePath; 0600 is already used, G306 lint is a false positive.
-	if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil {
-		return warnings, fmt.Errorf("write tmp: %w", err)
-	}
-	// #nosec G304,G703 -- both arguments flow from resolveRulePath.
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // #nosec G104,G304,G703 -- cleanup of our own tmp file
-		return warnings, fmt.Errorf("rename: %w", err)
+	// #nosec G304,G703 -- path is validated by resolveRulePath; no
+	// user-controlled component.
+	if err := fileutil.AtomicWrite(path, []byte(src), 0o600); err != nil {
+		return warnings, err
 	}
 
 	// Reload the whole directory so the new rule takes effect immediately.

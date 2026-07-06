@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // ─── Instance model ─────────────────────────────────────────────────────────
@@ -137,12 +139,8 @@ func (r *CDRInstanceRegistry) Save() error {
 	if err != nil {
 		return fmt.Errorf("cdr instances: marshal: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("cdr instances: write %q: %w", sanitizeLog(tmp), err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("cdr instances: rename: %w", err)
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		return fmt.Errorf("cdr instances: %w", err)
 	}
 	return nil
 }

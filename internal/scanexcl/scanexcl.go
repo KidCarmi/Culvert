@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
@@ -90,11 +91,7 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil { // #nosec G306
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fileutil.AtomicWrite(path, data, 0o600)
 }
 
 // Replace atomically swaps the exclusion lists, normalising to lower case.

@@ -103,6 +103,16 @@ const (
 	feedUserAgent   = "Culvert/1.0 (+https://github.com/KidCarmi/Claude-Test)"
 	feedHTTPTimeout = 60 * time.Second
 	maxFeedLines    = 500_000 // safety cap per feed to limit memory usage
+
+	// Source names stamped on entries. Each feed's name appears in exactly
+	// two places (the fetch call and the replacedSources bookkeeping in
+	// Sync), both via these constants — carryForward's keep-by-exclusion
+	// depends on the strings matching exactly, so they must never be
+	// spelled inline. "cluster-sync" (ImportFeedData) is deliberately NOT
+	// here: it is never a local fetch source, which is what makes those
+	// entries survive local syncs.
+	sourceURLhaus   = "urlhaus"
+	sourceOpenPhish = "openphish"
 )
 
 // Init configures the feed manager and loads any persisted DB from disk.
@@ -161,25 +171,48 @@ func (tf *Feed) Sync() {
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
 	var failures []string
+	replacedSources := make(map[string]bool, 2)
 
-	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
-	if err != nil {
-		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
-		failures = append(failures, fmt.Sprintf("URLhaus: %v", err))
+	if ok, fail := tf.fetchFeedInto(urlHausTextFeed, sourceURLhaus, "URLhaus", newURLs, newDomains); ok {
+		replacedSources[sourceURLhaus] = true
 	} else {
-		obs.Printf("ThreatFeed: URLhaus %d entries", n)
+		failures = append(failures, fail)
+	}
+	if ok, fail := tf.fetchFeedInto(openPhishFeed, sourceOpenPhish, "OpenPhish", newURLs, newDomains); ok {
+		replacedSources[sourceOpenPhish] = true
+	} else {
+		failures = append(failures, fail)
 	}
 
-	n, err = tf.fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
-	if err != nil {
-		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
-		failures = append(failures, fmt.Sprintf("OpenPhish: %v", err))
-	} else {
-		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
-	}
+	tf.applySync(newURLs, newDomains, failures, replacedSources, time.Now())
 
-	now := time.Now()
+	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
+
+	if tf.dbPath != "" {
+		if err := tf.saveToDisk(); err != nil {
+			obs.Printf("ThreatFeed: save to disk failed: %v", err)
+		}
+	}
+}
+
+// applySync installs freshly-fetched feed tables. Only entries owned by a
+// feed that fetched CLEANLY this sync (replacedSources) are replaced; every
+// other previous entry is carried forward. That covers two failure classes:
+//   - a feed whose fetch failed keeps its last-known-good entries — otherwise
+//     one sync with both feeds unreachable would wipe the entire threat DB in
+//     memory AND on disk (Sync persists right after), silently disabling
+//     threat-feed blocking until the next successful sync;
+//   - entries a local fetch never owns — the DP's "cluster-sync" import
+//     (ImportFeedData) — survive local syncs instead of being wiped until the
+//     next CP snapshot re-imports them.
+//
+// A feed that fetched cleanly is always fully replaced, so its stale entries
+// still age out; cluster-sync entries are refreshed wholesale by
+// ImportFeedData on every snapshot apply.
+func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, replacedSources map[string]bool, now time.Time) {
 	tf.mu.Lock()
+	carryForward(newURLs, tf.urls, replacedSources)
+	carryForward(newDomains, tf.domains, replacedSources)
 	tf.urls = newURLs
 	tf.domains = newDomains
 	tf.lastSync = now
@@ -191,12 +224,39 @@ func (tf *Feed) Sync() {
 	}
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
+}
 
-	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
+// fetchFeedInto fetches one feed into the fresh maps and reports whether the
+// result should REPLACE that source's previous entries. A fetch error keeps
+// last-known-good via carryForward — and so does a ZERO-entry "success": an
+// HTTP 200 maintenance page or empty/truncated-at-a-line-boundary body
+// returns (0, nil) from fetchTextFeed, and these public feeds are never
+// legitimately empty, so treating it as clean would wipe the feed the same
+// way a hard error used to (caught by review on PR #587).
+func (tf *Feed) fetchFeedInto(feedURL, source, label string, urls, domains map[string]entry) (replaced bool, failure string) {
+	n, err := tf.fetchTextFeed(feedURL, source, urls, domains)
+	if err != nil {
+		obs.Printf("ThreatFeed: %s sync failed: %v", label, err)
+		return false, fmt.Sprintf("%s: %v", label, err)
+	}
+	if n == 0 {
+		obs.Printf("ThreatFeed: %s returned 0 entries — keeping previous data", label)
+		return false, label + ": returned 0 entries"
+	}
+	obs.Printf("ThreatFeed: %s %d entries", label, n)
+	return true, ""
+}
 
-	if tf.dbPath != "" {
-		if err := tf.saveToDisk(); err != nil {
-			obs.Printf("ThreatFeed: save to disk failed: %v", err)
+// carryForward copies into dst the entries of old whose Source is NOT in
+// replaced (feeds that fetched cleanly this sync). Fresh entries win on key
+// collision.
+func carryForward(dst, old map[string]entry, replaced map[string]bool) {
+	for k, e := range old {
+		if replaced[e.Source] {
+			continue
+		}
+		if _, ok := dst[k]; !ok {
+			dst[k] = e
 		}
 	}
 }
