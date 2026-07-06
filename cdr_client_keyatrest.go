@@ -37,6 +37,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // cdrClientKeyEncryptEnvVar opts CDR client key encryption in (opt-in-first).
@@ -66,38 +69,38 @@ func cdrClientKeyEncryptionEnabled() bool {
 // <keyPath>.kek (model B, auto-generated 0600 on first use). Anchoring to the
 // key file keeps instances isolated. Deterministic; no I/O until the KEK is
 // actually needed.
-func cdrClientKEKProvider(keyPath string) KEKProvider {
-	return resolveKEKProvider(envKEKName, filepath.Clean(keyPath)+cdrClientKEKSuffix)
+func cdrClientKEKProvider(keyPath string) *secret.Provider {
+	return secret.ResolveProvider(secret.EnvKEKName, filepath.Clean(keyPath)+cdrClientKEKSuffix)
 }
 
-// decryptCDRClientKey returns the plaintext key PEM for raw on-disk CDR client
+// openCDRClientKey returns an opaque Sealed handle for raw on-disk CDR client
 // key bytes. If the bytes are a PSCA envelope it decrypts with the resolved KEK
 // and fails closed on any error (missing/wrong KEK, corrupt ciphertext/tag) —
-// the caller must NOT regenerate/re-enroll on failure. Plaintext bytes pass
-// through unchanged. The returned bool reports whether the on-disk form was
-// encrypted.
-func decryptCDRClientKey(keyPath string, rawKey []byte) (plainPEM []byte, wasEncrypted bool, err error) {
-	if !isEncryptedKeyFile(rawKey) {
-		return rawKey, false, nil
-	}
-	plain, derr := decryptWithKEK(rawKey, cdrClientKEKProvider(keyPath))
+// the caller must NOT regenerate/re-enroll on failure. Plaintext bytes are
+// wrapped unchanged. The returned bool reports whether the on-disk form was
+// encrypted. Callers reach the plaintext only via Sealed.WithPlaintext
+// (zeroized on return), so raw client key bytes never cross back into package
+// main as a []byte.
+func openCDRClientKey(keyPath string, rawKey []byte) (*secret.Sealed, bool, error) {
+	sealed, wasEncrypted, derr := secret.OpenOrPlaintext(rawKey, cdrClientKEKProvider(keyPath))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
 		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjCDRClient)
-		return nil, true, fmt.Errorf("cdr client key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
+		return nil, wasEncrypted, fmt.Errorf("cdr client key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
-	return plain, true, nil
+	return sealed, wasEncrypted, nil
 }
 
 // encodeCDRClientKeyForWrite returns the bytes to persist for a freshly issued
 // plaintext client key PEM: an encrypted PSCA envelope when encryption is
 // enabled, or the plaintext unchanged otherwise. The caller writes the result
-// with its existing atomic tmp+rename flow.
+// with its existing atomic tmp+rename flow. (The returned bytes are ciphertext
+// when encryption is on, so no plaintext escapes here.)
 func encodeCDRClientKeyForWrite(keyPath string, plainKeyPEM []byte) ([]byte, error) {
 	if !cdrClientKeyEncryptionEnabled() {
 		return plainKeyPEM, nil
 	}
-	return encryptWithKEK(plainKeyPEM, cdrClientKEKProvider(keyPath))
+	return secret.Seal(plainKeyPEM, cdrClientKEKProvider(keyPath))
 }
 
 // maybeMigrateCDRClientKey migrates an existing plaintext CDR client key at
@@ -146,10 +149,10 @@ func migrateCDRClientKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err err
 	p := cdrClientKEKProvider(keyPath)
 	bakPath := keyPath + ".plaintext.bak"
 
-	if err := atomicWriteFile(bakPath, plainKeyPEM, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(bakPath, plainKeyPEM, 0o600); err != nil {
 		return fmt.Errorf("cdr client key migration: quarantine plaintext: %w", err)
 	}
-	if err := writeEncryptedFile(keyPath, plainKeyPEM, p); err != nil {
+	if err := secret.SealToFile(keyPath, plainKeyPEM, p); err != nil {
 		_ = restoreCDRClientKeyPlaintext(keyPath, bakPath)
 		return fmt.Errorf("cdr client key migration: encrypt+write: %w", err)
 	}
@@ -163,19 +166,22 @@ func migrateCDRClientKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err err
 }
 
 // verifyEncryptedCDRClientKey re-reads keyPath, decrypts it, parses the key, and
-// confirms the decrypted bytes match the source plaintext.
-func verifyEncryptedCDRClientKey(keyPath string, wantPlainPEM []byte, p KEKProvider) error {
-	got, err := readEncryptedFile(keyPath, p)
+// confirms the decrypted bytes match the source plaintext. The decrypted bytes
+// stay inside the WithPlaintext closure and are zeroized on return.
+func verifyEncryptedCDRClientKey(keyPath string, wantPlainPEM []byte, p *secret.Provider) error {
+	sealed, err := secret.OpenFile(keyPath, p)
 	if err != nil {
 		return err
 	}
-	if err := parseAnyPrivateKeyPEM(got); err != nil {
-		return fmt.Errorf("decrypted key does not parse: %w", err)
-	}
-	if !bytes.Equal(got, wantPlainPEM) {
-		return errors.New("decrypted key does not match source")
-	}
-	return nil
+	return sealed.WithPlaintext(func(got []byte) error {
+		if err := parseAnyPrivateKeyPEM(got); err != nil {
+			return fmt.Errorf("decrypted key does not parse: %w", err)
+		}
+		if !bytes.Equal(got, wantPlainPEM) {
+			return errors.New("decrypted key does not match source")
+		}
+		return nil
+	})
 }
 
 // restoreCDRClientKeyPlaintext copies the quarantined plaintext back to keyPath
@@ -185,5 +191,5 @@ func restoreCDRClientKeyPlaintext(keyPath, bakPath string) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(keyPath, data, 0o600)
+	return fileutil.AtomicWrite(keyPath, data, 0o600)
 }
