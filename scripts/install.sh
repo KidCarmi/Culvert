@@ -864,13 +864,13 @@ ensure_agent_traversal() {
 maint_toml_string() {
   local key="$1" file="${2:-/etc/culvert-maint/config.toml}"
   sudo awk -v k="$key" '
-    BEGIN { FS="=" }
     /^[[:space:]]*#/ { next }
     $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
-      v=$2
-      sub(/^[[:space:]]*"/, "", v)
-      sub(/"[[:space:]]*$/, "", v)
-      print v
+      line=$0
+      sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
+      sub(/^"/, "", line)
+      sub(/".*$/, "", line)
+      print line
       exit
     }
   ' "$file" 2>/dev/null
