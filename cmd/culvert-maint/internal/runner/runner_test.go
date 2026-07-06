@@ -228,6 +228,12 @@ func TestNew_FailsClosedOnInvalidOptions(t *testing.T) {
 		{"env name lowercase", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"bad_name"}}},
 		{"env name with newline", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"BAD\nNAME"}}},
 		{"env name leading digit", Options{ComposeProjectDir: "/x", ComposeFile: "y", StageTimeout: time.Second, EnvAllow: []string{"1BAD"}}},
+		{"override with slash", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: "sub/o.yml", StageTimeout: time.Second}},
+		{"override with backslash", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: `sub\o.yml`, StageTimeout: time.Second}},
+		{"override traversal", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: "../o.yml", StageTimeout: time.Second}},
+		{"override dot", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: ".", StageTimeout: time.Second}},
+		{"override dotdot", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: "..", StageTimeout: time.Second}},
+		{"override equals compose_file", Options{ComposeProjectDir: "/x", ComposeFile: "y", ComposeOverrideFile: "y", StageTimeout: time.Second}},
 	}
 	for _, c := range cases {
 		_, err := New(c.opts)
@@ -235,6 +241,63 @@ func TestNew_FailsClosedOnInvalidOptions(t *testing.T) {
 			t.Errorf("%s: expected error, got nil", c.name)
 		}
 	}
+}
+
+// TestBuildArgv_ComposeOverride proves the {compose_override} token expands to a
+// second `-f <abs override>` ONLY when configured, and drops to nothing when
+// not — the exact behavior that lets the maintenance socket survive a recreate
+// while keeping the historical single-`-f` recreate for hosts with no override.
+func TestBuildArgv_ComposeOverride(t *testing.T) {
+	up := templateByID(TemplateComposeUp)
+	if up == nil {
+		t.Fatal("TemplateComposeUp not registered")
+	}
+
+	// No override → single -f, no empty tokens.
+	rNo, err := New(Options{ComposeProjectDir: "/srv/culvert", ComposeFile: "docker-compose.yml", StageTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("New (no override): %v", err)
+	}
+	gotNo := rNo.buildArgv(up)
+	wantNo := []string{"docker", "compose", "-f", "/srv/culvert/docker-compose.yml", "up", "-d"}
+	if !equalArgv(gotNo, wantNo) {
+		t.Errorf("no-override argv:\n got %q\nwant %q", gotNo, wantNo)
+	}
+
+	// Override → second -f with the absolute override path, positioned before `up`.
+	rYes, err := New(Options{ComposeProjectDir: "/srv/culvert", ComposeFile: "docker-compose.yml", ComposeOverrideFile: "docker-compose.maint-agent.yml", StageTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("New (override): %v", err)
+	}
+	gotYes := rYes.buildArgv(up)
+	wantYes := []string{"docker", "compose", "-f", "/srv/culvert/docker-compose.yml", "-f", "/srv/culvert/docker-compose.maint-agent.yml", "up", "-d"}
+	if !equalArgv(gotYes, wantYes) {
+		t.Errorf("override argv:\n got %q\nwant %q", gotYes, wantYes)
+	}
+
+	// The override must NOT leak onto a non-ComposeUp template (e.g. down).
+	down := templateByID(TemplateComposeDown)
+	if down == nil {
+		t.Fatal("TemplateComposeDown not registered")
+	}
+	gotDown := rYes.buildArgv(down)
+	for _, a := range gotDown {
+		if a == "/srv/culvert/docker-compose.maint-agent.yml" {
+			t.Errorf("override leaked onto compose.down argv: %q", gotDown)
+		}
+	}
+}
+
+func equalArgv(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestBuildEnv_DeterministicOrder(t *testing.T) {

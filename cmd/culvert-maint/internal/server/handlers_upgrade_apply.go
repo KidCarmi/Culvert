@@ -108,11 +108,22 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 	// Inline auto-rollback is opt-out: nil (omitted) → true (#375 §1).
 	rollbackOnFailure := req.RollbackOnFailure == nil || *req.RollbackOnFailure
 
+	// Self-heal preflight (record-only, never blocks): if no compose override is
+	// configured, the `restart` stage recreates the proxy with a single `-f` and
+	// will DROP any override-supplied socket wiring — after which the CP can no
+	// longer reach this agent. We surface it (op params → CP → GUI) rather than
+	// refuse, because a host may legitimately run without the socket (e.g. wiring
+	// baked into its base compose, or a local-only operator). The agent cannot
+	// introspect the proxy's mounts (that would need a new, format-unlocked
+	// `docker inspect` sudoers line), so this config-derived flag is the signal.
+	composeOverrideConfigured := s.opts.Cfg.ComposeOverrideFile != ""
+
 	params := map[string]interface{}{
-		"image_ref":           req.ImageRef,
-		"pre_backup":          req.PreBackup,
-		"passphrase_ref":      req.PassphraseRef,
-		"rollback_on_failure": rollbackOnFailure,
+		"image_ref":                   req.ImageRef,
+		"pre_backup":                  req.PreBackup,
+		"passphrase_ref":              req.PassphraseRef,
+		"rollback_on_failure":         rollbackOnFailure,
+		"compose_override_configured": composeOverrideConfigured,
 	}
 
 	imageRef := req.ImageRef

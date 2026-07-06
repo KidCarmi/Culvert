@@ -44,6 +44,12 @@ type Config struct {
 	// Filename within ComposeProjectDir. Default "docker-compose.yml".
 	ComposeFile string
 
+	// Optional second compose file (bare filename within ComposeProjectDir)
+	// merged as `-f` on the proxy-recreate ONLY, so an opt-in override — the
+	// maintenance-agent socket wiring in docker-compose.maint-agent.yml —
+	// survives an agent-driven recreate. Empty ⇒ single-file recreate.
+	ComposeOverrideFile string
+
 	// UDS path. Default "/run/culvert-maint/culvert-maint.sock" (under the
 	// systemd RuntimeDirectory the service user owns). Mode is fixed at
 	// 0660 regardless of config.
@@ -120,21 +126,22 @@ func (c *Config) IsAllowedBackupPath(p string) bool {
 // rawConfig mirrors the TOML on-disk layout. Unknown keys cause Load to
 // fail (toml.DecodeFile with strict mode).
 type rawConfig struct {
-	ComposeProjectDir string   `toml:"compose_project_dir"`
-	ComposeFile       string   `toml:"compose_file"`
-	SocketPath        string   `toml:"socket_path"`
-	StateDir          string   `toml:"state_dir"`
-	PrivilegeMode     string   `toml:"privilege_mode"`
-	HealthBaseURL     string   `toml:"health_base_url"`
-	HealthPath        string   `toml:"health_path"`
-	ReadyPath         string   `toml:"ready_path"`
-	OperationTimeout  string   `toml:"operation_timeout"`
-	StageTimeout      string   `toml:"stage_timeout"`
-	LogRetentionDays  *int     `toml:"log_retention_days"`
-	AllowedBackupDir  string   `toml:"allowed_backup_dir"`
-	ImageAllowlist    string   `toml:"image_allowlist"`
-	ProxyRepo         string   `toml:"proxy_repo"`
-	AllowPeers        []string `toml:"allow_peers"`
+	ComposeProjectDir   string   `toml:"compose_project_dir"`
+	ComposeFile         string   `toml:"compose_file"`
+	ComposeOverrideFile string   `toml:"compose_override_file"`
+	SocketPath          string   `toml:"socket_path"`
+	StateDir            string   `toml:"state_dir"`
+	PrivilegeMode       string   `toml:"privilege_mode"`
+	HealthBaseURL       string   `toml:"health_base_url"`
+	HealthPath          string   `toml:"health_path"`
+	ReadyPath           string   `toml:"ready_path"`
+	OperationTimeout    string   `toml:"operation_timeout"`
+	StageTimeout        string   `toml:"stage_timeout"`
+	LogRetentionDays    *int     `toml:"log_retention_days"`
+	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
+	ImageAllowlist      string   `toml:"image_allowlist"`
+	ProxyRepo           string   `toml:"proxy_repo"`
+	AllowPeers          []string `toml:"allow_peers"`
 }
 
 const (
@@ -218,6 +225,21 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, fmt.Errorf("config: compose_file must be a bare filename, got %q", cf)
 	}
 	cfg.ComposeFile = cf
+
+	// compose_override_file — OPTIONAL, no default. When set it is merged as a
+	// second `-f` on the proxy-recreate ONLY (so an opt-in override such as the
+	// maintenance-agent socket wiring survives an agent-driven recreate). It
+	// flows into a sudoers literal, so validate it STRICTER than compose_file:
+	// bare filename, reject "." / "..", and reject equality with compose_file.
+	if of := strings.TrimSpace(raw.ComposeOverrideFile); of != "" {
+		if of != filepath.Base(of) || strings.ContainsAny(of, "/\\") || of == "." || of == ".." {
+			return nil, fmt.Errorf("config: compose_override_file must be a bare filename, got %q", of)
+		}
+		if of == cf {
+			return nil, fmt.Errorf("config: compose_override_file must differ from compose_file, got %q", of)
+		}
+		cfg.ComposeOverrideFile = of
+	}
 
 	// socket_path — default /run/culvert-maint/culvert-maint.sock. Must be absolute.
 	sp := raw.SocketPath

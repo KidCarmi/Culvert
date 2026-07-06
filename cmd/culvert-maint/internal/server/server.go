@@ -48,20 +48,26 @@ type StatusProvider interface {
 
 // Status is the JSON shape of GET /v1/status.
 type Status struct {
-	AgentVersion       string                 `json:"agent_version"`
-	PrivilegeMode      string                 `json:"privilege_mode"`
-	PrivilegeWarning   string                 `json:"privilege_warning,omitempty"`
-	ComposeProjectDir  string                 `json:"compose_project_dir"`
-	ComposeFile        string                 `json:"compose_file"`
-	ComposeStackUp     bool                   `json:"compose_stack_up"`
-	ComposeServices    []ServiceStatus        `json:"compose_services"`
-	ComposeError       string                 `json:"compose_error,omitempty"`
-	RunningImage       *RunningImage          `json:"running_image,omitempty"`
-	LockHeldBy         *ops.Op                `json:"lock_held_by,omitempty"`
-	LastOperationKind  string                 `json:"last_operation_kind,omitempty"`
-	LastOperationOpID  string                 `json:"last_operation_op_id,omitempty"`
-	LastOperationState string                 `json:"last_operation_state,omitempty"`
-	Extra              map[string]interface{} `json:"extra,omitempty"`
+	AgentVersion      string `json:"agent_version"`
+	PrivilegeMode     string `json:"privilege_mode"`
+	PrivilegeWarning  string `json:"privilege_warning,omitempty"`
+	ComposeProjectDir string `json:"compose_project_dir"`
+	ComposeFile       string `json:"compose_file"`
+	// ComposeOverrideConfigured is true when compose_override_file is set, i.e.
+	// the agent-driven recreate carries a second `-f` (the opt-in socket
+	// override) so the CP↔agent connection survives an update. When false, an
+	// update-triggered recreate will drop any override-supplied socket wiring —
+	// the GUI surfaces this so operators can wire it before dispatching.
+	ComposeOverrideConfigured bool                   `json:"compose_override_configured"`
+	ComposeStackUp            bool                   `json:"compose_stack_up"`
+	ComposeServices           []ServiceStatus        `json:"compose_services"`
+	ComposeError              string                 `json:"compose_error,omitempty"`
+	RunningImage              *RunningImage          `json:"running_image,omitempty"`
+	LockHeldBy                *ops.Op                `json:"lock_held_by,omitempty"`
+	LastOperationKind         string                 `json:"last_operation_kind,omitempty"`
+	LastOperationOpID         string                 `json:"last_operation_op_id,omitempty"`
+	LastOperationState        string                 `json:"last_operation_state,omitempty"`
+	Extra                     map[string]interface{} `json:"extra,omitempty"`
 }
 
 // ServiceStatus describes one compose service from `docker compose ps`.

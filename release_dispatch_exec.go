@@ -61,6 +61,16 @@ var errDispatchInFlight = errors.New("dispatch: an execution is already in fligh
 // preflight read failure — see respondPreApply.
 const detailAnchorReadFailed = "anchor_read_failed"
 
+// detailAgentUnreachableAfterUpdate prefixes the Detail when an apply the agent
+// reported as SUCCEEDED is immediately followed by a TRANSPORT failure on the
+// post-verify /v1/status read — while the pre-apply anchor read had succeeded.
+// That differential is the signature of the recreate having dropped the CP↔agent
+// socket (e.g. no compose_override_file, so the single-`-f` recreate stripped the
+// maintenance-socket mount). It stays FAILED_NEEDS_ATTN (it must alert) but is
+// surfaced distinctly so the GUI can tell the operator to wire the override /
+// re-run, instead of a generic post_verify_read_failed.
+const detailAgentUnreachableAfterUpdate = "agent_unreachable_after_update"
+
 // errStaleAlreadyCurrent is returned when a plan's already-current determination
 // (computed from plan-time running digests by P1.6a) no longer holds against a
 // FRESH status read at execute time — the node drifted off the target between
@@ -359,6 +369,15 @@ func (e *DispatchExecutor) Resume(ctx context.Context, rc DispatchResumeContext)
 func (e *DispatchExecutor) classifyTerminal(ctx context.Context, plan *DispatchPlan, res *DispatchResult, anchor []string, state string) {
 	post, perr := e.client.RunningDigests(ctx)
 	if perr != nil {
+		// The pre-apply anchor read succeeded (Execute bails before dispatch
+		// otherwise), so a post-op read that fails with a TRANSPORT/transient
+		// error right after a SUCCEEDED apply is the fingerprint of the recreate
+		// dropping the CP↔agent socket — surface it distinctly. A deterministic
+		// (non-transient) read error keeps the generic post_verify_read_failed.
+		if state == agentStateSucceeded && isTransientAgentErr(perr) {
+			res.Terminal, res.Detail = TerminalFailedNeedsAttn, detailAgentUnreachableAfterUpdate+": "+perr.Error()
+			return
+		}
 		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "post_verify_read_failed: "+perr.Error()
 		return
 	}

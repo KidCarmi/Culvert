@@ -34,6 +34,17 @@ allow_peers = ["culvert-cp"]
 # (no path separator).
 compose_file = "docker-compose.yml"
 
+# OPTIONAL — a second compose file merged as `-f` onto the proxy-recreate ONLY,
+# so an opt-in override survives an agent-driven recreate. Its intended use is
+# the maintenance-agent socket wiring (docker-compose.maint-agent.yml): without
+# it, the agent recreates the proxy with a single `-f` and DROPS the socket
+# mount, so after the first update the Control Plane can no longer reach this
+# agent. Bare filename within compose_project_dir; must differ from compose_file.
+# NOTE: the agent runs compose with a scrubbed env, so any ${VAR} the override
+# interpolates (e.g. ${CULVERT_MAINT_GID}) must be present in
+# <compose_project_dir>/.env — compose auto-loads that file. Empty ⇒ disabled.
+# compose_override_file = "docker-compose.maint-agent.yml"
+
 # UDS path for the agent's API. Mode is fixed at 0660 regardless. Lives under
 # /run/culvert-maint/ — the systemd unit's RuntimeDirectory, owned by the
 # unprivileged culvert-maint user (it cannot bind a socket directly in /run).
