@@ -39,6 +39,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // ─── Cluster State ───────────────────────────────────────────────────────────
@@ -783,20 +785,22 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 		// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
 		// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
 		// a pure plaintext-PEM parser.
-		plainKey, wasEncrypted, decErr := decryptClusterCAKey(ca.dir, keyPEM)
+		sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
 		if decErr != nil {
 			return decErr
 		}
-		if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
-			return err
-		}
-		// Opt-in migration: plaintext on disk + encryption enabled → migrate.
-		if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
-			if err := migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey); err != nil {
+		// The decrypted CA key stays inside the closure and is zeroized on return;
+		// it never crosses back into package main as a plain []byte.
+		return sealed.WithPlaintext(func(plainKey []byte) error {
+			if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
 				return err
 			}
-		}
-		return nil
+			// Opt-in migration: plaintext on disk + encryption enabled → migrate.
+			if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
+				return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
+			}
+			return nil
+		})
 	case !certMissing && keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	case certMissing && !keyMissing:
@@ -1013,7 +1017,7 @@ func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 			// CA-3: when encryption is enabled, the key .bak must not be left
 			// as plaintext on disk. Best-effort, consistent with this helper.
 			if clusterCAKeyEncryptionEnabled() {
-				_ = writeEncryptedFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
+				_ = secret.SealToFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
 			} else {
 				_ = os.WriteFile(keyBak, keyPEM, 0o600)
 			}
