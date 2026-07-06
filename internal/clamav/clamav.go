@@ -33,8 +33,8 @@ type Client struct {
 	timeout time.Duration
 }
 
-const clamChunkSize = 4096  // bytes per INSTREAM chunk
-const clamMaxConcurrent = 4 // max parallel ClamAV scans
+const clamChunkSize = 64 << 10 // 64 KiB per INSTREAM chunk (fewer frames + syscalls than 4 KiB)
+const clamMaxConcurrent = 4    // max parallel ClamAV scans
 
 // clamSem limits concurrent ClamAV scans to prevent overwhelming the daemon
 // when multiple requests trigger scanning simultaneously.
@@ -170,6 +170,9 @@ func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err erro
 	}
 
 	// Stream data in fixed-size chunks, each prefixed with its 4-byte length.
+	// The length prefix and the chunk are written together via net.Buffers
+	// (writev), so each chunk costs ONE syscall instead of two. The on-wire
+	// framing is unchanged — only the chunk size and the write batching differ.
 	for off := 0; off < len(data); off += clamChunkSize {
 		end := off + clamChunkSize
 		if end > len(data) {
@@ -177,12 +180,10 @@ func (c *Client) Scan(data []byte) (virusName string, isMalicious bool, err erro
 		}
 		chunk := data[off:end]
 		var lenBuf [4]byte
-		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(chunk))) // #nosec G115 -- chunk size is bounded by clamChunkSize (4096), well within uint32 range
-		if _, err := conn.Write(lenBuf[:]); err != nil {
-			return "", false, fmt.Errorf("clamav: write chunk length: %w", err)
-		}
-		if _, err := conn.Write(chunk); err != nil {
-			return "", false, fmt.Errorf("clamav: write chunk data: %w", err)
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(chunk))) // #nosec G115 -- chunk size is bounded by clamChunkSize (65536), well within uint32 range
+		framed := net.Buffers{lenBuf[:], chunk}
+		if _, err := framed.WriteTo(conn); err != nil {
+			return "", false, fmt.Errorf("clamav: write chunk: %w", err)
 		}
 	}
 

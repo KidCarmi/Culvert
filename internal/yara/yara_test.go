@@ -206,6 +206,49 @@ func TestYARARuleSet_Match_NoCase(t *testing.T) {
 	}
 }
 
+// TestYARARuleSet_Match_CaseSensitiveVsNoCase guards the scanCtx refactor: the
+// once-per-scan body lowering must apply ONLY to nocase strings. A plain
+// literal stays case-sensitive; its nocase sibling matches any case. Both live
+// in one ruleset so a single Match threads the shared scanCtx across them.
+func TestYARARuleSet_Match_CaseSensitiveVsNoCase(t *testing.T) {
+	src := yaraRule("Sensitive", `        $a = "MALWARE"`, "any of them") +
+		yaraRule("Insensitive", `        $b = "MALWARE" nocase`, "any of them")
+	y := newYARASet(t, src)
+
+	// Lowercase body: only the nocase rule should fire.
+	got := y.Match([]byte("contains malware here"))
+	if len(got) != 1 || got[0] != "Insensitive" {
+		t.Fatalf("lowercase body: matched %v, want [Insensitive] only (case-sensitive rule must NOT match)", got)
+	}
+	// Exact-case body: both fire.
+	if got := y.Match([]byte("contains MALWARE here")); len(got) != 2 {
+		t.Fatalf("exact-case body: matched %v, want both rules", got)
+	}
+}
+
+// TestParseYARASrc_DuplicateStringIDSkipped pins that a duplicate string id is
+// dropped at parse time (first wins), so the map-free any/all path and the
+// map-based boolExpr path evaluate a rule identically and deterministically.
+func TestParseYARASrc_DuplicateStringIDSkipped(t *testing.T) {
+	rules, err := parseYARASrc(yaraRule("Dup",
+		"        $a = \"foo\"\n        $a = \"bar\"", "all of them"))
+	if err != nil {
+		t.Fatalf("parseYARASrc: %v", err)
+	}
+	if n := len(rules[0].strings); n != 1 {
+		t.Fatalf("duplicate id not skipped: %d strings, want 1", n)
+	}
+	if got := string(rules[0].strings[0].literal); got != "foo" {
+		t.Fatalf("kept %q, want first occurrence \"foo\"", got)
+	}
+	// "all of them" over the single surviving string $a="foo": a body with foo
+	// (but not bar) matches, proving the dropped dup can't flip the result.
+	y := &RuleSet{rules: rules}
+	if got := y.Match([]byte("has foo only")); len(got) != 1 {
+		t.Fatalf("matched %v, want the rule to fire on the surviving string", got)
+	}
+}
+
 func TestYARARuleSet_Match_HexPattern(t *testing.T) {
 	y := newYARASet(t, yaraRule("HexRule", `        $mz = { 4D 5A }`, "any of them"))
 	if matched := y.Match([]byte{0x4D, 0x5A, 0x90, 0x00}); len(matched) == 0 {
