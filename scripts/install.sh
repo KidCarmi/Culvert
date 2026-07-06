@@ -1034,8 +1034,19 @@ wire_release_agent_for_compose() {
     warn "Release Management auto-wiring skipped: maint-agent sudoers/config re-render failed."
     return 0
   fi
-  if ! sudo systemctl enable --now culvert-maint >/dev/null 2>&1; then
-    warn "Release Management auto-wiring skipped: could not start culvert-maint."
+  # enable (idempotent) + RESTART, not `enable --now`: on a re-run/upgrade where
+  # the agent is ALREADY running, `--now` only starts a stopped unit — it does
+  # NOT reload the config.toml this function just patched. The agent reads its
+  # config ONCE at startup, so both the allow_peers patch AND compose_override_file
+  # would be ignored by the running process, and it would keep recreating with a
+  # single `-f` (dropping the socket) until a manual restart. `restart` also
+  # starts a stopped unit, so it is correct for first-install and upgrade alike.
+  if ! sudo systemctl enable culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not enable culvert-maint."
+    return 0
+  fi
+  if ! sudo systemctl restart culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not (re)start culvert-maint."
     return 0
   fi
 
