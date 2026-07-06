@@ -146,13 +146,13 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --p
 
 # ─── compose.down / compose.up (D1.6b — used by restore.commit) ─────
 # The compose.up line has TWO forms: the plain single-`-f` recreate, and a
-# two-`-f` variant that also merges an OPTIONAL override compose file
-# ({compose_override_path}) so the maintenance-agent socket wiring survives an
-# agent-driven recreate. install.sh renders {compose_override_path} to the
-# configured override's absolute path when compose_override_file is set, and
-# DELETES the two-`-f` line entirely when it is not (so an un-configured host
-# never carries an unresolved placeholder or extra surface). Both files are
-# fixed literals — never a wildcard.
+# two-`-f` variant that also merges an OPTIONAL override compose file so the
+# maintenance-agent socket wiring survives an agent-driven recreate. install.sh
+# renders the override path when compose_override_file is set, and DELETES the
+# two-`-f` line entirely when it is not (so an un-configured host never carries
+# an unresolved placeholder or extra surface — the deletion targets the sole
+# line bearing that placeholder token, keeping this comment intact). Both files
+# are fixed literals — never a wildcard.
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} down
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} up -d
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d

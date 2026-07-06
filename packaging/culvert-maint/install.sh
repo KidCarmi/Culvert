@@ -390,12 +390,15 @@ if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     # ${VAR} / ${VAR:?...} the override interpolates (e.g. the socket override's
     # ${CULVERT_MAINT_GID}) MUST be resolvable from <compose_project_dir>/.env —
     # compose auto-loads that file. A required-but-unset var makes every
-    # agent-driven recreate hard-fail. Warn loudly; the operator owns the .env.
-    if [ ! -f "$PROJECT_DIR/.env" ]; then
-        warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but $PROJECT_DIR/.env is missing."
-        warn "The agent runs compose with a scrubbed env, so any \${VAR} the override needs"
-        warn "(e.g. \${CULVERT_MAINT_GID} for the socket override) must be in that .env, or"
-        warn "every agent-driven recreate will fail. Create it before dispatching an update."
+    # agent-driven recreate hard-fail. The ${VAR:?} colon form also trips on an
+    # EMPTY value, so check for the KEY, not just the file. Warn loudly; the
+    # operator owns the .env.
+    if [ ! -f "$PROJECT_DIR/.env" ] || ! grep -q '^CULVERT_MAINT_GID=' "$PROJECT_DIR/.env" 2>/dev/null; then
+        warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but CULVERT_MAINT_GID"
+        warn "is not present in $PROJECT_DIR/.env. The agent runs compose with a scrubbed"
+        warn "env, so the socket override's \${CULVERT_MAINT_GID:?...} must be in that .env"
+        warn "or every agent-driven recreate will hard-fail. Set it before dispatching:"
+        warn "  echo \"CULVERT_MAINT_GID=\$(getent group culvert-maint | cut -d: -f3)\" >> $PROJECT_DIR/.env"
     fi
 fi
 

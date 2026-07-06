@@ -56,8 +56,11 @@ type Status struct {
 	// ComposeOverrideConfigured is true when compose_override_file is set, i.e.
 	// the agent-driven recreate carries a second `-f` (the opt-in socket
 	// override) so the CP↔agent connection survives an update. When false, an
-	// update-triggered recreate will drop any override-supplied socket wiring —
-	// the GUI surfaces this so operators can wire it before dispatching.
+	// update-triggered recreate will drop any override-supplied socket wiring.
+	// EXPOSED here (and in apply/rollback op params) for a CP/GUI consumer to
+	// warn operators BEFORE dispatching on an un-migrated host; that CP-side
+	// surfacing is a follow-up slice. The reactive agent_unreachable_after_update
+	// classification already covers the post-facto case end-to-end.
 	ComposeOverrideConfigured bool                   `json:"compose_override_configured"`
 	ComposeStackUp            bool                   `json:"compose_stack_up"`
 	ComposeServices           []ServiceStatus        `json:"compose_services"`
