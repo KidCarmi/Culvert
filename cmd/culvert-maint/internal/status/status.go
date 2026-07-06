@@ -59,9 +59,10 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 // Snapshot implements server.StatusProvider.
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	st := server.Status{
-		PrivilegeMode:     string(p.cfg.PrivilegeMode),
-		ComposeProjectDir: p.cfg.ComposeProjectDir,
-		ComposeFile:       p.cfg.ComposeFile,
+		PrivilegeMode:             string(p.cfg.PrivilegeMode),
+		ComposeProjectDir:         p.cfg.ComposeProjectDir,
+		ComposeFile:               p.cfg.ComposeFile,
+		ComposeOverrideConfigured: p.cfg.ComposeOverrideFile != "",
 	}
 	if p.cfg.PrivilegeMode == config.PrivilegeDockerGroupLab {
 		st.PrivilegeWarning = "docker_group_lab is dev/lab only and effectively root-equivalent; not for production"

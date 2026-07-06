@@ -1011,13 +1011,44 @@ wire_release_agent_for_compose() {
   env_put CULVERT_MAINT_GID "$maint_gid" "$INSTALL_DIR/.env"
   env_put CULVERT_RELEASE_PROXY_REPO "$release_repo" "$INSTALL_DIR/.env"
 
+  # Persist the maintenance-socket override so AGENT-DRIVEN recreates keep the
+  # socket. Without this, the agent recreates the proxy with a single `-f`
+  # (sudoers-bound) and drops the override's socket mount — after the first
+  # update the CP can no longer reach the agent. compose_override_file carries
+  # docker-compose.maint-agent.yml as a second `-f` on the recreate ONLY. The
+  # ${CULVERT_MAINT_GID} it needs is resolved from $INSTALL_DIR/.env (written
+  # above) because the agent runs compose with a scrubbed env. Only when the
+  # override file is actually present. Set BEFORE the sudoers re-render so the
+  # override allowlist line is rendered too.
+  if [[ -f "$INSTALL_DIR/docker-compose.maint-agent.yml" ]]; then
+    # Delete ANY existing form (TOML allows `key=v` and `key = v`) then append the
+    # canonical line. A grep(prefix)+sed(` = ` only) pair would MISS a spaceless
+    # `compose_override_file="old"`: grep matches so the append is skipped, but the
+    # spaced sed does not replace it, leaving the stale value — the socket would
+    # then be dropped on the next update, the exact failure this persists against.
+    sudo sed -i '/^[[:space:]]*compose_override_file[[:space:]]*=/d' "$cfg"
+    printf '\ncompose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
+    info "Maintenance agent will carry docker-compose.maint-agent.yml on recreate (socket survives updates)."
+  fi
+
   # Re-render sudoers after the config patch, then start the service.
   if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
     warn "Release Management auto-wiring skipped: maint-agent sudoers/config re-render failed."
     return 0
   fi
-  if ! sudo systemctl enable --now culvert-maint >/dev/null 2>&1; then
-    warn "Release Management auto-wiring skipped: could not start culvert-maint."
+  # enable (idempotent) + RESTART, not `enable --now`: on a re-run/upgrade where
+  # the agent is ALREADY running, `--now` only starts a stopped unit — it does
+  # NOT reload the config.toml this function just patched. The agent reads its
+  # config ONCE at startup, so both the allow_peers patch AND compose_override_file
+  # would be ignored by the running process, and it would keep recreating with a
+  # single `-f` (dropping the socket) until a manual restart. `restart` also
+  # starts a stopped unit, so it is correct for first-install and upgrade alike.
+  if ! sudo systemctl enable culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not enable culvert-maint."
+    return 0
+  fi
+  if ! sudo systemctl restart culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not (re)start culvert-maint."
     return 0
   fi
 

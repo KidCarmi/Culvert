@@ -36,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // TemplateID identifies a registered command template.
@@ -159,8 +160,15 @@ type Result struct {
 type Runner struct {
 	composeProjectDir string
 	composeFile       string
-	useSudo           bool
-	envAllow          []string
+	// composeOverrideFile is an OPTIONAL second compose file (bare filename
+	// under composeProjectDir) carried ONLY on the proxy-recreate command
+	// (TemplateComposeUp) so an opt-in override — the maintenance-agent socket
+	// wiring in docker-compose.maint-agent.yml — survives an agent-driven
+	// recreate. Empty ⇒ single-file recreate (historical behavior). It is a
+	// fixed sudoers literal, never a wildcard.
+	composeOverrideFile string
+	useSudo             bool
+	envAllow            []string
 	// envOverlayOnly is the subset of envAllow that may ONLY be sourced
 	// from an explicit per-call overlay — never from the agent's own
 	// process environment. This prevents an ambient value (e.g. an
@@ -190,8 +198,13 @@ type Runner struct {
 type Options struct {
 	ComposeProjectDir string
 	ComposeFile       string
-	UseSudo           bool
-	StageTimeout      time.Duration
+	// ComposeOverrideFile is an OPTIONAL bare filename (under
+	// ComposeProjectDir) merged as a second `-f` on the proxy-recreate only.
+	// Empty ⇒ no override. Validated when non-empty: bare filename, no
+	// traversal, and must differ from ComposeFile.
+	ComposeOverrideFile string
+	UseSudo             bool
+	StageTimeout        time.Duration
 
 	// CaptureMax bounds per-stream capture (stdout, stderr) in bytes.
 	// Default 1 MiB if zero.
@@ -256,6 +269,44 @@ func resolveEnvSets(allow, overlayOnly []string) (envAllow []string, overlayOnly
 	return envAllow, overlayOnlySet, nil
 }
 
+// validateComposeFilenames checks ComposeFile (required, bare filename) and
+// ComposeOverrideFile (optional; when set, a bare filename that rejects "." /
+// ".." and must differ from ComposeFile — it flows into a sudoers literal, so it
+// is validated STRICTER than ComposeFile). Kept out of New to bound New's
+// cyclomatic complexity.
+func validateComposeFilenames(composeFile, overrideFile string) error {
+	if composeFile == "" {
+		return errors.New("runner: ComposeFile required")
+	}
+	if composeFile != filepath.Base(composeFile) || strings.ContainsAny(composeFile, "/\\") {
+		return fmt.Errorf("runner: ComposeFile must be a bare filename, got %q", composeFile)
+	}
+	if overrideFile == "" {
+		return nil
+	}
+	if overrideFile != filepath.Base(overrideFile) || strings.ContainsAny(overrideFile, "/\\") ||
+		overrideFile == "." || overrideFile == ".." {
+		return fmt.Errorf("runner: ComposeOverrideFile must be a bare filename, got %q", overrideFile)
+	}
+	// It becomes a sudoers literal AND an argv token, so reject whitespace and
+	// control chars (whitespace would split the sudo arg match → no matching rule
+	// → sudo denial) and shell metacharacters — parity with the installer's
+	// reject_unsafe, so a post-install hand-edit can't produce a config the Go
+	// binary accepts but sudo refuses.
+	for _, r := range overrideFile {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("runner: ComposeOverrideFile must not contain whitespace or control characters, got %q", overrideFile)
+		}
+	}
+	if strings.ContainsAny(overrideFile, "\"'|;&$`<>*?(){}") {
+		return fmt.Errorf("runner: ComposeOverrideFile must not contain shell metacharacters, got %q", overrideFile)
+	}
+	if overrideFile == composeFile {
+		return fmt.Errorf("runner: ComposeOverrideFile must differ from ComposeFile (%q)", overrideFile)
+	}
+	return nil
+}
+
 // New constructs a Runner. ComposeProjectDir must be absolute and
 // already cleaned. ComposeFile must be a bare filename (no path
 // separator, no traversal). EnvAllow names are validated against
@@ -267,12 +318,8 @@ func New(opts Options) (*Runner, error) {
 	if !filepath.IsAbs(opts.ComposeProjectDir) {
 		return nil, fmt.Errorf("runner: ComposeProjectDir must be absolute, got %q", opts.ComposeProjectDir)
 	}
-	if opts.ComposeFile == "" {
-		return nil, errors.New("runner: ComposeFile required")
-	}
-	if opts.ComposeFile != filepath.Base(opts.ComposeFile) ||
-		strings.ContainsAny(opts.ComposeFile, "/\\") {
-		return nil, fmt.Errorf("runner: ComposeFile must be a bare filename, got %q", opts.ComposeFile)
+	if err := validateComposeFilenames(opts.ComposeFile, opts.ComposeOverrideFile); err != nil {
+		return nil, err
 	}
 	if opts.StageTimeout <= 0 {
 		return nil, errors.New("runner: StageTimeout must be positive")
@@ -301,16 +348,17 @@ func New(opts Options) (*Runner, error) {
 		return nil, err
 	}
 	return &Runner{
-		composeProjectDir: filepath.Clean(opts.ComposeProjectDir),
-		composeFile:       opts.ComposeFile,
-		useSudo:           opts.UseSudo,
-		envAllow:          envAllow,
-		envOverlayOnly:    envOverlayOnly,
-		captureMax:        captureMax,
-		stageTimeout:      opts.StageTimeout,
-		proxyRepo:         proxyRepo,
-		dockerBinary:      docker,
-		sudoBinary:        sudo,
+		composeProjectDir:   filepath.Clean(opts.ComposeProjectDir),
+		composeFile:         opts.ComposeFile,
+		composeOverrideFile: opts.ComposeOverrideFile,
+		useSudo:             opts.UseSudo,
+		envAllow:            envAllow,
+		envOverlayOnly:      envOverlayOnly,
+		captureMax:          captureMax,
+		stageTimeout:        opts.StageTimeout,
+		proxyRepo:           proxyRepo,
+		dockerBinary:        docker,
+		sudoBinary:          sudo,
 	}, nil
 }
 
@@ -327,13 +375,17 @@ func (r *Runner) ComposeStatus(ctx context.Context) (*Result, error) {
 
 // buildArgv expands a Template's BaseArgv with the configured compose
 // path. Placeholder `{compose_path}` is replaced with the absolute
-// `<compose_project_dir>/<compose_file>` path. argv[0] is the
-// executable; the runner prepends `sudo -n` if useSudo.
+// `<compose_project_dir>/<compose_file>` path. The `{compose_override}`
+// placeholder (present only on TemplateComposeUp) expands to
+// `-f <compose_project_dir>/<compose_override_file>` when an override is
+// configured, or to NOTHING when it is not — so a host with no override
+// keeps the exact single-`-f` recreate. argv[0] is the executable; the
+// runner prepends `sudo -n` if useSudo.
 //
 // D1.6a templates have no operator-supplied positional args. D1.6b/c
 // expansions will accept validated args via additional methods.
 func (r *Runner) buildArgv(tmpl *Template) []string {
-	out := make([]string, 0, len(tmpl.BaseArgv)+2)
+	out := make([]string, 0, len(tmpl.BaseArgv)+4) // +2 sudo, +2 override
 	if r.useSudo {
 		out = append(out, r.sudoBinary, "-n")
 	}
@@ -344,6 +396,13 @@ func (r *Runner) buildArgv(tmpl *Template) []string {
 			out = append(out, r.dockerBinary)
 		case "{compose_path}":
 			out = append(out, composePath)
+		case "{compose_override}":
+			// Expands to two tokens when configured, zero when not. Position
+			// matters: the override -f must land after -f {compose_path} and
+			// before the `up -d` verb (Compose applies later -f over earlier).
+			if r.composeOverrideFile != "" {
+				out = append(out, "-f", filepath.Join(r.composeProjectDir, r.composeOverrideFile))
+			}
 		default:
 			out = append(out, a)
 		}
