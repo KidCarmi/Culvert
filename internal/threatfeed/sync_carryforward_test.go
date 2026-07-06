@@ -1,11 +1,13 @@
 package threatfeed
 
-// applySync last-known-good carry-forward tests: a feed whose fetch failed
-// must keep its previous entries instead of being replaced with nothing.
+// applySync carry-forward tests: only entries owned by a feed that fetched
+// cleanly this sync are replaced; everything else is preserved.
 // Pre-fix, one sync with both feeds unreachable wiped the entire threat DB
 // in memory and (via the saveToDisk right after) on disk — silently
 // disabling threat-feed blocking until the next successful sync, durably
-// across restarts.
+// across restarts. Entries imported from the control plane
+// ("cluster-sync", ImportFeedData) are never owned by a local fetch and
+// must survive local syncs too (Codex review on PR #587).
 
 import (
 	"testing"
@@ -31,10 +33,11 @@ func seedFeed() *Feed {
 func TestApplySync_AllFeedsFailed_KeepsLastKnownGood(t *testing.T) {
 	tf := seedFeed()
 
+	// Both fetches failed: nothing was replaced this sync.
 	tf.applySync(
 		make(map[string]entry), make(map[string]entry),
 		[]string{"URLhaus: dial timeout", "OpenPhish: dial timeout"},
-		map[string]bool{"urlhaus": true, "openphish": true},
+		map[string]bool{},
 		time.Now(),
 	)
 
@@ -64,7 +67,7 @@ func TestApplySync_OneFeedFailed_CarriesForwardOnlyThatFeed(t *testing.T) {
 	}
 	tf.applySync(fresh, freshDomains,
 		[]string{"URLhaus: HTTP 503"},
-		map[string]bool{"urlhaus": true},
+		map[string]bool{"openphish": true},
 		time.Now(),
 	)
 
@@ -87,14 +90,14 @@ func TestApplySync_OneFeedFailed_CarriesForwardOnlyThatFeed(t *testing.T) {
 	}
 }
 
-func TestApplySync_CleanSync_FullyReplaces(t *testing.T) {
+func TestApplySync_CleanSync_FullyReplacesFeedOwnedEntries(t *testing.T) {
 	tf := seedFeed()
 	before := time.Now().Add(-time.Second)
 
 	tf.applySync(
 		map[string]entry{"http://fresh.example/x": {Source: "urlhaus"}},
 		map[string]entry{"fresh.example": {Source: "urlhaus"}},
-		nil, map[string]bool{},
+		nil, map[string]bool{"urlhaus": true, "openphish": true},
 		time.Now(),
 	)
 
@@ -106,5 +109,46 @@ func TestApplySync_CleanSync_FullyReplaces(t *testing.T) {
 	}
 	if ok, lastSuccess, errSummary := tf.SyncStatus(); !ok || errSummary != "" || !lastSuccess.After(before) {
 		t.Errorf("SyncStatus after clean sync = (ok=%v, lastSuccess=%v, err=%q), want success", ok, lastSuccess, errSummary)
+	}
+}
+
+func TestApplySync_ClusterSyncEntriesSurviveLocalSync(t *testing.T) {
+	tf := New()
+	tf.enabled = true
+	// DP state: entries imported from the CP snapshot, not from a local fetch.
+	tf.ImportFeedData(
+		map[string]int64{"http://cp-known.example/mal": time.Now().Unix()},
+		map[string]int64{"cp-known.example": time.Now().Unix()},
+	)
+
+	// Local sync where both public feeds FAILED: cluster entries must survive
+	// (pre-fix this wiped and persisted an empty DB on the data plane).
+	tf.applySync(
+		make(map[string]entry), make(map[string]entry),
+		[]string{"URLhaus: dial timeout", "OpenPhish: dial timeout"},
+		map[string]bool{},
+		time.Now(),
+	)
+	if mal, src := tf.CheckDomain("cp-known.example"); !mal || src != "cluster-sync" {
+		t.Fatalf("cluster-sync domain after failed local sync = (%v, %q), want (true, cluster-sync)", mal, src)
+	}
+
+	// Local sync where both feeds SUCCEEDED: cluster entries are still not
+	// owned by a local fetch and must survive until the next snapshot
+	// re-import (ImportFeedData replaces them wholesale).
+	tf.applySync(
+		map[string]entry{"http://fresh.example/x": {Source: "urlhaus"}},
+		map[string]entry{"fresh.example": {Source: "urlhaus"}},
+		nil, map[string]bool{"urlhaus": true, "openphish": true},
+		time.Now(),
+	)
+	if mal, _ := tf.CheckURL("http://cp-known.example/mal"); !mal {
+		t.Error("cluster-sync URL wiped by a clean local sync; want preserved")
+	}
+	if mal, _ := tf.CheckDomain("cp-known.example"); !mal {
+		t.Error("cluster-sync domain wiped by a clean local sync; want preserved")
+	}
+	if mal, _ := tf.CheckDomain("fresh.example"); !mal {
+		t.Error("locally-fetched domain missing after clean sync")
 	}
 }

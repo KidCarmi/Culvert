@@ -161,27 +161,27 @@ func (tf *Feed) Sync() {
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
 	var failures []string
-	failedSources := make(map[string]bool, 2)
+	replacedSources := make(map[string]bool, 2)
 
 	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
 		failures = append(failures, fmt.Sprintf("URLhaus: %v", err))
-		failedSources["urlhaus"] = true
 	} else {
 		obs.Printf("ThreatFeed: URLhaus %d entries", n)
+		replacedSources["urlhaus"] = true
 	}
 
 	n, err = tf.fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
 	if err != nil {
 		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
 		failures = append(failures, fmt.Sprintf("OpenPhish: %v", err))
-		failedSources["openphish"] = true
 	} else {
 		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
+		replacedSources["openphish"] = true
 	}
 
-	tf.applySync(newURLs, newDomains, failures, failedSources, time.Now())
+	tf.applySync(newURLs, newDomains, failures, replacedSources, time.Now())
 
 	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
 
@@ -192,31 +192,24 @@ func (tf *Feed) Sync() {
 	}
 }
 
-// applySync installs freshly-fetched feed tables. A feed whose fetch failed
-// contributed nothing to the fresh maps, so its previous entries are carried
-// forward (last-known-good) instead of being replaced with nothing — otherwise
-// one sync with both feeds unreachable would wipe the entire threat DB in
-// memory AND on disk (Sync persists right after), silently disabling
-// threat-feed blocking until the next successful sync. A feed that fetched
-// cleanly is always fully replaced, so stale entries still age out.
-func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, failedSources map[string]bool, now time.Time) {
+// applySync installs freshly-fetched feed tables. Only entries owned by a
+// feed that fetched CLEANLY this sync (replacedSources) are replaced; every
+// other previous entry is carried forward. That covers two failure classes:
+//   - a feed whose fetch failed keeps its last-known-good entries — otherwise
+//     one sync with both feeds unreachable would wipe the entire threat DB in
+//     memory AND on disk (Sync persists right after), silently disabling
+//     threat-feed blocking until the next successful sync;
+//   - entries a local fetch never owns — the DP's "cluster-sync" import
+//     (ImportFeedData) — survive local syncs instead of being wiped until the
+//     next CP snapshot re-imports them.
+//
+// A feed that fetched cleanly is always fully replaced, so its stale entries
+// still age out; cluster-sync entries are refreshed wholesale by
+// ImportFeedData on every snapshot apply.
+func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, replacedSources map[string]bool, now time.Time) {
 	tf.mu.Lock()
-	if len(failedSources) > 0 {
-		for u, e := range tf.urls {
-			if failedSources[e.Source] {
-				if _, ok := newURLs[u]; !ok {
-					newURLs[u] = e
-				}
-			}
-		}
-		for d, e := range tf.domains {
-			if failedSources[e.Source] {
-				if _, ok := newDomains[d]; !ok {
-					newDomains[d] = e
-				}
-			}
-		}
-	}
+	carryForward(newURLs, tf.urls, replacedSources)
+	carryForward(newDomains, tf.domains, replacedSources)
 	tf.urls = newURLs
 	tf.domains = newDomains
 	tf.lastSync = now
@@ -228,6 +221,20 @@ func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []strin
 	}
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
+}
+
+// carryForward copies into dst the entries of old whose Source is NOT in
+// replaced (feeds that fetched cleanly this sync). Fresh entries win on key
+// collision.
+func carryForward(dst, old map[string]entry, replaced map[string]bool) {
+	for k, e := range old {
+		if replaced[e.Source] {
+			continue
+		}
+		if _, ok := dst[k]; !ok {
+			dst[k] = e
+		}
+	}
 }
 
 // CheckURL looks up a full URL against the threat feed.
