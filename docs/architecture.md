@@ -83,9 +83,22 @@ When a rule's SSL action is `Inspect`, Culvert terminates the client TLS
 session with an on-the-fly leaf certificate signed by its internal CA:
 
 - **Leaf certs:** ECDSA P-256, minted per SNI, cached in a bounded cache
-  (10,000 entries, 1h TTL).
+  (10,000 entries, 1h TTL). All forged leaves share one process-wide,
+  memory-only signing key (generated once, never persisted or sent on the
+  wire) — it sits at the same trust boundary as the co-located CA key and
+  survives CA rotation while the leaf cache itself is cleared.
 - **CA key at rest:** AES-256-GCM with PBKDF2-SHA256 (600,000 iterations);
   passphrase from `CULVERT_CA_PASSPHRASE`.
+- **TLS session resumption:** both legs of an inspected tunnel can resume
+  instead of paying a full handshake. The client-facing (forged-leaf) side
+  uses a shared, stable ticket-key config; the upstream leg caches sessions
+  only after a successful **verified** handshake, and only on the verifying
+  config — the per-rule skip-verify path never stores or resumes a session.
+  A Root CA change (auto-rotation, manual force-rotate, or custom-CA upload)
+  rotates the client-facing ticket key, ending that resumption epoch so no
+  client can keep resuming a session authenticated under the previous CA;
+  the next reconnect must full-handshake and is re-presented a leaf signed
+  by the new CA.
 - **Bypass:** rules can carry `Bypass` to tunnel sensitive destinations
   (banking, health) without decryption. Per-host bypass patterns are managed in
   the UI.
