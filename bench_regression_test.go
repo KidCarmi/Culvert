@@ -51,6 +51,35 @@ func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_PolicyEvalSourceCIDRAllocs locks in the O(1)-allocation
+// source-CIDR policy path. Before the precomputed-srcIPNet optimization every
+// CIDR-scoped rule re-ran net.ParseCIDR + net.ParseIP per request (~4
+// allocs/rule — 40k allocs/op and ~720 KB/op at 10000 rules); it is now a
+// small CONSTANT (host normalization + one lazy client-IP parse) regardless of
+// rule count. Any reintroduction of per-rule CIDR parsing fails this gate.
+func TestBenchGate_PolicyEvalSourceCIDRAllocs(t *testing.T) {
+	// Post-optimization: 3 allocs/op independent of rule count. Headroom of a
+	// few absorbs runtime noise while still catching an O(rules) regression
+	// immediately.
+	const maxAllocs int64 = 8
+	for _, rules := range []int{10, 100, 1000, 10000} {
+		ps := buildPolicyStoreSourceCIDR(rules)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = ps.Evaluate("10.1.2.3", "", "unauth", "target.example.com", nil)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("Evaluate(sourceCIDR) rules=%d: %d allocs/op (bound %d), %d ns/op", rules, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: Evaluate(sourceCIDR) rules=%d allocates %d/op, exceeds constant bound %d — "+
+				"per-rule CIDR parsing has returned to the policy hot path (net.ParseCIDR/net.ParseIP per rule?). "+
+				"See docs/ci/proxy-quality-architecture.md §8a.", rules, allocs, maxAllocs)
+		}
+	}
+}
+
 // TestBenchGate_UpstreamInspectTLSConfigAllocs locks in the shared-root-pool
 // contract on the SSL-inspect upstream leg. Before the optimization every
 // inspected CONNECT tunnel called x509.SystemCertPool(), which clones the

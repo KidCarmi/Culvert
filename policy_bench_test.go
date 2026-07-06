@@ -98,3 +98,41 @@ func BenchmarkScrubForwardedHeaders(b *testing.B) {
 		scrubForwardedHeaders(r)
 	}
 }
+
+// buildPolicyStoreSourceCIDR returns a store with n access rules scoped to a
+// source CIDR the benchmark client IP is INSIDE (so the CIDR check fully
+// executes on every rule) and a destination FQDN that never matches (so the
+// scan continues through all n rules — the worst case).
+func buildPolicyStoreSourceCIDR(n int) *PolicyStore {
+	ps := &PolicyStore{}
+	rules := make([]PolicyRule, n)
+	for i := 0; i < n; i++ {
+		rules[i] = PolicyRule{
+			Priority: i + 1,
+			Name:     fmt.Sprintf("cidr-rule-%d", i),
+			SourceIP: "10.0.0.0/8",
+			DestFQDN: fmt.Sprintf("no-match-%d.example.invalid", i),
+			Action:   ActionAllow,
+		}
+	}
+	ps.ReplaceAll(rules)
+	return ps
+}
+
+// BenchmarkPolicyEvaluate_NoMatch_SourceCIDR measures the full-scan cost when
+// every rule carries a source-CIDR condition — the common enterprise shape
+// (rules scoped to office/VPN/VLAN subnets).
+func BenchmarkPolicyEvaluate_NoMatch_SourceCIDR(b *testing.B) {
+	for _, n := range []int{10, 100, 1000, 10000} {
+		ps := buildPolicyStoreSourceCIDR(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if m := ps.Evaluate("10.1.2.3", "", "unauth", "target.example.com", nil); m != nil {
+					b.Fatalf("expected no match (default deny), got rule %q", m.Rule.Name)
+				}
+			}
+		})
+	}
+}

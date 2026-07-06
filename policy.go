@@ -124,6 +124,16 @@ type PolicyRule struct {
 	// normFQDN) falls back to the allocating path, so correctness never depends
 	// on it being populated.
 	normFQDN string
+
+	// srcIPNet is the parsed network when SourceIP is CIDR notation, precomputed
+	// by sortLocked() whenever rules are mutated — the same contract as normFQDN.
+	// The hot path (Evaluate) reads it instead of re-running net.ParseCIDR on
+	// every request: parsing a CIDR allocates (~4 allocs with the client-IP
+	// parse), so doing it per-rule per-request made source-scoped rules ~8×
+	// costlier than FQDN rules. nil (plain-IP SourceIP, invalid CIDR, or a rule
+	// built outside the mutators) falls back to matchIPOrCIDR, so correctness
+	// never depends on it being populated.
+	srcIPNet *net.IPNet
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -558,15 +568,24 @@ func (ps *PolicyStore) sortLocked() {
 	sort.Slice(ps.rules, func(i, j int) bool {
 		return ps.rules[i].Priority < ps.rules[j].Priority
 	})
-	// Precompute the normalized FQDN once per mutation so Evaluate never has to
-	// normalize a rule's pattern on the per-request hot path. Index-based range
-	// avoids copying the rule pointer's target.
+	// Precompute the normalized FQDN and parsed source CIDR once per mutation so
+	// Evaluate never has to normalize a pattern or parse a CIDR on the
+	// per-request hot path. Index-based range avoids copying the rule pointer's
+	// target.
 	for i := range ps.rules {
 		r := ps.rules[i]
 		if r.DestFQDN != "" {
 			r.normFQDN = normalizeHost(r.DestFQDN)
 		} else {
 			r.normFQDN = ""
+		}
+		// An invalid CIDR leaves srcIPNet nil; the fallback path re-parses and
+		// returns false — identical to the pre-precompute behavior.
+		r.srcIPNet = nil
+		if strings.Contains(r.SourceIP, "/") {
+			if _, ipNet, err := net.ParseCIDR(r.SourceIP); err == nil {
+				r.srcIPNet = ipNet
+			}
 		}
 	}
 }
@@ -599,6 +618,14 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// previously incurred re-normalizing host+pattern on every rule.
 	normHost := normalizeHost(host)
 
+	// Parse the client IP lazily and at most ONCE per request: only a scan that
+	// reaches a CIDR-scoped rule pays the parse, and every subsequent CIDR rule
+	// reuses it. Paired with each rule's precomputed srcIPNet this removes the
+	// ~4 allocs/rule that net.ParseCIDR+net.ParseIP previously cost source-scoped
+	// rules on every request.
+	var clientNetIP net.IP
+	clientIPParsed := false
+
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
@@ -610,7 +637,11 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if ruleTypeOf(rule) != ruleTypeAccess {
 			continue
 		}
-		if !matchSource(rule, clientIP, identity, authSource, groups) {
+		if rule.srcIPNet != nil && !clientIPParsed {
+			clientNetIP = net.ParseIP(clientIP)
+			clientIPParsed = true
+		}
+		if !matchSourceNorm(rule, clientIP, clientNetIP, identity, authSource, groups) {
 			continue
 		}
 		if !matchSchedule(rule.Schedule) {
@@ -721,11 +752,32 @@ func matchSchedule(s *PolicySchedule) bool {
 // ─── Source matching ──────────────────────────────────────────────────────────
 
 func matchSource(rule *PolicyRule, clientIP, identity, authSource string, groups []string) bool {
-	ipOK := rule.SourceIP == "" || matchIPOrCIDR(rule.SourceIP, clientIP)
+	return matchSourceNorm(rule, clientIP, nil, identity, authSource, groups)
+}
+
+// matchSourceNorm is matchSource's core. clientNetIP, when non-nil, MUST be
+// net.ParseIP(clientIP); the hot path (Evaluate) parses it at most once per
+// request and reuses it across every CIDR-scoped rule. nil means "parse on
+// demand" (simulator / CDR / test callers off the hot path).
+func matchSourceNorm(rule *PolicyRule, clientIP string, clientNetIP net.IP, identity, authSource string, groups []string) bool {
+	ipOK := rule.SourceIP == "" || matchRuleSourceIP(rule, clientIP, clientNetIP)
 	idOK := rule.SourceIdentity == "" || strings.EqualFold(rule.SourceIdentity, identity)
 	grpOK := rule.SourceGroup == "" || containsGroupCI(groups, rule.SourceGroup)
 	srcOK := rule.AuthSource == "" || matchAuthSource(rule.AuthSource, authSource)
 	return ipOK && idOK && grpOK && srcOK
+}
+
+// matchRuleSourceIP checks a rule's SourceIP condition using the precomputed
+// srcIPNet when available; otherwise it falls back to the parsing matchIPOrCIDR
+// so correctness never depends on the precompute (mirrors normFQDN's contract).
+func matchRuleSourceIP(rule *PolicyRule, clientIP string, clientNetIP net.IP) bool {
+	if rule.srcIPNet != nil {
+		if clientNetIP == nil {
+			clientNetIP = net.ParseIP(clientIP)
+		}
+		return clientNetIP != nil && rule.srcIPNet.Contains(clientNetIP)
+	}
+	return matchIPOrCIDR(rule.SourceIP, clientIP)
 }
 
 func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
