@@ -172,9 +172,10 @@ func (s *Writer) writeMsg(pri int, msg string) {
 		if err3 := s.writeLine(line); err3 != nil {
 			// A collector that ACCEPTS connections but never drains would
 			// otherwise reset the backoff on every call (connect succeeds,
-			// write times out), taxing every log caller ~2×writeTimeout
-			// serialized under s.mu. Arm the backoff so subsequent calls
-			// fast-drop for the window instead.
+			// write times out), taxing every log caller up to
+			// writeTimeout + dial (5s) + writeTimeout — three serialized
+			// network ops (~15s worst case) under s.mu. Arm the backoff so
+			// subsequent calls fast-drop for the window instead.
 			s.conn.Close()
 			s.conn = nil
 			s.lastReconnErr = time.Now()

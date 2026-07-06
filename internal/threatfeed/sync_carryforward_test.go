@@ -189,3 +189,112 @@ func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
 		t.Error("fetched entry missing from urls map")
 	}
 }
+
+// TestApplySync_MergeHoldsWriteLock_BlocksReaders PROVES the review finding
+// (PR #587, external review headline comment): the carryForward merge runs
+// inside tf.mu.Lock, so while a sync merges a large previous DB, request-path
+// readers (CheckURL/CheckDomain take RLock) are locked out for the duration —
+// the pre-fix lock hold was an O(1) pointer swap. The cost is accepted
+// (bounded, once per sync cycle) and this test documents it: if the recorded
+// follow-up lands (merge outside the lock with a pointer recheck), the
+// lock-out disappears and this test should be inverted/removed deliberately.
+func TestApplySync_MergeHoldsWriteLock_BlocksReaders(t *testing.T) {
+	const n = 100_000
+	tf := New()
+	tf.enabled = true
+	urls := make(map[string]entry, n)
+	domains := make(map[string]entry, n)
+	for i := 0; i < n; i++ {
+		urls[fmt.Sprintf("http://h%[1]d.example/p%[1]d", i)] = entry{Source: sourceURLhaus}
+		domains[fmt.Sprintf("h%d.example", i)] = entry{Source: sourceURLhaus}
+	}
+	tf.urls, tf.domains = urls, domains
+
+	done := make(chan struct{})
+	go func() {
+		// Both feeds failed → carryForward walks both 100k-entry maps and
+		// re-inserts every entry, all under tf.mu.Lock.
+		tf.applySync(make(map[string]entry), make(map[string]entry),
+			[]string{"URLhaus: down", "OpenPhish: down"},
+			map[string]bool{}, time.Now())
+		close(done)
+	}()
+
+	// Poll the read lock the way a request-path CheckDomain would contend for
+	// it. The merge holds the write lock for milliseconds while each poll
+	// iteration is sub-microsecond, so observing zero lock-outs is only
+	// possible if the merge ran outside the lock.
+	var blocked, polls int
+	for {
+		select {
+		case <-done:
+			if blocked == 0 {
+				t.Fatalf("request-path readers were never locked out across %d polls — merge no longer under the write lock? update/remove this pin deliberately", polls)
+			}
+			t.Logf("readers locked out on %d of %d lock polls during the merge", blocked, polls)
+			return
+		default:
+		}
+		polls++
+		if tf.mu.TryRLock() {
+			tf.mu.RUnlock()
+		} else {
+			blocked++
+		}
+	}
+}
+
+// TestFetchFeedInto_TruncatedNonZeroBodyReplaces_DocumentedResidual PROVES
+// the accepted residual named in the review: the zero-entry guard has no
+// magnitude floor. An HTTP 200 whose body was honestly truncated at a clean
+// line boundary to a HANDFUL of entries (not zero) counts as a clean fetch
+// and fully replaces the feed — the previous, much larger set is dropped.
+// This pins current behavior; if a diff-magnitude guard is added (the
+// CHAOS-08-style "N→~0" floor), update this test deliberately.
+func TestFetchFeedInto_TruncatedNonZeroBodyReplaces_DocumentedResidual(t *testing.T) {
+	tiny := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "http://only-survivor.example/x") // 1 entry where 3 existed
+	}))
+	defer tiny.Close()
+
+	tf := seedFeed() // 1 urlhaus URL + 2 openphish URLs seeded
+
+	newURLs, newDomains := map[string]entry{}, map[string]entry{}
+	replaced, failure := tf.fetchFeedInto(tiny.URL, sourceURLhaus, "URLhaus", newURLs, newDomains)
+	if !replaced || failure != "" {
+		t.Fatalf("truncated-but-nonzero fetch = (replaced=%v, failure=%q); the documented residual expects (true, \"\") — a magnitude floor was added, update this pin", replaced, failure)
+	}
+
+	tf.applySync(newURLs, newDomains, nil,
+		map[string]bool{sourceURLhaus: true}, time.Now())
+
+	if mal, _ := tf.CheckURL("http://evil.example/mal.exe"); mal {
+		t.Fatal("old urlhaus entry survived a truncated replace — magnitude guard now active, update this pin")
+	}
+	if mal, _ := tf.CheckURL("http://only-survivor.example/x"); !mal {
+		t.Error("truncated fetch's own entry missing")
+	}
+}
+
+// TestSeedForTest_MutatesPublishedMapsInPlace PROVES why the carryForward
+// merge must stay under the write lock (or a future lock-scope fix must
+// pointer-recheck): the published maps are NOT immutable-after-publish.
+// SeedForTest inserts into tf.urls/tf.domains IN PLACE under the lock, so
+// iterating those maps outside the lock (the naive "merge outside, swap
+// inside" optimization) would be a map read racing a map write.
+func TestSeedForTest_MutatesPublishedMapsInPlace(t *testing.T) {
+	tf := New()
+	urlsRef, domainsRef := tf.urls, tf.domains // aliases of the published maps
+
+	tf.SeedForTest(
+		map[string]string{"http://seeded.example/a": sourceURLhaus},
+		map[string]string{"seeded.example": sourceURLhaus},
+	)
+
+	if _, ok := urlsRef["http://seeded.example/a"]; !ok {
+		t.Fatal("SeedForTest replaced tf.urls instead of mutating in place — the merge-outside-the-lock optimization may now be safe; revisit the applySync lock-scope follow-up")
+	}
+	if _, ok := domainsRef["seeded.example"]; !ok {
+		t.Fatal("SeedForTest replaced tf.domains instead of mutating in place — revisit the applySync lock-scope follow-up")
+	}
+}

@@ -140,3 +140,68 @@ func TestWriteMsg_RetryWriteFailureArmsBackoff(t *testing.T) {
 		t.Errorf("Drops() after second call = %d, want 2", got)
 	}
 }
+
+// countingFailingConn additionally counts write attempts, so the worst-case
+// operation sequence of one writeMsg call can be proven.
+type countingFailingConn struct {
+	deadlineRecordingConn
+	writes int
+}
+
+func (c *countingFailingConn) Write([]byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return 0, &net.OpError{Op: "write", Err: errWouldBlock}
+}
+
+// TestWriteMsg_WedgedCollectorWorstCase_ThreeSerializedOps PROVES the
+// worst-case cost claimed in the review: against an accepting-but-wedged
+// collector, ONE writeMsg call performs exactly three serialized network
+// operations under s.mu — the initial write (up to writeTimeout), one
+// reconnect dial, and the retry write on the fresh conn (up to writeTimeout
+// again): writeTimeout + dial + writeTimeout, not "2×writeTimeout". After
+// that single full-cost cycle the backoff is armed, so the NEXT call does
+// zero network operations (fast drop) — the worst case is paid at most once
+// per backoff window, not per call.
+func TestWriteMsg_WedgedCollectorWorstCase_ThreeSerializedOps(t *testing.T) {
+	first := &countingFailingConn{}
+	second := &countingFailingConn{}
+	dials := 0
+	w := &Writer{
+		network: "tcp",
+		addr:    "192.0.2.1:514", // TEST-NET-1, never dialed: dialFunc injected
+		host:    "testhost",
+		tag:     "culvert",
+		format:  "rfc3164",
+		pid:     "1",
+		conn:    first,
+		dialFunc: func() (net.Conn, error) {
+			dials++
+			return second, nil // handshake accepted, writes wedge
+		},
+	}
+
+	w.writeMsg(14, "worst case")
+
+	if first.writes != 1 {
+		t.Errorf("initial conn writes = %d, want exactly 1 (op 1: initial write up to writeTimeout)", first.writes)
+	}
+	if dials != 1 {
+		t.Errorf("dials = %d, want exactly 1 (op 2: reconnect dial)", dials)
+	}
+	if second.writes != 1 {
+		t.Errorf("fresh conn writes = %d, want exactly 1 (op 3: retry write up to writeTimeout)", second.writes)
+	}
+
+	// The full-cost cycle is paid once: the next call within the backoff
+	// window performs ZERO network operations.
+	w.writeMsg(14, "fast drop")
+	if first.writes != 1 || second.writes != 1 || dials != 1 {
+		t.Errorf("second call did network work (writes=%d/%d dials=%d); want fast drop with none",
+			first.writes, second.writes, dials)
+	}
+	if got := w.Drops(); got != 2 {
+		t.Errorf("Drops() = %d, want 2 (both calls ultimately dropped)", got)
+	}
+}
