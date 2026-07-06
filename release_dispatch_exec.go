@@ -64,11 +64,17 @@ const detailAnchorReadFailed = "anchor_read_failed"
 // detailAgentUnreachableAfterUpdate prefixes the Detail when an apply the agent
 // reported as SUCCEEDED is immediately followed by a TRANSPORT failure on the
 // post-verify /v1/status read — while the pre-apply anchor read had succeeded.
-// That differential is the signature of the recreate having dropped the CP↔agent
-// socket (e.g. no compose_override_file, so the single-`-f` recreate stripped the
-// maintenance-socket mount). It stays FAILED_NEEDS_ATTN (it must alert) but is
-// surfaced distinctly so the GUI can tell the operator to wire the override /
-// re-run, instead of a generic post_verify_read_failed.
+// That differential is a strong HINT (not proof) that the recreate dropped the
+// CP↔agent socket (e.g. no compose_override_file → the single-`-f` recreate
+// stripped the maintenance-socket mount). It is deliberately a HEURISTIC: a
+// benign blip in the brief post-recreate settling window can also produce it,
+// and a slow-hanging drop that surfaces as context.DeadlineExceeded (which
+// isTransientAgentErr treats as non-transient) will fall back to the generic
+// detail. Either way the terminal is FAILED_NEEDS_ATTN, so the operator is
+// correctly alerted; this label only refines the description. A future CP/GUI
+// consumer SHOULD cross-check the agent's compose_override_configured flag (in
+// op params / on /v1/status) before prescribing "wire the override", rather than
+// treating this detail as a definitive diagnosis.
 const detailAgentUnreachableAfterUpdate = "agent_unreachable_after_update"
 
 // errStaleAlreadyCurrent is returned when a plan's already-current determination

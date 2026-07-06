@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -234,6 +235,18 @@ func validate(raw *rawConfig) (*Config, error) {
 	if of := strings.TrimSpace(raw.ComposeOverrideFile); of != "" {
 		if of != filepath.Base(of) || strings.ContainsAny(of, "/\\") || of == "." || of == ".." {
 			return nil, fmt.Errorf("config: compose_override_file must be a bare filename, got %q", of)
+		}
+		// It becomes a sudoers literal + argv token: reject internal whitespace /
+		// control chars (whitespace would split the sudo arg match) and shell
+		// metacharacters — parity with the installer's reject_unsafe and the
+		// runner's validateComposeFilenames.
+		for _, r := range of {
+			if unicode.IsSpace(r) || unicode.IsControl(r) {
+				return nil, fmt.Errorf("config: compose_override_file must not contain whitespace or control characters, got %q", of)
+			}
+		}
+		if strings.ContainsAny(of, "\"'|;&$`<>*?(){}") {
+			return nil, fmt.Errorf("config: compose_override_file must not contain shell metacharacters, got %q", of)
 		}
 		if of == cf {
 			return nil, fmt.Errorf("config: compose_override_file must differ from compose_file, got %q", of)

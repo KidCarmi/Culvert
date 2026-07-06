@@ -386,6 +386,17 @@ if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     [ "$COMPOSE_OVERRIDE_FILE" != "$COMPOSE_FILE" ] || \
         die "compose_override_file must differ from compose_file, got '$COMPOSE_OVERRIDE_FILE'"
     reject_unsafe "compose_override_file" "$COMPOSE_OVERRIDE_FILE"
+    # The override FILE must exist in the project dir. If it is configured but
+    # absent, every agent-driven recreate runs `docker compose -f <base> -f
+    # <missing> up -d`, which docker rejects with "no such file or directory" —
+    # so an update/rollback would hard-fail (worse than not configuring it at
+    # all). Warn loudly; the file is operator-managed (may be added before the
+    # first dispatch), so this does not hard-fail the install.
+    if [ ! -f "$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE" ]; then
+        warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but"
+        warn "$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE does not exist. Every agent-driven"
+        warn "recreate will hard-fail (docker: no such file) until it is present."
+    fi
     # The agent runs `docker compose` with a SCRUBBED environment, so any
     # ${VAR} / ${VAR:?...} the override interpolates (e.g. the socket override's
     # ${CULVERT_MAINT_GID}) MUST be resolvable from <compose_project_dir>/.env —

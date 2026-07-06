@@ -36,6 +36,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // TemplateID identifies a registered command template.
@@ -286,6 +287,19 @@ func validateComposeFilenames(composeFile, overrideFile string) error {
 	if overrideFile != filepath.Base(overrideFile) || strings.ContainsAny(overrideFile, "/\\") ||
 		overrideFile == "." || overrideFile == ".." {
 		return fmt.Errorf("runner: ComposeOverrideFile must be a bare filename, got %q", overrideFile)
+	}
+	// It becomes a sudoers literal AND an argv token, so reject whitespace and
+	// control chars (whitespace would split the sudo arg match → no matching rule
+	// → sudo denial) and shell metacharacters — parity with the installer's
+	// reject_unsafe, so a post-install hand-edit can't produce a config the Go
+	// binary accepts but sudo refuses.
+	for _, r := range overrideFile {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("runner: ComposeOverrideFile must not contain whitespace or control characters, got %q", overrideFile)
+		}
+	}
+	if strings.ContainsAny(overrideFile, "\"'|;&$`<>*?(){}") {
+		return fmt.Errorf("runner: ComposeOverrideFile must not contain shell metacharacters, got %q", overrideFile)
 	}
 	if overrideFile == composeFile {
 		return fmt.Errorf("runner: ComposeOverrideFile must differ from ComposeFile (%q)", overrideFile)

@@ -54,6 +54,9 @@ func TestLoad_ComposeOverrideFile(t *testing.T) {
 		"dot":                   ".",
 		"dotdot":                "..",
 		"equal to compose_file": "docker-compose.yml", // == default compose_file
+		"internal whitespace":   "maint agent.yml",    // would split the sudo arg match
+		"shell metachar pipe":   "a|b.yml",
+		"shell metachar dollar": "a${x}.yml",
 	}
 	for name, val := range rejected {
 		body := minimalValid + "\ncompose_override_file = \"" + val + "\""

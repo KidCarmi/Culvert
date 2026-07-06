@@ -1021,11 +1021,13 @@ wire_release_agent_for_compose() {
   # override file is actually present. Set BEFORE the sudoers re-render so the
   # override allowlist line is rendered too.
   if [[ -f "$INSTALL_DIR/docker-compose.maint-agent.yml" ]]; then
-    if grep -q '^compose_override_file' "$cfg" 2>/dev/null; then
-      sudo sed -i 's|^compose_override_file = .*|compose_override_file = "docker-compose.maint-agent.yml"|' "$cfg"
-    else
-      printf '\ncompose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
-    fi
+    # Delete ANY existing form (TOML allows `key=v` and `key = v`) then append the
+    # canonical line. A grep(prefix)+sed(` = ` only) pair would MISS a spaceless
+    # `compose_override_file="old"`: grep matches so the append is skipped, but the
+    # spaced sed does not replace it, leaving the stale value — the socket would
+    # then be dropped on the next update, the exact failure this persists against.
+    sudo sed -i '/^[[:space:]]*compose_override_file[[:space:]]*=/d' "$cfg"
+    printf '\ncompose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
     info "Maintenance agent will carry docker-compose.maint-agent.yml on recreate (socket survives updates)."
   fi
 
