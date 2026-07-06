@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // version is set via ldflags at build time: -X main.version=v1.2.3
@@ -987,13 +989,8 @@ func apiRegistrySettings(w http.ResponseWriter, r *http.Request) {
 			"credential":   regVal,
 		}
 		out, _ := json.MarshalIndent(save, "", "  ")
-		// U19: Atomic write via temp+rename to prevent corruption on crash.
-		tmp := registrySettingsFile + ".tmp"
-		if err := os.WriteFile(tmp, out, 0o600); err != nil {
-			http.Error(w, "write failed", http.StatusInternalServerError)
-			return
-		}
-		if err := os.Rename(tmp, registrySettingsFile); err != nil {
+		// U19: fsynced atomic write to prevent corruption on crash.
+		if err := fileutil.AtomicWrite(registrySettingsFile, out, 0o600); err != nil {
 			http.Error(w, "write failed", http.StatusInternalServerError)
 			return
 		}

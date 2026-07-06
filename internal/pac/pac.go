@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // Config is the persisted PAC configuration.
@@ -77,11 +79,7 @@ func (s *Store) Set(c Config) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return fileutil.AtomicWrite(s.path, data, 0o600)
 }
 
 // SetDefaultPort records the runtime proxy listening port used as the

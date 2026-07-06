@@ -80,3 +80,63 @@ func TestWriteMsg_SetsWriteDeadline(t *testing.T) {
 		t.Errorf("written line %q does not contain the message", got)
 	}
 }
+
+// failingConn is a fake net.Conn whose writes always fail (a collector that
+// accepts the TCP handshake but never drains, surfacing as deadline errors).
+type failingConn struct{ deadlineRecordingConn }
+
+func (c *failingConn) Write([]byte) (int, error) {
+	return 0, &net.OpError{Op: "write", Err: errWouldBlock}
+}
+
+var errWouldBlock = &timeoutErr{}
+
+type timeoutErr struct{}
+
+func (*timeoutErr) Error() string { return "i/o timeout" }
+func (*timeoutErr) Timeout() bool { return true }
+
+// TestWriteMsg_RetryWriteFailureArmsBackoff pins the accepting-but-wedged
+// collector case: connect() succeeds every time, so without arming the
+// backoff on the RETRY write failure, every log call would pay
+// ~2×writeTimeout serialized under s.mu (the backoff was only armed on
+// connect failure). After one full failure cycle, calls within the backoff
+// window must fast-drop.
+func TestWriteMsg_RetryWriteFailureArmsBackoff(t *testing.T) {
+	dials := 0
+	w := &Writer{
+		network: "tcp",
+		addr:    "192.0.2.1:514", // TEST-NET-1, never dialed: dialFunc injected
+		host:    "testhost",
+		tag:     "culvert",
+		format:  "rfc3164",
+		pid:     "1",
+		conn:    &failingConn{},
+		dialFunc: func() (net.Conn, error) {
+			dials++
+			return &failingConn{}, nil // handshake accepted, writes wedge
+		},
+	}
+
+	w.writeMsg(14, "first") // initial write fails → reconnect ok → retry fails
+	if dials != 1 {
+		t.Fatalf("dials after first call = %d, want 1", dials)
+	}
+	if w.conn != nil {
+		t.Error("conn not cleared after retry-write failure")
+	}
+	if w.lastReconnErr.IsZero() {
+		t.Fatal("backoff not armed after retry-write failure; every log call would pay the full write-timeout cycle")
+	}
+	if got := w.Drops(); got != 1 {
+		t.Errorf("Drops() = %d, want 1", got)
+	}
+
+	w.writeMsg(14, "second") // within backoff window → fast drop, no dial
+	if dials != 1 {
+		t.Errorf("dials after second call = %d, want 1 (backoff window must suppress reconnect)", dials)
+	}
+	if got := w.Drops(); got != 2 {
+		t.Errorf("Drops() after second call = %d, want 2", got)
+	}
+}

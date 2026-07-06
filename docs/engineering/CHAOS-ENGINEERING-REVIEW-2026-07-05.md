@@ -51,12 +51,24 @@ expiry brick).
   empty state was saved, a restart in the window reloaded the wipe (durable outage).
   `CheckURL`/`CheckDomain` then returned false for everything — threat blocking silently
   off.
-- **Fix:** `applySync` carries forward the previous entries of any feed whose fetch
-  failed (keyed on `entry.Source`), mirroring the last-known-good pattern
-  `internal/feedsync` already uses. A feed that fetched cleanly is still fully replaced,
-  so stale entries age out.
+- **Fix:** `applySync` replaces only the entries owned by feeds that fetched cleanly
+  this sync and carries everything else forward — failed feeds keep last-known-good,
+  and DP entries imported from the CP snapshot (`Source: "cluster-sync"`) survive local
+  syncs (Codex review catch). A zero-entry HTTP-200 "success" (maintenance/empty page)
+  is treated like a failure for replacement purposes (adversarial-review catch): these
+  feeds are never legitimately empty, and a clean-EOF empty body would otherwise wipe
+  the feed exactly like the hard-error case. A feed that fetched cleanly with data is
+  still fully replaced, so stale entries age out.
 - **Tests:** `internal/threatfeed/sync_carryforward_test.go` — all-failed keeps
-  last-known-good; one-failed carries forward only that feed; clean sync fully replaces.
+  last-known-good; one-failed carries forward only that feed; clean sync fully replaces
+  feed-owned entries; cluster-sync entries survive failed AND clean local syncs;
+  zero-entry fetch does not replace.
+- **Accepted residuals (documented posture):** (a) a feed that NEVER succeeds again
+  carries its last-known-good entries forever (no per-entry TTL) — stale threat intel
+  beats a silent wipe, but upstream de-listings on a dead feed never age out until it
+  recovers; (b) an entry listed by both feeds is attributed to one `Source`, so it can
+  be dropped when its recorded feed cleanly de-lists it while the other (failing) feed
+  still lists it — returns on that feed's next success.
 
 ### F2 — Stalled TCP syslog collector blocks the proxy indefinitely · HIGH
 - **Was:** `internal/syslog/syslog.go` `writeMsg` held `s.mu` across an **unbounded**
@@ -65,11 +77,19 @@ expiry brick).
   `Write`/`WriteAudit`/`WriteRequest` caller then queues on the mutex — a proxy-wide
   stall. The code comment promised "syslog must never block the proxy"; nothing enforced
   it for the write.
-- **Fix:** `SetWriteDeadline(now+5s)` before each write (initial and reconnect-retry
-  paths). A stalled peer now surfaces as a write error → existing close/reconnect/backoff
-  logic takes over.
-- **Tests:** `internal/syslog/syslog_deadline_test.go` (fake conn pins that a deadline is
-  set and sane before writing).
+- **Fix:** `SetWriteDeadline(now+5s)` before each write (shared `writeLine` helper for
+  the initial and reconnect-retry paths). A stalled peer now surfaces as a write error →
+  close/reconnect/backoff. Review hardening: a RETRY-write failure now also arms the 5s
+  backoff — an accepting-but-wedged collector previously reset the backoff on every call
+  (connect succeeds, write times out), taxing each log call ~2×deadline; now it costs one
+  probe per backoff window. Dropped messages are counted (`Writer.Drops()`), the only
+  loss signal for what is otherwise silent best-effort delivery.
+- **Tests:** `internal/syslog/syslog_deadline_test.go` (deadline armed before writing;
+  retry-write failure arms backoff, subsequent calls fast-drop, drops counted).
+- **Accepted residuals:** delivery is bounded-lossy by design (a slow-but-alive
+  collector loses lines instead of stalling the proxy); the writer is still serialized
+  under one mutex — the deeper fix is an async bounded queue (the `internal/alerts`
+  pattern), recorded as a follow-up; `Drops()` is not yet wired to Prometheus.
 
 ### F3 — Log rotation on a full disk destroyed the rotated archive · HIGH
 - **Was:** `internal/fileutil/rotating.go` on rotation did close → remove `.1` → rename
@@ -95,9 +115,19 @@ expiry brick).
   signed-catalog rollback window its fail-closed reader exists to close), and rule hit
   counters.
 - **Fix:** all six now use `fileutil.AtomicWrite` (unique `CreateTemp` + fsync + rename +
-  parent-dir fsync) — the helper the rest of the tree already standardized on.
+  parent-dir fsync) — the helper the rest of the tree already standardized on. The
+  adversarial review found five MORE stragglers, migrated in the follow-up commit:
+  `cdrstore.go` (CDR enrolled-instance registry), `internal/scanexcl` (scan exclusions),
+  `internal/yara` (rule saves), `internal/pac` (PAC config), and `update.go` (registry
+  settings). `cdr_health.go`'s cert/key `.tmp` pair is deliberately untouched (paired
+  two-file rename with its own cleanup semantics, single background writer).
 - **Tests:** covered by existing persistence round-trip suites (unchanged, green);
   `AtomicWrite` itself is pinned by `internal/fileutil/fileutil_test.go`.
+- **Accepted residuals:** (a) a hard crash between `CreateTemp` and rename leaves a
+  uniquely-named orphan `*.tmp.*` sibling that no later save reuses — pre-existing
+  `AtomicWrite` property tree-wide; a boot-time sweep is a recorded follow-up;
+  (b) `AtomicWrite` can return a parent-dir-fsync error AFTER the rename landed (rare;
+  fail-safe direction — callers report a failure for a save that persisted).
 
 ### F5 — Unbounded DNS-blocked goroutine fan-out per request · MEDIUM
 - **Was:** `handleRequest` fired `go trackDestinationCountry(host)` per proxied request;

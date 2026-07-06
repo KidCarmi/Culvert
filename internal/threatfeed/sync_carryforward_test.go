@@ -10,6 +10,9 @@ package threatfeed
 // must survive local syncs too (Codex review on PR #587).
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -150,5 +153,39 @@ func TestApplySync_ClusterSyncEntriesSurviveLocalSync(t *testing.T) {
 	}
 	if mal, _ := tf.CheckDomain("fresh.example"); !mal {
 		t.Error("locally-fetched domain missing after clean sync")
+	}
+}
+
+func TestFetchFeedInto_ZeroEntrySuccessDoesNotReplace(t *testing.T) {
+	// An HTTP 200 with an empty (or comment-only) body returns (0, nil) from
+	// fetchTextFeed. That must NOT count as a clean fetch: marking the source
+	// replaced would wipe its previous entries exactly like the hard-error
+	// case the carry-forward fix closed.
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "# maintenance — no entries")
+	}))
+	defer empty.Close()
+
+	tf := New()
+	tf.enabled = true
+	urls, domains := map[string]entry{}, map[string]entry{}
+	replaced, failure := tf.fetchFeedInto(empty.URL, sourceURLhaus, "URLhaus", urls, domains)
+	if replaced {
+		t.Fatal("zero-entry fetch reported replaced=true; previous entries would be wiped")
+	}
+	if failure == "" {
+		t.Error("zero-entry fetch reported no failure; staleness would be invisible in SyncStatus")
+	}
+
+	full := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "http://evil.example/mal.exe")
+	}))
+	defer full.Close()
+	replaced, failure = tf.fetchFeedInto(full.URL, sourceURLhaus, "URLhaus", urls, domains)
+	if !replaced || failure != "" {
+		t.Fatalf("non-empty fetch = (replaced=%v, failure=%q), want (true, \"\")", replaced, failure)
+	}
+	if _, ok := urls["http://evil.example/mal.exe"]; !ok {
+		t.Error("fetched entry missing from urls map")
 	}
 }

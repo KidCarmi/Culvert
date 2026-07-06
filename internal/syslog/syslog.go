@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,8 @@ type Writer struct {
 	format        string    // "rfc3164" (default) or "rfc5424"
 	pid           string    // cached PID string for RFC 5424 PROCID
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
+	drops         atomic.Uint64
+	dialFunc      func() (net.Conn, error) // test seam; nil = real dialer
 }
 
 // NewWriter dials the syslog server and returns a ready Writer.
@@ -63,6 +66,14 @@ func NewWriter(network, addr, format string) (*Writer, error) {
 }
 
 func (s *Writer) connect() error {
+	if s.dialFunc != nil {
+		conn, err := s.dialFunc()
+		if err != nil {
+			return err
+		}
+		s.conn = conn
+		return nil
+	}
 	// Background context + 5s Timeout is equivalent to the prior DialTimeout,
 	// in the DialContext form the house lint rules require (CLAUDE.md).
 	d := net.Dialer{Timeout: 5 * time.Second}
@@ -120,6 +131,14 @@ func (s *Writer) formatMsg(pri int, msg string) string {
 // every request/audit-log caller proxy-wide.
 const writeTimeout = 5 * time.Second
 
+// writeLine sends one formatted line on the current conn with the write
+// deadline armed. Caller must hold s.mu and guarantee s.conn is non-nil.
+func (s *Writer) writeLine(line string) error {
+	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
+	_, err := fmt.Fprint(s.conn, line)
+	return err
+}
+
 func (s *Writer) writeMsg(pri int, msg string) {
 	line := s.formatMsg(pri, msg)
 
@@ -128,30 +147,48 @@ func (s *Writer) writeMsg(pri int, msg string) {
 	if s.conn == nil {
 		// Backoff: don't retry more often than every 5 seconds.
 		if time.Since(s.lastReconnErr) < 5*time.Second {
+			s.drops.Add(1)
 			return
 		}
 		if err := s.connect(); err != nil {
 			s.lastReconnErr = time.Now()
+			s.drops.Add(1)
 			return // syslog down — swallow, never block the proxy
 		}
 		s.lastReconnErr = time.Time{} // reset on success
 	}
-	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
-	if _, err := fmt.Fprint(s.conn, line); err != nil {
+	if err := s.writeLine(line); err != nil {
 		s.conn.Close()
 		s.conn = nil
 		if time.Since(s.lastReconnErr) < 5*time.Second {
+			s.drops.Add(1)
 			return
 		}
-		if err2 := s.connect(); err2 == nil {
-			s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
-			fmt.Fprint(s.conn, line)                              //nolint:errcheck // best-effort reconnect retry; syslog must never block the proxy
-			s.lastReconnErr = time.Time{}
-		} else {
+		if err2 := s.connect(); err2 != nil {
 			s.lastReconnErr = time.Now()
+			s.drops.Add(1)
+			return
 		}
+		if err3 := s.writeLine(line); err3 != nil {
+			// A collector that ACCEPTS connections but never drains would
+			// otherwise reset the backoff on every call (connect succeeds,
+			// write times out), taxing every log caller ~2×writeTimeout
+			// serialized under s.mu. Arm the backoff so subsequent calls
+			// fast-drop for the window instead.
+			s.conn.Close()
+			s.conn = nil
+			s.lastReconnErr = time.Now()
+			s.drops.Add(1)
+			return
+		}
+		s.lastReconnErr = time.Time{}
 	}
 }
+
+// Drops reports the number of messages dropped because the collector was
+// unreachable or not draining. Monotonic per Writer; delivery is otherwise
+// silent-best-effort, so this is the only loss signal.
+func (s *Writer) Drops() uint64 { return s.drops.Load() }
 
 // Close closes the underlying connection.
 func (s *Writer) Close() error {
