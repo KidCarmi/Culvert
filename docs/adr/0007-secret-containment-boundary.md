@@ -42,7 +42,7 @@ Introduce `internal/secret`, housing the KEK provider and an **opaque-handle** A
 Secret plaintext never crosses the package boundary as an exported `[]byte`:
 
 ```go
-type Sealed struct{ b []byte }              // no String(), no exported accessor
+type Sealed struct{ b []byte }              // REDACTING Format/String/GoString; no exported byte accessor
 type Provider struct{ src kekSource }       // OPAQUE; kekSource.kek() is unexported
 func ResolveProvider(cfg ProviderConfig) (*Provider, error) // + FileProvider/EnvProvider
 func Seal(plaintext []byte, p *Provider) ([]byte, error)
@@ -93,8 +93,18 @@ secret accessor — the same machine-checked-invariant discipline as the C1/C2 w
   handler layer structurally cannot obtain raw key material.
 - Blast radius of secret exposure shrinks from "all 184 root files" to "one audited
   package + its explicit `WithPlaintext` call sites."
-- The consolidation (3 families → 1 helper) removes duplication flagged as divergence
-  risk in security code.
+- `Sealed`/`Provider` implement **redacting** `fmt.Formatter`/`Stringer`/`GoStringer`,
+  so no formatting verb (`%v`/`%+v`/`%#v`/`%x`/…) can reflect the buffer. (An early
+  draft's "no `String()`" instinct was wrong: with no method, `fmt` reflects the
+  unexported field — a redacting method is required, not absent. Locked by a fitness
+  test. Fixed during PR review.)
+
+**Implementation note (as shipped)**
+- The three per-domain families (cluster-CA / DP-node / CDR-client) were **not**
+  consolidated into one helper — that would have refactored working key-*recovery*
+  logic for cosmetic gain. Instead each consumer migrated directly onto
+  `secret.OpenOrPlaintext` + `WithPlaintext`; the shared "decrypt-or-passthrough"
+  logic lives in `internal/secret`, not a package-main helper.
 
 **Negative / cost**
 - One new escape hatch (`WithPlaintext`) that must be reviewed carefully — it is the
