@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,6 +281,40 @@ func TestResolveProviderPrecedence(t *testing.T) {
 	t.Setenv(EnvKEKName, "")
 	if got := ResolveProvider("", filePath).Name(); got != "file" {
 		t.Fatalf("with env empty, provider = %q, want file", got)
+	}
+}
+
+// TestSealedRedactsUnderAllVerbs is the fitness test for the fmt-reflection
+// leak: no formatting verb may print the backing plaintext bytes of a Sealed,
+// whether passed by pointer or by value. Guards against a future removal of the
+// Format/String/GoString redaction.
+func TestSealedRedactsUnderAllVerbs(t *testing.T) {
+	p := envProviderWith(t, testKEKHex)
+	const plaintext = "TOPSECRETKEYMATERIAL"
+	env, err := Seal([]byte(plaintext), p)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	sealed, err := Open(env, p) // NOT consumed: s.b still holds the plaintext
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Leak signatures: ASCII, hex ("54 4f 50…"), and decimal ("84 79 80…").
+	hexLeak := hex.EncodeToString([]byte(plaintext)) // %x form
+	decLeak := "84 79 80"                            // %v/%d byte-slice form of "TOP"
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%x", "%d", "%q"} {
+		for _, arg := range []any{sealed, *sealed, p, *p} {
+			out := fmt.Sprintf(verb, arg)
+			if strings.Contains(out, "TOPSECRET") ||
+				strings.Contains(strings.ToLower(out), hexLeak) ||
+				strings.Contains(out, decLeak) {
+				t.Fatalf("verb %s on %T leaked secret bytes: %s", verb, arg, out)
+			}
+			if !strings.Contains(out, redactedMark) {
+				t.Fatalf("verb %s on %T did not redact: %s", verb, arg, out)
+			}
+		}
 	}
 }
 

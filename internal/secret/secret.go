@@ -23,12 +23,18 @@ package secret
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
+
+// redactedMark is what every formatting verb prints for a secret handle, so an
+// accidental logger.Printf("%v"/"%+v"/"%#v"/"%x"/"%s", handle) can never reflect
+// the backing bytes.
+const redactedMark = "REDACTED"
 
 // KEKLen is the size of a key-encryption key in bytes (256-bit). The KEK is fed
 // to the PSCA envelope's PBKDF2 step as the passphrase input.
@@ -68,6 +74,19 @@ func (p *Provider) Name() string {
 	return p.src.name()
 }
 
+// Format redacts the Provider under all fmt verbs so an accidental %v/%+v/%#v
+// never reflects its internal source (KEK file path, env var name). Use Name()
+// for intentional, non-secret provider identification in logs.
+func (Provider) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "secret.Provider("+redactedMark+")")
+}
+
+// String redacts the Provider for Stringer consumers.
+func (Provider) String() string { return "secret.Provider(" + redactedMark + ")" }
+
+// GoString redacts the Provider for %#v / GoStringer consumers.
+func (Provider) GoString() string { return "secret.Provider(" + redactedMark + ")" }
+
 // providerKEK is the single internal chokepoint that yields raw KEK bytes to the
 // envelope operations. Its result must never be exposed outside this package.
 func providerKEK(p *Provider) ([]byte, error) {
@@ -92,11 +111,29 @@ func ValidateProvider(p *Provider) error {
 	return err
 }
 
-// Sealed is an opaque handle to plaintext secret bytes. It has no String() and
-// no exported accessor; reach the plaintext only via WithPlaintext.
+// Sealed is an opaque handle to plaintext secret bytes. It has no exported byte
+// accessor; reach the plaintext only via WithPlaintext. Its Format/String/
+// GoString methods below are REDACTING (not accessors): they exist precisely so
+// fmt can never reflect the backing buffer.
 type Sealed struct {
 	b []byte
 }
+
+// Format implements fmt.Formatter so EVERY verb (%v, %+v, %#v, %s, %x, %d, …)
+// prints a constant redaction instead of reflecting the plaintext buffer. fmt
+// consults Formatter before Stringer/GoStringer, so this single method closes
+// every verb. Value receiver so both Sealed and *Sealed are covered even when
+// passed by value (fmt cannot take the address of a value operand).
+func (Sealed) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "secret.Sealed("+redactedMark+")")
+}
+
+// String redacts for explicit Stringer consumers (belt and suspenders alongside
+// Format).
+func (Sealed) String() string { return "secret.Sealed(" + redactedMark + ")" }
+
+// GoString redacts for %#v / GoStringer consumers.
+func (Sealed) GoString() string { return "secret.Sealed(" + redactedMark + ")" }
 
 // WithPlaintext runs fn with the plaintext, then zeroizes the buffer. The []byte
 // passed to fn is invalid once fn returns; fn MUST NOT retain it. A Sealed is
