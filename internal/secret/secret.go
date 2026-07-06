@@ -185,6 +185,28 @@ func Open(envelope []byte, p *Provider) (*Sealed, error) {
 	return &Sealed{b: plain}, nil
 }
 
+// sealedOf wraps already-in-memory plaintext as a Sealed. Internal only: a
+// Sealed must only ever originate inside this package.
+func sealedOf(plaintext []byte) *Sealed { return &Sealed{b: plaintext} }
+
+// OpenOrPlaintext returns an opaque handle for raw on-disk key bytes following
+// the content-driven at-rest contract shared by every key-at-rest consumer: if
+// the bytes are a PSCA envelope it decrypts them (fail closed on missing/wrong
+// KEK or corruption); otherwise the plaintext is wrapped unchanged. The bool
+// reports whether the input was encrypted. Returning a Sealed for BOTH branches
+// means callers never hold raw key bytes directly — they reach the plaintext
+// only through the scoped, zeroize-on-return WithPlaintext.
+func OpenOrPlaintext(raw []byte, p *Provider) (*Sealed, bool, error) {
+	if !IsEnvelope(raw) {
+		return sealedOf(raw), false, nil
+	}
+	s, err := Open(raw, p)
+	if err != nil {
+		return nil, true, err
+	}
+	return s, true, nil
+}
+
 // SealToFile encrypts plaintext under p and writes the envelope to path with
 // 0600 permissions, atomically (fileutil.AtomicWrite).
 func SealToFile(path string, plaintext []byte, p *Provider) error {

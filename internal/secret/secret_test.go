@@ -318,6 +318,43 @@ func TestSealedRedactsUnderAllVerbs(t *testing.T) {
 	}
 }
 
+func TestOpenOrPlaintext(t *testing.T) {
+	p := envProviderWith(t, testKEKHex)
+
+	// Encrypted branch: an envelope decrypts and reports wasEncrypted=true.
+	env := mustSeal(t, p, []byte("encrypted key"))
+	sealed, wasEnc, err := OpenOrPlaintext(env, p)
+	if err != nil || !wasEnc {
+		t.Fatalf("envelope: wasEnc=%v err=%v", wasEnc, err)
+	}
+	_ = sealed.WithPlaintext(func(b []byte) error {
+		if string(b) != "encrypted key" {
+			t.Fatalf("decrypted mismatch: %q", b)
+		}
+		return nil
+	})
+
+	// Plaintext branch: non-envelope passes through, wasEncrypted=false.
+	plain := []byte("-----BEGIN EC PRIVATE KEY-----\nplaintext\n")
+	s2, wasEnc2, err := OpenOrPlaintext(plain, p)
+	if err != nil || wasEnc2 {
+		t.Fatalf("plaintext: wasEnc=%v err=%v", wasEnc2, err)
+	}
+	_ = s2.WithPlaintext(func(b []byte) error {
+		if !bytes.Equal(b, []byte("-----BEGIN EC PRIVATE KEY-----\nplaintext\n")) {
+			t.Fatalf("passthrough mismatch: %q", b)
+		}
+		return nil
+	})
+
+	// Encrypted-but-wrong-KEK fails closed with wasEncrypted=true.
+	wrong := EnvProvider("WRONG_KEK")
+	t.Setenv("WRONG_KEK", strings.Repeat("cd", KEKLen))
+	if _, wasEnc3, err := OpenOrPlaintext(env, wrong); err == nil || !wasEnc3 {
+		t.Fatalf("wrong KEK should fail closed with wasEnc=true; wasEnc=%v err=%v", wasEnc3, err)
+	}
+}
+
 // mustSeal seals plaintext under p, failing the test on error.
 func mustSeal(t *testing.T, p *Provider, plaintext []byte) []byte {
 	t.Helper()

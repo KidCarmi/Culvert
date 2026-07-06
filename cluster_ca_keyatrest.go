@@ -39,6 +39,8 @@ import (
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // clusterCAEncryptEnvVar opts cluster CA key encryption in (opt-in-first).
@@ -67,7 +69,7 @@ func clusterCAKeyEncryptionEnabled() bool {
 // CULVERT_KEK (model C) takes precedence; otherwise a local file KEK at
 // <dir>/cluster-ca.kek (model B, auto-generated 0600 on first use). Resolution
 // is deterministic and performs no I/O until the KEK is actually needed.
-func clusterCAKEKProvider(dir string) KEKProvider {
+func clusterCAKEKProvider(dir string) *secret.Provider {
 	if dir == "" {
 		dir = "."
 	}
@@ -77,7 +79,7 @@ func clusterCAKEKProvider(dir string) KEKProvider {
 	if err != nil {
 		kekPath = clusterCAKEKFileName
 	}
-	return resolveKEKProvider(envKEKName, kekPath)
+	return secret.ResolveProvider(secret.EnvKEKName, kekPath)
 }
 
 // isEncryptedKeyFile reports whether raw on-disk bytes are a PSCA envelope
@@ -87,22 +89,21 @@ func isEncryptedKeyFile(data []byte) bool {
 	return ca.HasBundleMagic(data)
 }
 
-// decryptClusterCAKey returns the plaintext key PEM for raw on-disk key bytes.
+// openClusterCAKey returns an opaque Sealed handle for raw on-disk key bytes.
 // If the bytes are a PSCA envelope it decrypts with the resolved KEK and fails
 // closed on any error (missing/wrong KEK, corrupt ciphertext/tag) — the caller
-// must NOT regenerate the CA on failure. Plaintext bytes are returned unchanged.
-// The returned bool reports whether the on-disk form was encrypted.
-func decryptClusterCAKey(dir string, rawKey []byte) (plainPEM []byte, wasEncrypted bool, err error) {
-	if !isEncryptedKeyFile(rawKey) {
-		return rawKey, false, nil
-	}
-	plain, derr := decryptWithKEK(rawKey, clusterCAKEKProvider(dir))
+// must NOT regenerate the CA on failure. Plaintext bytes are wrapped unchanged.
+// The returned bool reports whether the on-disk form was encrypted. Callers
+// reach the plaintext only via Sealed.WithPlaintext (zeroized on return), so raw
+// CA key bytes never cross back into package main as a plain []byte.
+func openClusterCAKey(dir string, rawKey []byte) (*secret.Sealed, bool, error) {
+	sealed, wasEncrypted, derr := secret.OpenOrPlaintext(rawKey, clusterCAKEKProvider(dir))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
 		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjClusterCA)
-		return nil, true, fmt.Errorf("cluster CA key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
+		return nil, wasEncrypted, fmt.Errorf("cluster CA key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
-	return plain, true, nil
+	return sealed, wasEncrypted, nil
 }
 
 // writeClusterCAKey persists a plaintext key PEM to keyPath, encrypting it with
@@ -110,9 +111,9 @@ func decryptClusterCAKey(dir string, rawKey []byte) (plainPEM []byte, wasEncrypt
 // Both branches write 0600 atomically.
 func writeClusterCAKey(dir, keyPath string, plainKeyPEM []byte) error {
 	if clusterCAKeyEncryptionEnabled() {
-		return writeEncryptedFile(keyPath, plainKeyPEM, clusterCAKEKProvider(dir))
+		return secret.SealToFile(keyPath, plainKeyPEM, clusterCAKEKProvider(dir))
 	}
-	return atomicWriteFile(keyPath, plainKeyPEM, 0o600)
+	return fileutil.AtomicWrite(keyPath, plainKeyPEM, 0o600)
 }
 
 // migrateClusterCAKeyToEncrypted migrates an existing plaintext cluster CA key
@@ -142,11 +143,11 @@ func migrateClusterCAKeyToEncrypted(dir, keyPath string, plainKeyPEM []byte) (er
 	bakPath := keyPath + ".plaintext.bak"
 
 	// 1. Quarantine plaintext first (copy, not move).
-	if err := atomicWriteFile(bakPath, plainKeyPEM, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(bakPath, plainKeyPEM, 0o600); err != nil {
 		return fmt.Errorf("cluster CA key migration: quarantine plaintext: %w", err)
 	}
 	// 2. Encrypt + write ciphertext to the active path.
-	if err := writeEncryptedFile(keyPath, plainKeyPEM, p); err != nil {
+	if err := secret.SealToFile(keyPath, plainKeyPEM, p); err != nil {
 		_ = restoreClusterCAKeyPlaintext(keyPath, bakPath)
 		return fmt.Errorf("cluster CA key migration: encrypt+write: %w", err)
 	}
@@ -161,23 +162,26 @@ func migrateClusterCAKeyToEncrypted(dir, keyPath string, plainKeyPEM []byte) (er
 }
 
 // verifyEncryptedClusterCAKey re-reads keyPath, decrypts it, parses the key, and
-// confirms the decrypted bytes match the source plaintext.
-func verifyEncryptedClusterCAKey(keyPath string, wantPlainPEM []byte, p KEKProvider) error {
-	got, err := readEncryptedFile(keyPath, p)
+// confirms the decrypted bytes match the source plaintext. The decrypted bytes
+// stay inside the WithPlaintext closure and are zeroized on return.
+func verifyEncryptedClusterCAKey(keyPath string, wantPlainPEM []byte, p *secret.Provider) error {
+	sealed, err := secret.OpenFile(keyPath, p)
 	if err != nil {
 		return err
 	}
-	block, _ := pem.Decode(got)
-	if block == nil {
-		return errors.New("decrypted key is not valid PEM")
-	}
-	if _, err := x509.ParseECPrivateKey(block.Bytes); err != nil {
-		return fmt.Errorf("decrypted key does not parse: %w", err)
-	}
-	if !bytes.Equal(got, wantPlainPEM) {
-		return errors.New("decrypted key does not match source")
-	}
-	return nil
+	return sealed.WithPlaintext(func(got []byte) error {
+		block, _ := pem.Decode(got)
+		if block == nil {
+			return errors.New("decrypted key is not valid PEM")
+		}
+		if _, err := x509.ParseECPrivateKey(block.Bytes); err != nil {
+			return fmt.Errorf("decrypted key does not parse: %w", err)
+		}
+		if !bytes.Equal(got, wantPlainPEM) {
+			return errors.New("decrypted key does not match source")
+		}
+		return nil
+	})
 }
 
 // restoreClusterCAKeyPlaintext copies the quarantined plaintext back to keyPath
@@ -187,5 +191,5 @@ func restoreClusterCAKeyPlaintext(keyPath, bakPath string) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(keyPath, data, 0o600)
+	return fileutil.AtomicWrite(keyPath, data, 0o600)
 }
