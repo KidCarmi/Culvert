@@ -525,7 +525,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		Version:    1,
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	filename := "culvert-backup"
+	filename := "culvert-config-export"
 
 	switch section {
 	case "blocklist":
@@ -616,7 +616,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	auditEvent(r, "config.export", filename, fmt.Sprintf("section=%s exported at %s", section, b.ExportedAt))
 }
 
-// POST /api/config/import — restore configuration from a backup JSON.
+// POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

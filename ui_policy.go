@@ -527,8 +527,8 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalCategoryGroups.Save()
-		auditEvent(r, "category-group.delete", name, "")
-		saveConfigVersion(sessionAdmin(r), "category-group.delete")
+		auditEvent(r, "category-group.remove", name, "")
+		saveConfigVersion(sessionAdmin(r), "category-group.remove")
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
@@ -1013,8 +1013,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 		logger.Printf("UI: policy rule deleted priority=%s", logPriority)
-		auditEventDiff(r, "policy.delete", name, "", beforeRule, nil)
-		saveConfigVersion(sessionAdmin(r), "policy.delete")
+		auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
+		saveConfigVersion(sessionAdmin(r), "policy.remove")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -1059,8 +1059,8 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	policyStore.Save()
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
-	auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
-	saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
+	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
+	saveConfigVersion(sessionAdmin(r), "policy.bulk_remove")
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 

@@ -614,7 +614,7 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	// is re-scanned under the new rule set. Without this, new rules don't
 	// apply to previously-cached content until the 1-hour TTL expires.
 	globalSecScanner.CacheClear()
-	auditEvent(r, "security.yara-reload", dir, "YARA rules reloaded and hash cache cleared")
+	auditEvent(r, "security.yara_reload", dir, "YARA rules reloaded and hash cache cleared")
 	jsonOK(w, map[string]any{
 		"yara_rules":    globalYARA.Count(),
 		"directory":     dir,
@@ -699,7 +699,7 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 		yaraSetOnTimeout(body.OnTimeout)
 		yaraSetOnSaturation(body.OnSaturation)
 		yaraSetAlertDegraded(body.AlertDegraded)
-		auditEventDiff(r, "security.yara-settings", "yara_engine", "", prev, yaraSettingsMap())
+		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMap())
 		adminSettingsSave()
 		// Intentionally NOT calling saveConfigVersion: YARA engine
 		// settings are out of the rollback surface by design (D-sec,
@@ -783,7 +783,7 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		}
 		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
 		globalSecScanner.CacheClear()
-		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
+		auditEvent(r, "security.yara_write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rules are filesystem
@@ -813,10 +813,10 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalSecScanner.CacheClear()
-		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
+		auditEvent(r, "security.yara_remove", name, "rule removed and cache cleared")
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
-		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara-write branch.
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara_write branch.
 		jsonOK(w, map[string]any{
 			"deleted":       name,
 			"yara_rules":    globalYARA.Count(),
@@ -903,7 +903,7 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		if err := globalScanExclusions.Save(); err != nil {
 			logger.Printf("ScanExclusions: save error: %v", err)
 		}
-		auditEvent(r, "security.scan-exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
+		auditEvent(r, "security.scan_exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
 		// Intentionally NOT calling saveConfigVersion: scan exclusions
 		// are out of the rollback surface by design (D-sec,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Exclusions are
@@ -947,11 +947,11 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		}
 		dpiScanner.SetBypassHosts(req.Hosts)
 		dpiScanner.Save()
-		auditEvent(r, "security.dpi-bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
+		auditEvent(r, "security.dpi_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
 		// Bypass hosts are in the rollback surface as of
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
-		saveConfigVersion(sessionAdmin(r), "security.dpi-bypass")
+		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
 		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
