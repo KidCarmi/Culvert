@@ -47,7 +47,8 @@ architecture review.
 ```go
 package secret
 
-// Sealed holds plaintext secret bytes. No String(), no exported accessor.
+// Sealed holds plaintext secret bytes. Redacting Format/String/GoString (so no
+// fmt verb can reflect the buffer), and no exported byte accessor.
 type Sealed struct{ b []byte }
 
 // Provider is an OPAQUE handle to KEK material. It exposes NO exported method
