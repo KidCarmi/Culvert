@@ -254,6 +254,17 @@ func handleSOCKS5(conn net.Conn) {
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
+	// ── Connection limit per IP ──────────────────────────────────────────────
+	// Symmetric with handleRequest: a SOCKS5 tunnel holds two goroutines and
+	// two FDs for its full lifetime, so it must count against the same per-IP
+	// budget as the HTTP/CONNECT path.
+	if !connLimiter.Acquire(clientIP) {
+		recordRequest(clientIP, "SOCKS5", "", "CONN_LIMITED", "", "", "", "")
+		logger.Printf("SOCKS5 CONN_LIMITED %s", clientIP)
+		return
+	}
+	defer connLimiter.Release(clientIP)
+
 	// ── IP filter ────────────────────────────────────────────────────────────
 	if !ipf.Allowed(clientIP) {
 		recordRequest(clientIP, "SOCKS5", "", "IP_BLOCKED", "", "", "", "")

@@ -38,9 +38,15 @@ type cacheEntry struct {
 }
 
 const (
-	cacheTTL     = 1 * time.Hour
-	cacheMaxSize = 5000
-	queryTimeout = 5 * time.Second
+	cacheTTL = 1 * time.Hour
+	// indeterminateCacheTTL bounds how long an all-responders-unreachable
+	// verdict is cached. The verdict itself stays fail-closed (treated as
+	// revoked), but a responder outage must not be remembered like a genuine
+	// revocation — with the full 1h TTL a seconds-long blip would keep
+	// hard-failing TLS to the affected upstream for an hour after recovery.
+	indeterminateCacheTTL = 2 * time.Minute
+	cacheMaxSize          = 5000
+	queryTimeout          = 5 * time.Second
 )
 
 // New returns a Checker with an empty verdict cache (disabled until Enable).
@@ -96,8 +102,8 @@ func (oc *Checker) checkCached(serialHex string) (revoked, found bool) {
 	return false, false
 }
 
-// cacheResult stores an OCSP result with TTL and evicts if needed.
-func (oc *Checker) cacheResult(serialHex string, revoked bool) {
+// cacheResult stores an OCSP result with the given TTL and evicts if needed.
+func (oc *Checker) cacheResult(serialHex string, revoked bool, ttl time.Duration) {
 	oc.mu.Lock()
 	if len(oc.cache) >= cacheMaxSize {
 		// Evict expired entries first, then oldest 10% if still over capacity.
@@ -120,7 +126,7 @@ func (oc *Checker) cacheResult(serialHex string, revoked bool) {
 	}
 	oc.cache[serialHex] = &cacheEntry{
 		revoked:   revoked,
-		expiresAt: time.Now().Add(cacheTTL),
+		expiresAt: time.Now().Add(ttl),
 	}
 	oc.mu.Unlock()
 }
@@ -150,19 +156,29 @@ func (oc *Checker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*
 		return nil
 	}
 
-	revoked := oc.checkResponders(leaf, issuer)
-	oc.cacheResult(serialHex, revoked)
+	revoked, indeterminate := oc.checkResponders(leaf, issuer)
+	ttl := cacheTTL
+	if indeterminate {
+		ttl = indeterminateCacheTTL
+	}
+	oc.cacheResult(serialHex, revoked, ttl)
 
 	if revoked {
+		if indeterminate {
+			return fmt.Errorf("ocsp: revocation status of certificate %s indeterminate (all responders unreachable) — failing closed", serialHex)
+		}
 		return fmt.Errorf("ocsp: certificate %s is revoked", serialHex)
 	}
 	return nil
 }
 
 // checkResponders queries each OCSP responder listed in the leaf certificate.
-// Fail-closed: returns true (revoked) if ALL responders fail, preventing
+// Fail-closed: returns revoked=true if ALL responders fail, preventing
 // acceptance of certificates when revocation status cannot be determined.
-func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) bool {
+// indeterminate=true distinguishes that outage verdict from a confirmed
+// revocation so the caller can cache it with a short TTL — recovery should
+// track the responder outage, not the full revocation cache TTL.
+func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) (revoked, indeterminate bool) {
 	anyResponded := false
 	for _, responderURL := range leaf.OCSPServer {
 		rev, err := oc.queryOCSP(leaf, issuer, responderURL)
@@ -171,15 +187,15 @@ func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) bool {
 		}
 		anyResponded = true
 		if rev {
-			return true // confirmed revoked
+			return true, false // confirmed revoked
 		}
 	}
 	if !anyResponded && len(leaf.OCSPServer) > 0 {
 		obs.Printf("OCSP: all %d responder(s) unreachable for cert %s — fail-closed (treating as revoked)",
 			len(leaf.OCSPServer), leaf.SerialNumber.Text(16))
-		return true // fail-closed: treat as revoked when no responder reachable
+		return true, true // fail-closed: treat as revoked when no responder reachable
 	}
-	return false
+	return false, false
 }
 
 // queryOCSP sends an OCSP request to the responder and returns whether the

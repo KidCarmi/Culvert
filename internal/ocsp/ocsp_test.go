@@ -109,7 +109,7 @@ func TestOCSPChecker_CacheExpired(t *testing.T) {
 
 func TestOCSPChecker_CacheResult(t *testing.T) {
 	oc := New()
-	oc.cacheResult("serial-123", true)
+	oc.cacheResult("serial-123", true, cacheTTL)
 	if len(oc.cache) != 1 {
 		t.Fatal("cache should have 1 entry")
 	}
@@ -128,7 +128,7 @@ func TestOCSPChecker_CacheEviction(t *testing.T) {
 		}
 	}
 	// Adding one more should trigger eviction.
-	oc.cacheResult("new-serial", false)
+	oc.cacheResult("new-serial", false, cacheTTL)
 	if len(oc.cache) > cacheMaxSize {
 		t.Fatalf("cache size = %d, should be <= %d", len(oc.cache), cacheMaxSize)
 	}
