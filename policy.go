@@ -124,6 +124,21 @@ type PolicyRule struct {
 	// normFQDN) falls back to the allocating path, so correctness never depends
 	// on it being populated.
 	normFQDN string
+
+	// srcIPNet is the parsed form of a CIDR SourceIP, precomputed by
+	// sortLocked() under the same contract as normFQDN: the hot path uses it
+	// (a single Contains on the once-parsed client IP) instead of re-running
+	// net.ParseCIDR + net.ParseIP per rule per request (~4 allocs/rule). nil
+	// for non-CIDR/empty/invalid SourceIP or for rules that bypassed the
+	// mutators — those fall back to the allocating matchIPOrCIDR path.
+	srcIPNet *net.IPNet
+
+	// matchedConds is the buildMatchedConditions summary, precomputed by
+	// sortLocked(): it depends only on the rule's configured fields, never on
+	// the request, so rebuilding it on every match was pure per-request
+	// allocation. Never empty after precompute (empty ⇒ "any"), so "" doubles
+	// as the fallback signal for rules that bypassed the mutators.
+	matchedConds string
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -558,9 +573,10 @@ func (ps *PolicyStore) sortLocked() {
 	sort.Slice(ps.rules, func(i, j int) bool {
 		return ps.rules[i].Priority < ps.rules[j].Priority
 	})
-	// Precompute the normalized FQDN once per mutation so Evaluate never has to
-	// normalize a rule's pattern on the per-request hot path. Index-based range
-	// avoids copying the rule pointer's target.
+	// Precompute the request-independent per-rule state once per mutation so
+	// Evaluate never re-derives it on the per-request hot path: the normalized
+	// FQDN, the parsed CIDR (when SourceIP is a CIDR), and the matched-conditions
+	// summary. Index-based range avoids copying the rule pointer's target.
 	for i := range ps.rules {
 		r := ps.rules[i]
 		if r.DestFQDN != "" {
@@ -568,6 +584,13 @@ func (ps *PolicyStore) sortLocked() {
 		} else {
 			r.normFQDN = ""
 		}
+		r.srcIPNet = nil
+		if strings.Contains(r.SourceIP, "/") {
+			if _, ipNet, err := net.ParseCIDR(r.SourceIP); err == nil {
+				r.srcIPNet = ipNet
+			}
+		}
+		r.matchedConds = buildMatchedConditions(r)
 	}
 }
 
@@ -598,6 +621,10 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// rule's precomputed normFQDN, removes the ~2 allocs/rule the policy hot path
 	// previously incurred re-normalizing host+pattern on every rule.
 	normHost := normalizeHost(host)
+	// Parse the client IP ONCE for the whole scan; every CIDR-scoped rule's
+	// precomputed srcIPNet reuses it (previously net.ParseCIDR + net.ParseIP
+	// ran per rule per request, ~4 allocs/rule on source-scoped rulesets).
+	clientAddr := net.ParseIP(clientIP)
 
 	for i := range rules {
 		rule := rules[i]
@@ -610,7 +637,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if ruleTypeOf(rule) != ruleTypeAccess {
 			continue
 		}
-		if !matchSource(rule, clientIP, identity, authSource, groups) {
+		if !matchSourceAddr(rule, clientIP, clientAddr, identity, authSource, groups) {
 			continue
 		}
 		if !matchSchedule(rule.Schedule) {
@@ -620,7 +647,12 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
-		conds := buildMatchedConditions(rule)
+		// Precomputed by sortLocked (never "" there — empty conditions render
+		// as "any"); fall back for rules that bypassed the mutators.
+		conds := rule.matchedConds
+		if conds == "" {
+			conds = buildMatchedConditions(rule)
+		}
 		return &PolicyMatch{
 			Rule:              rule,
 			Action:            rule.Action,
@@ -671,17 +703,41 @@ func buildMatchedConditions(rule *PolicyRule) string {
 
 // ─── Schedule matching ────────────────────────────────────────────────────────
 
+// scheduleLocCache memoises time.LoadLocation results for schedule timezones.
+// LoadLocation reads and parses the tzdata file from disk on EVERY call (the
+// stdlib does not cache it), so calling it per scheduled rule per request put
+// a disk read on the proxy hot path (~12 µs and ~8.6 KB per rule per request
+// measured). Keyed by the admin-configured timezone string — bounded, low
+// cardinality (never client-controlled). An invalid timezone caches time.UTC
+// (and warns once instead of once per request); a tzdata fix therefore needs a
+// restart to be picked up, matching the read-once posture of other config.
+// time.Location values are immutable and safe for concurrent use.
+var scheduleLocCache sync.Map // timezone string → *time.Location
+
+// scheduleLocation resolves an IANA timezone name to a *time.Location through
+// the process-wide cache, falling back to UTC on failure. Shared by every
+// matchSchedule caller (Stage-2 access rules, Stage-1 auth rules, CDR policy,
+// and the policy simulator).
+func scheduleLocation(name string) *time.Location {
+	if cached, ok := scheduleLocCache.Load(name); ok {
+		return cached.(*time.Location)
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(name))
+		loc = time.UTC
+	}
+	scheduleLocCache.Store(name, loc)
+	return loc
+}
+
 func matchSchedule(s *PolicySchedule) bool {
 	if s == nil {
 		return true
 	}
 	loc := time.UTC
 	if s.Timezone != "" {
-		if l, err := time.LoadLocation(s.Timezone); err != nil {
-			logWarnf("Policy: invalid schedule timezone %q, falling back to UTC", sanitizeLog(s.Timezone))
-		} else {
-			loc = l
-		}
+		loc = scheduleLocation(s.Timezone)
 	}
 	now := time.Now().In(loc)
 
@@ -721,7 +777,25 @@ func matchSchedule(s *PolicySchedule) bool {
 // ─── Source matching ──────────────────────────────────────────────────────────
 
 func matchSource(rule *PolicyRule, clientIP, identity, authSource string, groups []string) bool {
-	ipOK := rule.SourceIP == "" || matchIPOrCIDR(rule.SourceIP, clientIP)
+	return matchSourceAddr(rule, clientIP, net.ParseIP(clientIP), identity, authSource, groups)
+}
+
+// matchSourceAddr is matchSource's core. clientAddr MUST be
+// net.ParseIP(clientIP) (nil when clientIP is not a valid IP); the hot path
+// (Evaluate) parses it ONCE per request and reuses it across every rule's
+// precomputed srcIPNet — eliminating the per-rule ParseCIDR+ParseIP
+// allocations. Rules without a precomputed srcIPNet (non-CIDR SourceIP, or a
+// rule that bypassed the mutators) fall back to the allocating matchIPOrCIDR,
+// so correctness never depends on the precompute.
+func matchSourceAddr(rule *PolicyRule, clientIP string, clientAddr net.IP, identity, authSource string, groups []string) bool {
+	ipOK := true
+	if rule.SourceIP != "" {
+		if rule.srcIPNet != nil {
+			ipOK = clientAddr != nil && rule.srcIPNet.Contains(clientAddr)
+		} else {
+			ipOK = matchIPOrCIDR(rule.SourceIP, clientIP)
+		}
+	}
 	idOK := rule.SourceIdentity == "" || strings.EqualFold(rule.SourceIdentity, identity)
 	grpOK := rule.SourceGroup == "" || containsGroupCI(groups, rule.SourceGroup)
 	srcOK := rule.AuthSource == "" || matchAuthSource(rule.AuthSource, authSource)

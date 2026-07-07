@@ -1,12 +1,22 @@
 goos: linux
 goarch: amd64
 pkg: github.com/KidCarmi/Culvert
-BenchmarkPolicyEvaluate_NoMatch/rules=10-4         	     300	       561 ns/op	      48 B/op	       1 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=100-4        	     300	      3001 ns/op	      48 B/op	       1 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=1000-4       	     300	     27583 ns/op	      48 B/op	       1 allocs/op
-BenchmarkPolicyEvaluate_NoMatch/rules=10000-4      	     300	    281002 ns/op	      48 B/op	       1 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=11-4       	     300	      1264 ns/op	     144 B/op	       4 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=101-4      	     300	      4920 ns/op	     144 B/op	       4 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=1001-4     	     300	     27793 ns/op	     144 B/op	       4 allocs/op
-BenchmarkPolicyEvaluate_MatchLast/rules=10001-4    	     300	    281007 ns/op	     144 B/op	       4 allocs/op
-BenchmarkScrubForwardedHeaders-4                   	     300	      2243 ns/op	    1040 B/op	      13 allocs/op
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkPolicyEvaluate_NoMatch/rules=10-4 	    1000	       795.8 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=100-4         	    1000	      4045 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=1000-4        	    1000	     40637 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=10000-4       	    1000	    391494 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=11-4        	    1000	      1257 ns/op	     160 B/op	       3 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=101-4       	    1000	      4157 ns/op	     160 B/op	       3 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=1001-4      	    1000	     39939 ns/op	     160 B/op	       3 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=10001-4     	    1000	    365043 ns/op	     160 B/op	       3 allocs/op
+BenchmarkPolicyEvaluate_CIDRRules/rules=10-4        	    1000	      2630 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_CIDRRules/rules=100-4       	    1000	      5359 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_CIDRRules/rules=1000-4      	    1000	     58495 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPolicyEvaluate_ScheduledRules/rules=10-4   	    1000	      3825 ns/op	     150 B/op	      12 allocs/op
+BenchmarkPolicyEvaluate_ScheduledRules/rules=100-4  	    1000	     41443 ns/op	     630 B/op	     102 allocs/op
+BenchmarkPolicyEvaluate_ScheduledRules/rules=1000-4 	    1000	    381634 ns/op	    5431 B/op	    1002 allocs/op
+BenchmarkScrubForwardedHeaders-4                    	    1000	      2346 ns/op	    1040 B/op	      13 allocs/op
+BenchmarkUpstreamInspectTLSConfig-4                 	    1000	       139.3 ns/op	     480 B/op	       1 allocs/op
+PASS
+ok  	github.com/KidCarmi/Culvert	1.880s
