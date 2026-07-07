@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 48 packages (ADR-0002 decomposition, COMPLETE): 43 extracted engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 49 packages (ADR-0002 decomposition, COMPLETE, plus post-decomposition additions): 44 extracted/added engines + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Composition root: entrypoint, flag parsing, the 24 init* startup shims, proxy-server wiring, signal handling (DEBT-003 split; the file is the startup orchestrator only)
 main_shutdown.go — Graceful-shutdown sequence: runShutdownSequence, shutdown-order constants, registerEarly/LateShutdownHooks, drainActiveTunnels
 healthcheck.go — /healthz + /readyz handlers: handleHealth, handleReady, configSnapshotValidatorOK
@@ -34,14 +34,14 @@ auth_oidc_flow.go — Full OIDC Authorization Code + PKCE flow
 auth_saml.go  — SAML 2.0 SP via crewjam/saml
 auth_idp.go   — Multi-IdP registry, validateExternalURL
 identity.go   — Identity model (Sub, Groups, Source)
-clam.go       — ClamAV INSTREAM scanner
-yara_scan.go  — Pure-Go YARA rule engine
+clam_vars.go  — ClamAV shim: aliases over internal/clamav (ADR-0002; INSTREAM scanner client lives in the package)
+yara_vars.go  — YARA shim: aliases over internal/yara (ADR-0002; pure-Go rule engine lives in the package)
 scanner.go    — Unified DPI + ClamAV + YARA scan coordinator
 security.go   — Security helpers: SSRF wrappers over internal/ssrf + IP filter + header scrub
 security_scan.go — Scan-orchestrator shim: adapters + wrappers over internal/secscan (ADR-0006)
-fileblock.go  — File extension/MIME blocking profiles
-fileprofile.go — Named file-type blocking profiles (Executables, Archives, etc.)
+fileblock_vars.go — File-block shim: aliases over internal/fileblock (ADR-0002; extension/MIME blocking profiles + named profiles like Executables/Archives live in the package)
 geoip.go      — MaxMind GeoLite2 country lookup with background cache
+otlp.go       — OTLP/HTTP export shim: transport wiring + metrics/span snapshot builders over internal/otlp (ADR-0002-pattern post-decomposition addition; push loops, SSRF-guarded client, endpoint validation, and OTLP JSON schema live in the package)
 controlplane.go — CP/DP distributed architecture, split across cohesive same-package files (DEBT-003): controlplane.go (service def + CP aggregators + enroll rate-limit), controlplane_snapshot.go (ConfigSnapshot/ConfigStore + applyConfigSnapshot lifecycle), controlplane_server.go (CP gRPC server + RPC handlers), controlplane_client.go (DP gRPC client + loops), controlplane_tls.go (mTLS + cert-pool)
 enrollment.go — Token-based node enrollment, ClusterStore, cluster CA, heartbeat monitor
 upstream.go   — Upstream-pool shim: aliases + singleton over internal/upstream (ADR-0002; pool/circuit-breaker/health-loop engine lives in the package; main keeps applyUpstreamProxy transport wiring)
@@ -52,19 +52,19 @@ alerts.go     — Alerts shim: aliases + singleton + fireAlert/retry-loop wrappe
 threatfeed.go — Threat-feed shim: alias + singleton over internal/threatfeed (ADR-0002; URLhaus/OpenPhish, domain allowlist)
 feedsync.go   — Feedsync shim: aliases over internal/feedsync (ADR-0002)
 blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (ADR-0002; Merger iface + ssrf seam)
-rewrite.go    — HTTP header rewrite rules (per-host, wildcard)
+rewrite_vars.go — Rewrite shim: aliases over internal/rewrite (ADR-0002; HTTP header rewrite rules — per-host, wildcard — live in the package)
 plugin.go     — Plugin shim: aliases over internal/plugin (ADR-0002)
 logger.go     — Rotating file logger with JSON mode
 syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164)
 config.go     — YAML + CLI flag configuration (goccy/go-yaml)
 pac.go        — PAC shim: handlers + routes over internal/pac (ADR-0002)
-hashcache.go  — SHA-256 scan result cache with TTL
-lockout.go    — Brute-force lockout (IP + user)
-totp.go       — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep)
+hashcache_vars.go — Hash-cache shim: aliases over internal/hashcache (ADR-0002; SHA-256 scan result cache with TTL lives in the package)
+lockout_vars.go — Lockout shim: aliases over internal/lockout (ADR-0002; brute-force lockout — IP + user — lives in the package)
+(no root file) — TOTP 2FA (RFC 6238, inline stdlib HMAC-SHA1, no external dep) lives entirely in internal/totp (ADR-0002); wired directly from ui_auth.go, no root shim/vars file
 tls.go        — UI-TLS shim: uiExtraSANs + wrapper over internal/uitls (ADR-0002)
-blockpage.go  — Block page HTML template
+blockpage_vars.go — Block-page shim: aliases over internal/blockpage (ADR-0002; block page HTML template lives in the package)
 events.go     — SSE shim: broadcaster + apiEvents + /metrics exposition over internal/sse (ADR-0002; hub engine lives in the package)
-catdb.go      — URL category database
+catdb_vars.go — URL-category-DB shim: aliases over internal/catdb (ADR-0002; URL category database lives in the package; API handlers live in ui_policy.go)
 configversion.go — Config-versioning shim + typed logic: capture/apply/validate, diff engine, API handlers (numbered-file store → internal/configver per ADR-0002, json.RawMessage seam, 50-version max)
 nodegroup.go  — Node group definitions with label selectors, priority-based matching
 bandwidth.go  — Per-group bandwidth/QoS policies with token bucket rate limiting
@@ -87,10 +87,10 @@ go test -coverprofile=coverage.out ./...    # coverage report
 
 ```bash
 # Minimal
-./culvert -addr :8080 -ui-addr :9090
+./culvert -port :8080 -ui-port :9090
 
 # With SSL inspection
-CULVERT_CA_PASSPHRASE=mysecret ./culvert -addr :8080 -ui-addr :9090 -ca-bundle /data/ca.bundle
+CULVERT_CA_PASSPHRASE=mysecret ./culvert -port :8080 -ui-port :9090 -ca-path /data/ca.bundle
 
 # Docker
 docker compose up -d

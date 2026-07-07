@@ -174,7 +174,7 @@ TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
 Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
-Metrics     -metrics-token  -rate-limit
+Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
@@ -271,6 +271,10 @@ Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 
 | `culvert_uptime_seconds` | gauge | Proxy uptime |
 
 > Metric names are authoritative as of `metrics.go`. Run `curl -s localhost:8080/metrics | grep culvert_` against your build for the full current set.
+
+### OTLP export (metrics + traces)
+
+Optional push export to an OTLP/HTTP collector (e.g. the OpenTelemetry Collector, Grafana Alloy), independent of the pull-based `/metrics` endpoint above. Configure via `-otlp-endpoint <url>` / `otlp_endpoint` in `config.yaml`, or from the Admin UI's OpenTelemetry (OTLP) panel — cluster-synced and admin-durable, no restart required to change the endpoint. Unset by default (no export).
 
 ### Logging & SIEM
 

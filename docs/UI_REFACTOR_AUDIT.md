@@ -87,7 +87,7 @@ Counts below are derived from `ui.go:103-274`.
 | Auth / users / IdP / TOTP | ~6 | `ui_auth.go` |
 | Alerts (webhooks) | 3 | `alerts.go` (handlers) |
 | Config versioning / import / export | 4 | `ui_config.go` |
-| URL categories | 4 | `catdb.go` |
+| URL categories | 4 | `ui_policy.go` |
 | CDR (Sluice) | 7 | `cdr_ui.go` |
 | GeoIP / metrics / OTLP / connlimit / blockpage / upstream | ~9 | various |
 | PAC / proxy.pac | 2 | `pac.go` |
