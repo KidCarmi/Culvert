@@ -19,6 +19,30 @@ is what makes the migration low-risk and almost entirely additive.
 
 ---
 
+## 0. Change footprint (what actually changes)
+
+The migration is ~80% **infrastructure + CI + a GitHub setting**, plus **two
+small mandatory Go changes** and docs/tests. It is **not** solely CI/Cloudflare/
+repo-private.
+
+| Bucket | Changes | Mandatory? |
+|---|---|---|
+| **CI / GitHub Actions** | new `publish-catalog-r2` job (`ci.yml`); new `catalog-resign.yml`; (rings only) `catalog-revoke.yml`; delete `publish-catalog-pages.yml` (Phase 5); enforced `v*` tag ruleset (repo setting, GATE-A); Rekor monitor (GATE-A) | Yes |
+| **Cloudflare / R2** | bucket, custom domain `catalog.culvertlabs.com`, cache rules, scoped tokens; secondary independent origin (Phase 5) | Yes |
+| **Repo visibility** | flip to private (a GitHub setting) | Yes |
+| **Go code (client)** | (1) `release_wiring.go` — wire the **production periodic HTTP refresh** (P0-3 / §11; new integration, not a config flip — the `Refresher` drives a local dir today). (2) `update.go::checkGitHubLatestTag` (`:309`) — retire/default-off/authenticate (breaks 404 on a private repo, B3). | Yes |
+| **Docs + tests** | README env table, `docs/operator/*`, CLAUDE.md, new `catalog-hosting-r2.md`; new Go tests (`TestReleaseCatalogServedVerify`, counter concurrency test if rings ship) | Yes |
+| **Agent / installer (GHCR)** | `docker login ghcr.io` before the digest pull — touches `templates_upgrade.go`, `handlers_upgrade_apply.go`, sudoers, `config.example.toml`, both `install.sh` | **Only if images go private** — recommended to keep images **public** (§4.3, §10 #1), which eliminates this bucket |
+| **ed25519 second scheme (GATE-B)** | bake org ed25519 root (build/ldflags) + dual-sign in CI + KMS/HSM key custody | Before Phase 5 (Pages delete) |
+| **Version counter + graduation (GATE-C/D)** | R2 CAS counter, `history/v<N>/`, `graduate()` tooling, repoint preflight | **Rings only** — deferrable per §13 Amendment 4 (`stable`-only first) |
+
+**Minimal go-live path (recommended, §13 Amendment 4 — `stable`-only):** R2 + CF
+setup + the `publish-catalog-r2` job + wire the client refresh + retire the legacy
+tag check + docs. Rings, the CAS counter, graduation tooling, and `catalog-revoke`
+come later, only when a second ring is a real requirement.
+
+---
+
 ## Table of contents
 
 1. Current-state analysis
