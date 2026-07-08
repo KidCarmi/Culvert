@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
@@ -215,6 +216,7 @@ func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []strin
 	carryForward(newDomains, tf.domains, replacedSources)
 	tf.urls = newURLs
 	tf.domains = newDomains
+	tf.pruneAllowlistedDomainsLocked()
 	tf.lastSync = now
 	if len(failures) == 0 {
 		tf.lastSuccess = now
@@ -278,7 +280,7 @@ func (tf *Feed) CheckURL(rawURL string) (malicious bool, source string) {
 		}
 	}
 	if host != "" {
-		if e, ok := tf.domains[host]; ok {
+		if e, ok := tf.domains[host]; ok && !tf.domainAllowlist[host] {
 			return true, e.Source
 		}
 	}
@@ -291,11 +293,14 @@ func (tf *Feed) CheckDomain(domain string) (malicious bool, source string) {
 	if !tf.Enabled() {
 		return false, ""
 	}
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	domain = normaliseDomain(domain)
 
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 
+	if domain == "" || tf.domainAllowlist[domain] {
+		return false, ""
+	}
 	if e, ok := tf.domains[domain]; ok {
 		return true, e.Source
 	}
@@ -347,9 +352,10 @@ var defaultDomainAllowlist = []string{
 // DomainAllowlisted reports whether a domain is on the threat-feed allowlist
 // (domain-level blocking skipped; URL-level blocking still applies).
 func (tf *Feed) DomainAllowlisted(domain string) bool {
+	domain = normaliseDomain(domain)
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
-	return tf.domainAllowlist[strings.ToLower(domain)]
+	return tf.domainAllowlist[domain]
 }
 
 // DomainAllowlist returns the current allowlist entries sorted.
@@ -365,50 +371,61 @@ func (tf *Feed) DomainAllowlist() []string {
 }
 
 // SetDomainAllowlist replaces the entire allowlist and persists to disk.
-func (tf *Feed) SetDomainAllowlist(domains []string) {
+func (tf *Feed) SetDomainAllowlist(domains []string) error {
 	tf.mu.Lock()
 	tf.domainAllowlist = make(map[string]bool, len(domains))
 	for _, d := range domains {
-		d = strings.ToLower(strings.TrimSpace(d))
+		d = normaliseDomain(d)
 		if d != "" {
 			tf.domainAllowlist[d] = true
 		}
 	}
+	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // AddDomainAllowlist adds a domain to the allowlist and persists.
-func (tf *Feed) AddDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) AddDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	if domain == "" {
-		return
+		return nil
 	}
 	tf.mu.Lock()
+	if tf.domainAllowlist == nil {
+		tf.domainAllowlist = make(map[string]bool)
+	}
 	tf.domainAllowlist[domain] = true
+	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // RemoveDomainAllowlist removes a domain from the allowlist and persists.
-func (tf *Feed) RemoveDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) RemoveDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	tf.mu.Lock()
 	delete(tf.domainAllowlist, domain)
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // ── Feed fetching ─────────────────────────────────────────────────────────────
@@ -476,7 +493,7 @@ func NormaliseURL(raw string) (norm, host string) {
 	if err != nil || u.Host == "" {
 		return "", ""
 	}
-	host = strings.ToLower(u.Hostname())
+	host = canonicalHost(u.Hostname())
 	if host == "" {
 		return "", ""
 	}
@@ -488,6 +505,34 @@ func NormaliseURL(raw string) (norm, host string) {
 	norm = strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
 	norm = strings.TrimRight(norm, "/")
 	return norm, host
+}
+
+func normaliseDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return ""
+	}
+	if strings.Contains(domain, "://") {
+		if u, err := url.Parse(domain); err == nil && u.Host != "" {
+			domain = u.Host
+		}
+	} else if strings.Contains(domain, "/") {
+		if _, host := NormaliseURL(domain); host != "" {
+			domain = host
+		}
+	}
+	return canonicalHost(domain)
+}
+
+func canonicalHost(host string) string {
+	host = hostutil.StripHostPort(strings.ToLower(strings.TrimSpace(host)))
+	return hostutil.NormalizeHost(host)
+}
+
+func (tf *Feed) pruneAllowlistedDomainsLocked() {
+	for d := range tf.domainAllowlist {
+		delete(tf.domains, d)
+	}
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -537,9 +582,12 @@ func (tf *Feed) loadFromDisk(path string) error {
 	if db.DomainAllowlist != nil {
 		tf.domainAllowlist = make(map[string]bool, len(db.DomainAllowlist))
 		for _, d := range db.DomainAllowlist {
-			tf.domainAllowlist[strings.ToLower(d)] = true
+			if d = normaliseDomain(d); d != "" {
+				tf.domainAllowlist[d] = true
+			}
 		}
 	}
+	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(db.URLs)))
 
@@ -626,11 +674,16 @@ func (tf *Feed) ImportFeedData(urls map[string]int64, domains map[string]int64) 
 	}
 	newDomains := make(map[string]entry, len(domains))
 	for d, ts := range domains {
+		d = normaliseDomain(d)
+		if d == "" {
+			continue
+		}
 		newDomains[d] = entry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
 	}
 	tf.mu.Lock()
 	tf.urls = newURLs
 	tf.domains = newDomains
+	tf.pruneAllowlistedDomainsLocked()
 	tf.lastSync = time.Now()
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))

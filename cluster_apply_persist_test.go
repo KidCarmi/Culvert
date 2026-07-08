@@ -471,6 +471,60 @@ func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
 	}
 }
 
+func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "threatfeed.json")
+	origDbPath := globalThreatFeed.SetDBPathForTest(dbPath)
+	origAllowlist := globalThreatFeed.DomainAllowlist()
+	globalThreatFeed.ImportFeedData(nil, nil)
+	_ = globalThreatFeed.SetDomainAllowlist(nil)
+	t.Cleanup(func() {
+		globalThreatFeed.ImportFeedData(nil, nil)
+		_ = globalThreatFeed.SetDomainAllowlist(origAllowlist)
+		globalThreatFeed.SetDBPathForTest(origDbPath)
+	})
+
+	applyConfigSnapshot(ConfigSnapshot{
+		Version: 1,
+		ThreatFeedURLs: map[string]int64{
+			"https://www.google.com/malware": 1700000000,
+		},
+		ThreatFeedDomains: map[string]int64{
+			"www.google.com": 1700000001,
+		},
+		ThreatDomainAllowlist: []string{"www.google.com"},
+	})
+
+	if _, ok := globalThreatFeed.ExportDomains()["www.google.com"]; ok {
+		t.Fatal("applyConfigSnapshot retained an allowlisted threat-feed domain")
+	}
+	if _, ok := globalThreatFeed.ExportURLs()["https://www.google.com/malware"]; !ok {
+		t.Fatal("exact malicious URL should remain present after snapshot allowlist")
+	}
+
+	raw, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read threatfeed DB: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal threatfeed DB: %v", err)
+	}
+	domains, ok := decoded["domains"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB domains map missing or wrong type")
+	}
+	if _, ok := domains["www.google.com"]; ok {
+		t.Fatal("applyConfigSnapshot persisted an allowlisted threat-feed domain")
+	}
+	urls, ok := decoded["urls"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB urls map missing or wrong type")
+	}
+	if _, ok := urls["https://www.google.com/malware"]; !ok {
+		t.Fatal("applyConfigSnapshot should persist exact malicious URL entries")
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
