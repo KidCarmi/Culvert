@@ -1302,6 +1302,133 @@ flagged for retirement in the roadmap.
 
 ---
 
-*Prepared for review. Next: an independent security-architecture review
-(Palo Alto-style) challenges every assumption below in
-`roadmap/R2-CATALOG-MIGRATION-REVIEW.md`.*
+---
+
+## 11. Post-review addendum (design corrections from the security review)
+
+An independent Palo Alto-style security architecture review
+(`roadmap/R2-CATALOG-MIGRATION-REVIEW.md`) confirmed the core thesis (untrusted
+transport, in-binary verification, additive migration) but found **three P0
+defects that would brick real appliances** — latent in the current code and
+*activated for the first time* by this plan's new workflows. These corrections
+are **binding on the plan above** and must be resolved on paper before Phase 1.
+
+### P0-1 + P0-2 — The rollback floor is a single GLOBAL integer; rings must share ONE `catalog_version` space
+
+**Verified:** `catalogStateFile` is one unkeyed `{"highest_accepted_version": int}`
+(`release_catalog_freshness.go:61-63`), and today's only writer is CI's
+`(count of v* tags)+1` (`ci.yml`).
+
+**The §2.2/§2.4 ring model as written is WRONG.** Independent per-ring
+`catalog_version` counters (the §8.4 `.well-known` example `dev:611, beta:57,
+stable:42`) mean:
+- Repointing an appliance from a higher-numbered ring to a lower one (dev→stable)
+  **permanently wedges it at `available:false`** — its floor (611) exceeds
+  stable's version (42). No attacker required.
+- The three writers this plan adds (CI tag build, weekly re-sign, revoke) each
+  "bump" the version with no shared authority → they collide, and the next real
+  tag release is **rejected as a rollback** against a floor a cron already
+  advanced (self-inflicted downgrade DoS).
+
+**Correction (supersedes §2.2, §2.4, §8.4):**
+- **One monotonic `catalog_version` authority spanning ALL rings.** Every publish
+  (any ring, any writer: tag build, resign, revoke) draws the next version from a
+  **single shared counter** — a small `version-counter` object in R2 read-modify-
+  written under a conditional-PUT / lease (or an equivalent single source such as
+  a monotonic derivation the pipeline agrees on). CI, resign, and revoke all use
+  it; none invents its own.
+- Because the version space is global and monotonic, a given appliance's floor is
+  coherent no matter which ring it points at — moving stable→beta→dev is always
+  "forward" (higher numbers) and never wedges. `dev` naturally carries the
+  highest numbers (it publishes most), `stable` the lowest of the recent set, but
+  all are drawn from the same increasing sequence, so no ring ever emits a number
+  below an appliance's floor for a catalog it legitimately should accept.
+- **Ring-downgrade caveat (documented):** moving an appliance to a ring whose
+  *current* release is an older global version than one it already accepted is
+  still a floor violation **by design** (that IS a downgrade). This is correct
+  behavior, but operators must be told: ring changes go "up the freshness
+  ladder," and a genuine ring downgrade is a break-glass floor reset
+  (§2.7 item 3), not a routine repoint. The `.well-known` file therefore reports
+  the **single global** current version plus which release each ring currently
+  offers — not per-ring version counters.
+- The enterprise plan's still-open "explicit break-glass recovery flag to accept
+  a lower version" (Phase 3, `enterprise-release-catalog-plan.md`) becomes a
+  **hard prerequisite** for supporting any ring downgrade at all.
+
+### P0-3 — No production client-side refresh; the expiry mitigation never reaches a running appliance
+
+**Verified:** production wiring builds a bare `NewCatalogHolder`
+(`release_wiring.go:225-228`), not the `Refresher`/ticker; refresh is only the
+admin-triggered `rm.refresh` closure, and `isExpiredNow` hides the catalog at
+`expires_at` on the read path (`release_catalog_freshness.go:93-102`,
+`release_catalog_holder.go`).
+
+**Consequence:** §2.9/§3.4/R4's headline fix — "a weekly re-sign slides the
+freshness window" — is **inert** for a long-running appliance. It keeps
+serving its loaded catalog and, at `expires_at`, flips to `available:false` until
+a **restart or a manual/API refresh**. Publishing a fresh catalog to R2 does not,
+by itself, reach it.
+
+**Correction (supersedes §2.9, and re-sequences §6):**
+- **Wiring the production periodic refresh (the existing `Refresher`/ticker, or an
+  equivalent jittered client-side re-fetch of `CULVERT_RELEASE_CATALOG_URL`) is a
+  HARD PREREQUISITE, promoted from Phase 6 to Phase 2** — the R2 cutover is not
+  safe without it. Without a client that periodically re-pulls, none of
+  re-sign, revocation, or phased-rollout pointer moves propagate without operator
+  action, which defeats the entire "PM presses three buttons" model (§9).
+- Interval: jittered (e.g. 1h ± jitter) with single-flight + backoff (the
+  `Refresher` already implements this per `D1.6d-P1.5`); conditional GET (ETag)
+  keeps it cheap and cache-friendly.
+- Until that refresh is wired, treat re-sign/revocation as requiring an explicit
+  appliance-side "refresh now" (admin API) and **say so** — do not claim
+  automatic freshness propagation.
+
+### P1 items accepted from the review (fold into the phases)
+
+- **Download-back verify can false-green on a stale edge cache** (§5.2): the
+  verify currently runs against the URL *before* the purge, so it can validate the
+  *old* cached index. **Fix:** purge first (or bypass cache with a
+  cache-busting/`no-cache` fetch), then verify the *served new* bytes, then a
+  final confirm. Make the post-purge confirm a full re-verify, not just a `jq`
+  `catalog_version` check.
+- **Single Sigstore trust scheme:** promote "bake an independent ed25519 org
+  root" (§4.1) from optional to **recommended-before-Phase-5**, so deleting Pages
+  doesn't leave a single-scheme, single-origin trust+availability chain.
+- **Do not delete Pages (Phase 5) until a *tested secondary origin* exists.**
+  A single origin/URL with manual DR is the DR weak point (review DR score 4).
+  Keep a second, verified origin (Pages, or a second R2 bucket / alternate
+  hostname the client can be pointed at) and a tested "re-serve last-good"
+  runbook before removing Pages.
+- **Keep container images PUBLIC in GHCR** (confirms §4.3 / §10 decision #1): the
+  digest pin already prevents tampering, so private images add credential-
+  distribution attack surface for zero integrity gain. Only go private with a
+  concrete business justification.
+- **The legacy `updater` sidecar also pulls by tag anonymously** (§1.6, B3/B4
+  siblings): freeze/retire it on the same schedule as the `update.go` tag path,
+  and confirm it isn't the silent update mechanism on any appliance before the
+  repo goes private.
+
+### Review scorecard (as delivered)
+
+| Dimension | Score (/10) |
+|---|---|
+| Security | 8 |
+| Reliability | 4 |
+| Operability | 5 |
+| Maintainability | 6 |
+| Scalability | 8 |
+| Disaster Recovery | 4 |
+| Release Engineering maturity | 6 |
+
+**Verdict: Ship-with-changes** — the security framing, least-privilege token
+model, and additive sequencing are sound and preserved; **Reliability and DR are
+the gating axes** and are addressed by the P0/P1 corrections above (global version
+authority, wired client refresh, tested secondary origin). Do not start Phase 1
+until P0-1/P0-2/P0-3 are resolved in the design.
+
+---
+
+*This plan has completed one independent security-architecture review round; see
+`roadmap/R2-CATALOG-MIGRATION-REVIEW.md` for the full attack-path analysis and
+prioritized change list. Implementation remains gated on the P0 resolutions
+above; the current GitHub Pages flow is untouched.*
