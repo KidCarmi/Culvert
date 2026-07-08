@@ -477,6 +477,71 @@ func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
 	}
 }
 
+func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T) {
+	globalThreatFeed.mu.Lock()
+	origDbPath := globalThreatFeed.dbPath
+	origURLs := globalThreatFeed.urls
+	origDomains := globalThreatFeed.domains
+	origAllowlist := globalThreatFeed.domainAllowlist
+	origEnabled := globalThreatFeed.enabled
+	origLastSync := globalThreatFeed.lastSync
+	origTotalEntries := globalThreatFeed.totalEntries.Load()
+	dbPath := filepath.Join(t.TempDir(), "threatfeed.json")
+	globalThreatFeed.dbPath = dbPath
+	globalThreatFeed.urls = map[string]feedEntry{}
+	globalThreatFeed.domains = map[string]feedEntry{}
+	globalThreatFeed.domainAllowlist = map[string]bool{}
+	globalThreatFeed.enabled = true
+	globalThreatFeed.mu.Unlock()
+	t.Cleanup(func() {
+		globalThreatFeed.mu.Lock()
+		globalThreatFeed.dbPath = origDbPath
+		globalThreatFeed.urls = origURLs
+		globalThreatFeed.domains = origDomains
+		globalThreatFeed.domainAllowlist = origAllowlist
+		globalThreatFeed.enabled = origEnabled
+		globalThreatFeed.lastSync = origLastSync
+		globalThreatFeed.mu.Unlock()
+		globalThreatFeed.totalEntries.Store(origTotalEntries)
+	})
+
+	applyConfigSnapshot(ConfigSnapshot{
+		Version: 1,
+		ThreatFeedURLs: map[string]int64{
+			"https://www.google.com/malware": 1700000000,
+		},
+		ThreatFeedDomains: map[string]int64{
+			"www.google.com": 1700000001,
+		},
+		ThreatDomainAllowlist: []string{"www.google.com"},
+	})
+
+	if hit, _ := globalThreatFeed.CheckDomain("www.google.com"); hit {
+		t.Fatal("applyConfigSnapshot reintroduced an allowlisted threat-feed domain")
+	}
+	if _, ok := globalThreatFeed.ExportDomains()["www.google.com"]; ok {
+		t.Fatal("applyConfigSnapshot retained an allowlisted threat-feed domain")
+	}
+	if hit, src := globalThreatFeed.CheckURL("https://www.google.com/malware"); !hit || src != "cluster-sync" {
+		t.Fatalf("exact malicious URL should remain blocked after snapshot allowlist; hit=%v src=%q", hit, src)
+	}
+
+	raw, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read threatfeed DB: %v", err)
+	}
+	var decoded feedDB
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal threatfeed DB: %v", err)
+	}
+	if _, ok := decoded.Domains["www.google.com"]; ok {
+		t.Fatal("applyConfigSnapshot persisted an allowlisted threat-feed domain")
+	}
+	if _, ok := decoded.URLs["https://www.google.com/malware"]; !ok {
+		t.Fatal("applyConfigSnapshot should persist exact malicious URL entries")
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

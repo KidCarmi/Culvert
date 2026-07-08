@@ -246,7 +246,7 @@ var defaultDomainAllowlist = []string{
 func (tf *ThreatFeed) DomainAllowlisted(domain string) bool {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
-	return tf.domainAllowlist[strings.ToLower(domain)]
+	return tf.domainAllowlist[normaliseThreatDomain(domain)]
 }
 
 // DomainAllowlist returns the current allowlist entries sorted.

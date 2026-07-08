@@ -164,6 +164,9 @@ func TestThreatFeed_DomainAllowlistNormalizesOperatorInputs(t *testing.T) {
 	if len(got) != 1 || got[0] != "www.google.com" {
 		t.Fatalf("DomainAllowlist normalized entries = %v, want [www.google.com]", got)
 	}
+	if !tf.DomainAllowlisted("https://www.google.com:443/path") {
+		t.Error("DomainAllowlisted should use the same normalization as allowlist writes")
+	}
 	tf.domains["www.google.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
 	if hit, _ := tf.CheckDomain("www.google.com:443"); hit {
 		t.Error("normalized allowlist should match host:port lookup")
