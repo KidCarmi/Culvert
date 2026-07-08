@@ -1428,7 +1428,189 @@ until P0-1/P0-2/P0-3 are resolved in the design.
 
 ---
 
-*This plan has completed one independent security-architecture review round; see
-`roadmap/R2-CATALOG-MIGRATION-REVIEW.md` for the full attack-path analysis and
-prioritized change list. Implementation remains gated on the P0 resolutions
-above; the current GitHub Pages flow is untouched.*
+---
+
+## 12. Go-live gates (second-review corrections — signing surface, trust durability, version-counter spec)
+
+The second review round accepted §11 (the fleet-bricking availability/correctness
+fixes are "sound on paper") and moved Reliability 4→7 and DR 4→6, but withheld a
+**customer-facing production sign-off**: §11 hardened *availability*, not the
+*signing surface* or *trust durability*, which are the axes a security vendor's
+update channel is judged on. This section converts those residuals into **binding
+pre-go-live GATES** and turns two prose commitments into concrete, testable specs.
+
+**Gate model.** Phases 1–4 (build R2 path, dual-publish, default-switch, repo
+private) may proceed once §11 is designed. **Phase 5 (delete Pages) and any
+customer-facing cutover are BLOCKED until GATE-A, GATE-B, and GATE-C below are
+green.** These are the sign-off conditions the reviewer named.
+
+### GATE-A — Signing-surface hardening (the real integrity gate)
+
+The pinned identity trusts *any* `refs/tags/v*` run of `ci.yml`
+(`release_catalog_sigstore.go:72`). CI/OIDC is the **only** integrity-bypass path,
+and §11 was silent on restricting and detecting it. Required before go-live:
+
+- **A-1 — Enforced `v*` protected-tag ruleset (verified, not assumed).** A GitHub
+  repository **tag ruleset** on `v*` that: restricts tag creation/update/deletion
+  to a minimal set of actors (ideally the release automation only), requires the
+  Security + QA gates to have passed on the tagged commit, and blocks
+  force-updates. **Acceptance:** an automated check (a CI job or a periodic
+  attestation) asserts the ruleset exists and matches the expected policy — the
+  design must *verify* the protection, because `require-gate.sh` on the tag path
+  is checked out from the tagged tree and the real control against a rogue tag is
+  the ruleset itself (`require-gate.sh` threat-model note). This closes the gap
+  where "anyone who can push `v*` can mint a signed catalog."
+- **A-2 — Transparency-log monitoring of the pinned identity.** A standing monitor
+  (scheduled job / Worker) queries **Rekor** for new entries under the pinned
+  issuer + SAN (`release_identity.env`) and **alerts on any signing event that
+  does not correspond to a known, expected release run** (correlate against the
+  CI run id / tag). This is the detective control for an OIDC/identity compromise
+  that A-1 cannot prevent. **Acceptance:** a drill where an out-of-band test
+  signature under a *non-pinned* identity is generated and the monitor's
+  correlation logic correctly classifies known-vs-unknown (the pinned identity
+  itself must never be test-signed outside a release).
+- **A-3 — Minimize `id-token: write`.** Confirm the OIDC-signing capability is
+  scoped to exactly the `catalog-pipeline`/`release`/`docker` signing jobs and the
+  new `publish-catalog-r2` does **not** need it beyond the in-binary verify test
+  (it runs `cosign verify`, not `cosign sign`). No other job carries it.
+
+### GATE-B — Trust-scheme durability (survive multi-year field life)
+
+A multi-year field appliance on a **single** trust scheme with an **aging baked
+root** silently fails to verify newly-signed catalogs after a Sigstore key
+rotation. §11 made the second scheme "recommended" and said nothing about root
+aging. Required before Pages deletion:
+
+- **B-1 — Independent ed25519 second scheme is REQUIRED (promoted from
+  "recommended").** Bake an org-controlled ed25519 catalog root (`key_id`,
+  `not_before`/`not_after`) as a **second, independently-rotatable** scheme
+  (`NewTrustStoreWithSigstore` already supports both; artifact-owns-outcome
+  selection is safe). CI signs the index with **both** schemes on the tag path
+  (`index.json.sigstore` **and** `index.json.sig`); the appliance accepts either.
+  This removes the single-ecosystem dependency: a Sigstore/Fulcio/Rekor incident
+  no longer disables Release Management, and a Sigstore root-rotation gap is
+  covered by the ed25519 path while the baked root is refreshed.
+- **B-1a — ed25519 key custody bar.** The private ed25519 signing key must meet
+  **the same custody bar as the release identity**: hardware-backed / KMS / HSM,
+  no export, audited access, dual-control for use. A hastily-baked org key with a
+  weak custody story is a *net negative* — B-1 is only an improvement if custody
+  is real. **Acceptance:** a written key-custody attestation + rotation procedure
+  before the key signs anything customer-facing.
+- **B-2 — Baked `trusted_root.json` aging answer.** Adopt a committed
+  **root-refresh cadence**: the baked Sigstore public-good root is re-fetched
+  (TUF) and **shipped in each release build** so a running appliance's root is
+  never older than its binary, plus the operator override
+  (`CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT`) documented for out-of-band refresh on
+  long-lived installs. **Acceptance:** `sigstore-trusted-root-lifecycle.md` gains
+  a concrete cadence + a CI check that the baked root's validity window is not
+  within N days of expiry at build time (fail the build early, not the field).
+
+### GATE-C — Prove the global version-counter under contention (spec, not prose)
+
+§11's "single R2 version-counter under conditional-PUT/lease" is one sentence
+hiding a correctness-critical distributed CAS that is now on the **critical path
+of every publish** and **poisons the whole fleet's floor if wrong** (a naive
+build reintroduces P0-2 in prod). Concrete spec:
+
+- **C-1 — Atomic compare-and-swap only.** The counter is a single object
+  `version-counter.json` (`{"next": <int>}`) mutated **exclusively** via R2/S3
+  **`If-Match: <etag>`** conditional PUT (read value+ETag → compute `next` →
+  `PutObject(If-Match=etag)`; on 412 Precondition Failed, **retry the whole
+  read-modify-write** with bounded backoff). No non-conditional write path exists.
+  **[ASSUMPTION]** R2 supports `If-Match` on PutObject (S3 conditional writes) —
+  **verify against R2's current capability during Phase 1; if unavailable, use a
+  D1/Durable-Object/Workers-KV-with-CAS counter instead of an R2 object.** Do not
+  ship a counter without a proven atomic primitive.
+- **C-2 — Serialized writers + single allocation point.** All three writers
+  (tag build, weekly resign, revoke dispatch) call **one** `allocate_next_version`
+  routine; none computes a version any other way. A publish **allocates its
+  version first, then writes content addressed by it** — and `history/v<N>/` is
+  written with **`If-None-Match: *`** (create-only) so two publishes can never
+  land *different content at the same version* (the reviewer's top paper≠prod
+  risk). A collision attempt fails the publish, loudly.
+- **C-3 — Fail-closed on counter unavailability.** If the counter can't be read or
+  the CAS can't be completed within the retry budget, the publish **aborts and
+  changes nothing** (the old catalog keeps serving). A publish **never invents,
+  guesses, or resets a version**. Counter corruption is fail-closed, mirroring the
+  rollback-floor corruption posture (`readVersionFloor` fails closed).
+- **C-4 — Runaway bound.** Reject an allocation that would jump the counter by more
+  than a small delta over the last-known value (a sanity clamp so a corrupt read
+  can't rocket the fleet floor to MAX_INT and brick everyone). Alert on any clamp.
+- **C-5 — Concurrency test (mandatory acceptance).** A test harness fires
+  **concurrent** tag-build + resign + revoke allocations against the real (or a
+  faithful) counter and asserts: monotonic, **no two publishes share a version**,
+  no `history/v<N>/` overwrite, and a forced 412 storm still converges to distinct
+  versions. This test is the GATE-C exit criterion; without it, GATE-C is red.
+
+### GATE-D — beta→stable graduation must be tooling-enforced (not a runbook footnote)
+
+The reviewer's sharpest operational catch: because the version space is global and
+monotonic, **beta is always ahead of stable**, so repointing a beta customer to
+stable is a **floor violation every time** unless the target release was already
+promoted *into* stable at a higher global version first. Left to operators this
+bricks customers routinely. Required:
+
+- **D-1 — Promote-then-repoint is enforced in the promote tooling, not documented
+  as operator discipline.** The graduation action is a single workflow:
+  `graduate(release_id, from=beta, to=stable)` that (1) allocates the next global
+  version (C-2), (2) publishes the **same digest** into the **stable** index at
+  that new (higher) version with `stable.recommended` pointing at it, (3) purges,
+  (4) verifies, and **only then** is a customer repoint to `stable` safe — because
+  the release the customer already has (from beta) is now present in stable at a
+  version **≥** their floor. The operator/PM never repoints manually ahead of the
+  promote; the tooling gates the repoint on "target release present in target ring
+  at ≥ the appliance's floor."
+- **D-2 — Repoint preflight.** Before a ring change, the CP checks the target
+  ring's current catalog against the appliance's persisted floor and **refuses
+  with a clear message** ("target ring offers v<N> < your floor v<M> — promote the
+  release into <ring> first, or use break-glass reset") instead of letting the
+  appliance fetch-and-wedge. This makes the floor violation a *pre-flight refusal
+  with a fix*, not a silent `available:false`.
+
+### Refresher reality (correct the §11 "wire the existing Refresher" wording)
+
+**Confirmed:** the shipped `Refresher` drives a **local directory** source
+(`release_catalog_refresher.go`), not `HTTPCatalogProvider`. So P0-3's fix is
+**new HTTP integration**, not a config flip: periodically driving
+`HTTPCatalogProvider.Stage` → verify → freshness/rollback → atomic publish with
+single-flight/backoff/ETag against the remote origin, **which auto-raises the
+rollback floor on every accepted pull**. Because this is unattended, a bad counter
+value or a runaway version now **auto-poisons floors fleet-wide** — which is
+exactly why GATE-C (counter correctness) is a hard dependency of the Phase-2
+refresh wiring, not an independent Phase-6 nicety. Estimate and staff it as new
+integration with its own failure-mode tests, not as "turn on the existing loop."
+
+### Secondary origin must be genuinely independent (correct §11 "tested secondary origin")
+
+A second R2 bucket **in the same Cloudflare account** is **DR theater** for the
+account-compromise and Cloudflare-wide-outage cases that dominate the DR score.
+**Required for Phase 5:** the secondary origin is a **different provider or a
+different, independently-credentialed account** (e.g. the retained GitHub Pages
+origin, or an S3/GCS mirror on a separate account), reachable by repointing
+`CULVERT_RELEASE_CATALOG_URL`, with a **tested** "re-serve last-good from
+`history/`" runbook and a periodic DR drill. Same-account redundancy is fine for
+*availability* (edge/bucket blips) but does not count toward the
+account-compromise DR posture.
+
+### Updated go-live gate summary
+
+| Gate | Blocks | Exit criterion |
+|---|---|---|
+| §11 (P0-1/2/3) | Phase 1 start | Global version authority + wired client refresh + documented ring-downgrade designed |
+| GATE-A | customer cutover | Verified `v*` ruleset (A-1) + Rekor identity monitor drill (A-2) + minimized `id-token` (A-3) |
+| GATE-B | Phase 5 (Pages delete) | Required dual-scheme ed25519 with real custody (B-1/B-1a) + trusted-root aging cadence + build-time expiry check (B-2) |
+| GATE-C | Phase 2 refresh wiring & customer cutover | Atomic CAS counter (C-1) + single allocation point + create-only history (C-2) + fail-closed (C-3) + runaway bound (C-4) + **passing concurrency test (C-5)** |
+| GATE-D | customer cutover | Promote-then-repoint enforced in tooling (D-1) + repoint preflight refusal (D-2) |
+
+With §11 designed and GATE-A/B/C/D green, the reviewer's stated position is a
+**production sign-off**. Until then: build through Phase 4 under the gates, keep
+Pages, and make **no customer-facing cutover**.
+
+---
+
+*This plan has completed two independent security-architecture review rounds; see
+`roadmap/R2-CATALOG-MIGRATION-REVIEW.md`. §11 resolves the fleet-bricking P0s;
+§12 converts the second-round residuals (signing surface, trust durability,
+version-counter correctness, graduation ordering, real DR independence) into
+binding pre-go-live gates. Implementation remains gated on these; the current
+GitHub Pages flow is untouched.*
