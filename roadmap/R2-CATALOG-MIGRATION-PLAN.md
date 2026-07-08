@@ -719,26 +719,36 @@ weekly cron
 - **Inputs:** the artifact `release-catalog-bundle` (already produced by
   `catalog-pipeline`) and the target ring (derived from the tag: `vX.Y.Z` →
   `stable`; `vX.Y.Z-rc.N` / `-beta.N` → `beta`).
-- **Ordering (atomicity, §2.8):** upload immutable `manifests/**` first → upload
-  `index.json.sigstore` (+ `.sig`) → upload `index.json` → upload `history/<ring>/v<N>/**`.
-- **Download-back verify (mandatory gate):** fetch
-  `https://catalog.culvertlabs.com/<ring>/{index.json,index.json.sigstore,manifests/*}`
-  and run the **real in-binary verifier** (`go test -run TestReleaseCatalogKeylessVerify`
-  or a small `verify` harness pointed at the live URL) — proves what's *served*
-  verifies, not just what was *generated*. **Fail the job if it doesn't verify.**
-- **Cache purge:** purge the index + sidecar URLs together, then a second
-  download-back to confirm the *new* `catalog_version` is what the edge serves.
+- **Stage → verify → promote (the live pointer is NEVER overwritten with
+  unverified bytes).** The verify gate must run against a **staged**, not the
+  **live**, index — otherwise the live `index.json` is already the new (possibly
+  bad) bytes by the time verify runs, and "don't purge" only protects the cached
+  copy until TTL/eviction (the origin already serves the bad bytes). Correct
+  order:
+  1. **Upload immutable `manifests/**` to live** — safe early: content-addressed,
+     nothing references them until the live index is promoted.
+  2. **Stage the full bundle to `history/<ring>/v<N>/**`** (immutable, unique,
+     never-cached key; create-only under rings, §12 C-2). This IS the staging area.
+  3. **Download-back verify the STAGED bundle** at its `history/v<N>/` URL with the
+     **real in-binary verifier** (`TestReleaseCatalogServedVerify`) — the staged
+     index resolves its manifests from the same `history/v<N>/manifests/`, so the
+     check is self-contained. **Fail closed here and the live pointer is untouched.**
+  4. **Promote** index + sidecars from `history/v<N>/` into the live `<ring>/`
+     keys **only on verify success** — the live pointer flips atomically to
+     already-verified bytes.
+  5. **Purge** the live index + sidecars as a set, then **confirm** with a
+     cache-busting (`no-cache`) fetch that the edge serves the promoted version.
 - **Idempotent + safe:** re-running with the same tag re-uploads identical bytes
-  (deterministic generation) → no-op. A partial failure leaves the *old* pointer
-  intact because `index.json` is uploaded last and purge is last.
+  (deterministic generation) → no-op. Any failure before step 4 leaves the *old*
+  live pointer fully intact (promote is the only step that touches it).
 
 ### 5.3 Failure behavior
 
 | Failure | Behavior |
 |---|---|
-| Upload of `manifests/` fails | Abort before touching `index.json`; old catalog fully intact; job red. |
-| Upload of sidecar/index fails | Abort; old pointer intact (new index not yet uploaded or purge not issued); job red. |
-| **Download-back verify fails** | **Do not purge** (so the edge keeps serving the old, good catalog); job red; alert. This is the critical safety gate — a bad publish is caught before customers see it. |
+| Upload of `manifests/` or staging fails | Abort before promote; the live `<ring>/index.json` still points at the prior manifests (all still present); old catalog fully intact; job red. |
+| **Download-back verify fails (on the STAGED bundle)** | **Do not promote** — the live pointer was never overwritten, so the old good catalog keeps serving unchanged (origin and edge). Job red; alert. This is the critical safety gate: a bad publish is caught **before** any live byte changes, not merely before the cache is purged. The staged `history/v<N>/` bytes are harmless (unreferenced by any live index). |
+| Promote succeeds, purge fails | Live origin already serves the new **verified** bytes; edge may serve the prior version up to TTL (60s). Retry purge; alert. Correctness-safe (both old and new are validly signed + fresh), latency only. |
 | Cache purge fails | Job red; new bytes are at origin but edge may serve stale up to TTL (60s). Retry purge; alert. Not a correctness problem (bytes are signed + fresh), only latency. |
 | `catalog-resign` fails | Old stable index keeps serving until its `expires_at`; alert with lead time (window is 180d, so ample time to fix). |
 
@@ -984,8 +994,8 @@ proof) over the raw `index.json` bytes. **`index.json.sig`** — ed25519 envelop
     runs-on: ubuntu-latest
     environment: release                      # protected: reviewers + secrets
     permissions:
-      contents: read
-      id-token: write                          # for the in-binary keyless verify test
+      contents: read                           # NO id-token: this job only VERIFIES an already-signed
+                                               # bundle (offline in-binary / cosign verify), never signs (GATE-A A-3)
     env:
       AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -1008,31 +1018,48 @@ proof) over the raw `index.json` bytes. **`index.json.sig`** — ed25519 envelop
           case "$TAG" in *-rc.*|*-beta.*) RING=beta;; *) RING=stable;; esac
           V="$(jq -r .catalog_version bundle/index.json)"
           echo "ring=$RING" >>"$GITHUB_OUTPUT"; echo "ver=$V" >>"$GITHUB_OUTPUT"
-      - name: Upload manifests (immutable)
+      # Manifests are content-addressed + immutable; uploading them to the live
+      # <ring>/manifests/ early is safe — nothing REFERENCES them until the live
+      # index.json is promoted (last), and the live index isn't overwritten until
+      # the staged bundle verifies. (Orphans on a failed publish are harmless.)
+      - name: Upload manifests to live (immutable)
         run: |
           aws s3 cp bundle/manifests "s3://$BUCKET/${{ steps.r.outputs.ring }}/manifests" \
             --recursive --cache-control "public,max-age=31536000,immutable" --content-type application/json
-      - name: Upload sidecars then index (mutable, short TTL)
+      # STAGE the full bundle to the immutable history/ prefix FIRST — this doubles
+      # as the staging area. The live <ring>/ index+sidecars are NOT touched yet.
+      - name: Stage bundle to immutable history (create-only)
+        run: |
+          H="s3://$BUCKET/history/${{ steps.r.outputs.ring }}/v${{ steps.r.outputs.ver }}"
+          aws s3 cp bundle "$H" --recursive --cache-control "public,max-age=31536000,immutable"
+          # create-only intent: with rings, this write MUST be If-None-Match (§12 C-2)
+          # so two publishes can never land different content at the same version.
+      # VERIFY the STAGED bytes at their immutable, unique, never-cached history URL —
+      # NEVER the live pointer. The staged index resolves its manifests from the same
+      # history/v<N>/manifests/ dir, so the check is fully self-contained.
+      - name: Download-back + in-binary verify the STAGED bundle (fail closed)
+        env:
+          CULVERT_RELEASE_GEN_VERIFY_SIGSTORE: "1"
+          CATALOG_URL: "${{ env.BASE_URL }}/history/${{ steps.r.outputs.ring }}/v${{ steps.r.outputs.ver }}"
+        run: go test -run TestReleaseCatalogServedVerify -count=1 -v .
+      # PROMOTE only after the staged bundle verifies: copy index+sidecars into the
+      # live <ring>/ keys. The live pointer is overwritten ONLY with verified bytes,
+      # so a verify failure leaves the prior live catalog fully intact (nothing to undo).
+      - name: Promote verified index + sidecars to live
         run: |
           CC="public,max-age=60,must-revalidate"
-          aws s3 cp bundle/index.json.sigstore "s3://$BUCKET/${{ steps.r.outputs.ring }}/index.json.sigstore" --cache-control "$CC"
-          [ -f bundle/index.json.sig ] && aws s3 cp bundle/index.json.sig "s3://$BUCKET/${{ steps.r.outputs.ring }}/index.json.sig" --cache-control "$CC" || true
-          aws s3 cp bundle/index.json "s3://$BUCKET/${{ steps.r.outputs.ring }}/index.json" --cache-control "$CC" --content-type application/json
-      - name: Mirror to immutable history
-        run: |
-          aws s3 cp bundle "s3://$BUCKET/history/${{ steps.r.outputs.ring }}/v${{ steps.r.outputs.ver }}" \
-            --recursive --cache-control "public,max-age=31536000,immutable"
-      - name: Download-back + in-binary verify (fail closed)
-        env: { CULVERT_RELEASE_GEN_VERIFY_SIGSTORE: "1", CATALOG_URL: "${{ env.BASE_URL }}/${{ steps.r.outputs.ring }}" }
-        run: go test -run TestReleaseCatalogServedVerify -count=1 -v .   # NEW test: fetch live URL, verify
-      - name: Purge cache (index + sidecars as a set)
+          S="s3://$BUCKET/history/${{ steps.r.outputs.ring }}/v${{ steps.r.outputs.ver }}"
+          D="s3://$BUCKET/${{ steps.r.outputs.ring }}"
+          aws s3 cp "$S/index.json.sigstore" "$D/index.json.sigstore" --cache-control "$CC"
+          aws s3 cp "$S/index.json.sig"      "$D/index.json.sig"      --cache-control "$CC" 2>/dev/null || true
+          aws s3 cp "$S/index.json"          "$D/index.json"          --cache-control "$CC" --content-type application/json
+      - name: Purge cache (index + sidecars as a set), then confirm the served bytes
         run: |
           curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CF_ZONE_ID }}/purge_cache" \
             -H "Authorization: Bearer ${{ secrets.CF_CACHE_PURGE_TOKEN }}" -H "Content-Type: application/json" \
             --data "{\"files\":[\"$BASE_URL/${{ steps.r.outputs.ring }}/index.json\",\"$BASE_URL/${{ steps.r.outputs.ring }}/index.json.sigstore\",\"$BASE_URL/${{ steps.r.outputs.ring }}/index.json.sig\"]}"
-      - name: Confirm edge serves the new version
-        run: |
-          test "$(curl -fsS "$BASE_URL/${{ steps.r.outputs.ring }}/index.json" | jq -r .catalog_version)" = "${{ steps.r.outputs.ver }}"
+          # confirm with a cache-busting fetch that the edge now serves the promoted version
+          test "$(curl -fsS -H 'Cache-Control: no-cache' "$BASE_URL/${{ steps.r.outputs.ring }}/index.json" | jq -r .catalog_version)" = "${{ steps.r.outputs.ver }}"
 ```
 
 (Wrangler or `rclone` are equally valid; `aws s3` shown for familiarity. R2 is
@@ -1409,12 +1436,16 @@ by itself, reach it.
 
 ### P1 items accepted from the review (fold into the phases)
 
-- **Download-back verify can false-green on a stale edge cache** (§5.2): the
-  verify currently runs against the URL *before* the purge, so it can validate the
-  *old* cached index. **Fix:** purge first (or bypass cache with a
-  cache-busting/`no-cache` fetch), then verify the *served new* bytes, then a
-  final confirm. Make the post-purge confirm a full re-verify, not just a `jq`
-  `catalog_version` check.
+- **Download-back verify must not false-green on a stale edge cache, and must not
+  verify the LIVE pointer after it's already overwritten** (§5.2 — **resolved by
+  the stage→verify→promote model**): the verify gate runs against the **staged**
+  `history/<ring>/v<N>/` URL — an immutable, unique, never-before-cached key — so
+  it can neither validate a stale cached copy nor a live pointer that's already
+  been overwritten with unverified bytes. Promotion (overwriting the live index)
+  happens **only** after that staged verify passes; the post-promote confirm is a
+  cache-busting (`no-cache`) fetch of the live URL (and should be a full re-verify,
+  not just a `jq catalog_version` check). This supersedes the earlier "purge
+  first, then verify" phrasing — staging removes the ordering hazard entirely.
 - **Single Sigstore trust scheme:** promote "bake an independent ed25519 org
   root" (§4.1) from optional to **recommended-before-Phase-5**, so deleting Pages
   doesn't leave a single-scheme, single-origin trust+availability chain.
@@ -1493,10 +1524,15 @@ and §11 was silent on restricting and detecting it. Required before go-live:
   signature under a *non-pinned* identity is generated and the monitor's
   correlation logic correctly classifies known-vs-unknown (the pinned identity
   itself must never be test-signed outside a release).
-- **A-3 — Minimize `id-token: write`.** Confirm the OIDC-signing capability is
-  scoped to exactly the `catalog-pipeline`/`release`/`docker` signing jobs and the
-  new `publish-catalog-r2` does **not** need it beyond the in-binary verify test
-  (it runs `cosign verify`, not `cosign sign`). No other job carries it.
+- **A-3 — Minimize `id-token: write`.** The OIDC-signing capability is scoped to
+  **exactly** the `catalog-pipeline`/`release`/`docker` signing jobs. The new
+  `publish-catalog-r2` job carries **no `id-token: write` at all** — it only
+  *verifies* an already-signed bundle (offline in-binary verify / `cosign verify`,
+  never `cosign sign`), so minting an OIDC token there would needlessly let a
+  compromised step in the publisher forge a token whose SAN matches the pinned
+  `ci.yml@refs/tags/v*` identity — expanding the exact signing surface this gate
+  constrains. Its permissions are `contents: read` only (§8.5). No other job
+  carries `id-token: write`.
 
 ### GATE-B — Trust-scheme durability (survive multi-year field life)
 
