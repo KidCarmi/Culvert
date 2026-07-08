@@ -62,9 +62,10 @@ func TestNormaliseFeedURL_TrailingSlash(t *testing.T) {
 
 func newEnabledFeed() *ThreatFeed {
 	tf := &ThreatFeed{
-		urls:    make(map[string]feedEntry),
-		domains: make(map[string]feedEntry),
-		enabled: true,
+		urls:            make(map[string]feedEntry),
+		domains:         make(map[string]feedEntry),
+		domainAllowlist: make(map[string]bool),
+		enabled:         true,
 	}
 	tf.totalEntries.Store(0)
 	return tf
@@ -102,6 +103,70 @@ func TestThreatFeed_CheckURL_DomainFallback(t *testing.T) {
 	}
 	if src != "openphish" {
 		t.Errorf("CheckURL domain fallback source = %q, want openphish", src)
+	}
+}
+
+func TestThreatFeed_DomainAllowlistClearsDomainButKeepsURLBlock(t *testing.T) {
+	tf := newEnabledFeed()
+	now := time.Now()
+	tf.urls["https://www.google.com/malware"] = feedEntry{Source: "urlhaus", AddedAt: now}
+	tf.domains["www.google.com"] = feedEntry{Source: "openphish", AddedAt: now}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); !hit {
+		t.Fatal("setup failed: domain should be blocked before allowlist")
+	}
+
+	tf.AddDomainAllowlist("www.google.com")
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Error("allowlisted domain should stop domain-level threat blocks immediately")
+	}
+	if hit, _ := tf.CheckURL("https://www.google.com/safe"); hit {
+		t.Error("allowlisted domain should not be blocked through URL domain fallback")
+	}
+	if _, ok := tf.domains["www.google.com"]; ok {
+		t.Error("allowlisting should prune the stale domain entry from the in-memory domain map")
+	}
+
+	hit, src := tf.CheckURL("https://www.google.com/malware?ignored=true")
+	if !hit {
+		t.Fatal("exact malicious URL must remain blocked after domain allowlist")
+	}
+	if src != "urlhaus" {
+		t.Errorf("exact URL block source = %q, want urlhaus", src)
+	}
+}
+
+func TestThreatFeed_CheckDomainAllowlistDefendsAgainstStaleDomainMap(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domainAllowlist["www.google.com"] = true
+	tf.domains["www.google.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Error("allowlist should suppress stale domain-map entries on the hot path")
+	}
+	if hit, _ := tf.CheckURL("https://www.google.com/clean"); hit {
+		t.Error("allowlist should suppress stale domain fallback in CheckURL")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistNormalizesOperatorInputs(t *testing.T) {
+	tf := newEnabledFeed()
+
+	tf.SetDomainAllowlist([]string{
+		"WWW.GOOGLE.COM.",
+		"www.google.com:443",
+		"https://www.google.com/",
+		"www.google.com/safe/path",
+	})
+
+	got := tf.DomainAllowlist()
+	if len(got) != 1 || got[0] != "www.google.com" {
+		t.Fatalf("DomainAllowlist normalized entries = %v, want [www.google.com]", got)
+	}
+	tf.domains["www.google.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+	if hit, _ := tf.CheckDomain("www.google.com:443"); hit {
+		t.Error("normalized allowlist should match host:port lookup")
 	}
 }
 
@@ -282,5 +347,29 @@ func TestThreatFeed_ImportFeedData(t *testing.T) {
 	}
 	if tf.domains["new-domain.com"].Source != "cluster-sync" {
 		t.Errorf("source = %q, want cluster-sync", tf.domains["new-domain.com"].Source)
+	}
+}
+
+func TestThreatFeed_ImportFeedDataPreservesDomainAllowlistAndURLBlocks(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.SetDomainAllowlist([]string{"www.google.com"})
+
+	urls := map[string]int64{
+		"https://www.google.com/malware": 1700000000,
+	}
+	domains := map[string]int64{
+		"www.google.com": 1700000001,
+	}
+
+	tf.ImportFeedData(urls, domains)
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Error("cluster import should not reintroduce allowlisted domain blocks")
+	}
+	if _, ok := tf.domains["www.google.com"]; ok {
+		t.Error("cluster import should prune allowlisted domains from the domain map")
+	}
+	if hit, src := tf.CheckURL("https://www.google.com/malware"); !hit || src != "cluster-sync" {
+		t.Errorf("exact malicious URL should remain blocked after cluster import; hit=%v src=%q", hit, src)
 	}
 }
