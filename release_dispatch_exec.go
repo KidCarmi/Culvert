@@ -61,6 +61,29 @@ var errDispatchInFlight = errors.New("dispatch: an execution is already in fligh
 // preflight read failure — see respondPreApply.
 const detailAnchorReadFailed = "anchor_read_failed"
 
+// detailAgentUnreachableAfterUpdate prefixes the Detail when an apply the agent
+// reported as SUCCEEDED is immediately followed by a TRANSPORT failure on the
+// post-verify /v1/status read — while the pre-apply anchor read had succeeded.
+// That differential is a HINT (not proof) that the recreate dropped the CP↔agent
+// socket. It is a HEURISTIC: a benign blip in the post-recreate settling window
+// can also produce it, and a slow-hanging drop surfacing as context.DeadlineExceeded
+// (non-transient per isTransientAgentErr) falls back to the generic detail.
+//
+// REACHABILITY (important): for a CP-LOCAL agent — the common single-node case,
+// where CULVERT_MAINT_AGENT_URL is a unix socket mounted into the SAME proxy
+// container that runs this dispatcher — a real recreate SIGKILLs this process
+// mid-Execute, so classifyTerminal never runs; recovery goes through Resume()
+// (which reports the generic post_verify_read_failed). This distinct label
+// therefore mostly fires for a REMOTE agent (network transport, dispatcher not
+// co-recreated) or when the restart did not recreate this container. The durable
+// prevention is the structural override-carry (the socket survives by
+// construction); the more reachable proactive signal is the agent's
+// compose_override_configured flag (op params / /v1/status), which a future GUI
+// consumer should surface pre-dispatch rather than relying on this post-facto
+// label. Either way the terminal stays FAILED_NEEDS_ATTN, so the operator is
+// alerted regardless.
+const detailAgentUnreachableAfterUpdate = "agent_unreachable_after_update"
+
 // errStaleAlreadyCurrent is returned when a plan's already-current determination
 // (computed from plan-time running digests by P1.6a) no longer holds against a
 // FRESH status read at execute time — the node drifted off the target between
@@ -359,6 +382,15 @@ func (e *DispatchExecutor) Resume(ctx context.Context, rc DispatchResumeContext)
 func (e *DispatchExecutor) classifyTerminal(ctx context.Context, plan *DispatchPlan, res *DispatchResult, anchor []string, state string) {
 	post, perr := e.client.RunningDigests(ctx)
 	if perr != nil {
+		// The pre-apply anchor read succeeded (Execute bails before dispatch
+		// otherwise), so a post-op read that fails with a TRANSPORT/transient
+		// error right after a SUCCEEDED apply is the fingerprint of the recreate
+		// dropping the CP↔agent socket — surface it distinctly. A deterministic
+		// (non-transient) read error keeps the generic post_verify_read_failed.
+		if state == agentStateSucceeded && isTransientAgentErr(perr) {
+			res.Terminal, res.Detail = TerminalFailedNeedsAttn, detailAgentUnreachableAfterUpdate+": "+perr.Error()
+			return
+		}
 		res.Terminal, res.Detail = TerminalFailedNeedsAttn, "post_verify_read_failed: "+perr.Error()
 		return
 	}

@@ -690,6 +690,7 @@ tr.dragging  { opacity: .4; }
           <option value="IP_BLOCKED">IP Blocked</option>
           <option value="POLICY_DEFAULT_DENY">Policy Deny</option>
           <option value="AUTH_FAIL">Auth Fail</option>
+          <option value="TUNNEL_CLOSED">Tunnel Closed</option>
         </select>
         <select class="select" id="log-level" data-change="applyLogFilter">
           <option value="">All levels</option>
@@ -1025,6 +1026,7 @@ tr.dragging  { opacity: .4; }
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
               <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">ClamAV</div>
               <div id="sec-clamav-status" style="font-weight:600;font-size:.9rem">—</div>
+              <div id="sec-clamav-version" style="font-size:.7rem;color:var(--muted);margin-top:2px"></div>
               <div id="sec-clam-blocked" style="font-size:.75rem;color:var(--muted);margin-top:2px"></div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:12px">
@@ -1737,12 +1739,12 @@ Firefox (all platforms):
           </div>
         </div>
 
-      <!-- Backup & Restore -->
+      <!-- Config Export / Import -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">Backup &amp; Restore</span></div>
+        <div class="panel-header"><span class="panel-title">Config Export / Import</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px">
-            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file.<br>
+            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file. To roll back a recent config change instead, use Config Versions below; for full disaster-recovery backup/restore of <code>/data</code>, see the <code>cli</code> service in <code>docker-compose.yml</code>.<br>
             <strong style="color:var(--red)">Note:</strong> Admin credentials are not exported for security reasons.
           </p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -1752,7 +1754,7 @@ Firefox (all platforms):
               <input type="file" accept=".json" style="display:none" data-change="importConfig">
             </label>
           </div>
-          <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+          <div id="config-export-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
           <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -1860,29 +1862,44 @@ Firefox (all platforms):
               Enable only when running behind a trusted reverse proxy. When disabled, X-Forwarded-Host/Proto headers are ignored.
             </p>
           </div>
+          <div class="form-group" style="margin-top:14px">
+            <label class="form-label" for="s-trusted-proxies">Trusted proxy IPs/CIDRs (admin-UI client IP)</label>
+            <input type="text" class="input" style="width:100%" id="s-trusted-proxies" placeholder="Comma-separated, e.g. 10.0.0.0/8,192.168.1.5">
+            <p style="font-size:.72rem;color:var(--muted);margin-top:4px">
+              Reverse proxies whose <code>X-Forwarded-For</code> is trusted to resolve the real client IP for login lockout, admin-API rate limiting, the admin-IP allowlist, and audit attribution. Only requests arriving directly from one of these addresses have their X-Forwarded-For honored; empty = always use the direct peer IP (spoofing-safe default).
+            </p>
+          </div>
           <button class="btn" style="margin-top:10px" data-click="saveNetworkTLS">Save Network Settings</button>
           <span id="s-network-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
         </div>
       </div>
 
-      <!-- Proxy Authentication Mode -->
+      <!-- Default Authentication Behavior -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">🔑 Proxy Authentication Mode</span></div>
+        <div class="panel-header"><span class="panel-title">🔑 Default authentication behavior</span></div>
         <div class="panel-body">
-          <div id="s-unauth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
-            <span id="s-unauth-mode-icon" style="font-size:1.2rem">🔒</span>
+          <div id="s-default-auth-status-bar" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:.85rem;background:rgba(20,184,166,.08);border:1px solid rgba(20,184,166,.2)">
+            <span id="s-default-auth-icon" style="font-size:1.2rem">🔒</span>
             <div>
-              <div id="s-unauth-mode-label" style="font-weight:600">Credentials Required</div>
-              <div id="s-unauth-mode-desc" style="font-size:.75rem;color:var(--muted)">Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.</div>
+              <div id="s-default-auth-label" style="font-weight:600">Require authentication</div>
+              <div id="s-default-auth-desc" style="font-size:.75rem;color:var(--muted)">Traffic that matches no auth rule must authenticate.</div>
             </div>
           </div>
+          <div style="margin-bottom:12px">
+            <label class="label" for="s-default-auth-select">Default for unmatched traffic</label>
+            <select class="input" id="s-default-auth-select" data-change="setDefaultAuthOutcome" style="max-width:340px">
+              <option value="Default">Require authentication</option>
+              <option value="Exempt">Open unmatched traffic</option>
+            </select>
+            <span id="s-default-auth-save-status" style="font-size:.8rem;color:var(--muted);margin-left:10px"></span>
+          </div>
           <p class="hint">
-            <strong>Credentials Required</strong> - Proxy port demands authentication (407). Use when all clients authenticate via local/LDAP/OIDC credentials.<br>
-            <strong>Open / Policy-Only</strong> — Proxy accepts all clients without credentials. Identity is set to <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> for unauthenticated traffic. <strong>Policy rules</strong> control access — create a rule with Auth Source = <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code> to allow or block unauthenticated users. Recommended when using a PAC file with PBAC.
+            Scoped <strong>auth rules are evaluated first and always enforce</strong> — this setting applies <strong>only to traffic that no rule matches</strong>.<br>
+            <strong>Require authentication</strong> — unmatched traffic must authenticate (407 / SSO), unless no auth backend is configured.<br>
+            <strong>Open unmatched traffic</strong> — unmatched traffic is admitted without credentials (authSource <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code>). This is <strong>not Allow</strong>: Stage-2 policy still decides access and <strong>default-deny still applies</strong>.
           </p>
-          <div style="display:flex;gap:10px;align-items:center">
-            <button class="btn" id="s-unauth-toggle-btn" data-click="toggleUnauthMode">Enable Open / Policy-Only</button>
-            <span id="s-unauth-save-status" style="font-size:.8rem;color:var(--muted)"></span>
+          <div id="s-default-auth-enforce-warn" style="display:none;margin-top:6px;padding:8px 12px;border-radius:6px;font-size:.78rem;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24">
+            ⚠ Open unmatched traffic is selected and scoped CredentialRequired/SSORequired rules exist — those rules still enforce for matching traffic. See <strong>Diagnostics</strong> for details.
           </div>
         </div>
       </div>
@@ -2179,7 +2196,7 @@ Firefox (all platforms):
               <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice">
             </div>
             <div>
-              <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
+              <label class="form-label">Group Provider Filter <span style="color:var(--muted);font-weight:400">(narrows Source Group search)</span></label>
               <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
                 <option value="">Any provider</option>
               </select>
@@ -2571,7 +2588,7 @@ Firefox (all platforms):
       <div style="margin-bottom:14px">
         <p style="font-size:.82rem;color:var(--muted);margin:0;line-height:1.6">
           Create named extension profiles and assign them to policy rules via <strong>File Extension Profile</strong>.
-          The <strong>Global Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
+          The <strong>Global File Extension Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
         </p>
       </div>
 
@@ -2606,10 +2623,10 @@ Firefox (all platforms):
         </div>
       </div>
 
-      <!-- Global Block List (existing flat list) -->
+      <!-- Global File Extension Block List (existing flat list) -->
       <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
         <div class="panel">
-          <div class="panel-header"><span class="panel-title">Global Block List</span></div>
+          <div class="panel-header"><span class="panel-title">Global File Extension Block List</span></div>
           <div class="panel-body">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:14px">
               Extensions here are blocked for ALL traffic. Independent of policy rules.
@@ -3092,6 +3109,12 @@ Firefox (all platforms):
                 <input id="ha-leader-addr" class="input" placeholder="e.g. cp1.internal:50051" style="margin-top:4px">
                 <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">The hostname/IP that the standby server can reach this CP on</span>
               </label>
+              <label style="font-size:.8rem;color:var(--muted);display:flex;align-items:flex-start;gap:8px">
+                <input id="ha-auto-failover" type="checkbox" style="margin-top:3px">
+                <span>Automatic failover <span style="color:#f59e0b">(advanced — leave OFF unless you understand the risk)</span>
+                  <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">When ON, the standby self-promotes if it cannot reach this leader for ~15s. With only two Control Planes and no witness, a network partition where this leader is still alive causes BOTH nodes to act as leader (split-brain) and admin state diverges. Default OFF = manual failover: on leader loss the standby stays read-only until an operator promotes it or restarts it as leader.</span>
+                </span>
+              </label>
               <div style="margin-top:4px">
                 <button class="btn" id="ha-enable-btn" data-click="enableHA">Enable HA</button>
               </div>
@@ -3103,6 +3126,17 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Node</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-term-val">—</div><div class="stat-label">Term</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-lease-val">—</div><div class="stat-label">Fencing Lease</div></div>
+            </div>
+            <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
+              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease.
+            </p>
+            <!-- Manual failover: shown only when this node is a standby -->
+            <div id="ha-promote-row" style="display:none;margin-bottom:16px">
+              <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this node to Leader</button>
+              <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Use when the leader is down and automatic failover is off. Confirm the leader is truly gone first — promoting while the leader still serves causes split-brain.</span>
             </div>
             <details style="margin-top:12px">
               <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
@@ -3624,6 +3658,7 @@ Firefox (all platforms):
               <input id="rel-agent" value="local" data-change="releaseAgentChange"
                 style="margin-left:6px;width:120px;padding:4px 6px;font-size:.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
             </label>
+            <button class="btn ghost sm" data-click="releaseCatalogRefresh" data-min-role="admin" title="Re-fetch the signed catalog from its configured origin (CULVERT_RELEASE_CATALOG_URL) and reload — no restart needed">⟳ Refresh catalog</button>
             <button class="btn ghost sm" data-click="loadReleases">↺ Refresh</button>
           </div>
         </div>
@@ -3853,7 +3888,6 @@ document.addEventListener('click', e => {
     case 'saveUIAllowIPs':    saveUIAllowIPs(); break;
     case 'removeUIAllowIP':   removeUIAllowIP(+arg); break;
     case 'saveNetworkTLS':    saveNetworkTLS(); break;
-    case 'toggleUnauthMode':  toggleUnauthMode(); break;
     case 'saveSyslog':        saveSyslog(); break;
     case 'disableSyslog':     disableSyslog(); break;
     case 'saveMetricsToken':  saveMetricsToken(); break;
@@ -4001,6 +4035,7 @@ document.addEventListener('click', e => {
 
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
+    case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
     case 'releaseDispatchSubmit':  releaseDispatchSubmit(); break;
@@ -4883,14 +4918,14 @@ async function toggleBlocklistMode() {
   }
 }
 
-// ── Config Backup / Restore ──────────────────────────────────────────────
+// ── Config Export / Import ────────────────────────────────────────────────
 async function exportConfig() {
   const r = await fetch('/api/config/export');
   if (!r.ok) { toast('Export failed: ' + await r.text(), 'error'); return; }
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'culvert-backup.json';
+  a.download = 'culvert-config-export.json';
   a.click();
 }
 
@@ -4911,7 +4946,7 @@ async function importConfig(input) {
   if (!file) return;
   const ok = await confirmAction('Import Configuration', 'Imported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.', 'Import');
   if (!ok) { input.value = ''; return; }
-  const statusEl = document.getElementById('backup-status');
+  const statusEl = document.getElementById('config-export-status');
   statusEl.style.display = 'none';
   try {
     const text = await file.text();
@@ -4924,7 +4959,7 @@ async function importConfig(input) {
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
       statusEl.style.cssText = 'display:block;color:var(--green)';
-      statusEl.textContent = `✓ Configuration restored (backup from ${data.exportedAt || 'unknown date'})`;
+      statusEl.textContent = `✓ Configuration imported (exported ${data.exportedAt || 'unknown date'})`;
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
     } else {
@@ -4974,13 +5009,33 @@ async function diffConfigVersions(from, to) {
     }
     let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
     data.changes.forEach(c => {
-      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${escHtml(String(c.from))}</td><td style="color:var(--green)">${escHtml(String(c.to))}</td></tr>`;
+      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${fmtDiffCell(c.from)}</td><td style="color:var(--green)">${fmtDiffCell(c.to)}</td></tr>`;
     });
     html += '</tbody></table></div>';
     el.innerHTML = html;
   } catch (err) {
     el.innerHTML = `<em style="color:var(--red)">Diff failed: ${escHtml(err.message)}</em>`;
   }
+}
+
+// fmtDiffCell renders one side of a config-diff cell. Scalar fields
+// (default_action, blocklist_mode, rate_limit_rpm, …) arrive as plain
+// strings/numbers; list & struct fields (file_block_extensions, blocklist,
+// policy_rules, category_groups, …) arrive as objects shaped
+// {count, added?, removed?, changed?} from diffStringList/diffPolicyRules/
+// diffCategoryGroups/diffURLCategories (configversion.go). A naive String()
+// on those objects prints "[object Object]"; unpack them into a readable
+// "N items · added/removed/changed: …" summary instead. Returns HTML-safe
+// text (element values are individually escaped).
+function fmtDiffCell(v) {
+  if (v === null || v === undefined) return '<span style="color:var(--muted)">—</span>';
+  if (typeof v !== 'object') return escHtml(String(v));
+  const bits = [];
+  if (typeof v.count === 'number') bits.push(`${v.count} item${v.count === 1 ? '' : 's'}`);
+  if (Array.isArray(v.added)   && v.added.length)   bits.push(`added: ${v.added.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.removed) && v.removed.length) bits.push(`removed: ${v.removed.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.changed) && v.changed.length) bits.push(`changed: ${v.changed.map(escHtml).join(', ')}`);
+  return bits.length ? bits.join(' · ') : escHtml(JSON.stringify(v));
 }
 
 async function rollbackConfigVersion(version) {
@@ -5159,7 +5214,18 @@ function badgeHTML(status) {
   if (status === 'IP_BLOCKED')      return '<span class="badge blocked" title="IP Filter">IP BLOCK</span>';
   if (status === 'POLICY_DEFAULT_DENY') return '<span class="badge blocked" title="No matching policy rule">POLICY DENY</span>';
   if (status === 'AUTH_FAIL')       return '<span class="badge auth">AUTH FAIL</span>';
+  if (status === 'TUNNEL_CLOSED')   return '<span class="badge bypass" title="Raw tunnel closed — bytes/duration accounted (WebSocket / CONNECT / SOCKS5)">TUNNEL</span>';
   return '<span class="badge auth">' + escHtml(status) + '</span>';
+}
+
+// fmtBytes renders a byte count as a compact human-readable string.
+function fmtBytes(n) {
+  n = n || 0;
+  if (n < 1024) return n + ' B';
+  const u = ['KB', 'MB', 'GB', 'TB'];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(1) + ' ' + u[i];
 }
 
 function levelBadge(level) {
@@ -5178,7 +5244,7 @@ function rowHTML(e) {
     <td style="font-family:monospace">${escHtml(e.ip)}</td>
     ${identityCell}
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
-    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}</td>
+    <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}${(e.bytesSent || e.bytesRecv || e.durationMs) ? `<div style="font-size:.7rem;color:var(--muted)">&#8593;${fmtBytes(e.bytesSent)} &#8595;${fmtBytes(e.bytesRecv)}${e.durationMs ? ' &middot; ' + (e.durationMs >= 1000 ? (e.durationMs/1000).toFixed(1)+'s' : e.durationMs+'ms') : ''}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
     <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${escHtml(e.ruleMatched||'')}</td>
     <td>${levelBadge(e.level)}</td>
@@ -5954,6 +6020,17 @@ async function loadSecScanStatus() {
       clamEl.textContent  = s.clamav_status || '—';
       clamEl.style.color  = ok ? 'var(--green)' : (s.clamav_status === 'disabled' ? 'var(--muted)' : 'var(--red)');
     }
+    const cvEl = document.getElementById('sec-clamav-version');
+    if (cvEl) {
+      const v = s.clamav_version;
+      if (v && v.engine) {
+        const defs = v.db_date ? ' · defs ' + escHtml(v.db_date) : (v.db_version ? ' · defs ' + escHtml(v.db_version) : '');
+        cvEl.innerHTML = escHtml(v.engine) + defs;
+        cvEl.title = v.raw || '';
+      } else {
+        cvEl.textContent = '';
+      }
+    }
     const cb = document.getElementById('sec-clam-blocked');
     if (cb) cb.textContent = s.stat_clam_blocked ? s.stat_clam_blocked + ' blocked' : '';
     const yr = document.getElementById('sec-yara-count');
@@ -5963,7 +6040,15 @@ async function loadSecScanStatus() {
     const fe = document.getElementById('sec-feed-entries');
     if (fe) fe.textContent = s.threat_feed_entries != null ? s.threat_feed_entries.toLocaleString() + ' entries' : '—';
     const fs = document.getElementById('sec-feed-sync');
-    if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+    if (fs) {
+      if (s.threat_feed_sync_ok === false) {
+        const since = s.threat_feed_last_success ? new Date(s.threat_feed_last_success).toLocaleString() : 'never';
+        fs.innerHTML = '<span style="color:var(--red)" title="' + escHtml(s.threat_feed_sync_error || '') + '">sync failing</span> · last good sync: ' + escHtml(since);
+      } else {
+        fs.style.color = '';
+        fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+      }
+    }
     const fb = document.getElementById('sec-feed-blocked');
     if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
 
@@ -6474,10 +6559,15 @@ function initPolicyDragDrop() {
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
 
-    const allRows = [...document.querySelectorAll('#pol-table tr[data-priority]')];
-    const priorities = allRows.map(r => parseInt(r.dataset.priority));
+    // /api/policy/reorder is access-only: it expects every Stage-2 access-rule
+    // priority exactly once and permutes them among their own slots (auth rules
+    // keep their priorities). Build the COMPLETE access order from the store —
+    // not the DOM — so an active search/action filter can't truncate the list,
+    // then apply the drag.
+    const priorities = polRules.filter(r => r.ruleType !== 'auth').map(r => r.priority);
     const fromIdx = priorities.indexOf(fromPri);
     const toIdx   = priorities.indexOf(toPri);
+    if (fromIdx < 0 || toIdx < 0) return;
     priorities.splice(fromIdx, 1);
     priorities.splice(toIdx, 0, fromPri);
 
@@ -6541,7 +6631,9 @@ function showMoveTarget(pri, direction) {
   document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
   // Build a list of other rule names.
   const currentRule = polRules.find(r => r.priority === pri);
-  const otherRules = polRules.filter(r => r.priority !== pri);
+  // Only Stage-2 access rules are valid move targets here; auth rules are
+  // managed via the Auth Policy panel.
+  const otherRules = polRules.filter(r => r.priority !== pri && r.ruleType !== 'auth');
   if (!otherRules.length) { toast('No other rules to move relative to', 'error'); return; }
   const options = otherRules.map(r => `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`).join('');
   const label = direction === 'before' ? 'Move BEFORE rule:' : 'Move AFTER rule:';
@@ -6621,46 +6713,58 @@ function exportLogs(format) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
-let _unauthMode = false;
+let _defaultAuthOutcome = 'Default';
+// Human labels for the two global defaults (single source — avoids duplicated
+// string literals across the render and save handlers).
+const DEFAULT_AUTH_LABELS = { Default: 'Require authentication', Exempt: 'Open unmatched traffic' };
 
-function renderUnauthModeUI(enabled) {
-  _unauthMode = enabled;
-  const bar  = document.getElementById('s-unauth-status-bar');
-  const icon = document.getElementById('s-unauth-mode-icon');
-  const lbl  = document.getElementById('s-unauth-mode-label');
-  const desc = document.getElementById('s-unauth-mode-desc');
-  const btn  = document.getElementById('s-unauth-toggle-btn');
-  if (!bar) return;
-  if (enabled) {
-    bar.style.background = 'rgba(34,197,94,.08)';
-    bar.style.borderColor = 'rgba(34,197,94,.25)';
-    icon.textContent = '🌐';
-    lbl.textContent = 'Open / Policy-Only';
-    desc.textContent = 'Proxy accepts all traffic without credentials. Policy rules control access based on identity.';
-    btn.textContent = 'Switch to Credentials Required';
-    btn.className = 'btn danger';
-  } else {
-    bar.style.background = 'rgba(20,184,166,.08)';
-    bar.style.borderColor = 'rgba(20,184,166,.2)';
-    icon.textContent = '🔒';
-    lbl.textContent = 'Credentials Required';
-    desc.textContent = 'Proxy requires Proxy-Authorization. Clients must authenticate before any traffic is forwarded.';
-    btn.textContent = 'Enable Open / Policy-Only';
-    btn.className = 'btn';
+// renderDefaultAuthUI reflects the global default-authentication setting. `open`
+// is true when the default is Exempt (open unmatched traffic).
+function renderDefaultAuthUI(outcome) {
+  _defaultAuthOutcome = (outcome === 'Exempt') ? 'Exempt' : 'Default';
+  const open = _defaultAuthOutcome === 'Exempt';
+  const bar  = document.getElementById('s-default-auth-status-bar');
+  const icon = document.getElementById('s-default-auth-icon');
+  const lbl  = document.getElementById('s-default-auth-label');
+  const desc = document.getElementById('s-default-auth-desc');
+  const sel  = document.getElementById('s-default-auth-select');
+  if (sel) sel.value = _defaultAuthOutcome;
+  if (bar) {
+    if (open) {
+      bar.style.background = 'rgba(34,197,94,.08)';
+      bar.style.borderColor = 'rgba(34,197,94,.25)';
+      icon.textContent = '🌐';
+      lbl.textContent = DEFAULT_AUTH_LABELS.Exempt;
+      desc.textContent = 'Traffic that matches no auth rule is admitted without credentials (authSource "unauth"). Not Allow — Stage-2 policy and default-deny still apply.';
+    } else {
+      bar.style.background = 'rgba(20,184,166,.08)';
+      bar.style.borderColor = 'rgba(20,184,166,.2)';
+      icon.textContent = '🔒';
+      lbl.textContent = DEFAULT_AUTH_LABELS.Default;
+      desc.textContent = 'Traffic that matches no auth rule must authenticate.';
+    }
+  }
+  // Warn when Open is selected and scoped CR/SSO rules exist (those still enforce).
+  const warn = document.getElementById('s-default-auth-enforce-warn');
+  if (warn) {
+    const hasChallengeRules = Array.isArray(apRules) && apRules.some(r =>
+      r.auth && (r.auth.outcome === 'CredentialRequired' || r.auth.outcome === 'SSORequired'));
+    warn.style.display = (open && hasChallengeRules) ? 'block' : 'none';
   }
 }
 
-async function toggleUnauthMode() {
-  const next = !_unauthMode;
-  const statusEl = document.getElementById('s-unauth-save-status');
+async function setDefaultAuthOutcome() {
+  const sel = document.getElementById('s-default-auth-select');
+  const outcome = sel ? sel.value : 'Default';
+  const statusEl = document.getElementById('s-default-auth-save-status');
   try {
     await api('/api/settings/unauth-mode', {
       method: 'PUT', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({enabled: next})
+      body: JSON.stringify({defaultAuthOutcome: outcome})
     });
-    renderUnauthModeUI(next);
-    toast('Proxy auth mode updated', 'success');
-    if (statusEl) { statusEl.textContent = next ? '✅ Open / Policy-Only active' : '✅ Credentials Required active'; statusEl.style.color = 'var(--green)'; }
+    renderDefaultAuthUI(outcome);
+    toast('Default authentication updated', 'success');
+    if (statusEl) { statusEl.textContent = '✅ ' + (DEFAULT_AUTH_LABELS[outcome] || DEFAULT_AUTH_LABELS.Default) + ' active'; statusEl.style.color = 'var(--green)'; }
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
@@ -6668,7 +6772,7 @@ async function loadSettings() {
   try {
     const s = await api('/api/settings');
     document.getElementById('s-user').value = s.user || '';
-    renderUnauthModeUI(!!s.unauthMode);
+    renderDefaultAuthUI(s.defaultAuthOutcome || 'Default');
   } catch(e) { console.error(e); }
   // Session timeout
   try {
@@ -6718,6 +6822,7 @@ async function loadSettings() {
     document.getElementById('s-base-url').value = n.base_url || '';
     document.getElementById('s-ui-sans').value = (n.ui_sans || []).join(', ');
     document.getElementById('s-trust-fwd').checked = !!n.trust_forwarded_headers;
+    document.getElementById('s-trusted-proxies').value = (n.trusted_proxy_cidrs || []).join(', ');
   } catch(e) { console.error(e); }
 }
 
@@ -7229,12 +7334,14 @@ async function saveNetworkTLS() {
   const baseURL = document.getElementById('s-base-url').value.trim();
   const sansRaw = document.getElementById('s-ui-sans').value.trim();
   const trustFwd = document.getElementById('s-trust-fwd').checked;
+  const proxiesRaw = document.getElementById('s-trusted-proxies').value.trim();
   const uiSans = sansRaw ? sansRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const trustedProxies = proxiesRaw ? proxiesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
   try {
     await api('/api/settings/network', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd })
+      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd, trusted_proxy_cidrs: trustedProxies })
     });
     const el = document.getElementById('s-network-status');
     el.textContent = 'Saved. TLS SAN changes require restart.';
@@ -8265,7 +8372,12 @@ function renderPolicy() {
     return;
   }
   const tbody = document.getElementById('pol-table');
-  const total = polRules.length;
+  // Stage-1 auth rules (ruleType:"auth") are managed in the Auth Policy panel
+  // via /api/authpolicy. They share the unified policy store (and its priority
+  // namespace) with Stage-2 access rules, but must never appear in this
+  // access-rules table — filter them out of the view.
+  const accessRules = polRules.filter(r => r.ruleType !== 'auth');
+  const total = accessRules.length;
   updateDefaultActionBadge();
   if (!total) {
     document.getElementById('pol-count').textContent = '0 rules';
@@ -8275,7 +8387,7 @@ function renderPolicy() {
 
   // F20: client-side search + action filter
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
-  const filtered = polRules.filter(r => {
+  const filtered = accessRules.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
@@ -9122,7 +9234,7 @@ function onGroupFocus() {
   const pid = document.getElementById('pol-src-provider').value;
   if (!pid) {
     const dd = document.getElementById('pol-src-group-dropdown');
-    dd.innerHTML = '<div class="picker-empty">Select an Auth Provider first</div>';
+    dd.innerHTML = '<div class="picker-empty">Select a Group Provider Filter first</div>';
     dd.style.display = '';
     return;
   }
@@ -9274,8 +9386,12 @@ async function runPolicyTest() {
     const exempt = a.outcome === 'Exempt';
     const credReq = a.outcome === 'CredentialRequired';
     const sso = a.outcome === 'SSORequired';
+    const scopedExempt = exempt && !!a.rule;       // explicit Exempt rule → authSource=exempt
+    const defaultExempt = exempt && !a.rule;       // global default Open → authSource=unauth
     let badge;
-    if (exempt) {
+    if (defaultExempt) {
+      badge = '<span style="background:rgba(34,197,94,.15);color:#34d399;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🌐 Open unmatched (default)</span>';
+    } else if (exempt) {
       badge = '<span style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🪪 Exempt</span>';
     } else if (credReq) {
       badge = '<span style="background:rgba(96,165,250,.15);color:#60a5fa;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600">🔐 CredentialRequired</span>';
@@ -9298,13 +9414,15 @@ async function runPolicyTest() {
     }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
-      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''}</div>` : ''}
+      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''} <span style="color:var(--muted)">(scoped rules evaluate first)</span></div>` : `<div class="pt-sub" style="color:var(--muted)">No scoped auth rule matched — the global default applies (Default authentication: <strong>${escHtml(a.defaultAuthOutcome || 'Default')}</strong>).</div>`}
       ${runtimeLine}
-      ${exempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Exempt skips authentication only — it does NOT allow traffic. The Stage-2 access decision below still applies (Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}").</div>` : ''}
+      ${scopedExempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Scoped Exempt rule — skips authentication only; it does NOT allow traffic. Stage-2 still applies and sees authSource="${escHtml(a.stage2AuthSource)}".</div>` : ''}
+      ${defaultExempt ? `<div class="pt-sub" style="color:#34d399;margin-top:4px">Open unmatched traffic (defaultAuthOutcome=Exempt) — admitted without authentication because no rule matched. This is NOT Allow: Stage-2 policy and default-deny still apply, and Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}" (no identity).</div>` : ''}
       ${credReq ? '<div class="pt-sub" style="color:#60a5fa;margin-top:4px">CredentialRequired returns a deterministic 407 credential challenge — the client must authenticate first. This is NOT Allow. At runtime Stage-2 is NOT evaluated until the client authenticates; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-authentication decision (with the authenticated identity) may differ.</div>' : ''}
       ${sso ? '<div class="pt-sub" style="color:#34d399;margin-top:4px">SSORequired requires an interactive browser SSO login first. A browser client is redirected (302) to the IdP; a non-browser or CONNECT client is failed closed (403). This is NOT Allow. Stage-2 is NOT evaluated until SSO completes and a session exists; the Stage-2 result shown below is computed with the UNAUTHENTICATED context for reference only, and the real post-SSO decision (with the authenticated identity) may differ.</div>' : ''}
       ${a.credentialsPresented ? '<div class="pt-sub" style="color:var(--muted);margin-top:4px">Credentials presented — at runtime, credentials always win and the Stage-1 outcome is not evaluated.</div>' : ''}
-      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — all exemptions are forced to Default (auth required). CredentialRequired and SSORequired are unaffected.</div>' : ''}
+      ${a.killSwitch ? '<div class="pt-sub" style="color:#ef4444;margin-top:4px">Kill switch engaged — exemptions (scoped Exempt and the Open default) are forced to Require authentication. CredentialRequired and SSORequired are unaffected.</div>' : ''}
+      <div class="pt-sub" style="margin-top:6px;color:${a.stage2Reached ? '#34d399' : 'var(--muted)'}">Stage-2: <strong>${a.stage2Reached ? 'reached at runtime' : 'NOT reached at runtime'}</strong>.${a.stage2Note ? ' ' + escHtml(a.stage2Note) : ''}</div>
     </div>`;
   }
 
@@ -9621,6 +9739,26 @@ async function loadReleases() {
   await loadReleaseCatalog();
   await loadReleaseCurrent();
   await loadReleaseStatus();
+}
+
+// releaseCatalogRefresh re-fetches the signed catalog from its configured origin
+// (admin POST /api/releases/catalog-refresh) and reloads the panel — so a release
+// published to the catalog URL after startup appears without restarting the proxy.
+async function releaseCatalogRefresh() {
+  try {
+    const r = await apiFetch('/api/releases/catalog-refresh', { method: 'POST' });
+    let payload = {};
+    try { payload = await r.json(); } catch (_) {}
+    if (r.ok) {
+      toast(payload.available ? 'Catalog refreshed from origin' : 'Refreshed — no catalog available', 'success');
+    } else {
+      toast('Refresh failed: ' + (payload.error || ('HTTP ' + r.status)), 'error');
+    }
+  } catch (err) {
+    toast('Refresh failed: ' + err.message, 'error');
+  }
+  await loadReleaseCatalog();
+  await loadReleaseCurrent();
 }
 
 async function loadReleaseCatalog() {
@@ -10710,13 +10848,14 @@ async function enableControlPlane() {
 async function enableHA() {
   const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
   if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
+  const autoFailover = document.getElementById('ha-auto-failover').checked;
   const btn = document.getElementById('ha-enable-btn');
   btn.disabled = true; btn.textContent = 'Enabling…';
   try {
     const r = await api('/api/cluster/ha', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ leader_addr: leaderAddr })
+      body: JSON.stringify({ leader_addr: leaderAddr, auto_failover: autoFailover })
     });
     if (!r) return;
     toast('HA enabled - this node is now the leader', 'success');
@@ -10725,6 +10864,22 @@ async function enableHA() {
     toast('Failed to enable HA: ' + e.message, 'error');
   } finally {
     btn.disabled = false; btn.textContent = 'Enable HA';
+  }
+}
+
+async function promoteHA() {
+  if (!confirm('Promote this standby to Leader?\n\nOnly do this if the current leader is truly down. Promoting while the leader is still serving will cause split-brain (two leaders, diverging state).')) return;
+  const btn = document.getElementById('ha-promote-btn');
+  btn.disabled = true; btn.textContent = 'Promoting…';
+  try {
+    const r = await api('/api/cluster/ha/promote', { method: 'POST' });
+    if (!r) return;
+    toast('This node is now the leader', 'success');
+    loadCluster();
+  } catch(e) {
+    toast('Promote failed: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Promote this node to Leader';
   }
 }
 
@@ -10744,6 +10899,24 @@ async function loadHA(isCP) {
       document.getElementById('ha-role-val').innerHTML = `<span style="color:${roleColor}">${escHtml(r.role)}</span>`;
       document.getElementById('ha-peer-val').textContent = r.peer_addr || '—';
       document.getElementById('ha-since-val').textContent = r.since ? timeAgo(new Date(r.since)) : '—';
+      document.getElementById('ha-failover-val').innerHTML = r.auto_failover
+        ? '<span style="color:#f59e0b">Automatic</span>'
+        : '<span style="color:#22c55e">Manual</span>';
+      document.getElementById('ha-term-val').textContent = (r.term != null) ? r.term : '—';
+      // Fencing-lease posture (ADR-0005): startup-scoped config, status-only here.
+      const leaseVal = document.getElementById('ha-lease-val');
+      const leaseNote = document.getElementById('ha-lease-note');
+      if (r.lease_mode === 'lease') {
+        leaseVal.innerHTML = r.lease_valid
+          ? `<span style="color:#22c55e">● held</span><br><span style="font-size:.65rem;color:var(--muted)">epoch ${escHtml(String(r.epoch))}</span>`
+          : '<span style="color:#ef4444">○ not held</span><br><span style="font-size:.65rem;color:var(--muted)">writes fenced</span>';
+        leaseNote.style.display = '';
+      } else {
+        leaseVal.innerHTML = '<span style="color:var(--muted)">none</span>';
+        leaseNote.style.display = 'none';
+      }
+      // Manual-failover button: only a standby can be promoted.
+      document.getElementById('ha-promote-row').style.display = (r.role === 'standby') ? '' : 'none';
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
       }

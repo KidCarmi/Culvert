@@ -112,7 +112,7 @@ func TestP3S3_Runtime_SSOWinsByPriority(t *testing.T) {
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validExemptRule(), "ex-2", 2))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeSSORequired {
 		t.Errorf("runtime: SSO@1 must win over Exempt@2 by priority; got %q", d.Outcome)
 	}
 
@@ -120,14 +120,14 @@ func TestP3S3_Runtime_SSOWinsByPriority(t *testing.T) {
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-1", 1))
 	policyStore.Add(mk(validCRRule(), "cr-2", 2))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeSSORequired {
 		t.Errorf("runtime: SSO@1 must win over CR@2 by priority; got %q", d.Outcome)
 	}
 
 	// SSO-only → runtime resolves SSORequired (runtime-active).
 	withFreshPolicyStore(t)
 	policyStore.Add(mk(validSSORule(), "sso-only", 1))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeSSORequired {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeSSORequired {
 		t.Errorf("runtime: SSO-only must resolve SSORequired (active); got %q", d.Outcome)
 	}
 }
@@ -138,19 +138,19 @@ func TestP3S3_Runtime_ExemptCRUnchanged(t *testing.T) {
 
 	withFreshPolicyStore(t)
 	policyStore.Add(scopeLocal(validExemptRule(), "ex", host))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeExempt {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeExempt {
 		t.Errorf("Exempt-only runtime must resolve Exempt; got %q", d.Outcome)
 	}
 
 	withFreshPolicyStore(t)
 	policyStore.Add(scopeLocal(validCRRule(), "cr", host))
-	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1"); d.Outcome != OutcomeCredentialRequired {
+	if d := resolveNoCredAuthOutcome(makeRequest("http://"+host+"/", nil), "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeCredentialRequired {
 		t.Errorf("CR-only runtime must resolve CredentialRequired; got %q", d.Outcome)
 	}
 
 	// Presented credentials → header guard returns Default (resolver not consulted).
 	r := makeRequest("http://"+host+"/", map[string]string{"Proxy-Authorization": "Basic Zm9vOmJhcg=="})
-	if d := resolveNoCredAuthOutcome(r, "127.0.0.1"); d.Outcome != OutcomeDefault {
+	if d := resolveNoCredAuthOutcome(r, "127.0.0.1", OutcomeDefault); d.Outcome != OutcomeDefault {
 		t.Errorf("presented credentials must short-circuit to Default; got %q", d.Outcome)
 	}
 }

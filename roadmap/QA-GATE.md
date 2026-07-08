@@ -1,5 +1,14 @@
 # QA Gate — hard-blocking pipeline gate
 
+> **STATUS (2026-07-03): PR-time enforcement is superseded by the Fast/Deep
+> PR Gates** (`pr-fast-gate.yml` / `pr-deep-gate.yml` — see
+> `roadmap/CI-REDESIGN.md`, retirement step 5). On PRs this workflow's jobs
+> skip and `qa-gate-approved` reports pass-through success; the gate runs
+> fully on main pushes. Branch protection should require the Fast/Deep gate
+> aggregates, NOT `qa-gate-approved`. Sections below describe the original
+> (main-push) behavior; job counts and required-check instructions predate
+> the lane redesign.
+
 This document describes the QA-as-hard-gate enforcement introduced on branch
 `claude/enforce-qa-pipeline-gate-WHnKi`. It pairs with the workflow at
 `.github/workflows/qa-gate.yml` and the tests at `qa_gate_test.go`.

@@ -117,9 +117,140 @@ func (s *socks5Server) serve() {
 	}
 }
 
+// errSOCKS5ATYPUnsupported is returned by parseSOCKS5Request for an unknown
+// address type. It is the ONLY parse error the caller answers with a reply
+// (0x08, "address type not supported"), reproducing the prior inline behavior;
+// every other parse failure (bad version, short read) returns a distinct error
+// and the caller closes silently.
+var errSOCKS5ATYPUnsupported = errors.New("socks5: unsupported address type")
+
+// parseSOCKS5Request reads a SOCKS5 request — VER(1) CMD(1) RSV(1) ATYP(1),
+// the ATYP-typed destination address, and the 2-byte big-endian port — from r.
+// It is a pure wire parser: it performs NO writes, dials, logging, or policy
+// checks; the caller owns every reply and side effect. Host formatting matches
+// the wire: IPv4/IPv6 via net.IP.String() (IPv6 bracketed), domain as the raw
+// string. A zero-length domain is accepted (host == "", err == nil), exactly as
+// the prior inline parser did — it is rejected later by the SSRF guard, not here.
+// The returned cmd is NOT validated (the caller enforces CONNECT-only) so the
+// full address+port frame is consumed first, preserving the original read order.
+func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, err error) {
+	req := make([]byte, 4)
+	if _, err = io.ReadFull(r, req); err != nil {
+		return 0, "", 0, err
+	}
+	if req[0] != 0x05 {
+		return 0, "", 0, fmt.Errorf("socks5: bad request version 0x%02x", req[0])
+	}
+	cmd = req[1]
+
+	switch req[3] { // ATYP
+	case 0x01: // IPv4
+		b := make([]byte, 4)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return 0, "", 0, err
+		}
+		host = net.IP(b).String()
+	case 0x03: // Domain
+		lenBuf := make([]byte, 1)
+		if _, err = io.ReadFull(r, lenBuf); err != nil {
+			return 0, "", 0, err
+		}
+		domain := make([]byte, lenBuf[0])
+		if _, err = io.ReadFull(r, domain); err != nil {
+			return 0, "", 0, err
+		}
+		host = string(domain)
+	case 0x04: // IPv6
+		b := make([]byte, 16)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return 0, "", 0, err
+		}
+		host = "[" + net.IP(b).String() + "]"
+	default:
+		return 0, "", 0, errSOCKS5ATYPUnsupported
+	}
+
+	portBuf := make([]byte, 2)
+	if _, err = io.ReadFull(r, portBuf); err != nil {
+		return 0, "", 0, err
+	}
+	return cmd, host, binary.BigEndian.Uint16(portBuf), nil
+}
+
+// socks5Negotiate performs the SOCKS5 greeting (VER NMETHODS METHODS) and, when
+// auth is enabled, the RFC 1929 username/password sub-negotiation, writing the
+// method-selection and auth-status replies. It returns true iff the client
+// authenticated (or auth is disabled) and may proceed to the request phase.
+// Every failure path (bad greeting, no acceptable method, short read, auth
+// failure) is fully handled here — reply + stats + audit — and returns false so
+// the caller simply closes the connection. Extracted from handleSOCKS5 to keep
+// that function's cognitive complexity under the linter threshold; behavior is a
+// strict relocation of the prior inline greeting/auth block.
+func socks5Negotiate(conn net.Conn, clientIP string) bool {
+	// Greeting: VER(1) NMETHODS(1) METHODS(N)
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
+		return false
+	}
+	methods := make([]byte, hdr[1])
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return false
+	}
+
+	if !cfg.AuthEnabled() {
+		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck // best-effort no-auth method selection; a write error surfaces on the next read
+		return true
+	}
+
+	// Auth required: the client must offer USER/PASS (0x02).
+	hasUserPass := false
+	for _, m := range methods {
+		if m == 0x02 {
+			hasUserPass = true
+			break
+		}
+	}
+	if !hasUserPass {
+		conn.Write([]byte{0x05, 0xFF}) //nolint:errcheck // best-effort "no acceptable method" reply before close
+		return false
+	}
+	conn.Write([]byte{0x05, 0x02}) //nolint:errcheck // best-effort USER/PASS method selection; error surfaces on the next read
+
+	// RFC 1929 sub-negotiation: VER(1) ULEN(1) UNAME PLEN(1) PASSWD
+	subHdr := make([]byte, 2)
+	if _, err := io.ReadFull(conn, subHdr); err != nil {
+		return false
+	}
+	uname := make([]byte, subHdr[1])
+	if _, err := io.ReadFull(conn, uname); err != nil {
+		return false
+	}
+	plenBuf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, plenBuf); err != nil {
+		return false
+	}
+	passwd := make([]byte, plenBuf[0])
+	if _, err := io.ReadFull(conn, passwd); err != nil {
+		return false
+	}
+	authOK := cfg.VerifyAuth(string(uname), string(passwd))
+	// B5: Zero credentials from memory immediately after auth check.
+	clear(uname)
+	clear(passwd)
+	if !authOK {
+		conn.Write([]byte{0x01, 0x01}) //nolint:errcheck // best-effort auth-failure reply before close
+		atomic.AddInt64(&statAuthFail, 1)
+		recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
+		logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
+		return false
+	}
+	conn.Write([]byte{0x01, 0x00}) //nolint:errcheck // best-effort auth-success reply; error surfaces on the next read
+	return true
+}
+
 func handleSOCKS5(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
+	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -135,109 +266,37 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
-	// ── Greeting: VER(1) NMETHODS(1) METHODS(N) ─────────────────────────────
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
-		return
-	}
-	methods := make([]byte, hdr[1])
-	if _, err := io.ReadFull(conn, methods); err != nil {
+	// ── Greeting + auth negotiation ─────────────────────────────────────────
+	if !socks5Negotiate(conn, clientIP) {
 		return
 	}
 
-	// ── Auth negotiation ─────────────────────────────────────────────────────
-	if cfg.AuthEnabled() {
-		hasUserPass := false
-		for _, m := range methods {
-			if m == 0x02 {
-				hasUserPass = true
-				break
-			}
+	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) + address + port ──────────────
+	cmd, host, port, err := parseSOCKS5Request(conn)
+	if err != nil {
+		// Only the unsupported-ATYP case emits a reply before closing, exactly
+		// as the prior inline parser did; every other parse failure (bad VER,
+		// short read) closes silently.
+		if errors.Is(err, errSOCKS5ATYPUnsupported) {
+			socks5Reply(conn, 0x08) // address type not supported
 		}
-		if !hasUserPass {
-			conn.Write([]byte{0x05, 0xFF}) //nolint:errcheck
-			return
-		}
-		conn.Write([]byte{0x05, 0x02}) //nolint:errcheck
-
-		// RFC 1929 sub-negotiation
-		subHdr := make([]byte, 2)
-		if _, err := io.ReadFull(conn, subHdr); err != nil {
-			return
-		}
-		uname := make([]byte, subHdr[1])
-		if _, err := io.ReadFull(conn, uname); err != nil {
-			return
-		}
-		plenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(conn, plenBuf); err != nil {
-			return
-		}
-		passwd := make([]byte, plenBuf[0])
-		if _, err := io.ReadFull(conn, passwd); err != nil {
-			return
-		}
-		authOK := cfg.VerifyAuth(string(uname), string(passwd))
-		// B5: Zero credentials from memory immediately after auth check.
-		clear(uname)
-		clear(passwd)
-		if !authOK {
-			conn.Write([]byte{0x01, 0x01}) //nolint:errcheck
-			atomic.AddInt64(&statAuthFail, 1)
-			recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
-			logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
-			return
-		}
-		conn.Write([]byte{0x01, 0x00}) //nolint:errcheck
-	} else {
-		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck
-	}
-
-	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) ───────────────────────────────
-	req := make([]byte, 4)
-	if _, err := io.ReadFull(conn, req); err != nil || req[0] != 0x05 {
 		return
 	}
-	cmd, atyp := req[1], req[3]
-
-	var host string
-	switch atyp {
-	case 0x01: // IPv4
-		b := make([]byte, 4)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return
-		}
-		host = net.IP(b).String()
-	case 0x03: // Domain
-		lenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(conn, lenBuf); err != nil {
-			return
-		}
-		domain := make([]byte, lenBuf[0])
-		if _, err := io.ReadFull(conn, domain); err != nil {
-			return
-		}
-		host = string(domain)
-	case 0x04: // IPv6
-		b := make([]byte, 16)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return
-		}
-		host = "[" + net.IP(b).String() + "]"
-	default:
-		socks5Reply(conn, 0x08) // address type not supported
-		return
-	}
-
-	portBuf := make([]byte, 2)
-	if _, err := io.ReadFull(conn, portBuf); err != nil {
-		return
-	}
-	port := binary.BigEndian.Uint16(portBuf)
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
 	if cmd != 0x01 { // only CONNECT supported
 		socks5Reply(conn, 0x07)
+		return
+	}
+
+	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
+	// Mirror of the handleRequest gate: a destination that cannot be
+	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
+	if _, ok := normalizeHostStrict(host); !ok {
+		atomic.AddInt64(&statBlocked, 1)
+		socks5Reply(conn, 0x02)
+		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
+		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
 		return
 	}
 
@@ -284,19 +343,40 @@ func handleSOCKS5(conn net.Conn) {
 	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
 	logger.Printf("SOCKS5 OK %s -> %s", clientIP, target)
 
+	socks5Relay(conn, destConn, clientIP, host)
+}
+
+// socks5Relay bidirectionally copies between the client and destination conns,
+// waiting for BOTH directions to finish. Closing the write half of each side
+// (CloseWrite) unblocks the peer's io.Copy so the second direction returns —
+// the same relay contract as the CONNECT/WebSocket tunnels (CLAUDE.md relay
+// pattern). On teardown it records the per-connection tunnel-close accounting
+// entry (byte counts + lifetime); log-only — the OK request-log entry already
+// ran the stats fan-out for this connection.
+func socks5Relay(client, dest net.Conn, clientIP, host string) {
+	start := time.Now()
+	// Byte counts: each direction is written by exactly one goroutine before
+	// its done-send and read only after both receives (channel happens-before).
+	var toDest, toClient int64
 	done := make(chan struct{}, 2)
-	relay := func(dst, src net.Conn) { io.Copy(dst, src); done <- struct{}{} } //nolint:errcheck
-	go relay(destConn, conn)
-	go relay(conn, destConn)
+	relay := func(dst, src net.Conn, count *int64) {
+		n, _ := io.Copy(dst, src) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
+		*count = n
+		done <- struct{}{}
+	}
+	go relay(dest, client, &toDest)
+	go relay(client, dest, &toClient)
 	<-done
 	// Unblock the peer goroutine by closing write halves so io.Copy returns.
-	if tc, ok := destConn.(interface{ CloseWrite() error }); ok {
+	if tc, ok := dest.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck
 	}
-	if tc, ok := conn.(interface{ CloseWrite() error }); ok {
+	if tc, ok := client.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck
 	}
 	<-done
+
+	recordTunnelClose(clientIP, "SOCKS5", host, "", "", toDest, toClient, start, "")
 }
 
 // socks5Reply sends a minimal SOCKS5 reply (IPv4 bind address 0.0.0.0:0).

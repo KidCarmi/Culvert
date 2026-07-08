@@ -516,76 +516,8 @@ func TestPolicyStore_Evaluate_FQDNMatch(t *testing.T) {
 
 // ─── SSLBypassMatcher ─────────────────────────────────────────────────────────
 
-func TestSSLBypassMatcher_GlobMatches(t *testing.T) {
-	m := &SSLBypassMatcher{}
-	_ = m.Add("*.corp.local")
-	_ = m.Add("exact.example.com")
-
-	cases := []struct {
-		host string
-		want bool
-	}{
-		{"app.corp.local", true},
-		{"corp.local", true}, // apex
-		{"other.example.com", false},
-		{"exact.example.com", true},
-		{"sub.exact.example.com", true}, // matchFQDN: bare domain also matches subdomains (Palo Alto style)
-		{"unrelated.com", false},
-	}
-	for _, c := range cases {
-		got := m.Matches(c.host)
-		if got != c.want {
-			t.Errorf("Matches(%q) = %v, want %v", c.host, got, c.want)
-		}
-	}
-}
-
-func TestSSLBypassMatcher_RegexMatches(t *testing.T) {
-	m := &SSLBypassMatcher{}
-	if err := m.Add(`~^.*\.gov\.il$`); err != nil {
-		t.Fatalf("Add regex: %v", err)
-	}
-
-	cases := []struct {
-		host string
-		want bool
-	}{
-		{"gov.il", false}, // doesn't have a subdomain prefix
-		{"tax.gov.il", true},
-		{"deep.sub.gov.il", true},
-		{"evil-gov.il", false},
-	}
-	for _, c := range cases {
-		got := m.Matches(c.host)
-		if got != c.want {
-			t.Errorf("Matches(%q) = %v, want %v", c.host, got, c.want)
-		}
-	}
-}
-
-func TestSSLBypassMatcher_Set(t *testing.T) {
-	m := &SSLBypassMatcher{}
-	_ = m.Add("old.com")
-
-	if err := m.Set([]string{"new1.com", "new2.com"}); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	list := m.List()
-	if len(list) != 2 || list[0] != "new1.com" || list[1] != "new2.com" {
-		t.Errorf("unexpected list after Set: %v", list)
-	}
-}
-
-func TestSSLBypassMatcher_LoadInvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bad.json")
-	_ = os.WriteFile(path, []byte("bad json"), 0o600)
-
-	m := &SSLBypassMatcher{}
-	if err := m.Load(path); err == nil {
-		t.Error("expected error for invalid JSON")
-	}
-}
+// The SSLBypassMatcher engine tests (glob/regex/Set/LoadInvalidJSON) moved to
+// internal/sslbypass (ADR-0002, policy.go decomposition Phase B).
 
 // ─── PolicyStore.Save — HitCount not persisted ────────────────────────────────
 
@@ -817,6 +749,31 @@ func TestReorder_DuplicatePriorities(t *testing.T) {
 	ok2 := ps2.Reorder([]int{1, 999})
 	if ok2 {
 		t.Error("Reorder with non-existent priority should return false")
+	}
+}
+
+func TestPermutePriorities_DuplicatePriorityInStore(t *testing.T) {
+	// Duplicate priorities can enter the store via ReplaceAll (e.g. config import).
+	// PermutePriorities must return false rather than silently reassigning only the
+	// last rule that shares the ambiguous priority slot.
+	ps := newTestPolicyStore()
+	ps.ReplaceAll([]PolicyRule{
+		{Priority: 5, Name: "dup-a", Action: ActionAllow},
+		{Priority: 5, Name: "dup-b", Action: ActionAllow},
+		{Priority: 10, Name: "single", Action: ActionDrop},
+	})
+
+	// Swapping priorities 5 and 10 is ambiguous because two rules share priority 5.
+	ok := ps.PermutePriorities([]int{10, 5})
+	if ok {
+		t.Errorf("PermutePriorities should return false when store has duplicate priority; got true; store: %v", ps.List())
+	}
+	// The store must be unchanged on failure.
+	rules := ps.List()
+	for _, r := range rules {
+		if r.Name == "single" && r.Priority != 10 {
+			t.Errorf("store mutated despite failure: 'single' priority = %d, want 10", r.Priority)
+		}
 	}
 }
 

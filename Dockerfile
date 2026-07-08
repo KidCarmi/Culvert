@@ -1,5 +1,5 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 RUN apk add --no-cache git
@@ -17,7 +17,19 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
     fi && \
     : "${VERSION:=dev}" && \
     echo "$VERSION" > /app/VERSION && \
-    go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o culvert .
+# No `go mod tidy` here — the image must build from the EXACT reviewed module
+# graph (go.mod/go.sum COPYed + `go mod download`ed above), not re-resolve deps
+# at build time (a divergent-recipe supply-chain smell). Tidiness is enforced in
+# CI (Fast Gate `go mod tidy -diff`). `-trimpath` strips build-path prefixes and
+# `-buildvcs=false` drops the VCS stamp — together they make the image binary
+# byte-reproducible. -buildvcs=false is REQUIRED, not cosmetic: `.git` is in the
+# build context (the `git describe` above needs it) while `.dockerignore` strips
+# tracked files (*_test.go, *.md, …), so the in-container `git status` sees those
+# as deleted → the default `auto` would stamp vcs.modified=true and make the
+# binary depend on which files the build context happened to include. VERSION is
+# still stamped explicitly via the -X ldflag above (independent of buildvcs), so
+# the git-describe/--build-arg version path is unaffected.
 
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
@@ -27,7 +39,7 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # If the download fails (db-ip.com blocks some cloud/CI IPs), the build
 # continues without GeoIP — country-based policy rules will be silently
 # skipped until a valid .mmdb is mounted at runtime.
-FROM alpine:3.22 AS geoip
+FROM alpine:3.24 AS geoip
 RUN apk add --no-cache wget && \
     (wget -qO- "https://download.db-ip.com/free/dbip-country-lite-$(date +%Y-%m).mmdb.gz" \
       | gzip -d > /GeoLite2-Country.mmdb 2>/dev/null && \
@@ -44,12 +56,17 @@ RUN apk add --no-cache wget && \
 #       (see deploy/seccomp.json)
 #   • Drop all Linux capabilities: --cap-drop=ALL
 #   • No new privileges: --security-opt no-new-privileges
-FROM alpine:3.22
+FROM alpine:3.24
 
+# /data and /backup are pre-created + chowned to proxy so that a FRESH named
+# volume mounted over them (proxy-data:/data, culvert-backups:/backup) inherits
+# proxy ownership — otherwise Docker creates the volume mountpoint root-owned and
+# the non-root `cli` user (same image) gets "permission denied" writing the first
+# backup to /backup. /backup is only used by the profile-gated `cli` service.
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tzdata && \
     addgroup -S proxy && adduser -S proxy -G proxy && \
-    mkdir -p /data && chown proxy:proxy /data
+    mkdir -p /data /backup && chown proxy:proxy /data /backup
 
 # Switch to non-root user before COPY so all assets are owned by proxy from
 # the start — no extra chown layer needed after the binary is written.

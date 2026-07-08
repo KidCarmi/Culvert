@@ -95,9 +95,13 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 		return
 	}
 
+	// Same self-heal preflight as apply: a rollback also recreates the proxy via
+	// ComposeUp, so without a compose override the socket wiring is dropped.
+	// Record-only (never blocks); surfaced to the CP/GUI via op params.
 	params := map[string]interface{}{
-		"mode":      "image",
-		"image_ref": req.ImageRef,
+		"mode":                        "image",
+		"image_ref":                   req.ImageRef,
+		"compose_override_configured": s.opts.Cfg.ComposeOverrideFile != "",
 	}
 	targetRef := req.ImageRef
 

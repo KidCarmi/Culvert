@@ -8,6 +8,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/feedsync"
+
+	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // snapshotFeedGlobals saves and restores the package globals the UC-6 metrics
@@ -83,10 +87,11 @@ func TestURLCatMetrics_PopulatedRendersValues(t *testing.T) {
 	saasTime := time.Unix(1_700_000_500, 0)
 
 	ut1 := newFeedSyncer(nil, "x", time.Hour)
-	ut1.lastSync.Store(ut1Time)
-	ut1.totalDomains.Store(42)
+	ut1.SeedStats(ut1Time, 42)
 	globalUT1FeedSyncer = ut1
-	globalSaaSFeed = &SaaSFeedSyncer{lastSync: saasTime, lastCount: 7}
+	saas := saasfeed.New(saasfeed.Deps{})
+	saas.SeedStats(saasTime, 7)
+	globalSaaSFeed = saas
 
 	body := scrapeMetrics(t)
 	for _, want := range []string{
@@ -104,21 +109,22 @@ func TestURLCatMetrics_PopulatedRendersValues(t *testing.T) {
 // 4a. UT1 failure counter increments on a deterministic, network-free sync
 // failure: an invalid URL (control char) fails at request build, before any dial.
 func TestURLCatMetrics_UT1FailureCounterIncrements(t *testing.T) {
-	before := statCategoryFeedSyncFailures.Load()
+	before := feedsync.SyncFailures()
 	fs := newFeedSyncer(nil, "\x7f", time.Hour) // DEL control char → url.Parse rejects
 	fs.Sync()
-	if got := statCategoryFeedSyncFailures.Load(); got != before+1 {
-		t.Errorf("statCategoryFeedSyncFailures = %d, want %d", got, before+1)
+	if got := feedsync.SyncFailures(); got != before+1 {
+		t.Errorf("feedsync.SyncFailures = %d, want %d", got, before+1)
 	}
 }
 
 // 4b. SaaS failure counter increments on a deterministic, network-free sync
-// failure: a URL that fails the validSaaSFeedURL guard returns before any fetch.
+// failure: a URL that fails the saasfeed URL guard returns before any fetch.
 func TestURLCatMetrics_SaaSFailureCounterIncrements(t *testing.T) {
-	before := statSaaSFeedSyncFailures.Load()
-	s := &SaaSFeedSyncer{feedURL: "not-a-valid-url"} // fails validSaaSFeedURL regex
+	before := saasfeed.SyncFailures()
+	s := saasfeed.New(saasfeed.Deps{})
+	s.SetFeedURLForTest("not-a-valid-url") // fails the package's URL guard
 	s.Sync(context.Background())
-	if got := statSaaSFeedSyncFailures.Load(); got != before+1 {
-		t.Errorf("statSaaSFeedSyncFailures = %d, want %d", got, before+1)
+	if got := saasfeed.SyncFailures(); got != before+1 {
+		t.Errorf("saasfeed.SyncFailures = %d, want %d", got, before+1)
 	}
 }

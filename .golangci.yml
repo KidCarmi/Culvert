@@ -61,8 +61,9 @@ linters:
         - G104  # unhandled errors on stream copies
         - G302  # log file permissions
         - G304  # file path from variable (acceptable for blocklist loading)
-        - G401  # MD5/SHA1 misidentification
-        - G402  # TLSSkipVerify — config-guarded
+        # G401 (weak crypto) + G402 (InsecureSkipVerify) are ENFORCED — the few
+        # legit config-gated sites carry an at-site `// #nosec G402` (honored by
+        # both golangci and standalone gosec); new ungated ones fail the gate.
         - G704  # SSRF — forward proxy design
 
     cyclop:
@@ -97,25 +98,32 @@ linters:
             - "checkPrivateReceivers"
             - "sayRepetitiveInsteadOfStutters"
 
+  # Exclusions (golangci-lint v2 location). NOTE: these previously lived under
+  # `issues.exclude-rules` / `issues.exclude-dirs` / `issues.exclude-files`,
+  # which are v1 keys that v2 silently ignores — so the test-file exemptions
+  # below were dead for the whole repo and _test.go files were being held to the
+  # full bar (errcheck/funlen/cyclop/unparam/dupl). Moved here so v2 honors them.
+  exclusions:
+    generated: lax
+    # Skip generated / vendored files.
+    paths:
+      - vendor
+      - ".*_generated\\.go$"
+    rules:
+      # Test files are held to a looser bar than production code.
+      - path: "_test\\.go$"
+        linters:
+          - funlen      # test functions can be long
+          - dupl        # test cases often look similar
+          - cyclop      # table-driven tests have high complexity
+          - errcheck    # defer Close() and cleanup errors in tests are non-critical
+          - unparam     # t *testing.T is required by Go even if not used in body
+      # Allow TODO/FIXME in comments — tracked via issues.
+      - linters: [godox]
+        text: "TODO|FIXME"
+
 issues:
-  # Skip generated / vendored files.
-  exclude-dirs:
-    - vendor
-  exclude-files:
-    - ".*_generated\\.go$"
   # Allow up to 3 issues of the same type before suppressing.
   max-same-issues: 3
-  # Don't exclude issues in test files.
-  exclude-rules:
-    - path: "_test\\.go$"
-      linters:
-        - funlen      # test functions can be long
-        - dupl        # test cases often look similar
-        - cyclop      # table-driven tests have high complexity
-        - errcheck    # defer Close() and cleanup errors in tests are non-critical
-        - unparam     # t *testing.T is required by Go even if not used in body
-    # Allow TODO/FIXME in comments — tracked via issues.
-    - linters: [godox]
-      text: "TODO|FIXME"
   # Show all issues, not just new ones on the diff.
   new: false

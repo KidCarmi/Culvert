@@ -33,6 +33,7 @@ type FileConfig struct {
 		URLCategoriesFile     string   `yaml:"url_categories_file"`     // JSON file for dynamic URL categories (host lists per category)
 		BaseURL               string   `yaml:"base_url"`                // External base URL for OIDC/SAML callbacks (e.g. "https://proxy.corp.com:9090")
 		TrustForwardedHeaders bool     `yaml:"trust_forwarded_headers"` // Trust X-Forwarded-* headers (enable when behind reverse proxy)
+		TrustedProxyCIDRs     []string `yaml:"trusted_proxy_cidrs"`     // IPs/CIDRs of reverse proxies whose X-Forwarded-For is trusted for admin-UI client-IP (RISK-019); empty = never trust XFF
 		BlocklistFeedURL      string   `yaml:"blocklist_feed_url"`      // URL to auto-sync blocklist from (one domain per line)
 		BlocklistFeedInterval string   `yaml:"blocklist_feed_interval"` // sync interval (e.g. "24h"); default 24h
 		FileProfilesFile      string   `yaml:"fileprofiles_file"`       // JSON file for dynamic file extension profiles
@@ -157,6 +158,17 @@ type FileConfig struct {
 		// HA is configured at runtime from the admin GUI (Enable HA button) or
 		// via --ha-join/--ha-token flags on the standby. No shared filesystem needed —
 		// state is replicated over the existing mTLS gRPC channel.
+
+		// ADR-0005 S5: the etcd fencing lease for SAFE automatic failover.
+		// When etcd_endpoints is set, every path to HA leadership is
+		// arbitrated by a lease in etcd (epoch-fenced write sinks, automatic
+		// standby promotion on leader loss, self-fence on lease loss). Unset
+		// = legacy manual-failover mode (ADR-0004). Read once at startup.
+		EtcdEndpoints   string `yaml:"etcd_endpoints"`    // comma-separated (e.g. "https://etcd1:2379,https://etcd2:2379")
+		EtcdCert        string `yaml:"etcd_cert_file"`    // client cert for etcd mTLS (optional)
+		EtcdKey         string `yaml:"etcd_key_file"`     // client key for etcd mTLS (optional)
+		EtcdCA          string `yaml:"etcd_ca_file"`      // CA cert for etcd server validation (optional)
+		LeaseTTLSeconds int    `yaml:"lease_ttl_seconds"` // fencing lease TTL (default 10, minimum 3; failover latency ≈ TTL)
 	} `yaml:"cluster"`
 
 	// SecurityScan configures the local security scanning stack:

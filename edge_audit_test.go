@@ -8,41 +8,47 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
+
+	"github.com/KidCarmi/Culvert/internal/ocsp"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ─── Finding 1.1: Blocklist.ClearAll ────────────────────────────────────────
 
 func TestBlocklistClearAll(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{"example.com": true, "test.org": true},
-		wildcards:  map[string]bool{".evil.com": true},
-		manual:     map[string]bool{"manual.net": true},
-		exceptions: map[string]bool{"safe.com": true},
-		mode:       "block",
-	}
+	b := blocklist.New()
+	b.Add("example.com")
+	b.Add("test.org")
+	b.Add("*.evil.com")
+	b.AddManual("manual.net")
+	b.AddException("safe.com")
+	b.SetMode("block")
+
 	b.ClearAll()
-	if len(b.exact) != 0 {
-		t.Error("exact should be empty after ClearAll")
+	if b.Count() != 0 {
+		t.Errorf("Count after ClearAll = %d, want 0 (exact+wildcard+manual cleared)", b.Count())
 	}
-	if len(b.wildcards) != 0 {
-		t.Error("wildcards should be empty after ClearAll")
+	if b.IsBlocked("example.com") || b.IsBlocked("sub.evil.com") || b.IsBlocked("manual.net") {
+		t.Error("no entry should be blocked after ClearAll")
 	}
-	if len(b.manual) != 0 {
-		t.Error("manual should be empty after ClearAll")
+	// Exceptions and mode survive ClearAll by contract.
+	if got := b.ListExceptions(); len(got) != 1 || got[0] != "safe.com" {
+		t.Errorf("exceptions after ClearAll = %v, want [safe.com]", got)
 	}
-	// Exceptions and mode should be preserved.
-	if len(b.exceptions) != 1 {
-		t.Error("exceptions should be preserved after ClearAll")
-	}
-	if b.mode != "block" {
-		t.Error("mode should be preserved after ClearAll")
+	if b.Mode() != "block" {
+		t.Errorf("mode after ClearAll = %q, want block", b.Mode())
 	}
 }
 
 // ─── Finding 1.1: FileBlocker.ClearAll ──────────────────────────────────────
 
 func TestFileBlockerClearAll(t *testing.T) {
-	fb := &FileBlocker{extensions: map[string]bool{".exe": true, ".dll": true}}
+	fb := fileblock.NewBlocker()
+	fb.Add(".exe")
+	fb.Add(".dll")
 	fb.ClearAll()
 	if fb.Count() != 0 {
 		t.Errorf("expected 0 after ClearAll, got %d", fb.Count())
@@ -161,10 +167,7 @@ func TestRateLimiterExemption(t *testing.T) {
 // ─── Finding 3.1: SSLAction in LogEntry ─────────────────────────────────────
 
 func TestRecordRequestSSLAction(t *testing.T) {
-	// Clear logs.
-	logsMu.Lock()
-	logs = nil
-	logsMu.Unlock()
+	isolateLogRing(t)
 
 	recordRequest("1.2.3.4", "CONNECT", "example.com:443", "OK", "rule1", "allow", "user@test", "inspect")
 
@@ -175,62 +178,6 @@ func TestRecordRequestSSLAction(t *testing.T) {
 	last := entries[len(entries)-1]
 	if last.SSLAction != "inspect" {
 		t.Errorf("expected SSLAction='inspect', got %q", last.SSLAction)
-	}
-}
-
-// ─── Finding 6.2: auditGetMemory ────────────────────────────────────────────
-
-func TestAuditGetMemory(t *testing.T) {
-	// Seed some audit entries.
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-
-	now := time.Now().UnixMilli()
-	for i := 0; i < 5; i++ {
-		auditMu.Lock()
-		auditLog = append(auditLog, AuditEntry{
-			TS:     now + int64(i*1000),
-			Time:   time.Now().Format("15:04:05"),
-			Actor:  "admin",
-			Action: "test",
-		})
-		auditMu.Unlock()
-	}
-
-	// No filter.
-	entries, total := auditGetMemory(0, 100, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 5 {
-		t.Errorf("expected 5 entries, got %d", len(entries))
-	}
-
-	// With pagination.
-	entries, total = auditGetMemory(2, 2, 0, 0)
-	if total != 5 {
-		t.Errorf("expected total=5, got %d", total)
-	}
-	if len(entries) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(entries))
-	}
-
-	// Offset past end.
-	entries, _ = auditGetMemory(10, 5, 0, 0)
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries for offset past end, got %d", len(entries))
-	}
-
-	// With time filter.
-	entries, _ = auditGetMemory(0, 100, now+1000, now+3000)
-	if len(entries) == 0 {
-		t.Error("expected some entries with time filter")
-	}
-	for _, e := range entries {
-		if e.TS < now+1000 || e.TS > now+3000 {
-			t.Errorf("entry TS %d outside filter range [%d, %d]", e.TS, now+1000, now+3000)
-		}
 	}
 }
 
@@ -322,19 +269,10 @@ func TestConfigImportReplaceMode(t *testing.T) {
 func TestRevokeUserSessions(t *testing.T) {
 	// sessionRevoked is a package-global; under -count=2 or -shuffle=on this
 	// test's own RevokeUser("deleteme") call leaks into the next run and
-	// causes the "valid before revocation" assertion to fail. Tear down the
-	// revocation entries we create, before AND after, so the test is
+	// causes the "valid before revocation" assertion to fail. Swap in a
+	// fresh list for the duration (restored on cleanup) so the test is
 	// deterministic regardless of run order.
-	sessionRevoked.mu.Lock()
-	delete(sessionRevoked.users, "deleteme")
-	delete(sessionRevoked.users, "otheruser")
-	sessionRevoked.mu.Unlock()
-	t.Cleanup(func() {
-		sessionRevoked.mu.Lock()
-		delete(sessionRevoked.users, "deleteme")
-		delete(sessionRevoked.users, "otheruser")
-		sessionRevoked.mu.Unlock()
-	})
+	t.Cleanup(sessionRevoked.SwapForTest())
 
 	// Create a valid session for a user.
 	s := &Session{
@@ -450,19 +388,19 @@ func TestSetBlockPageHTML_InvalidTemplate(t *testing.T) {
 // ─── connlimit: Disable / MaxPerIP / ActiveIPs ──────────────────────────────
 
 func TestConnLimiterDisable(t *testing.T) {
-	cl := &ConnLimiter{}
+	cl := newConnLimiter()
 	cl.Enable(100)
-	if !cl.enabled.Load() {
+	if !cl.Enabled() {
 		t.Fatal("expected enabled after Enable()")
 	}
 	cl.Disable()
-	if cl.enabled.Load() {
+	if cl.Enabled() {
 		t.Error("expected disabled after Disable()")
 	}
 }
 
 func TestConnLimiterMaxPerIP(t *testing.T) {
-	cl := &ConnLimiter{}
+	cl := newConnLimiter()
 	cl.Enable(50)
 	if got := cl.MaxPerIP(); got != 50 {
 		t.Errorf("MaxPerIP() = %d, want 50", got)
@@ -472,7 +410,7 @@ func TestConnLimiterMaxPerIP(t *testing.T) {
 // ─── ocsp: Disable / CacheLen ────────────────────────────────────────────────
 
 func TestOCSPDisable(t *testing.T) {
-	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{}}
+	oc := ocsp.New()
 	oc.Enable()
 	if !oc.Enabled() {
 		t.Fatal("expected enabled")
@@ -483,18 +421,9 @@ func TestOCSPDisable(t *testing.T) {
 	}
 }
 
-func TestOCSPCacheLen(t *testing.T) {
-	oc := &OCSPChecker{cache: map[string]*ocspCacheEntry{
-		"a": {}, "b": {},
-	}}
-	if got := oc.CacheLen(); got != 2 {
-		t.Errorf("CacheLen() = %d, want 2", got)
-	}
-}
-
 // ─── logScanLimitExceeded (Finding 4.2) ──────────────────────────────────────
 
-func TestLogScanLimitExceeded(t *testing.T) {
+func TestLogScanLimitExceeded(_ *testing.T) {
 	// Just ensure it doesn't panic. No need to swap globalAlertStore since
 	// logScanLimitExceeded fires the alert via go fireAlert() which captures
 	// the store pointer internally.

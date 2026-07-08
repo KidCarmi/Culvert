@@ -1,0 +1,386 @@
+package main
+
+// config_surfaces.go — the declarative config-surface registry (DEBT-004/006/009).
+//
+// Culvert's configuration crosses FIVE hand-maintained lists that historically
+// drifted only prose could prevent:
+//
+//  1. configBackup (ui_policy.go)      — export/import AND version-rollback DTO
+//  2. captureConfigBackup / applyConfigBackup / diffConfigs (configversion.go)
+//     — the rollback trio, per-field lockstep + nil-vs-[] semantics
+//  3. AdminSettings (admin_settings.go) — restart durability (+ sentinel booleans)
+//  4. ConfigSnapshot (controlplane.go)  — CP→DP sync DTO
+//  5. validateConfigSnapshot caps       — per-slice DoS bounds (H5)
+//
+// This file is the single source of truth for WHICH logical setting lives on
+// WHICH surface with WHAT semantics. It is data only — no behavior. The parity
+// tests in config_surfaces_test.go enforce it both ways (every struct field is
+// claimed by exactly one row; every binding resolves to a real field), so the
+// table cannot go stale the same way the uiRoutes/C1 layer keeps route
+// metadata honest.
+//
+// Adding a config field now means: add the struct field, add (or extend) a
+// registry row, and the tests tell you every place you still need to wire.
+// Forgetting the registry is a compile-adjacent test failure, not a code
+// review hope.
+
+// fieldKind classifies what a bound struct field IS, so meta/sentinel fields
+// are registered (parity must see every field) without pretending they are
+// operator-facing configuration.
+type fieldKind int
+
+const (
+	kindConfig          fieldKind = iota // an operator-facing setting
+	kindMeta                             // format versions, timestamps, epochs, informational mirrors
+	kindSentinel                         // AdminSettings *Saved booleans gating their value fields
+	kindLegacyMigration                  // read-only migration inputs; never written back
+)
+
+// emptySemantics records what the APPLY path on a given surface does with an
+// empty/zero value for the field. This is the axis that actually drifts —
+// diffConfigs must mirror applyConfigBackup's nil-guards or dry-run rollback
+// lies to the operator (the ContentScanBypassHosts bug fixed alongside this
+// registry).
+type emptySemantics int
+
+const (
+	semNA               emptySemantics = iota // not applied on this surface (export-only, meta, informational)
+	semAlwaysReplace                          // zero/empty value is applied and wipes/overwrites live state
+	semNilSkipEmptyWipe                       // nil → leave live state untouched; non-nil [] → explicit wipe
+	semSkipIfZero                             // zero value keeps live state (cannot roll back TO zero)
+	semValidatedSkip                          // applied only if it passes validation; invalid input skipped
+)
+
+// surfaceBinding ties a logical setting to one concrete struct field.
+// Apply records the empty-value semantics of THAT struct's apply path:
+// configBackup → applyConfigBackup (rollback), ConfigSnapshot → the
+// applySnapshot* family (DP), AdminSettings → semNA (its load path is
+// sentinel-structured, recorded via kindSentinel rows).
+type surfaceBinding struct {
+	Struct   string // "configBackup" | "AdminSettings" | "ConfigSnapshot"
+	Field    string // exact Go field name; reflection-verified by the parity test
+	Apply    emptySemantics
+	Redacted bool // true when the capture/export accessor strips secret material
+	// AppliesOnDP marks a ConfigSnapshot binding that the Data Plane consumes
+	// but whose consumption is NOT an empty-value config apply (so Apply stays
+	// semNA). Today the sole case is Epoch — read by dpObserveEpoch as the
+	// ADR-0005 fence ratchet, not applied as configuration. SnapshotApplyParity
+	// keys "must be consumed on the DP" on (Apply != semNA || AppliesOnDP), so a
+	// fence/rotation field mislabeled kindMeta is still apply-verified.
+	AppliesOnDP bool
+}
+
+// configSurfaceRow is one logical setting spanning up to three structs.
+type configSurfaceRow struct {
+	ID             string    // stable snake_case identifier
+	Kind           fieldKind // config / meta / sentinel / legacy-migration
+	Owner          string    // owning store/global ("bl", "policyStore", "rl", …)
+	Export         bool      // serialized by apiConfigExport (all-branch)
+	Import         bool      // applied by apiConfigImport (note: import skips empty lists, unlike rollback)
+	Rollback       bool      // captured + applied + diffed by the configversion.go trio
+	Diffed         bool      // reported by diffConfigs
+	DiffKey        string    // Field name diffConfigs emits (when Diffed)
+	DiffNilGuarded bool      // diffConfigs nil-skips, mirroring apply's semNilSkipEmptyWipe
+	AdminDurable   bool      // restart-durable via /data/admin_settings.json
+	ClusterSynced  bool      // pushed CP→DP in ConfigSnapshot
+	Sensitive      bool      // may carry secret material (never Rollback; Export only via Redacted accessor)
+	SnapshotCap    int       // validateConfigSnapshot cap for the ConfigSnapshot slice/map binding (0 = scalar / not synced)
+	// WireWipeCapable marks a semNilSkipEmptyWipe ConfigSnapshot slice whose
+	// EMPTY state must actually propagate CP→DP (clearing the last entry wipes
+	// the DP's copy). That requires the JSON tag to OMIT `omitempty` — else Go
+	// drops a non-nil empty slice on the wire and the DP reads it as nil→skip,
+	// keeping stale state. Today only rate_limit_exempt. Every OTHER
+	// semNilSkipEmptyWipe field keeps `omitempty`, so its []-wipe is
+	// intentionally wire-dead (an operator clearing the list must push a
+	// non-empty replacement); SnapshotWireWipe pins both postures.
+	WireWipeCapable bool
+	Note            string // constraint the flags can't express (ordering, validation, known gaps)
+	Bindings        []surfaceBinding
+}
+
+// configSurfaces is the registry. Ordering: meta rows, then the
+// configBackup-anchored rows in struct order, then AdminSettings-only rows in
+// struct order, then ConfigSnapshot-only rows in struct order.
+var configSurfaces = []configSurfaceRow{
+	// ── Meta fields ──────────────────────────────────────────────────────
+	{ID: "backup_format_version", Kind: kindMeta,
+		Note:     "always 1; apiConfigImport rejects other values",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "Version"}}},
+	{ID: "exported_at", Kind: kindMeta,
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ExportedAt"}}},
+	{ID: "snapshot_version", Kind: kindMeta,
+		Note:     "monotonic publish counter stamped by ConfigStore.Update — unrelated to backup_format_version",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Version"}}},
+	{ID: "snapshot_epoch", Kind: kindMeta,
+		Note:     "ADR-0005 fencing epoch; DPs CAS-ratchet and reject stale-epoch snapshots",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch", AppliesOnDP: true}}},
+	{ID: "snapshot_updated_at", Kind: kindMeta,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "UpdatedAt"}}},
+	{ID: "policy_version", Kind: kindMeta,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "PolicyVersion"}}},
+	{ID: "cp_addresses", Kind: kindMeta, ClusterSynced: true, SnapshotCap: maxSnapCPAddresses,
+		Note:     "HA failover discovery, populated by the leader; len>0-guarded apply",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "CPAddresses", Apply: semSkipIfZero}}},
+	{ID: "ca_fingerprint", Kind: kindMeta,
+		Note:     "cluster-CA rotation detection trigger; \"\"-skip",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "CAFingerprint", Apply: semSkipIfZero}}},
+	{ID: "auth_enabled", Kind: kindMeta,
+		Note:     "informational mirror — no DP apply function consumes it",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "AuthEnabled"}}},
+	{ID: "default_auth_outcome", Kind: kindMeta,
+		Note:     "informational mirror (defaultAuthOutcome spec) — DP does not apply it",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "DefaultAuthOutcome"}}},
+
+	// ── configBackup-anchored settings (export/import/rollback core) ─────
+	{ID: "blocklist_mode", Kind: kindConfig, Owner: "bl",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "blocklist_mode",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "BlocklistMode", Apply: semValidatedSkip}}},
+	{ID: "blocklist", Kind: kindConfig, Owner: "bl",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "blocklist",
+		ClusterSynced: true, SnapshotCap: maxSnapBlockedHosts,
+		Note: "DP apply replaces feed entries only, preserving DP-local mode/manual/exceptions",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "Blocklist", Apply: semAlwaysReplace},
+			{Struct: "ConfigSnapshot", Field: "BlockedHosts", Apply: semAlwaysReplace}}},
+	{ID: "policy_rules", Kind: kindConfig, Owner: "policyStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "policy_rules",
+		ClusterSynced: true, SnapshotCap: maxSnapPolicyRules,
+		Note: "rollback validates per-rule (invalid rules silently dropped); apply ordered AFTER url_categories → category_groups; diff keys on Priority and compares Name only",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "PolicyRules", Apply: semAlwaysReplace},
+			{Struct: "ConfigSnapshot", Field: "PolicyRules", Apply: semNilSkipEmptyWipe}}},
+	{ID: "default_action", Kind: kindConfig, Owner: "policyStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "default_action",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "rollback applies unconditionally; import validates; DP \"\"-skips",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "DefaultAction", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "DefaultAction"},
+			{Struct: "ConfigSnapshot", Field: "DefaultAction", Apply: semSkipIfZero}}},
+	{ID: "rewrite_rules", Kind: kindConfig, Owner: "rewriter",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "rewrite_rules",
+		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRewriteRules,
+		Note: "diff keys on Host only (in-place op edits on the same host are invisible); Rule.ID is a runtime handle reassigned by SetRules — not config identity",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "RewriteRules", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "RewriteRules"},
+			{Struct: "ConfigSnapshot", Field: "RewriteRules", Apply: semNilSkipEmptyWipe}}},
+	{ID: "ssl_bypass", Kind: kindConfig, Owner: "sslBypass",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "ssl_bypass",
+		ClusterSynced: true, SnapshotCap: maxSnapSSLBypassPatterns,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "SSLBypass", Apply: semAlwaysReplace},
+			{Struct: "ConfigSnapshot", Field: "SSLBypassPatterns", Apply: semNilSkipEmptyWipe}}},
+	{ID: "content_scan_patterns", Kind: kindConfig, Owner: "dpiScanner",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "content_scan_patterns",
+		ClusterSynced: true, SnapshotCap: maxSnapDPIPatterns,
+		Note: "invalid regex aborts patterns AND bypass hosts AND the shared envelope Save",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "ContentScanPatterns", Apply: semValidatedSkip},
+			{Struct: "ConfigSnapshot", Field: "DPIPatterns", Apply: semNilSkipEmptyWipe}}},
+	{ID: "file_block_extensions", Kind: kindConfig, Owner: "fileBlocker",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "file_block_extensions",
+		ClusterSynced: true, SnapshotCap: maxSnapFileBlockExtensions,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "FileBlockExtensions", Apply: semAlwaysReplace},
+			{Struct: "ConfigSnapshot", Field: "FileBlockExtensions", Apply: semNilSkipEmptyWipe}}},
+	{ID: "ip_filter_mode", Kind: kindConfig, Owner: "ipf",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "ip_filter_mode",
+		AdminDurable: true, ClusterSynced: true,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "IPFilterMode", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "IPFilterMode"},
+			{Struct: "ConfigSnapshot", Field: "IPFilterMode", Apply: semAlwaysReplace}}},
+	{ID: "ip_list", Kind: kindConfig, Owner: "ipf",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "ip_list",
+		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapIPList,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "IPList", Apply: semAlwaysReplace},
+			{Struct: "AdminSettings", Field: "IPFilterList"},
+			{Struct: "ConfigSnapshot", Field: "IPList", Apply: semAlwaysReplace}}},
+	{ID: "rate_limit_rpm", Kind: kindConfig, Owner: "rl",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "rate_limit_rpm",
+		AdminDurable: true, ClusterSynced: true,
+		Note: "rollback skips ≤0 (cannot roll back to unlimited)",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "RateLimitRPM", Apply: semSkipIfZero},
+			{Struct: "AdminSettings", Field: "RateLimitRPM"},
+			{Struct: "ConfigSnapshot", Field: "RateLimitRPM", Apply: semAlwaysReplace}}},
+	{ID: "rate_limit_exempt", Kind: kindConfig, Owner: "rl",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "rate_limit_exempt", DiffNilGuarded: true,
+		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRateLimitExempt, WireWipeCapable: true,
+		Note: "the one wire-wipe-capable synced slice: NO omitempty so an empty list clears DP exemptions; CurrentConfigSnapshot sends non-nil",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "RateLimitExempt", Apply: semNilSkipEmptyWipe},
+			{Struct: "AdminSettings", Field: "RateLimitExemptions"},
+			{Struct: "ConfigSnapshot", Field: "RateLimitExempt", Apply: semNilSkipEmptyWipe}}},
+	{ID: "pac_proxy_host", Kind: kindConfig, Owner: "pacStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "pac_proxy_host",
+		Note:     "rollback replaces the whole PACConfig unconditionally (snapshot with no PAC opinion wipes live PAC)",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "PACProxyHost", Apply: semAlwaysReplace}}},
+	{ID: "pac_proxy_port", Kind: kindConfig, Owner: "pacStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "pac_proxy_port",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "PACProxyPort", Apply: semAlwaysReplace}}},
+	{ID: "pac_exclusions", Kind: kindConfig, Owner: "pacStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "pac_exclusions",
+		ClusterSynced: true, SnapshotCap: maxSnapPACExclusions,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "PACExclusions", Apply: semAlwaysReplace},
+			{Struct: "ConfigSnapshot", Field: "PACExclusions", Apply: semNilSkipEmptyWipe}}},
+	{ID: "alert_webhooks", Kind: kindConfig, Owner: "globalAlertStore",
+		Export: true, Import: true, Sensitive: true,
+		Note:     "export via List() which strips HMAC secrets; off the rollback surface by design (Finding 10.3)",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "AlertWebhooks", Redacted: true}}},
+	{ID: "block_page_html", Kind: kindConfig, Owner: "blockPage",
+		Export: true, Import: true, AdminDurable: true,
+		Note: "operational setting, not versioned policy — off the rollback surface by design",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "BlockPageHTML"},
+			{Struct: "AdminSettings", Field: "BlockPageHTML"}}},
+	{ID: "upstream_proxies", Kind: kindConfig, Owner: "upstreamPool",
+		Export: true, Import: true, Sensitive: true, AdminDurable: true,
+		Note: "export via List() (redacted); admin_settings persists RAW entries (0600, UpstreamProxiesSaved sentinel); URLs may embed credentials — off the rollback surface by design",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "UpstreamProxies", Redacted: true},
+			{Struct: "AdminSettings", Field: "UpstreamProxies"}}},
+	{ID: "conn_limit_enabled", Kind: kindConfig, Owner: "connLimiter",
+		Export: true, Import: true, AdminDurable: true,
+		Note: "operational setting — off the rollback surface by design",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "ConnLimitEnabled"},
+			{Struct: "AdminSettings", Field: "ConnLimitEnabled"}}},
+	{ID: "conn_limit_max_per_ip", Kind: kindConfig, Owner: "connLimiter",
+		Export: true, Import: true, AdminDurable: true, ClusterSynced: true,
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "ConnLimitMaxPerIP"},
+			{Struct: "AdminSettings", Field: "ConnLimitMaxPerIP"},
+			{Struct: "ConfigSnapshot", Field: "MaxConnsPerIP", Apply: semSkipIfZero}}},
+	{ID: "category_groups", Kind: kindConfig, Owner: "globalCategoryGroups",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "category_groups", DiffNilGuarded: true,
+		ClusterSynced: true, SnapshotCap: maxSnapCategoryGroups,
+		Note: "apply ordered after url_categories, before policy_rules (import and rollback both); import never wipes (merge = upsert-by-name)",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe},
+			{Struct: "ConfigSnapshot", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe}}},
+	{ID: "url_categories", Kind: kindConfig, Owner: "catStore",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "url_categories", DiffNilGuarded: true,
+		ClusterSynced: true, SnapshotCap: maxSnapURLCategories,
+		Note: "admin-managed Layer 1 only (communityDB untouched); import never wipes",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "URLCategories", Apply: semNilSkipEmptyWipe},
+			{Struct: "ConfigSnapshot", Field: "URLCategories", Apply: semNilSkipEmptyWipe}}},
+	{ID: "content_scan_bypass_hosts", Kind: kindConfig, Owner: "dpiScanner",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "content_scan_bypass_hosts", DiffNilGuarded: true,
+		Note:     "shares the content_scan.json envelope with content_scan_patterns (single Save on import and rollback); import never wipes",
+		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ContentScanBypassHosts", Apply: semNilSkipEmptyWipe}}},
+
+	// ── AdminSettings-only settings ──────────────────────────────────────
+	{ID: "syslog_addr", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SyslogAddr"}}},
+	{ID: "syslog_format", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SyslogFormat"}}},
+	{ID: "otlp_endpoint", Kind: kindConfig, Owner: "globalOTLP", AdminDurable: true, ClusterSynced: true,
+		Note: "DP apply: \"\" is an ACTIVE clear (stops the exporter) — the one snapshot field where empty is a command",
+		Bindings: []surfaceBinding{
+			{Struct: "AdminSettings", Field: "OTLPEndpoint"},
+			{Struct: "ConfigSnapshot", Field: "OTLPEndpoint", Apply: semAlwaysReplace}}},
+	{ID: "otlp_headers", Kind: kindConfig, Owner: "globalOTLP", AdminDurable: true, Sensitive: true,
+		Note:     "headers commonly carry API keys; persisted raw in the 0600 admin_settings file",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "OTLPHeaders"}}},
+	{ID: "metrics_token", Kind: kindConfig, Owner: "metricsAuth", AdminDurable: true, Sensitive: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "MetricsToken"}}},
+	{ID: "log_level", Kind: kindConfig, Owner: "logger", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogLevel"}}},
+	{ID: "log_retention_days", Kind: kindConfig, Owner: "logStore", AdminDurable: true,
+		Note:     "gated by log_retention_saved sentinel",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionDays"}}},
+	{ID: "log_retention_max_gb", Kind: kindConfig, Owner: "logStore", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionMaxGB"}}},
+	{ID: "log_store_enabled", Kind: kindConfig, Owner: "logStore", AdminDurable: true,
+		Note:     "gated by log_store_enabled_saved sentinel",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogStoreEnabled"}}},
+	{ID: "log_critical_disk_pct", Kind: kindConfig, Owner: "logStore", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogCriticalDiskPct"}}},
+	{ID: "session_timeout_hours", Kind: kindConfig, Owner: "session", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SessionTimeoutHours"}}},
+	{ID: "ui_allow_ips", Kind: kindConfig, Owner: "uiIPGuard", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPs"}}},
+	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
+		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRs"}}},
+	{ID: "base_url", Kind: kindConfig, Owner: "proxyBaseURL", AdminDurable: true, ClusterSynced: true,
+		Bindings: []surfaceBinding{
+			{Struct: "AdminSettings", Field: "BaseURL"},
+			{Struct: "ConfigSnapshot", Field: "ProxyBaseURL", Apply: semAlwaysReplace}}},
+	{ID: "ui_sans", Kind: kindConfig, Owner: "uitls", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UISANs"}}},
+	{ID: "trust_forwarded_headers", Kind: kindConfig, Owner: "identity", AdminDurable: true, ClusterSynced: true,
+		Bindings: []surfaceBinding{
+			{Struct: "AdminSettings", Field: "TrustForwardedHeaders"},
+			{Struct: "ConfigSnapshot", Field: "TrustForwardedHeaders", Apply: semAlwaysReplace}}},
+	{ID: "blocklist_feeds", Kind: kindConfig, Owner: "blocklistfeed", AdminDurable: true,
+		Note:     "gated by blocklist_feeds_saved sentinel (authoritative incl. empty list)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeeds"}}},
+	{ID: "saas_feed_url", Kind: kindConfig, Owner: "saasFeed", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SaaSFeedURL"}}},
+	{ID: "yara_enabled", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Note:     "gated by yara_settings_saved sentinel (as are all yara_* rows)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAEnabled"}}},
+	{ID: "yara_timeout_secs", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARATimeoutSecs"}}},
+	{ID: "yara_max_inflight", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAMaxInflight"}}},
+	{ID: "yara_on_timeout", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnTimeout"}}},
+	{ID: "yara_on_saturation", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnSaturation"}}},
+	{ID: "yara_alert_degraded", Kind: kindConfig, Owner: "yara", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
+
+	// ── AdminSettings sentinels + legacy migration inputs ────────────────
+	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
+	{ID: "log_store_enabled_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogStoreEnabledSaved"}}},
+	{ID: "blocklist_feeds_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedsSaved"}}},
+	{ID: "upstream_proxies_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UpstreamProxiesSaved"}}},
+	{ID: "trusted_proxy_cidrs_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
+	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
+	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,
+		Note:     "read iff blocklist_feeds_saved is false; never written back",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedURL"}}},
+	{ID: "blocklist_feed_interval_legacy", Kind: kindLegacyMigration,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedInterval"}}},
+
+	// ── ConfigSnapshot-only settings (cluster sync) ──────────────────────
+	{ID: "file_profiles", Kind: kindConfig, Owner: "globalProfileStore",
+		ClusterSynced: true, SnapshotCap: maxSnapFileProfiles,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "FileProfiles", Apply: semNilSkipEmptyWipe}}},
+	{ID: "threat_feed_urls", Kind: kindConfig, Owner: "globalThreatFeed",
+		ClusterSynced: true, SnapshotCap: maxSnapThreatFeedURLs,
+		Note:     "len>0-guarded import (can be large); paired with threat_feed_domains",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatFeedURLs", Apply: semSkipIfZero}}},
+	{ID: "threat_feed_domains", Kind: kindConfig, Owner: "globalThreatFeed",
+		ClusterSynced: true, SnapshotCap: maxSnapThreatFeedDomains,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatFeedDomains", Apply: semSkipIfZero}}},
+	{ID: "threat_domain_allowlist", Kind: kindConfig, Owner: "globalThreatFeed",
+		ClusterSynced: true, SnapshotCap: maxSnapDomainAllowlist,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatDomainAllowlist", Apply: semNilSkipEmptyWipe}}},
+	{ID: "session_hmac", Kind: kindConfig, Owner: "session", Sensitive: true, ClusterSynced: true,
+		Note:     "deliberate secret sync (cross-node sessions); redacted for unenrolled GetConfig callers; hex ≥32B validated on apply",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "SessionHMAC", Apply: semValidatedSkip}}},
+	{ID: "idp_profiles", Kind: kindConfig, Owner: "idpRegistry", Sensitive: true,
+		ClusterSynced: true, SnapshotCap: maxSnapIdPProfiles,
+		Note:     "carries OIDC client secrets by design (DP-local auth); redacted for unenrolled callers; compile-validated ReplaceAll, rejection aborts extended state",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "IdPProfiles", Apply: semValidatedSkip}}},
+	{ID: "bandwidth_policies", Kind: kindConfig, Owner: "globalBandwidth",
+		ClusterSynced: true, SnapshotCap: maxSnapBandwidthPolicies,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "BandwidthPolicies", Apply: semNilSkipEmptyWipe}}},
+	{ID: "node_groups", Kind: kindConfig, Owner: "globalNodeGroups",
+		ClusterSynced: true, SnapshotCap: maxSnapNodeGroups,
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "NodeGroups", Apply: semNilSkipEmptyWipe}}},
+}

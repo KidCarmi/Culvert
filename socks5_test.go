@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,23 +47,66 @@ func socks5HandshakeAuth(t *testing.T, conn net.Conn, user, pass string) byte {
 	return authResp[1] // 0x00 = success, 0x01 = failure
 }
 
-// startSOCKS5Listener starts a SOCKS5 listener and returns it.
-// Caller must defer ln.Close().
+// startSOCKS5Listener starts a SOCKS5 listener and returns it. Callers may
+// still `defer ln.Close()` (the double-close is harmless); a t.Cleanup also
+// drains in-flight handlers.
+//
+// The drain is load-bearing for determinism, not cosmetic: handleSOCKS5 reads
+// the global stores (bl, ipf, cfg). If a handler goroutine outlives its test,
+// it races against the NEXT test's setupProxyTest, which rewrites those same
+// globals — a real data race surfaced under `-race -shuffle=on`. Cleanup marks
+// the listener closed, force-closes every accepted conn (so a handler blocked
+// in Read returns promptly), waits for the accept loop to exit, then waits for
+// all handlers — guaranteeing no handler can touch globals after the test ends.
 func startSOCKS5Listener(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := ctxListen("127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	var (
+		mu       sync.Mutex
+		closed   bool
+		conns    []net.Conn
+		handlers sync.WaitGroup
+	)
+	var acceptLoop sync.WaitGroup
+	acceptLoop.Add(1)
 	go func() {
+		defer acceptLoop.Done()
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go handleSOCKS5(conn)
+			mu.Lock()
+			if closed {
+				mu.Unlock()
+				conn.Close()
+				continue
+			}
+			conns = append(conns, conn)
+			handlers.Add(1) // under mu: never races handlers.Wait (see cleanup)
+			mu.Unlock()
+			go func(c net.Conn) {
+				defer handlers.Done()
+				handleSOCKS5(c)
+			}(conn)
 		}
 	}()
+
+	t.Cleanup(func() {
+		mu.Lock()
+		closed = true
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+		_ = ln.Close()
+		acceptLoop.Wait() // accept loop has exited → no further handlers.Add
+		handlers.Wait()   // all handlers drained → no global reads after this point
+	})
 	return ln
 }
 

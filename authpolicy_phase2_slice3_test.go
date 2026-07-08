@@ -220,21 +220,25 @@ func TestP2S3_KillSwitchDoesNotDisableCR(t *testing.T) {
 	}
 }
 
-func TestP2S3_UnauthModeSkipsCR(t *testing.T) {
+// Slice 3 (S2): a scoped CR rule ENFORCES even when the global default is Exempt
+// (open) — auth rules evaluate first; the global default applies only on
+// no-match. (Pre-S2 this asserted the opposite: UnauthMode skipped the gate.)
+func TestP2S3_DefaultExempt_CRStillEnforces(t *testing.T) {
 	setupAuthGateTest(t)
-	cfg.SetUnauthMode(true)
-	t.Cleanup(func() { cfg.SetUnauthMode(false) })
+	withFreshPolicyStore(t)                  // restore the global store on cleanup (no rule leak)
+	cfg.SetDefaultAuthOutcome(OutcomeExempt) // open mode (defaultAuthOutcome Exempt)
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 	const host = "p2s3-unauth.example.test"
 	policyStore.Add(p2s3CR("cr-1", host))
 
 	start := crCount()
 	w := httptest.NewRecorder()
 	handleRequest(w, makeRequest("http://"+host+"/", nil))
-	if w.Code == http.StatusProxyAuthRequired {
-		t.Fatal("UnauthMode skips the auth gate — CR must not fire")
+	if w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("scoped CR must enforce over default Exempt (407), got %d", w.Code)
 	}
-	if crCount() != start {
-		t.Error("CR metric must not move under UnauthMode")
+	if crCount() != start+1 {
+		t.Error("CR metric must move — the scoped rule fired over default Exempt")
 	}
 }
 

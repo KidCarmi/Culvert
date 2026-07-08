@@ -388,6 +388,40 @@ func TestEnrollRateLimitAllow(t *testing.T) {
 	}
 }
 
+// TestEnrollRateLimitCleanup is the regression guard for the unbounded-map
+// growth: an IP that attempts enrollment once and never returns is pruned only
+// on its (never-arriving) next call, so without a janitor its entry persists
+// forever. Cleanup must drop entries whose timestamps have all aged out while
+// keeping IPs with in-window activity.
+func TestEnrollRateLimitCleanup(t *testing.T) {
+	enrollRateLimit.mu.Lock()
+	now := time.Now()
+	enrollRateLimit.attempts = map[string][]time.Time{
+		"stale-1shot": {now.Add(-2 * time.Minute)},                            // aged out → evict
+		"stale-multi": {now.Add(-3 * time.Minute), now.Add(-2 * time.Minute)}, // all aged out → evict
+		"fresh":       {now.Add(-10 * time.Second)},                           // in window → keep
+		"mixed":       {now.Add(-5 * time.Minute), now.Add(-1 * time.Second)}, // keep, pruned to 1
+	}
+	enrollRateLimit.mu.Unlock()
+
+	enrollRateLimitCleanup()
+
+	enrollRateLimit.mu.Lock()
+	defer enrollRateLimit.mu.Unlock()
+	if _, ok := enrollRateLimit.attempts["stale-1shot"]; ok {
+		t.Error("single stale entry should be evicted (one-shot IP leak)")
+	}
+	if _, ok := enrollRateLimit.attempts["stale-multi"]; ok {
+		t.Error("all-stale entry should be evicted")
+	}
+	if got := enrollRateLimit.attempts["fresh"]; len(got) != 1 {
+		t.Errorf("fresh entry: len = %d, want 1 (kept)", len(got))
+	}
+	if got := enrollRateLimit.attempts["mixed"]; len(got) != 1 {
+		t.Errorf("mixed entry: len = %d, want 1 (stale timestamp pruned, fresh kept)", len(got))
+	}
+}
+
 // ── CSR CommonName Validation ────────────────────────────────────────────────
 
 func TestEnroll_CSRCommonNameMismatch(t *testing.T) {

@@ -204,10 +204,10 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/policy/reorder", Handler: "apiPolicyReorder", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
-			Note: "dynamic escalation: reorders that change a Stage-1 auth rule's priority require admin (authPrioritiesWouldChange); C4 observes the divergence"}}},
+			Note: "access-only: permutes Stage-2 access rules among their own slots (PermutePriorities); rejects any Stage-1 auth priority, which is reordered via /api/authpolicy"}}},
 	{Path: "/api/policy/move", Handler: "apiPolicyMove", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
-			Note: "dynamic escalation: moves that change a Stage-1 auth rule's priority require admin (authPrioritiesWouldChange); C4 observes the divergence"}}},
+			Note: "access-only: moves a Stage-2 access rule among access rules (PermutePriorities); an auth rule is not found among them and is rejected"}}},
 	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "POST is read-only in spirit (dry-run policy match), no audit"}}},
 	{Path: "/api/authpolicy", Handler: "apiAuthPolicy", Domain: "policy", Public: false,
@@ -516,6 +516,10 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "no direct auditEvent observed"},
 		}},
+	{Path: "/api/cluster/ha/promote", Handler: "apiClusterHAPromote", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/cluster/bandwidth", Handler: "apiBandwidthPolicies", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
@@ -601,4 +605,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/releases/dispatch/resume", Handler: "apiReleaseDispatchResume", Domain: "release", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true,
 			Note: "re-poll existing op_id; never calls Apply; audited by DispatchService"}}},
+	{Path: "/api/releases/catalog-refresh", Handler: "apiReleaseCatalogRefresh", Domain: "release", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
 }

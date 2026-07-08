@@ -26,6 +26,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // keyAtRestActor is the synthetic actor for system-initiated key-at-rest audit
@@ -64,18 +66,17 @@ func auditKeyAtRest(action, object string) {
 }
 
 // processKEKSource reports the process-level KEK source and whether it is
-// usable, as non-secret enums. It MIRRORS resolveKEKProvider's selection logic:
-// CULVERT_KEK (env, model C) is selected whenever the variable is non-empty —
-// independent of whether the value is valid — otherwise subsystems fall back to
-// their own local model-B KEK file ("file"). The returned envUsable reports
-// whether a selected env KEK actually decodes; a malformed env value still
-// selects "env" (so key operations fail closed) and must NOT be reported as a
-// healthy "file" fallback (Codex P2). It never exposes key bytes — the env
-// value is only probed for validity and the decoded bytes are discarded.
+// usable, as non-secret enums. It MIRRORS secret.ResolveProvider's selection
+// logic: CULVERT_KEK (env, model C) is selected whenever the variable is
+// non-empty — independent of whether the value is valid — otherwise subsystems
+// fall back to their own local model-B KEK file ("file"). The returned envUsable
+// reports whether a selected env KEK actually decodes; a malformed env value
+// still selects "env" (so key operations fail closed) and must NOT be reported
+// as a healthy "file" fallback (Codex P2). It never exposes key bytes —
+// secret.ValidateProvider probes validity WITHOUT returning any bytes.
 func processKEKSource() (source string, envUsable bool) {
-	if v, ok := os.LookupEnv(envKEKName); ok && v != "" {
-		_, err := newEnvKEKProvider(envKEKName).KEK()
-		return "env", err == nil
+	if v, ok := os.LookupEnv(secret.EnvKEKName); ok && v != "" {
+		return "env", secret.ValidateProvider(secret.EnvProvider(secret.EnvKEKName)) == nil
 	}
 	// File model-B KEK: auto-generated on first use, always usable here.
 	return "file", true

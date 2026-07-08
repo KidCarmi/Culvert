@@ -1,0 +1,41 @@
+# CI-only Compose override for the system-lifecycle E2E.
+#
+# `docker compose up` auto-merges a `docker-compose.override.yml` sitting next
+# to the base file, so dropping this into the stack directory lets the REAL
+# `scripts/install.sh` bring the stack up UNMODIFIED while we neutralize the two
+# sidecars that are heavy/fragile on a CI runner and orthogonal to the
+# install/migrate lifecycle we are proving:
+#
+#   - clamav  — the real image downloads ~250 MB of virus signatures on first
+#               boot (slow, memory-hungry, 300s start_period).
+#   - updater — the real image is pulled from ghcr.io (an external dependency
+#               we do not want the hermetic lifecycle gate to rely on).
+#
+# We replace BOTH with a tiny always-up busybox so the proxy's start-order
+# `depends_on` is satisfied, and disable their healthchecks so
+# `docker compose up --wait` only gates on the proxy becoming healthy. The proxy
+# itself is the REAL `culvert/proxy:pinned` image, started by the REAL compose
+# definition via the REAL installer — only the orthogonal sidecars are stubbed.
+#
+# The proxy tolerates an unreachable ClamAV at runtime (per-request retry) and a
+# missing GeoIP DB at startup (logged, GeoIP disabled), so /health and /ready
+# still answer 200. This file is TEST-ONLY and never ships to operators.
+services:
+  clamav:
+    image: busybox:stable
+    command: ["sleep", "infinity"]
+    healthcheck:
+      disable: true
+
+  updater:
+    image: busybox:stable
+    command: ["sleep", "infinity"]
+    healthcheck:
+      disable: true
+
+  # Give `docker compose up --wait` a little boot margin: the base proxy
+  # healthcheck has no start_period, so the first probe lands ~30s after start.
+  # The proxy boots in seconds, but a start_period keeps slow CI from flaking.
+  proxy:
+    healthcheck:
+      start_period: 15s

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -42,7 +44,7 @@ func resetFileBlockingStores(t *testing.T) {
 	t.Helper()
 	origBlocker := fileBlocker
 	origProfiles := globalProfileStore
-	fileBlocker = &FileBlocker{extensions: map[string]bool{}}
+	fileBlocker = fileblock.NewBlocker()
 	globalProfileStore = &FileProfileStore{}
 	t.Cleanup(func() {
 		fileBlocker = origBlocker
@@ -137,8 +139,8 @@ func TestLoadFileBlocking_SeedsFromDefaultsWhenEmpty(t *testing.T) {
 		ProfilesPath: filepath.Join(t.TempDir(), "fileprofiles.json"),
 	}
 	_ = loadFileBlocking(cfg)
-	if got := fileBlocker.Count(); got != len(defaultBlockedExts) {
-		t.Errorf("fileBlocker.Count = %d, want %d (defaultBlockedExts)", got, len(defaultBlockedExts))
+	if got := fileBlocker.Count(); got != len(fileblock.DefaultBlockedExts) {
+		t.Errorf("fileBlocker.Count = %d, want %d (defaultBlockedExts)", got, len(fileblock.DefaultBlockedExts))
 	}
 }
 
@@ -255,8 +257,8 @@ func TestInitFileBlocking_ShimSwallowsLoadError(t *testing.T) {
 	// Contract: loadFileBlockerExtensions runs BEFORE the failing
 	// globalProfileStore.Load, so default extensions are still seeded.
 	// fc.FileBlock.Extensions is empty here ⇒ defaultBlockedExts.
-	if got := fileBlocker.Count(); got != len(defaultBlockedExts) {
+	if got := fileBlocker.Count(); got != len(fileblock.DefaultBlockedExts) {
 		t.Errorf("fileBlocker.Count after shim error path = %d, want %d (defaults)",
-			got, len(defaultBlockedExts))
+			got, len(fileblock.DefaultBlockedExts))
 	}
 }

@@ -25,11 +25,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 func makeInitedCertManager(t *testing.T) *CertManager {
 	t.Helper()
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -49,7 +51,7 @@ func TestColdStart_CABundle_MissingFile(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "ca.bundle") // does not exist
-			cm := &CertManager{cache: map[string]*certCacheEntry{}}
+			cm := ca.New()
 			err := cm.LoadCA(path, c.passphrase)
 			if err == nil {
 				t.Fatal("expected error on missing file")
@@ -79,7 +81,7 @@ func TestColdStart_CABundle_EmptyFile(t *testing.T) {
 			if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
 				t.Fatalf("write empty: %v", err)
 			}
-			cm := &CertManager{cache: map[string]*certCacheEntry{}}
+			cm := ca.New()
 			err := cm.LoadCA(path, c.passphrase)
 			if err == nil {
 				t.Fatal("expected error on empty file")
@@ -100,7 +102,7 @@ func TestColdStart_CABundle_GarbageBytes(t *testing.T) {
 	if err := os.WriteFile(path, []byte("totally not a CA bundle, just text"), 0o600); err != nil {
 		t.Fatalf("write garbage: %v", err)
 	}
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	err := cm.LoadCA(path, "test-passphrase")
 	if err == nil {
 		t.Fatal("expected error on garbage bytes")
@@ -126,7 +128,7 @@ func TestColdStart_CABundle_PlainPEMLoadsEvenWithPassphraseSet(t *testing.T) {
 	origPEM := cm.CACertPEM()
 
 	// Now try to load with a passphrase set — should still succeed.
-	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm2 := ca.New()
 	if err := cm2.LoadCA(path, "operator-set-this-later"); err != nil {
 		t.Fatalf("LoadCA with passphrase on plain-PEM file: %v", err)
 	}
@@ -160,7 +162,7 @@ func TestColdStart_CABundle_EncryptedTruncated(t *testing.T) {
 		t.Fatalf("write truncated: %v", err)
 	}
 
-	cm2 := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm2 := ca.New()
 	err = cm2.LoadCA(path, "real-passphrase")
 	if err == nil {
 		t.Fatal("expected error on truncated encrypted bundle")

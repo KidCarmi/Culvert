@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // handleWebSocket must only hijack the connection into a raw tunnel when the
@@ -53,16 +55,14 @@ func TestHandleWebSocket_Non101NotTunneled(t *testing.T) {
 	// Bypass the two SSRF layers for the loopback test target: seed the DNS
 	// cache so isPrivateHost passes, and swap the dialer so ssrfControl does
 	// not reject the loopback connect. Both are restored on cleanup.
-	ssrfDNSCache.Store("127.0.0.1", false)
+	ssrf.CacheStore("127.0.0.1", false)
 	origDial := ssrfSafeDialContext
 	ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
 	}
 	t.Cleanup(func() {
 		ssrfSafeDialContext = origDial
-		ssrfDNSCache.mu.Lock()
-		delete(ssrfDNSCache.entries, "127.0.0.1")
-		ssrfDNSCache.mu.Unlock()
+		ssrf.CacheDelete("127.0.0.1")
 	})
 
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+hostport+"/ws", http.NoBody)
@@ -71,7 +71,7 @@ func TestHandleWebSocket_Non101NotTunneled(t *testing.T) {
 	r.Header.Set("Connection", "Upgrade")
 	w := httptest.NewRecorder()
 
-	handleWebSocket(w, r)
+	handleWebSocket(w, r, nil, ProxyIdentity{ClientIP: "192.0.2.99"})
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (upstream's declined-upgrade response must be relayed, not tunneled); body=%q",

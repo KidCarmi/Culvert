@@ -16,9 +16,9 @@
 //   - catalog entries must be regular files within per-file and total bounds;
 //   - non-catalog entries (the future image blobs, plan §8) are skipped
 //     WITHOUT reading their content;
-//   - index.json is required; index.json.sig is staged when present — the
-//     enforce/permissive decision for a missing signature belongs to the P1.3
-//     mode at verify time, not to the transport.
+//   - index.json is required; index.json.sig and index.json.sigstore are staged
+//     when present — the enforce/permissive decision for a missing signature
+//     belongs to the P1.3 mode at verify time, not to the transport.
 //
 // Scope (roadmap/D1.6d-P1.5-catalog-distribution-plan.md — Slice d): catalog
 // extraction + staging + cleanup only. NO image docker-load (the bundle slice
@@ -203,6 +203,11 @@ func classifyBundleEntry(hdr *tar.Header) (dst string, isIndex, ok bool) {
 		return "index.json", true, true
 	case name == "index.json.sig":
 		return "index.json.sig", false, true
+	case name == "index.json.sigstore":
+		// Keyless (Sigstore) sidecar (P2b) — staged alongside .sig so an air-gap
+		// bundle's keyless signature survives import and LoadVerifiedCatalog can
+		// verify it under the Sigstore scheme.
+		return "index.json.sigstore", false, true
 	case strings.HasPrefix(name, "manifests/"):
 		ref := strings.TrimPrefix(name, "manifests/")
 		if catalogValidateManifestRef(ref) != nil {

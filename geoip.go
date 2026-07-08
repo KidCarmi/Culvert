@@ -6,122 +6,23 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/oschwald/geoip2-golang"
+	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
 // ---------------------------------------------------------------------------
-// GeoIP — local MaxMind GeoLite2 database
+// GeoIP host resolution + dashboard counters (package main side)
 //
-// No external HTTP calls. Lookups are served from the local .mmdb file.
-// If no database path is configured, all GeoIP lookups return ("", "")
-// and destCountry policy conditions are silently skipped (fail-open for
-// country checks only — the rest of the rule still applies).
+// The GeoIP *lookup engine* (MaxMind .mmdb reader + IP→country cache) lives in
+// internal/geoip. This file keeps the parts that depend on package main:
 //
-// To enable:
-//   1. Download GeoLite2-Country.mmdb from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
-//   2. Place it in /data/ (Docker) or any accessible path
-//   3. Pass -geoip-db /data/GeoLite2-Country.mmdb
-// ---------------------------------------------------------------------------
-
-var (
-	geoDBMu sync.RWMutex
-	geoDB   *geoip2.Reader // nil = disabled
-)
-
-// InitGeoDB opens the GeoLite2-Country .mmdb file.
-// Call once at startup. Subsequent calls replace the open reader atomically.
-func InitGeoDB(path string) error {
-	r, err := geoip2.Open(path)
-	if err != nil {
-		return err
-	}
-	geoDBMu.Lock()
-	old := geoDB
-	geoDB = r
-	geoDBMu.Unlock()
-	if old != nil {
-		_ = old.Close()
-	}
-	return nil
-}
-
-// geoEnabled reports whether a GeoIP database is loaded.
-func geoEnabled() bool {
-	geoDBMu.RLock()
-	ok := geoDB != nil
-	geoDBMu.RUnlock()
-	return ok
-}
-
-// ---------------------------------------------------------------------------
-// In-memory cache — avoids repeated .mmdb lookups for the same IP
-// ---------------------------------------------------------------------------
-
-type geoResult struct {
-	CountryCode string
-	Country     string
-}
-
-type geoCache struct {
-	mu    sync.RWMutex
-	cache map[string]*geoResult
-}
-
-const geoCacheMaxSize = 50_000
-
-var geo = &geoCache{cache: make(map[string]*geoResult)}
-
-func (g *geoCache) lookup(ipStr string) (code, name string) {
-	g.mu.RLock()
-	if r, ok := g.cache[ipStr]; ok {
-		code, name = r.CountryCode, r.Country
-		g.mu.RUnlock()
-		return
-	}
-	g.mu.RUnlock()
-
-	geoDBMu.RLock()
-	db := geoDB
-	geoDBMu.RUnlock()
-	if db == nil {
-		return "", ""
-	}
-
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return "", ""
-	}
-	record, err := db.Country(ip)
-	if err != nil {
-		return "", ""
-	}
-	code = record.Country.IsoCode
-	name = record.Country.Names["en"]
-
-	g.mu.Lock()
-	if len(g.cache) >= geoCacheMaxSize {
-		// Evict ~10 % of entries to avoid thrashing (one-at-a-time eviction
-		// under sustained load causes a cache miss on nearly every new IP).
-		toEvict := geoCacheMaxSize / 10
-		if toEvict == 0 {
-			toEvict = 1
-		}
-		evicted := 0
-		for k := range g.cache {
-			delete(g.cache, k)
-			evicted++
-			if evicted >= toEvict {
-				break
-			}
-		}
-	}
-	g.cache[ipStr] = &geoResult{CountryCode: code, Country: name}
-	g.mu.Unlock()
-	return
-}
-
-// ---------------------------------------------------------------------------
-// Public API used by proxy.go and policy.go
+//   - resolveHost: host → public net.IP, applying the shared SSRF private-range
+//     check (isPrivateIP/privateCIDRs). It stays here because that SSRF backbone
+//     is shared by proxy/security/threatfeed/release and must not be forked.
+//   - geo: a thin host-based wrapper preserving the LookupFull/Lookup/LookupCached
+//     API used by callers (enrollment.go, policy.go, proxy.go), delegating to the
+//     internal/geoip engine after resolution.
+//   - countryTraffic / activeConns: dashboard/runtime counters, unrelated to the
+//     GeoIP engine (deliberately left in main, ADR-0002 option F).
 // ---------------------------------------------------------------------------
 
 // resolveHost returns the first public IP for a given host (or parses it directly).
@@ -137,7 +38,7 @@ func resolveHost(host string) net.IP {
 		}
 		return ip
 	}
-	addrs, err := net.LookupHost(host)
+	addrs, err := net.LookupHost(host) //nolint:noctx // pre-existing resolver call moved verbatim during the internal/geoip split (ADR-0002); context-aware DNS is a separate, out-of-scope change to this SSRF-adjacent path
 	if err != nil || len(addrs) == 0 {
 		return nil
 	}
@@ -150,42 +51,45 @@ func resolveHost(host string) net.IP {
 	return nil
 }
 
+// geoResolver is the host-based GeoIP facade used across package main. It owns
+// host→IP resolution (with the SSRF check) and delegates the actual country
+// lookup to the internal/geoip engine.
+type geoResolver struct{}
+
+// geo preserves the call-site API (geo.LookupFull/Lookup/LookupCached) that
+// existed before the engine was extracted to internal/geoip.
+var geo = &geoResolver{}
+
 // Lookup returns the two-letter ISO country code for a host ("" on failure or disabled).
-func (g *geoCache) Lookup(host string) string {
-	code, _ := g.LookupFull(host)
+func (geoResolver) Lookup(host string) string {
+	code, _ := geo.LookupFull(host)
 	return code
 }
 
 // LookupFull returns the country code and full name for a host.
-func (g *geoCache) LookupFull(host string) (code, name string) {
-	if !geoEnabled() {
+func (geoResolver) LookupFull(host string) (code, name string) {
+	if !geoip.Enabled() {
 		return "", ""
 	}
 	ip := resolveHost(host)
 	if ip == nil {
 		return "", ""
 	}
-	return g.lookup(ip.String())
+	return geoip.LookupByIP(ip)
 }
 
 // LookupCached returns the country code only if already in cache.
 // Never triggers a new lookup — safe to call in the hot policy path.
 // Returns ("", false) on cache miss or when GeoIP is disabled.
-func (g *geoCache) LookupCached(host string) (code string, ok bool) {
-	if !geoEnabled() {
+func (geoResolver) LookupCached(host string) (code string, ok bool) {
+	if !geoip.Enabled() {
 		return "", false
 	}
 	ip := resolveHost(host)
 	if ip == nil {
 		return "", false
 	}
-	ipStr := ip.String()
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	if r, hit := g.cache[ipStr]; hit {
-		return r.CountryCode, true
-	}
-	return "", false
+	return geoip.LookupCachedByIP(ip)
 }
 
 // ---------------------------------------------------------------------------

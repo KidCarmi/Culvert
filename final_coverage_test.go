@@ -11,6 +11,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── ScanBody cache paths ─────────────────────────────────────────────────────
@@ -19,14 +23,13 @@ import (
 // BodyScanEnabled() returns true (requires clam != nil OR globalYARA.Enabled()).
 func makeScannerWithYARA(t *testing.T) (*SecurityScanner, func()) { //nolint:gocritic // unnamed cleanup func is idiomatic Go
 	t.Helper()
-	rules, err := parseYARASrc(yaraRule("TestCacheRule", `        $a = "MATCH_THIS_STRING"`, "any of them"))
-	if err != nil {
-		t.Fatalf("parseYARASrc: %v", err)
+	y := &YARARuleSet{}
+	if _, err := y.LoadSource(yaraRule("TestCacheRule", `        $a = "MATCH_THIS_STRING"`, "any of them")); err != nil {
+		t.Fatalf("LoadSource: %v", err)
 	}
-	y := &YARARuleSet{rules: rules}
 	old := globalYARA
 	globalYARA = y
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	return ss, func() { globalYARA = old }
 }
 
@@ -36,7 +39,7 @@ func TestSecurityScanner_ScanBody_CacheHit_Dirty(t *testing.T) {
 
 	data := []byte("evil cached content")
 	hash := SHA256Hex(data)
-	ss.cache.Set(hash, ScanCacheResult{Clean: false, Reason: "virus-name", Source: "clamav"})
+	ss.CacheSet(hash, ScanCacheResult{Clean: false, Reason: "virus-name", Source: "clamav"})
 
 	result := ss.ScanBody(data)
 	if result == nil {
@@ -53,7 +56,7 @@ func TestSecurityScanner_ScanBody_CacheHit_Clean(t *testing.T) {
 
 	data := []byte("clean cached content")
 	hash := SHA256Hex(data)
-	ss.cache.Set(hash, ScanCacheResult{Clean: true, Source: "clean"})
+	ss.CacheSet(hash, ScanCacheResult{Clean: true, Source: "clean"})
 
 	result := ss.ScanBody(data)
 	if result != nil {
@@ -223,14 +226,13 @@ func TestBlocklist_SetMode_Block(t *testing.T) {
 func TestSecurityScanner_ScanBody_YARA_Clean(t *testing.T) {
 	// YARA enabled but no match
 	y := &YARARuleSet{}
-	rules, _ := parseYARASrc(yaraRule("DetectEICAR", `        $a = "EICAR_MATCH"`, "any of them"))
-	y.rules = rules
+	_, _ = y.LoadSource(yaraRule("DetectEICAR", `        $a = "EICAR_MATCH"`, "any of them"))
 
 	old := globalYARA
 	globalYARA = y
 	defer func() { globalYARA = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	result := ss.ScanBody([]byte("clean data that does not match"))
 	if result != nil {
 		t.Error("ScanBody should return nil for clean data with no YARA match")
@@ -366,22 +368,10 @@ func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 }
 
-// ─── store.auditAdd with syslog (global nil) ──────────────────────────────────
-
-func TestAuditAdd_NoFile_NoSyslog(_ *testing.T) {
-	// Make sure auditLogFile and globalSyslog are nil
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	// auditAdd should not panic when both file and syslog are nil
-	auditAdd(AuditEntry{TS: 1, Action: "test.action", Actor: "testactor"})
-}
-
 // ─── CertManager.GetCert ─────────────────────────────────────────────────────
 
 func TestCertManager_GetCert(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -401,7 +391,7 @@ func TestCertManager_GetCert(t *testing.T) {
 }
 
 func TestCertManager_GetCert_EmptyServerName(t *testing.T) {
-	cm := &CertManager{cache: make(map[string]*certCacheEntry)}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -424,21 +414,22 @@ func TestBlocklist_SaveMode_NonEmptyPath(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/blocklist.txt",
-		mode:      "allow",
+	path := dir + "/blocklist.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	b.saveMode()
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b.SetMode("allow") // persists the .mode sidecar via the public path
 
-	// Verify the mode file was created
-	data, err := os.ReadFile(dir + "/blocklist.txt.mode")
+	data, err := os.ReadFile(path + ".mode")
 	if err != nil {
-		t.Fatalf("saveMode should create mode file: %v", err)
+		t.Fatalf("SetMode should create mode file: %v", err)
 	}
 	if string(data) != "allow" {
-		t.Errorf("saveMode content = %q, want allow", string(data))
+		t.Errorf("mode sidecar content = %q, want allow", string(data))
 	}
 }
 
@@ -461,15 +452,12 @@ func TestBlocklist_Load_WithModeSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b := blocklist.New()
 	if err := b.Load(path); err != nil {
 		t.Fatalf("Blocklist.Load: %v", err)
 	}
-	if b.mode != "allow" {
-		t.Errorf("Blocklist.Load mode = %q, want allow", b.mode)
+	if b.Mode() != "allow" {
+		t.Errorf("Blocklist.Load mode = %q, want allow", b.Mode())
 	}
 }
 
@@ -482,37 +470,10 @@ func TestValidateExternalURL_PublicHTTPS(t *testing.T) {
 	}
 }
 
-// ─── auditAdd with file ───────────────────────────────────────────────────────
-
-func TestAuditAdd_WithFile(t *testing.T) {
-	f, err := os.CreateTemp("", "auditadd*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	oldFile := auditLogFile
-	auditLogFile = f
-	defer func() {
-		auditLogFile = oldFile
-		f.Close()
-	}()
-
-	auditAdd(AuditEntry{TS: 1, Action: "test.file.write", Actor: "testactor"})
-
-	// Verify something was written
-	f.Seek(0, 0) //nolint:errcheck // seeking to start of file; error is non-actionable in test context
-	buf := make([]byte, 1024)
-	n, _ := f.Read(buf)
-	if n == 0 {
-		t.Error("auditAdd should write to the file when auditLogFile is set")
-	}
-}
-
 // ─── ca.go: decryptBundle error paths ────────────────────────────────────────
 
 func TestDecryptBundle_TooShort(t *testing.T) {
-	_, err := decryptBundle([]byte("short"), []byte("passphrase"))
+	_, err := ca.DecryptBundle([]byte("short"), []byte("passphrase"))
 	if err == nil {
 		t.Error("decryptBundle should fail on short data")
 	}
@@ -520,9 +481,9 @@ func TestDecryptBundle_TooShort(t *testing.T) {
 
 func TestDecryptBundle_BadMagic(t *testing.T) {
 	data := make([]byte, 100)
-	data[4] = caVersion
+	data[4] = ca.BundleVersion
 	binary.BigEndian.PutUint32(data[5:9], 100_001) // valid iteration count
-	_, err := decryptBundle(data, []byte("passphrase"))
+	_, err := ca.DecryptBundle(data, []byte("passphrase"))
 	if err == nil {
 		t.Error("decryptBundle should fail with bad magic")
 	}
@@ -552,43 +513,8 @@ func TestCertManager_LoadCA_BadPassphrase(t *testing.T) {
 	}
 }
 
-// ─── store: logAdd truncation ─────────────────────────────────────────────────
-
-func TestLogAdd_Truncation(t *testing.T) {
-	// Fill logs beyond maxLogs limit
-	for i := 0; i < maxLogs+10; i++ {
-		logAdd(LogEntry{TS: int64(i), Host: "trunctest.example.com", Status: "OK"})
-	}
-	// Verify logs were truncated to maxLogs
-	logsMu.Lock()
-	n := len(logs)
-	logsMu.Unlock()
-	if n > maxLogs {
-		t.Errorf("logAdd should cap logs at %d, got %d", maxLogs, n)
-	}
-}
-
-// ─── auditAdd truncation ──────────────────────────────────────────────────────
-
-func TestAuditAdd_Truncation(t *testing.T) {
-	oldFile := auditLogFile
-	auditLogFile = nil
-	defer func() { auditLogFile = oldFile }()
-
-	oldLog := auditLog
-	auditLog = nil
-	defer func() { auditLog = oldLog }()
-
-	for i := 0; i < maxAuditLogs+10; i++ {
-		auditAdd(AuditEntry{TS: int64(i), Action: "test"})
-	}
-	auditMu.Lock()
-	n := len(auditLog)
-	auditMu.Unlock()
-	if n > maxAuditLogs {
-		t.Errorf("auditAdd should cap at %d, got %d", maxAuditLogs, n)
-	}
-}
+// store: logAdd truncation moved to internal/reqlog (ADR-0002, store.go
+// decomposition Phase C — TestAdd_RingTruncation).
 
 // ─── exportBundle / SaveCA with passphrase ────────────────────────────────────
 
@@ -806,46 +732,6 @@ func TestAuthSelectProvider_WithRelay(t *testing.T) {
 	}
 }
 
-// ─── InitAuditLog: with oversized existing data ───────────────────────────────
-
-func TestInitAuditLog_WithManyEntries(t *testing.T) {
-	f, err := os.CreateTemp("", "auditinit*.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
-
-	// Write more than maxAuditLogs entries to trigger truncation
-	for i := 0; i < maxAuditLogs+5; i++ {
-		_, _ = f.WriteString(`{"ts":` + string(rune('0'+i%10)) + `,"action":"test"}` + "\n")
-	}
-	f.Close()
-
-	oldFile := auditLogFile
-	oldCloser := auditCloser
-	oldLog := auditLog
-	auditLogFile = nil
-	auditCloser = nil
-	auditLog = nil
-	defer func() {
-		auditLogFile = oldFile
-		auditCloser = oldCloser
-		auditLog = oldLog
-		if auditCloser != nil {
-			auditCloser.Close()
-		}
-	}()
-
-	if err := InitAuditLog(f.Name()); err != nil {
-		t.Fatalf("InitAuditLog: %v", err)
-	}
-	if auditCloser != nil {
-		auditCloser.Close()
-		auditLogFile = nil
-		auditCloser = nil
-	}
-}
-
 // ─── apiUIAllowIPs POST with valid IPs ───────────────────────────────────────
 
 func TestAPIUIAllowIPs_Post_ValidEmpty(t *testing.T) {
@@ -979,10 +865,9 @@ func TestAPIStats_WithBlockedStats(t *testing.T) {
 // ─── Blocklist.List with wildcards ────────────────────────────────────────────
 
 func TestBlocklist_List_WithWildcards(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"exact.example.com": true},
-		wildcards: map[string]bool{".example.com": true},
-	}
+	b := blocklist.New()
+	b.Add("exact.example.com")
+	b.Add("*.example.com")
 	list := b.List()
 	if len(list) != 2 {
 		t.Errorf("List should return 2 items (1 exact + 1 wildcard), got %d", len(list))
@@ -1055,11 +940,9 @@ func TestTsRecord_DiffPath(_ *testing.T) {
 // ─── Blocklist.IsBlocked in allow mode ───────────────────────────────────────
 
 func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
-	b := &Blocklist{
-		exact:     map[string]bool{"allowed.example.com": true},
-		wildcards: make(map[string]bool),
-		mode:      "allow",
-	}
+	b := blocklist.New()
+	b.Add("allowed.example.com")
+	b.SetMode("allow")
 	// In allow mode, listed hosts are NOT blocked (allowed), unlisted ARE blocked
 	if b.IsBlocked("allowed.example.com") {
 		t.Error("listed host in allow mode should NOT be blocked")
@@ -1072,13 +955,14 @@ func TestBlocklist_IsBlocked_AllowMode(t *testing.T) {
 // ─── Blocklist.Remove wildcard ────────────────────────────────────────────────
 
 func TestBlocklist_Remove_Wildcard(t *testing.T) {
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: map[string]bool{".example.com": true},
+	b := blocklist.New()
+	b.Add("*.example.com")
+	if !b.IsBlocked("sub.example.com") {
+		t.Fatal("wildcard should block subdomains after Add")
 	}
 	b.Remove("*.example.com")
-	if b.wildcards[".example.com"] {
-		t.Error("Remove wildcard should delete from wildcards map")
+	if b.IsBlocked("sub.example.com") {
+		t.Error("Remove wildcard should delete the wildcard entry")
 	}
 }
 
@@ -1141,20 +1025,19 @@ func TestBlocklist_List_Save(t *testing.T) {
 	}
 	defer os.RemoveAll(dir) //nolint:errcheck // test cleanup
 
-	b := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-		path:      dir + "/bl.txt",
-		mode:      "block",
+	path := dir + "/bl.txt"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := blocklist.New()
+	if err := b.Load(path); err != nil {
+		t.Fatalf("initial Load: %v", err)
 	}
 	b.Add("list-save-test.example.com")
 	b.Save()
 
 	// Reload
-	b2 := &Blocklist{
-		exact:     make(map[string]bool),
-		wildcards: make(map[string]bool),
-	}
+	b2 := blocklist.New()
 	if err := b2.Load(dir + "/bl.txt"); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

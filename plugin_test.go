@@ -20,9 +20,8 @@ func (p *testPlugin) OnResponse(resp *http.Response) {
 }
 
 func withPlugins(ps []Middleware, fn func()) {
-	orig := plugins
-	plugins = ps
-	defer func() { plugins = orig }()
+	orig := pluginReplace(ps)
+	defer pluginReplace(orig)
 	fn()
 }
 
@@ -82,8 +81,14 @@ func TestRegisterPlugin(t *testing.T) {
 	withPlugins(nil, func() {
 		p := &testPlugin{name: "reg", decision: DecisionAllow}
 		RegisterPlugin(p)
-		if len(plugins) != 1 {
-			t.Errorf("expected 1 plugin after Register, got %d", len(plugins))
+		// Read the chain back via the swap API (the slice is package-owned
+		// in internal/plugin now) and put it straight back — withPlugins'
+		// cleanup restores the original chain when fn returns, so a deferred
+		// restore here would run AFTER it and leak the test plugin.
+		got := pluginReplace(nil)
+		pluginReplace(got)
+		if len(got) != 1 {
+			t.Errorf("expected 1 plugin after Register, got %d", len(got))
 		}
 	})
 }

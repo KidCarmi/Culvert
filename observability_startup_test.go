@@ -18,13 +18,15 @@ import (
 	"context"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/otlp"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 var observabilityStartupLoggerMu sync.Mutex
@@ -38,24 +40,15 @@ func ensureObservabilityStartupTestLogger(t *testing.T) {
 	}
 }
 
-// freshOTLPExporter constructs a zero-state OTLPExporter for tests.
-// Mirrors the package-level initialiser at otlp.go:45–51.
+// freshOTLPExporter constructs a zero-state metrics exporter for tests
+// (nil snapshot: the engine exports an empty metric set).
 func freshOTLPExporter() *OTLPExporter {
-	return &OTLPExporter{
-		interval: 15 * time.Second,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
+	return otlp.NewMetrics(nil)
 }
 
-// freshOTLPSpanExporter constructs a zero-state OTLPSpanExporter for
-// tests. Mirrors otlp_traces.go:67–.
+// freshOTLPSpanExporter constructs a zero-state span exporter for tests.
 func freshOTLPSpanExporter() *OTLPSpanExporter {
-	return &OTLPSpanExporter{
-		interval: 15 * time.Second,
-		client:   &http.Client{Timeout: 10 * time.Second},
-	}
+	return otlp.NewSpans()
 }
 
 // snapshotObservabilityGlobals saves and zeroes every package-level
@@ -74,30 +67,17 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	oldGlobalOTLP := globalOTLP
 	oldGlobalOTLPTraces := globalOTLPTraces
 
-	// Audit log (store.go).
-	oldAuditLogFile := auditLogFile
-	oldAuditCloser := auditCloser
-	oldAuditLogFilePath := auditLogFilePath
-	oldAuditLog := auditLog
+	// Audit engine (internal/audit).
+	restoreAudit := audit.ResetForTest()
 
-	// Request log (store.go).
-	oldRequestLogWriter := requestLogWriter
-	oldRequestLogCloser := requestLogCloser
-	oldRequestLogFilePath := requestLogFilePath
+	// Request-log persistence (internal/reqlog). The restore closes any
+	// handle the test-under-test opened before reinstating the snapshot.
+	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	syslogConfigured = ""
 	globalSyslog = nil
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
-	auditLogFile = nil
-	auditCloser = nil
-	auditLogFilePath = ""
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-	requestLogWriter = nil
-	requestLogCloser = nil
-	requestLogFilePath = ""
 
 	t.Cleanup(func() {
 		// Close handles + stop goroutines the test opened on the
@@ -107,25 +87,14 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		}
 		globalOTLP.Stop()
 		globalOTLPTraces.Stop()
-		if auditCloser != nil {
-			_ = auditCloser.Close()
-		}
-		if requestLogCloser != nil {
-			_ = requestLogCloser.Close()
-		}
+		_ = audit.Close() // close any handle the test-under-test opened
 		syslogConfigured = oldSyslogConfigured
 		globalSyslog = oldGlobalSyslog
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
-		auditLogFile = oldAuditLogFile
-		auditCloser = oldAuditCloser
-		auditLogFilePath = oldAuditLogFilePath
-		auditMu.Lock()
-		auditLog = oldAuditLog
-		auditMu.Unlock()
-		requestLogWriter = oldRequestLogWriter
-		requestLogCloser = oldRequestLogCloser
-		requestLogFilePath = oldRequestLogFilePath
+		audit.ClearPersistForTest() // closed above; restore must not double-close
+		restoreAudit()
+		restoreReqlog()
 	})
 }
 
@@ -227,11 +196,11 @@ func TestLoadObservability_EmptyConfigIsNoOp(t *testing.T) {
 	if globalOTLPTraces.Enabled() {
 		t.Errorf("globalOTLPTraces.Enabled() = true; want false")
 	}
-	if auditCloser != nil {
-		t.Errorf("auditCloser = %v; want nil", auditCloser)
+	if audit.PersistActive() {
+		t.Error("audit persistence active; want inactive (no AuditLogPath)")
 	}
-	if requestLogCloser != nil {
-		t.Errorf("requestLogCloser = %v; want nil", requestLogCloser)
+	if reqlog.PersistActive() {
+		t.Error("request-log persistence active; want inactive (no RequestLogPath)")
 	}
 }
 
@@ -245,11 +214,8 @@ func TestLoadObservability_AuditLogOpens(t *testing.T) {
 		RequestLogMaxMB: 100,
 	})
 
-	if auditCloser == nil {
-		t.Fatal("auditCloser == nil after AuditLogPath set; want non-nil")
-	}
-	if auditLogFilePath != path {
-		t.Errorf("auditLogFilePath = %q; want %q", auditLogFilePath, path)
+	if !audit.PersistActive() {
+		t.Fatal("audit persistence inactive after AuditLogPath set; want active")
 	}
 }
 
@@ -263,11 +229,11 @@ func TestLoadObservability_RequestLogOpens(t *testing.T) {
 		RequestLogMaxMB: 10,
 	})
 
-	if requestLogCloser == nil {
-		t.Fatal("requestLogCloser == nil after RequestLogPath set; want non-nil")
+	if !reqlog.PersistActive() {
+		t.Fatal("request-log persistence inactive after RequestLogPath set; want active")
 	}
-	if requestLogFilePath != path {
-		t.Errorf("requestLogFilePath = %q; want %q", requestLogFilePath, path)
+	if reqlog.FilePath() != path {
+		t.Errorf("reqlog.FilePath() = %q; want %q", reqlog.FilePath(), path)
 	}
 }
 

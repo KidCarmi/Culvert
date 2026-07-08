@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/feedsync"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -525,8 +527,8 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalCategoryGroups.Save()
-		auditEvent(r, "category-group.delete", name, "")
-		saveConfigVersion(sessionAdmin(r), "category-group.delete")
+		auditEvent(r, "category-group.remove", name, "")
+		saveConfigVersion(sessionAdmin(r), "category-group.remove")
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
@@ -543,7 +545,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		ut1Set := make(map[string]bool)
 		feedActive := communityDB != nil // only show badge if feed is actually configured
 		if feedActive {
-			for _, cat := range ut1CategoryMap {
+			for _, cat := range feedsync.MappedCategories() {
 				ut1Set[strings.ToLower(cat)] = true
 			}
 		}
@@ -1011,8 +1013,8 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 		logger.Printf("UI: policy rule deleted priority=%s", logPriority)
-		auditEventDiff(r, "policy.delete", name, "", beforeRule, nil)
-		saveConfigVersion(sessionAdmin(r), "policy.delete")
+		auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
+		saveConfigVersion(sessionAdmin(r), "policy.remove")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -1057,9 +1059,23 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	policyStore.Save()
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
-	auditEvent(r, "policy.bulk_delete", fmt.Sprintf("%d rule(s)", deleted), "")
-	saveConfigVersion(sessionAdmin(r), "policy.bulk_delete")
+	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
+	saveConfigVersion(sessionAdmin(r), "policy.bulk_remove")
 	jsonOK(w, map[string]any{"deleted": deleted})
+}
+
+// listAccessRules returns the Stage-2 access rules from the policy store, in
+// priority order. Stage-1 auth rules are excluded — they are managed via
+// /api/authpolicy and keep their priorities through every access-side reorder.
+func listAccessRules() []PolicyRule {
+	rules := policyStore.List()
+	out := make([]PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
+			out = append(out, rules[i])
+		}
+	}
+	return out
 }
 
 // POST /api/policy/reorder — drag-and-drop priority reordering
@@ -1079,14 +1095,28 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
-	// /api/authpolicy contract). Pure access-rule reorders that leave every
-	// auth rule at its current priority remain operator-level. Documented
-	// dynamic role escalation — see the uiRoutes Note and C4 observability.
-	if authPrioritiesWouldChange(body.Priorities) && !requireRole(w, r, RoleAdmin) {
+	// Access-only contract: the list must be exactly the current Stage-2 access-
+	// rule priority set. Stage-1 auth rules are reordered exclusively via
+	// /api/authpolicy (admin-only) and keep their priorities, so this endpoint
+	// permutes access rules among their own slots and never touches an auth rule
+	// (no operator/admin escalation). Rejecting any auth priority — and any
+	// partial/stale list — keeps the permutation well-defined.
+	access := listAccessRules()
+	accessPris := make(map[int]bool, len(access))
+	for i := range access {
+		accessPris[access[i].Priority] = true
+	}
+	if len(body.Priorities) != len(accessPris) {
+		http.Error(w, "priorities must list every access rule exactly once", http.StatusBadRequest)
 		return
 	}
-	if !policyStore.Reorder(body.Priorities) {
+	for _, p := range body.Priorities {
+		if !accessPris[p] {
+			http.Error(w, fmt.Sprintf("priority %d is not an access rule", p), http.StatusBadRequest)
+			return
+		}
+	}
+	if !policyStore.PermutePriorities(body.Priorities) {
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
@@ -1182,24 +1212,22 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rules := policyStore.List()
-	if len(rules) == 0 {
+	// Access-only: build the moved order over Stage-2 access rules and permute
+	// just those priorities. Stage-1 auth rules are reordered via /api/authpolicy
+	// and keep their priorities, so an access move never crosses or renumbers one
+	// (no operator/admin escalation). Moving an auth rule via this endpoint is
+	// rejected because buildMovedPriorities won't find it among the access rules.
+	access := listAccessRules()
+	if len(access) == 0 {
 		http.Error(w, "no rules to reorder", http.StatusBadRequest)
 		return
 	}
-	priorities, err := buildMovedPriorities(rules, body.Priority, body.Position, body.TargetName)
+	priorities, err := buildMovedPriorities(access, body.Priority, body.Position, body.TargetName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Repositioning a Stage-1 auth rule is an admin-only mutation (the
-	// /api/authpolicy contract): this covers both moving an auth rule itself
-	// and moving an access rule across one (which shifts its priority).
-	// Documented dynamic role escalation — see the uiRoutes Note and C4.
-	if authPrioritiesWouldChange(priorities) && !requireRole(w, r, RoleAdmin) {
-		return
-	}
-	if !policyStore.Reorder(priorities) {
+	if !policyStore.PermutePriorities(priorities) {
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
 		return
 	}

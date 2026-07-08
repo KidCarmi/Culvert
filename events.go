@@ -6,79 +6,28 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/logstore"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/sse"
 )
 
-// sseHub manages Server-Sent Events (SSE) connections for the live dashboard.
-// Clients connect to /api/events and receive JSON stats every second.
-type sseHub struct {
-	mu      sync.Mutex
-	clients map[chan []byte]struct{}
-}
-
-var hub = &sseHub{clients: make(map[chan []byte]struct{})}
-
-// sseMaxClients caps concurrent SSE connections per hub. Each connection
-// holds a goroutine and an HTTP stream with no write deadline, so without a
-// cap any viewer credential could exhaust goroutines/FDs by opening streams.
-// 0 disables the cap. Accessed atomically: tests adjust it, and it is the
-// seam for the planned admin-configurable connection limit.
-var sseMaxClients int64 = 256
+// hub manages the Server-Sent Events (SSE) connections for the live
+// dashboard. Clients connect to /api/events and receive JSON stats every
+// second. The hub engine (registration cap, slow-client eviction, counters)
+// lives in internal/sse (ADR-0002); this file keeps the broadcaster (which
+// assembles the payload from main's stats), the handler, and the /metrics
+// exposition.
+var hub = sse.NewHub()
 
 // sseWriteTimeout bounds each SSE frame write. The dashboard ticks every 1 s,
 // so a healthy client drains well within this window; a half-open TCP peer
 // (client gone, no RST — and SSE runs with WriteTimeout 0) would otherwise
 // block the handler goroutine forever on a full socket buffer.
 const sseWriteTimeout = 10 * time.Second
-
-// Live-feed observability counters (exposed via /metrics).
-var (
-	statSSEEvicted  int64 // slow SSE clients evicted by broadcast
-	statSSERejected int64 // SSE connections rejected at the sseMaxClients cap
-)
-
-// register adds the client channel to the hub. It reports false — without
-// registering — when the hub is already at the sseMaxClients cap.
-func (h *sseHub) register(ch chan []byte) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if limit := atomic.LoadInt64(&sseMaxClients); limit > 0 && int64(len(h.clients)) >= limit {
-		return false
-	}
-	h.clients[ch] = struct{}{}
-	return true
-}
-
-func (h *sseHub) unregister(ch chan []byte) {
-	h.mu.Lock()
-	delete(h.clients, ch)
-	h.mu.Unlock()
-}
-
-func (h *sseHub) broadcast(msg []byte) {
-	h.mu.Lock()
-	for ch := range h.clients {
-		select {
-		case ch <- msg:
-		default:
-			// B21: Close and remove slow clients instead of silently dropping messages.
-			// This prevents stale connections from accumulating and missing state updates.
-			close(ch)
-			delete(h.clients, ch)
-			atomic.AddInt64(&statSSEEvicted, 1)
-		}
-	}
-	h.mu.Unlock()
-}
-
-// ClientCount returns the number of connected SSE clients.
-func (h *sseHub) ClientCount() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.clients)
-}
 
 // DashboardPayload is sent to SSE clients every second.
 type DashboardPayload struct {
@@ -157,6 +106,7 @@ func (b *sseBroadcaster) tick() {
 	updLatest := globalUpdateInfo.latestVersion
 	globalUpdateInfo.mu.RUnlock()
 
+	scanCounters := secscan.Counters()
 	payload := DashboardPayload{
 		ActiveConns:       getActiveConns(),
 		TotalRequests:     atomic.LoadInt64(&statTotal),
@@ -165,15 +115,15 @@ func (b *sseBroadcaster) tick() {
 		RPS:               rps,
 		TopCountries:      countryTraffic.Top(15),
 		UptimeSec:         int64(time.Since(startTime).Seconds()),
-		ClamBlocked:       atomic.LoadInt64(&statClamBlocked),
-		YARABlocked:       atomic.LoadInt64(&statYARABlocked),
+		ClamBlocked:       scanCounters.ClamBlocked,
+		YARABlocked:       scanCounters.YARABlocked,
 		DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
-		ThreatFeedBlocked: atomic.LoadInt64(&statThreatFeedBlocked),
+		ThreatFeedBlocked: scanCounters.ThreatFeedBlocked,
 		UpdateAvailable:   updAvail,
 		LatestVersion:     updLatest,
 	}
 	data, _ := json.Marshal(payload)
-	hub.broadcast(data)
+	hub.Broadcast(data)
 }
 
 // startSSEBroadcaster spawns the live-dashboard broadcaster goroutine
@@ -229,13 +179,13 @@ func apiEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ch := make(chan []byte, 4)
-	if !hub.register(ch) {
-		atomic.AddInt64(&statSSERejected, 1)
+	if !hub.Register(ch) {
+		hub.AddRejected()
 		w.Header().Set("Retry-After", "30")
 		http.Error(w, "too many live dashboard connections", http.StatusServiceUnavailable)
 		return
 	}
-	defer hub.unregister(ch)
+	defer hub.Unregister(ch)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -298,17 +248,17 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_sse_clients Currently connected SSE dashboard clients\n")
 	fmt.Fprintf(w, "# TYPE culvert_sse_clients gauge\nculvert_sse_clients %d\n", hub.ClientCount())
 	fmt.Fprintf(w, "\n# HELP culvert_sse_evictions_total SSE clients evicted for falling behind the broadcast\n")
-	fmt.Fprintf(w, "# TYPE culvert_sse_evictions_total counter\nculvert_sse_evictions_total %d\n", atomic.LoadInt64(&statSSEEvicted))
+	fmt.Fprintf(w, "# TYPE culvert_sse_evictions_total counter\nculvert_sse_evictions_total %d\n", hub.Evicted())
 	fmt.Fprintf(w, "\n# HELP culvert_sse_rejected_total SSE connections rejected at the client cap\n")
-	fmt.Fprintf(w, "# TYPE culvert_sse_rejected_total counter\nculvert_sse_rejected_total %d\n", atomic.LoadInt64(&statSSERejected))
+	fmt.Fprintf(w, "# TYPE culvert_sse_rejected_total counter\nculvert_sse_rejected_total %d\n", hub.Rejected())
 	fmt.Fprintf(w, "\n# HELP culvert_reqlog_write_errors_total Persistent request-log write or marshal failures (e.g. disk full)\n")
-	fmt.Fprintf(w, "# TYPE culvert_reqlog_write_errors_total counter\nculvert_reqlog_write_errors_total %d\n", atomic.LoadInt64(&statReqLogWriteErrors))
+	fmt.Fprintf(w, "# TYPE culvert_reqlog_write_errors_total counter\nculvert_reqlog_write_errors_total %d\n", reqlog.WriteErrors())
 	fmt.Fprintf(w, "\n# HELP culvert_reqlog_skipped_lines_total Corrupt JSONL lines skipped while reading the persistent request log\n")
-	fmt.Fprintf(w, "# TYPE culvert_reqlog_skipped_lines_total counter\nculvert_reqlog_skipped_lines_total %d\n", atomic.LoadInt64(&statReqLogSkippedLines))
+	fmt.Fprintf(w, "# TYPE culvert_reqlog_skipped_lines_total counter\nculvert_reqlog_skipped_lines_total %d\n", reqlog.SkippedLines())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_dropped_total History-store entries dropped because the async write queue was full\n")
-	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", atomic.LoadInt64(&statLogStoreDropped))
+	fmt.Fprintf(w, "# TYPE culvert_logstore_dropped_total counter\nculvert_logstore_dropped_total %d\n", logstore.Dropped())
 	fmt.Fprintf(w, "\n# HELP culvert_logstore_pruned_total History-store entries deleted by the size-retention janitor\n")
-	fmt.Fprintf(w, "# TYPE culvert_logstore_pruned_total counter\nculvert_logstore_pruned_total %d\n", atomic.LoadInt64(&statLogStorePruned))
+	fmt.Fprintf(w, "# TYPE culvert_logstore_pruned_total counter\nculvert_logstore_pruned_total %d\n", logstore.Pruned())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

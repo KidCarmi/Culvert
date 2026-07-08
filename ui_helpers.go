@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,10 +25,9 @@ func auditEvent(r *http.Request, action, object, detail string) {
 // service (which audits via the headless auditAdd) use this to pass the same
 // actor string the audit ring would record.
 func auditActor(r *http.Request) string {
-	actor, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if actor == "" {
-		actor = r.RemoteAddr
-	}
+	// RISK-019: attribute to the real client behind a configured trusted proxy
+	// so audit lines don't all name the reverse proxy (falls back to the peer).
+	actor := realClientIP(r)
 	if sess, err := readUISessionCookie(r); err == nil && sess != nil {
 		name := sess.Sub
 		if name == "" {
@@ -112,6 +110,17 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 	for i := range existingRules {
 		if strings.EqualFold(existingRules[i].Name, rule.Name) && existingRules[i].Priority != editPriority {
 			return fmt.Errorf("rule name already exists")
+		}
+	}
+	// Duplicate priority check. When rule.Priority > 0, the caller is
+	// supplying an explicit slot; reject it if another rule already owns that
+	// slot. For update operations editPriority is the current slot (excluded
+	// from the check so keeping the same priority is always allowed).
+	if rule.Priority > 0 {
+		for i := range existingRules {
+			if existingRules[i].Priority == rule.Priority && existingRules[i].Priority != editPriority {
+				return fmt.Errorf("priority %d is already in use", rule.Priority)
+			}
 		}
 	}
 	// Schedule timezone is validated for both rule types.

@@ -155,7 +155,7 @@ func TestColdStart_UIUsers_NewEnvelopeWithUser(t *testing.T) {
 	if _, ok := c.uiUsers["admin"]; !ok {
 		t.Error("expected admin user from envelope")
 	}
-	if c.unauthMode {
+	if c.DefaultAuthOutcome() == OutcomeExempt {
 		t.Error("expected unauthMode=false")
 	}
 }

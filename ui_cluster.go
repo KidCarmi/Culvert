@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/bootstrap"
 )
 
 func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +216,7 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 
 	// Build bootstrap command (curl | bash).
-	cpBase := cpBaseURL(r)
+	cpBase := bootstrap.BaseURL(r, trustForwardedHeaders)
 	bootstrapCmd := fmt.Sprintf("curl -fsSL -k %s/api/cluster/bootstrap/%s | sudo bash", cpBase, plaintext)
 	enrollCmd := fmt.Sprintf("./culvert -enroll %q", enrollURL)
 
@@ -395,7 +398,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		"cluster_mode":  clusterRoleIsDP.Load() || clusterRole.role == "control-plane",
+		"cluster_mode":  audit.DPMode() || clusterRole.role == "control-plane",
 	})
 }
 
@@ -588,6 +591,7 @@ func registerClusterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cluster/revocations", apiClusterRevocations)             // GET revocation sync status
 	mux.HandleFunc("/api/cluster/rotation", apiClusterRotation)                   // GET CA rotation progress
 	mux.HandleFunc("/api/cluster/ha", apiClusterHA)                               // GET HA status
+	mux.HandleFunc("/api/cluster/ha/promote", apiClusterHAPromote)                // POST manual standby→leader promotion
 	mux.HandleFunc("/api/cluster/bandwidth", apiBandwidthPolicies)                // GET/POST/DELETE bandwidth QoS policies
 	mux.HandleFunc("/api/cluster/bootstrap/", apiBootstrapRouter)                 // GET bootstrap script/compose (token-authed)
 }

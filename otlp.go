@@ -1,237 +1,62 @@
 package main
 
-// ─── OpenTelemetry OTLP/HTTP metrics export ──────────────────────────────────
-//
-// Exports Culvert metrics to any OpenTelemetry Collector via the OTLP/HTTP
-// JSON protocol (POST /v1/metrics). No SDK dependency — uses plain net/http
-// and encoding/json, keeping the binary self-contained.
+// otlp.go — package-main glue for OTLP/HTTP export, moved to internal/otlp
+// (post-ADR-0002 recorded extraction). The engine owns the transport (push
+// loops, SSRF-guarded client, endpoint validation) and the OTLP JSON
+// schema; main owns WHAT gets exported — the snapshot builders below read
+// the culvert_* stat singletons and are injected into the metrics exporter
+// at construction. Span recording (proxy.go) goes through the aliases.
 //
 // Configuration:
 //   -otlp-endpoint http://otel-collector:4318    (OTLP/HTTP receiver)
 //   config.yaml:  otlp_endpoint: "http://otel-collector:4318"
-//
-// The exporter pushes a snapshot of all culvert_* metrics every push interval
-// (default 15s). Headers can be set for authentication (e.g. API keys).
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
 	"math"
-	"net/http"
-	"regexp"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/otlp"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// validOTLPEndpoint matches http:// or https:// followed by at least one host
-// character.  Regexp.MatchString is a CodeQL-recognised SSRF sanitiser,
-// breaking the taint chain on the endpoint URL (go/request-forgery).
-var validOTLPEndpoint = regexp.MustCompile(`^https?://[^/]`)
+// OTLPExporter pushes metrics to an OTLP/HTTP endpoint (engine type is
+// otlp.MetricsExporter).
+type OTLPExporter = otlp.MetricsExporter
 
-// OTLPExporter pushes metrics to an OTLP/HTTP endpoint.
-type OTLPExporter struct {
-	mu       sync.RWMutex
-	endpoint string            // e.g. "http://otel-collector:4318"
-	headers  map[string]string // custom headers (auth, etc.)
-	interval time.Duration
-	client   *http.Client
-	cancel   context.CancelFunc
+// OTLPSpanExporter collects and pushes request spans (engine type is
+// otlp.SpanExporter).
+type OTLPSpanExporter = otlp.SpanExporter
+
+// SpanRecord holds the per-request span data (engine type is
+// otlp.SpanRecord).
+type SpanRecord = otlp.SpanRecord
+
+var (
+	globalOTLP       = otlp.NewMetrics(culvertMetricsSnapshot)
+	globalOTLPTraces = otlp.NewSpans()
+)
+
+// parseTraceparent extracts trace-id and span-id from a W3C Traceparent
+// header value. Wrapper function (not a func var) — called per request on
+// the proxy telemetry path.
+func parseTraceparent(tp string) (traceID, spanID string) { return otlp.ParseTraceparent(tp) }
+
+// culvertMetricsSnapshot builds the full culvert_* metric set, stamped with
+// now (UnixNano string). This is the injected snapshot source for
+// globalOTLP — it reads main's stat singletons, which is exactly why it
+// lives here and not in the engine.
+func culvertMetricsSnapshot(now string) []otlp.Metric {
+	metrics := otlpCounterMetrics(now)
+	metrics = append(metrics, otlpGaugeMetrics(now)...)
+	metrics = append(metrics, otlpHistogramMetric(now))
+	metrics = append(metrics, otlpRuleMetrics(now)...)
+	return metrics
 }
 
-var globalOTLP = &OTLPExporter{
-	interval: 15 * time.Second,
-	client: &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
-	},
-}
-
-// Configure sets the OTLP endpoint and starts the push loop.
-func (o *OTLPExporter) Configure(endpoint string, headers map[string]string) {
-	o.mu.Lock()
-	// Stop existing loop if reconfiguring.
-	if o.cancel != nil {
-		o.cancel()
-	}
-	o.endpoint = strings.TrimRight(endpoint, "/")
-	o.headers = headers
-	o.mu.Unlock()
-
-	if endpoint == "" {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	o.mu.Lock()
-	o.cancel = cancel
-	o.mu.Unlock()
-	go o.pushLoop(ctx)
-	logger.Printf("OTLP: exporting metrics to %s every %s", sanitizeLog(endpoint), o.interval)
-}
-
-// Stop halts the push loop.
-func (o *OTLPExporter) Stop() {
-	o.mu.Lock()
-	if o.cancel != nil {
-		o.cancel()
-		o.cancel = nil
-	}
-	o.endpoint = ""
-	o.mu.Unlock()
-}
-
-// Enabled returns whether OTLP export is active.
-func (o *OTLPExporter) Enabled() bool {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.endpoint != ""
-}
-
-// Endpoint returns the current endpoint URL.
-func (o *OTLPExporter) Endpoint() string {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return o.endpoint
-}
-
-func (o *OTLPExporter) pushLoop(ctx context.Context) {
-	ticker := time.NewTicker(o.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := o.push(ctx); err != nil {
-				logger.Printf("OTLP push error: %s", sanitizeLog(err.Error()))
-			}
-		}
-	}
-}
-
-func (o *OTLPExporter) push(ctx context.Context) error {
-	o.mu.RLock()
-	endpoint := o.endpoint
-	headers := o.headers
-	o.mu.RUnlock()
-
-	if endpoint == "" {
-		return nil
-	}
-
-	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
-	// sanitiser, breaking the taint chain on endpoint (go/request-forgery).
-	if !validOTLPEndpoint.MatchString(endpoint) {
-		return fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)
-	}
-	metricsURL := strings.TrimRight(endpoint, "/") + "/v1/metrics"
-
-	payload := o.buildPayload()
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		metricsURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := o.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("post: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("OTLP collector returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// ─── OTLP JSON payload construction ─────────────────────────────────────────
-// Follows the OTLP/HTTP JSON schema:
-// https://opentelemetry.io/docs/specs/otlp/#otlphttp
-
-type otlpExportRequest struct {
-	ResourceMetrics []otlpResourceMetrics `json:"resourceMetrics"`
-}
-
-type otlpResourceMetrics struct {
-	Resource     otlpResource      `json:"resource"`
-	ScopeMetrics []otlpScopeMetric `json:"scopeMetrics"`
-}
-
-type otlpResource struct {
-	Attributes []otlpKeyValue `json:"attributes"`
-}
-
-type otlpScopeMetric struct {
-	Scope   otlpScope    `json:"scope"`
-	Metrics []otlpMetric `json:"metrics"`
-}
-
-type otlpScope struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type otlpMetric struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	Unit        string     `json:"unit,omitempty"`
-	Sum         *otlpSum   `json:"sum,omitempty"`
-	Gauge       *otlpGauge `json:"gauge,omitempty"`
-	Histogram   *otlpHist  `json:"histogram,omitempty"`
-}
-
-type otlpSum struct {
-	DataPoints             []otlpNumberDataPoint `json:"dataPoints"`
-	AggregationTemporality int                   `json:"aggregationTemporality"` // 2 = cumulative
-	IsMonotonic            bool                  `json:"isMonotonic"`
-}
-
-type otlpGauge struct {
-	DataPoints []otlpNumberDataPoint `json:"dataPoints"`
-}
-
-type otlpHist struct {
-	DataPoints             []otlpHistDataPoint `json:"dataPoints"`
-	AggregationTemporality int                 `json:"aggregationTemporality"`
-}
-
-type otlpNumberDataPoint struct {
-	Attributes   []otlpKeyValue `json:"attributes,omitempty"`
-	TimeUnixNano string         `json:"timeUnixNano"`
-	AsInt        *int64         `json:"asInt,omitempty"`
-	AsDouble     *float64       `json:"asDouble,omitempty"`
-}
-
-type otlpHistDataPoint struct {
-	TimeUnixNano   string    `json:"timeUnixNano"`
-	Count          int64     `json:"count,string"`
-	Sum            float64   `json:"sum"`
-	BucketCounts   []string  `json:"bucketCounts"`
-	ExplicitBounds []float64 `json:"explicitBounds"`
-}
-
-type otlpKeyValue struct {
-	Key   string       `json:"key"`
-	Value otlpAnyValue `json:"value"`
-}
-
-type otlpAnyValue struct {
-	StringValue string `json:"stringValue,omitempty"`
-}
-
-func otlpCounterMetrics(now string) []otlpMetric {
+func otlpCounterMetrics(now string) []otlp.Metric {
+	scanCounters := secscan.Counters()
 	counters := []struct {
 		name string
 		desc string
@@ -242,22 +67,22 @@ func otlpCounterMetrics(now string) []otlpMetric {
 		{"culvert.requests.auth_fail", "Total auth failures", atomic.LoadInt64(&statAuthFail)},
 		{"culvert.requests.file_blocked", "File extension blocks", atomic.LoadInt64(&statFileBlocked)},
 		{"culvert.requests.dpi_blocked", "DPI content blocks", atomic.LoadInt64(&statDPIBlocked)},
-		{"culvert.requests.clamav_blocked", "ClamAV blocks", atomic.LoadInt64(&statClamBlocked)},
-		{"culvert.requests.yara_blocked", "YARA blocks", atomic.LoadInt64(&statYARABlocked)},
-		{"culvert.requests.threat_feed_blocked", "Threat feed blocks", atomic.LoadInt64(&statThreatFeedBlocked)},
+		{"culvert.requests.clamav_blocked", "ClamAV blocks", scanCounters.ClamBlocked},
+		{"culvert.requests.yara_blocked", "YARA blocks", scanCounters.YARABlocked},
+		{"culvert.requests.threat_feed_blocked", "Threat feed blocks", scanCounters.ThreatFeedBlocked},
 		{"culvert.bytes.sent", "Bytes sent upstream", atomic.LoadInt64(&statBytesSent)},
 		{"culvert.bytes.recv", "Bytes received", atomic.LoadInt64(&statBytesRecv)},
 	}
-	metrics := make([]otlpMetric, 0, len(counters))
+	metrics := make([]otlp.Metric, 0, len(counters))
 	for _, c := range counters {
 		v := c.val
-		metrics = append(metrics, otlpMetric{
+		metrics = append(metrics, otlp.Metric{
 			Name:        c.name,
 			Description: c.desc,
-			Sum: &otlpSum{
+			Sum: &otlp.Sum{
 				AggregationTemporality: 2, // cumulative
 				IsMonotonic:            true,
-				DataPoints: []otlpNumberDataPoint{{
+				DataPoints: []otlp.NumberDataPoint{{
 					TimeUnixNano: now,
 					AsInt:        &v,
 				}},
@@ -267,10 +92,10 @@ func otlpCounterMetrics(now string) []otlpMetric {
 	return metrics
 }
 
-func otlpGaugeMetrics(now string) []otlpMetric {
+func otlpGaugeMetrics(now string) []otlp.Metric {
 	uptimeSec := time.Since(startTime).Seconds()
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	_, _, cacheSize := globalSecScanner.cache.Stats()
+	_, _, cacheSize := globalSecScanner.CacheStats()
 	gauges := []struct {
 		name string
 		desc string
@@ -282,15 +107,15 @@ func otlpGaugeMetrics(now string) []otlpMetric {
 		{"culvert.threat_feed.entries", "Threat feed entries", float64(feedEntries)},
 		{"culvert.scan_cache.size", "Scan cache entries", float64(cacheSize)},
 	}
-	metrics := make([]otlpMetric, 0, len(gauges))
+	metrics := make([]otlp.Metric, 0, len(gauges))
 	for _, g := range gauges {
 		v := g.val
-		metrics = append(metrics, otlpMetric{
+		metrics = append(metrics, otlp.Metric{
 			Name:        g.name,
 			Description: g.desc,
 			Unit:        "1",
-			Gauge: &otlpGauge{
-				DataPoints: []otlpNumberDataPoint{{
+			Gauge: &otlp.Gauge{
+				DataPoints: []otlp.NumberDataPoint{{
 					TimeUnixNano: now,
 					AsDouble:     &v,
 				}},
@@ -300,19 +125,19 @@ func otlpGaugeMetrics(now string) []otlpMetric {
 	return metrics
 }
 
-func otlpHistogramMetric(now string) otlpMetric {
+func otlpHistogramMetric(now string) otlp.Metric {
 	bucketCounts := make([]string, len(latencyHist.buckets)+1)
 	for i := range latencyHist.counts {
 		bucketCounts[i] = fmt.Sprintf("%d", atomic.LoadInt64(&latencyHist.counts[i]))
 	}
 	histSum := math.Float64frombits(uint64(atomic.LoadInt64(&latencyHist.sumBits))) // #nosec G115
-	return otlpMetric{
+	return otlp.Metric{
 		Name:        "culvert.request.duration",
 		Description: "Request latency",
 		Unit:        "s",
-		Histogram: &otlpHist{
+		Histogram: &otlp.Hist{
 			AggregationTemporality: 2,
-			DataPoints: []otlpHistDataPoint{{
+			DataPoints: []otlp.HistDataPoint{{
 				TimeUnixNano:   now,
 				Count:          atomic.LoadInt64(&latencyHist.total),
 				Sum:            histSum,
@@ -323,53 +148,29 @@ func otlpHistogramMetric(now string) otlpMetric {
 	}
 }
 
-func otlpRuleMetrics(now string) []otlpMetric {
+func otlpRuleMetrics(now string) []otlp.Metric {
 	ruleMet.mu.RLock()
 	defer ruleMet.mu.RUnlock()
-	metrics := make([]otlpMetric, 0, len(ruleMet.order))
+	metrics := make([]otlp.Metric, 0, len(ruleMet.order))
 	for _, name := range ruleMet.order {
 		ctr := ruleMet.hits[name]
 		v := atomic.LoadInt64(ctr)
-		metrics = append(metrics, otlpMetric{
+		metrics = append(metrics, otlp.Metric{
 			Name:        "culvert.policy.rule_hits",
 			Description: "Per-rule hit count",
-			Sum: &otlpSum{
+			Sum: &otlp.Sum{
 				AggregationTemporality: 2,
 				IsMonotonic:            true,
-				DataPoints: []otlpNumberDataPoint{{
+				DataPoints: []otlp.NumberDataPoint{{
 					TimeUnixNano: now,
 					AsInt:        &v,
-					Attributes: []otlpKeyValue{{
+					Attributes: []otlp.KeyValue{{
 						Key:   "rule",
-						Value: otlpAnyValue{StringValue: name},
+						Value: otlp.AnyValue{StringValue: name},
 					}},
 				}},
 			},
 		})
 	}
 	return metrics
-}
-
-func (o *OTLPExporter) buildPayload() otlpExportRequest {
-	now := fmt.Sprintf("%d", time.Now().UnixNano())
-
-	metrics := otlpCounterMetrics(now)
-	metrics = append(metrics, otlpGaugeMetrics(now)...)
-	metrics = append(metrics, otlpHistogramMetric(now))
-	metrics = append(metrics, otlpRuleMetrics(now)...)
-
-	return otlpExportRequest{
-		ResourceMetrics: []otlpResourceMetrics{{
-			Resource: otlpResource{
-				Attributes: []otlpKeyValue{
-					{Key: "service.name", Value: otlpAnyValue{StringValue: "culvert"}},
-					{Key: "service.version", Value: otlpAnyValue{StringValue: "1.0.0"}},
-				},
-			},
-			ScopeMetrics: []otlpScopeMetric{{
-				Scope:   otlpScope{Name: "culvert", Version: "1.0.0"},
-				Metrics: metrics,
-			}},
-		}},
-	}
 }

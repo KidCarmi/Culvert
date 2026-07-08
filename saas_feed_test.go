@@ -1,110 +1,48 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
-func TestSaaSFeedSyncer_ConfigureAndStop(t *testing.T) {
-	s := &SaaSFeedSyncer{
-		client: &http.Client{Timeout: 5 * time.Second},
-	}
-	if s.Enabled() {
-		t.Error("should not be enabled before Configure")
-	}
-	s.Configure("http://localhost:9999/feed.json", 1*time.Hour)
-	if !s.Enabled() {
-		t.Error("should be enabled after Configure")
-	}
-	s.Stop()
-	if s.Enabled() {
-		t.Error("should not be enabled after Stop")
-	}
-}
+// TestMergeSaaSCategories pins main's merge-closure semantics over catStore:
+// new categories are created with all hosts; existing ones get only new
+// hosts (additive — duplicates by case-insensitive match are skipped).
+// The fetch/parse/dispatch half lives in internal/saasfeed's own suite.
+func TestMergeSaaSCategories_AdditiveMerge(t *testing.T) {
+	// Isolate the package-global catStore (fresh store, tmp Save path):
+	// without this the created category leaks into later runs and the
+	// first-merge count assertion fails under -count=2 / -shuffle=on.
+	snapshotCatStore(t)
 
-func TestSaaSFeedSyncer_SyncMerge(t *testing.T) {
-	// Serve a test feed with one category.
-	feed := []CategoryEntry{{
-		Name:  "TestCat",
-		Hosts: []string{"test1.com", "test2.com"},
+	feed := []saasfeed.Category{{
+		Name:  "MergeTestCat",
+		Hosts: []string{"merge1.com", "merge2.com"},
 	}}
-	feedJSON, _ := json.Marshal(feed)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(feedJSON) //nolint:errcheck
-	}))
-	defer ts.Close()
 
-	s := &SaaSFeedSyncer{
-		feedURL:  ts.URL,
-		client:   ts.Client(),
-		interval: 1 * time.Hour,
+	added := mergeSaaSCategories(feed)
+	if added != 2 {
+		t.Fatalf("first merge added = %d, want 2", added)
 	}
-	s.enabled.Store(true)
-
-	s.Sync(context.Background())
-
-	// Verify category was created in catStore.
-	entry := catStore.GetByName("TestCat")
-	if entry == nil {
-		t.Fatal("TestCat category not created after sync")
-	}
-	if len(entry.Hosts) < 2 {
-		t.Errorf("expected at least 2 hosts, got %d", len(entry.Hosts))
+	entry := catStore.GetByName("MergeTestCat")
+	if entry == nil || len(entry.Hosts) < 2 {
+		t.Fatalf("MergeTestCat not created with hosts: %+v", entry)
 	}
 
-	// Sync again — should not duplicate.
-	s.Sync(context.Background())
-	entry2 := catStore.GetByName("TestCat")
-	if len(entry2.Hosts) != len(entry.Hosts) {
-		t.Errorf("duplicate sync added hosts: %d → %d", len(entry.Hosts), len(entry2.Hosts))
+	// Second merge with one duplicate (different case) and one new host.
+	feed[0].Hosts = []string{"MERGE1.com", "merge3.com"}
+	added = mergeSaaSCategories(feed)
+	if added != 1 {
+		t.Errorf("second merge added = %d, want 1 (dup skipped case-insensitively)", added)
 	}
 }
 
-func TestSaaSFeedSyncer_Stats(t *testing.T) {
-	s := &SaaSFeedSyncer{
-		feedURL:  "http://example.com/feed.json",
-		interval: 24 * time.Hour,
-	}
-	url, _, _, interval := s.Stats()
-	if url != "http://example.com/feed.json" {
-		t.Errorf("url = %q", url)
-	}
-	if interval != 24*time.Hour {
-		t.Errorf("interval = %v", interval)
-	}
-}
-
-func TestSaaSFeedSyncer_EmptyURL(t *testing.T) {
-	s := &SaaSFeedSyncer{client: &http.Client{}}
-	s.Configure("", 1*time.Hour)
-	if s.Enabled() {
-		t.Error("empty URL should not enable")
-	}
-}
-
-func TestCategoryStore_GetByName(t *testing.T) {
-	cs := newCategoryStore(defaultCategoryEntries())
-
-	// Should find existing category (case-insensitive).
-	entry := cs.GetByName("ai")
-	if entry == nil {
-		t.Fatal("GetByName('ai') returned nil")
-	}
-	if entry.Name != "AI" {
-		t.Errorf("name = %q, want 'AI'", entry.Name)
-	}
-
-	// Non-existent.
-	if cs.GetByName("NonExistent") != nil {
-		t.Error("expected nil for non-existent category")
-	}
-}
+// TestCategoryStore_GetByName moved to internal/urlcat (ADR-0002, policy.go
+// decomposition Phase A) with GetByName itself.
 
 func TestApiCategoryGroups_CRUD(t *testing.T) {
 	setupProxyTest(t)

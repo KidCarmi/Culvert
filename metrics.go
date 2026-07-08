@@ -13,6 +13,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── Per-rule hit counter ────────────────────────────────────────────────────
@@ -70,13 +73,8 @@ func saveHitCounters(path string) {
 		logger.Printf("HitCounters: marshal error: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(path, b, 0o600); err != nil {
 		logger.Printf("HitCounters: write error: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		logger.Printf("HitCounters: rename error: %v", err)
 	}
 }
 
@@ -282,14 +280,15 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) { //nolint:errcheck /
 		rlEnabled = 1
 	}
 
-	clamBlocked := atomic.LoadInt64(&statClamBlocked)
-	yaraBlocked := atomic.LoadInt64(&statYARABlocked)
-	feedBlocked := atomic.LoadInt64(&statThreatFeedBlocked)
+	scanCounters := secscan.Counters()
+	clamBlocked := scanCounters.ClamBlocked
+	yaraBlocked := scanCounters.YARABlocked
+	feedBlocked := scanCounters.ThreatFeedBlocked
 	dpiBlocked := atomic.LoadInt64(&statDPIBlocked)
 	bytesSent := atomic.LoadInt64(&statBytesSent)
 	bytesRecv := atomic.LoadInt64(&statBytesRecv)
 	feedEntries, _, _ := globalThreatFeed.Stats()
-	cacheHits, cacheMisses, cacheSize := globalSecScanner.cache.Stats()
+	cacheHits, cacheMisses, cacheSize := globalSecScanner.CacheStats()
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 

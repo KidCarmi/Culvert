@@ -188,7 +188,7 @@ func Decide(ctx RequestContext) AccessDecision {
 
 // authSourceExempt is the categorical auth source recorded for requests whose
 // authentication challenge was waived by a Stage-1 exempt rule. Distinct from
-// "unauth" (global UnauthMode / pre-gate default) so Stage-2 policy, request
+// "unauth" (no credentials / default-Exempt open default) so Stage-2 policy, request
 // logs, and SIEM can target explicit exemptions separately — e.g. allow
 // authSource=exempt only to specific destinations, or report exempt traffic on
 // its own. No identity is ever attached to an exempt request.
@@ -199,7 +199,7 @@ const authSourceExempt = "exempt"
 // request logs, and SIEM exports:
 //
 //	exempt — Stage-1 exemption waived authentication (Slice 7)
-//	unauth — no credentials presented / global UnauthMode
+//	unauth — no credentials presented / open default (defaultAuthOutcome=Exempt)
 //	local  — local bcrypt account authentication
 //	system — reserved for internal/system-originated traffic (future)
 //
@@ -247,15 +247,26 @@ func authRequestContext(r *http.Request, clientIP string) RequestContext {
 // overlong username) — the latter is PRESENTED credentials and must take the
 // existing 407 path, never an exemption. This guard pins the contract that
 // credential failures of any kind are never exempted.
-func resolveNoCredAuthOutcome(r *http.Request, clientIP string) AuthDecision {
+func resolveNoCredAuthOutcome(r *http.Request, clientIP string, defaultOutcome AuthOutcome) AuthDecision {
 	if r.Header.Get("Proxy-Authorization") != "" {
+		// Presented credentials are NEVER default-exempted: keep today's Default
+		// path (validated in arm 2, or 407). Independent of defaultAuthOutcome.
 		return AuthDecision{Outcome: OutcomeDefault}
 	}
 	// RUNTIME PATH — proxy.go's arm-3 hook handles Exempt (waive), CR (407
 	// challenge) and, as of Phase 3 Slice 4, SSORequired (302 redirect / 403
 	// fail-closed). All three are runtime-active; the highest-priority matching
 	// auth rule wins (priority-only model).
-	return resolveAuthOutcome(authRequestContext(r, clientIP))
+	d := resolveAuthOutcome(authRequestContext(r, clientIP))
+	// S2 (Slice 3): only when NO scoped rule matched (Outcome=Default, Rule=nil)
+	// does the global defaultAuthOutcome apply. Rule stays nil so the caller
+	// distinguishes default-Exempt (authSource="unauth") from a scoped Exempt
+	// rule (authSource="exempt"). The pure resolveAuthOutcomeFrom is unchanged
+	// (simulator-shared); the global-default tail lives here on the runtime path.
+	if d.Outcome == OutcomeDefault && d.Rule == nil {
+		return AuthDecision{Outcome: defaultOutcome}
+	}
+	return d
 }
 
 // ─── Kill switch (§1.11) — read-once accessor only ──────────────────────────

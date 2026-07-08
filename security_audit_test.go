@@ -16,6 +16,8 @@ import (
 	"time"
 
 	crand "crypto/rand"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // ── uiAuthMiddleware Tests ─────────────────────────────────────────────────
@@ -297,12 +299,7 @@ func TestAPIBlocklistFeed_RejectsInternalNetwork(t *testing.T) {
 // ── Blocklist exceptions tests ─────────────────────────────────────────────
 
 func TestBlocklistException_BypassesBlock(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	b := blocklist.New()
 	b.Add("evil.com")
 	if !b.IsBlocked("evil.com") {
 		t.Fatal("evil.com should be blocked")
@@ -320,12 +317,7 @@ func TestBlocklistException_BypassesBlock(t *testing.T) {
 }
 
 func TestBlocklistException_WildcardException(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	b := blocklist.New()
 	b.Add("*.example.com")
 	if !b.IsBlocked("sub.example.com") {
 		t.Fatal("sub.example.com should be blocked by wildcard")
@@ -338,12 +330,7 @@ func TestBlocklistException_WildcardException(t *testing.T) {
 }
 
 func TestBlocklistException_ListExceptions(t *testing.T) {
-	b := &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	b := blocklist.New()
 	b.AddException("a.com")
 	b.AddException("b.com")
 
@@ -401,9 +388,9 @@ func TestCertManager_GetCert_EmptyServerName_Audit(t *testing.T) {
 
 // ── ConnLimiter edge cases ─────────────────────────────────────────────────
 
-func newTestConnLimiter(max int) *ConnLimiter {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
-	cl.Enable(max)
+func newTestConnLimiter(limit int) *ConnLimiter {
+	cl := newConnLimiter()
+	cl.Enable(limit)
 	return cl
 }
 

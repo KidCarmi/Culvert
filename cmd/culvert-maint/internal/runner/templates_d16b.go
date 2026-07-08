@@ -221,10 +221,18 @@ func d16bTemplates() []Template {
 			StateChanging: true,
 		},
 		{
-			ID:       TemplateComposeUp,
-			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "up", "-d"},
+			ID: TemplateComposeUp,
+			// {compose_override} expands to `-f <override_path>` when an override
+			// is configured, or to nothing when it is not (buildArgv). Both forms
+			// are allowlisted below so a host with OR without an override passes
+			// parity; whether the override -f is emitted is a per-host CONFIG
+			// decision, never a wildcard. Carrying the override here — and ONLY
+			// here, the sole proxy-recreate path — is what lets the maintenance
+			// socket survive an agent-driven recreate.
+			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "{compose_override}", "up", "-d"},
 			SudoersLines: []string{
 				"/usr/bin/docker compose -f {compose_path} up -d",
+				"/usr/bin/docker compose -f {compose_path} -f {compose_override_path} up -d",
 			},
 			StateChanging: true,
 		},

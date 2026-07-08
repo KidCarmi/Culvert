@@ -13,6 +13,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/halease"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // ── Control Plane High Availability ─────────────────────────────────────────
@@ -25,47 +29,166 @@ import (
 //   1. Admin enables CP from GUI, clicks "Enable HA" → generates HA token
 //   2. GUI shows a deploy command for the standby (includes --ha-join URL)
 //   3. Admin runs command on Server B → standby syncs state, stands by
-//   4. If leader dies → standby promotes after 3 failed sync attempts
+//   4. If the leader dies, failover depends on the mode:
+//      - LEASE mode (ADR-0005; --ha-etcd-endpoints set): automatic failover is
+//        always on and SAFE — the standby promotes only after ACQUIRING the
+//        etcd fencing lease (denied while the leader lives), a partitioned
+//        leader self-fences to read-only standby, and --ha-auto-failover is
+//        ignored. See ha_lease.go (S2), ha_fencing.go (S3), ha_failover.go (S4).
+//      - LEGACY mode (no lease): auto-failover is OPT-IN and OFF by default —
+//        a 2-node cluster without a witness cannot promote safely on a
+//        surviving-leader partition (ADR-0004 / RISK-001). Default (manual):
+//        the standby stays read-only until an operator acts.
 //   5. DPs automatically failover (--dp-cp-addr supports comma-separated addrs)
 //
-// Leader failback: when the original leader restarts, it loads its persisted
-// HA config, detects the peer is already serving, and becomes standby.
+// Restart behaviour (ADR-0004): on restart a node honours its PERSISTED role —
+// a standby re-enters standby (it never silently self-asserts as a second
+// leader). A restarted LEADER in lease mode must RE-ACQUIRE the lease
+// (acquireLeaseForResume waits out its own previous process's ghost lease);
+// denied + a recorded standby address (ADR-0005 S0, learned via HASync) means
+// the standby promoted meanwhile, so the node re-enters standby and resyncs
+// from it (enterStandbyResync). In legacy mode a restarted leader resumes
+// leadership — it has no way to probe its peer — and under auto-failover it
+// logs a split-brain-risk warning.
 //
 // Authentication: standby presents a shared HA token in every HASync RPC.
 // The leader verifies it against the stored token.
 
 // HAState tracks the HA status of this Control Plane instance.
 type HAState struct {
-	mu       sync.RWMutex
-	role     string    // "leader", "standby", or "" (HA disabled)
-	token    string    // shared HA token for authentication
-	peerAddr string    // address of the other CP
-	since    time.Time // when current role was acquired
-	stopCh   chan struct{}
+	mu           sync.RWMutex
+	role         string         // "leader", "standby", or "" (HA disabled)
+	token        string         // shared HA token for authentication
+	peerAddr     string         // address of the other CP
+	standbyAddr  string         // leader-side: the standby's advertised address, learned via HASync (ADR-0005 S0 — failback target)
+	since        time.Time      // when current role was acquired
+	autoFailover bool           // standby self-promotes on leader loss (default OFF — see ADR-0004)
+	term         uint64         // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
+	pc           promoteContext // params captured at StartAsStandby so a manual/planned promote can reuse them
+	stopCh       chan struct{}
+
+	// plannedPromotion (leader side) signals the standby, via the next HASync
+	// bundle, to perform a COORDINATED promotion — a planned handoff (e.g. a CP
+	// rolling update) that must happen even when auto-failover is OFF. Distinct
+	// from unplanned auto-failover. (ADR-0004 Slice 1e.)
+	plannedPromotion atomic.Bool
+	// promoted guards promote() so the expensive onPromote (gRPC server start)
+	// runs at most once whether triggered by the sync loop, a manual API call,
+	// or a planned handoff.
+	promoted atomic.Bool
+
+	// ── Fencing lease (ADR-0005 S2; nil provider = legacy manual mode) ──
+	lease            halease.Provider
+	leaseCandidateID string
+	leaseEpoch       int64         // epoch of our current grant; 0 = not held
+	leaseConfirmedAt time.Time     // local time of the last backend-CONFIRMED grant/renew
+	leaseValidFor    time.Duration // validity the backend confirmed at leaseConfirmedAt
+	leaseStopCh      chan struct{} // keepalive loop stop; nil = not running
+
+	// ── Lease-arbitrated failover (ADR-0005 S4) ──
+	resync        haResyncContext // material to re-enter standby after a demotion (cluster loader)
+	lastSyncOK    time.Time       // last successful HASync apply (freshness-gate input)
+	lastSelfFence time.Time       // last self-fence (re-promotion hysteresis)
+}
+
+// promoteContext holds the parameters StartAsStandby threads into the sync loop,
+// captured so PromoteManually / a planned handoff can promote without them.
+type promoteContext struct {
+	grpcAddr, certFile, keyFile, caFile string
+	onPromote                           func() error
+	set                                 bool
 }
 
 var globalHA = &HAState{}
 
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
-	Enabled  bool   `json:"enabled"`
-	Role     string `json:"role"`                // "leader", "standby", or ""
-	Since    string `json:"since,omitempty"`     // RFC3339
-	PeerAddr string `json:"peer_addr,omitempty"` // other CP address
+	Enabled      bool   `json:"enabled"`
+	Role         string `json:"role"`                   // "leader", "standby", or ""
+	Since        string `json:"since,omitempty"`        // RFC3339
+	PeerAddr     string `json:"peer_addr,omitempty"`    // other CP address
+	AutoFailover bool   `json:"auto_failover"`          // standby self-promotes on leader loss (ADR-0004)
+	Term         uint64 `json:"term"`                   // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr  string `json:"standby_addr,omitempty"` // leader-side failback target (ADR-0005 S0)
 }
 
 func (h *HAState) Status() HAStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s := HAStatus{
-		Enabled:  h.role != "",
-		Role:     h.role,
-		PeerAddr: h.peerAddr,
+		Enabled:      h.role != "",
+		Role:         h.role,
+		PeerAddr:     h.peerAddr,
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+		StandbyAddr:  h.standbyAddr,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
 	}
 	return s
+}
+
+// snapshotConfigLocked builds the persisted haConfig from the live state.
+// Caller must hold h.mu. Centralises the field→config mapping so RecordStandbyAddr
+// (and future callers) persist a canonical record.
+func (h *HAState) snapshotConfigLocked() *haConfig {
+	return &haConfig{
+		Enabled:      h.role != "",
+		Token:        h.token,
+		PeerAddr:     h.peerAddr,
+		Role:         h.role,
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+		StandbyAddr:  h.standbyAddr,
+	}
+}
+
+// RecordStandbyAddr (leader side) records the standby's advertised address,
+// learned from the HASync request (ADR-0005 S0). This is the failback target:
+// when this leader later loses the lease and demotes, it must resync FROM the
+// standby — but the topology otherwise never tells the leader the standby's
+// address (ADR-0004 asymmetry). Persisted (throttled to changes) so it survives
+// a leader restart. No-op unless we are the leader and the address changed.
+func (h *HAState) RecordStandbyAddr(addr string) {
+	if addr == "" {
+		return
+	}
+	h.mu.Lock()
+	if h.role != "leader" || h.standbyAddr == addr {
+		h.mu.Unlock()
+		return
+	}
+	h.standbyAddr = addr
+	cfg := h.snapshotConfigLocked()
+	h.mu.Unlock()
+	_ = saveHAConfig(cfg)
+	logger.Printf("HA: recorded standby address %q (failback target, ADR-0005 S0)", sanitizeLog(addr))
+}
+
+// StandbyAddr returns the leader's recorded standby address (failback target),
+// or "" if not yet learned.
+func (h *HAState) StandbyAddr() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.standbyAddr
+}
+
+// advertiseAddr returns this node's own gRPC address (captured at StartAsStandby)
+// so the standby can advertise it to the leader in each HASync request.
+func (h *HAState) advertiseAddr() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.pc.grpcAddr
+}
+
+// autoFailoverEnabled reports whether this node may self-promote on leader loss.
+// Default OFF: 2-node active/passive has no witness, so unattended auto-promotion
+// is unsafe (split-brain). See ADR-0004 / RISK-001.
+func (h *HAState) autoFailoverEnabled() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.autoFailover
 }
 
 // IsLeader returns true if this CP is the HA leader.
@@ -85,26 +208,95 @@ func (h *HAState) VerifyToken(token string) bool {
 // ── Leader Mode ─────────────────────────────────────────────────────────────
 
 // EnableAsLeader marks this node as the HA leader and generates an HA token.
-// Returns the generated token for inclusion in the standby deploy command.
-func (h *HAState) EnableAsLeader(peerAddr string) string {
+// autoFailover records whether the standby is permitted to self-promote on
+// leader loss (default OFF — see ADR-0004); the leader stores the preference so
+// the standby deploy command carries it. Returns the generated token for
+// inclusion in the standby deploy command.
+func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, error) {
+	// ADR-0005 S2: even HA genesis must hold the fence when a lease backend
+	// is configured — otherwise the first leader never acquires, never
+	// keepalives, and has no write authority. No-op in legacy mode.
+	if !h.acquireLeaseForLeadership("ha enable") {
+		return "", fmt.Errorf("fencing lease not acquired — cannot enable HA leadership (see logs)")
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.role = "leader"
 	h.peerAddr = peerAddr
 	h.since = time.Now()
+	h.autoFailover = autoFailover
+	if h.lease != nil {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	} else {
+		h.term = 1 // first leadership epoch (ADR-0004 Slice 1c)
+	}
 	h.token = generateHAToken()
 	h.stopCh = make(chan struct{})
+	token, term := h.token, h.term
 
 	// Persist HA config so leader restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    h.token,
-		PeerAddr: peerAddr,
-		Role:     "leader",
+		Enabled:      true,
+		Token:        h.token,
+		PeerAddr:     peerAddr,
+		Role:         "leader",
+		AutoFailover: autoFailover,
+		Term:         h.term,
 	})
+	h.mu.Unlock()
+	h.startLeaseKeepalive()
 
-	logger.Printf("HA: enabled as leader (peer=%s)", sanitizeLog(peerAddr))
-	return h.token
+	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, term)
+	return token, nil
+}
+
+// ResumeAsLeader restores leader state from a persisted haConfig on restart
+// WITHOUT bumping the term — it is the same leadership epoch continuing, not a
+// new promotion. Replaces the previous EnableAsLeader-then-patch-token dance in
+// main.go so the persisted term/token survive a restart intact (ADR-0004).
+func (h *HAState) ResumeAsLeader(cfg *haConfig) {
+	// ADR-0005 S2: a restarting leader's old lease expired during the
+	// restart, so it must re-acquire. Granted ⇒ normal leadership (epoch,
+	// keepalive). Denied ⇒ S4: if the ex-standby's address was recorded
+	// (S0) and the loader provided resync material, re-enter STANDBY
+	// against it instead of asserting an unfenced leader role; otherwise
+	// fall back to the S2 stance (role kept, NO write authority, CRITICAL
+	// alert).
+	leaseGranted := h.acquireLeaseForResume()
+	if !leaseGranted && h.leaseConfigured() {
+		h.mu.Lock()
+		h.token = cfg.Token
+		h.standbyAddr = cfg.StandbyAddr
+		h.autoFailover = cfg.AutoFailover
+		h.mu.Unlock()
+		if h.enterStandbyResync("unfenced leader resume") {
+			return
+		}
+	}
+	h.mu.Lock()
+	h.role = "leader"
+	h.peerAddr = cfg.PeerAddr
+	h.token = cfg.Token
+	h.autoFailover = cfg.AutoFailover
+	h.term = cfg.Term
+	if h.lease != nil && leaseGranted {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	}
+	h.standbyAddr = cfg.StandbyAddr // restore failback target across restart (ADR-0005 S0)
+	h.since = time.Now()
+	h.stopCh = make(chan struct{})
+	leaseConfigured := h.lease != nil
+	h.mu.Unlock()
+	if leaseConfigured && !leaseGranted {
+		logger.Printf("HA: CRITICAL — resumed leader role WITHOUT the fencing lease; write authority is OFF until an operator acts (ADR-0005 S2)")
+		go alerts.Fire("ha_resume_unfenced", alerts.Payload{
+			Event:  "ha_resume_unfenced",
+			Detail: "leader restarted but could not acquire the fencing lease; serving read-only (no write authority)",
+			Source: "ha",
+		})
+	}
+	h.startLeaseKeepalive()
+	// Re-persist the SAME values (idempotent; keeps the file canonical).
+	_ = saveHAConfig(cfg)
 }
 
 // ── Standby Mode ────────────────────────────────────────────────────────────
@@ -113,95 +305,173 @@ func (h *HAState) EnableAsLeader(peerAddr string) string {
 // When the leader becomes unreachable (3 consecutive failures), the standby
 // promotes itself to leader by calling onPromote.
 func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
-	grpcAddr, certFile, keyFile, caFile string,
+	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
-
 	h.mu.Lock()
 	h.role = "standby"
 	h.peerAddr = leaderAddr
 	h.token = token
 	h.since = time.Now()
+	h.autoFailover = autoFailover
+	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile, onPromote: onPromote, set: true}
+	h.promoted.Store(false)
 	h.stopCh = make(chan struct{})
 	h.mu.Unlock()
 
 	// Persist HA config so standby restarts know HA is enabled.
 	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    token,
-		PeerAddr: leaderAddr,
-		Role:     "standby",
+		Enabled:      true,
+		Token:        token,
+		PeerAddr:     leaderAddr,
+		Role:         "standby",
+		AutoFailover: autoFailover,
 	})
 
-	logger.Printf("HA: starting as standby (leader=%s)", sanitizeLog(leaderAddr))
+	logger.Printf("HA: starting as standby (leader=%q, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
 
-	go h.standbyLoop(ctx, leaderAddr, token, grpcAddr, certFile, keyFile, caFile, onPromote)
+	go h.standbyLoop(ctx, leaderAddr, token, certFile, keyFile, caFile)
+}
+
+// haStandbyMaxFail is the number of consecutive HASync failures (≈ maxFail × 5s)
+// that trips the leader-unreachable threshold.
+const haStandbyMaxFail = 3
+
+// standbyLoopState carries the standby sync loop's mutable state so the per-tick
+// logic lives in small methods (keeps standbyLoop's cognitive complexity low).
+type standbyLoopState struct {
+	h                         *HAState
+	ctx                       context.Context
+	leaderAddr, token         string
+	certFile, keyFile, caFile string
+	client                    *DataPlaneClient
+	failCount                 int
+	manualWarned              bool // warn-once latch for the auto-failover-disabled path
 }
 
 func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
-	grpcAddr, certFile, keyFile, caFile string,
-	onPromote func() error) {
+	certFile, keyFile, caFile string) {
+	// Capture the stop channel once. promote() calls Stop() (which closes then
+	// nils h.stopCh), so reading the field per-iteration could select on a nil
+	// channel after a manual/planned promotion; the local keeps the closed
+	// channel reachable so the loop exits cleanly.
+	h.mu.RLock()
+	stopCh := h.stopCh
+	h.mu.RUnlock()
 
+	s := &standbyLoopState{
+		h: h, ctx: ctx, leaderAddr: leaderAddr, token: token,
+		certFile: certFile, keyFile: keyFile, caFile: caFile,
+	}
 	// Connect to leader using the same gRPC client infrastructure as DPs.
-	client, err := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
-	if err != nil {
-		logger.Printf("HA: failed to connect to leader: %v — will retry", err)
+	if c, cerr := NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile); cerr != nil {
+		logger.Printf("HA: failed to connect to leader: %v — will retry", cerr)
+	} else {
+		s.client = c
 	}
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	failCount := 0
-	const maxFail = 3
-
-	// Try immediately.
-	if client != nil {
-		if h.syncFromLeader(ctx, client, token) {
-			failCount = 0
-		} else {
-			failCount++
-		}
-	} else {
-		failCount++
-	}
+	s.syncOnce() // try immediately
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-h.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
-			if client == nil {
-				// Retry connection.
-				client, err = NewDataPlaneClient("ha-standby", leaderAddr, certFile, keyFile, caFile)
-				if err != nil {
-					failCount++
-					logger.Printf("HA: reconnect to leader failed (%d/%d): %v", failCount, maxFail, err)
-					if failCount >= maxFail {
-						h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
-						return
-					}
-					continue
-				}
-			}
-
-			if h.syncFromLeader(ctx, client, token) {
-				failCount = 0
-			} else {
-				failCount++
-				logger.Printf("HA: sync failed (%d/%d)", failCount, maxFail)
-				if failCount >= maxFail {
-					h.promote(grpcAddr, certFile, keyFile, caFile, onPromote)
-					return
-				}
+			if s.tick() {
+				return
 			}
 		}
 	}
 }
 
+// onMaxFail handles the leader-unreachable threshold. Returns true when the loop
+// should EXIT (this node promoted to leader); false to keep the standby
+// read-only and retrying.
+//
+// Lease mode (ADR-0005 S4): promotion is arbitrated by the FENCE, not the
+// --ha-auto-failover flag — Acquire is denied while the leader lives, so the
+// split-brain that made the flag opt-in cannot happen; freshness + hysteresis
+// additionally gate the automatic path (see leaseAutoPromote).
+//
+// Legacy mode (ADR-0004, unchanged): auto-failover only when opted in;
+// otherwise warn once and stay read-only until an operator acts.
+func (s *standbyLoopState) onMaxFail() bool {
+	if s.h.leaseConfigured() {
+		return s.h.leaseAutoPromote()
+	}
+	if s.h.autoFailoverEnabled() {
+		s.h.promote("leader unreachable")
+		return true
+	}
+	if !s.manualWarned {
+		s.h.warnManualFailoverRequired(s.leaderAddr)
+		s.manualWarned = true
+	}
+	return false
+}
+
+// syncOnce performs a single sync attempt without reconnecting (the immediate
+// try at loop start), updating failCount.
+func (s *standbyLoopState) syncOnce() {
+	if s.client == nil {
+		s.failCount++
+		return
+	}
+	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+		s.failCount = 0
+		s.manualWarned = false
+	} else {
+		s.failCount++
+	}
+}
+
+// tick runs one loop iteration: reconnect if needed, then sync. Returns true
+// when the loop should exit (this node was promoted to leader).
+func (s *standbyLoopState) tick() bool {
+	if s.client == nil {
+		c, err := NewDataPlaneClient("ha-standby", s.leaderAddr, s.certFile, s.keyFile, s.caFile)
+		if err != nil {
+			s.failCount++
+			logger.Printf("HA: reconnect to leader failed (%d/%d): %v", s.failCount, haStandbyMaxFail, err)
+			return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+		}
+		s.client = c
+	}
+	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+		s.failCount = 0
+		s.manualWarned = false // leader recovered — re-arm the warning
+		return false
+	}
+	s.failCount++
+	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
+	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+}
+
+// warnManualFailoverRequired logs and alerts that the leader is unreachable
+// while automatic failover is disabled, so this standby is intentionally
+// staying read-only. The operator must promote it (admin UI) or restart it as
+// leader. See ADR-0004 / RISK-001.
+func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
+	logger.Printf("HA: leader %s unreachable and automatic failover is DISABLED — staying standby (read-only). "+
+		"Manual failover required: promote via the admin UI or restart this node as leader (ADR-0004/RISK-001).",
+		sanitizeLog(leaderAddr))
+	go alerts.Fire("ha_manual_failover_required", alerts.Payload{
+		Event:  "ha_manual_failover_required",
+		Host:   leaderAddr,
+		Detail: "leader unreachable; automatic failover disabled; standby staying read-only pending manual action",
+		Source: "ha",
+	})
+}
+
 // syncFromLeader calls HASync on the leader and applies the state bundle.
 func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) bool {
-	reqBytes, _ := json.Marshal(map[string]string{"token": token})
+	// ADR-0005 S0: advertise this standby's own address so the leader can record
+	// it as the failback target (the topology otherwise never tells the leader).
+	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
@@ -213,7 +483,44 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: parse state bundle error: %v", err)
 		return false
 	}
-	return applyHABundle(&bundle, token)
+	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
+	// epoch against our own lease backend BEFORE any import. A zombie
+	// leader serving stale state must not reach ImportFullState.
+	if !h.verifyBundleEpoch(bundle.Epoch) {
+		return false
+	}
+	ok := applyHABundle(&bundle, token)
+	if ok {
+		h.markSyncOK() // ADR-0005 S4: freshness-gate input
+		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
+		// Codex P2): without this a standby starts at term 0, so its first
+		// promotion reports term 1 — identical to the original leader's term 1,
+		// and the /healthz split-brain signal can't tell which side promoted
+		// later. Carrying the leader term means a promotion yields leaderTerm+1,
+		// strictly greater, so the post-promotion epoch is monotonic.
+		h.seedTermFromLeader(bundle.LeaderTerm)
+	}
+	// Coordinated planned handoff (ADR-0004 Slice 1e): the leader sets
+	// PromoteRequested in the bundle before a deliberate takedown (e.g. a CP
+	// rolling update). Promote even when auto-failover is OFF — this is a
+	// planned, leader-initiated handoff, not an unattended auto-failover. Only
+	// after the state apply succeeded, so the new leader has the latest state.
+	if ok && bundle.PromoteRequested && !h.IsLeader() {
+		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
+		h.promote("planned handoff requested by leader")
+	}
+	return ok
+}
+
+// seedTermFromLeader raises this standby's epoch to the leader's term (never
+// lowers it), so a later promotion produces a strictly-higher epoch than the
+// leader's last-known term. Standby-only; a no-op once this node is leader.
+func (h *HAState) seedTermFromLeader(leaderTerm uint64) {
+	h.mu.Lock()
+	if h.role != "leader" && leaderTerm > h.term {
+		h.term = leaderTerm
+	}
+	h.mu.Unlock()
 }
 
 // applyHABundle applies a decoded HA state bundle on the standby, fail-closed
@@ -283,16 +590,39 @@ func applyReplicatedCA(certPEM []byte, caKeyEncrypted, token string) error {
 	return nil
 }
 
-// promote switches this standby to leader mode. The grpcAddr/certFile/keyFile/
-// caFile params are threaded from Start → standbyLoop → promote for call-site
-// symmetry with the reconnect path and kept for a future promote impl; they are
-// pre-existing and not introduced by CA-3.
-//
-//nolint:unparam // see note above — params kept for signature symmetry / future use
-func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote func() error) {
-	logger.Printf("HA: leader unreachable — promoting to leader")
+// promote switches this standby to leader mode using the promote context
+// captured at StartAsStandby. reason labels the trigger (unplanned auto-failover,
+// a manual operator promotion, or a coordinated planned handoff). It is
+// idempotent: the `promoted` guard ensures the expensive onPromote (gRPC server
+// start) runs at most once, so a manual/planned promote cannot race the sync
+// loop's auto-promote. On an onPromote failure the guard is reset so a later
+// attempt can retry.
+func (h *HAState) promote(reason string) {
+	if !h.promoted.CompareAndSwap(false, true) {
+		return // already promoted (or another trigger won the race)
+	}
+	h.mu.RLock()
+	pc := h.pc
+	h.mu.RUnlock()
+	if !pc.set || pc.onPromote == nil {
+		h.promoted.Store(false)
+		logger.Printf("HA: promote (%s) requested but no promote context available — ignoring", reason)
+		return
+	}
 
-	if err := onPromote(); err != nil {
+	// ADR-0005 S2: every path to leadership goes through the fence. Denied
+	// or transport-unknown ⇒ no promotion. A grant whose onPromote then
+	// fails leaves an unkept lease that simply expires after its TTL
+	// (bounded stall; the S1 Provider deliberately has no Release).
+	if !h.acquireLeaseForLeadership(reason) {
+		h.promoted.Store(false)
+		logger.Printf("HA: promote (%s) blocked by the fencing lease — staying as standby", sanitizeLog(reason))
+		return
+	}
+
+	logger.Printf("HA: promoting to leader (%s)", reason)
+	if err := pc.onPromote(); err != nil {
+		h.promoted.Store(false) // allow a later retry
 		logger.Printf("HA: promote failed: %v — staying as standby", err)
 		return
 	}
@@ -300,21 +630,61 @@ func (h *HAState) promote(grpcAddr, certFile, keyFile, caFile string, onPromote 
 	h.mu.Lock()
 	h.role = "leader"
 	h.since = time.Now()
+	if h.lease != nil {
+		h.term = termFromEpoch(h.leaseEpoch) // term collapses into the fencing epoch (ADR-0005 Finding 6)
+	} else {
+		h.term++ // new leadership epoch (ADR-0004 Slice 1c)
+	}
+	cfg := &haConfig{
+		Enabled:      true,
+		Token:        h.token,
+		PeerAddr:     h.peerAddr,
+		Role:         "leader",
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+	}
+	newTerm := h.term
 	h.mu.Unlock()
 	statHAFailovers.Add(1) // CL-9 PR3: count standby→leader promotions only
 
 	// Update persisted config.
-	_ = saveHAConfig(&haConfig{
-		Enabled:  true,
-		Token:    h.token,
-		PeerAddr: h.peerAddr,
-		Role:     "leader",
-	})
+	_ = saveHAConfig(cfg)
 
-	logger.Printf("HA: now serving as leader (promoted from standby)")
+	// Becoming leader makes the standby sync loop pointless — stop it so a
+	// manual/planned promotion (which runs outside the loop) doesn't leave it
+	// spinning against the old leader. Idempotent with the auto-failover path,
+	// which also exits the loop after promote returns.
+	h.Stop()
+	h.startLeaseKeepalive() // after Stop(): Stop halts the keepalive too
+
+	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
 
-// Stop terminates the sync loop.
+// PromoteManually performs an explicit, operator- or orchestrator-triggered
+// promotion of this standby to leader — the manual-failover path (ADR-0004
+// Slice 1e). Unlike auto-failover it does NOT require --ha-auto-failover: an
+// explicit promotion is a deliberate, coordinated action, not an unattended
+// reaction to leader silence, so it carries no split-brain surprise. Returns an
+// error if this node is not a promotable standby.
+func (h *HAState) PromoteManually() error {
+	h.mu.RLock()
+	role := h.role
+	ctxSet := h.pc.set
+	h.mu.RUnlock()
+	if role != "standby" {
+		return fmt.Errorf("cannot promote: node role is %q, not standby", role)
+	}
+	if !ctxSet {
+		return fmt.Errorf("cannot promote: no promote context (node was not started as a standby)")
+	}
+	h.promote("manual promotion")
+	if !h.IsLeader() {
+		return fmt.Errorf("promotion did not complete (see logs)")
+	}
+	return nil
+}
+
+// Stop terminates the sync loop and the lease keepalive loop.
 func (h *HAState) Stop() {
 	h.mu.Lock()
 	if h.stopCh != nil {
@@ -322,6 +692,7 @@ func (h *HAState) Stop() {
 		h.stopCh = nil
 	}
 	h.mu.Unlock()
+	h.stopLeaseKeepalive()
 }
 
 // ── HA Config Persistence ───────────────────────────────────────────────────
@@ -329,10 +700,13 @@ func (h *HAState) Stop() {
 const haConfigFile = "ha_config.json"
 
 type haConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Token    string `json:"token"`
-	PeerAddr string `json:"peer_addr"`
-	Role     string `json:"role"` // "leader" or "standby"
+	Enabled      bool   `json:"enabled"`
+	Token        string `json:"token"`
+	PeerAddr     string `json:"peer_addr"`
+	Role         string `json:"role"`                   // "leader" or "standby"
+	AutoFailover bool   `json:"auto_failover"`          // standby self-promotes on leader loss (ADR-0004; default OFF)
+	Term         uint64 `json:"term"`                   // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr  string `json:"standby_addr,omitempty"` // leader-side failback target (ADR-0005 S0)
 }
 
 func haConfigPath() string {
@@ -350,6 +724,21 @@ func saveHAConfig(cfg *haConfig) error {
 	// plain os.WriteFile which left a non-durable / potentially-
 	// truncated file on crash.
 	return atomicWriteFile(haConfigPath(), data, 0o600)
+}
+
+// haRestartAction decides what a node restarting on the normal CP path should
+// do given its persisted HA config: "standby" (re-enter standby, do NOT assert
+// leadership), "leader" (resume leadership — includes legacy configs with no
+// role for back-compat), or "none" (HA disabled / unreadable config → plain CP).
+// ADR-0004: a persisted standby must never silently come up as a second leader.
+func haRestartAction(cfg *haConfig, loadErr error) string {
+	if loadErr != nil || cfg == nil || !cfg.Enabled {
+		return "none"
+	}
+	if cfg.Role == "standby" {
+		return "standby"
+	}
+	return "leader"
 }
 
 func loadHAConfig() (*haConfig, error) {
@@ -380,7 +769,7 @@ func generateHAToken() string {
 // the normal case; the node stays "ok" — degraded logging must not pull it
 // out of the load balancer.
 func addRequestLogHealth(resp map[string]any) {
-	if n := atomic.LoadInt64(&statReqLogWriteErrors); n > 0 {
+	if n := reqlog.WriteErrors(); n > 0 {
 		resp["requestLogWriteErrors"] = n
 	}
 }
@@ -396,20 +785,35 @@ func apiHealthz(w http.ResponseWriter, r *http.Request) {
 	status := globalHA.Status()
 	// If HA is not enabled, this node is standalone — always healthy.
 	if !status.Enabled {
-		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true}
+		resp := map[string]any{"status": "ok", "role": "standalone", "leader": true, "write_authority": true}
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
 	}
 	if status.Role == "leader" {
-		resp := map[string]any{"status": "ok", "role": "leader", "leader": true, "since": status.Since}
+		// ADR-0004 Slice 1c: surface term + write_authority + auto_failover so an
+		// external monitor scraping BOTH CPs can DETECT split-brain (two nodes
+		// reporting role=leader, comparable by term). ADR-0005 S2: in lease mode
+		// write_authority is gated on the fencing lease (WriteAllowed) and the
+		// epoch + lease_valid fields are surfaced; legacy mode keeps the honest
+		// role-based value (WriteAllowed is true with no provider).
+		resp := map[string]any{
+			"status": "ok", "role": "leader", "leader": true, "since": status.Since,
+			"term": status.Term, "write_authority": globalHA.WriteAllowed(), "auto_failover": status.AutoFailover,
+		}
+		addLeaseHealth(resp, globalHA)
 		addRequestLogHealth(resp)
 		jsonOK(w, resp)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	resp, _ := json.Marshal(map[string]any{"status": "standby", "role": "standby", "leader": false})
+	standbyResp := map[string]any{
+		"status": "standby", "role": "standby", "leader": false,
+		"term": status.Term, "write_authority": false, "auto_failover": status.AutoFailover,
+	}
+	addLeaseHealth(standbyResp, globalHA)
+	resp, _ := json.Marshal(standbyResp)
 	_, _ = w.Write(resp)
 }
 
@@ -422,11 +826,17 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		}
 		status := globalHA.Status()
 		resp := map[string]any{
-			"enabled":   status.Enabled,
-			"role":      status.Role,
-			"since":     status.Since,
-			"peer_addr": status.PeerAddr,
+			"enabled":       status.Enabled,
+			"role":          status.Role,
+			"since":         status.Since,
+			"peer_addr":     status.PeerAddr,
+			"auto_failover": status.AutoFailover,
+			"term":          status.Term,
 		}
+		// ADR-0005 S5: surface the fencing-lease posture (GUI parity for the
+		// -ha-etcd-endpoints wiring; the endpoints themselves are startup
+		// config — read-once, restart-scoped — so the panel shows STATUS).
+		addLeaseHealth(resp, globalHA)
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
 		}
@@ -451,7 +861,8 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 // See roadmap/CA-CLUSTER-ROLLBACK-CLASSIFICATION.md §2 (runtime/lifecycle).
 func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		LeaderAddr string `json:"leader_addr"` // this leader's externally reachable gRPC address
+		LeaderAddr   string `json:"leader_addr"`   // this leader's externally reachable gRPC address
+		AutoFailover bool   `json:"auto_failover"` // opt-in standby self-promotion (default OFF — ADR-0004)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -477,15 +888,21 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enable as leader and generate token.
-	token := globalHA.EnableAsLeader(req.LeaderAddr)
+	// Enable as leader and generate token. With a fencing-lease backend
+	// configured this is Acquire-gated (ADR-0005 S2) and can fail.
+	token, err := globalHA.EnableAsLeader(req.LeaderAddr, req.AutoFailover)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 
 	deployCmd := haDeployCommand()
 	jsonOK(w, map[string]any{
-		"ok":          true,
-		"role":        "leader",
-		"leader_addr": req.LeaderAddr,
-		"deploy_cmd":  deployCmd,
+		"ok":            true,
+		"role":          "leader",
+		"leader_addr":   req.LeaderAddr,
+		"auto_failover": req.AutoFailover,
+		"deploy_cmd":    deployCmd,
 	})
 
 	auditAdd(AuditEntry{
@@ -494,7 +911,48 @@ func apiClusterHAEnable(w http.ResponseWriter, r *http.Request) {
 		Actor:  sessionAdmin(r),
 		Action: "cluster.ha-enable",
 		Object: req.LeaderAddr,
-		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…)", token[:8]),
+		Detail: fmt.Sprintf("HA enabled, token generated (token=%s…), auto_failover=%v", token[:8], req.AutoFailover),
+	})
+}
+
+// ── Planned promotion (leader side) ─────────────────────────────────────────
+
+// RequestPlannedPromotion (leader) arms the coordinated-handoff flag so the next
+// HASync bundle instructs the standby to promote. Used before a deliberate
+// leader takedown (e.g. a CP rolling update). Clear with ClearPlannedPromotion.
+func (h *HAState) RequestPlannedPromotion() { h.plannedPromotion.Store(true) }
+
+// ClearPlannedPromotion disarms the coordinated-handoff flag.
+func (h *HAState) ClearPlannedPromotion() { h.plannedPromotion.Store(false) }
+
+// apiClusterHAPromote handles POST /api/cluster/ha/promote — the explicit
+// manual-failover action (ADR-0004 Slice 1e). It promotes THIS node (a standby)
+// to leader. Auth: admin RBAC for the operator UI path. Unlike auto-failover it
+// needs no --ha-auto-failover, because an explicit promotion is deliberate.
+func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	if err := globalHA.PromoteManually(); err != nil {
+		// Inline-sanitize the engine error (CWE-117) before it reaches the log
+		// via the response path; the message names only role/context, no input.
+		http.Error(w, "promote failed: "+err.Error(), http.StatusConflict)
+		return
+	}
+	status := globalHA.Status()
+	jsonOK(w, map[string]any{"ok": true, "role": status.Role, "term": status.Term})
+
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  sessionAdmin(r),
+		Action: "cluster.ha-promote",
+		Object: "self",
+		Detail: fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term),
 	})
 }
 
@@ -512,6 +970,7 @@ func haDeployCommand() string {
 	globalHA.mu.RLock()
 	token := globalHA.token
 	leaderAddr := globalHA.peerAddr
+	autoFailover := globalHA.autoFailover
 	globalHA.mu.RUnlock()
 
 	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --ha-join %s --ha-token %s",
@@ -523,6 +982,11 @@ func haDeployCommand() string {
 	}
 	if caFile != "" {
 		cmd += fmt.Sprintf(" \\\n  --cp-grpc-ca %s", caFile)
+	}
+	// Carry the auto-failover preference to the standby (default OFF — the
+	// flag only appears when the operator explicitly enabled it). See ADR-0004.
+	if autoFailover {
+		cmd += " \\\n  --ha-auto-failover"
 	}
 	return cmd
 }

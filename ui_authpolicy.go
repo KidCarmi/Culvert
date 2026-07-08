@@ -214,8 +214,8 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	policyStore.Save()
 	logger.Printf("UI: auth rule deleted priority=%s",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
-	auditEventDiff(r, "authpolicy.delete", before.Name, "", before, nil)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.delete")
+	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
+	saveConfigVersion(sessionAdmin(r), "authpolicy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -314,6 +314,22 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 	} else {
 		ctx := RequestContext{ClientIP: sourceIP, Host: host, Protocol: protocol, Method: method}
 		d = resolveAuthOutcomeFrom(rules, ctx) // priority-ordered resolver (matches the live gate)
+		// Slice 4 parity: when no scoped rule matches, apply the global
+		// defaultAuthOutcome exactly as the runtime resolveNoCredAuthOutcome does
+		// (kill switch forces Default). Rule stays nil so default-Exempt is
+		// distinguishable from a scoped Exempt rule (authSource unauth vs exempt).
+		if d.Outcome == OutcomeDefault && d.Rule == nil {
+			eff := cfg.DefaultAuthOutcome()
+			if authExemptKillSwitchEngaged() {
+				eff = OutcomeDefault
+			}
+			d.Outcome = eff
+			if eff == OutcomeExempt {
+				note = "Open unmatched traffic (defaultAuthOutcome=Exempt) — no scoped auth rule matched, so this request " +
+					"is admitted without authentication. This is NOT Allow: Stage-2 policy still decides access and default-deny " +
+					"still applies. Stage-2 sees authSource=\"unauth\" (no identity)."
+			}
+		}
 		if d.Outcome == OutcomeCredentialRequired {
 			// CredentialRequired is a CHALLENGE class, not an access decision. It
 			// is NOT Allow or Block: the client must authenticate first, then the
@@ -338,18 +354,37 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 	if stage2AuthSource == "" {
 		stage2AuthSource = "unauth"
 	}
-	// Stage-2 sees authSource=exempt only when the resolved outcome is Exempt
-	// (mirrors Slice 7 runtime wiring). A CR/SSORequired/Default decision keeps the
-	// unauthenticated source — those outcomes do not authenticate the request here.
-	if d.Outcome == OutcomeExempt {
+	// Stage-2 sees authSource=exempt ONLY for an explicit scoped Exempt rule
+	// (Rule != nil). Default-Exempt (no rule) and CR/SSORequired/Default keep the
+	// unauthenticated source — those outcomes do not authenticate the request.
+	if d.Outcome == OutcomeExempt && d.Rule != nil {
 		stage2AuthSource = authSourceExempt
+	}
+	// fromDefault: the outcome came from the global default, not a scoped rule.
+	fromDefault := !hasCreds && d.Rule == nil
+	// stage2Reached: whether Stage-2 is evaluated at runtime for this Stage-1
+	// outcome. Exempt (scoped or default) and presented credentials proceed to
+	// Stage-2; CR/SSO return a challenge first (Stage-2 not reached); a Default
+	// (auth-required) outcome issues a 407/redirect first UNLESS no auth backend
+	// is configured — surfaced via stage2Note rather than a misleading bool.
+	stage2Reached := hasCreds || d.Outcome == OutcomeExempt
+	stage2Note := ""
+	switch {
+	case d.Outcome == OutcomeCredentialRequired || d.Outcome == OutcomeSSORequired:
+		stage2Note = "Stage-2 is NOT reached at runtime until the client authenticates; the decision below is for reference only."
+	case d.Outcome == OutcomeDefault && !hasCreds:
+		stage2Note = "Default (Require authentication): at runtime a 407/redirect is issued first, so Stage-2 is reached only when no auth backend is configured. The decision below is for reference."
 	}
 	block = map[string]any{
 		"outcome":              string(d.Outcome),
-		"runtimeOutcome":       string(d.Outcome), // runtime now resolves the same outcome the simulator shows
+		"runtimeOutcome":       string(d.Outcome), // runtime resolves the same outcome the simulator shows
+		"defaultAuthOutcome":   string(cfg.DefaultAuthOutcome()),
+		"fromDefault":          fromDefault,
 		"killSwitch":           authExemptKillSwitchEngaged(),
 		"credentialsPresented": hasCreds,
 		"stage2AuthSource":     stage2AuthSource,
+		"stage2Reached":        stage2Reached,
+		"stage2Note":           stage2Note,
 		"note":                 note,
 	}
 	if d.Rule != nil {
@@ -360,30 +395,4 @@ func simulateAuthOutcome(rules []PolicyRule, sourceIP, host, protocol, method, i
 		}
 	}
 	return stage2AuthSource, block
-}
-
-// authPrioritiesWouldChange reports whether applying PolicyStore.Reorder with
-// orderedPriorities would assign any Stage-1 auth rule a different priority
-// (Reorder assigns newPriority = index+1). Used by the operator-level
-// /api/policy/reorder and /api/policy/move handlers: pure access-rule
-// reorders that leave every auth rule at its current priority stay operator-
-// level, while any repositioning of an auth rule is an admin-only mutation
-// (consistent with /api/authpolicy).
-func authPrioritiesWouldChange(orderedPriorities []int) bool {
-	rules := policyStore.List()
-	authPri := make(map[int]bool)
-	for i := range rules {
-		if ruleTypeOf(&rules[i]) == ruleTypeAuth {
-			authPri[rules[i].Priority] = true
-		}
-	}
-	if len(authPri) == 0 {
-		return false
-	}
-	for idx, p := range orderedPriorities {
-		if authPri[p] && idx+1 != p {
-			return true
-		}
-	}
-	return false
 }

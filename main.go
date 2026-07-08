@@ -4,17 +4,6 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,19 +12,19 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // caPassphraseEnv holds the name of the environment variable that supplies the
 // CA private-key encryption passphrase. Using an env var keeps the passphrase
 // out of CLI history and process listings (shift-left: secrets management).
 // This is an env-var name, NOT a credential — the false-positive is suppressed.
-const caPassphraseEnv = "CULVERT_CA_PASSPHRASE"        // #nosec G101 -- env-var name, not a credential
+const caPassphraseEnv = "CULVERT_CA_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
+
 const logStorePassphraseEnv = "CULVERT_LOG_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
 
 var logger *log.Logger
@@ -44,10 +33,12 @@ var logger *log.Logger
 // Cancelled on graceful shutdown. Exposed at package level so that API
 // handlers (e.g. enabling CP mode at runtime) can start background tasks.
 var appLifecycleCtx context.Context
+
 var appLifecycleCancel context.CancelFunc
 
 // blFeedSyncer is the process-wide blocklist feed syncer, set in main().
 var blFeedSyncer *BlocklistSyncer
+
 var clusterDBPathGlobal string // persisted cluster state path, set at startup
 
 // dataDir is the base directory for persisted runtime state (node groups, bandwidth policies, etc.).
@@ -79,6 +70,12 @@ type startupState struct {
 	cpGRPCCA                *string
 	haJoin                  *string
 	haToken                 *string
+	haAutoFailover          *bool
+	haEtcdEndpoints         *string
+	haEtcdCert              *string
+	haEtcdKey               *string
+	haEtcdCA                *string
+	haLeaseTTL              *int
 	dpCPAddr                *string
 	dpNodeID                *string
 	dpCert                  *string
@@ -93,6 +90,7 @@ type startupState struct {
 	syslogFormat            *string
 	otlpEndpoint            *string
 	uiAllowIP               *string
+	trustedProxyCIDRs       *string
 	sessionHrs              *int
 	geoIPDB                 *string
 	clamavAddr              *string
@@ -168,6 +166,14 @@ func main() {
 	s := &startupState{}
 	parseFlags(s)
 	handleOneShotCommands(s)
+	// RISK-005: refuse to boot on a data dir left missing by a restore commit
+	// that was killed mid-rename (would otherwise start empty + silently lose
+	// data). Runs AFTER the one-shots so --list/--cleanup-restore-leftovers and
+	// --restore can still operate on the orphaned state.
+	if err := checkInterruptedRestore(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
@@ -219,7 +225,7 @@ func parseFlags(s *startupState) {
 	s.pass = flag.String("pass", "", "Basic auth password")
 	s.blockFile = flag.String("blocklist", "", "Blocklist file path")
 	s.logFilePath = flag.String("logfile", "", "Log file path")
-	s.logMaxMB = flag.Int("log-max-mb", 50, "Log rotation size in MB")
+	s.logMaxMB = flag.Int("log-max-mb", 0, "Log rotation size in MB (default 50; overrides config)")
 	s.tlsCert = flag.String("tls-cert", "", "TLS cert file for UI (optional)")
 	s.tlsKey = flag.String("tls-key", "", "TLS key file for UI (optional)")
 	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
@@ -232,6 +238,12 @@ func parseFlags(s *startupState) {
 	s.cpGRPCCA = flag.String("cp-grpc-ca", "", "ControlPlane gRPC CA for mTLS client validation")
 	s.haJoin = flag.String("ha-join", "", "HA standby: leader CP gRPC address to sync from (e.g. cp1:50051)")
 	s.haToken = flag.String("ha-token", "", "HA standby: authentication token (from leader's deploy command)")
+	s.haAutoFailover = flag.Bool("ha-auto-failover", false, "HA: allow the standby to self-promote on leader loss. DEFAULT OFF — 2-node active/passive has no witness, so unattended auto-promotion can split-brain (ADR-0004/RISK-001). Off = manual failover. With -ha-etcd-endpoints the fencing lease arbitrates instead and this flag is ignored (ADR-0005).")
+	s.haEtcdEndpoints = flag.String("ha-etcd-endpoints", "", "HA fencing lease: comma-separated etcd endpoints (e.g. https://etcd1:2379). Enables SAFE automatic failover — every path to leadership is lease-arbitrated (ADR-0005). Empty = legacy manual failover.")
+	s.haEtcdCert = flag.String("ha-etcd-cert", "", "HA fencing lease: client certificate for etcd mTLS")
+	s.haEtcdKey = flag.String("ha-etcd-key", "", "HA fencing lease: client key for etcd mTLS")
+	s.haEtcdCA = flag.String("ha-etcd-ca", "", "HA fencing lease: CA certificate to validate the etcd server")
+	s.haLeaseTTL = flag.Int("ha-lease-ttl", 0, "HA fencing lease TTL in seconds (failover latency ≈ TTL; minimum 3; 0 = cluster.lease_ttl_seconds from config, or 10)")
 	s.dpCPAddr = flag.String("dp-cp-addr", "", "DataPlane: ControlPlane gRPC addr to connect to (comma-separated for HA failover)")
 	s.dpNodeID = flag.String("dp-node-id", "", "DataPlane: node identifier (default=hostname)")
 	s.dpCert = flag.String("dp-cert", "", "DataPlane gRPC client TLS cert")
@@ -241,11 +253,12 @@ func parseFlags(s *startupState) {
 	s.caPath = flag.String("ca-path", "", "Path to persist encrypted Root CA bundle (optional)")
 	s.auditLog = flag.String("audit-log", "", "Persistent audit log file path (JSONL, appended)")
 	s.requestLogPath = flag.String("request-log", "", "Persistent request log file path (JSONL, rotated)")
-	s.requestLogMaxMB = flag.Int("request-log-max-mb", 100, "Request log rotation size in MB")
+	s.requestLogMaxMB = flag.Int("request-log-max-mb", 0, "Request log rotation size in MB (default 100; overrides config)")
 	s.syslogAddr = flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
 	s.syslogFormat = flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
 	s.otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
 	s.uiAllowIP = flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
+	s.trustedProxyCIDRs = flag.String("trusted-proxy-cidrs", "", "Comma-separated CIDRs/IPs of reverse proxies whose X-Forwarded-For is trusted for admin-UI client-IP (empty=never trust XFF)")
 	s.sessionHrs = flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")
 	s.geoIPDB = flag.String("geoip-db", "", "Path to GeoLite2-Country.mmdb (empty=GeoIP disabled)")
 	s.clamavAddr = flag.String("clamav-addr", "", "ClamAV address: unix:/run/clamav/clamd.sock or tcp:host:port")
@@ -502,6 +515,9 @@ func initLogger(s *startupState) {
 		log.Fatalf("Logger setup failed: %v", err)
 	}
 	SetLogLevel(ParseLogLevel(s.fc.LogLevel))
+	// Route internal/* package logs (obs facade) into the same logger. Published
+	// once here at startup, before any traffic is served (ADR-0003 seam).
+	obs.SetSink(func(line string) { logger.Print(line) })
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -541,9 +557,9 @@ func initSession(s *startupState) {
 // audit/request logs. P4.3 / S1: the implementation lives in
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
-// loader. No carry to startupState — the file-handle closers stay on
-// their package globals (globalSyslog, auditCloser, requestLogCloser)
-// and continue to be read by the existing syslog-close / audit-log-
+// loader. No carry to startupState — the file handles stay on their
+// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
 	loadObservability(resolveObservabilityStartupConfig(
@@ -568,7 +584,7 @@ func initGeoIP(s *startupState) {
 // initUIAccessPolicy is the PR3 expansion shim: resolve the UI access
 // policy slice (IP allowlist + base URL + IdP registry) and apply it.
 func initUIAccessPolicy(s *startupState) {
-	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP, *s.idpProfilesFile)
+	cfg := resolveUIAccessPolicyStartupConfig(s.fc, *s.uiAllowIP, *s.trustedProxyCIDRs, *s.idpProfilesFile)
 	if err := loadUIAccessPolicy(cfg); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -599,77 +615,35 @@ func initMetricsToken(s *startupState) {
 }
 
 // initCluster starts Control Plane / Data Plane gRPC and HA failover.
+// initCluster resolves the cluster slice config and hands it to the loader
+// (cluster_startup*.go), which owns the CP/HA-standby/HA-resume boot flow
+// (ADR-0004) and the 3-priority Data-Plane wiring. The fresh-enrollment
+// result is a runtime input passed alongside the resolved config.
 func initCluster(s *startupState) {
-	// ── Control Plane / Data Plane gRPC ──────────────────────────────────────
-	clusterRole.role = "standalone"
-	if h, err2 := os.Hostname(); err2 == nil {
-		clusterRole.nodeID = h
-	}
-	// ── Cluster state persistence ────────────────────────────────────────
-	clusterDBPath := firstStr(*s.clusterDB, s.fc.Cluster.StateDB, "cluster.json")
-	clusterDBPathGlobal = clusterDBPath
-	if err := globalClusterStore.Load(clusterDBPath); err != nil {
-		logger.Printf("ClusterDB: load error: %v — starting fresh", err)
-	} else {
-		nodes := globalClusterStore.ListNodes()
-		if len(nodes) > 0 {
-			logger.Printf("ClusterDB: loaded %d enrolled node(s) from %s", len(nodes), clusterDBPath)
-		}
-	}
-
-	// Merge CLI flags with YAML cluster config (CLI wins).
-	cpAddr := firstStr(*s.cpGRPCAddr, s.fc.Cluster.GRPCAddr)
-	cpCert := firstStr(*s.cpGRPCCert, s.fc.Cluster.CertFile)
-	cpKey := firstStr(*s.cpGRPCKey, s.fc.Cluster.KeyFile)
-	cpCA := firstStr(*s.cpGRPCCA, s.fc.Cluster.CAFile)
-
-	if *s.haJoin != "" && *s.haToken != "" {
-		// ── HA Standby: sync state from leader, then stand by ────────
-		initClusterCA(clusterDBPath)
-		globalHA.StartAsStandby(appLifecycleCtx, *s.haJoin, *s.haToken,
-			cpAddr, cpCert, cpKey, cpCA,
-			func() error {
-				return enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath)
-			},
-		)
-	} else if cpAddr != "" || s.fc.Cluster.Role == "control-plane" {
-		// ── Normal CP startup ────────────────────────────────────────
-		if err := enableControlPlane(cpAddr, cpCert, cpKey, cpCA, clusterDBPath); err != nil {
-			logger.Fatalf("ControlPlane gRPC: %v", err)
-		}
-		// Check for persisted HA config (leader restart).
-		if haCfg, err := loadHAConfig(); err == nil && haCfg.Enabled {
-			globalHA.EnableAsLeader(haCfg.PeerAddr)
-			globalHA.mu.Lock()
-			globalHA.token = haCfg.Token // restore original token
-			globalHA.mu.Unlock()
-			logger.Printf("HA: restored leader state from %s (peer=%s)", haConfigFile, haCfg.PeerAddr)
-		}
-	}
-	// ── Data Plane startup: from flags, enrollment, or saved config ─────────
-	dpAddr, dpNID, dpCertF, dpKeyF, dpCAF := *s.dpCPAddr, *s.dpNodeID, *s.dpCert, *s.dpKey, *s.dpCA
-	// Priority 1: fresh enrollment from this run.
-	if s.enrolledConfig != nil && dpAddr == "" {
-		dpAddr = s.enrolledConfig.CPAddr
-		dpNID = s.enrolledConfig.NodeID
-		dpCertF = s.enrolledConfig.CertFile
-		dpKeyF = s.enrolledConfig.KeyFile
-		dpCAF = s.enrolledConfig.CAFile
-	}
-	// Priority 2: saved enrollment config from a previous run.
-	if dpAddr == "" {
-		if ec, err := loadEnrollmentConfig(); err == nil {
-			dpAddr = ec.CPAddr
-			dpNID = ec.NodeID
-			dpCertF = ec.CertFile
-			dpKeyF = ec.KeyFile
-			dpCAF = ec.CAFile
-			logger.Printf("DataPlane: loaded enrollment config from %s", enrollmentConfigFile)
-		}
-	}
-	if dpAddr != "" {
-		startDataPlane(appLifecycleCtx, dpAddr, dpNID, dpCertF, dpKeyF, dpCAF)
-	}
+	loadCluster(
+		resolveClusterStartupConfig(s.fc, clusterCLIFlags{
+			ClusterDB:       *s.clusterDB,
+			CPGRPCAddr:      *s.cpGRPCAddr,
+			CPGRPCCert:      *s.cpGRPCCert,
+			CPGRPCKey:       *s.cpGRPCKey,
+			CPGRPCCA:        *s.cpGRPCCA,
+			HAJoin:          *s.haJoin,
+			HAToken:         *s.haToken,
+			HAAutoFailover:  *s.haAutoFailover,
+			HAEtcdEndpoints: *s.haEtcdEndpoints,
+			HAEtcdCert:      *s.haEtcdCert,
+			HAEtcdKey:       *s.haEtcdKey,
+			HAEtcdCA:        *s.haEtcdCA,
+			HALeaseTTLSec:   *s.haLeaseTTL,
+			DPCPAddr:        *s.dpCPAddr,
+			DPNodeID:        *s.dpNodeID,
+			DPCert:          *s.dpCert,
+			DPKey:           *s.dpKey,
+			DPCA:            *s.dpCA,
+		}),
+		appLifecycleCtx,
+		s.enrolledConfig,
+	)
 }
 
 // initConnAndRateLimit configures per-IP connection limits, IP filter, and
@@ -698,33 +672,14 @@ func initBlocklist(s *startupState) {
 	loadBlocklist(resolveBlocklistStartupConfig(s.fc, s.blPath), appLifecycleCtx)
 }
 
-// initRootCA loads or initialises the Root CA used for SSL inspection.
+// initRootCA resolves the Root-CA slice config and hands it to the loader
+// (rootca_startup*.go). The passphrase is read from env HERE (never CLI —
+// shift-left secret hygiene) and passed as a param so the resolver stays pure.
 func initRootCA(s *startupState) {
-	// ── Root CA for SSL inspection ────────────────────────────────────────────
-	// Passphrase is read from env so it never appears in CLI history or
-	// process listings (shift-left secret hygiene).
-	caPassphrase := os.Getenv(caPassphraseEnv)
-	caPathVal := firstStr(*s.caPath, s.fc.Proxy.CAPath)
-	if caPathVal != "" {
-		if err := certMgr.LoadOrInitCA(caPathVal, caPassphrase); err != nil {
-			logger.Printf("Warning: Root CA load/init failed (%v) — SSL inspection disabled", err)
-		} else {
-			logger.Printf("SSLCA: Root CA ready (persisted at %s, encrypted=%v)", caPathVal, caPassphrase != "")
-		}
-	} else {
-		if err := certMgr.InitCA(); err != nil {
-			logger.Printf("Warning: Root CA init failed (%v) — SSL inspection disabled", err)
-		} else {
-			logger.Printf("SSLCA: Root CA ready in-memory (set -ca-path + %s for persistence)", caPassphraseEnv)
-		}
-	}
-	// Store CA runtime config for API-driven rotation.
-	caRuntime.path = caPathVal
-	caRuntime.passphrase = caPassphrase
-	// Start CA auto-rotation background check.
-	if certMgr.Ready() {
-		StartCAAutoRotation(appLifecycleCtx, caPathVal, caPassphrase)
-	}
+	loadRootCA(
+		resolveRootCAStartupConfig(s.fc, *s.caPath, os.Getenv(caPassphraseEnv)),
+		appLifecycleCtx,
+	)
 }
 
 // initPolicy loads the policy rules file into the global policy store.
@@ -744,107 +699,30 @@ func initPolicy(s *startupState) {
 }
 
 // initURLCategories loads URL categories, category groups, SaaS feed, and the community BadgerDB feed.
+// initURLCategories resolves the URL-categories slice config and hands it to
+// the loader (urlcategories_startup*.go); the returned UT1 feed syncer (nil
+// when the community feed is disabled) is stashed on startupState.
 func initURLCategories(s *startupState) {
-	// ── URL Categories ────────────────────────────────────────────────────────
-	catPath := s.fc.Proxy.URLCategoriesFile
-	if catPath == "" {
-		catPath = "categories.json"
-	}
-	if err := catStore.Load(catPath); err != nil {
-		logger.Fatalf("Cannot load URL categories: %v", err)
-	}
-	logger.Printf("URLCat: %d categories loaded from %s", len(catStore.All()), catPath)
-
-	// Seed empty catStore entries for all UT1 mapped category names so they
-	// appear in the Category Groups dropdown. The names must exist in catStore
-	// (Layer 1) for the GUI to list them, even though domains are in BadgerDB
-	// (Layer 2). lookupHostCategory checks both layers for matching.
-	ut1Seeded := 0
-	seen := map[string]bool{}
-	for _, mappedCat := range ut1CategoryMap {
-		lc := strings.ToLower(mappedCat)
-		if seen[lc] {
-			continue
-		}
-		seen[lc] = true
-		if catStore.GetByName(mappedCat) == nil {
-			_ = catStore.Set(mappedCat, []string{}, true) // empty, built-in
-			ut1Seeded++
-		}
-	}
-	if ut1Seeded > 0 {
-		catStore.Save()
-		logger.Printf("URLCat: seeded %d UT1 category name(s) into catStore for GUI visibility", ut1Seeded)
-	}
-
-	// ── Category Groups ──────────────────────────────────────────────────────
-	if err := globalCategoryGroups.Load(filepath.Join(dataDir, "category_groups.json")); err != nil {
-		logger.Printf("CategoryGroups: load error: %v", err)
-	}
-
-	// ── SaaS category feed (dynamic updates from GitHub) ────────────────────
-	// Auto-syncs curated SaaS categories (AI, Marketing, Messaging, etc.)
-	// from the Culvert repo. Additive merge: new domains added, admin
-	// removals preserved. Disabled by default; enable via admin GUI.
-	globalSaaSFeed.Configure(defaultSaaSFeedURL, 24*time.Hour)
-
-	// ── Community URL category feed (BadgerDB) ────────────────────────────────
-	// When --cat-feed-db is set, open BadgerDB and start the UT1 FeedSyncer.
-	// Layer 1 (catStore) remains the priority; BadgerDB is the fallback.
-	if *s.catFeedDB == "" { //nolint:nestif // straightforward init block; nesting is necessary
-		logger.Printf("CatFeedDB: disabled (set --cat-feed-db for community feed)")
-	} else {
-		var dbErr error
-		communityDB, dbErr = openCommunityDB(*s.catFeedDB)
-		if dbErr != nil {
-			logger.Fatalf("CatFeedDB → cannot open BadgerDB at %s: %v", *s.catFeedDB, dbErr)
-		}
-		syncD := 24 * time.Hour
-		if *s.catSyncIntvl != "" {
-			if d, err2 := time.ParseDuration(*s.catSyncIntvl); err2 == nil {
-				syncD = d
-			}
-		}
-		s.feedSyncer = newFeedSyncer(communityDB, *s.catFeedURL, syncD)
-		globalUT1FeedSyncer = s.feedSyncer // UC-6: expose Stats() to /metrics
-		s.feedSyncer.Start(appLifecycleCtx)
-		logger.Printf("CatFeedDB: BadgerDB at %s, sync every %s", *s.catFeedDB, syncD)
-	}
+	s.feedSyncer = loadURLCategories(
+		resolveURLCategoriesStartupConfig(s.fc, dataDir, *s.catFeedDB, *s.catFeedURL, *s.catSyncIntvl),
+		appLifecycleCtx,
+	)
 }
 
 // initLogStore opens the Badger-backed request-log history store when a path is
 // configured, wires it as the process-wide globalLogStore, and starts the size
 // retention janitor parented to appLifecycleCtx. Disabled (no-op) when no path
 // is set — the in-memory ring and optional JSONL writer still operate.
+// initLogStore resolves the persistent log-store slice config and hands it to
+// the loader. Implementation lives in logstore_startup_config.go (pure
+// resolver + DTO) + logstore_startup.go (loader); env values are read HERE so
+// the resolver stays pure (slice convention).
 func initLogStore(s *startupState) {
-	// logStoreDir is where the store lives when the admin enables saving from
-	// the GUI (no YAML needed). Default under the data dir; a configured
-	// log_store_path overrides it.
-	logStoreDir = s.fc.LogStorePath
-	if logStoreDir == "" {
-		logStoreDir = filepath.Join(dataDir, "logstore")
-	}
-	// Encryption-at-rest key source: dedicated CULVERT_LOG_PASSPHRASE, falling
-	// back to the CA passphrase (which is already set when SSL-inspecting — the
-	// case where URL logging is most sensitive). Empty = encryption off.
-	logStorePassphrase = os.Getenv(logStorePassphraseEnv)
-	if logStorePassphrase == "" {
-		logStorePassphrase = os.Getenv(caPassphraseEnv)
-	}
-	// Seed-enable only when log_store_path is set in config (back-compat).
-	// Otherwise the store stays off until the admin enables it from the UI;
-	// LoadAdminSettings (later in startup) restores the GUI-saved enabled state.
-	if s.fc.LogStorePath == "" {
-		logger.Printf("LogStore: off (enable from the admin UI, or set log_store_path)")
-		return
-	}
-	if err := enableLogStore(appLifecycleCtx, logStoreDir, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB); err != nil {
-		// Non-fatal: history is an enhancement over the in-memory ring, so a
-		// store open failure must not stop the proxy from serving traffic.
-		logger.Printf("LogStore: cannot open at %s: %v — history disabled", logStoreDir, err)
-		return
-	}
-	logger.Printf("LogStore: history at %s (retention: %d days, %.2f GB)", logStoreDir, s.fc.LogRetentionDays, s.fc.LogRetentionMaxGB)
+	loadLogStore(
+		resolveLogStoreStartupConfig(s.fc, dataDir,
+			os.Getenv(logStorePassphraseEnv), os.Getenv(caPassphraseEnv)),
+		appLifecycleCtx,
+	)
 }
 
 // initFileBlocking sets up the file-extension blocker and named file-type profiles.
@@ -878,203 +756,49 @@ func initRewriteAndDefaultAction(s *startupState) {
 }
 
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
+// initScanning resolves the security-scanning slice config and hands it to
+// the loader (scanning_startup*.go); the returned sidecar service (nil unless
+// --scan-svc-listen) is stashed on startupState for graceful shutdown.
 func initScanning(s *startupState) {
-	// ── Security scanning: ClamAV + YARA + Threat Feeds ─────────────────────
-	secCfg := s.fc.SecurityScan
-	clamAddr := firstStr(*s.clamavAddr, secCfg.ClamAVAddr)
-	yaraDir := firstStr(*s.yaraRulesDir, secCfg.YARARulesDir)
-	feedDB := firstStr(*s.threatFeedDB, secCfg.ThreatFeedDB)
-
-	// Remote scan service mode: delegate body scanning to a sidecar.
-	remoteScanURL := firstStr(*s.scanSvcURL, secCfg.ScanSvcURL)
-	if remoteScanURL != "" {
-		globalRemoteScanner.Init(remoteScanURL)
-		logger.Printf("ScanSvc: remote mode, delegating to %s", remoteScanURL)
-		// Threat feeds still run locally (URL/domain checks are cheap).
-		if feedDB != "" || secCfg.Enabled {
-			syncInterval := 6 * time.Hour
-			if secCfg.SyncInterval != "" {
-				if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
-					syncInterval = d
-				}
-			}
-			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
-		}
-	} else if secCfg.Enabled || clamAddr != "" || yaraDir != "" || feedDB != "" {
-		// Scan result cache TTL.
-		cacheTTL := time.Hour
-		if secCfg.CacheTTL != "" {
-			if d, err := time.ParseDuration(secCfg.CacheTTL); err == nil {
-				cacheTTL = d
-			}
-		}
-		// Feed sync interval.
-		syncInterval := 6 * time.Hour
-		if secCfg.SyncInterval != "" {
-			if d, err := time.ParseDuration(secCfg.SyncInterval); err == nil {
-				syncInterval = d
-			}
-		}
-		cacheSize := secCfg.CacheSize
-		if cacheSize <= 0 {
-			cacheSize = 10_000
-		}
-		var maxScanBytes int64
-		if secCfg.MaxScanMB > 0 {
-			maxScanBytes = int64(secCfg.MaxScanMB) << 20
-		}
-
-		// Initialise scanner and hash cache.
-		globalSecScanner.cache = newHashCache(cacheSize, cacheTTL)
-		globalSecScanner.Init(clamAddr, maxScanBytes)
-
-		// YARA rules.
-		if yaraDir != "" {
-			// Seed the rules directory from the bundled /app/yara on first boot
-			// so starter rules are available even when yaraDir points to a
-			// persistent volume (e.g. /data/yara). Only copies if the target
-			// directory is empty or doesn't exist.
-			seedYARARules(yaraDir)
-			if err := globalYARA.LoadDir(yaraDir); err != nil {
-				logger.Printf("YARA: load error: %v", err)
-			} else {
-				logger.Printf("YARA: %d rule(s) from %s", globalYARA.Count(), yaraDir)
-			}
-		} else {
-			logger.Printf("YARA: disabled (set -yara-rules-dir to enable)")
-		}
-
-		// Tier 3.3: admin-managed scan exclusion lists (hash + host allowlists).
-		// Persisted under the same data directory as the rest of the state.
-		if dataDir != "" {
-			if err := globalScanExclusions.Load(filepath.Join(dataDir, "scan_exclusions.json")); err != nil {
-				logger.Printf("ScanExclusions: load error: %v", err)
-			}
-		}
-
-		// Threat feeds.
-		if feedDB != "" || secCfg.Enabled {
-			globalThreatFeed.Init(feedDB, syncInterval)
-			globalThreatFeed.Start(appLifecycleCtx)
-			logger.Printf("ThreatFeed: sync every %s, db=%q", syncInterval, feedDB)
-		}
-	}
-
-	// Scan microservice sidecar: expose local scanners as an HTTP service.
-	svcListenAddr := firstStr(*s.scanSvcListen, secCfg.ScanSvcListen)
-	if svcListenAddr != "" {
-		s.scanSvc = NewScanService(svcListenAddr)
-		if err := s.scanSvc.Listen(); err != nil {
-			logger.Printf("ScanSvc: listen error: %v", err)
-		} else {
-			go func() {
-				if err := s.scanSvc.Start(); err != nil {
-					logger.Printf("ScanSvc: error: %v", err)
-				}
-			}()
-		}
-	}
+	s.scanSvc = loadScanning(
+		resolveScanningStartupConfig(s.fc, scanningCLIFlags{
+			ClamAVAddr:    *s.clamavAddr,
+			YARARulesDir:  *s.yaraRulesDir,
+			ThreatFeedDB:  *s.threatFeedDB,
+			ScanSvcURL:    *s.scanSvcURL,
+			ScanSvcListen: *s.scanSvcListen,
+		}, dataDir),
+		appLifecycleCtx,
+	)
 }
 
-// initUpstreamProxy configures parent-proxy chaining when configured.
+// initUpstreamProxy configures parent-proxy chaining. Runs even when the
+// YAML seeds no proxies so the pool records the configured circuit-breaker
+// parameters and the health-check loop starts — GUI-added proxies (restored
+// from admin_settings.json or POSTed to /api/upstream) then inherit both.
 func initUpstreamProxy(s *startupState) {
-	// ── Upstream proxy chaining ──────────────────────────────────────────────
-	if len(s.fc.Upstream.Proxies) > 0 {
-		initUpstreamPool(s.fc)
-	}
+	initUpstreamPool(s.fc)
 }
 
 // initCDR wires Sluice CDR configuration, persistent state, client, and health poller.
+// initCDR resolves the CDR (Sluice) slice config and hands it to the loader
+// (cdr_startup*.go). CLI flag values are packed here; the runtime
+// enable-sentinel is read by the loader (filesystem side effect).
 func initCDR(s *startupState) {
-	// ── Sluice CDR integration (Phase 1: config plumbing only) ──────────────
-	// Client wiring into the proxy pipeline (handleTunnelInspect) lands in a
-	// follow-up phase.  For now we merge flags, validate, and log status so
-	// operators can sanity-check their setup before Phase 2 ships.
-	cdrCfg := s.fc.CDR
-	if *s.cdrEnabledFlag {
-		cdrCfg.Enabled = true
-	}
-	if ep := firstStr(*s.cdrEndpointFlag, cdrCfg.Endpoint); ep != "" {
-		cdrCfg.Endpoint = ep
-	}
-	if fm := firstStr(*s.cdrFailModeFlag, cdrCfg.FailMode); fm != "" {
-		cdrCfg.FailMode = fm
-	}
-	if pn := firstStr(*s.cdrProfileFlag, cdrCfg.DefaultProfile); pn != "" {
-		cdrCfg.DefaultProfile = pn
-	}
-	if m := firstStr(*s.cdrModeFlag, cdrCfg.DefaultMode); m != "" {
-		cdrCfg.DefaultMode = m
-	}
-	if t := firstNonZero(*s.cdrTimeoutFlag, cdrCfg.TimeoutSec); t != 0 {
-		cdrCfg.TimeoutSec = t
-	}
-	if sz := firstNonZero(*s.cdrMaxSizeFlag, cdrCfg.MaxFileSizeMB); sz != 0 {
-		cdrCfg.MaxFileSizeMB = sz
-	}
-	if fp := firstStr(*s.cdrFingerprintFlag, cdrCfg.ServerFingerprint); fp != "" {
-		cdrCfg.ServerFingerprint = fp
-	}
-	if d := firstStr(*s.cdrCertsDirFlag, cdrCfg.CertsDir); d != "" {
-		cdrCfg.CertsDir = d
-	}
-	// Runtime sentinel takes priority: if /data/cdr_enabled exists
-	// (written by the admin GUI toggle or by the first enrollment
-	// auto-enable path), CDR is on regardless of YAML/CLI.  This lets
-	// operators enable CDR via the admin UI without editing config
-	// files or restarting the proxy.
-	if cdrRuntimeEnabled() {
-		cdrCfg.Enabled = true
-	}
-
-	// Load persistent state unconditionally — the registry and policy
-	// store must know their on-disk paths even when CDR is currently
-	// disabled, otherwise Save() silently no-ops (see
-	// CDRInstanceRegistry.Save: path=="" returns nil) and any enroll /
-	// toggle done via the GUI lives only in RAM until the next restart
-	// wipes it.  Missing files are tolerated (fresh install); malformed
-	// files fail loudly so admins notice.
-	const (
-		cdrInstPath   = "/data/cdr_instances.json"
-		cdrPolicyPath = "/data/cdr_policies.json"
+	loadCDR(
+		resolveCDRStartupConfig(s.fc, cdrCLIFlags{
+			Enabled:     *s.cdrEnabledFlag,
+			Endpoint:    *s.cdrEndpointFlag,
+			FailMode:    *s.cdrFailModeFlag,
+			Profile:     *s.cdrProfileFlag,
+			Mode:        *s.cdrModeFlag,
+			TimeoutSec:  *s.cdrTimeoutFlag,
+			MaxSizeMB:   *s.cdrMaxSizeFlag,
+			Fingerprint: *s.cdrFingerprintFlag,
+			CertsDir:    *s.cdrCertsDirFlag,
+		}),
+		appLifecycleCtx,
 	)
-	if err := cdrInstances.Load(cdrInstPath); err != nil {
-		logger.Printf("CDR: instance registry load failed: %v", err)
-	}
-	if err := cdrPolicyStore.Load(cdrPolicyPath); err != nil {
-		logger.Printf("CDR: policy store load failed: %v", err)
-	}
-
-	if cdrCfg.Enabled {
-		mode := cdrCfg.DefaultMode
-		if mode == "" {
-			mode = "ENFORCE"
-		}
-		profile := cdrCfg.DefaultProfile
-		if profile == "" {
-			profile = "default"
-		}
-		failSafe := "fail-open"
-		if !cdrCfg.CDRFailOpen() {
-			failSafe = "fail-closed"
-		}
-
-		if err := initCDRClient(cdrCfg); err != nil {
-			// Non-fatal: CDR is opt-in.  If the dial fails we log + continue;
-			// handleTunnelInspect (Phase 2b) will fail-open/closed per policy.
-			logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", sanitizeLog(err.Error()))
-		}
-
-		// Phase 2c: background Health poller — updates cached snapshot
-		// every 15s so /api/cdr/health is cheap and the GUI sees instance
-		// liveness without polling Sluice on every view.
-		startCDRHealthPoller(appLifecycleCtx)
-
-		logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
-			sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)
-	}
 }
 
 // initMTLSAndOCSP is the PR3 expansion shim: resolve the upstream
@@ -1084,46 +808,13 @@ func initMTLSAndOCSP(s *startupState) {
 }
 
 // initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
+// initBackgroundServices resolves the background-services slice config and
+// hands it to the loader (background_services_startup*.go).
 func initBackgroundServices(s *startupState) {
-	// ── SSE live dashboard broadcaster ───────────────────────────────────────
-	// P1.2 / S4.SSE: parented to appLifecycleCtx so the goroutine exits when
-	// runProxyUntilShutdown calls appLifecycleCancel(). Handle discarded here;
-	// Phase 2's shutdown registry will pick it up if needed.
-	startSSEBroadcaster(appLifecycleCtx)
-
-	// ── F16: Alert retry queue ──────────────────────────────────────────────
-	go startAlertRetryLoop(appLifecycleCtx)
-
-	// ── Docker self-update system ────────────────────────────────────────────
-	// H4: install the operator-curated allowlist BEFORE validating the
-	// configured updater URL — validateUpdaterURL consults it.
-	allowlist := append([]string(nil), s.fc.Update.URLAllowlist...)
-	if cli := strings.TrimSpace(*s.updaterURLAllowFlag); cli != "" {
-		for _, entry := range strings.Split(cli, ",") {
-			if e := strings.TrimSpace(entry); e != "" {
-				allowlist = append(allowlist, e)
-			}
-		}
-	}
-	SetUpdaterURLAllowlist(allowlist)
-	if u := firstStr(*s.updaterURLFlag, s.fc.Update.UpdaterURL); u != "" {
-		if err := validateUpdaterURL(u); err != nil {
-			logWarnf("Update: invalid updater URL %q: %v — using default", u, err)
-		} else {
-			updaterURL = u
-		}
-	}
-	ensureUpdaterToken()
-	// Write current version to shared volume so the updater sidecar can read
-	// it without inspecting Docker image tags (which show "latest" for local builds).
-	// cleanSemver strips git-describe suffixes (e.g. "v0.0.19-4-g8ac6d14" → "v0.0.19")
-	// so the updater always sees a clean semver for comparison.
-	if cv := cleanSemver(version); cv != "" && cv != "dev" {
-		// #nosec G306 -- 0644 required: updater sidecar runs with cap_drop:ALL (no DAC_OVERRIDE)
-		_ = os.WriteFile("/data/version.txt", []byte(cv+"\n"), 0o644)
-	}
-	go startUpdateChecker(appLifecycleCtx)
-	recoverClusterUpdate()
+	loadBackgroundServices(
+		resolveBackgroundServicesStartupConfig(s.fc, *s.updaterURLAllowFlag, *s.updaterURLFlag, version),
+		appLifecycleCtx,
+	)
 }
 
 // initSOCKS5 starts the optional SOCKS5 listener. The accept loop is owned
@@ -1138,27 +829,12 @@ func initSOCKS5(s *startupState) {
 }
 
 // initPersistentAdminState initializes config versioning, node groups, bandwidth, hit counters, and admin settings.
-func initPersistentAdminState(s *startupState) {
-	// ── Storage writability probe (one-shot, startup-only) ──────────────
-	// Result is cached for the diagnostics handler so /api/diagnostics
-	// stays side-effect-free. Never retries; never blocks startup.
-	probeStorageWritability()
-
-	// ── Config versioning ────────────────────────────────────────────────
-	initConfigVersioning()
-
-	// ── Node Groups ─────────────────────────────────────────────────────
-	globalNodeGroups = NewNodeGroupStore(filepath.Join(dataDir, "node_groups.json"))
-
-	// ── Bandwidth / QoS ─────────────────────────────────────────────────
-	globalBandwidth = NewBandwidthManager(filepath.Join(dataDir, "bandwidth.json"))
-
-	// ── Hit counter persistence (Finding 2.3) ───────────────────────────
-	startHitCounterPersistence(appLifecycleCtx, filepath.Join(dataDir, "hit_counters.json"))
-	RestoreHitCounts() // copy persisted hit counters back into PolicyRule.HitCount
-
-	// ── Admin settings persistence (restore GUI changes across restarts) ──
-	LoadAdminSettings(filepath.Join(dataDir, "admin_settings.json"))
+// initPersistentAdminState resolves the persistent-admin-state slice config
+// and hands it to the loader (persistent_admin_state_startup*.go). The loader
+// documents the ordering contract (probe → versioning → stores → hit counters
+// → admin settings LAST).
+func initPersistentAdminState(_ *startupState) {
+	loadPersistentAdminState(resolvePersistentAdminStateStartupConfig(dataDir), appLifecycleCtx)
 }
 
 // startAdminUI wires UI globals and launches the admin UI server.
@@ -1329,408 +1005,6 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 	logger.Println("Stopped.")
 }
 
-// runShutdownSequence runs the early registry with context.Background()
-// (no shutdown budget), then creates a fresh ctx with the supplied late
-// budget and runs the late registry. The late ctx's cancel is deferred so
-// it runs at function exit, mirroring the original
-// `defer cancel()` placement in runProxyUntilShutdown.
-//
-// Extracted so the budget-vs-no-budget contract — the entire reason this
-// PR splits into two registries — is unit-testable end to end without
-// touching production globals. P2.2 / S5.
-func runShutdownSequence(early, late *shutdownRegistry, lateBudget time.Duration) {
-	if err := early.RunAll(context.Background()); err != nil {
-		logger.Printf("Early shutdown error(s): %v", err)
-	}
-
-	// 30s shutdown budget begins HERE — same point as the original
-	// `ctx, cancel := context.WithTimeout(...)` in the pre-P2.2 body,
-	// after the rate-limit cleanup cancel and before scanSvc.Shutdown.
-	ctx, cancel := context.WithTimeout(context.Background(), lateBudget)
-	defer cancel()
-
-	if err := late.RunAll(ctx); err != nil {
-		// All late hooks currently log per-hook on failure and return nil,
-		// so this branch is unreachable today. Kept as a backstop for
-		// future hooks that opt into registry-level error aggregation.
-		logger.Printf("Shutdown error(s): %v", err)
-	}
-}
-
-// shutdown hook order constants. Gaps of 10 leave room for future inserts
-// without renumbering. Hooks at or below shutdownEarlyLateBoundary belong
-// in registerEarlyShutdownHooks (no shutdown budget); hooks above it belong
-// in registerLateShutdownHooks (under the 30s budget). P2.2 / S5.
-const (
-	shutdownOrderHAStop                 = 10
-	shutdownOrderControlPlaneGRPCStop   = 20
-	shutdownOrderCDRClientShutdown      = 30
-	shutdownOrderAppLifecycleCancel     = 40
-	shutdownOrderRateLimitCleanupCancel = 50
-
-	// shutdownEarlyLateBoundary is the cut-line: orders <= this run in
-	// the early phase (bg ctx, no budget); orders > this run in the late
-	// phase (30s ctx). Encoded as a constant so the test suite can pin
-	// the split structurally.
-	shutdownEarlyLateBoundary = 50
-
-	// shutdownOrderClusterStoreFlush runs first in the late phase. CL-2:
-	// closes the heartbeat-throttle window. UpdateNodeSeen only persists
-	// every 10th heartbeat (enrollment.go) and checkHeartbeats persists
-	// only when liveness/GC change something. Anything mutated in-memory
-	// since the last Save() is otherwise lost on shutdown. By this point
-	// in the sequence the gRPC server has stopped (no new heartbeats) and
-	// appLifecycleCancel has stopped the heartbeat monitor, so the Save
-	// races with nothing.
-	shutdownOrderClusterStoreFlush   = 55
-	shutdownOrderScanSvcShutdown     = 60
-	shutdownOrderAdminUIShutdown     = 70
-	shutdownOrderSOCKS5ListenerStop  = 80
-	shutdownOrderProxyServerShutdown = 90
-	shutdownOrderTunnelDrain         = 100
-	shutdownOrderSyslogClose         = 110
-	shutdownOrderCommunityDBClose    = 120
-	shutdownOrderLogStoreClose       = 125
-	shutdownOrderRequestLogClose     = 130
-	shutdownOrderAuditLogClose       = 135
-	shutdownOrderLogCloser           = 140
-)
-
-// registerEarlyShutdownHooks registers the pre-budget shutdown hooks: HA,
-// control-plane gRPC, CDR client, app lifecycle cancel, rate-limit cleanup
-// cancel. These ran BEFORE the 30s ctx in the pre-P2.2 hand-ordered body
-// and continue to run with context.Background() — they are not subject to
-// any shutdown timeout. None of them observe ctx; they ignore the parameter.
-// P2.2 / S5.
-func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
-	// Stop HA leader election and release lock before gRPC shutdown.
-	reg.Register("ha-stop", shutdownOrderHAStop, func(context.Context) error {
-		globalHA.Stop()
-		return nil
-	})
-	// Gracefully stop gRPC server (drains in-flight RPCs).
-	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
-		StopControlPlaneGRPC()
-		return nil
-	})
-	// Close the CDR client before cancelling lifecycle context so any
-	// in-flight Sanitize streams get a clean tear-down rather than a
-	// context-cancelled transport error.
-	reg.Register("cdr-client-shutdown", shutdownOrderCDRClientShutdown, func(context.Context) error {
-		shutdownCDRClient()
-		return nil
-	})
-	// Cancel all background goroutines (feed syncers, CA rotation, health checks, etc.).
-	reg.Register("app-lifecycle-cancel", shutdownOrderAppLifecycleCancel, func(context.Context) error {
-		appLifecycleCancel()
-		return nil
-	})
-	reg.Register("rate-limit-cleanup-cancel", shutdownOrderRateLimitCleanupCancel, func(context.Context) error {
-		if s.rlCleanupCancel != nil {
-			s.rlCleanupCancel()
-		}
-		return nil
-	})
-}
-
-// drainActiveTunnels drains in-flight CONNECT/WebSocket tunnels after the
-// proxy server's HTTP listener has shut down. proxySrv.Shutdown only closes
-// HTTP/1.x idle connections; hijacked tunnels need time to finish. The 15s
-// drain budget is independent of the parent ctx — extracted as a named
-// function (rather than an inline closure inside registerLateShutdownHooks)
-// to keep the wiring function's cognitive complexity low. P2.2 / S5.
-func drainActiveTunnels(context.Context) error {
-	active := atomic.LoadInt64(&activeConns)
-	if active <= 0 {
-		return nil
-	}
-	logger.Printf("Draining %d active tunnel(s)…", active)
-	drainDeadline := time.After(15 * time.Second)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-drainDeadline:
-			logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
-			return nil
-		case <-ticker.C:
-			if atomic.LoadInt64(&activeConns) <= 0 {
-				logger.Println("All tunnels drained")
-				return nil
-			}
-		}
-	}
-}
-
-// registerLateShutdownHooks registers the budget-bound shutdown hooks: scan
-// service, Admin UI, SOCKS5 listener, proxy server, tunnel drain, syslog
-// close, community DB close, request log close, log closer. These run under
-// the 30s ctx that runShutdownSequence creates after the early phase
-// completes; the ctx is observed by hooks that take it (scanSvc, adminUI,
-// socks5, proxySrv) and ignored by io.Closer-style hooks.
-//
-// Per-hook log messages and best-effort error suppression are byte-
-// equivalent to the previous hand-ordered body. Hooks return nil today;
-// registry-level error aggregation is reserved for a future PR. P2.2 / S5.
-func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv *http.Server) {
-	// CL-2: flush in-memory cluster state to disk once at shutdown so the
-	// heartbeat-throttle gap (UpdateNodeSeen saves every 10th tick) cannot
-	// drop LastSeen/Status mutations on a graceful stop. Save() is RLock +
-	// atomicWriteFile; no path → no-op.
-	reg.Register("cluster-store-flush", shutdownOrderClusterStoreFlush, func(context.Context) error {
-		if globalClusterStore == nil {
-			return nil
-		}
-		if err := globalClusterStore.Save(); err != nil {
-			logger.Printf("Cluster store flush error: %v", err)
-		}
-		return nil
-	})
-	// Shut down scan microservice sidecar if running. Best-effort: error suppressed.
-	reg.Register("scan-svc-shutdown", shutdownOrderScanSvcShutdown, func(ctx context.Context) error {
-		if s.scanSvc != nil {
-			_ = s.scanSvc.Shutdown(ctx)
-		}
-		return nil
-	})
-	// P1.1 / S4.AdminUI: stop accepting new admin UI requests before draining
-	// the proxy. shutdownAdminUI builds a 5s sub-context internally so an
-	// active SSE stream cannot consume the entire shutdown budget.
-	reg.Register("admin-ui-shutdown", shutdownOrderAdminUIShutdown, func(ctx context.Context) error {
-		if err := shutdownAdminUI(ctx, s.adminUISrv); err != nil {
-			logger.Printf("Admin UI shutdown error: %v", err)
-		}
-		return nil
-	})
-	// P1.5 / S4.SOCKS5: close the SOCKS5 listener. Bounded to 2s via a
-	// sub-context. Does NOT drain in-flight SOCKS5 tunnels — they keep
-	// their per-conn 30s deadlines (set in handleSOCKS5).
-	reg.Register("socks5-listener-stop", shutdownOrderSOCKS5ListenerStop, func(ctx context.Context) error {
-		if s.socks5Srv == nil {
-			return nil
-		}
-		socksCtx, socksCancel := context.WithTimeout(ctx, 2*time.Second)
-		defer socksCancel()
-		if err := s.socks5Srv.Stop(socksCtx); err != nil {
-			logger.Printf("SOCKS5 shutdown error: %v", err)
-		}
-		return nil
-	})
-	reg.Register("proxy-server-shutdown", shutdownOrderProxyServerShutdown, func(ctx context.Context) error {
-		if err := proxySrv.Shutdown(ctx); err != nil {
-			logger.Printf("Shutdown error: %v", err)
-		}
-		return nil
-	})
-	// Drain active tunnels (CONNECT/WebSocket). proxySrv.Shutdown only
-	// closes HTTP/1.x idle connections; hijacked tunnels need time to
-	// finish. 15s drain budget is independent of the parent ctx, matching
-	// the original behaviour exactly.
-	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, drainActiveTunnels)
-	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
-		if globalSyslog != nil {
-			_ = globalSyslog.Close() // best-effort flush
-		}
-		return nil
-	})
-	reg.Register("community-db-close", shutdownOrderCommunityDBClose, func(context.Context) error {
-		if communityDB != nil {
-			if err := communityDB.Close(); err != nil {
-				logger.Printf("CatFeedDB: close error: %v", err)
-			}
-		}
-		return nil
-	})
-	reg.Register("log-store-close", shutdownOrderLogStoreClose, func(context.Context) error {
-		if ls := globalLogStore.Load(); ls != nil {
-			if err := ls.Close(); err != nil {
-				logger.Printf("LogStore: close error: %v", err)
-			}
-		}
-		return nil
-	})
-	reg.Register("request-log-close", shutdownOrderRequestLogClose, func(context.Context) error {
-		if requestLogCloser != nil {
-			_ = requestLogCloser.Close() // best-effort flush
-		}
-		return nil
-	})
-	// P3.3 / S7. Release the audit-log file descriptor. Writes are
-	// synchronous, unbuffered, kernel-side already on disk — this closes
-	// the OS handle to eliminate the FD leak flagged as Risk #6 in
-	// ARCH_DISCOVERY. Best-effort, byte-equivalent to request-log-close.
-	reg.Register("audit-log-close", shutdownOrderAuditLogClose, func(context.Context) error {
-		if auditCloser != nil {
-			_ = auditCloser.Close() // best-effort FD release
-		}
-		return nil
-	})
-	reg.Register("log-closer", shutdownOrderLogCloser, func(context.Context) error {
-		if s.logCloser != nil {
-			_ = s.logCloser.Close()
-		}
-		return nil
-	})
-}
-
-// handleHealth returns liveness + readiness details for monitoring tools.
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	// CA cert expiry
-	caExpiresDays := -1
-	if info := certMgr.CACertInfo(); info["ready"] == true {
-		if notAfterStr, ok := info["notAfter"].(string); ok {
-			if t, err := time.Parse("2006-01-02", notAfterStr); err == nil {
-				caExpiresDays = int(time.Until(t).Hours() / 24)
-			}
-		}
-	}
-
-	// Threat feed entry count
-	tfEntries, _, _ := globalThreatFeed.Stats()
-
-	// ClamAV connectivity
-	clamStatus := "disabled"
-	if globalSecScanner != nil {
-		clamStatus = globalSecScanner.ClamAVStatus()
-	}
-
-	type healthResponse struct {
-		Status            string `json:"status"`
-		Uptime            string `json:"uptime"`
-		Version           string `json:"version"`
-		ClamAV            string `json:"clamav"`
-		CAExpiresDays     int    `json:"ca_expires_days"`
-		ThreatFeedEntries int64  `json:"threat_feed_entries"`
-	}
-	resp := healthResponse{
-		Status:            "ok",
-		Uptime:            uptime(),
-		Version:           version,
-		ClamAV:            clamStatus,
-		CAExpiresDays:     caExpiresDays,
-		ThreatFeedEntries: tfEntries,
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		logger.Printf("handleHealth encode: %v", err)
-	}
-}
-
-// handleReady is a readiness probe — returns 200 only when all configured
-// subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
-// Unlike /health (liveness), this returns 503 when dependencies are degraded.
-// configSnapshotValidatorOK reports whether the config-snapshot
-// validator accepts the empty baseline (its identity contract). Defined
-// as a package-level variable so tests can swap in a stub that simulates
-// a broken validator without mutating the per-slice caps in
-// configversion / controlplane.
-var configSnapshotValidatorOK = func() bool {
-	return validateConfigSnapshot(ConfigSnapshot{}) == nil
-}
-
-func handleReady(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	type checkResult struct {
-		Status string `json:"status"` // "ok" or "fail"
-		Detail string `json:"detail,omitempty"`
-	}
-	checks := map[string]*checkResult{}
-	allOK := true
-
-	// 1. CA: report status but don't fail readiness — proxy still works
-	// as a plain forward proxy if the CA didn't load.
-	if certMgr.Ready() {
-		checks["ca"] = &checkResult{Status: "ok"}
-	}
-
-	// 2. ClamAV: if scanner is initialised, verify connectivity.
-	if globalSecScanner != nil {
-		st := globalSecScanner.ClamAVStatus()
-		switch st {
-		case "disabled":
-			// Not configured — skip.
-		case "connected":
-			checks["clamav"] = &checkResult{Status: "ok"}
-		default:
-			checks["clamav"] = &checkResult{Status: "fail", Detail: st}
-			allOK = false
-		}
-	}
-
-	// 3. GeoIP: if configured, verify DB is loaded.
-	if geoEnabled() {
-		checks["geoip"] = &checkResult{Status: "ok"}
-	}
-	// GeoIP is optional — absence is not a failure.
-
-	// 4. YARA rules: if configured, verify loaded.
-	if globalYARA.Enabled() {
-		checks["yara"] = &checkResult{Status: "ok"}
-	}
-
-	// 5. Policy loaded (informational). Empty policy is a valid
-	// Zero-Trust posture — default-deny applies — so this row does NOT
-	// gate readiness. Surfaces "no rules yet" as a hint to operators
-	// without flapping load balancers on a fresh install.
-	if ver, _ := policyStore.policyVersion(); ver > 0 {
-		checks["policy_loaded"] = &checkResult{Status: "ok"}
-	} else {
-		checks["policy_loaded"] = &checkResult{Status: "fail", Detail: "no rules"}
-	}
-
-	// 6. Admin session HMAC initialised. Without this, signed cookies
-	// cannot be issued or verified — the admin UI is effectively
-	// unmanageable. Fail readiness so traffic is held off until the
-	// node is restarted with a valid secret.
-	if sessionSecretSet() {
-		checks["session_secret"] = &checkResult{Status: "ok"}
-	} else {
-		checks["session_secret"] = &checkResult{Status: "fail", Detail: "uninitialised"}
-		allOK = false
-	}
-
-	// 7. ConfigSnapshot validator. The pure validateConfigSnapshot
-	// function must accept the empty baseline (its identity contract).
-	// If it ever rejects, the cluster control-plane apply path is
-	// broken and we must shed load. configSnapshotValidatorOK is a
-	// package-level seam so tests can simulate a broken validator
-	// without mutating the per-slice caps.
-	if configSnapshotValidatorOK() {
-		checks["config_snapshot_validator"] = &checkResult{Status: "ok"}
-	} else {
-		checks["config_snapshot_validator"] = &checkResult{Status: "fail", Detail: "validator rejected empty baseline"}
-		allOK = false
-	}
-
-	status := "ready"
-	code := http.StatusOK
-	if !allOK {
-		status = "not_ready"
-		code = http.StatusServiceUnavailable
-	}
-
-	resp := struct {
-		Status  string                  `json:"status"`
-		Uptime  string                  `json:"uptime"`
-		Version string                  `json:"version"`
-		Checks  map[string]*checkResult `json:"checks"`
-	}{
-		Status:  status,
-		Uptime:  uptime(),
-		Version: version,
-		Checks:  checks,
-	}
-
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		logger.Printf("handleReady encode: %v", err)
-	}
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 // seedYARARules copies bundled starter rules from /app/yara to the target
 // directory on first boot. Only copies if the target is empty or doesn't exist.
 // This ensures starter rules are available when yaraDir points to a persistent
@@ -1795,30 +1069,10 @@ func firstStr(vals ...string) string {
 }
 
 // initUpstreamPool configures upstream proxy chaining from the file config.
+// initUpstreamPool resolves the upstream-pool slice config and hands it to
+// the loader (upstream_pool_startup*.go).
 func initUpstreamPool(fc *FileConfig) {
-	cbTimeout := 60 * time.Second
-	if fc.Upstream.CircuitBreaker.Timeout != "" {
-		if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
-			cbTimeout = d
-		}
-	}
-	upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
-	applyUpstreamProxy()
-	logger.Printf("Upstream: %s", formatUpstreamSummary(fc.Upstream.Proxies))
-
-	// Start health check loop.
-	hi := fc.Upstream.HealthInterval
-	if hi == "" {
-		return
-	}
-	d, err := time.ParseDuration(hi)
-	if err != nil || d <= 0 {
-		return
-	}
-	// P1.3 / S4.UpstreamHealth: parented to appLifecycleCtx so the loop exits
-	// when runProxyUntilShutdown calls appLifecycleCancel(). The previous
-	// `for range t.C` loop had no cancellation path.
-	go runUpstreamHealthCheckLoop(appLifecycleCtx, upstreamPool, d)
+	loadUpstreamPool(resolveUpstreamPoolStartupConfig(fc), appLifecycleCtx)
 }
 
 // initClusterCA initialises the cluster CA for node enrollment.
@@ -1863,324 +1117,6 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	return nil
 }
 
-// dpEnrollmentConfig is persisted to disk after successful enrollment so the
-// DP can auto-start on subsequent restarts without manual cert flags.
-type dpEnrollmentConfig struct {
-	CPAddr   string `json:"cp_addr"`
-	NodeID   string `json:"node_id"`
-	CertFile string `json:"cert_file"`
-	KeyFile  string `json:"key_file"`
-	CAFile   string `json:"ca_file"`
-}
-
-const enrollmentConfigFile = "dp_enrollment.json"
-
-// loadEnrollmentConfig reads a previously persisted enrollment config.
-func loadEnrollmentConfig() (*dpEnrollmentConfig, error) {
-	data, err := os.ReadFile(enrollmentConfigFile)
-	if err != nil {
-		return nil, err
-	}
-	var ec dpEnrollmentConfig
-	if err := json.Unmarshal(data, &ec); err != nil {
-		return nil, err
-	}
-	return &ec, nil
-}
-
-// runEnrollment handles the enrollment flow: generates a keypair+CSR,
-// contacts the Control Plane, and persists the signed certificate.
-// Returns the enrollment config so the caller can start as a DP node.
-func runEnrollment(enrollURLStr string) (*dpEnrollmentConfig, error) {
-	info, err := parseEnrollURL(enrollURLStr)
-	if err != nil {
-		return nil, err
-	}
-	nodeID, _ := os.Hostname()
-	if nodeID == "" {
-		nodeID = "dp-node"
-	}
-	fmt.Printf("[Culvert] Enrolling as node %q with Control Plane at %s\n", nodeID, info.CPAddr)
-
-	privKey, csrPEM, err := generateCSR(nodeID)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := callEnrollRPC(info.CPAddr, info.Token, nodeID, csrPEM)
-	if err != nil {
-		return nil, err
-	}
-	// Verify CA fingerprint from the enrollment URL matches the received CA cert.
-	if info.CAFingerprint != "" {
-		if err := verifyCAFingerprint([]byte(resp.CAPEM), info.CAFingerprint); err != nil {
-			return nil, fmt.Errorf("CA fingerprint mismatch — possible MITM: %w", err)
-		}
-		fmt.Printf("[Culvert] CA fingerprint verified ✓\n")
-	}
-	ec, err := persistEnrollCerts(privKey, resp, info.CPAddr, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	return ec, nil
-}
-
-// enrollmentInfo holds parsed enrollment URL components.
-type enrollmentInfo struct {
-	CPAddr        string
-	Token         string
-	CAFingerprint string // sha256:hex (from ?ca-fp= query param)
-}
-
-// parseEnrollURL extracts CP address, token, and CA fingerprint from the enrollment URL.
-func parseEnrollURL(raw string) (*enrollmentInfo, error) {
-	raw = strings.TrimPrefix(raw, "culvert://enroll/")
-	parts := strings.SplitN(raw, "/", 2)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid enrollment URL format — expected culvert://enroll/host:port/TOKEN")
-	}
-	info := &enrollmentInfo{CPAddr: parts[0]}
-	info.Token = parts[1]
-	if idx := strings.Index(info.Token, "?"); idx >= 0 {
-		query := info.Token[idx+1:]
-		info.Token = info.Token[:idx]
-		// Parse ca-fp= parameter.
-		for _, kv := range strings.Split(query, "&") {
-			if strings.HasPrefix(kv, "ca-fp=") {
-				info.CAFingerprint = strings.TrimPrefix(kv, "ca-fp=")
-			}
-		}
-	}
-	return info, nil
-}
-
-// generateCSR creates an ECDSA P-256 keypair and CSR for enrollment.
-func generateCSR(nodeID string) (*ecdsa.PrivateKey, []byte, error) {
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("generate key: %w", err)
-	}
-	csrTemplate := &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: nodeID, Organization: []string{"Culvert Data Plane"}},
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create CSR: %w", err)
-	}
-	return privKey, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
-}
-
-// callEnrollRPC connects to the CP and calls the Enroll gRPC method.
-// If caFingerprint is non-empty, the CP's TLS cert is verified against it.
-func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse, error) {
-	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, fmt.Errorf("connect to CP: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck // best-effort close
-
-	reqBytes, _ := json.Marshal(EnrollRequest{Token: token, CSR: string(csrPEM), NodeID: nodeID})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var respRaw json.RawMessage
-	if err := conn.Invoke(ctx, methodEnroll, json.RawMessage(reqBytes), &respRaw); err != nil {
-		return nil, fmt.Errorf("enrollment RPC failed: %w", err)
-	}
-	var resp EnrollResponse
-	if err := json.Unmarshal(respRaw, &resp); err != nil {
-		return nil, fmt.Errorf("parse enrollment response: %w", err)
-	}
-	return &resp, nil
-}
-
-// verifyCAFingerprint checks that the CA cert PEM matches the expected SHA-256 fingerprint.
-func verifyCAFingerprint(caPEM []byte, expected string) error {
-	want := strings.TrimPrefix(expected, "sha256:")
-	wantBytes, err := hex.DecodeString(want)
-	if err != nil {
-		return fmt.Errorf("invalid CA fingerprint hex: %w", err)
-	}
-	block, _ := pem.Decode(caPEM)
-	if block == nil {
-		return fmt.Errorf("no PEM block in CA cert")
-	}
-	fp := sha256.Sum256(block.Bytes)
-	if !hmac.Equal(fp[:], wantBytes) {
-		return fmt.Errorf("CA fingerprint sha256:%x does not match expected sha256:%s", fp, want)
-	}
-	return nil
-}
-
-// persistEnrollCerts saves the signed certificate, private key, CA cert, and
-// enrollment config to disk. Returns the config so the caller can start as DP.
-func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr, nodeID string) (*dpEnrollmentConfig, error) {
-	certPath, keyPath, caPath := "./dp-node.crt", "./dp-node.key", "./cluster-ca.crt"
-
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("marshal private key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	// Bucket-4 durability hardening: atomicWriteFile gives unique
-	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
-	// dir) — replaces the previous plain os.WriteFile which left a
-	// non-durable / potentially-truncated file on crash. Sibling
-	// follow-up to CL-7 / PR #244 (which hardened the
-	// dp_enrollment.json branch a few lines below).
-	if err := atomicWriteFile(certPath, []byte(resp.CertPEM), 0o600); err != nil {
-		return nil, fmt.Errorf("write cert: %w", err)
-	}
-	// CA-3: encrypt the DP node key at rest when enabled; plaintext otherwise.
-	// Cert and CA cert remain plaintext PEM.
-	if err := writeDPNodeKey(keyPath, keyPEM); err != nil {
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	if err := atomicWriteFile(caPath, []byte(resp.CAPEM), 0o600); err != nil {
-		return nil, fmt.Errorf("write CA: %w", err)
-	}
-
-	// Persist enrollment config for automatic restarts.
-	ec := &dpEnrollmentConfig{
-		CPAddr:   cpAddr,
-		NodeID:   nodeID,
-		CertFile: certPath,
-		KeyFile:  keyPath,
-		CAFile:   caPath,
-	}
-	ecJSON, _ := json.MarshalIndent(ec, "", "  ")
-	// CL-7: atomicWriteFile gives unique tmp + chmod + fsync(file) +
-	// rename + best-effort fsync(parent dir) — replaces the previous
-	// plain os.WriteFile which left a non-durable / potentially-
-	// truncated file on crash. The sibling cert/key/CA writes above
-	// (lines ~1953/1956/1959) share the same pre-existing defect but
-	// are intentionally out of CL-7 scope; flagged in the PR body as
-	// a deferred follow-up.
-	if err := atomicWriteFile(enrollmentConfigFile, ecJSON, 0o600); err != nil {
-		return nil, fmt.Errorf("write enrollment config: %w", err)
-	}
-
-	fmt.Printf("[Culvert] Enrollment successful!\n")
-	fmt.Printf("[Culvert] Certificate: %s\n", certPath)
-	fmt.Printf("[Culvert] Key:         %s\n", keyPath)
-	fmt.Printf("[Culvert] CA:          %s\n", caPath)
-	fmt.Printf("[Culvert] Config:      %s\n", enrollmentConfigFile)
-	fmt.Printf("[Culvert] Starting as Data Plane node — connecting to %s\n", cpAddr)
-	return ec, nil
-}
-
-// startDataPlane initialises and runs the Data Plane client.
-func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
-	clusterRole.role = "data-plane"
-	clusterRole.grpcAddr = addr
-	if nodeID == "" {
-		nodeID = clusterRole.nodeID
-	}
-	clusterRole.nodeID = nodeID
-
-	if certFile != "" {
-		if err := checkDPCertExpiry(certFile); err != nil {
-			logWarnf("ControlPlane: %v", err)
-		}
-	}
-	// CA-3: opt-in one-time migration of an existing plaintext DP node key to
-	// encrypted-at-rest, at the single startup load point (not on reconnect).
-	// Fails closed if an encrypted key is present but unreadable.
-	if keyFile != "" {
-		if err := maybeMigrateDPNodeKey(keyFile); err != nil {
-			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
-		}
-	}
-	if snap, err := applyDPLastGoodConfigSnapshot(); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logger.Printf("DataPlane: last-known-good config unavailable: %v", err)
-		} else {
-			logger.Printf("DataPlane: no last-known-good config at %s", dpLastGoodConfigSnapshotPath())
-		}
-	} else if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
-		logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
-		addr = mergedAddr
-	}
-	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
-	if err != nil {
-		logger.Fatalf("DataPlane client: %v", err)
-	}
-	activeDPClient.Store(dpClient) // for HA address discovery
-	clusterRoleIsDP.Store(true)
-	dpClient.Run(ctx, 30*time.Second)
-	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)
-	logger.Printf("DataPlane: polling ControlPlane at %s every 30s", addr)
-}
-
-// checkDPCertExpiry warns if the DP node certificate is expired or near expiry.
-func checkDPCertExpiry(certFile string) error {
-	data, err := os.ReadFile(certFile)
-	if err != nil {
-		return fmt.Errorf("DP cert read: %w", err)
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return fmt.Errorf("DP cert: no PEM block found in %s", certFile)
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("DP cert parse: %w", err)
-	}
-	now := time.Now()
-	if now.After(cert.NotAfter) {
-		return fmt.Errorf("DP certificate expired at %s — re-enroll to get a new cert", cert.NotAfter.Format(time.RFC3339))
-	}
-	remaining := time.Until(cert.NotAfter)
-	if remaining < 30*24*time.Hour {
-		return fmt.Errorf("DP certificate expires in %d days — auto-renewal will attempt before expiry", int(remaining.Hours()/24))
-	}
-	return nil
-}
-
-// dpCertRenewalLoop checks cert expiry periodically and requests a new cert
-// from the CP before the current one expires. Also listens for CA rotation
-// notifications to trigger immediate renewal (zero-touch CA rotation).
-func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
-	// Check every 6 hours.
-	ticker := time.NewTicker(6 * time.Hour)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-				logger.Printf("DataPlane: cert renewal check: %v", err)
-			}
-		case <-caRotationNotify:
-			// CP rotated its CA — renew immediately regardless of cert expiry.
-			logger.Printf("DataPlane: CA rotation detected — initiating immediate cert renewal")
-			if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
-				logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
-			}
-		}
-	}
-}
-
-// certNeedsRenewal checks if a PEM cert file expires within 30 days.
-// Returns days remaining, or -1 if the cert cannot be read.
-func certNeedsRenewal(certFile string) (int, bool) {
-	data, err := os.ReadFile(certFile)
-	if err != nil {
-		return -1, false
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return -1, false
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return -1, false
-	}
-	days := int(time.Until(cert.NotAfter).Hours() / 24)
-	return days, days <= 30
-}
-
 // atomicWriteFile writes data to path durably: unique temp in same dir,
 // chmod, fsync(file), close, rename, fsync(parent dir).
 // Cleans up the temp file on any error after creation.
@@ -2196,114 +1132,9 @@ func certNeedsRenewal(certFile string) (int, bool) {
 //   - The dir handle is always closed; a Close error is propagated only when
 //     Sync did not already report an error.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	f, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("atomic write %s: create temp: %w", path, err)
-	}
-	tmp := f.Name()
-	cleanup := func() { _ = os.Remove(tmp) } // #nosec G104 -- best-effort cleanup
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: write: %w", path, err)
-	}
-	if err := f.Chmod(perm); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: chmod: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		cleanup()
-		return fmt.Errorf("atomic write %s: fsync: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: close: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write %s: rename: %w", path, err)
-	}
-
-	d, err := os.Open(dir)
-	if err != nil {
-		// Best-effort: opening a directory for sync is not portable.
-		return nil
-	}
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return fmt.Errorf("atomic write %s: parent dir fsync: %w", path, syncErr)
-	}
-	if closeErr != nil && syncErr == nil {
-		return fmt.Errorf("atomic write %s: parent dir close: %w", path, closeErr)
-	}
-	return nil
-}
-
-// forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
-func forceRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
-	return renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, "CA rotation")
-}
-
-// tryRenewDPCert renews the DP cert if it expires within 30 days.
-func tryRenewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) error {
-	days, needsRenewal := certNeedsRenewal(certFile)
-	if !needsRenewal {
-		return nil
-	}
-	return renewDPCert(ctx, client, nodeID, certFile, keyFile, caFile, fmt.Sprintf("cert expires in %d days", days))
-}
-
-// renewDPCert performs the actual cert renewal via RenewCert RPC.
-func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile, reason string) error {
-	logger.Printf("DataPlane: requesting cert renewal (%s)", reason)
-
-	privKey, csrPEM, err := generateCSR(nodeID)
-	if err != nil {
-		return fmt.Errorf("generate CSR: %w", err)
-	}
-
-	reqBytes, _ := json.Marshal(map[string]string{"node_id": nodeID, "csr": string(csrPEM)})
-	raw, err := client.call(ctx, methodRenewCert, json.RawMessage(reqBytes))
-	if err != nil {
-		return fmt.Errorf("RenewCert RPC: %w", err)
-	}
-	var resp struct {
-		CertPEM string `json:"cert_pem"`
-		CAPEM   string `json:"ca_pem"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return fmt.Errorf("parse renewal response: %w", err)
-	}
-
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		return fmt.Errorf("marshal key: %w", err)
-	}
-	if err := atomicWriteFile(certFile, []byte(resp.CertPEM), 0o600); err != nil {
-		return fmt.Errorf("write cert: %w", err)
-	}
-	// CA-3: renewal rewrites the private key (fresh CSR keypair); encrypt at
-	// rest when enabled, plaintext otherwise. Cert/CA remain plaintext PEM.
-	if err := writeDPNodeKey(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})); err != nil {
-		return fmt.Errorf("write key: %w", err)
-	}
-	if resp.CAPEM != "" {
-		if err := atomicWriteFile(caFile, []byte(resp.CAPEM), 0o600); err != nil {
-			return fmt.Errorf("write CA: %w", err)
-		}
-	}
-	logger.Printf("DataPlane: certificate renewed successfully (%s)", reason)
-	return nil
+	// Delegates to internal/fileutil (ADR-0003 seam). Kept as a thin wrapper so
+	// all existing call sites stay unchanged.
+	return fileutil.AtomicWrite(path, data, perm)
 }
 
 // applyHotReload applies safe-to-reload config values from a freshly parsed
@@ -2352,16 +1183,13 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: rewrite %d rules", len(fc.Rewrite))
 	}
 
-	// Upstream proxy pool
+	// Upstream proxy pool. Gated on a non-empty YAML list so a reload with no
+	// upstream section does not wipe GUI-configured proxies; resolution is
+	// shared with the startup slice (resolveUpstreamPoolStartupConfig).
 	if len(fc.Upstream.Proxies) > 0 {
-		cbTimeout := 60 * time.Second
-		if fc.Upstream.CircuitBreaker.Timeout != "" {
-			if d, err := time.ParseDuration(fc.Upstream.CircuitBreaker.Timeout); err == nil {
-				cbTimeout = d
-			}
-		}
-		upstreamPool.Configure(fc.Upstream.Proxies, fc.Upstream.CircuitBreaker.Threshold, cbTimeout)
+		ucfg := resolveUpstreamPoolStartupConfig(fc)
+		upstreamPool.Configure(ucfg.Proxies, ucfg.CBThreshold, ucfg.CBTimeout)
 		applyUpstreamProxy()
-		logger.Printf("Reload: upstream %s", formatUpstreamSummary(fc.Upstream.Proxies))
+		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
 	}
 }

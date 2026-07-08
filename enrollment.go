@@ -39,6 +39,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // ─── Cluster State ───────────────────────────────────────────────────────────
@@ -271,7 +273,13 @@ func (cs *ClusterStore) ValidateAndConsumeToken(plaintext, nodeID, sourceIP stri
 		return TokenInfo{}, fmt.Errorf("node ID %q does not match required prefix %q", nodeID, tok.NodePrefix)
 	}
 	if tok.AllowCIDR != "" {
-		_, cidr, _ := net.ParseCIDR(tok.AllowCIDR)
+		_, cidr, cidrErr := net.ParseCIDR(tok.AllowCIDR)
+		if cidrErr != nil || cidr == nil {
+			// Malformed CIDR (e.g. corrupted persisted token state). Fail
+			// closed rather than dereferencing a nil *net.IPNet below.
+			cs.mu.Unlock()
+			return TokenInfo{}, fmt.Errorf("token has invalid allowed CIDR %q: %w", tok.AllowCIDR, cidrErr)
+		}
 		ip := net.ParseIP(sourceIP)
 		if ip == nil || !cidr.Contains(ip) {
 			cs.mu.Unlock()
@@ -783,20 +791,22 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 		// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
 		// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
 		// a pure plaintext-PEM parser.
-		plainKey, wasEncrypted, decErr := decryptClusterCAKey(ca.dir, keyPEM)
+		sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
 		if decErr != nil {
 			return decErr
 		}
-		if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
-			return err
-		}
-		// Opt-in migration: plaintext on disk + encryption enabled → migrate.
-		if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
-			if err := migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey); err != nil {
+		// The decrypted CA key stays inside the closure and is zeroized on return;
+		// it never crosses back into package main as a plain []byte.
+		return sealed.WithPlaintext(func(plainKey []byte) error {
+			if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
 				return err
 			}
-		}
-		return nil
+			// Opt-in migration: plaintext on disk + encryption enabled → migrate.
+			if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
+				return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
+			}
+			return nil
+		})
 	case !certMissing && keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	case certMissing && !keyMissing:
@@ -1013,7 +1023,7 @@ func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 			// CA-3: when encryption is enabled, the key .bak must not be left
 			// as plaintext on disk. Best-effort, consistent with this helper.
 			if clusterCAKeyEncryptionEnabled() {
-				_ = writeEncryptedFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
+				_ = secret.SealToFile(keyBak, keyPEM, clusterCAKEKProvider(dir))
 			} else {
 				_ = os.WriteFile(keyBak, keyPEM, 0o600)
 			}
@@ -1285,5 +1295,6 @@ type EnrollResponse struct {
 	CertPEM string `json:"cert_pem"` // signed node certificate
 	CAPEM   string `json:"ca_pem"`   // cluster CA certificate
 	NodeID  string `json:"node_id"`
-	CPAddr  string `json:"cp_addr"` // control plane gRPC address for reconnect
+	CPAddr  string `json:"cp_addr"`         // control plane gRPC address for reconnect
+	Epoch   int64  `json:"epoch,omitempty"` // issuing CP's fencing epoch (ADR-0005 S3; seeds the DP ratchet)
 }

@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 type testProxyIdentityProvider struct {
@@ -36,11 +39,11 @@ func (p *testProxyIdentityProvider) Name() string { return "test-idp" }
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}, manual: map[string]bool{}, exceptions: map[string]bool{}}
+	bl = blocklist.New()
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = newRateLimiter()
 	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
-	plugins = nil
+	pluginReplace(nil)
 	// Also reset policy state — callers like TestHandleRequest_DefaultDeny_NoRules
 	// rely on "no rules" AND "default deny" being the post-setup state. Earlier
 	// tests (e.g. TestHandleRequest_AllowedByRule, apiDefaultAction handlers)
@@ -99,7 +102,7 @@ func setupProxyIdentityE2EWithRules(t *testing.T, provider IdentityProvider, rul
 
 func sessionCookieForIdentity(t *testing.T, id *Identity) *http.Cookie {
 	t.Helper()
-	if len(sessionSecret) == 0 {
+	if !sessionSecretSet() {
 		initSessionSecret()
 	}
 	value, err := encodeSession(&Session{
@@ -247,7 +250,7 @@ func TestHandleRequest_RateLimited(t *testing.T) {
 
 func TestHandleRequest_PluginBlocks(t *testing.T) {
 	setupProxyTest(t)
-	plugins = []Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}}
+	pluginReplace([]Middleware{&testPlugin{name: "block-all", decision: DecisionBlock}})
 
 	w := httptest.NewRecorder()
 	r := makeRequest("http://example.com/", nil)
@@ -736,8 +739,18 @@ func startTestProxy(t *testing.T) *url.URL {
 		policyStore.mu.Unlock()
 	})
 
+	// Track in-flight handlers so the test cleanup can WAIT for them to fully
+	// return before the next test runs. This matters for hijacked CONNECT/tunnel
+	// requests: httptest's Close() does NOT wait for hijacked connections, so
+	// without this a relay handler can outlive the test and its earlier read of a
+	// process global (e.g. globalOTLPTraces at proxy.go:690) races a later test
+	// that reassigns that global. handleRequest only returns once the tunnel is
+	// fully torn down, so inFlight.Wait() provides the missing happens-before edge.
+	var inFlight sync.WaitGroup
 	// Must not use http.ServeMux: it 301-redirects CONNECT requests (empty path).
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inFlight.Add(1)
+		defer inFlight.Done()
 		if r.URL.Path == "/health" {
 			handleHealth(w, r)
 		} else {
@@ -746,6 +759,17 @@ func startTestProxy(t *testing.T) *url.URL {
 	})
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
+	// Registered AFTER srv.Close so it runs FIRST (LIFO): the test's own deferred
+	// conn.Close lets each tunnel reach EOF; we then wait (bounded) for every
+	// handler goroutine to return.
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { inFlight.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
 
 	u, err := url.Parse(srv.URL)
 	if err != nil {

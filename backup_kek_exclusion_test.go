@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // kekMarker is a recognizable byte string written into seeded KEK files so a
@@ -25,7 +27,7 @@ func TestBackup_ExcludesKEKBesideEncryptedKey(t *testing.T) {
 	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
 	// An encrypted cluster CA key (PSCA envelope) plus its local KEK sibling.
 	seedFile(t, dataDir, "cluster-ca.crt", []byte("-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"), 0o600)
-	seedFile(t, dataDir, "cluster-ca.key", append(caMagic[:], []byte("ciphertext")...), 0o600)
+	seedFile(t, dataDir, "cluster-ca.key", append(ca.Magic(), []byte("ciphertext")...), 0o600)
 	seedFile(t, dataDir, "cluster-ca.kek", kekMarker, 0o600)
 
 	out := filepath.Join(t.TempDir(), "backup.tar.gz")
@@ -71,7 +73,7 @@ func TestBackup_ExcludesKEKInWalkedDir(t *testing.T) {
 func TestBackup_NoKEKBytesInArchive(t *testing.T) {
 	dataDir := t.TempDir()
 	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
-	seedFile(t, dataDir, "cluster-ca.key", append(caMagic[:], []byte("ct")...), 0o600)
+	seedFile(t, dataDir, "cluster-ca.key", append(ca.Magic(), []byte("ct")...), 0o600)
 	seedFile(t, dataDir, "cluster-ca.kek", kekMarker, 0o600)
 	seedFile(t, dataDir, "config_versions/other.kek", kekMarker, 0o600)
 

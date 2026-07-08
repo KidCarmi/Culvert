@@ -1,0 +1,154 @@
+# Proxy Nightly E2E + Load (CI quality program — PR-2)
+#
+# Medium-confidence, NON-BLOCKING nightly tier. Pure Go (no k6/JS/external load
+# tools — the harnesses are Go). Three jobs:
+#
+#   load-harness   in-process Go load harness (HTTP + CONNECT concurrency) with
+#                  pprof capture, run under a 1000-rule policy set
+#   binary-load    the SHIPPED binary driven over a real socket (Go driver),
+#                  incl. graceful-shutdown assertion
+#   benchmarks     policy-eval + header-scrub benchmarks at 10/100/1000/10000
+#                  rules — the benchstat baseline the PR-3 regression gate uses
+#
+# Separate from qa-gate.yml and proxy-pr-gate.yml; advisory. See
+# docs/ci/proxy-quality-architecture.md.
+
+name: Proxy Nightly E2E + Load
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+jobs:
+  load-harness:
+    name: In-process load harness (HTTP + CONNECT, pprof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Load harness (nightly-medium, under 1000-rule policy)
+        id: load
+        env:
+          CULVERT_LOAD_CLIENTS: "100"
+          CULVERT_LOAD_REQS: "50"
+          CULVERT_LOAD_TUNNELS: "100"
+          CULVERT_LOAD_POLICY_RULES: "1000"
+          CULVERT_LOAD_PPROF: ${{ github.workspace }}/pprof
+        run: |
+          set -o pipefail
+          go test -tags proxyload -run 'TestProxyLoad_' -v -timeout 15m . 2>&1 | tee load.log
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## In-process Load Harness"
+            echo ""
+            [ "${{ steps.load.outcome }}" = "success" ] && echo "✅ HTTP + CONNECT concurrency held (0% error) under a 1000-rule policy." || echo "❌ See \`load.log\` artifact."
+            echo ""
+            echo '```'
+            grep -E 'p50=|throughput|under .* policy' load.log || true
+            echo '```'
+            echo "pprof profiles (cpu/heap/goroutine) attached for both HTTP and CONNECT load."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload load log + pprof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-load-harness
+          path: |
+            load.log
+            pprof/
+          retention-days: 14
+
+  binary-load:
+    name: Real-binary load (Go driver, graceful shutdown)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      # The binary's dataDir is hardcoded to /data; make it writable for the
+      # non-root runner user (documented limitation, see the architecture doc).
+      - name: Prepare /data
+        run: |
+          sudo mkdir -p /data
+          sudo chown "$USER" /data
+
+      - name: Build binary once
+        run: CGO_ENABLED=0 go build -o culvert .
+
+      - name: Real-binary HTTP load
+        id: binload
+        env:
+          CULVERT_BIN: ${{ github.workspace }}/culvert
+          CULVERT_LOAD_CLIENTS: "100"
+          CULVERT_LOAD_REQS: "50"
+        run: |
+          set -o pipefail
+          go test -tags proxybinload -run 'TestBinaryLoad_' -v -timeout 10m . 2>&1 | tee binary-load.log
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Real-Binary Load"
+            echo ""
+            [ "${{ steps.binload.outcome }}" = "success" ] && echo "✅ Shipped binary sustained concurrent load and shut down gracefully on SIGTERM." || echo "❌ See \`binary-load.log\` artifact (binary log is dumped on failure)."
+            echo ""
+            echo '```'
+            grep -E 'binary HTTP load' binary-load.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload binary-load log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-binary-load
+          path: binary-load.log
+          retention-days: 14
+
+  benchmarks:
+    name: Policy-engine benchmarks (benchstat baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Run benchmarks (10/100/1000/10000 rules)
+        run: |
+          set -o pipefail
+          go test -run '^$' -bench 'BenchmarkPolicy|BenchmarkScrub|BenchmarkUpstreamInspect' -benchmem -benchtime=1000x . \
+            | tee bench.txt
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Policy-Engine Benchmarks"
+            echo ""
+            echo "Baseline for the PR-3 benchstat regression gate. Watch ns/op and allocs/op scaling with rule count."
+            echo ""
+            echo '```'
+            grep -E 'Benchmark' bench.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark baseline
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-bench-baseline
+          path: bench.txt
+          retention-days: 30

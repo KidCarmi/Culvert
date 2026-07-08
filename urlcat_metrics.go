@@ -18,8 +18,10 @@ package main
 import (
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/feedsync"
+	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // globalUT1FeedSyncer is a package handle to the UT1 FeedSyncer created in
@@ -28,13 +30,9 @@ import (
 // renders 0/0 in that case.
 var globalUT1FeedSyncer *FeedSyncer
 
-// Failure counters, incremented on the existing error-return paths in
-// FeedSyncer.Sync (feedsync.go) and SaaSFeedSyncer.Sync (saas_feed.go).
-// Plain atomics — no labels, no feed identity.
-var (
-	statCategoryFeedSyncFailures atomic.Int64
-	statSaaSFeedSyncFailures     atomic.Int64
-)
+// Failure counters are package-owned by the syncers: the UT1 counter by
+// internal/feedsync (feedsync.SyncFailures()) and the SaaS counter by
+// internal/saasfeed (saasfeed.SyncFailures()).
 
 // unixOrZero renders t as Unix seconds, or 0 when t is the zero time
 // (never-synced), so a freshness alert can use `time() - <metric> > threshold`.
@@ -76,9 +74,9 @@ func urlcatWritePrometheus(w *strings.Builder) {
 
 	w.WriteString("\n# HELP culvert_category_feed_sync_failures_total UT1 category feed sync failures (download/parse or bulk-write errors)\n")
 	w.WriteString("# TYPE culvert_category_feed_sync_failures_total counter\n")
-	fmt.Fprintf(w, "culvert_category_feed_sync_failures_total %d\n", statCategoryFeedSyncFailures.Load())
+	fmt.Fprintf(w, "culvert_category_feed_sync_failures_total %d\n", feedsync.SyncFailures())
 
 	w.WriteString("\n# HELP culvert_saas_feed_sync_failures_total SaaS category feed sync failures (request/fetch/read/parse errors)\n")
 	w.WriteString("# TYPE culvert_saas_feed_sync_failures_total counter\n")
-	fmt.Fprintf(w, "culvert_saas_feed_sync_failures_total %d\n", statSaaSFeedSyncFailures.Load())
+	fmt.Fprintf(w, "culvert_saas_feed_sync_failures_total %d\n", saasfeed.SyncFailures())
 }

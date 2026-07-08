@@ -14,6 +14,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // GET /api/audit — return configuration-change audit entries (newest first).
@@ -75,7 +79,7 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		"serverTime":  time.Now().Format("2006-01-02 15:04:05"),
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
-		"logWriteErrors": atomic.LoadInt64(&statReqLogWriteErrors),
+		"logWriteErrors": reqlog.WriteErrors(),
 	})
 }
 
@@ -102,11 +106,12 @@ func apiDashboardThreats(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	scanCounters := secscan.Counters()
 	jsonOK(w, map[string]any{
-		"clamav":     atomic.LoadInt64(&statClamBlocked),
-		"yara":       atomic.LoadInt64(&statYARABlocked),
+		"clamav":     scanCounters.ClamBlocked,
+		"yara":       scanCounters.YARABlocked,
 		"dpi":        atomic.LoadInt64(&statDPIBlocked),
-		"threatFeed": atomic.LoadInt64(&statThreatFeedBlocked),
+		"threatFeed": scanCounters.ThreatFeedBlocked,
 	})
 }
 
@@ -168,7 +173,7 @@ func apiLogsSource(w http.ResponseWriter, r *http.Request) (entries []LogEntry, 
 // GET /api/logs?filter=...&status=...&level=...&method=...&from=...&to=...&source=file
 // from/to accept Unix timestamps (seconds) or ISO 8601 (RFC 3339) strings.
 // source=file reads from the persistent JSONL request log file (newest-first,
-// capped at requestLogMaxPersistentReturn entries); any other value reads from
+// capped at reqlog.MaxPersistentReturn entries); any other value reads from
 // the in-memory ring buffer.
 func apiLogs(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
@@ -520,7 +525,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		Version:    1,
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	filename := "culvert-backup"
+	filename := "culvert-config-export"
 
 	switch section {
 	case "blocklist":
@@ -562,7 +567,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		}
 		filename = "culvert-upstream"
 	case "connlimit":
-		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
 		filename = "culvert-connlimit"
 	default: // "all" or empty — full export
@@ -593,8 +598,16 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 			b.UpstreamProxies = append(b.UpstreamProxies, UpstreamEntry{URL: us.URL})
 		}
 		// Connection limits.
-		b.ConnLimitEnabled = connLimiter.enabled.Load()
+		b.ConnLimitEnabled = connLimiter.Enabled()
 		b.ConnLimitMaxPerIP = connLimiter.MaxPerIP()
+		// Category taxonomy + DPI bypass hosts (config-surface registry rows
+		// url_categories / category_groups / content_scan_bypass_hosts).
+		// Previously rollback-only: a "full" export could not round-trip
+		// category policy, so a restored backup silently dropped every
+		// category-group rule's referents.
+		b.URLCategories = catStore.All()
+		b.CategoryGroups = globalCategoryGroups.List()
+		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -603,7 +616,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	auditEvent(r, "config.export", filename, fmt.Sprintf("section=%s exported at %s", section, b.ExportedAt))
 }
 
-// POST /api/config/import — restore configuration from a backup JSON.
+// POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -643,6 +656,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		bl.SetMode(b.BlocklistMode)
 	}
 
+	// URL categories + category groups — BEFORE policy rules, matching
+	// applyConfigBackup's leaf-first dependency order (rules reference groups,
+	// groups reference categories by name).
+	importCategoryTaxonomy(&b, replaceMode)
+
 	// Policy rules — validate each before importing.
 	if replaceMode && len(b.PolicyRules) > 0 {
 		policyStore.ReplaceAll(b.PolicyRules)
@@ -679,15 +697,30 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	sslBypass.Save()
 
-	// Content scan patterns.
+	// Content scan patterns. Track replace-mode success: bypass hosts share
+	// the content_scan.json envelope, and a failed pattern replace must not
+	// be followed by a bypass import + Save — that would persist a mixed
+	// old-patterns/new-bypass envelope matching neither the backup nor the
+	// prior state. Mirrors applyConfigBackup's guard on the same envelope
+	// (PR #557 Codex review). Merge-mode Add failures stay per-pattern and
+	// additive, so they don't gate the bypass import.
+	patternsOK := true
 	if replaceMode && len(b.ContentScanPatterns) > 0 {
-		_ = dpiScanner.Set(b.ContentScanPatterns)
+		if err := dpiScanner.Set(b.ContentScanPatterns); err != nil {
+			patternsOK = false
+			logger.Printf("ConfigImport: content scan patterns rejected: %s — skipping bypass-host import (shared envelope)", strings.ReplaceAll(err.Error(), "\n", ""))
+		}
 	} else {
 		for _, p := range b.ContentScanPatterns {
 			_ = dpiScanner.Add(p)
 		}
 	}
-	dpiScanner.Save()
+	if patternsOK {
+		// DPI bypass hosts — applied before the single Save so both halves
+		// of the envelope persist atomically.
+		importScanBypassHosts(&b, replaceMode)
+		dpiScanner.Save()
+	}
 
 	// File block extensions.
 	if replaceMode && len(b.FileBlockExtensions) > 0 {
@@ -756,9 +789,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Upstream proxies (Finding 10.3).
+	// Upstream proxies (Finding 10.3). SetProxies keeps the YAML-configured
+	// circuit-breaker parameters (previously hardcoded to 5/60s here).
 	if len(b.UpstreamProxies) > 0 {
-		upstreamPool.Configure(b.UpstreamProxies, 5, 60*time.Second)
+		upstreamPool.SetProxies(b.UpstreamProxies)
+		applyUpstreamProxy()
 	}
 
 	// Connection limits (Finding 10.3).
@@ -776,7 +811,90 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "config.import", importMode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
 	saveConfigVersion(sessionAdmin(r), "config.import")
+	// Snapshot the admin-settings layer (rate limit, IP filter, rewrite
+	// rules, block page, conn limit, upstream pool, …) so the imported state
+	// survives a restart — import previously left it runtime-only.
+	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
+}
+
+// importCategoryTaxonomy applies URL categories then category groups from an
+// import backup, in that order — groups reference categories by name and
+// policy rules (applied by the caller AFTER this) reference groups, the same
+// leaf-first chain as applyConfigBackup (configversion.go). Empty/absent
+// slices are skipped in BOTH modes: import never wipes (an old backup without
+// these fields must not clear live taxonomy); explicit wipes are a
+// rollback-surface capability only. Merge mode upserts by name (incoming
+// wins) so re-importing an edited backup updates entries instead of
+// duplicating them.
+func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
+	if len(b.URLCategories) > 0 {
+		if replaceMode {
+			catStore.ReplaceAll(b.URLCategories)
+		} else {
+			catStore.ReplaceAll(mergeByName(catStore.All(), b.URLCategories,
+				func(e CategoryEntry) string { return e.Name }))
+		}
+		catStore.Save()
+	}
+	if len(b.CategoryGroups) > 0 {
+		if replaceMode {
+			globalCategoryGroups.ReplaceAll(b.CategoryGroups)
+		} else {
+			globalCategoryGroups.ReplaceAll(mergeByName(globalCategoryGroups.List(), b.CategoryGroups,
+				func(g CategoryGroup) string { return g.Name }))
+		}
+		globalCategoryGroups.Save()
+	}
+}
+
+// importScanBypassHosts applies the DPI bypass-host half of the
+// content_scan.json envelope. The caller runs this before its single
+// dpiScanner.Save() so patterns and bypass hosts persist in one atomic
+// envelope write. Empty/absent is skipped in both modes (no import wipes).
+func importScanBypassHosts(b *configBackup, replaceMode bool) {
+	if len(b.ContentScanBypassHosts) == 0 {
+		return
+	}
+	if replaceMode {
+		dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+		return
+	}
+	merged := b.ContentScanBypassHosts
+	existing := dpiScanner.BypassHosts()
+	seen := make(map[string]struct{}, len(existing)+len(merged))
+	union := make([]string, 0, len(existing)+len(merged))
+	for _, h := range append(existing, merged...) {
+		if _, ok := seen[h]; ok {
+			continue
+		}
+		seen[h] = struct{}{}
+		union = append(union, h)
+	}
+	dpiScanner.SetBypassHosts(union)
+}
+
+// mergeByName upserts incoming entries into existing by case-insensitive
+// name: matches are replaced in place (incoming wins), new names are
+// appended. Existing order is preserved so a merge-mode import doesn't
+// reshuffle the operator's list.
+func mergeByName[T any](existing, incoming []T, name func(T) string) []T {
+	merged := make([]T, len(existing))
+	copy(merged, existing)
+	idx := make(map[string]int, len(merged))
+	for i := range merged {
+		idx[strings.ToLower(name(merged[i]))] = i
+	}
+	for i := range incoming {
+		key := strings.ToLower(name(incoming[i]))
+		if j, ok := idx[key]; ok {
+			merged[j] = incoming[i]
+		} else {
+			idx[key] = len(merged)
+			merged = append(merged, incoming[i])
+		}
+	}
+	return merged
 }
 
 // GET/POST /api/session-secret — shared session signing key management.
@@ -808,7 +926,9 @@ func apiSessionSecret(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "secret must be ≥32 bytes of hex (64 hex chars)", http.StatusBadRequest)
 			return
 		}
-		sessionSecret = key
+		// Synchronized setter — rotation happens while concurrent requests
+		// compute session MACs (internal/session owns the lock).
+		session.SetSigningKey(key)
 		auditEvent(r, "settings.session_secret", "rotated", "shared session key updated via GUI")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true})
@@ -959,7 +1079,9 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	globalSyslog.writeMsg(14, "Culvert syslog test message — connectivity verified")
+	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
+	// now via the exported io.Writer surface (writeMsg is package-internal).
+	_, _ = globalSyslog.Write([]byte("Culvert syslog test message — connectivity verified"))
 	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
 }
 
@@ -968,11 +1090,11 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, map[string]any{
-			"authEnabled": cfg.AuthEnabled(),
-			"user":        cfg.GetUser(), // password is NEVER returned
-			"proxyPort":   cfg.ProxyPort,
-			"uiPort":      cfg.UIPort,
-			"unauthMode":  cfg.UnauthMode(),
+			"authEnabled":        cfg.AuthEnabled(),
+			"user":               cfg.GetUser(), // password is NEVER returned
+			"proxyPort":          cfg.ProxyPort,
+			"uiPort":             cfg.UIPort,
+			"defaultAuthOutcome": string(cfg.DefaultAuthOutcome()), // "Default" | "Exempt"
 		})
 
 	case http.MethodPost:
@@ -1006,7 +1128,11 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PUT /api/settings/unauth-mode — toggle proxy authentication requirement
+// PUT /api/settings/unauth-mode — set the global default authentication behavior.
+// (Route name is legacy; the contract is the defaultAuthOutcome string. Scoped
+// auth rules always evaluate first; this default applies only to unmatched
+// traffic, and Exempt is NOT an allow — Stage-2 policy and default-deny still
+// apply.) Accepts {"defaultAuthOutcome":"Default"|"Exempt"}.
 func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1016,23 +1142,30 @@ func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Enabled bool `json:"enabled"`
+		DefaultAuthOutcome string `json:"defaultAuthOutcome"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	cfg.SetUnauthMode(body.Enabled)
-	if body.Enabled {
-		auditEvent(r, "settings.update", "unauthMode", "enabled — proxy accepts unauthenticated traffic; policy rules govern access")
-		adminSettingsSave()
-		logger.Printf("UI: unauth mode enabled — proxy accepts traffic without credentials")
-	} else {
-		auditEvent(r, "settings.update", "unauthMode", "disabled — proxy requires credentials")
-		adminSettingsSave()
-		logger.Printf("UI: unauth mode disabled — proxy requires credentials")
+	// Only the two v1 global defaults are valid; anything else is rejected
+	// (reserved outcomes like CredentialRequired are not valid global defaults).
+	switch AuthOutcome(body.DefaultAuthOutcome) {
+	case OutcomeDefault, OutcomeExempt:
+	default:
+		http.Error(w, `defaultAuthOutcome must be "Default" or "Exempt"`, http.StatusBadRequest)
+		return
 	}
-	jsonOK(w, map[string]any{"ok": true, "unauthMode": body.Enabled})
+	outcome := AuthOutcome(body.DefaultAuthOutcome)
+	cfg.SetDefaultAuthOutcome(outcome)
+	adminSettingsSave()
+	if outcome == OutcomeExempt {
+		auditEvent(r, "settings.update", "defaultAuthOutcome", "Exempt — unmatched traffic is open (not Allow; Stage-2 policy still governs); scoped auth rules still enforce")
+	} else {
+		auditEvent(r, "settings.update", "defaultAuthOutcome", "Default — unmatched traffic requires authentication")
+	}
+	logger.Printf("UI: default authentication set to %q", sanitizeLog(string(outcome)))
+	jsonOK(w, map[string]any{"ok": true, "defaultAuthOutcome": string(outcome)})
 }
 
 // GET/PUT /api/settings/log-level — view/change runtime log level.
@@ -1080,6 +1213,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			"base_url":                proxyExternalBaseURL,
 			"ui_sans":                 uiExtraSANs,
 			"trust_forwarded_headers": trustForwardedHeaders,
+			"trusted_proxy_cidrs":     ListTrustedProxyCIDRs(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1089,9 +1223,16 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			BaseURL               string   `json:"base_url"`
 			UISANs                []string `json:"ui_sans"`
 			TrustForwardedHeaders bool     `json:"trust_forwarded_headers"`
+			TrustedProxyCIDRs     []string `json:"trusted_proxy_cidrs"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Validate + apply the trusted-proxy set BEFORE the other mutations so
+		// an invalid CIDR rejects the whole update without partial application.
+		if err := SetTrustedProxyCIDRs(body.TrustedProxyCIDRs); err != nil {
+			http.Error(w, "invalid trusted_proxy_cidrs: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		SetProxyBaseURL(body.BaseURL)
@@ -1194,7 +1335,7 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		jsonOK(w, map[string]any{
-			"enabled":   connLimiter.enabled.Load(),
+			"enabled":   connLimiter.Enabled(),
 			"maxPerIP":  connLimiter.MaxPerIP(),
 			"activeIPs": connLimiter.ActiveIPs(),
 		})
@@ -1215,9 +1356,9 @@ func apiConnLimit(w http.ResponseWriter, r *http.Request) {
 		} else if body.MaxPerIP > 0 {
 			connLimiter.Enable(body.MaxPerIP)
 		}
-		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.enabled.Load(), connLimiter.MaxPerIP()), "")
+		auditEvent(r, "connlimit.update", fmt.Sprintf("enabled=%v max=%d", connLimiter.Enabled(), connLimiter.MaxPerIP()), "")
 		adminSettingsSave()
-		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.enabled.Load(), "maxPerIP": connLimiter.MaxPerIP()})
+		jsonOK(w, map[string]any{"ok": true, "enabled": connLimiter.Enabled(), "maxPerIP": connLimiter.MaxPerIP()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1283,9 +1424,13 @@ func apiUpstream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		upstreamPool.Configure(body.Proxies, 5, 60*time.Second)
+		// SetProxies keeps the YAML-configured circuit-breaker parameters;
+		// adminSettingsSave makes the change survive a restart (the pool is
+		// otherwise runtime-only — Finding 10.3 out-of-scope observation).
+		upstreamPool.SetProxies(body.Proxies)
 		applyUpstreamProxy()
 		auditEvent(r, "upstream.update", fmt.Sprintf("%d proxies", len(body.Proxies)), "")
+		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "proxies": upstreamPool.List()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1325,10 +1470,8 @@ func resolveOTLPHeaders(name, value string) map[string]string {
 	if n != "" && v != "" {
 		return map[string]string{n: v}
 	}
-	globalOTLP.mu.RLock()
-	defer globalOTLP.mu.RUnlock()
-	if len(globalOTLP.headers) > 0 {
-		return globalOTLP.headers
+	if h := globalOTLP.Headers(); len(h) > 0 {
+		return h
 	}
 	return nil
 }
@@ -1341,14 +1484,13 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Check if auth headers are configured (don't expose the actual value).
-		globalOTLP.mu.RLock()
-		hasAuth := len(globalOTLP.headers) > 0
+		headers := globalOTLP.Headers()
+		hasAuth := len(headers) > 0
 		authName := ""
-		for k := range globalOTLP.headers {
+		for k := range headers {
 			authName = k // return the header NAME (not value) so UI can show it
 			break
 		}
-		globalOTLP.mu.RUnlock()
 		jsonOK(w, map[string]any{
 			"enabled":        globalOTLP.Enabled(),
 			"endpoint":       globalOTLP.Endpoint(),

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // TestKeyAtRest_Audit_MigrateCompleted: a successful cluster-CA plaintext→
@@ -64,7 +66,7 @@ func TestKeyAtRest_Audit_UnlockFailed(t *testing.T) {
 
 	baseTS := time.Now().UnixMilli()
 	t.Setenv(envKEKName, "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100") // wrong KEK
-	if _, _, err := decryptClusterCAKey(dir, enc); err == nil {
+	if _, _, err := openClusterCAKey(dir, enc); err == nil {
 		t.Fatal("expected decrypt to fail with wrong KEK")
 	}
 	if !hasMatchingAuditEntry(auditGet(), keyAtRestActor, auditKeyAtRestUnlockFailed, keyAtRestObjClusterCA, baseTS) {
@@ -80,18 +82,10 @@ func TestKeyAtRest_Audit_UnlockFailed(t *testing.T) {
 // entry — the unlock-failed audit is only on the decrypt-error branch, which a
 // plaintext passthrough never reaches.
 func TestKeyAtRest_Audit_NoEventWhenPlaintextDecrypt(t *testing.T) {
-	auditMu.Lock()
-	saved := auditLog
-	auditLog = nil
-	auditMu.Unlock()
-	t.Cleanup(func() {
-		auditMu.Lock()
-		auditLog = saved
-		auditMu.Unlock()
-	})
+	t.Cleanup(audit.SwapRingForTest())
 
 	dir := t.TempDir()
-	if _, wasEnc, err := decryptClusterCAKey(dir, dpTestKeyPEM(t)); err != nil || wasEnc {
+	if _, wasEnc, err := openClusterCAKey(dir, dpTestKeyPEM(t)); err != nil || wasEnc {
 		t.Fatalf("plaintext passthrough: err=%v wasEnc=%v", err, wasEnc)
 	}
 	for _, e := range auditGet() {

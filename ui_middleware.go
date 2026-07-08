@@ -121,11 +121,10 @@ func uiIPGuardMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
-		ip := net.ParseIP(host)
+		// RISK-019: match the allowlist against the real client behind a
+		// configured trusted proxy, so the admin-IP allowlist keeps working
+		// when the panel is fronted by an L7 proxy (falls back to direct peer).
+		ip := net.ParseIP(realClientIP(r))
 		for _, cidr := range allowed {
 			if ip != nil && cidr.Contains(ip) {
 				next.ServeHTTP(w, r)
@@ -185,10 +184,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 
 		// ── API rate limit on mutating requests ──────────────────────────────
 		if isMutating && strings.HasPrefix(r.URL.Path, "/api/") {
-			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if ip == "" {
-				ip = r.RemoteAddr
-			}
+			ip := realClientIP(r) // RISK-019: real client behind a trusted proxy
 			if !apiLimiter.Allow(ip) {
 				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 				return
@@ -242,8 +238,10 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Auth not yet configured — first-time or intentionally disabled.
-		if !cfg.AuthEnabled() {
+		// Setup not yet complete — first-time bootstrap. Gate on IsConfigured (NOT
+		// AuthEnabled): open mode (defaultAuthOutcome=Exempt) counts as configured,
+		// so it keeps the admin UI gated rather than granting RoleAdmin to all.
+		if !cfg.IsConfigured() {
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

@@ -1,152 +1,51 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
-	"golang.org/x/net/idna"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
-// normalizeHost applies IDNA2008 normalization (RFC 5890) to a hostname,
-// converting Unicode/Punycode domains to their canonical ASCII form. This
-// prevents IDN homograph attacks where visually similar Unicode characters
-// (e.g., Cyrillic 'а' vs Latin 'a') bypass blocklists and policy rules.
-//
-// Returns the lowercased, IDNA-normalized host. If normalization fails
-// (e.g., the host is an IP address or already ASCII), the input is returned
-// lowercased — fail-open for usability since most hosts are pure ASCII.
-func normalizeHost(host string) string {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return host
-	}
-	// Skip IDNA for IP addresses and already-pure-ASCII hostnames
-	// (fast path — avoids allocation for the common case).
-	if net.ParseIP(host) != nil {
-		return host
-	}
-	ascii, err := idna.ToASCII(host)
-	if err != nil {
-		return host // fail-open: return lowercased original
-	}
-	return strings.ToLower(ascii)
-}
+// normalizeHost and stripHostPort moved to internal/hostutil (ADR-0002/0003).
+// These thin wrappers keep the unqualified package-main call sites (policy,
+// store, catdb, scanner, security_scan) and the existing tests unchanged.
+func normalizeHost(host string) string { return hostutil.NormalizeHost(host) }
+func stripHostPort(host string) string { return hostutil.StripHostPort(host) }
 
-// stripHostPort removes a trailing :port and IPv6 brackets from a host value,
-// accepting all shapes that reach scan/bypass lookups: "host:port",
-// "[v6]:port", "[v6]", bare "v6", and bare "host". A naive
-// LastIndex(host, ":") cut corrupts bare IPv6 literals (already de-bracketed
-// by net.SplitHostPort upstream) — "2001:db8::1" would become "2001:db8:".
-func stripHostPort(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	return strings.Trim(host, "[]")
-}
+// normalizeHostStrict is the fail-closed variant used by the request-path
+// dispatch gates (handleRequest, SOCKS5): ok=false means the host cannot be
+// IDNA-canonicalized and the request must be REJECTED rather than evaluated
+// against policy/blocklist with an un-normalized host (RISK-013).
+func normalizeHostStrict(host string) (string, bool) { return hostutil.NormalizeHostStrict(host) }
 
-// ─── SSRF-safe dialer ────────────────────────────────────────────────────────
+// ─── SSRF guard (moved to internal/ssrf, ADR-0002) ──────────────────────────
+// The CIDR table, DNS-cached host check, and connect-time dialer control live
+// in internal/ssrf. These thin wrappers keep every unqualified call site (and
+// the CodeQL inline-guard convention at those sites) unchanged.
 
-// ssrfControl rejects a connection when the resolved peer address falls into
-// any private/internal range. Installed as net.Dialer.Control, it runs AFTER
-// DNS resolution and IMMEDIATELY BEFORE connect(2), closing the TOCTOU window
-// that a pre-flight LookupHost leaves open (DNS-rebinding: public IP on the
-// pre-check, private IP on the real dial).
-//
-// address is the resolved IP:port that the kernel is about to connect to
-// (never a hostname at this layer), so net.ParseIP always succeeds for a
-// well-formed stack. We still fail-closed on any parse anomaly.
-func ssrfControl(network, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("ssrf control: invalid address %q: %w", address, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("ssrf control: unexpected non-IP %q in dial", host)
-	}
-	if isPrivateIP(ip) {
-		return fmt.Errorf("ssrf control: refusing %s dial to private address %s", network, ip)
-	}
-	return nil
-}
+// isPrivateIP reports whether ip falls within any private/internal range.
+func isPrivateIP(ip net.IP) bool { return ssrf.PrivateIP(ip) }
 
-// ssrfSafeDialer is the canonical SSRF-safe dialer. It resolves DNS once, then
-// Go applies ssrfControl to every resolved address the dialer attempts.
-var ssrfSafeDialer = &net.Dialer{
-	Timeout: 15 * time.Second,
-	Control: ssrfControl,
-}
+// isPrivateHost resolves host (host or host:port) and returns an error if any
+// resolved IP falls within a private/internal range (30s-TTL DNS cache;
+// fail-closed on resolution errors).
+func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
+
+// ssrfControl is the connect-time guard (net.Dialer.Control) — rejects dials
+// whose resolved address is private/internal. Re-exposed for the CONNECT and
+// SOCKS5 paths, which build their own dialers.
+var ssrfControl = ssrf.Control
 
 // ssrfSafeDialContext is a net.Dialer.DialContext replacement that rejects
-// connections to private/internal IPs. Use as the DialContext in an
-// http.Transport to prevent SSRF at the network level, independent of URL
-// validation. Safe against DNS rebinding because the check runs on the
-// post-resolution address that will actually be connected.
+// connections to private/internal IPs at connect time (DNS-rebinding safe).
 //
 // Declared as a variable so that tests can temporarily replace it with a
 // plain dialer that permits localhost webhook targets.
-var ssrfSafeDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return ssrfSafeDialer.DialContext(ctx, network, addr)
-}
-
-// ─── DNS result cache for SSRF checks ────────────────────────────────────────
-// Avoids repeated DNS lookups in isPrivateHost() for the same host within a
-// short window. Entries expire after dnsSSRFCacheTTL. Negative results (DNS
-// errors) are NOT cached so that transient failures remain fail-closed.
-
-const dnsSSRFCacheTTL = 30 * time.Second
-
-type dnsSSRFEntry struct {
-	private bool // true if any resolved IP was private
-	expires time.Time
-}
-
-type dnsSSRFCache struct {
-	mu      sync.RWMutex
-	entries map[string]dnsSSRFEntry
-}
-
-var ssrfDNSCache = &dnsSSRFCache{entries: make(map[string]dnsSSRFEntry)}
-
-// Lookup returns (isPrivate, found). If found is false the caller must do a
-// live DNS lookup and call Store.
-func (c *dnsSSRFCache) Lookup(host string) (bool, bool) {
-	c.mu.RLock()
-	e, ok := c.entries[host]
-	c.mu.RUnlock()
-	if !ok || time.Now().After(e.expires) {
-		return false, false
-	}
-	return e.private, true
-}
-
-// Store records a positive (resolved) result. DNS errors are not stored.
-func (c *dnsSSRFCache) Store(host string, private bool) {
-	c.mu.Lock()
-	c.entries[host] = dnsSSRFEntry{
-		private: private,
-		expires: time.Now().Add(dnsSSRFCacheTTL),
-	}
-	c.mu.Unlock()
-}
-
-// Cleanup evicts expired entries (called periodically from main tick loop).
-func (c *dnsSSRFCache) Cleanup() {
-	c.mu.Lock()
-	now := time.Now()
-	for k, e := range c.entries {
-		if now.After(e.expires) {
-			delete(c.entries, k)
-		}
-	}
-	c.mu.Unlock()
-}
+var ssrfSafeDialContext = ssrf.SafeDialContext
 
 // ─── IP Filter ────────────────────────────────────────────────────────────────
 
@@ -162,6 +61,16 @@ type IPFilter struct {
 
 var ipf = &IPFilter{single: map[string]bool{}}
 
+// SetMode sets the IP-filter mode. Valid values are "allow" (allowlist),
+// "block" (blocklist), and "" (disabled). The mode is stored verbatim — the
+// fail-closed handling lives in Allowed(), which denies ALL traffic for any
+// unrecognized (corrupt) mode. This is safer than coercing a corrupt value to
+// "block" here, which would silently convert a corrupted *allowlist*
+// deployment into a permissive blocklist (admitting every non-listed IP). The
+// validated admin API path only ever passes "allow"/"block"; the raw
+// persistence/snapshot paths (config reload, admin_settings restore,
+// config-version rollback, cluster ConfigSnapshot) may carry corruption, and
+// Allowed() fails closed on it.
 func (f *IPFilter) SetMode(mode string) {
 	f.mu.Lock()
 	f.mode = mode
@@ -242,6 +151,15 @@ func (f *IPFilter) contains(ipStr string) bool {
 }
 
 // Allowed returns true when the IP should be allowed through.
+//
+// Mode semantics: "allow" = allowlist (only listed IPs pass), "block" =
+// blocklist (listed IPs are denied), "" = disabled (filter off, all pass).
+// ANY OTHER value is treated as corruption and DENIES ALL traffic (fail
+// closed). Coercing a corrupt mode to "block" instead would be unsafe: a
+// corrupted *allowlist* deployment (mode was "allow" with a list of the only
+// trusted IPs) would become a blocklist that admits every IP not on the list —
+// fail open. When we cannot trust the mode, we cannot reason about the list, so
+// we deny everything until an operator restores a valid config.
 func (f *IPFilter) Allowed(ipStr string) bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -250,8 +168,10 @@ func (f *IPFilter) Allowed(ipStr string) bool {
 		return f.contains(ipStr)
 	case "block":
 		return !f.contains(ipStr)
+	case "":
+		return true // filter disabled
 	default:
-		return true
+		return false // corrupt/unknown mode — deny all (fail closed)
 	}
 }
 

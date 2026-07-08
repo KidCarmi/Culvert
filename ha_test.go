@@ -98,7 +98,10 @@ func TestHAState_VerifyToken(t *testing.T) {
 
 func TestHAState_EnableAsLeader(t *testing.T) {
 	h := &HAState{}
-	token := h.EnableAsLeader("cp2:50051")
+	token, err := h.EnableAsLeader("cp2:50051", false)
+	if err != nil {
+		t.Fatalf("EnableAsLeader: %v", err)
+	}
 
 	if token == "" {
 		t.Error("expected non-empty token")
@@ -111,6 +114,10 @@ func TestHAState_EnableAsLeader(t *testing.T) {
 	}
 	if !h.VerifyToken(token) {
 		t.Error("expected token to be verifiable")
+	}
+	// ADR-0004: auto-failover is OFF unless explicitly enabled.
+	if h.autoFailoverEnabled() {
+		t.Error("auto-failover must default to OFF")
 	}
 }
 

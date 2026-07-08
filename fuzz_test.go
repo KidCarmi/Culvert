@@ -9,12 +9,18 @@ package main
 //   go test -fuzz=FuzzNormaliseFeedURL   -fuzztime=30s
 //   go test -fuzz=FuzzMatchDest          -fuzztime=30s
 //   go test -fuzz=FuzzParseYARALiteral   -fuzztime=30s
+//   go test -fuzz=FuzzRemoveHopHeaders   -fuzztime=30s
 //
-// In CI the targets run for a short duration (5 s each) as a regression
-// check; the corpus/ directories capture any panics found during local runs.
+// In CI these run nightly (Mon/Wed/Fri) with a 15m coverage-guided budget each
+// (fuzz-nightly.yml); any crash input is uploaded so it can be committed as a
+// permanent regression seed.
 
 import (
+	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // FuzzIsPrivateHost ensures the private-host classifier never panics on
@@ -72,30 +78,8 @@ func FuzzIsSafeRedirectURL(f *testing.F) {
 	})
 }
 
-// FuzzParseClamResponse ensures the ClamAV response parser never panics on
-// malformed or truncated daemon output.
-func FuzzParseClamResponse(f *testing.F) {
-	seeds := []string{
-		"stream: OK",
-		"stream: Eicar-Test-Signature FOUND",
-		"stream: ERROR",
-		"stdin: Win.Test.EICAR_HDB-1 FOUND",
-		"",
-		"FOUND",
-		"OK",
-		": FOUND",
-		"stream: some.virus.name FOUND",
-		"stream: \x00\xff FOUND",
-		"a: b: FOUND",
-		"stream: OK\nstream: FOUND",
-	}
-	for _, s := range seeds {
-		f.Add(s)
-	}
-	f.Fuzz(func(t *testing.T, resp string) {
-		_, _, _ = parseClamResponse(resp)
-	})
-}
+// FuzzParseClamResponse moved to internal/clamav (ADR-0002) — it fuzzes the
+// unexported parseClamResponse, now in package clamav.
 
 // FuzzNormaliseFeedURL ensures the feed-URL normaliser never panics on
 // arbitrary URLs from untrusted operator input.
@@ -115,7 +99,7 @@ func FuzzNormaliseFeedURL(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
-		_, _ = normaliseFeedURL(raw)
+		_, _ = threatfeed.NormaliseURL(raw)
 	})
 }
 
@@ -143,25 +127,68 @@ func FuzzMatchDest(f *testing.F) {
 	})
 }
 
-// FuzzParseYARALiteral exercises the YARA string-literal parser which handles
-// escape sequences from untrusted rule files.
-func FuzzParseYARALiteral(f *testing.F) {
-	seeds := []string{
-		`"hello world"`,
-		`"test\x41\x42"`,
-		`"line\nnewline"`,
-		`"tab\there"`,
-		`"back\\slash"`,
-		`"quote\""`,
-		`""`,
-		`"unclosed`,
-		`"\xff\x00"`,
-		`"` + string([]byte{0x00, 0x01, 0x02}) + `"`,
+// FuzzParseYARALiteral moved to internal/yara (ADR-0002) — it fuzzes the
+// unexported parseYARALiteralString, now in package yara.
+
+// FuzzRemoveHopHeaders fuzzes the custom RFC 7230 §6.1 Connection-token parser in
+// removeHopHeaders (proxy.go): the header the proxy uses to strip attacker- or
+// origin-supplied hop-by-hop headers before forwarding. It feeds an arbitrary
+// Connection header value (a comma-separated token list) plus an arbitrary extra
+// header, pre-populates a header entry for every listed token, and asserts the
+// parser never panics, always removes the Connection header itself, and removes
+// every non-empty token the Connection header names. It deliberately does NOT
+// assert any header survives — a fuzzed Connection value may legitimately name
+// (and thus strip) any header, including the extra one.
+func FuzzRemoveHopHeaders(f *testing.F) {
+	seeds := []struct {
+		connVal, name, val string
+	}{
+		{"close", "X-Keep", "1"},
+		{"keep-alive, Foo-Bar", "Foo-Bar", "leak"},
+		{"X-Custom-Hop", "X-Custom-Hop", "secret"},
+		{"", "X-Present", "v"},
+		{" , , ", "X-Edge", "v"},
+		{"Upgrade,Connection", "Upgrade", "websocket"},
+		{"a,b,c,d,e", "b", "v"},
+		{"X-Token\x00", "X-Token", "v"},
+		{"UPPER,lower,MiXeD", "MiXeD", "v"},
+		// Regression seeds: fuzzed extra-header name canonicalizes to "Connection"
+		// and must NOT clobber the token list under assertion.
+		{"X-Custom-Hop,close", "Connection", "close"},
+		{"A,B", "connection", "override"},
+		{"A", "CONNECTION", ""},
 	}
 	for _, s := range seeds {
-		f.Add(s)
+		f.Add(s.connVal, s.name, s.val)
 	}
-	f.Fuzz(func(t *testing.T, s string) {
-		_, _, _ = parseYARALiteralString(s)
+	f.Fuzz(func(t *testing.T, connVal, name, val string) {
+		h := http.Header{}
+		// Set the arbitrary extra header FIRST, then Connection LAST: if the fuzzed
+		// name canonicalizes to "Connection" it must not clobber the token list we
+		// are about to assert on (that would make the test fail on a non-bug).
+		h.Set(name, val)
+		h.Set("Connection", connVal)
+		// Pre-populate a header for every token the Connection value names, so a
+		// successful removal is observable.
+		tokens := strings.Split(connVal, ",")
+		for _, tok := range tokens {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				h.Add(tok, "populated")
+			}
+		}
+
+		removeHopHeaders(h) // must not panic
+
+		if len(h["Connection"]) != 0 {
+			t.Errorf("Connection header not stripped: %#v", h["Connection"])
+		}
+		for _, tok := range tokens {
+			if tok = strings.TrimSpace(tok); tok == "" {
+				continue
+			}
+			if h.Get(tok) != "" {
+				t.Errorf("Connection-listed hop-by-hop token %q not removed", tok)
+			}
+		}
 	})
 }

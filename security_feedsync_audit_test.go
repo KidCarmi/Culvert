@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // ── apiSecFeedsSync audit emission ────────────────────────────────────────
@@ -42,7 +44,9 @@ func TestSecFeedsSync_RecordsAuditEntry(t *testing.T) {
 	// outbound network reachability.
 	orig := globalThreatFeed
 	t.Cleanup(func() { globalThreatFeed = orig })
-	globalThreatFeed = &ThreatFeed{enabled: true, syncInterval: time.Hour}
+	fresh := threatfeed.New()
+	fresh.Init("", time.Hour) // enabled, no persistence
+	globalThreatFeed = fresh
 
 	// auditEvent stamps TS via time.Now().UnixMilli(); use the same
 	// clock so the post-call entry's TS is guaranteed >= baselineTS.
@@ -80,7 +84,7 @@ func TestSecFeedsSync_RecordsAuditEntry(t *testing.T) {
 func TestSecFeedsSync_FeedDisabled_NoAuditEntry(t *testing.T) {
 	orig := globalThreatFeed
 	t.Cleanup(func() { globalThreatFeed = orig })
-	globalThreatFeed = &ThreatFeed{enabled: false}
+	globalThreatFeed = threatfeed.New() // disabled until Init
 
 	baselineTS := time.Now().UnixMilli()
 

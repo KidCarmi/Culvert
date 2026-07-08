@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# needs-verdict — the ONE implementation of the "skipped = pass" aggregate.
+#
+# Every branch-protection-facing aggregate job (Fast/Deep PR Gates, QA Gate,
+# Security Gate) evaluates its `needs` through this action instead of a
+# copy-pasted jq block. This logic is load-bearing for merge protection —
+# before consolidation it existed in four hand-synced copies that had
+# already begun to diverge (CI review, maintainability P1-5).
+#
+# Contract:
+#   • any needed job with result `failure` or `cancelled`  → FAIL.
+#     (cancelled counts as failure ON PURPOSE: GitHub treats a skipped
+#      required check as satisfied, so a manually-cancelled run must never
+#      leave a green-by-omission check on a head commit.)
+#   • jobs listed in `require-success` must be exactly `success` → else FAIL
+#     (used for the diff classifier — a gate must not pass on an unclassified
+#      diff).
+#   • everything else (skipped jobs) passes, and a results table is written
+#     to the step summary.
+#
+# NOTE: local composite — the calling job must `actions/checkout` first.
+# ─────────────────────────────────────────────────────────────────────────────
+name: "Aggregate verdict (skipped = pass)"
+description: "Evaluate a needs context for gate aggregates; skipped passes, failure/cancelled fails"
+
+inputs:
+  needs-json:
+    # NOTE: this description is plain text on purpose — a literal
+    # "$ {{ toJSON(needs) }}" here is EVALUATED by the runner when the
+    # manifest loads, and 'needs' is undefined in that context, which
+    # kills every job that uses this action.
+    description: "Pass the aggregate job's needs context, JSON-encoded via toJSON"
+    required: true
+  title:
+    description: "Step-summary heading"
+    required: true
+  require-success:
+    description: "Comma-separated job ids that must be exactly 'success' (not skipped)"
+    required: false
+    default: ""
+  extra-summary:
+    description: "Optional extra markdown appended to the step summary"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Evaluate results
+      shell: bash
+      env:
+        NEEDS_JSON: ${{ inputs.needs-json }}
+        REQUIRE: ${{ inputs.require-success }}
+        TITLE: ${{ inputs.title }}
+        EXTRA: ${{ inputs.extra-summary }}
+      run: |
+        set -euo pipefail
+        echo "$NEEDS_JSON" | jq .
+        if [ -n "$REQUIRE" ]; then
+          IFS=',' read -ra REQ <<< "$REQUIRE"
+          for r in "${REQ[@]}"; do
+            r="$(echo "$r" | xargs)"; [ -z "$r" ] && continue
+            RES=$(echo "$NEEDS_JSON" | jq -r --arg k "$r" '.[$k].result // "missing"')
+            if [ "$RES" != "success" ]; then
+              echo "::error::required job '$r' result=$RES — cannot trust the gate"; exit 1
+            fi
+          done
+        fi
+        BAD=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+        if [ -n "$BAD" ]; then
+          echo "::error::failed jobs: $BAD"; exit 1
+        fi
+        echo "Aggregate verdict: all needed jobs passed (or were not applicable)."
+        {
+          echo "## $TITLE"
+          echo ""
+          echo "| Job | Result |"
+          echo "|-----|--------|"
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"'
+          if [ -n "$EXTRA" ]; then echo ""; echo "$EXTRA"; fi
+        } >> "$GITHUB_STEP_SUMMARY"

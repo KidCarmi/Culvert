@@ -26,6 +26,46 @@ func writeConfig(t *testing.T, body string) string {
 const minimalValid = `compose_project_dir = "/srv/culvert"
 allow_peers = ["culvert-cp"]`
 
+// compose_override_file (socket-persist): optional; empty by default;
+// bare filename accepted; traversal / "." / ".." / equal-to-compose_file rejected.
+func TestLoad_ComposeOverrideFile(t *testing.T) {
+	// Default: unset.
+	cfg, err := Load(writeConfig(t, minimalValid))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ComposeOverrideFile != "" {
+		t.Errorf("compose_override_file default: got %q, want empty", cfg.ComposeOverrideFile)
+	}
+
+	// Accepted: a bare filename distinct from compose_file.
+	okBody := minimalValid + "\ncompose_override_file = \"docker-compose.maint-agent.yml\""
+	cfg, err = Load(writeConfig(t, okBody))
+	if err != nil {
+		t.Fatalf("Load (valid override): %v", err)
+	}
+	if cfg.ComposeOverrideFile != "docker-compose.maint-agent.yml" {
+		t.Errorf("compose_override_file: got %q", cfg.ComposeOverrideFile)
+	}
+
+	rejected := map[string]string{
+		"traversal":             "../etc/x.yml",
+		"slash":                 "sub/x.yml",
+		"dot":                   ".",
+		"dotdot":                "..",
+		"equal to compose_file": "docker-compose.yml", // == default compose_file
+		"internal whitespace":   "maint agent.yml",    // would split the sudo arg match
+		"shell metachar pipe":   "a|b.yml",
+		"shell metachar dollar": "a${x}.yml",
+	}
+	for name, val := range rejected {
+		body := minimalValid + "\ncompose_override_file = \"" + val + "\""
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("%s (%q): expected rejection, got nil", name, val)
+		}
+	}
+}
+
 // proxy_repo (P1.4): default applied; bare repos and registry host:port
 // accepted; @digest and TAGGED values rejected (a tag would break repo-bound
 // pin validation).

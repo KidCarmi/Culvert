@@ -36,8 +36,8 @@ func snapshotCatStore(t *testing.T) {
 	t.Helper()
 	orig := catStore
 	dir := t.TempDir()
-	fresh := &CategoryStore{path: filepath.Join(dir, "categories.json")}
-	fresh.rebuildIndex()
+	fresh := newCategoryStore(nil)
+	fresh.SetPathForTest(filepath.Join(dir, "categories.json"))
 	catStore = fresh
 	t.Cleanup(func() { catStore = orig })
 }

@@ -7,6 +7,9 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
+	"github.com/KidCarmi/Culvert/internal/threatfeed"
 )
 
 // ─── IdPRegistry.Load ─────────────────────────────────────────────────────────
@@ -155,15 +158,24 @@ func TestValidateExternalURL_HTTP(t *testing.T) {
 
 // ─── SecurityScanner.CheckURL/CheckDomain with enabled feed ──────────────────
 
+// newEnabledFeed returns an enabled in-memory threat feed (no persistence).
+// Entries are seeded via threatfeed.SeedForTest — the engine's whitebox map
+// pokes moved in-package with the extraction (ADR-0002).
+func newEnabledFeed() *ThreatFeed {
+	tf := threatfeed.New()
+	tf.Init("", time.Hour)
+	return tf
+}
+
 func TestSecurityScanner_CheckURL_EnabledFeed_Hit(t *testing.T) {
 	// Temporarily enable the global threat feed and add a URL
 	old := globalThreatFeed
 	tf := newEnabledFeed()
-	tf.urls["http://evil.example.com/malware"] = feedEntry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.SeedForTest(map[string]string{"http://evil.example.com/malware": "urlhaus"}, nil)
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckURL("http://evil.example.com/malware")
 	if result == nil {
 		t.Error("CheckURL should return result for known malicious URL")
@@ -176,11 +188,11 @@ func TestSecurityScanner_CheckURL_EnabledFeed_Hit(t *testing.T) {
 func TestSecurityScanner_CheckDomain_EnabledFeed_Hit(t *testing.T) {
 	old := globalThreatFeed
 	tf := newEnabledFeed()
-	tf.domains["phishing.example.com"] = feedEntry{Source: "openphish", AddedAt: time.Now()}
+	tf.SeedForTest(nil, map[string]string{"phishing.example.com": "openphish"})
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckDomain("phishing.example.com")
 	if result == nil {
 		t.Error("CheckDomain should return result for known malicious domain")
@@ -196,7 +208,7 @@ func TestSecurityScanner_CheckURL_EnabledFeed_Miss(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckURL("http://clean.example.com/page")
 	if result != nil {
 		t.Error("CheckURL should return nil for clean URL")
@@ -209,7 +221,7 @@ func TestSecurityScanner_CheckDomain_EnabledFeed_Miss(t *testing.T) {
 	globalThreatFeed = tf
 	defer func() { globalThreatFeed = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Feed: tf})
 	result := ss.CheckDomain("clean.example.com")
 	if result != nil {
 		t.Error("CheckDomain should return nil for clean domain")
@@ -268,19 +280,21 @@ func TestRecordAndGetActiveConns(t *testing.T) {
 	recordActiveConn(-1)
 }
 
-// ─── geoip.go: LookupFull/LookupCached when geo disabled ──────────────────────
+// ─── geoip.go: geo wrapper LookupFull/LookupCached when geo disabled ──────────
+// The host-based wrapper lives in package main (geoResolver); the IP→country
+// engine moved to internal/geoip (ADR-0002). These assert the wrapper's
+// disabled-geo early return; the engine's disabled path is covered by
+// internal/geoip/geoip_test.go.
 
 func TestGeoCache_LookupFull_GeoDisabled(t *testing.T) {
-	g := &geoCache{}
-	code, name := g.LookupFull("example.com")
+	code, name := geo.LookupFull("example.com")
 	if code != "" || name != "" {
 		t.Errorf("LookupFull with geo disabled should return empty, got code=%q name=%q", code, name)
 	}
 }
 
 func TestGeoCache_LookupCached_GeoDisabled(t *testing.T) {
-	g := &geoCache{}
-	code, ok := g.LookupCached("example.com")
+	code, ok := geo.LookupCached("example.com")
 	if ok || code != "" {
 		t.Error("LookupCached with geo disabled should return false")
 	}

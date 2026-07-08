@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
 // pendingCARotation holds a confirmation token for the two-step CA rotation flow.
@@ -133,7 +135,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
 	}
-	ok2 := deliverWebhook(globalAlertStore, h, payload)
+	ok2 := globalAlertStore.Deliver(h, payload)
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
@@ -599,10 +601,7 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	globalYARA.mu.RLock()
-	dir := globalYARA.dir
-	globalYARA.mu.RUnlock()
-
+	dir := globalYARA.Dir() // engine moved to internal/yara; use the exported getter
 	if dir == "" {
 		http.Error(w, "no YARA rules directory configured", http.StatusServiceUnavailable)
 		return
@@ -614,8 +613,8 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	// Tier 1.1: Clear hash cache so content scanned as clean under old rules
 	// is re-scanned under the new rule set. Without this, new rules don't
 	// apply to previously-cached content until the 1-hour TTL expires.
-	globalSecScanner.cache.Clear()
-	auditEvent(r, "security.yara-reload", dir, "YARA rules reloaded and hash cache cleared")
+	globalSecScanner.CacheClear()
+	auditEvent(r, "security.yara_reload", dir, "YARA rules reloaded and hash cache cleared")
 	jsonOK(w, map[string]any{
 		"yara_rules":    globalYARA.Count(),
 		"directory":     dir,
@@ -700,7 +699,7 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 		yaraSetOnTimeout(body.OnTimeout)
 		yaraSetOnSaturation(body.OnSaturation)
 		yaraSetAlertDegraded(body.AlertDegraded)
-		auditEventDiff(r, "security.yara-settings", "yara_engine", "", prev, yaraSettingsMap())
+		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMap())
 		adminSettingsSave()
 		// Intentionally NOT calling saveConfigVersion: YARA engine
 		// settings are out of the rollback surface by design (D-sec,
@@ -783,8 +782,8 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
-		globalSecScanner.cache.Clear()
-		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
+		globalSecScanner.CacheClear()
+		auditEvent(r, "security.yara_write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rules are filesystem
@@ -813,11 +812,11 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "delete rule: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		globalSecScanner.cache.Clear()
-		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
+		globalSecScanner.CacheClear()
+		auditEvent(r, "security.yara_remove", name, "rule removed and cache cleared")
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
-		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara-write branch.
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara_write branch.
 		jsonOK(w, map[string]any{
 			"deleted":       name,
 			"yara_rules":    globalYARA.Count(),
@@ -904,7 +903,7 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		if err := globalScanExclusions.Save(); err != nil {
 			logger.Printf("ScanExclusions: save error: %v", err)
 		}
-		auditEvent(r, "security.scan-exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
+		auditEvent(r, "security.scan_exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
 		// Intentionally NOT calling saveConfigVersion: scan exclusions
 		// are out of the rollback surface by design (D-sec,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Exclusions are
@@ -948,11 +947,11 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		}
 		dpiScanner.SetBypassHosts(req.Hosts)
 		dpiScanner.Save()
-		auditEvent(r, "security.dpi-bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
+		auditEvent(r, "security.dpi_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
 		// Bypass hosts are in the rollback surface as of
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
-		saveConfigVersion(sessionAdmin(r), "security.dpi-bypass")
+		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
 		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -991,11 +990,11 @@ func apiScanCache(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		if globalSecScanner == nil || globalSecScanner.cache == nil {
+		if !globalSecScanner.CacheReady() {
 			jsonOK(w, map[string]any{"enabled": false})
 			return
 		}
-		hits, misses, size := globalSecScanner.cache.Stats()
+		hits, misses, size := globalSecScanner.CacheStats()
 		jsonOK(w, map[string]any{
 			"enabled":      true,
 			"cache_hits":   hits,
@@ -1007,17 +1006,17 @@ func apiScanCache(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		if globalSecScanner == nil || globalSecScanner.cache == nil {
+		if !globalSecScanner.CacheReady() {
 			http.Error(w, "scan cache not enabled", http.StatusServiceUnavailable)
 			return
 		}
 		hash := r.URL.Query().Get("hash")
 		if hash != "" {
-			found := globalSecScanner.cache.Evict(hash)
+			found := globalSecScanner.CacheEvict(hash)
 			auditEvent(r, "scan_cache.evict", sanitizeLog(hash), "")
 			jsonOK(w, map[string]any{"evicted": found, "hash": hash})
 		} else {
-			globalSecScanner.cache.Clear()
+			globalSecScanner.CacheClear()
 			auditEvent(r, "scan_cache.clear", "all", "")
 			jsonOK(w, map[string]any{"cleared": true})
 		}
@@ -1261,7 +1260,7 @@ func apiGeoIPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"enabled": geoEnabled(),
+		"enabled": geoip.Enabled(),
 		"dbPath":  uiCfgGeoIPDB,
 	})
 }

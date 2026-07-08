@@ -27,7 +27,7 @@ import (
 //   • In-process httptest.Server — no os/exec, no Playwright, no new CI
 //     job. Runs inside the existing `go test ./...` invocation.
 //   • Per-test fixture. Globals (cfg.user, cfg.passHash, cfg.uiUsers,
-//     cfg.unauthMode, dataDir) are snapshotted at fixture start and
+//     cfg.defaultAuthOutcome, dataDir) are snapshotted at fixture start and
 //     restored in t.Cleanup. Tests are deterministic under
 //     -count=2 -shuffle=on.
 //   • Audit assertions are content-based (Action + host substring +
@@ -70,7 +70,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	cfg.mu.Lock()
 	prevUser := cfg.user
 	prevPassHash := cfg.passHash
-	prevUnauth := cfg.unauthMode
+	prevAuthOutcome := cfg.defaultAuthOutcome
 	prevUsers := make(map[string]*uiAdminUser, len(cfg.uiUsers))
 	for k, v := range cfg.uiUsers {
 		prevUsers[k] = v
@@ -83,22 +83,9 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 	// JWTs. If a prior test logged out and revoked a JWT for "e2e_viewer"
 	// at second T, a fresh login here at the same second T would
 	// regenerate the revoked JWT and immediately trip decodeSession's
-	// "session: revoked" guard. Snapshot+restore isolates each fixture
-	// from any other test's revocations.
-	sessionRevoked.mu.Lock()
-	prevRevokedTokens := make(map[string]time.Time, len(sessionRevoked.tokens))
-	for k, v := range sessionRevoked.tokens {
-		prevRevokedTokens[k] = v
-	}
-	prevRevokedUsers := make(map[string]time.Time, len(sessionRevoked.users))
-	for k, v := range sessionRevoked.users {
-		prevRevokedUsers[k] = v
-	}
-	// Reset to empty for this fixture's lifetime so my own logout
-	// revocations cannot collide with my own re-logins.
-	sessionRevoked.tokens = map[string]time.Time{}
-	sessionRevoked.users = map[string]time.Time{}
-	sessionRevoked.mu.Unlock()
+	// "session: revoked" guard. Swap-in-fresh (restored below) isolates
+	// each fixture from any other test's revocations.
+	restoreRevoked := sessionRevoked.SwapForTest()
 
 	prevDataDir := dataDir
 	dataDir = t.TempDir()
@@ -129,14 +116,11 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		cfg.mu.Lock()
 		cfg.user = prevUser
 		cfg.passHash = prevPassHash
-		cfg.unauthMode = prevUnauth
+		cfg.defaultAuthOutcome = prevAuthOutcome
 		cfg.uiUsers = prevUsers
 		cfg.mu.Unlock()
 		cfg.cache.clear()
-		sessionRevoked.mu.Lock()
-		sessionRevoked.tokens = prevRevokedTokens
-		sessionRevoked.users = prevRevokedUsers
-		sessionRevoked.mu.Unlock()
+		restoreRevoked()
 		dataDir = prevDataDir
 	})
 

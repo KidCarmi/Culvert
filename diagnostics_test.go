@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // withCachedStorageState saves and restores both dataDir and the cached
@@ -129,7 +131,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"cluster_posture":            false,
 		"saml_state_posture":         false,
 		"saml_base_url":              false,
-		"unauth_mode":                false,
+		"default_auth_open":          false,
 		"yara_engine_posture":        false,
 		"updater_url":                false,
 		"config_snapshot_validator":  false,
@@ -867,9 +869,9 @@ func TestConfigVersionsCheck_NoBackupContentLeak(t *testing.T) {
 // endpoint itself is healthy and responsive) but the session_secret
 // row reports fail with a non-empty operator_action.
 func TestApiDiagnostics_SessionSecretMissingFail(t *testing.T) {
-	prev := sessionSecret
-	sessionSecret = nil
-	t.Cleanup(func() { sessionSecret = prev })
+	prev := session.SigningKey()
+	session.SetSigningKey(nil)
+	t.Cleanup(func() { session.SetSigningKey(prev) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()

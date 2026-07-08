@@ -17,13 +17,16 @@ import (
 	"github.com/crewjam/saml"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 	fixture := newClusterAuthLiveSyncFixture(t)
 	setupProxyTest(t)
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
-	sessionSecret = nil
+	session.SetSigningKey(nil)
 
 	client := &DataPlaneClient{
 		nodeID:      fixture.nodeID,
@@ -37,7 +40,7 @@ func TestClusterAuth_LiveControlPlaneSyncUpdatesDataPlaneAuth(t *testing.T) {
 	if cfg.ProxyBaseURL() != "https://proxy.example.test/culvert" || !trustForwardedHeaders {
 		t.Fatalf("DP auth settings = base %q trust %v, want CP-published values", cfg.ProxyBaseURL(), trustForwardedHeaders)
 	}
-	if !sameBytes(sessionSecret, fixture.sessionSecret) {
+	if !sameBytes(session.SigningKey(), fixture.sessionSecret) {
 		t.Fatal("DP session HMAC did not sync from CP")
 	}
 	if providers := idpRegistry.EnabledProviders(); len(providers) != 1 || providers[0].Name() != "saml:corp-saml" {
@@ -123,7 +126,7 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 
 	setupProxyTest(t)
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
-	sessionSecret = nil
+	session.SetSigningKey(nil)
 	loaded, err := applyDPLastGoodConfigSnapshot()
 	if err != nil {
 		t.Fatalf("apply last-known-good snapshot: %v", err)
@@ -134,7 +137,7 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 	if !trustForwardedHeaders || cfg.ProxyBaseURL() != "https://proxy.example.test/culvert" {
 		t.Fatalf("auth callback settings not restored: base=%q trust=%v", cfg.ProxyBaseURL(), trustForwardedHeaders)
 	}
-	if !sameBytes(sessionSecret, cpSecret) {
+	if !sameBytes(session.SigningKey(), cpSecret) {
 		t.Fatal("session HMAC was not restored from last-known-good snapshot")
 	}
 	if providers := idpRegistry.EnabledProviders(); len(providers) != 1 || providers[0].Name() != "saml:corp-saml" {
@@ -150,7 +153,7 @@ func TestClusterAuth_LastGoodSnapshotKeepsSAMLSessionPolicyLocal(t *testing.T) {
 		Provider: "corp-saml",
 	}), http.StatusForbidden)
 
-	clusterRoleIsDP.Store(true)
+	audit.SetDPMode(true)
 	activeDPClient.Store(&DataPlaneClient{})
 	dpControlPlanePollFailing.Store(true)
 	if got := checkDPLastGoodConfigSnapshot(); got.Status != diagWarn {
@@ -163,10 +166,10 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 	origRegistry := idpRegistry
 	origStore := globalConfigStore
 	origClusterStore := globalClusterStore
-	origSecret := append([]byte(nil), sessionSecret...)
+	origSecret := session.SigningKey()
 	origBaseURL := cfg.ProxyBaseURL()
 	origTrustForwarded := trustForwardedHeaders
-	origDP := clusterRoleIsDP.Load()
+	origDP := audit.DPMode()
 	origClient := activeDPClient.Load()
 	origPollFailing := dpControlPlanePollFailing.Load()
 	withDPLastGoodConfigTestGlobals(t)
@@ -175,10 +178,10 @@ func withClusterAuthLastGoodGlobals(t *testing.T) {
 		idpRegistry = origRegistry
 		globalConfigStore = origStore
 		globalClusterStore = origClusterStore
-		sessionSecret = origSecret
+		session.SetSigningKey(origSecret)
 		SetProxyBaseURL(origBaseURL)
 		trustForwardedHeaders = origTrustForwarded
-		clusterRoleIsDP.Store(origDP)
+		audit.SetDPMode(origDP)
 		activeDPClient.Store(origClient)
 		dpControlPlanePollFailing.Store(origPollFailing)
 	})

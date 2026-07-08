@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -22,12 +24,12 @@ func adminCtx(r *http.Request) *http.Request {
 // resetSetupLockout clears the per-IP lockout state apiSetupComplete uses
 // when validation fails. Without this, the lockout counter LEAKS ACROSS
 // tests (every TestAPISetupComplete_* test that hits a 4xx path triggers
-// loginLimiter.RecordFailure on the same setupKey "setup:127.0.0.1"), so
+// loginLimiter.RecordFailure on the same ("127.0.0.1", "setup") pair), so
 // after ~5 attempts in a single suite run the next test gets a 429 instead
 // of the expected 4xx — a flake that surfaces under -count>1 / -shuffle=on.
 // Tests calling apiSetupComplete should defer or invoke this helper.
 func resetSetupLockout() {
-	loginLimiter.RecordSuccess("setup:127.0.0.1")
+	loginLimiter.ResetUser("setup")
 }
 
 // jsonReq builds a request with a JSON body.
@@ -251,7 +253,7 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
-	defer func() { cfg.SetUnauthMode(false) }()
+	defer func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) }()
 
 	w := httptest.NewRecorder()
 	initSecret(t)
@@ -259,6 +261,49 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 		"unauth": true,
 	}))
 	assertStatus(t, w, http.StatusOK)
+}
+
+// TestAPISetupComplete_ConcurrentRequests_OnlyOneWins proves apiSetupComplete's
+// "callable once" contract holds under concurrency. The handler reads
+// cfg.IsConfigured() and only later calls cfg.SetAuth — a classic
+// check-then-act TOCTOU gap. On the real first-boot setup wizard, the
+// endpoint is reachable by anyone on the network before an admin account
+// exists, so a second requester racing the legitimate admin's first POST
+// must not also be able to provision a credential set.
+func TestAPISetupComplete_ConcurrentRequests_OnlyOneWins(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "")
+	defer func() { _ = cfg.SetAuth("", "") }()
+	initSecret(t)
+
+	const n = 20
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			body := map[string]any{
+				"user": fmt.Sprintf("admin%d", i),
+				"pass": "Password123",
+			}
+			apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", body))
+			codes[i] = w.Code
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("expected exactly 1 of %d concurrent /api/setup/complete requests to succeed, got %d successes; codes=%v", n, successes, codes)
+	}
 }
 
 // ─── /api/auth ────────────────────────────────────────────────────────────────
@@ -307,7 +352,7 @@ func TestAPIAuthLogin_InvalidCredentials(t *testing.T) {
 	initSecret(t)
 
 	// Reset lockout counter for this user to avoid test pollution.
-	loginLimiter.RecordSuccess("admin")
+	loginLimiter.ResetUser("admin")
 
 	w := httptest.NewRecorder()
 	apiAuthLogin(w, jsonReq(http.MethodPost, "/api/auth/login", map[string]string{

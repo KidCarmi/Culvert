@@ -25,14 +25,14 @@ import (
 	"testing"
 )
 
-// withTempConfigVersionsDir redirects configVersionsDir to the given
+// withTempConfigVersionsDir redirects the version store to the given
 // dir for the duration of the test, restoring the original value via
-// t.Cleanup. Returns the dir for convenience.
+// t.Cleanup.
 func withTempConfigVersionsDir(t *testing.T, dir string) {
 	t.Helper()
-	orig := configVersionsDir
-	configVersionsDir = dir
-	t.Cleanup(func() { configVersionsDir = orig })
+	orig := configVersions.Dir()
+	configVersions.SetDirForTest(dir)
+	t.Cleanup(func() { configVersions.SetDirForTest(orig) })
 }
 
 func writeVersionFile(t *testing.T, dir string, ver int, body string) {

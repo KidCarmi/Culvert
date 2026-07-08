@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // ── ConfigStore Tests ──────────────────────────────────────────────────────
@@ -235,106 +237,49 @@ func TestVerifyNode_ValidNode(t *testing.T) {
 	}
 }
 
-func testBGCtx() context.Context { //nolint:unused -- used by tests
+func testBGCtx() context.Context { //nolint:unused // used by tests
 	return context.Background()
 }
 
 // ensure context import is used
 var _ = context.Background
 
-// ── Session Revocation Persistence Tests ───────────────────────────────────
-
-func TestRevocationList_SaveAndLoad(t *testing.T) {
-	dir := t.TempDir()
-	origPath := revocationFilePath
-	defer func() { revocationFilePath = origPath }()
-	revocationFilePath = filepath.Join(dir, "revocations.json")
-
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	rl.Revoke("token-1", time.Now().Add(time.Hour))
-	rl.Revoke("token-2", time.Now().Add(2*time.Hour))
-
-	if err := rl.SaveRevocations(); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	// Load into fresh list.
-	rl2 := &revocationList{tokens: map[string]time.Time{}}
-	if err := rl2.LoadRevocations(); err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if !rl2.IsRevoked("token-1") {
-		t.Fatal("token-1 should be revoked after load")
-	}
-	if !rl2.IsRevoked("token-2") {
-		t.Fatal("token-2 should be revoked after load")
-	}
-}
-
-func TestRevocationList_SaveEmptyPath(t *testing.T) {
-	origPath := revocationFilePath
-	defer func() { revocationFilePath = origPath }()
-	revocationFilePath = ""
-
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	if err := rl.SaveRevocations(); err != nil {
-		t.Fatalf("save with empty path should be no-op: %v", err)
-	}
-}
-
-func TestRevocationList_LoadEmptyPath(t *testing.T) {
-	origPath := revocationFilePath
-	defer func() { revocationFilePath = origPath }()
-	revocationFilePath = ""
-
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	if err := rl.LoadRevocations(); err != nil {
-		t.Fatalf("load with empty path should be no-op: %v", err)
-	}
-}
-
-func TestRevocationList_LoadMissingFile(t *testing.T) {
-	origPath := revocationFilePath
-	defer func() { revocationFilePath = origPath }()
-	revocationFilePath = "/nonexistent/revocations.json"
-
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	if err := rl.LoadRevocations(); err != nil {
-		t.Fatalf("load of missing file should succeed (no-op): %v", err)
-	}
-}
+// ── Session secret startup shim tests ──────────────────────────────────────
+// (Revocation-list persistence tests moved to internal/session with the
+// ADR-0002 extraction; these stay because initSessionSecretFromConfig is the
+// main-side env/config wiring.)
 
 func TestInitSessionSecretFromConfig_Empty(t *testing.T) {
-	origSecret := sessionSecret
-	defer func() { sessionSecret = origSecret }()
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
 
 	// Empty string should be no-op.
 	initSessionSecretFromConfig("")
 }
 
 func TestInitSessionSecretFromConfig_Valid(t *testing.T) {
-	origSecret := sessionSecret
-	defer func() { sessionSecret = origSecret }()
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
 
 	// 32 bytes = 64 hex chars (test-only, not a real key)
 	hexKey := "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111" //nolint:gosec // test value
 	initSessionSecretFromConfig(hexKey)
-	if len(sessionSecret) != 32 {
-		t.Fatalf("session secret length = %d, want 32", len(sessionSecret))
+	if len(session.SigningKey()) != 32 {
+		t.Fatalf("session secret length = %d, want 32", len(session.SigningKey()))
 	}
 }
 
 func TestInitSessionSecretFromConfig_InvalidHex(t *testing.T) {
-	origSecret := sessionSecret
-	defer func() { sessionSecret = origSecret }()
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
 
 	initSessionSecretFromConfig("not-valid-hex!")
 	// Should keep the original secret (warning logged).
 }
 
 func TestInitSessionSecretFromConfig_TooShort(t *testing.T) {
-	origSecret := sessionSecret
-	defer func() { sessionSecret = origSecret }()
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
 
 	initSessionSecretFromConfig("aabb") // only 2 bytes
 	// Should keep the original secret.
@@ -381,7 +326,7 @@ func TestApplyConfigSnapshot(t *testing.T) {
 	}()
 
 	// Initialize required globals.
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	bl = blocklist.New()
 	ipf = &IPFilter{single: map[string]bool{}}
 	rl = &RateLimiter{}
 
@@ -420,10 +365,10 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 		cfg = origCfg
 	}()
 
-	bl = &Blocklist{exact: map[string]bool{}, wildcards: map[string]bool{}}
+	bl = blocklist.New()
 	bl.Add("test.com")
 	ipf = &IPFilter{single: map[string]bool{}}
-	ipf.SetMode("deny")
+	ipf.SetMode("block") // valid mode; snapshot must round-trip it
 	rl = &RateLimiter{}
 	rl.Configure(200, time.Minute)
 
@@ -431,7 +376,7 @@ func TestCurrentConfigSnapshot(t *testing.T) {
 	if len(snap.BlockedHosts) != 1 || snap.BlockedHosts[0] != "test.com" {
 		t.Fatalf("blocked hosts = %v", snap.BlockedHosts)
 	}
-	if snap.IPFilterMode != "deny" {
+	if snap.IPFilterMode != "block" {
 		t.Fatalf("IP filter mode = %q", snap.IPFilterMode)
 	}
 	if snap.RateLimitRPM != 200 {

@@ -1,0 +1,64 @@
+# E2E compose for the appliance-install → catalog-driven-update flow.
+#
+# This is the FAITHFUL appliance topology (unlike the maint-agent E2E which
+# drives the agent socket directly): the Control Plane that serves
+# /api/releases + /api/releases/dispatch runs INSIDE this proxy container — the
+# very container the maintenance agent recreates during an upgrade. So a
+# catalog-driven dispatch SIGKILLs its own dispatcher mid-flight (exactly what a
+# real self-updating appliance does), which is why the workflow verifies the
+# flip out-of-band via `docker inspect` and then reconciles via
+# POST /api/releases/dispatch/resume against the freshly-recreated CP.
+#
+# All tunables come from a rendered `.env` in the compose project dir (docker
+# compose auto-loads it); the maintenance agent's env is allowlisted and does
+# NOT inherit the workflow's shell env, so `.env` is the only reliable channel.
+#
+# The image is the FIXED local tag culvert/proxy:pinned — exactly what the agent
+# retags a pulled digest to (P1.4). The agent never edits this file; it only
+# runs `docker tag <repo@sha256> culvert/proxy:pinned` + `docker compose up -d`.
+services:
+  proxy:
+    image: culvert/proxy:pinned
+    container_name: culvert-e2e-proxy
+    # Run as the host runner uid so (a) the bind-mounted /data is shared-owned
+    # with the host-seeded catalog (read + rollback-floor write) and (b) the
+    # in-container CP connects to the agent UDS as an allow_peers-listed uid
+    # (host userns is off in CI, so the container uid == the host uid).
+    user: "${E2E_UID}:${E2E_GID}"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080" # data-plane proxy: /health, /ready, /metrics
+      - "127.0.0.1:9090:9090" # admin API (plain HTTP via -ui-no-tls): /api/releases
+    volumes:
+      # /data holds the seeded release_catalog/ + the release_catalog_state.json
+      # rollback floor. Host-owned so a re-seed between phases just overwrites.
+      - "${E2E_DATA}:/data"
+      # The agent's socket DIRECTORY (not the file) is mounted so the socket the
+      # host agent creates appears inside the container at a stable path.
+      - "${E2E_SOCK_DIR}:/run/culvert-maint"
+    environment:
+      - TZ=UTC
+      # Enforce-by-default trust: a present trust root arms VerifyEnforce, so an
+      # unsigned/tampered/expired catalog is refused (read AND dispatch paths).
+      - CULVERT_RELEASE_CATALOG_VERIFY=enforce
+      - "CULVERT_RELEASE_CATALOG_TRUST_KEYS=${E2E_TRUST_KEYS}"
+      # The repo the catalog's image.repo must match (else RefusedRepoMismatch)
+      # and that the agent pull binds to.
+      - "CULVERT_RELEASE_PROXY_REPO=${E2E_PROXY_REPO}"
+      # The CP-local maintenance agent (dispatch target "local").
+      - CULVERT_MAINT_AGENT_URL=unix:///run/culvert-maint/culvert-maint.sock
+    # Minimal flag set: dataDir defaults to /data so release_catalog/ resolves
+    # under the bind mount. No ui-users-file is configured, so the CP is in
+    # first-run bootstrap (unauth == admin) — the same posture catalog-e2e.yml
+    # uses to exercise the admin-gated dispatch without a login flow.
+    command: [
+      "-port",    "8080",
+      "-ui-port", "9090",
+      "-ui-no-tls"
+    ]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s

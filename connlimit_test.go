@@ -19,7 +19,7 @@ func TestGenerateRequestID(t *testing.T) {
 }
 
 func TestConnLimiter_Disabled(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	// Disabled by default: should always allow.
 	if !cl.Acquire("1.2.3.4") {
 		t.Fatal("disabled limiter should always allow")
@@ -28,7 +28,7 @@ func TestConnLimiter_Disabled(t *testing.T) {
 }
 
 func TestConnLimiter_Enabled(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	cl.Enable(3)
 
 	if !cl.Acquire("10.0.0.1") {
@@ -60,7 +60,7 @@ func TestConnLimiter_Enabled(t *testing.T) {
 }
 
 func TestConnLimiter_DifferentIPs(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	cl.Enable(1)
 
 	if !cl.Acquire("ip-a") {
@@ -78,7 +78,7 @@ func TestConnLimiter_DifferentIPs(t *testing.T) {
 }
 
 func TestConnLimiter_ReleaseCleanup(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	cl.Enable(10)
 	cl.Acquire("clean-ip")
 	cl.Release("clean-ip")
@@ -89,7 +89,7 @@ func TestConnLimiter_ReleaseCleanup(t *testing.T) {
 }
 
 func TestConnLimiter_Concurrent(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	cl.Enable(100)
 
 	var wg sync.WaitGroup
@@ -114,7 +114,7 @@ func TestConnLimiter_Concurrent(t *testing.T) {
 // while Acquire runs on the proxy hot path; the race detector must not flag
 // the maxPerIP read/write.
 func TestConnLimiter_ConcurrentEnableReconfigure(t *testing.T) {
-	cl := &ConnLimiter{conns: make(map[string]*int64)}
+	cl := newConnLimiter()
 	cl.Enable(100)
 
 	var wg sync.WaitGroup

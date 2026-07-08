@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# build-release-binaries — single source of truth for the RELEASE build command.
+#
+# Both the `release` matrix job and the `verify-reproducible` job (ci.yml) call
+# this composite with identical inputs, so the independent tag rebuild CANNOT
+# drift from the real release build. If the build command lived in two places,
+# the reproducibility check would silently become tautological (both copies
+# drift together) or falsely-red (they drift apart) — this action is the
+# anti-drift wall.
+#
+# Builds the proxy for the given GOOS/GOARCH, and (linux only, via
+# include-maint) the culvert-maint agent — a SEPARATE Go module, Linux-only by
+# design (SO_PEERCRED peer auth), version-stamped through its OWN symbol path.
+#
+# NOTE: checkout + setup-go-cache must run in the calling job BEFORE this action
+# (a local composite is resolved from the already-checked-out tree, and the Go
+# toolchain must already be installed). The maint toolchain is 1.25.11 too:
+# setup-go-cache pins the root go.mod version and GOTOOLCHAIN selects it for the
+# maint module (root 1.25.11 ≥ maint's `go 1.25`) — do NOT override
+# go-version-file to the maint module or the toolchains drift.
+# ─────────────────────────────────────────────────────────────────────────────
+name: "Build release binaries"
+description: "Byte-reproducible release build for one GOOS/GOARCH leg (proxy + optional culvert-maint)"
+
+inputs:
+  goos:
+    description: "Target GOOS"
+    required: true
+  goarch:
+    description: "Target GOARCH"
+    required: true
+  ext:
+    description: "Proxy binary extension (e.g. .exe for windows)"
+    required: false
+    default: ""
+  ref-name:
+    description: "Version string to stamp (github.ref_name); passed via env, never shell-interpolated"
+    required: true
+  include-maint:
+    description: "Also build culvert-maint (linux legs only)"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Download dependencies
+      shell: bash
+      run: go mod download
+
+    - name: Build proxy ${{ inputs.goos }}/${{ inputs.goarch }}
+      shell: bash
+      env:
+        GOOS: ${{ inputs.goos }}
+        GOARCH: ${{ inputs.goarch }}
+        CGO_ENABLED: "0"
+        # env-indirection: never shell-interpolate ref names (injection).
+        REF_NAME: ${{ inputs.ref-name }}
+      run: |
+        # -buildvcs=false: the binary must be byte-reproducible independent of
+        # working-tree state. Without it (auto), a non-gitignored untracked file
+        # (e.g. the sibling binary written by an earlier matrix step) flips the
+        # embedded vcs.modified and changes the hash — making the SLSA subject
+        # order-dependent. The commit is already carried by the git tag + SLSA
+        # provenance, so the embedded VCS stamp is redundant.
+        go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${REF_NAME}" \
+          -o culvert-${{ inputs.goos }}-${{ inputs.goarch }}${{ inputs.ext }} .
+
+    # Maintenance agent (cmd/culvert-maint) is a SEPARATE Go module and is
+    # Linux-only by design — build + ship it on the linux legs only. The version
+    # is stamped via the agent's OWN symbol path (culvert-maint/internal/server.Version),
+    # not main.version. CGO_ENABLED=0 yields a static binary; operators must use
+    # NUMERIC UIDs in allow_peers since pure-Go os/user cannot resolve NSS/LDAP.
+    - name: Download agent dependencies (linux)
+      if: ${{ inputs.include-maint == 'true' }}
+      shell: bash
+      working-directory: cmd/culvert-maint
+      run: go mod download
+
+    - name: Build culvert-maint ${{ inputs.goos }}/${{ inputs.goarch }} (linux)
+      if: ${{ inputs.include-maint == 'true' }}
+      shell: bash
+      working-directory: cmd/culvert-maint
+      env:
+        GOOS: ${{ inputs.goos }}
+        GOARCH: ${{ inputs.goarch }}
+        CGO_ENABLED: "0"
+        # env-indirection: never shell-interpolate ref names (injection).
+        REF_NAME: ${{ inputs.ref-name }}
+      run: |
+        # -buildvcs=false (see the proxy build above): REQUIRED here — this
+        # module has no own .git and reads the ROOT repo status, and the proxy
+        # binary written by the earlier step is an untracked, non-gitignored
+        # sibling, so `auto` would stamp vcs.modified=true and produce an
+        # order-dependent hash. false makes it byte-reproducible. The -o path is
+        # ABSOLUTE ($GITHUB_WORKSPACE) so the binary lands at the repo root
+        # regardless of this step's working-directory — the SLSA subject line
+        # (computed from the repo root) is the BARE basename, so the verify job
+        # must sha256sum it from $GITHUB_WORKSPACE with a bare name too.
+        go build -trimpath -buildvcs=false -ldflags="-s -w -X culvert-maint/internal/server.Version=${REF_NAME}" \
+          -o "${GITHUB_WORKSPACE}/culvert-maint-${{ inputs.goos }}-${{ inputs.goarch }}" .

@@ -10,6 +10,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ── Log levels ───────────────────────────────────────────────────────────────
@@ -58,9 +61,12 @@ func ParseLogLevel(s string) LogLevel {
 // logLevel is the global minimum log level. Atomically accessed.
 var logLevel atomic.Int32
 
-// SetLogLevel sets the global minimum log level.
+// SetLogLevel sets the global minimum log level. The debug-enabled boolean is
+// mirrored into the obs facade so internal/* packages (which cannot read
+// main's level state) gate their Debugf lines identically.
 func SetLogLevel(l LogLevel) {
 	logLevel.Store(int32(l))
+	obs.SetDebugEnabled(l <= LevelDebug)
 }
 
 // GetLogLevel returns the current global minimum log level.
@@ -72,18 +78,9 @@ func GetLogLevel() LogLevel {
 // These wrap the global logger with level filtering.
 // Printf remains an alias for Infof (backward compatibility — all 418 existing
 // logger.Printf calls continue to work at INFO level).
-
-func logDebugf(format string, args ...any) {
-	if GetLogLevel() <= LevelDebug {
-		logger.Printf("DEBUG "+format, args...)
-	}
-}
-
-func logInfof(format string, args ...any) {
-	if GetLogLevel() <= LevelInfo {
-		logger.Printf("INFO "+format, args...)
-	}
-}
+// logDebugf was removed when its last caller moved to internal/threatfeed
+// (which uses the level-gated obs.Debugf); main code needing a debug line
+// uses obs.Debugf too, or logger.Printf("DEBUG ...") behind GetLogLevel.
 
 func logWarnf(format string, args ...any) {
 	if GetLogLevel() <= LevelWarn {
@@ -97,61 +94,14 @@ func logErrorf(format string, args ...any) {
 }
 
 // ── Rotating file writer ─────────────────────────────────────────────────────
+// rotatingFile moved to internal/fileutil (ADR-0002, store.go decomposition
+// Phase B — the audit engine shares it); the aliases keep the logger and
+// request-log call sites unchanged.
 
-// rotatingFile wraps a log file and rotates it when it exceeds maxBytes.
-type rotatingFile struct {
-	mu       sync.Mutex
-	path     string
-	maxBytes int64
-	file     *os.File
-	size     int64
-}
+type rotatingFile = fileutil.RotatingFile
 
 func newRotatingFile(path string, maxMB int) (*rotatingFile, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return nil, err
-	}
-	info, _ := f.Stat()
-	var sz int64
-	if info != nil {
-		sz = info.Size()
-	}
-	maxBytes := int64(maxMB) * 1024 * 1024
-	if maxBytes <= 0 {
-		// Zero or negative (e.g. a stray -log-max-mb -1) would make the
-		// Write-time rotation check size+len > maxBytes always true, rotating
-		// on every write and thrashing the disk. Fall back to the default.
-		maxBytes = 50 * 1024 * 1024 // 50 MB default
-	}
-	return &rotatingFile{path: path, maxBytes: maxBytes, file: f, size: sz}, nil
-}
-
-func (r *rotatingFile) Write(p []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.size+int64(len(p)) > r.maxBytes {
-		r.file.Close()
-		// Remove any previous rotated file before renaming the current one.
-		// This prevents unbounded growth from accumulating stale .1 files.
-		_ = os.Remove(r.path + ".1")
-		_ = os.Rename(r.path, r.path+".1")
-		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-		if err != nil {
-			return 0, err
-		}
-		r.file = f
-		r.size = 0
-	}
-
-	n, err := r.file.Write(p)
-	r.size += int64(n)
-	return n, err
-}
-
-func (r *rotatingFile) Close() error {
-	return r.file.Close()
+	return fileutil.NewRotatingFile(path, maxMB)
 }
 
 // ── JSON log writer ──────────────────────────────────────────────────────────

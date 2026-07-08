@@ -1,0 +1,12 @@
+goos: linux
+goarch: amd64
+pkg: github.com/KidCarmi/Culvert
+BenchmarkPolicyEvaluate_NoMatch/rules=10-4         	     300	       561 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=100-4        	     300	      3001 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=1000-4       	     300	     27583 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_NoMatch/rules=10000-4      	     300	    281002 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=11-4       	     300	      1264 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=101-4      	     300	      4920 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=1001-4     	     300	     27793 ns/op	     144 B/op	       4 allocs/op
+BenchmarkPolicyEvaluate_MatchLast/rules=10001-4    	     300	    281007 ns/op	     144 B/op	       4 allocs/op
+BenchmarkScrubForwardedHeaders-4                   	     300	      2243 ns/op	    1040 B/op	      13 allocs/op

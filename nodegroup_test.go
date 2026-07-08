@@ -138,7 +138,7 @@ func TestNodeGroupStore_NodesInGroup(t *testing.T) {
 		{NodeID: "n4"}, // no labels
 	}
 
-	matched := s.NodesInGroup("us-nodes", nodes)
+	matched := nodesInGroup(s, "us-nodes", nodes)
 	if len(matched) != 2 {
 		t.Fatalf("expected 2 nodes in us-nodes, got %d", len(matched))
 	}
@@ -151,7 +151,7 @@ func TestNodeGroupStore_NodesInGroup(t *testing.T) {
 	}
 
 	// Unknown group returns nil.
-	if got := s.NodesInGroup("nonexistent", nodes); got != nil {
+	if got := nodesInGroup(s, "nonexistent", nodes); got != nil {
 		t.Fatalf("expected nil for unknown group, got %v", got)
 	}
 }

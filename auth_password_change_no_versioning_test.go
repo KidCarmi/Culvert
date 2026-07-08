@@ -52,18 +52,13 @@ import (
 func snapshotConfigVersionsDir(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
-	origDir := configVersionsDir
-	configVersionsDir = tmp
-	t.Cleanup(func() { configVersionsDir = origDir })
-
-	configVersionMu.Lock()
-	origSeq := configVersionSeq
-	configVersionSeq = 0
-	configVersionMu.Unlock()
+	origDir := configVersions.Dir()
+	origSeq := configVersions.Seq()
+	configVersions.SetDirForTest(tmp)
+	configVersions.SetSeqForTest(0)
 	t.Cleanup(func() {
-		configVersionMu.Lock()
-		configVersionSeq = origSeq
-		configVersionMu.Unlock()
+		configVersions.SetDirForTest(origDir)
+		configVersions.SetSeqForTest(origSeq)
 	})
 	return tmp
 }

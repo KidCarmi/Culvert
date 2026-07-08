@@ -66,13 +66,14 @@ func main() {
 // tag, so CULVERT_PROXY_IMAGE and its env_keep are gone.
 func newRunner(cfg *config.Config) (*runner.Runner, error) {
 	return runner.New(runner.Options{
-		ComposeProjectDir: cfg.ComposeProjectDir,
-		ComposeFile:       cfg.ComposeFile,
-		UseSudo:           cfg.PrivilegeMode == config.PrivilegeSudoers,
-		StageTimeout:      cfg.StageTimeout,
-		ProxyRepo:         cfg.ProxyRepo,
-		EnvAllow:          []string{runner.EnvCulvertBackupPassphrase},
-		EnvOverlayOnly:    []string{runner.EnvCulvertBackupPassphrase},
+		ComposeProjectDir:   cfg.ComposeProjectDir,
+		ComposeFile:         cfg.ComposeFile,
+		ComposeOverrideFile: cfg.ComposeOverrideFile,
+		UseSudo:             cfg.PrivilegeMode == config.PrivilegeSudoers,
+		StageTimeout:        cfg.StageTimeout,
+		ProxyRepo:           cfg.ProxyRepo,
+		EnvAllow:            []string{runner.EnvCulvertBackupPassphrase},
+		EnvOverlayOnly:      []string{runner.EnvCulvertBackupPassphrase},
 	})
 }
 

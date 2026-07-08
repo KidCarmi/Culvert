@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 // ── Config tests ───────────────────────────────────────────────────────────────
@@ -51,65 +53,10 @@ func TestConfig_ConcurrentAccess(t *testing.T) {
 }
 
 // ── LogEntry / logAdd / logGet tests ──────────────────────────────────────────
-
-func newTestLog() (add func(LogEntry), get func() []LogEntry, clear func()) {
-	var mu sync.Mutex
-	var entries []LogEntry
-	add = func(e LogEntry) {
-		mu.Lock()
-		defer mu.Unlock()
-		entries = append(entries, e)
-		if len(entries) > maxLogs {
-			entries = entries[len(entries)-maxLogs:]
-		}
-	}
-	get = func() []LogEntry {
-		mu.Lock()
-		cp := make([]LogEntry, len(entries))
-		copy(cp, entries)
-		mu.Unlock()
-		// reverse
-		for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
-			cp[i], cp[j] = cp[j], cp[i]
-		}
-		return cp
-	}
-	clear = func() {
-		mu.Lock()
-		entries = nil
-		mu.Unlock()
-	}
-	return
-}
-
-func TestLog_OrderedMostRecentFirst(t *testing.T) {
-	add, get, clear := newTestLog()
-	defer clear()
-
-	add(LogEntry{TS: 1, Host: "first"})
-	add(LogEntry{TS: 2, Host: "second"})
-	add(LogEntry{TS: 3, Host: "third"})
-
-	got := get()
-	if len(got) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(got))
-	}
-	if got[0].Host != "third" {
-		t.Errorf("most recent entry should be first, got %q", got[0].Host)
-	}
-}
-
-func TestLog_MaxCapacity(t *testing.T) {
-	add, get, clear := newTestLog()
-	defer clear()
-
-	for i := 0; i < maxLogs+50; i++ {
-		add(LogEntry{TS: int64(i), Host: "h"})
-	}
-	if got := get(); len(got) != maxLogs {
-		t.Errorf("expected maxLogs=%d entries, got %d", maxLogs, len(got))
-	}
-}
+// The ring order/capacity tests moved to internal/reqlog (ADR-0002, store.go
+// decomposition Phase C) — and now exercise the REAL ring via
+// reqlog.SwapRingForTest instead of the local reimplementation they used
+// here (newTestLog, deleted with the move).
 
 // ── Uptime helper ─────────────────────────────────────────────────────────────
 
@@ -134,9 +81,9 @@ func TestUptime_Format(t *testing.T) {
 // ── Audit log ─────────────────────────────────────────────────────────────────
 
 func resetAuditLog() {
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
+	// Clear the ring (snapshot deliberately dropped — matches the
+	// pre-extraction `auditLog = nil` reset semantics).
+	_ = audit.SwapRingForTest()
 }
 
 func TestAuditLog_AddAndGet(t *testing.T) {

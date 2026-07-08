@@ -125,6 +125,28 @@ services:
       # logs (/data/logstore) and falls back to the CA passphrase when unset.
       - CULVERT_CA_PASSPHRASE=${CULVERT_CA_PASSPHRASE:-}
       - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
+      # Release Management catalog/dispatch config. The maint-agent URL is
+      # intentionally supplied only by docker-compose.maint-agent.yml, because
+      # it is valid only when the host agent socket is mounted.
+      - CULVERT_RELEASE_PROXY_REPO=${CULVERT_RELEASE_PROXY_REPO:-}
+      - CULVERT_RELEASE_CATALOG_TRUST_KEYS=${CULVERT_RELEASE_CATALOG_TRUST_KEYS:-}
+      # Break-glass ONLY. Catalog signature verification is enforce-by-default
+      # whenever a trust root is present; set this to permissive/disabled to
+      # deliberately relax it (e.g. local dev / unsigned catalog). Leave unset
+      # in production. PUBLIC keys only above — never private signing material.
+      - CULVERT_RELEASE_CATALOG_VERIFY=${CULVERT_RELEASE_CATALOG_VERIFY:-}
+      # OPTIONAL signed-catalog auto-seed origin (P1.7). When set AND trust roots
+      # are present, the Control Plane fetches + verifies the signed catalog from
+      # this URL at startup. Verification happens in the binary; unset ⇒ no fetch.
+      # The installer never bakes a default URL.
+      - CULVERT_RELEASE_CATALOG_URL=${CULVERT_RELEASE_CATALOG_URL:-}
+      # OPTIONAL keyless (Sigstore-identity) trust overrides (P2b). Break-glass /
+      # fork-mirror use only — the official identity + trusted root are baked at
+      # build time. IDENTITY is JSON {"issuer","san_regex"}; TRUSTED_ROOT is a path
+      # to a custom Sigstore TUF trusted_root.json. PUBLIC trust material only —
+      # never private signing keys. Unset ⇒ baked defaults (scheme dormant in OSS).
+      - CULVERT_RELEASE_SIGSTORE_IDENTITY=${CULVERT_RELEASE_SIGSTORE_IDENTITY:-}
+      - CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT=${CULVERT_RELEASE_SIGSTORE_TRUSTED_ROOT:-}
     command: [
       "-port",           "8080",
       "-ui-port",        "9090",
@@ -143,6 +165,7 @@ services:
       "-fileprofiles-file", "/data/fileprofiles.json",
       "-idp-profiles-file", "/data/idp_profiles.json"
       # Optional extras — uncomment as needed:
+      # "-ha-etcd-endpoints", "http://etcd:2379",  # ADR-0005 fencing lease (needs --profile ha)
       # "-syslog",          "udp://10.0.0.1:514",
       # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",
       # "-session-timeout", "8",
@@ -150,6 +173,39 @@ services:
     ]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── etcd fencing-lease witness (ADR-0005) ──────────────────────────────
+  # OPTIONAL, profile-gated: enables SAFE automatic HA failover by arbitrating
+  # leadership through a fencing lease. Start with:
+  #
+  #   docker compose --profile ha up -d
+  #
+  # then add to the proxy command on BOTH Control Planes:
+  #   "-ha-etcd-endpoints", "http://etcd:2379",
+  #
+  # LAB/SINGLE-HOST ONLY as configured here (plaintext client port, never
+  # published to the host, single member). A witness on the same host as a
+  # CP cannot arbitrate that host's failure — production runs etcd on a
+  # THIRD machine (or a 3-node cluster) with TLS (-ha-etcd-ca/-cert/-key).
+  # See docs/operator/ha-lease-failover.md.
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.13   # matches the etcd client pinned in go.mod
+    container_name: culvert-etcd
+    profiles: ["ha"]
+    restart: unless-stopped
+    command:
+      - etcd
+      - --name=culvert-witness
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -204,3 +260,4 @@ volumes:
   clamav-db:        # ClamAV signature database — persisted to skip re-download on restart
   updater-state:   # writable rollback state for the updater sidecar (survives self-update)
   culvert-backups: # backup archives produced by the cli service (D1.5; mounted at /backup, only in cli)
+  etcd-data:       # fencing-lease witness state (ADR-0005; only with --profile ha)

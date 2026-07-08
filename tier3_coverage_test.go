@@ -1,90 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
-// ─── sanitizeYARAName ─────────────────────────────────────────────────────────
-
-func TestSanitizeYARAName_Valid(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"rule1", "rule1"},
-		{"Rule_1-foo", "Rule_1-foo"},
-		{"  trim  ", "trim"},
-		{"name.yar", "name"},
-		{"name.yara", "name"},
-		{"A", "A"},
-	}
-	for _, c := range cases {
-		got, err := sanitizeYARAName(c.in)
-		if err != nil {
-			t.Errorf("sanitizeYARAName(%q) unexpected error: %v", c.in, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("sanitizeYARAName(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestSanitizeYARAName_Invalid(t *testing.T) {
-	bad := []string{
-		"",
-		"   ",
-		"..",
-		"../etc/passwd",
-		"foo/bar",
-		"foo bar",
-		"foo\\bar",
-		"foo;rm",
-		"foo$bar",
-		strings.Repeat("a", 65),
-	}
-	for _, in := range bad {
-		if _, err := sanitizeYARAName(in); err == nil {
-			t.Errorf("sanitizeYARAName(%q) expected error, got nil", in)
-		}
-	}
-}
-
-// ─── resolveRulePath ──────────────────────────────────────────────────────────
-
-func TestResolveRulePath_Basic(t *testing.T) {
-	dir := t.TempDir()
-	y := &YARARuleSet{dir: dir}
-
-	path, got, err := y.resolveRulePath("myrule")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != filepath.Clean(dir) {
-		t.Errorf("dir = %q, want %q", got, dir)
-	}
-	want := filepath.Join(dir, "myrule.yar")
-	if path != want {
-		t.Errorf("path = %q, want %q", path, want)
-	}
-}
-
-func TestResolveRulePath_NoDirConfigured(t *testing.T) {
-	y := &YARARuleSet{}
-	if _, _, err := y.resolveRulePath("rule"); err == nil {
-		t.Fatal("expected error when dir is empty")
-	}
-}
-
-func TestResolveRulePath_InvalidName(t *testing.T) {
-	y := &YARARuleSet{dir: t.TempDir()}
-	if _, _, err := y.resolveRulePath("../escape"); err == nil {
-		t.Fatal("expected error for traversal attempt")
-	}
-}
+// sanitizeYARAName + resolveRulePath tests moved to internal/yara (ADR-0002) —
+// they exercise the unexported helpers + the dir field.
 
 // ─── ReadRule / WriteRule / DeleteRule ────────────────────────────────────────
 
@@ -311,7 +234,7 @@ func TestValidateYARASource_PartialSkip(t *testing.T) {
 // ─── ContentScanner DPI bypass hosts (Tier 3.4) ───────────────────────────────
 
 func TestContentScanner_BypassHosts_SetGetIs(t *testing.T) {
-	s := &ContentScanner{maxBytes: 1 << 20}
+	s := newContentScanner(1 << 20)
 	s.SetBypassHosts([]string{"Example.com", "  internal.local  ", ""})
 
 	list := s.BypassHosts()
@@ -351,7 +274,7 @@ func TestContentScanner_BypassHosts_LoadSave(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi.json")
 
-	s := &ContentScanner{maxBytes: 1 << 20}
+	s := newContentScanner(1 << 20)
 	if err := s.Load(path); err != nil {
 		t.Fatalf("Load missing file: %v", err)
 	}
@@ -362,7 +285,7 @@ func TestContentScanner_BypassHosts_LoadSave(t *testing.T) {
 	s.Save()
 
 	// Re-load in a fresh scanner.
-	s2 := &ContentScanner{maxBytes: 1 << 20}
+	s2 := newContentScanner(1 << 20)
 	if err := s2.Load(path); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -374,139 +297,5 @@ func TestContentScanner_BypassHosts_LoadSave(t *testing.T) {
 	}
 }
 
-// ─── ScanExclusionStore (Tier 3.3) ────────────────────────────────────────────
-
-func TestScanExclusionStore_ReplaceAndIsHashExcluded(t *testing.T) {
-	s := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	s.Replace([]string{"ABCDEF123", "  "}, []string{"Example.com", ""})
-
-	if !s.IsHashExcluded("abcdef123") {
-		t.Error("hash should be excluded (lowercased)")
-	}
-	if !s.IsHashExcluded("ABCDEF123") {
-		t.Error("hash should be excluded regardless of input case")
-	}
-	if s.IsHashExcluded("deadbeef") {
-		t.Error("unknown hash should not match")
-	}
-
-	if !s.IsHostExcluded("example.com") {
-		t.Error("host should be excluded")
-	}
-	if !s.IsHostExcluded("EXAMPLE.COM:443") {
-		t.Error("host with port should be excluded (case-insensitive)")
-	}
-	if s.IsHostExcluded("other.com") {
-		t.Error("false positive on host")
-	}
-	if s.IsHostExcluded("") {
-		t.Error("empty host should not match")
-	}
-}
-
-func TestScanExclusionStore_NilReceiver(t *testing.T) {
-	var s *ScanExclusionStore
-	if s.IsHashExcluded("x") {
-		t.Error("nil receiver hash")
-	}
-	if s.IsHostExcluded("example.com") {
-		t.Error("nil receiver host")
-	}
-}
-
-func TestScanExclusionStore_Lists_Sorted(t *testing.T) {
-	s := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	s.Replace([]string{"beef", "dead", "cafe"}, []string{"c.com", "a.com", "b.com"})
-	hashes, hosts := s.Lists()
-	if len(hashes) != 3 || hashes[0] != "beef" || hashes[1] != "cafe" || hashes[2] != "dead" {
-		t.Errorf("hashes not sorted: %v", hashes)
-	}
-	if len(hosts) != 3 || hosts[0] != "a.com" || hosts[1] != "b.com" || hosts[2] != "c.com" {
-		t.Errorf("hosts not sorted: %v", hosts)
-	}
-}
-
-func TestScanExclusionStore_LoadSave_Roundtrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "excl.json")
-
-	s1 := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	// Load missing file is not an error.
-	if err := s1.Load(path); err != nil {
-		t.Fatalf("load missing: %v", err)
-	}
-
-	s1.Replace([]string{"h1", "h2"}, []string{"host1.example", "host2.example"})
-	if err := s1.Save(); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	// Fresh store reloads from disk.
-	s2 := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	if err := s2.Load(path); err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if !s2.IsHashExcluded("h1") || !s2.IsHashExcluded("h2") {
-		t.Error("hashes not roundtripped")
-	}
-	if !s2.IsHostExcluded("host1.example") || !s2.IsHostExcluded("host2.example") {
-		t.Error("hosts not roundtripped")
-	}
-}
-
-func TestScanExclusionStore_Load_InvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "excl.json")
-	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	if err := s.Load(path); err == nil {
-		t.Fatal("expected parse error")
-	}
-}
-
-func TestScanExclusionStore_Save_NoPath(t *testing.T) {
-	s := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	s.Replace([]string{"x"}, []string{"y"})
-	// No path configured → Save is a no-op, no error.
-	if err := s.Save(); err != nil {
-		t.Errorf("Save without path should be no-op: %v", err)
-	}
-}
-
-func TestScanExclusionStore_Load_ValidEnvelope(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "excl.json")
-	env := scanExclusionsFile{
-		Hashes: []string{"AAA", "BBB"},
-		Hosts:  []string{"Foo.Example"},
-	}
-	data, _ := json.Marshal(env)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s := &ScanExclusionStore{hashes: map[string]bool{}, hosts: map[string]bool{}}
-	if err := s.Load(path); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !s.IsHashExcluded("aaa") || !s.IsHashExcluded("bbb") {
-		t.Error("hashes not loaded/lowercased")
-	}
-	if !s.IsHostExcluded("foo.example") {
-		t.Error("host not loaded/lowercased")
-	}
-}
-
-// ─── sortStrings helper ───────────────────────────────────────────────────────
-
-func TestSortStrings(t *testing.T) {
-	in := []string{"c", "a", "b", "a"}
-	sortStrings(in)
-	if in[0] != "a" || in[1] != "a" || in[2] != "b" || in[3] != "c" {
-		t.Errorf("sortStrings = %v", in)
-	}
-
-	sortStrings(nil) // should not panic
-	sortStrings([]string{"only"})
-}
+// ScanExclusionStore + sortStrings tests moved to internal/scanexcl (ADR-0002)
+// — they exercise the unexported fields / helper, now in package scanexcl.

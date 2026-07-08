@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // restoreSchemaVersion is the manifest envelope version this PR accepts.
@@ -458,7 +460,7 @@ func validateTier1Artifacts(files map[string][]byte, passphrase string, summary 
 	}
 
 	if body, ok := files["data/ca.bundle"]; ok {
-		summary.CABundleEncrypted = len(body) >= 5 && [4]byte(body[:4]) == caMagic
+		summary.CABundleEncrypted = ca.HasBundleMagic(body)
 		if err := validateCABundle(body, passphrase); err != nil {
 			return fmt.Errorf("restore: ca.bundle: %w", err)
 		}
@@ -499,21 +501,21 @@ func validateClusterJSON(data []byte) (int, error) {
 
 func validateCABundle(data []byte, passphrase string) error {
 	var plaintext []byte
-	if len(data) >= 5 && [4]byte(data[:4]) == caMagic {
+	if ca.HasBundleMagic(data) {
 		// Encrypted bundle.
 		if passphrase == "" {
 			return fmt.Errorf("encrypted bundle but no passphrase available (set CULVERT_CA_PASSPHRASE)")
 		}
 		var err error
-		plaintext, err = decryptBundle(data, []byte(passphrase))
+		plaintext, err = ca.DecryptBundle(data, []byte(passphrase))
 		if err != nil {
 			return fmt.Errorf("decrypt: %w", err)
 		}
 	} else {
 		plaintext = data
 	}
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
-	if err := cm.importBundle(plaintext); err != nil {
+	cm := ca.New()
+	if err := cm.ImportBundle(plaintext); err != nil {
 		return fmt.Errorf("import: %w", err)
 	}
 	return nil
@@ -908,6 +910,65 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
 	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
 	return nil
+}
+
+// checkInterruptedRestore is the boot-time guard for RISK-005. A restore commit
+// killed in the critical window (after `os.Rename(dataDir → .bak)` and before
+// `os.Rename(staging → dataDir)`, runRestoreCommit steps 6–7) leaves dataDir
+// ABSENT while its `<dataDir>.bak.<ts>-<pid>` sibling (the previous data, moved
+// aside) — and usually a matching `.staging.<ts>-<pid>` (the new data, staged
+// but not yet promoted) — remain on disk. Starting normally in that state would
+// create a fresh empty dataDir and SILENTLY lose the operator's data, with the
+// recovery `.bak` only discoverable by hand.
+//
+// This guard, called once at startup after the one-shot CLI commands (so
+// --list-restore-leftovers / --cleanup-restore-leftovers still run), refuses to
+// boot when dataDir is missing AND an interrupted-restore `.bak` sibling exists,
+// printing the exact recovery moves. It reuses the D1.3c leftover scanner
+// (discoverLeftovers), which only admits safe, exact-name, sibling directories.
+//
+// A genuine fresh install (dataDir absent, NO `.bak` sibling) is unaffected:
+// the guard returns nil and normal first-run initialization proceeds.
+func checkInterruptedRestore(dataDir string) error {
+	if _, err := os.Stat(dataDir); err == nil {
+		return nil // dataDir present — normal boot
+	} else if !os.IsNotExist(err) {
+		return nil // unexpected stat error — don't block boot on a transient FS issue
+	}
+	// dataDir is absent. Scan for interrupted-restore siblings.
+	leftovers, _, err := discoverLeftovers(dataDir)
+	if err != nil {
+		return nil // cannot scan the parent dir — nothing to assert
+	}
+	var newestBak, newestStaging *leftover
+	for i := range leftovers {
+		lo := &leftovers[i]
+		switch lo.Kind {
+		case leftoverBak:
+			if newestBak == nil || lo.Timestamp.After(newestBak.Timestamp) {
+				newestBak = lo
+			}
+		case leftoverStaging:
+			if newestStaging == nil || lo.Timestamp.After(newestStaging.Timestamp) {
+				newestStaging = lo
+			}
+		}
+	}
+	// Only a `.bak` (the moved-aside previous data) marks an interrupted
+	// restore. No `.bak` ⇒ a genuine fresh install — let boot proceed.
+	if newestBak == nil {
+		return nil
+	}
+	msg := fmt.Sprintf("interrupted restore detected: data directory %q is missing, but the previous "+
+		"data was preserved at %q (a restore commit was killed before it finished). "+
+		"Recover by choosing ONE, then start Culvert again:\n"+
+		"    REVERT to the previous data:            mv %q %q",
+		dataDir, newestBak.Path, newestBak.Path, dataDir)
+	if newestStaging != nil {
+		msg += fmt.Sprintf("\n    COMPLETE the restore (promote staged):  mv %q %q", newestStaging.Path, dataDir)
+	}
+	msg += "\n    (run --list-restore-leftovers to inspect all leftovers)"
+	return fmt.Errorf("%s", msg)
 }
 
 // stageArtifacts creates stagingDir and populates it according to the

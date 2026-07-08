@@ -50,6 +50,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/blocklist"
 )
 
 // snapshotBL captures and restores the package-global bl pointer
@@ -86,18 +88,12 @@ func TestApplyConfigSnapshot_BlocklistPersist(t *testing.T) {
 		t.Fatalf("seed write: %v", err)
 	}
 
-	bl = &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	bl = blocklist.New()
 	if err := bl.Load(path); err != nil {
 		t.Fatalf("bl.Load: %v", err)
 	}
-	if bl.path == "" {
-		t.Fatal("invariant: bl.path should be set after Load")
-	}
+	// (bl's persistence path being set after Load is proven by the on-disk
+	// assertions below — the path field is package-private post-extraction.)
 	if !bl.IsBlocked("boot-time-host.example") {
 		t.Fatal("invariant: initial host should be blocked after Load")
 	}
@@ -153,12 +149,7 @@ func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
 		t.Fatalf("seed main: %v", err)
 	}
 
-	bl = &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	bl = blocklist.New()
 	if err := bl.Load(path); err != nil {
 		t.Fatalf("bl.Load: %v", err)
 	}
@@ -213,11 +204,15 @@ func TestApplyConfigSnapshot_BlocklistPreservesLocalState(t *testing.T) {
 		t.Errorf("post-apply: exceptions = %v, want [never-block.example]", gotExceptions)
 	}
 	//   (4) Manual attribution survives in metadata.
-	bl.mu.RLock()
-	hasManual := bl.manual["admin-blocked.example"]
-	bl.mu.RUnlock()
+	hasManual := false
+	for _, e := range bl.ListWithSource() {
+		if e.Host == "admin-blocked.example" && e.Source == "manual" {
+			hasManual = true
+			break
+		}
+	}
 	if !hasManual {
-		t.Errorf("post-apply: bl.manual lost admin-blocked.example attribution")
+		t.Errorf("post-apply: manual attribution lost for admin-blocked.example")
 	}
 }
 
@@ -237,12 +232,7 @@ func TestApplyConfigSnapshot_BlocklistPreservesMode(t *testing.T) {
 		t.Fatalf("seed main: %v", err)
 	}
 
-	bl = &Blocklist{
-		exact:      map[string]bool{},
-		wildcards:  map[string]bool{},
-		manual:     map[string]bool{},
-		exceptions: map[string]bool{},
-	}
+	bl = blocklist.New()
 	if err := bl.Load(path); err != nil {
 		t.Fatalf("bl.Load: %v", err)
 	}

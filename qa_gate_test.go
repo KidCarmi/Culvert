@@ -6,17 +6,18 @@ package main
 //
 // The tests are grouped by defect they cover:
 //
-//   1. TOTP empty-secret rejection            (totp.go)
-//   2. TOTP replay protection                 (totp.go + store.go)
-//   3. TOTP code-format hardening             (totp.go)
-//   4. TOTP positive round-trip (HOTP vector) (totp.go)
-//   5. sanitizeLog control-byte strip         (proxy.go)
-//   6. privateCIDRs coverage expansion        (proxy.go)
-//   7. SSRF ssrfControl Dialer.Control hook   (security.go)
-//   8. Config.TOTPLastCounter persistence     (store.go)
+//   1. sanitizeLog control-byte strip         (proxy.go)
+//   2. privateCIDRs coverage expansion        (proxy.go)
+//   3. SSRF ssrfControl Dialer.Control hook   (security.go)
+//   4. Config.TOTPLastCounter persistence     (store.go)
+//
+// The TOTP algorithm tests (empty-secret rejection, replay protection, code-format
+// hardening, positive round-trip) moved to internal/totp/totp_test.go when totp.go
+// was extracted into the internal/totp package (ADR-0002). Config.TOTPLastCounter
+// persistence stays here — it exercises store.go, not the TOTP algorithm.
 
 import (
-	"encoding/base32"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -35,118 +36,6 @@ func newRequestWithHeader(key, value string) (*http.Request, error) {
 	req := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
 	req.Header.Set(key, value)
 	return req, nil
-}
-
-// ─── 1. TOTP empty-secret rejection ─────────────────────────────────────────
-
-func TestVerifyTOTP_RejectsEmptyAndBlankSecret(t *testing.T) {
-	// Historical bug: an empty base32 secret decoded to an empty HMAC key
-	// which still produced a deterministic (and predictable) OTP. verifyTOTP
-	// must now fail-closed on empty/whitespace secrets.
-	cases := []string{"", "   ", "\t\n"}
-	for _, s := range cases {
-		if verifyTOTP(s, "123456") {
-			t.Errorf("verifyTOTP must reject empty/blank secret %q", s)
-		}
-	}
-}
-
-// ─── 2. TOTP replay protection ──────────────────────────────────────────────
-
-// deriveCodeAt produces the OTP a real authenticator would for (secret, t).
-func deriveCodeAt(t *testing.T, secret string, unix int64) string {
-	t.Helper()
-	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
-	if err != nil {
-		t.Fatalf("decode secret: %v", err)
-	}
-	return hotp(key, unix/totpPeriod)
-}
-
-func TestVerifyTOTPReturnCounter_ReplayRejected(t *testing.T) {
-	const secret = "JBSWY3DPEHPK3PXP" // RFC 6238 canonical test vector key
-	now := int64(1_700_000_000)       // deterministic moment
-	code := deriveCodeAt(t, secret, now)
-
-	// First use — must succeed and return the matching counter.
-	ok, counter := verifyTOTPReturnCounter(secret, code, now, 0)
-	if !ok || counter == 0 {
-		t.Fatalf("first use: ok=%v counter=%d, want ok=true counter>0", ok, counter)
-	}
-
-	// Same code a second later is still cryptographically valid, but MUST be
-	// rejected because its counter is <= lastCounter. Without replay
-	// protection an observer of a single OTP could reuse it for the
-	// remainder of the ~90s window.
-	ok2, _ := verifyTOTPReturnCounter(secret, code, now+1, counter)
-	if ok2 {
-		t.Fatalf("same code must be rejected as replay once lastCounter=%d is recorded", counter)
-	}
-
-	// And critically: the very next step of the SAME authenticator MUST still
-	// be accepted (replay protection must not lock the user out forever).
-	nextCode := deriveCodeAt(t, secret, now+totpPeriod)
-	if nextCode == code {
-		// Step boundary skipped; bump further to guarantee rollover.
-		nextCode = deriveCodeAt(t, secret, now+2*totpPeriod)
-	}
-	ok3, nextCounter := verifyTOTPReturnCounter(secret, nextCode, now+totpPeriod+1, counter)
-	if !ok3 {
-		t.Fatalf("next step code must validate after replay-guarded lastCounter=%d", counter)
-	}
-	if nextCounter <= counter {
-		t.Fatalf("nextCounter=%d must advance past lastCounter=%d", nextCounter, counter)
-	}
-}
-
-func TestVerifyTOTPReturnCounter_SkewWindow(t *testing.T) {
-	const secret = "JBSWY3DPEHPK3PXP"
-	now := int64(1_700_000_000)
-
-	// A code from the PREVIOUS step is still accepted because totpSkew=1.
-	prev := deriveCodeAt(t, secret, now-totpPeriod)
-	ok, counter := verifyTOTPReturnCounter(secret, prev, now, 0)
-	if !ok {
-		t.Fatalf("previous-step code must validate within ±%d skew", totpSkew)
-	}
-	if counter != now/totpPeriod-1 {
-		t.Fatalf("matched counter = %d, want %d", counter, now/totpPeriod-1)
-	}
-
-	// A code from TWO steps ago must NOT validate (outside skew).
-	tooOld := deriveCodeAt(t, secret, now-2*totpPeriod)
-	if ok, _ := verifyTOTPReturnCounter(secret, tooOld, now, 0); ok {
-		t.Fatal("code from two steps ago must be outside the skew window")
-	}
-}
-
-// ─── 3. TOTP code-format hardening ──────────────────────────────────────────
-
-func TestVerifyTOTP_RejectsNonDigitCode(t *testing.T) {
-	// Must reject codes that include non-digit runes even if the length is 6.
-	// Prevents base10/base32 confusion and ensures the constant-time compare
-	// only ever runs on like strings.
-	const secret = "JBSWY3DPEHPK3PXP"
-	bad := []string{"12345a", "12345 ", "abcdef", "12345\n", "١٢٣٤٥٦"}
-	for _, code := range bad {
-		if verifyTOTP(secret, code) {
-			t.Errorf("verifyTOTP must reject non-digit code %q", code)
-		}
-	}
-}
-
-// ─── 4. TOTP positive round-trip ────────────────────────────────────────────
-
-func TestVerifyTOTP_PositiveRoundTrip(t *testing.T) {
-	// Generating a code with the same secret/time MUST validate. Guards
-	// against silent hashing-algorithm regressions (the old `math.Pow10`
-	// modulus was replaced with a computed integer constant).
-	secret := strings.ToUpper("JBSWY3DPEHPK3PXP")
-	now := time.Now().Unix()
-	code := deriveCodeAt(t, secret, now)
-	if !verifyTOTP(secret, code) {
-		t.Fatalf("freshly generated code %q did not validate — HOTP regression", code)
-	}
 }
 
 // ─── 5. sanitizeLog control-byte strip ──────────────────────────────────────
@@ -331,13 +220,13 @@ func TestSSRFSafeDialer_RejectsLoopbackDial(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot bind loopback listener: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	addr := ln.Addr().String()
-	conn, err := ssrfSafeDialer.Dial("tcp", addr)
+	conn, err := ssrfSafeDialContext(context.Background(), "tcp", addr)
 	if err == nil {
-		conn.Close()
-		t.Fatalf("ssrfSafeDialer permitted loopback dial to %s — SSRF guard regression", addr)
+		_ = conn.Close()
+		t.Fatalf("SSRF-safe dialer permitted loopback dial to %s — SSRF guard regression", addr)
 	}
 }
 
@@ -564,12 +453,12 @@ func TestAPIAuthLogin_TOTPFailureRecordsLockout(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg.DeleteUIUser(user)
-		loginLimiter.RecordSuccess(user)
+		loginLimiter.ResetUser(user)
 	})
-	loginLimiter.RecordSuccess(user)
+	loginLimiter.ResetUser(user)
 	initSecret(t)
 
-	before := loginLimiter.AttemptsLeft(user)
+	before := loginLimiter.AttemptsLeft("127.0.0.1", user)
 
 	w := httptest.NewRecorder()
 	body := map[string]string{"user": user, "pass": pass, "totp": "000000"}
@@ -578,7 +467,7 @@ func TestAPIAuthLogin_TOTPFailureRecordsLockout(t *testing.T) {
 	if w.Code != http.StatusUnauthorized && w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 401/429 for bad TOTP, got %d body=%s", w.Code, w.Body.String())
 	}
-	after := loginLimiter.AttemptsLeft(user)
+	after := loginLimiter.AttemptsLeft("127.0.0.1", user)
 	if after >= before {
 		t.Fatalf("TOTP failure did not consume a lockout attempt: before=%d after=%d — "+
 			"regression of the OTP brute-force fix", before, after)

@@ -1,25 +1,37 @@
 package main
 
+// session.go — Session shim: aliases + startup wiring + HTTP cookie helpers
+// over internal/session (ADR-0002). The engine — signing-key holder (now
+// race-safe: the DP cluster sync replaces the key at runtime), token
+// encode/decode, revocation list + persistence, TTL, jti — lives in the
+// package. main keeps: env/config key priority (env is read HERE per the
+// startup-slice convention), the cookie helpers (isSecureRequest + the
+// Identity hub type), and the Session→Identity conversion.
+
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
-// ---------------------------------------------------------------------------
-// Session secret — configurable for multi-node deployments
-// ---------------------------------------------------------------------------
+type (
+	// Session is the payload stored inside the signed proxy session cookie.
+	Session = session.Session
+	// RevocationEntry is a single revoked session token for gRPC gossip.
+	RevocationEntry = session.RevocationEntry
+)
 
-var sessionSecret []byte
+const sessionCookieName = session.CookieName
+
+// sessionRevoked is the process-wide revocation list (package singleton;
+// pointer is stable — tests swap its contents, never the pointer).
+var sessionRevoked = session.Revoked
 
 // initSessionSecret sets the HMAC key for session cookies.
 // Priority: CULVERT_SESSION_SECRET env > config file > random.
@@ -29,32 +41,11 @@ func initSessionSecret() {
 		if err != nil || len(key) < 32 {
 			panic("CULVERT_SESSION_SECRET must be at least 32 bytes of hex (64 hex chars)")
 		}
-		sessionSecret = key
+		session.SetSigningKey(key)
 		logger.Printf("Session: using shared signing key from CULVERT_SESSION_SECRET")
 		return
 	}
-	sessionSecret = make([]byte, 32)
-	if _, err := rand.Read(sessionSecret); err != nil {
-		panic(fmt.Sprintf("session: failed to generate secret: %v", err))
-	}
-}
-
-// newSessionJti returns a fresh 128-bit random session identifier, hex
-// encoded. Stamped into every newly-issued Session by the cookie
-// issuers so two same-second logins for the same user produce distinct
-// b64 payloads (and therefore distinct HMACs and cookie values). The
-// only collision space is 2^128, far beyond birthday-bound concerns
-// for any plausible deployment.
-//
-// crypto/rand failure is treated the same as initSessionSecret's:
-// fail loudly. A session machinery that cannot generate randomness is
-// unsafe to keep running.
-func newSessionJti() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic(fmt.Sprintf("session: failed to generate jti: %v", err))
-	}
-	return hex.EncodeToString(b[:])
+	session.InitRandomKey()
 }
 
 // initSessionSecretFromConfig applies a config-file session secret.
@@ -68,161 +59,32 @@ func initSessionSecretFromConfig(hexKey string) {
 		logWarnf("Session: session_secret must be ≥32 bytes hex — ignoring, using random key")
 		return
 	}
-	sessionSecret = key
+	session.SetSigningKey(key)
 	logger.Printf("Session: using shared signing key from config file")
 }
 
-// ---------------------------------------------------------------------------
-// Session revocation list — invalidates tokens on explicit logout.
-// Entries are evicted lazily when their original expiry passes.
-// ---------------------------------------------------------------------------
+func newSessionJti() string { return session.NewJti() }
 
-type revocationList struct {
-	mu     sync.Mutex
-	tokens map[string]time.Time // b64 payload → session expiry
-	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
-}
+func getSessionTTL() time.Duration { return session.TTL() }
 
-var sessionRevoked = &revocationList{
-	tokens: map[string]time.Time{},
-	users:  map[string]time.Time{},
-}
+// SetSessionTTL updates the session lifetime. Clamped to [15min, 7d].
+func SetSessionTTL(d time.Duration) { session.SetTTL(d) }
 
-func (r *revocationList) Revoke(token string, exp time.Time) {
-	r.mu.Lock()
-	r.tokens[token] = exp
-	r.mu.Unlock()
-}
+func encodeSession(s *Session) (string, error) { return session.Encode(s) }
 
-func (r *revocationList) IsRevoked(token string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	exp, ok := r.tokens[token]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(r.tokens, token) // lazy eviction
-		return false
-	}
-	return true
-}
+func decodeSession(raw string) (*Session, error) { return session.Decode(raw) }
 
-// RevokeUser invalidates all sessions for a username. Active session cookies
-// for this user are rejected until the revocation expiry (max session TTL).
-// Called when a user account is deleted (Finding 5.2).
-func (r *revocationList) RevokeUser(username string) {
-	r.mu.Lock()
-	r.users[username] = time.Now().Add(getSessionTTL())
-	r.mu.Unlock()
-}
-
-// IsUserRevoked returns true if all sessions for the given username are revoked.
-func (r *revocationList) IsUserRevoked(username string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	exp, ok := r.users[username]
-	if !ok {
-		return false
+// sessionIdentity converts the session payload into the canonical Identity
+// object. (Was Session.Identity(); a method can no longer live on the
+// aliased package type because Identity is a main hub type.)
+func sessionIdentity(s *Session) *Identity {
+	return &Identity{
+		Sub:      s.Sub,
+		Email:    s.Email,
+		Name:     s.Name,
+		Groups:   s.Groups,
+		Provider: s.Provider,
 	}
-	if time.Now().After(exp) {
-		delete(r.users, username) // lazy eviction
-		return false
-	}
-	return true
-}
-
-// RevocationEntry is a single revoked session token for gRPC gossip.
-type RevocationEntry struct {
-	Token  string `json:"token"`
-	Expiry int64  `json:"expiry"` // Unix timestamp
-}
-
-// ExportRevocations returns all non-expired revocation entries for syncing.
-func (r *revocationList) ExportRevocations() []RevocationEntry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	now := time.Now()
-	entries := make([]RevocationEntry, 0, len(r.tokens))
-	for tok, exp := range r.tokens {
-		if now.After(exp) {
-			delete(r.tokens, tok)
-			continue
-		}
-		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
-	}
-	return entries
-}
-
-// MergeRevocations imports remote revocation entries (from other cluster nodes).
-// Only adds entries that are not yet expired and not already present.
-func (r *revocationList) MergeRevocations(entries []RevocationEntry) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	now := time.Now()
-	added := 0
-	for _, e := range entries {
-		exp := time.Unix(e.Expiry, 0)
-		if now.After(exp) {
-			continue // already expired
-		}
-		if _, exists := r.tokens[e.Token]; !exists {
-			r.tokens[e.Token] = exp
-			added++
-		}
-	}
-	return added
-}
-
-// Count returns the number of active revoked sessions.
-func (r *revocationList) Count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.tokens)
-}
-
-// revocationFilePath is the path used to persist revocations to disk.
-// Set via --revocations-file flag; empty means no persistence.
-var revocationFilePath string
-
-// SaveRevocations writes all non-expired revocations to disk as JSON.
-func (r *revocationList) SaveRevocations() error {
-	if revocationFilePath == "" {
-		return nil
-	}
-	entries := r.ExportRevocations()
-	data, err := json.Marshal(entries)
-	if err != nil {
-		return fmt.Errorf("marshal revocations: %w", err)
-	}
-	tmp := revocationFilePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write revocations: %w", err)
-	}
-	return os.Rename(tmp, revocationFilePath)
-}
-
-// LoadRevocations reads revocations from disk and merges them.
-func (r *revocationList) LoadRevocations() error {
-	if revocationFilePath == "" {
-		return nil
-	}
-	data, err := os.ReadFile(revocationFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read revocations: %w", err)
-	}
-	var entries []RevocationEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return fmt.Errorf("unmarshal revocations: %w", err)
-	}
-	added := r.MergeRevocations(entries)
-	if added > 0 {
-		logger.Printf("Session: loaded %d revocations from disk", added)
-	}
-	return nil
 }
 
 // revokeSessionCookie adds the cookie from r to the revocation list.
@@ -246,134 +108,6 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 			}
 		}
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Session type
-// ---------------------------------------------------------------------------
-
-const sessionCookieName = "ps_session"
-
-// uiSessionTTL is the lifetime of admin UI sessions.
-// Configurable at runtime via /api/session-timeout; default 8 hours.
-var (
-	uiSessionTTL   = 8 * time.Hour
-	uiSessionTTLMu sync.RWMutex
-)
-
-func getSessionTTL() time.Duration {
-	uiSessionTTLMu.RLock()
-	defer uiSessionTTLMu.RUnlock()
-	return uiSessionTTL
-}
-
-// SetSessionTTL updates the session lifetime. Clamped to [15min, 7d].
-func SetSessionTTL(d time.Duration) {
-	const minTTL = 15 * time.Minute
-	const maxTTL = 7 * 24 * time.Hour
-	if d < minTTL {
-		d = minTTL
-	}
-	if d > maxTTL {
-		d = maxTTL
-	}
-	uiSessionTTLMu.Lock()
-	uiSessionTTL = d
-	uiSessionTTLMu.Unlock()
-}
-
-// Session is the payload stored inside the signed proxy session cookie.
-// It carries just enough identity data to reconstruct an Identity object
-// without talking to the IdP on every request.
-type Session struct {
-	Sub      string   `json:"sub"`
-	Email    string   `json:"email"`
-	Name     string   `json:"name"`
-	Groups   []string `json:"grp,omitempty"`
-	Provider string   `json:"pvd"`
-	Role     string   `json:"role,omitempty"` // UI admin role: admin|operator|viewer
-	Exp      int64    `json:"exp"`            // Unix timestamp
-	// Jti is a 128-bit random session identifier (hex-encoded). Added in
-	// Phase C5.1 to make the JSON payload unique per login even when two
-	// logins for the same user happen in the same wall-clock second —
-	// without Jti the (Sub, Role, Exp-in-seconds) tuple yielded a
-	// byte-identical payload, identical b64, identical HMAC, and an
-	// effectively-revoked cookie if any prior login of that tuple had
-	// been revoked. omitempty keeps legacy cookies (issued before C5.1)
-	// decoding cleanly: their Jti unmarshals to "" and the field is
-	// simply absent on the wire.
-	Jti string `json:"jti,omitempty"`
-}
-
-// Identity converts the session payload into the canonical Identity object.
-func (s *Session) Identity() *Identity {
-	return &Identity{
-		Sub:      s.Sub,
-		Email:    s.Email,
-		Name:     s.Name,
-		Groups:   s.Groups,
-		Provider: s.Provider,
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Cookie encoding / decoding
-// ---------------------------------------------------------------------------
-
-// encodeSession serialises session data, signs it with HMAC-SHA256, and
-// returns a cookie-safe string: base64(json).HMAC.
-func encodeSession(s *Session) (string, error) {
-	payload, err := json.Marshal(s)
-	if err != nil {
-		return "", err
-	}
-	b64 := base64.RawURLEncoding.EncodeToString(payload)
-	mac := sessionMAC(b64)
-	return b64 + "." + mac, nil
-}
-
-// decodeSession parses and verifies a session cookie value.
-// Returns an error when the signature is invalid or the session has expired.
-func decodeSession(raw string) (*Session, error) {
-	dot := strings.LastIndex(raw, ".")
-	if dot < 0 {
-		return nil, fmt.Errorf("session: malformed cookie")
-	}
-	b64, mac := raw[:dot], raw[dot+1:]
-
-	// Constant-time MAC comparison.
-	expected := sessionMAC(b64)
-	if !hmac.Equal([]byte(mac), []byte(expected)) {
-		return nil, fmt.Errorf("session: invalid signature")
-	}
-
-	// Revocation check (explicit logout).
-	if sessionRevoked.IsRevoked(b64) {
-		return nil, fmt.Errorf("session: revoked")
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(b64)
-	if err != nil {
-		return nil, fmt.Errorf("session: base64 decode: %w", err)
-	}
-	var s Session
-	if err := json.Unmarshal(payload, &s); err != nil {
-		return nil, fmt.Errorf("session: json decode: %w", err)
-	}
-	if time.Now().Unix() > s.Exp {
-		return nil, fmt.Errorf("session: expired")
-	}
-	// User-level revocation (account deleted while session was active).
-	if s.Sub != "" && sessionRevoked.IsUserRevoked(s.Sub) {
-		return nil, fmt.Errorf("session: user revoked")
-	}
-	return &s, nil
-}
-
-func sessionMAC(data string) string {
-	h := hmac.New(sha256.New, sessionSecret)
-	h.Write([]byte(data))
-	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 }
 
 // ---------------------------------------------------------------------------

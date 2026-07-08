@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
 )
 
 func TestPublicIdPProfile_RedactsClientSecret(t *testing.T) {
@@ -161,16 +163,11 @@ func TestAPIIdPListPost_StoresAndRedactsClientSecret(t *testing.T) {
 
 func TestAPIIdPAudit_RedactsWriteOnlyFields(t *testing.T) {
 	origRegistry := idpRegistry
-	auditMu.Lock()
-	origAudit := append([]AuditEntry(nil), auditLog...)
-	auditMu.Unlock()
+	restoreAudit := audit.SwapRingForTest()
 	idpRegistry = &IdPRegistry{live: make(map[string]IdentityProvider)}
-	resetAuditLog()
 	t.Cleanup(func() {
 		idpRegistry = origRegistry
-		auditMu.Lock()
-		auditLog = origAudit
-		auditMu.Unlock()
+		restoreAudit()
 	})
 
 	createW := httptest.NewRecorder()

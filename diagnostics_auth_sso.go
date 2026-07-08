@@ -12,8 +12,8 @@ import (
 //
 // All functions here are REPORT-ONLY: they never mutate rules, never touch the
 // request path, and only build OperatorContractCheck rows (warn/fail). They are
-// pure over the supplied ruleset plus the two environmental facts they read
-// (UnauthMode and the live IdP registry via eligibleSSOProviders / idpRegistry).
+// pure over the supplied ruleset plus the live IdP registry (via
+// eligibleSSOProviders / idpRegistry).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // authSSORequiredDiagnostics reports operator risks for SSORequired (SSO) Stage-1
@@ -22,10 +22,13 @@ import (
 //   - auth_sso_no_idp                  FAIL — SSO rules but zero enabled interactive IdPs.
 //   - auth_sso_rule_no_eligible_provider FAIL — a rule's providerRefs resolve to none.
 //   - auth_sso_providerref_unavailable WARN — some (not all) refs disabled/deleted.
-//   - auth_sso_dead_under_unauth_mode  WARN — SSO rules dead under UnauthMode.
 //   - auth_sso_may_match_non_browser   WARN — protocol "" / connect can match non-browsers.
 //   - auth_sso_ambiguous_idp           WARN — multiple IdPs + empty providerRefs.
-func authSSORequiredDiagnostics(rules []PolicyRule, unauthMode bool) []OperatorContractCheck {
+//
+// Slice 3 (S2): the legacy "dead under UnauthMode" WARN is removed — SSO rules now
+// ENFORCE under defaultAuthOutcome=Exempt. The migration risk is surfaced by
+// authDefaultExemptMigrationDiagnostics instead.
+func authSSORequiredDiagnostics(rules []PolicyRule) []OperatorContractCheck {
 	var ssoRules []*PolicyRule
 	for i := range rules {
 		r := &rules[i]
@@ -53,14 +56,6 @@ func authSSORequiredDiagnostics(rules []PolicyRule, unauthMode bool) []OperatorC
 			Status:         diagFail,
 			Message:        "SSORequired rules exist but no enabled interactive (OIDC/SAML) IdP is configured — every covered browser redirects into nothing and every non-browser is failed closed (403): " + ruleNameList(ssoRules),
 			OperatorAction: "Enable at least one OIDC or SAML identity provider, or remove the SSORequired rules.",
-		})
-	}
-	if unauthMode {
-		checks = append(checks, OperatorContractCheck{
-			Code:           "auth_sso_dead_under_unauth_mode",
-			Status:         diagWarn,
-			Message:        "SSORequired rules cannot fire while the proxy is in UnauthMode (the auth gate is skipped): " + ruleNameList(ssoRules),
-			OperatorAction: "Disable UnauthMode under Settings if these rules should enforce SSO, or remove the rules.",
 		})
 	}
 	checks = append(checks, ssoProviderRefChecks(ssoRules, len(allEligible))...)

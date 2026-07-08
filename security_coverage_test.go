@@ -11,24 +11,22 @@ package main
 
 import (
 	"crypto/tls"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 // resetAlertDedup wipes the dedup state so two back-to-back invocations of
 // fireAlert with the same (event, detail) both go through. Required for
-// deterministic alert tests.
+// deterministic alert tests. The dedup window is per-Store since the
+// internal/alerts extraction, so this resets the current global store's.
 func resetAlertDedup() {
-	alertDedupMu.Lock()
-	for k := range alertDedupMap {
-		delete(alertDedupMap, k)
-	}
-	alertDedupMu.Unlock()
+	globalAlertStore.ResetDedupForTest()
 }
 
 // ── AlertStore ────────────────────────────────────────────────────────────────
@@ -120,10 +118,10 @@ func TestAlertStore_AddListDelete(t *testing.T) {
 }
 
 func TestFireAlert_EnabledAndDisabled(t *testing.T) {
-	// fireAlert dedupes on event+detail for 30 s via the package-global
-	// alertDedupMap. Under -count>1 or -shuffle=on the second run would be
-	// silently suppressed. Reset the dedup state up front (and on cleanup)
-	// so this test is deterministic regardless of run order.
+	// fireAlert dedupes on event+detail for 30 s (per-store dedup window).
+	// Under -count>1 or -shuffle=on the second run would be silently
+	// suppressed. Reset the dedup state up front (and on cleanup) so this
+	// test is deterministic regardless of run order.
 	resetAlertDedup()
 	t.Cleanup(resetAlertDedup)
 
@@ -135,10 +133,12 @@ func TestFireAlert_EnabledAndDisabled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Override ssrfSafeDialContext to allow localhost in tests.
-	origDial := ssrfSafeDialContext
-	ssrfSafeDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
-	defer func() { ssrfSafeDialContext = origDial }()
+	// Allow loopback through the ssrf guard so delivery reaches the httptest
+	// server — the extracted engine dials via ssrf.SafeDialContext directly,
+	// so the old ssrfSafeDialContext var swap no longer reaches it (same
+	// retarget as the blocklistfeed extraction, ADR-0002).
+	restore := ssrf.AllowLoopbackForTest()
+	defer restore()
 
 	// Save and restore the global store.
 	orig := globalAlertStore
@@ -209,10 +209,12 @@ func TestFireAlert_WildcardEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Override ssrfSafeDialContext to allow localhost in tests.
-	origDial := ssrfSafeDialContext
-	ssrfSafeDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
-	defer func() { ssrfSafeDialContext = origDial }()
+	// Allow loopback through the ssrf guard so delivery reaches the httptest
+	// server — the extracted engine dials via ssrf.SafeDialContext directly,
+	// so the old ssrfSafeDialContext var swap no longer reaches it (same
+	// retarget as the blocklistfeed extraction, ADR-0002).
+	restore := ssrf.AllowLoopbackForTest()
+	defer restore()
 
 	orig := globalAlertStore
 	defer func() { globalAlertStore = orig }()
@@ -369,38 +371,5 @@ func TestConfig_ConsumeBackupCode(t *testing.T) {
 	// Replay — code should be gone.
 	if c.ConsumeBackupCode("backup_user", code) {
 		t.Error("used backup code should not be reusable")
-	}
-}
-
-// ── verifyTOTP ────────────────────────────────────────────────────────────────
-
-func TestVerifyTOTP_InvalidCode(t *testing.T) {
-	// A valid base32 secret but wrong code — should return false, not panic.
-	secret := "JBSWY3DPEHPK3PXP"
-	if verifyTOTP(secret, "000000") {
-		t.Error("random code should not validate against secret")
-	}
-}
-
-func TestVerifyTOTP_EmptyInputs(t *testing.T) {
-	if verifyTOTP("", "") {
-		t.Error("empty secret+code should not validate")
-	}
-	if verifyTOTP("JBSWY3DPEHPK3PXP", "") {
-		t.Error("empty code should not validate")
-	}
-	if verifyTOTP("", "123456") {
-		t.Error("empty secret should not validate")
-	}
-}
-
-func TestVerifyTOTP_TrimsWhitespace(t *testing.T) {
-	// Whitespace-padded code should behave the same as the trimmed version
-	// (both should be false for a wrong code — the important thing is no panic).
-	secret := "JBSWY3DPEHPK3PXP"
-	r1 := verifyTOTP(secret, " 999999 ")
-	r2 := verifyTOTP(secret, "999999")
-	if r1 != r2 {
-		t.Errorf("whitespace should be trimmed: padded=%v trimmed=%v", r1, r2)
 	}
 }

@@ -22,22 +22,12 @@ func ensurePACStartupTestLogger(t *testing.T) {
 	}
 }
 
-// resetPACStartupGlobals snapshots/restores pacDefaultProxyPort and
-// pacStore.path for isolation under -shuffle.
+// resetPACStartupGlobals snapshots/restores the pacStore state (config,
+// path, default port) for isolation under -shuffle.
 func resetPACStartupGlobals(t *testing.T) {
 	t.Helper()
-	origPort := pacDefaultProxyPort
-	pacStore.mu.RLock()
-	origPath := pacStore.path
-	origCfg := pacStore.cfg
-	pacStore.mu.RUnlock()
-	t.Cleanup(func() {
-		pacDefaultProxyPort = origPort
-		pacStore.mu.Lock()
-		pacStore.path = origPath
-		pacStore.cfg = origCfg
-		pacStore.mu.Unlock()
-	})
+	orig := pacStore.Snapshot()
+	t.Cleanup(func() { pacStore.Restore(orig) })
 }
 
 func TestResolvePACStartupConfig_SetsPort(t *testing.T) {
@@ -66,8 +56,8 @@ func TestLoadPAC_MissingFileIsNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing file should be non-fatal; got %v", err)
 	}
-	if pacDefaultProxyPort != 9090 {
-		t.Errorf("pacDefaultProxyPort not set; got %d", pacDefaultProxyPort)
+	if pacStore.DefaultPort() != 9090 {
+		t.Errorf("default port not set; got %d", pacStore.DefaultPort())
 	}
 }
 
@@ -82,8 +72,8 @@ func TestLoadPAC_AppliesPortEvenWhenConfigEmpty(t *testing.T) {
 	if err := loadPAC(pacStartupConfig{ConfigPath: path, DefaultProxyPort: 7777}); err != nil {
 		t.Fatalf("loadPAC: %v", err)
 	}
-	if pacDefaultProxyPort != 7777 {
-		t.Errorf("pacDefaultProxyPort: got %d", pacDefaultProxyPort)
+	if pacStore.DefaultPort() != 7777 {
+		t.Errorf("default port: got %d", pacStore.DefaultPort())
 	}
 }
 

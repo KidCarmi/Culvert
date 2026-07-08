@@ -1,0 +1,267 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DAST Nightly — attack the running product (PANW audit item 3)
+#
+# The running product was never attacked in CI. This lane boots the real proxy
+# and points scanners at it:
+#   J1  testssl.sh against the admin UI's own TLS (:9090) — GATED on legacy
+#       protocols / weak cipher families (NOT on severity: a self-signed cert
+#       is a HIGH PKI finding that would false-fail every run).
+#   J3  OWASP ZAP baseline against the admin UI, AUTHENTICATED — provisions an
+#       admin (so auth is enforced), logs in, and injects the ps_ui_session
+#       cookie on every ZAP request to scan the real post-login surface. The
+#       provision + anon-401 + authenticated-200 gate is a deterministic guard;
+#       ZAP findings stay advisory (passive: missing headers / cookie flags /
+#       info leaks).
+#   J4  gosec report-only view with the remaining blocking-gate exclusions
+#       dropped (G703/G704 — SSRF / forward-proxy-by-design). G401 (weak crypto)
+#       + G402 (InsecureSkipVerify) are now ENFORCED by the blocking gate, so
+#       this lane just surfaces the residual excluded classes for human eyes.
+#
+# The forged-leaf TLS posture of the INSPECTED path is asserted deterministically
+# and hermetically by TestMITM_ForgedLeafTLSPosture (Go), not here — the shipped
+# binary's SSRF loopback guard makes an external scanner through the CONNECT path
+# infeasible in CI (see roadmap/CI-REDESIGN.md §5c).
+# ─────────────────────────────────────────────────────────────────────────────
+name: DAST Nightly
+
+on:
+  schedule:
+    - cron: "45 3 * * *"   # 03:45 UTC nightly (after fuzz 03:30, before e2e 04:00)
+  workflow_dispatch:
+
+concurrency:
+  group: dast-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ─── J1 — TLS posture of the admin UI (gated) ──────────────────────────────
+  admin-ui-tls:
+    name: "DAST · admin UI TLS (testssl)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Build + start proxy (admin UI on self-signed TLS)
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+          # No -ui-no-tls → the admin UI serves HTTPS with a generated
+          # self-signed cert; unconfigured first-run serves without auth.
+          ./culvert -port 8080 -ui-port 9090 > "$RUNNER_TEMP/proxy.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/proxy.pid"
+          for i in $(seq 1 30); do
+            if curl -ksf https://127.0.0.1:9090/ >/dev/null 2>&1; then echo "admin UI up"; break; fi
+            sleep 1
+            [ "$i" = 30 ] && { echo "::error::admin UI did not come up"; cat "$RUNNER_TEMP/proxy.log"; exit 1; }
+          done
+
+      - name: Fetch testssl.sh (pinned tag)
+        run: git clone --depth 1 --branch v3.2.3 https://github.com/testssl/testssl.sh "$RUNNER_TEMP/testssl"
+
+      - name: Run testssl against admin UI TLS
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/testssl/testssl.sh" \
+            --jsonfile-pretty "$RUNNER_TEMP/testssl.json" \
+            --protocols -s --server-preference \
+            --fast --connect-timeout 30 --openssl-timeout 30 \
+            --warnings off --color 0 \
+            https://127.0.0.1:9090 || true
+          test -s "$RUNNER_TEMP/testssl.json" || { echo "::error::no testssl output"; exit 1; }
+
+      - name: Gate on legacy protocols + weak cipher families
+        # Scope the gate to protocol/cipher IDs only — NOT severity. A self-signed
+        # cert legitimately raises HIGH PKI/trust findings that must not fail us.
+        run: |
+          set -euo pipefail
+          J="$RUNNER_TEMP/testssl.json"
+          fail=0
+          # Legacy protocols offered → fail.
+          while IFS= read -r line; do
+            echo "::error::legacy protocol offered: $line"; fail=1
+          done < <(jq -r '.[] | select((.id=="SSLv2" or .id=="SSLv3" or .id=="TLS1" or .id=="TLS1_1")
+                            and (.finding | test("not offered"; "i") | not))
+                          | "\(.id): \(.finding)"' "$J")
+          # Weak cipher families offered → fail.
+          while IFS= read -r line; do
+            echo "::error::weak cipher family offered: $line"; fail=1
+          done < <(jq -r '.[] | select((.id | test("^cipherlist_(NULL|aNULL|EXPORT|LOW|3DES)"; "i"))
+                            and (.finding | test("not offered"; "i") | not))
+                          | "\(.id): \(.finding)"' "$J")
+          [ "$fail" = 0 ] && echo "admin UI TLS posture: no legacy protocols / weak ciphers offered."
+          exit $fail
+
+      - name: Diagnostics + teardown
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/proxy.pid" 2>/dev/null)" 2>/dev/null || true
+          echo "=== proxy.log ==="; tail -n 40 "$RUNNER_TEMP/proxy.log" 2>/dev/null || true
+
+      - name: Upload testssl report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: testssl-admin-ui
+          path: ${{ runner.temp }}/testssl.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─── J3 — Authenticated ZAP baseline against the admin UI ───────────────────
+  # Scans the CONFIGURED proxy (an admin is provisioned, so auth is ENFORCED)
+  # with a real session cookie, exercising the post-login attack surface — not
+  # an open first-run server where the auth/session/CSRF/RBAC stack is inert.
+  # The provision+login+gate check is a deterministic (non-advisory) guard; the
+  # ZAP findings themselves stay advisory (-I + || true).
+  admin-ui-zap:
+    name: "DAST · admin UI ZAP authenticated (advisory scan)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25   # traditional + AJAX (JS-aware) spider for the SPA
+    env:
+      # Ephemeral CI admin, provisioned + torn down with the runner. Low-entropy
+      # wordy value ON PURPOSE (meets complexity: upper+lower+digit, >=8) so
+      # gitleaks' entropy rule doesn't false-flag it — NOT a real secret.
+      ZAP_ADMIN_USER: zapadmin
+      ZAP_ADMIN_PASS: ZapNightly-Test-Admin-1
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Build + start proxy (admin UI on self-signed TLS)
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o culvert .
+          ./culvert -port 8080 -ui-port 9090 > "$RUNNER_TEMP/proxy.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/proxy.pid"
+          for i in $(seq 1 30); do
+            curl -ksf https://127.0.0.1:9090/api/setup/status >/dev/null 2>&1 && break
+            sleep 1
+            [ "$i" = 30 ] && { echo "::error::admin UI did not come up"; cat "$RUNNER_TEMP/proxy.log"; exit 1; }
+          done
+
+      - name: Provision admin + verify auth gate (deterministic guard)
+        # NON-advisory: the whole value of an "authenticated" scan is that auth is
+        # actually enforced. If setup/login/gating regresses, fail the job red so
+        # a future change can't silently un-authenticate the scan.
+        run: |
+          set -euo pipefail
+          # 1. Provision the first admin → IsConfigured() true → auth enforced.
+          curl -ksf -X POST https://127.0.0.1:9090/api/setup/complete \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"$ZAP_ADMIN_USER\",\"pass\":\"$ZAP_ADMIN_PASS\"}" >/dev/null
+          # 2. Anon-rejection smoke: a protected route with NO session must 401.
+          code=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:9090/api/policy)
+          [ "$code" = 401 ] || { echo "::error::unauth /api/policy expected 401, got $code (auth not enforced?)"; exit 1; }
+          # 3. Log in → capture the admin-UI session cookie (ps_ui_session, HttpOnly).
+          curl -ksf -c "$RUNNER_TEMP/cj" -X POST https://127.0.0.1:9090/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"user\":\"$ZAP_ADMIN_USER\",\"pass\":\"$ZAP_ADMIN_PASS\"}" >/dev/null
+          # Netscape jar: fields are domain flag path secure expiry NAME VALUE;
+          # HttpOnly prefixes $1 with "#HttpOnly_" but $6/$7 (name/value) are stable.
+          SESSVAL=$(awk '$6=="ps_ui_session"{print $7}' "$RUNNER_TEMP/cj")
+          [ -n "$SESSVAL" ] || { echo "::error::failed to capture ps_ui_session cookie"; cat "$RUNNER_TEMP/cj"; exit 1; }
+          # 4. Positive reach-check: the SAME cookie must authenticate (200).
+          code=$(curl -ks -b "$RUNNER_TEMP/cj" -o /dev/null -w '%{http_code}' https://127.0.0.1:9090/api/policy)
+          [ "$code" = 200 ] || { echo "::error::session cookie did not authenticate /api/policy, got $code"; exit 1; }
+          printf 'ps_ui_session=%s' "$SESSVAL" > "$RUNNER_TEMP/cookie.txt"
+          echo "auth gate verified: anon=401, authenticated=200"
+
+      - name: ZAP baseline authenticated (advisory findings)
+        # Advisory: ZAP findings never fail the job (-I + || true). The session
+        # cookie is injected on EVERY request via the Replacer add-on
+        # (matchtype=REQ_HEADER ADDS the Cookie header when the request has none);
+        # the logout route is globally excluded so a stray hit can't
+        # un-authenticate the rest of the scan.
+        run: |
+          set -o pipefail
+          COOKIE=$(cat "$RUNNER_TEMP/cookie.txt")
+          # Build the -z option string via single-space concatenation (NOT a
+          # backslash-continued quoted literal, whose continuation-line indent
+          # would inject runs of spaces that ZAP could split into empty tokens).
+          R="replacer.full_list(0)"
+          G="globalexcludeurl.url_list.url(0)"
+          Z="-config ${R}.description=authcookie"
+          Z="$Z -config ${R}.enabled=true"
+          Z="$Z -config ${R}.matchtype=REQ_HEADER"
+          Z="$Z -config ${R}.matchstr=Cookie"
+          Z="$Z -config ${R}.regex=false"
+          Z="$Z -config ${R}.replacement=$COOKIE"
+          Z="$Z -config ${G}.regex=true"
+          Z="$Z -config ${G}.enabled=true"
+          Z="$Z -config ${G}.url=.*/api/auth/logout.*"
+          # Bound the AJAX spider so it can't run its 60-min default and blow the
+          # job timeout.
+          Z="$Z -config ajaxSpider.maxDuration=3"
+          # -j = ALSO run the AJAX (JS-aware) spider. The admin UI is a SPA whose
+          # protected /api/* routes are fetched from JavaScript, not HTML
+          # href/form links, so the traditional spider alone never reaches them —
+          # it would rescan the static shell with a cookie. The AJAX spider drives
+          # a headless browser (in the stable image) that executes the SPA's JS;
+          # the cookie replacer applies to those browser requests too, so the
+          # authenticated API surface is actually crawled. /api/auth/logout is
+          # globally excluded (above) so ZAP won't forward a logout that would
+          # drop the session mid-crawl.
+          docker run --rm --network host -v "$RUNNER_TEMP:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t https://127.0.0.1:9090 -I -j -m 2 -T 5 \
+            -J zap-auth.json -w zap-auth.md -z "$Z" || true
+          echo "── ZAP authenticated baseline summary ──"; sed -n '1,60p' "$RUNNER_TEMP/zap-auth.md" 2>/dev/null || true
+
+      - name: Teardown + upload
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/proxy.pid" 2>/dev/null)" 2>/dev/null || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zap-admin-ui-authenticated
+          path: |
+            ${{ runner.temp }}/zap-auth.json
+            ${{ runner.temp }}/zap-auth.md
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ─── J4 — gosec G401/G402 discovery (report-only) ──────────────────────────
+  weak-crypto-discovery:
+    name: "DAST · gosec G401/G402 surface (report-only)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Install gosec (pinned)
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+
+      - name: gosec with the blocking-gate exclusions dropped (non-test, report-only)
+        # G401 (weak crypto) + G402 (InsecureSkipVerify) are now ENFORCED by the
+        # blocking gates (the few config-gated sites carry an at-site `// #nosec`).
+        # This lane keeps a broader report-only view by dropping the REMAINING
+        # exclusions too (G703/G704 — SSRF / forward-proxy-by-design), surfacing
+        # that hidden surface for periodic human eyes without blocking. Non-test
+        # (inline #nosec on annotated production sites suppresses the legit ones).
+        run: |
+          set -o pipefail
+          echo "── root module ──"
+          gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... || true
+          echo "── cmd/culvert-maint ──"
+          ( cd cmd/culvert-maint && gosec -tests=false -exclude=G104,G302,G304 -fmt=text ./... ) || true
+          echo "Report-only: G401/G402 are enforced in the blocking gate; this surfaces the remaining (G703/G704) delta."

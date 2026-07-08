@@ -45,20 +45,20 @@ func diagAbsent(t *testing.T, checks []OperatorContractCheck, code string) {
 
 func TestP3S5_SSO_NoRulesNoChecks(t *testing.T) {
 	withSSORegistry(t, idp("corp", IdPTypeOIDC, true))
-	if got := authSSORequiredDiagnostics([]PolicyRule{validExemptRule()}, false); got != nil {
+	if got := authSSORequiredDiagnostics([]PolicyRule{validExemptRule()}); got != nil {
 		t.Errorf("no SSO rules → no SSO checks, got %+v", got)
 	}
 }
 
 func TestP3S5_SSO_NoIdP_Fail(t *testing.T) {
 	withSSORegistry(t) // empty registry — no interactive IdP
-	checks := authSSORequiredDiagnostics([]PolicyRule{validSSORule()}, false)
+	checks := authSSORequiredDiagnostics([]PolicyRule{validSSORule()})
 	diagHas(t, checks, "auth_sso_no_idp", diagFail)
 }
 
 func TestP3S5_SSO_WithIdP_NoNoIdPFail(t *testing.T) {
 	withSSORegistry(t, idp("corp", IdPTypeSAML, true))
-	checks := authSSORequiredDiagnostics([]PolicyRule{validSSORule()}, false)
+	checks := authSSORequiredDiagnostics([]PolicyRule{validSSORule()})
 	diagAbsent(t, checks, "auth_sso_no_idp")
 }
 
@@ -71,21 +71,26 @@ func TestP3S5_SSO_InactiveRulesIgnored(t *testing.T) {
 	disabled := validSSORule()
 	off := false
 	disabled.Enabled = &off
-	if got := authSSORequiredDiagnostics([]PolicyRule{disabled}, false); got != nil {
+	if got := authSSORequiredDiagnostics([]PolicyRule{disabled}); got != nil {
 		t.Errorf("disabled SSO rule must produce no diagnostics, got %+v", got)
 	}
 
 	expired := validSSORule()
 	expired.Auth.ExpiresAt = "2000-01-01T00:00:00Z"
-	if got := authSSORequiredDiagnostics([]PolicyRule{expired}, false); got != nil {
+	if got := authSSORequiredDiagnostics([]PolicyRule{expired}); got != nil {
 		t.Errorf("expired SSO rule must produce no diagnostics, got %+v", got)
 	}
 }
 
-func TestP3S5_SSO_DeadUnderUnauthMode_Warn(t *testing.T) {
+// Slice 3 (S2): SSO rules no longer carry a "dead under UnauthMode" WARN — under
+// defaultAuthOutcome=Exempt they ENFORCE. The SSO diagnostics must not emit the
+// removed code; the migration risk is surfaced by the shared migration diagnostic.
+func TestP3S5_SSO_DefaultExemptMigration_Warn(t *testing.T) {
 	withSSORegistry(t, idp("corp", IdPTypeOIDC, true))
-	checks := authSSORequiredDiagnostics([]PolicyRule{validSSORule()}, true /*unauthMode*/)
-	diagHas(t, checks, "auth_sso_dead_under_unauth_mode", diagWarn)
+	diagAbsent(t, authSSORequiredDiagnostics([]PolicyRule{validSSORule()}), "auth_sso_dead_under_unauth_mode")
+	if c, ok := hasCheck(authDefaultExemptMigrationDiagnostics([]PolicyRule{validSSORule()}, true), "auth_default_exempt_rules_now_enforce"); !ok || c.Status != diagWarn {
+		t.Errorf("expected WARN auth_default_exempt_rules_now_enforce under default Exempt")
+	}
 }
 
 func TestP3S5_SSO_ProviderRefs_UnavailableAndDead(t *testing.T) {
@@ -94,14 +99,14 @@ func TestP3S5_SSO_ProviderRefs_UnavailableAndDead(t *testing.T) {
 	// Some refs unavailable (corp-a enabled, old disabled) → WARN, not FAIL.
 	r := validSSORule()
 	r.Auth.ProviderRefs = []string{"corp-a", "old"}
-	checks := authSSORequiredDiagnostics([]PolicyRule{r}, false)
+	checks := authSSORequiredDiagnostics([]PolicyRule{r})
 	diagHas(t, checks, "auth_sso_providerref_unavailable", diagWarn)
 	diagAbsent(t, checks, "auth_sso_rule_no_eligible_provider")
 
 	// All refs unavailable → FAIL (rule always fails closed).
 	r2 := validSSORule()
 	r2.Auth.ProviderRefs = []string{"old", "ghost"}
-	checks = authSSORequiredDiagnostics([]PolicyRule{r2}, false)
+	checks = authSSORequiredDiagnostics([]PolicyRule{r2})
 	diagHas(t, checks, "auth_sso_rule_no_eligible_provider", diagFail)
 }
 
@@ -111,24 +116,24 @@ func TestP3S5_SSO_MayMatchNonBrowser(t *testing.T) {
 	// protocol "" (any) → WARN.
 	rAny := validSSORule()
 	rAny.Auth.Protocol = ""
-	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{rAny}, false), "auth_sso_may_match_non_browser", diagWarn)
+	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{rAny}), "auth_sso_may_match_non_browser", diagWarn)
 
 	// protocol "connect" → WARN.
 	rConn := validSSORule()
 	rConn.Auth.Protocol = "connect"
-	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{rConn}, false), "auth_sso_may_match_non_browser", diagWarn)
+	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{rConn}), "auth_sso_may_match_non_browser", diagWarn)
 
 	// protocol "http" → no such WARN.
 	rHTTP := validSSORule()
 	rHTTP.Auth.Protocol = "http"
-	diagAbsent(t, authSSORequiredDiagnostics([]PolicyRule{rHTTP}, false), "auth_sso_may_match_non_browser")
+	diagAbsent(t, authSSORequiredDiagnostics([]PolicyRule{rHTTP}), "auth_sso_may_match_non_browser")
 }
 
 func TestP3S5_SSO_AmbiguousIdP(t *testing.T) {
 	withSSORegistry(t, idp("corp-a", IdPTypeOIDC, true), idp("corp-b", IdPTypeSAML, true))
 	r := validSSORule() // empty providerRefs
 	r.Auth.Protocol = "http"
-	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{r}, false), "auth_sso_ambiguous_idp", diagWarn)
+	diagHas(t, authSSORequiredDiagnostics([]PolicyRule{r}), "auth_sso_ambiguous_idp", diagWarn)
 }
 
 // End-to-end: a no-IdP SSO FAIL drives the operator-contract verdict to fail.

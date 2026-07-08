@@ -4,18 +4,28 @@
 ## This workflow is the mandatory security gate that must pass before any
 ## release is published.  It runs automatically on:
 ##   • Push of a version tag (v*)   → blocks release if any check fails
-##   • Pull requests to main/master → enforces the gate on every merge
-##   • Manual trigger               → allows ad-hoc scanning (nightly, etc.)
+##   • Push to main + weekly cron   → continuous scanning cadence
+##   • Pull requests to main        → PASS-THROUGH ONLY (retirement step 6):
+##     the scan jobs skip and the aggregate reports success — PR-time
+##     scanning lives in the Fast/Deep PR Gates (roadmap/CI-REDESIGN.md)
+##   • Manual trigger               → allows ad-hoc scanning
 ##
 ## How the gate fits into the release flow:
-##   1. Developer pushes tag:  git tag v1.2.3 && git push origin v1.2.3
-##   2. This workflow runs ALL checks below in parallel where possible.
-##   3. The "release-approved" job only runs if EVERY check passes.
-##   4. The main ci.yml "release" job depends on "release-approved" as a
-##      required status check (enforce via Branch Protection rules).
+##   1. A main push runs this gate AND ci.yml in parallel.
+##   2. ci.yml's auto-tag job POLLS the "✅ Security Gate — APPROVED"
+##      check-run for the same SHA and refuses to create the release tag
+##      until it concludes success — that wait step is the mechanical
+##      enforcement point (branch protection cannot gate tag-triggered
+##      workflows). Manually-pushed tags bypass it: only tag commits that
+##      are already green on main.
 ## ─────────────────────────────────────────────────────────────────────────────
 
 name: Security Release Gate
+# Least-privilege default: jobs that need write scopes (packages, checks,
+# contents, security-events, pull-requests) declare them at job level.
+permissions:
+  contents: read
+
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -24,8 +34,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # PR trigger retained ONLY so the "✅ Security Gate — APPROVED" check name
+  # keeps reporting (pass-through; see header). Do not remove until branch
+  # protection no longer requires it.
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "30 5 * * 1"   # weekly full scan, Mondays 05:30 UTC
   workflow_dispatch:
 
 # Prevent two concurrent scans on the same ref — cancel the older one.
@@ -37,6 +52,9 @@ jobs:
   # ─── 1. SAST — gosec ───────────────────────────────────────────────────────
   sast-gosec:
     name: "SAST · gosec"
+    timeout-minutes: 15
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,12 +62,10 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: "1.25"
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 
       # G703 (taint-analysis path traversal) is the taint-mode variant of the
       # already-excluded G304 (CWE-22 file access via variable): a new gosec
@@ -59,14 +75,14 @@ jobs:
       - name: Run gosec (SARIF for upload)
         # Generate SARIF for GitHub Security tab; continue even if findings exist.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=sarif -out=gosec-results.sarif \
             ./... || true
 
       - name: Run gosec (text for log visibility)
         # Re-run with text output so findings are visible in CI logs.
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=text \
             ./...
 
@@ -79,14 +95,14 @@ jobs:
         # gate's logs as well.
         working-directory: cmd/culvert-maint
         run: |
-          gosec -exclude=G104,G302,G304,G401,G402,G703,G704 \
+          gosec -exclude=G104,G302,G304,G703,G704 \
             -fmt=text \
             ./...
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         with:
           sarif_file: gosec-results.sarif
           category: gosec
@@ -94,28 +110,50 @@ jobs:
   # ─── 2. Known CVEs — govulncheck ───────────────────────────────────────────
   vuln-govulncheck:
     name: "CVE · govulncheck"
+    timeout-minutes: 15
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
 
       - name: Check for known Go vulnerabilities
         # govulncheck exits non-zero if any reachable code has a known CVE.
         run: govulncheck ./...
 
+      # govulncheck does not traverse module boundaries — `./...` from the
+      # repo root analyzes the root module only, so the nested modules get
+      # explicit runs (RISK-014). cmd/culvert-maint is blocking like the root.
+      - name: Check nested module cmd/culvert-maint
+        working-directory: cmd/culvert-maint
+        run: govulncheck ./...
+
+      # ADVISORY: updater/ carries known unfixed docker/docker CVEs whose
+      # unreachability was previously asserted only by prose (.trivyignore
+      # rationale — RISK-ACC-1). This run turns that assertion into real
+      # reachability analysis. Non-blocking because the module is slated for
+      # deletion (DEBT-008) and a reachable finding has no fix short of
+      # removal — but ANY finding here invalidates the RISK-ACC-1 acceptance
+      # and must be triaged, not ignored.
+      - name: Check nested module updater (advisory)
+        continue-on-error: true
+        working-directory: updater
+        run: govulncheck ./...
+
   # ─── 3. Dependency audit — trivy filesystem ────────────────────────────────
   vuln-trivy-fs:
     name: "CVE · trivy (source)"
+    timeout-minutes: 15
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -143,6 +181,32 @@ jobs:
             --format table \
             .
 
+      # RISK-006: the blocking gate above structurally CANNOT fail on a vuln
+      # that is (a) unfixed upstream, (b) MEDIUM or lower, or (c) listed in
+      # .trivyignore — all three masks are active there. This advisory pass
+      # drops the severity/unfixed filters and adds --show-suppressed so the
+      # .trivyignore'd findings appear WITH their suppression status (trivy
+      # auto-loads .trivyignore from the cwd, so merely omitting --ignorefile
+      # would NOT unmask them — PR #557 Codex review). "Green gate" can never
+      # silently mean "vulns exist but are filtered". Never fails.
+      - name: Full-severity unmasked report (advisory — what the gate cannot see)
+        if: always()
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --show-suppressed \
+            --exit-code 0 \
+            --format table \
+            . | tee trivy-fs-unmasked.txt
+          {
+            echo "### Trivy full-severity report (advisory)"
+            echo "Everything Trivy knows about, INCLUDING vulns masked from the blocking gate by --ignore-unfixed, the CRITICAL,HIGH filter, or .trivyignore."
+            echo '```'
+            cat trivy-fs-unmasked.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Generate SARIF report (optional — for GitHub Security tab)
         if: always()
         run: |
@@ -159,7 +223,7 @@ jobs:
       - name: Upload Trivy SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -167,6 +231,9 @@ jobs:
   # ─── 4. Docker image scan — trivy ──────────────────────────────────────────
   vuln-trivy-image:
     name: "CVE · trivy (Docker image)"
+    timeout-minutes: 30
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -213,7 +280,7 @@ jobs:
       - name: Upload Trivy image SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -221,6 +288,9 @@ jobs:
   # ─── 5. Secret scanning — gitleaks ─────────────────────────────────────────
   secrets-gitleaks:
     name: "Secrets · gitleaks"
+    timeout-minutes: 10
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -236,32 +306,35 @@ jobs:
   # ─── 6. Dependency license check ───────────────────────────────────────────
   license-check:
     name: "Licenses · go-licenses"
+    timeout-minutes: 10
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
 
       - name: Install go-licenses
-        run: go install github.com/google/go-licenses@latest
+        run: go install github.com/google/go-licenses@v1.6.0
 
       - name: Check for disallowed licenses
         # Fail if any dependency uses GPL, AGPL, LGPL, or CPAL.
+        # pipefail is required: the default shell does not set it, so without
+        # it the pipeline returns tee's (always-zero) status and a forbidden
+        # license would NOT fail this job.
         run: |
+          set -o pipefail
           go-licenses check ./... \
             --disallowed_types=forbidden,restricted \
             --ignore=proxy 2>&1 | tee license-report.txt
-          # Exit code from go-licenses is respected automatically.
 
       - name: Upload license report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: license-report
           path: license-report.txt
@@ -270,9 +343,14 @@ jobs:
   # ─── 7. Generate SBOM ──────────────────────────────────────────────────────
   sbom:
     name: "SBOM · syft"
+    timeout-minutes: 10
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # SBOM generation is informational — does not block the gate.
-    # The artifact is attached to every release for supply-chain transparency.
+    # Informational SOURCE-TREE SBOM (whole repo), 90-day artifact — NOT a
+    # release asset. It runs on main/weekly to catch dependency drift BETWEEN
+    # releases. The authoritative per-release evidence is the signed per-MODULE
+    # binary SBOMs attached to each GitHub Release by ci.yml's `release` job.
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -285,7 +363,7 @@ jobs:
           output-file: "culvert-sbom.json"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom
           path: culvert-sbom.json
@@ -294,14 +372,14 @@ jobs:
   # ─── 8. Static analysis — staticcheck ──────────────────────────────────────
   sast-staticcheck:
     name: "SAST · staticcheck"
+    timeout-minutes: 20
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
@@ -326,19 +404,21 @@ jobs:
   # ─── 9. Race-condition & coverage tests ────────────────────────────────────
   tests-race:
     name: "Tests · race detector + coverage"
+    timeout-minutes: 25
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: "1.25"
-          cache: true
+      - uses: ./.github/actions/setup-go-cache
 
       - name: Download dependencies
         run: go mod download
 
       - name: Run tests with race detector
+        env:
+          TEST_SEED: "20260421"   # same seed as the other gates — reproducible reruns
         run: go test -v -race -count=1 -timeout=15m -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold (≥ 55%)
@@ -351,7 +431,7 @@ jobs:
           fi
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
           path: coverage.out
@@ -360,6 +440,9 @@ jobs:
   # ─── 10. Dockerfile linting — hadolint ──────────────────────────────────────
   lint-dockerfile:
     name: "Lint · Hadolint (Dockerfile)"
+    timeout-minutes: 10
+    # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the Fast/Deep PR Gates (gosec/govulncheck/gitleaks in Lane A; trivy-image/hadolint/go-licenses in Lane B); full behavior retained on main pushes, tags, and the weekly schedule.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -382,7 +465,7 @@ jobs:
       - name: Upload Hadolint SARIF
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v3
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v3
         with:
           sarif_file: hadolint.sarif
           category: hadolint
@@ -391,6 +474,7 @@ jobs:
   release-approved:
     name: "✅ Security Gate — APPROVED"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - sast-gosec
       - vuln-govulncheck
@@ -402,8 +486,23 @@ jobs:
       - tests-race
       - lint-dockerfile
     # sbom is informational — not in needs (non-blocking)
+    # always() + skipped-as-pass: on PRs the scan jobs are skipped
+    # (superseded by the Fast/Deep PR Gates — retirement step 6) but this
+    # check name must keep reporting success so a branch-protection rule
+    # requiring it can never wedge a PR at "Expected". On main pushes, tags,
+    # and the weekly schedule everything runs and any failure/cancellation
+    # fails the gate as before.
+    if: always()
     steps:
-      - name: Gate passed
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/needs-verdict
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          title: "✅ Security Gate — APPROVED"
+          extra-summary: ${{ github.event_name == 'pull_request' && 'PASS-THROUGH on PRs — scanning is enforced by the Fast PR Gate (govulncheck/gosec/gitleaks) and Deep PR Gate (trivy/hadolint/go-licenses) — roadmap/CI-REDESIGN.md, step 6; this gate runs fully on main pushes, tags, and weekly.' || '' }}
+
+      - name: Release-approved banner
+        if: github.event_name != 'pull_request'
         run: |
           echo "=================================================="
           echo "  All security checks passed — release approved"
@@ -414,6 +513,7 @@ jobs:
           echo "=================================================="
 
       - name: Create gate summary
+        if: github.event_name != 'pull_request'
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## ✅ Security Gate Passed
@@ -430,5 +530,7 @@ jobs:
           | Tests (race detector + coverage) | ✅ |
           | Dockerfile lint (hadolint) | ✅ |
 
-          **SBOM** attached as artifact (`culvert-sbom.json`).
+          **SBOM** (source-tree) uploaded as a 90-day workflow artifact
+          (`culvert-sbom.json`). Per-release binary SBOMs are signed + attached
+          to each GitHub Release by the `release` job.
           EOF

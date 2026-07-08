@@ -3,24 +3,12 @@ package main
 import (
 	"bytes"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// ─── Rewriter extras ─────────────────────────────────────────────────────────
-
-func TestRewriter_matchesHost_CaseInsensitive(t *testing.T) {
-	r := &RewriteRule{Host: "Example.COM"}
-	if !r.matchesHost("example.com") {
-		t.Error("matchesHost should be case-insensitive")
-	}
-}
-
-func TestRewriter_matchesHost_WildcardExact(t *testing.T) {
-	// *.example.com: "example.com" itself should match (without www.)
-	r := &RewriteRule{Host: "*.example.com"}
-	if !r.matchesHost("example.com") {
-		t.Error("wildcard pattern should also match the bare domain")
-	}
-}
+// Rewriter matchesHost tests moved to internal/rewrite (ADR-0002) — matchesHost
+// is unexported and now lives in package rewrite.
 
 // ─── ContentScanner extras ────────────────────────────────────────────────────
 
@@ -78,59 +66,22 @@ func TestContainsGroupCI_Empty(t *testing.T) {
 
 // ─── SSLBypassMatcher ─────────────────────────────────────────────────────────
 
-func TestSSLBypassMatcher_AddRemoveMatches(t *testing.T) {
-	s := &SSLBypassMatcher{}
-
-	if err := s.Add("*.example.com"); err != nil {
-		t.Fatalf("Add wildcard error: %v", err)
-	}
-	if err := s.Add("exact.test.com"); err != nil {
-		t.Fatalf("Add exact error: %v", err)
-	}
-
-	list := s.List()
-	if len(list) < 2 {
-		t.Errorf("List should have 2 entries, got %d", len(list))
-	}
-	if !s.Matches("sub.example.com") {
-		t.Error("should match wildcard pattern")
-	}
-	if !s.Matches("exact.test.com") {
-		t.Error("should match exact pattern")
-	}
-	if s.Matches("other.com") {
-		t.Error("should not match unrelated host")
-	}
-
-	if !s.Remove("exact.test.com") {
-		t.Error("Remove should return true for existing pattern")
-	}
-	if s.Matches("exact.test.com") {
-		t.Error("removed pattern should no longer match")
-	}
-}
-
-func TestSSLBypassMatcher_CompileBypassPattern(t *testing.T) {
-	_, err := compileBypassPattern("*.valid.com")
-	if err != nil {
-		t.Errorf("compileBypassPattern valid: %v", err)
-	}
-}
+// TestSSLBypassMatcher_AddRemoveMatches + CompileBypassPattern moved to
+// internal/sslbypass (ADR-0002, policy.go decomposition Phase B).
 
 // ─── SecurityScanner with YARA ────────────────────────────────────────────────
 
 func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 	// Install a YARA rule that matches "EICAR"
 	y := &YARARuleSet{}
-	rules, _ := parseYARASrc(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
-	y.rules = rules
+	_, _ = y.LoadSource(yaraRule("Detect", `        $a = "EICAR"`, "any of them"))
 
 	// Temporarily swap globalYARA
 	old := globalYARA
 	globalYARA = y
 	defer func() { globalYARA = old }()
 
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{Yara: yaraRuleSetMatcher{y}})
 	result := ss.ScanBody([]byte("contains EICAR pattern"))
 	if result == nil {
 		t.Error("ScanBody should detect YARA match")
@@ -141,7 +92,7 @@ func TestSecurityScanner_ScanBody_WithYARA(t *testing.T) {
 }
 
 func TestSecurityScanner_ScanBody_CachesClean(t *testing.T) {
-	ss := &SecurityScanner{cache: newHashCache(100, 0), enabled: true}
+	ss := newEnabledScanner(secscan.Deps{})
 	// No ClamAV, no YARA — body scan enabled = false
 	// (BodyScanEnabled needs enabled=true AND (clam!=nil OR yara enabled))
 	// So for this test, just confirm clean data returns nil

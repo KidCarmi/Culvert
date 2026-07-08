@@ -1,17 +1,19 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/hostutil"
+	"github.com/KidCarmi/Culvert/internal/sslbypass"
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // PolicyAction defines what happens when a rule matches.
@@ -33,263 +35,36 @@ const (
 )
 
 // URLCategory defines known content categories for destination matching.
-type URLCategory string
+// The URL-category engine (CategoryStore + host index + defaults embed)
+// moved to internal/urlcat (ADR-0002, policy.go decomposition Phase A).
+// main keeps the two-tier category resolution below (matchCategory /
+// lookupHostCategory compose the admin store with the community BadgerDB
+// feed), the API handlers, cluster sync, and rollback — via these aliases.
 
+// URLCategory names a URL category referenced by policy rules.
+type URLCategory = urlcat.Category
+
+// Built-in category names, re-exposed under their original identifiers.
 const (
-	CategorySocial    URLCategory = "Social Media"
-	CategoryMalicious URLCategory = "Malicious"
-	CategoryNews      URLCategory = "News"
-	CategoryStreaming URLCategory = "Streaming"
-	CategoryGambling  URLCategory = "Gambling"
-	CategoryAdult     URLCategory = "Adult"
-	CategoryAny       URLCategory = "Any"
+	CategorySocial    = urlcat.Social
+	CategoryMalicious = urlcat.Malicious
+	CategoryNews      = urlcat.News
+	CategoryStreaming = urlcat.Streaming
+	CategoryGambling  = urlcat.Gambling
+	CategoryAdult     = urlcat.Adult
+	CategoryAny       = urlcat.Any
 )
 
 // CategoryEntry is one named URL category with its list of host patterns.
-type CategoryEntry struct {
-	Name    string   `json:"name"`
-	Hosts   []string `json:"hosts"`
-	BuiltIn bool     `json:"builtIn"` // seeded from built-in defaults; editable by admin
-}
+type CategoryEntry = urlcat.Entry
 
-// CategoryStore manages URL categories with thread-safe, file-backed persistence.
-// index maps lowercase(category-name) → set of lowercase host strings for O(1)
-// host membership checks during policy evaluation.
-type CategoryStore struct {
-	mu      sync.RWMutex
-	entries []*CategoryEntry
-	index   map[string]map[string]bool // lowercase cat → lowercase host set
-	path    string
-}
+// CategoryStore manages URL categories (engine type is urlcat.Store).
+type CategoryStore = urlcat.Store
 
-var catStore = newCategoryStore(defaultCategoryEntries())
+var catStore = urlcat.New(urlcat.DefaultEntries())
 
-func newCategoryStore(entries []*CategoryEntry) *CategoryStore {
-	cs := &CategoryStore{entries: entries}
-	cs.rebuildIndex()
-	return cs
-}
-
-// rebuildIndex reconstructs the category→hosts index from cs.entries.
-// Caller must hold cs.mu (write or be the sole owner).
-func (cs *CategoryStore) rebuildIndex() {
-	idx := make(map[string]map[string]bool, len(cs.entries))
-	for _, e := range cs.entries {
-		key := strings.ToLower(e.Name)
-		set := make(map[string]bool, len(e.Hosts))
-		for _, h := range e.Hosts {
-			set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
-		}
-		idx[key] = set
-	}
-	cs.index = idx
-}
-
-// defaultCategoryEntries returns the built-in category seed list.
-//
-//go:embed default_categories.json
-var defaultCategoriesJSON []byte
-
-func defaultCategoryEntries() []*CategoryEntry {
-	// Start with the built-in hardcoded categories.
-	entries := []*CategoryEntry{
-		{Name: "Social Media", BuiltIn: true, Hosts: []string{
-			"facebook.com", "twitter.com", "x.com", "instagram.com",
-			"tiktok.com", "linkedin.com", "reddit.com", "snapchat.com", "pinterest.com",
-		}},
-		{Name: "Malicious", BuiltIn: true, Hosts: []string{
-			"malware.com", "phishing.com", "eicar.org",
-		}},
-		{Name: "News", BuiltIn: true, Hosts: []string{
-			"cnn.com", "bbc.com", "bbc.co.uk", "reuters.com", "nytimes.com",
-			"theguardian.com", "foxnews.com", "nbcnews.com", "apnews.com",
-		}},
-		{Name: "Streaming", BuiltIn: true, Hosts: []string{
-			"netflix.com", "youtube.com", "twitch.tv", "hulu.com",
-			"disneyplus.com", "spotify.com", "primevideo.com",
-		}},
-		{Name: "Gambling", BuiltIn: true, Hosts: []string{
-			"bet365.com", "pokerstars.com", "draftkings.com", "fanduel.com",
-		}},
-		{Name: "Adult", BuiltIn: true, Hosts: []string{}},
-	}
-
-	// Merge embedded SaaS categories (AI, Marketing, Messaging, etc.).
-	var saas []CategoryEntry
-	if json.Unmarshal(defaultCategoriesJSON, &saas) == nil {
-		for i := range saas {
-			e := &saas[i]
-			e.BuiltIn = true
-			entries = append(entries, e)
-		}
-	}
-	return entries
-}
-
-// Load reads categories from a JSON file. If the file does not exist the
-// built-in defaults are seeded and written to disk.
-func (cs *CategoryStore) Load(path string) error {
-	cs.path = path
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			cs.mu.Lock()
-			cs.entries = defaultCategoryEntries()
-			cs.rebuildIndex()
-			cs.mu.Unlock()
-			cs.Save()
-			return nil
-		}
-		return err
-	}
-	var entries []*CategoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return err
-	}
-	cs.mu.Lock()
-	cs.entries = entries
-	cs.rebuildIndex()
-	cs.mu.Unlock()
-	return nil
-}
-
-// Save atomically persists categories to disk.
-func (cs *CategoryStore) Save() {
-	if cs.path == "" {
-		return
-	}
-	cs.mu.RLock()
-	data, err := json.MarshalIndent(cs.entries, "", "  ")
-	cs.mu.RUnlock()
-	if err != nil {
-		return
-	}
-	// Bucket-4 durability hardening: atomicWriteFile gives unique
-	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
-	// dir) — replaces the previous os.WriteFile+os.Rename which was
-	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	_ = atomicWriteFile(cs.path, data, 0o600)
-}
-
-// All returns a copy of all category entries.
-func (cs *CategoryStore) All() []CategoryEntry {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	out := make([]CategoryEntry, len(cs.entries))
-	for i, e := range cs.entries {
-		cp := *e
-		cp.Hosts = append([]string(nil), e.Hosts...)
-		out[i] = cp
-	}
-	return out
-}
-
-// ReplaceAll atomically replaces all categories (used by cluster config sync).
-func (cs *CategoryStore) ReplaceAll(cats []CategoryEntry) {
-	cs.mu.Lock()
-	cs.entries = make([]*CategoryEntry, len(cats))
-	for i := range cats {
-		cp := cats[i]
-		cp.Hosts = append([]string(nil), cats[i].Hosts...)
-		cs.entries[i] = &cp
-	}
-	cs.rebuildIndex()
-	cs.mu.Unlock()
-}
-
-// Set creates or replaces the host list for a named category.
-func (cs *CategoryStore) Set(name string, hosts []string, builtIn bool) error {
-	if name == "" {
-		return fmt.Errorf("category name must not be empty")
-	}
-	if hosts == nil {
-		hosts = []string{}
-	}
-	cs.mu.Lock()
-	key := strings.ToLower(name)
-	set := make(map[string]bool, len(hosts))
-	for _, h := range hosts {
-		set[strings.ToLower(strings.TrimSuffix(h, "."))] = true
-	}
-	for _, e := range cs.entries {
-		if strings.EqualFold(e.Name, name) {
-			e.Hosts = hosts
-			cs.index[key] = set
-			cs.mu.Unlock()
-			cs.Save()
-			return nil
-		}
-	}
-	cs.entries = append(cs.entries, &CategoryEntry{Name: name, Hosts: hosts, BuiltIn: builtIn})
-	cs.index[key] = set
-	cs.mu.Unlock()
-	cs.Save()
-	return nil
-}
-
-// Delete removes a category by name. Returns an error if not found.
-func (cs *CategoryStore) Delete(name string) error {
-	cs.mu.Lock()
-	key := strings.ToLower(name)
-	for i, e := range cs.entries {
-		if strings.EqualFold(e.Name, name) {
-			cs.entries = append(cs.entries[:i], cs.entries[i+1:]...)
-			delete(cs.index, key)
-			cs.mu.Unlock()
-			cs.Save()
-			return nil
-		}
-	}
-	cs.mu.Unlock()
-	return fmt.Errorf("category %q not found", name)
-}
-
-// AddHost appends a host to the named category (no-op if already present).
-func (cs *CategoryStore) AddHost(category, host string) error {
-	cs.mu.Lock()
-	key := strings.ToLower(category)
-	for _, e := range cs.entries {
-		if !strings.EqualFold(e.Name, category) {
-			continue
-		}
-		host = normalizeHost(strings.TrimSpace(host))
-		if cs.index[key][host] {
-			cs.mu.Unlock()
-			return nil // already present
-		}
-		e.Hosts = append(e.Hosts, host)
-		cs.index[key][host] = true
-		cs.mu.Unlock()
-		cs.Save()
-		return nil
-	}
-	cs.mu.Unlock()
-	return fmt.Errorf("category %q not found", category)
-}
-
-// RemoveHost deletes a host from the named category.
-func (cs *CategoryStore) RemoveHost(category, host string) error {
-	cs.mu.Lock()
-	key := strings.ToLower(category)
-	for _, e := range cs.entries {
-		if strings.EqualFold(e.Name, category) {
-			host = normalizeHost(strings.TrimSpace(host))
-			for i, h := range e.Hosts {
-				if normalizeHost(h) == host {
-					e.Hosts = append(e.Hosts[:i], e.Hosts[i+1:]...)
-					delete(cs.index[key], host)
-					cs.mu.Unlock()
-					cs.Save()
-					return nil
-				}
-			}
-			cs.mu.Unlock()
-			return fmt.Errorf("host %q not in category %q", host, category)
-		}
-	}
-	cs.mu.Unlock()
-	return fmt.Errorf("category %q not found", category)
-}
+// Engine constructor re-exposed under its original name (tests).
+var newCategoryStore = urlcat.New
 
 // FileProfileName identifies a named file-extension block profile.
 type FileProfileName string
@@ -339,6 +114,16 @@ type PolicyRule struct {
 	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
 	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
 	HitCount          int64           `json:"hitCount"`               // runtime counter, not persisted
+
+	// normFQDN is the IDNA-normalized form of DestFQDN, precomputed by
+	// sortLocked() whenever rules are mutated. The proxy hot path (Evaluate)
+	// reads it instead of re-normalizing DestFQDN on every request — normalizing
+	// a host allocates (~1 alloc via idna.ToASCII), so doing it per-rule
+	// per-request was the dominant policy-eval allocation. Unexported ⇒ never
+	// serialized; a rule that reaches the store outside the mutators (empty
+	// normFQDN) falls back to the allocating path, so correctness never depends
+	// on it being populated.
+	normFQDN string
 }
 
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
@@ -600,6 +385,29 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 			}
 		}
 		nr.Priority = maxPri + 1
+	} else {
+		// Defense-in-depth: recheck priority uniqueness under the lock.
+		// validatePolicyRule catches the common non-concurrent case; this guard
+		// closes the TOCTOU window for concurrent adds that both pass validation
+		// against the same pre-lock snapshot.
+		collision := false
+		for _, existing := range ps.rules {
+			if existing.Priority == nr.Priority {
+				collision = true
+				break
+			}
+		}
+		if collision {
+			maxPri := 0
+			for _, existing := range ps.rules {
+				if existing.Priority > maxPri {
+					maxPri = existing.Priority
+				}
+			}
+			logWarnf("Policy: Add: priority %d collision (concurrent request?) — reassigning to %d",
+				nr.Priority, maxPri+1)
+			nr.Priority = maxPri + 1
+		}
 	}
 	ps.rules = append(ps.rules, &nr)
 	ps.sortLocked()
@@ -702,6 +510,9 @@ func (ps *PolicyStore) PermutePriorities(orderedPriorities []int) bool {
 	byOldPri := make(map[int]*PolicyRule, len(orderedPriorities))
 	for _, r := range ps.rules {
 		if seen[r.Priority] {
+			if _, already := byOldPri[r.Priority]; already {
+				return false // ambiguous: two store rules share a listed priority
+			}
 			byOldPri[r.Priority] = r
 		}
 	}
@@ -770,6 +581,17 @@ func (ps *PolicyStore) sortLocked() {
 	sort.Slice(ps.rules, func(i, j int) bool {
 		return ps.rules[i].Priority < ps.rules[j].Priority
 	})
+	// Precompute the normalized FQDN once per mutation so Evaluate never has to
+	// normalize a rule's pattern on the per-request hot path. Index-based range
+	// avoids copying the rule pointer's target.
+	for i := range ps.rules {
+		r := ps.rules[i]
+		if r.DestFQDN != "" {
+			r.normFQDN = normalizeHost(r.DestFQDN)
+		} else {
+			r.normFQDN = ""
+		}
+	}
 }
 
 // PolicyMatch is returned when a rule is matched against a request.
@@ -794,6 +616,12 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	rules := ps.rules
 	ps.mu.RUnlock()
 
+	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
+	// check reuses it (the host is identical across rules). This, plus each
+	// rule's precomputed normFQDN, removes the ~2 allocs/rule the policy hot path
+	// previously incurred re-normalizing host+pattern on every rule.
+	normHost := normalizeHost(host)
+
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
@@ -811,7 +639,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchSchedule(rule.Schedule) {
 			continue
 		}
-		if !matchDest(rule, host) {
+		if !matchDestNorm(rule, host, normHost) {
 			continue
 		}
 		atomic.AddInt64(&rule.HitCount, 1)
@@ -927,7 +755,29 @@ func matchAuthSource(ruleAuthSource, actualAuthSource string) bool {
 	if strings.EqualFold(ruleAuthSource, actualAuthSource) {
 		return true
 	}
-	return strings.EqualFold(stripIdPPrefix(ruleAuthSource), stripIdPPrefix(actualAuthSource))
+	// Legacy/canonical alias: a bare profile ID ("okta") and its prefixed form
+	// ("oidc:okta") refer to the same provider, so they match. BUT two DIFFERENT
+	// explicit schemes MUST NOT alias — a rule scoped to "oidc:okta" must not
+	// authorize a "saml:okta" source (cross-IdP/cross-scheme confusion). Match
+	// iff the bare names are equal AND the schemes are compatible (either side
+	// bare, or the same scheme).
+	ruleScheme, ruleName := splitIdPSource(ruleAuthSource)
+	actScheme, actName := splitIdPSource(actualAuthSource)
+	if !strings.EqualFold(ruleName, actName) {
+		return false
+	}
+	return ruleScheme == "" || actScheme == "" || strings.EqualFold(ruleScheme, actScheme)
+}
+
+// splitIdPSource separates an auth-source string into its IdP scheme
+// ("oidc"/"saml", or "" when bare/non-IdP) and the profile name.
+func splitIdPSource(source string) (scheme, name string) {
+	for _, p := range []string{"oidc:", "saml:"} {
+		if rest, ok := strings.CutPrefix(source, p); ok && rest != "" {
+			return strings.TrimSuffix(p, ":"), rest
+		}
+	}
+	return "", source
 }
 
 func stripIdPPrefix(source string) string {
@@ -965,15 +815,32 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
+	return matchDestNorm(rule, host, normalizeHost(host))
+}
+
+// matchDestNorm is matchDest's core. normHost MUST be normalizeHost(host); the
+// hot path (Evaluate) computes it ONCE per request and reuses it across every
+// rule, and uses each rule's precomputed normFQDN — eliminating the two
+// per-rule host+pattern normalization allocations. Category/country checks keep
+// using the raw host (they normalize internally and are far less common).
+func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 	// Empty fields mean "match any" — all configured fields must satisfy.
 	fqdnSet := rule.DestFQDN != ""
 	catSet := rule.DestCategory != "" && rule.DestCategory != CategoryAny
 	catGroupSet := rule.DestCategoryGroup != ""
 	countrySet := len(rule.DestCountry) > 0
 
-	// FQDN check.
-	if fqdnSet && !matchFQDN(rule.DestFQDN, host) {
-		return false
+	// FQDN check — use the precomputed normalized pattern when available;
+	// otherwise fall back to the allocating matchFQDN so correctness never
+	// depends on normFQDN having been precomputed.
+	if fqdnSet {
+		if rule.normFQDN != "" {
+			if !matchFQDNNorm(rule.normFQDN, normHost) {
+				return false
+			}
+		} else if !matchFQDN(rule.DestFQDN, host) {
+			return false
+		}
 	}
 	// URL category check (single category).
 	if catSet && !matchCategory(rule.DestCategory, host) {
@@ -981,7 +848,7 @@ func matchDest(rule *PolicyRule, host string) bool {
 	}
 	// Category group check — host must be in ANY category within the group.
 	// O(1): lookupHostCategory(host) → group.catSet[result].
-	if catGroupSet && !globalCategoryGroups.MatchesHost(rule.DestCategoryGroup, host) {
+	if catGroupSet && !categoryGroupMatchesHost(rule.DestCategoryGroup, host) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.
@@ -1049,24 +916,19 @@ func matchFileExt(urlPath string, exts []string) bool {
 	return false
 }
 
-func matchFQDN(pattern, host string) bool {
-	host = normalizeHost(host)
-	pattern = normalizeHost(pattern)
-	if pattern == "*" {
-		return true
-	}
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // .example.com
-		return strings.HasSuffix(host, suffix) || host == pattern[2:]
-	}
-	// Palo Alto-style: a bare domain implicitly includes all its subdomains.
-	// "example.com" matches "example.com" AND "www.example.com".
-	return host == pattern || strings.HasSuffix(host, "."+pattern)
-}
+// The canonical FQDN-glob matcher moved to internal/hostutil (ADR-0002,
+// policy.go decomposition Phase B) — it is shared by rule matching here and
+// the SSL-bypass matcher (internal/sslbypass); their agreement is pinned by
+// policy_bypass_security_test.go. Wrapper FUNCTIONS (not func vars) so the
+// per-rule call in Evaluate's hot path stays direct and inlinable.
+
+func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, host) }
+
+func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
 func matchCategory(cat URLCategory, host string) bool {
 	// Layer 1: admin-managed catStore — exact + suffix match (fast, in-memory).
-	if matchCategoryInStore(cat, host) {
+	if catStore.MatchesHost(cat, host) {
 		return true
 	}
 	// Layer 2: community BadgerDB feed — domain-walking point lookups.
@@ -1082,32 +944,13 @@ func matchCategory(cat URLCategory, host string) bool {
 // Returns (category, tier, matchedBy) where tier is "admin", "community", or "none".
 // Used by the admin URL-lookup API endpoint and policy test response enrichment.
 func lookupHostCategory(host string) (category, tier, matchedBy string) {
-	h := normalizeHost(host)
-
 	// Layer 1: admin-managed catStore — exact + suffix match.
-	catStore.mu.RLock()
-	found := false
-	for _, e := range catStore.entries {
-		for _, p := range e.Hosts {
-			pl := strings.ToLower(p)
-			if h == pl || strings.HasSuffix(h, "."+pl) {
-				category = e.Name
-				tier = "admin"
-				matchedBy = p
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-	catStore.mu.RUnlock()
-	if found {
-		return
+	if name, pattern, ok := catStore.LookupHost(host); ok {
+		return name, "admin", pattern
 	}
 
 	// Layer 2: community BadgerDB feed.
+	h := normalizeHost(host)
 	if communityDB != nil {
 		if foundCat, ok := communityDB.Lookup(h); ok {
 			return foundCat, "community", h
@@ -1116,185 +959,15 @@ func lookupHostCategory(host string) (category, tier, matchedBy string) {
 	return "", "none", ""
 }
 
-// matchCategoryInStore checks whether host belongs to the named URL category.
-// Uses the pre-built index for O(labels) lookup instead of O(N×M) iteration.
-func matchCategoryInStore(cat URLCategory, host string) bool {
-	host = normalizeHost(host)
-	catKey := strings.ToLower(string(cat))
-
-	catStore.mu.RLock()
-	hostSet := catStore.index[catKey]
-	catStore.mu.RUnlock()
-
-	if hostSet == nil {
-		return false
-	}
-	// Exact match.
-	if hostSet[host] {
-		return true
-	}
-	// Subdomain match: foo.example.com → check "example.com", "com", etc.
-	for i, ch := range host {
-		if ch == '.' && hostSet[host[i+1:]] {
-			return true
-		}
-	}
-	return false
-}
-
 // ── SSL Bypass Matcher ────────────────────────────────────────────────────────
+// The SSL-bypass engine (pattern compilation, glob/regex matching, JSON
+// persistence) moved to internal/sslbypass (ADR-0002, policy.go
+// decomposition Phase B). main keeps the /api/ssl-bypass handlers, the
+// inspection-rules startup slice, cluster sync, and rollback — via this
+// alias + singleton. Matches sits on the per-CONNECT hot path
+// (resolveSSLAction).
 
-// bypassPattern holds one compiled bypass entry.
-// Glob patterns (e.g. "*.co.il") use matchFQDN semantics.
-// Regex patterns are prefixed with "~" (e.g. "~^.*\.gov\.il$").
-type bypassPattern struct {
-	raw  string
-	isRE bool
-	re   *regexp.Regexp
-}
-
-// SSLBypassMatcher holds a list of host patterns that must always bypass
-// SSL inspection, regardless of what the PBAC policy says.
-// Patterns are managed at runtime via /api/ssl-bypass and persisted to a
-// JSON file so they survive restarts without modifying config.yaml.
-type SSLBypassMatcher struct {
-	mu       sync.RWMutex
-	raw      []string        // raw strings for persistence and API listing
-	compiled []bypassPattern // pre-compiled for fast matching
-	path     string          // optional JSON file path for persistence
-}
+// SSLBypassMatcher is re-exposed unqualified (engine type is sslbypass.Matcher).
+type SSLBypassMatcher = sslbypass.Matcher
 
 var sslBypass = &SSLBypassMatcher{}
-
-func compileBypassPattern(p string) (bypassPattern, error) {
-	bp := bypassPattern{raw: p}
-	if strings.HasPrefix(p, "~") {
-		re, err := regexp.Compile(p[1:])
-		if err != nil {
-			return bypassPattern{}, fmt.Errorf("ssl bypass pattern %q: %w", p, err)
-		}
-		bp.isRE = true
-		bp.re = re
-	}
-	return bp, nil
-}
-
-// Set atomically replaces all bypass patterns.
-func (m *SSLBypassMatcher) Set(patterns []string) error {
-	compiled := make([]bypassPattern, 0, len(patterns))
-	for _, p := range patterns {
-		bp, err := compileBypassPattern(p)
-		if err != nil {
-			return err
-		}
-		compiled = append(compiled, bp)
-	}
-	m.mu.Lock()
-	m.raw = append([]string(nil), patterns...)
-	m.compiled = compiled
-	m.mu.Unlock()
-	return nil
-}
-
-// Load reads bypass patterns from a JSON file (array of strings).
-// A missing file is treated as an empty list (not an error).
-// Sets the persistence path so subsequent Save() calls write to this file.
-func (m *SSLBypassMatcher) Load(path string) error {
-	m.path = path
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var patterns []string
-	if err := json.Unmarshal(data, &patterns); err != nil {
-		return err
-	}
-	return m.Set(patterns)
-}
-
-// Save atomically persists the current patterns to the configured JSON file.
-// A temporary file + rename ensures a crash mid-write never corrupts the list.
-func (m *SSLBypassMatcher) Save() {
-	if m.path == "" {
-		return
-	}
-	m.mu.RLock()
-	raw := make([]string, len(m.raw))
-	copy(raw, m.raw)
-	m.mu.RUnlock()
-
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return
-	}
-	// Bucket-4 durability hardening: atomicWriteFile gives unique
-	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
-	// dir) — replaces the previous os.WriteFile+os.Rename which was
-	// atomic-via-rename but NOT fsynced.
-	_ = atomicWriteFile(m.path, data, 0o600)
-}
-
-// Add appends a single pattern. No-ops if the pattern is already present.
-func (m *SSLBypassMatcher) Add(pattern string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, p := range m.raw {
-		if p == pattern {
-			return nil // already present
-		}
-	}
-	bp, err := compileBypassPattern(pattern)
-	if err != nil {
-		return err
-	}
-	m.raw = append(m.raw, pattern)
-	m.compiled = append(m.compiled, bp)
-	return nil
-}
-
-// Remove deletes a pattern by exact string match. Returns true if removed.
-func (m *SSLBypassMatcher) Remove(pattern string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, p := range m.raw {
-		if p == pattern {
-			m.raw = append(m.raw[:i], m.raw[i+1:]...)
-			m.compiled = append(m.compiled[:i], m.compiled[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// List returns a snapshot of all raw patterns.
-func (m *SSLBypassMatcher) List() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]string, len(m.raw))
-	copy(out, m.raw)
-	return out
-}
-
-// Matches reports whether host matches any configured bypass pattern.
-// Glob patterns follow matchFQDN semantics ("*.co.il" matches "www.co.il").
-// Regex patterns (prefix "~") are matched against the lower-cased bare host.
-func (m *SSLBypassMatcher) Matches(host string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	h := normalizeHost(host)
-	for _, p := range m.compiled {
-		if p.isRE {
-			if p.re.MatchString(h) {
-				return true
-			}
-		} else {
-			if matchFQDN(p.raw, h) {
-				return true
-			}
-		}
-	}
-	return false
-}

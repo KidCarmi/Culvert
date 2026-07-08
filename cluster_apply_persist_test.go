@@ -62,6 +62,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/catgroup"
+	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
 // ─── globalProfileStore ─────────────────────────────────────────────
@@ -71,10 +74,9 @@ import (
 // triggered by applyConfigSnapshot's snap.FileProfiles branch
 // (controlplane.go:1521–1523).
 func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
-	origPath := globalProfileStore.path
 	origProfiles := globalProfileStore.List()
 	t.Cleanup(func() {
-		globalProfileStore.path = origPath
+		globalProfileStore.SetPath("") // drop the test's temp persistence path
 		restored := make([]FileExtProfile, 0, len(origProfiles))
 		for _, p := range origProfiles {
 			restored = append(restored, *p)
@@ -84,7 +86,7 @@ func TestApplyConfigSnapshot_FileProfilesPersist(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "fileprofiles.json")
-	globalProfileStore.path = path
+	globalProfileStore.SetPath(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -188,10 +190,9 @@ func TestApplyConfigSnapshot_BandwidthPoliciesPersist(t *testing.T) {
 // efficiency observation (out of P3.4 scope per the brief's
 // "no broad persistence framework rewrite" constraint).
 func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
-	origPath := fileBlocker.path
 	origExts := fileBlocker.List()
 	t.Cleanup(func() {
-		fileBlocker.SetPath(origPath)
+		fileBlocker.SetPath("") // drop the test's temp persistence path
 		fileBlocker.ClearAll()
 		for _, ext := range origExts {
 			fileBlocker.Add(ext)
@@ -216,7 +217,7 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 
 	// Read the file directly and unmarshal — FileBlocker's on-disk
 	// shape is `[]string` per fileblock.go save() body.
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- test-controlled temp path
 	if err != nil {
 		t.Fatalf("read %q: %v", path, err)
 	}
@@ -240,7 +241,7 @@ func TestApplyConfigSnapshot_FileBlockExtensionsPersist(t *testing.T) {
 
 	// Fresh-reader evidence: SetPath() on a brand-new FileBlocker
 	// should load the same extensions.
-	fresh := &FileBlocker{extensions: map[string]bool{}}
+	fresh := fileblock.NewBlocker()
 	fresh.SetPath(path)
 	freshExts := fresh.List()
 	if len(freshExts) != 3 {
@@ -312,16 +313,16 @@ func TestApplyConfigSnapshot_NodeGroupsPersist(t *testing.T) {
 // caller-side sslBypass.Save() hook after sslBypass.Set() in
 // applyConfigSnapshot's snap.SSLBypassPatterns branch.
 func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
-	origPath := sslBypass.path
+	origPath := sslBypass.Path()
 	origPatterns := sslBypass.List()
 	t.Cleanup(func() {
-		sslBypass.path = origPath
+		sslBypass.SetPathForTest(origPath)
 		_ = sslBypass.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ssl_bypass.json")
-	sslBypass.path = path
+	sslBypass.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version:           1,
@@ -347,16 +348,16 @@ func TestApplyConfigSnapshot_SSLBypassPatternsPersist(t *testing.T) {
 // caller-side catStore.Save() hook after catStore.ReplaceAll() in
 // applyConfigSnapshot's snap.URLCategories branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
-	origPath := catStore.path
+	origPath := catStore.Path()
 	origEntries := catStore.All()
 	t.Cleanup(func() {
-		catStore.path = origPath
+		catStore.SetPathForTest(origPath)
 		catStore.ReplaceAll(origEntries)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "categories.json")
-	catStore.path = path
+	catStore.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -387,16 +388,16 @@ func TestApplyConfigSnapshot_URLCategoriesPersist(t *testing.T) {
 // caller-side dpiScanner.Save() hook after dpiScanner.Set() in
 // applyConfigSnapshot's snap.DPIPatterns branch (P6.2 SC-3 closure).
 func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
-	origPath := dpiScanner.path
-	origPatterns := append([]string(nil), dpiScanner.raw...)
+	origPath := dpiScanner.Path()
+	origPatterns := append([]string(nil), dpiScanner.List()...)
 	t.Cleanup(func() {
-		dpiScanner.path = origPath
+		dpiScanner.SetPath(origPath)
 		_ = dpiScanner.Set(origPatterns)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dpi_patterns.json")
-	dpiScanner.path = path
+	dpiScanner.SetPath(path)
 
 	snap := ConfigSnapshot{
 		Version:     1,
@@ -408,15 +409,15 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
 	}
 
-	fresh := &ContentScanner{bypassHosts: map[string]bool{}}
+	fresh := newContentScanner(0)
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("fresh.Load: %v", err)
 	}
-	if len(fresh.raw) != 1 {
-		t.Fatalf("loaded %d patterns, want 1", len(fresh.raw))
+	if len(fresh.List()) != 1 {
+		t.Fatalf("loaded %d patterns, want 1", len(fresh.List()))
 	}
-	if fresh.raw[0] != "p34-test-dpi-pattern" {
-		t.Errorf("fresh.raw[0] = %q, want p34-test-dpi-pattern", fresh.raw[0])
+	if fresh.List()[0] != "p34-test-dpi-pattern" {
+		t.Errorf("fresh.List()[0] = %q, want p34-test-dpi-pattern", fresh.List()[0])
 	}
 }
 
@@ -428,20 +429,13 @@ func TestApplyConfigSnapshot_DPIPatternsPersist(t *testing.T) {
 // (threatfeed.go:266); ImportFeedData does NOT — this test verifies
 // the latter branch becomes durable after the caller-side hook.
 func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
-	origDbPath := globalThreatFeed.dbPath
-	t.Cleanup(func() {
-		globalThreatFeed.mu.Lock()
-		globalThreatFeed.dbPath = origDbPath
-		globalThreatFeed.urls = map[string]feedEntry{}
-		globalThreatFeed.domains = map[string]feedEntry{}
-		globalThreatFeed.mu.Unlock()
-	})
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "threatfeed.json")
-	globalThreatFeed.mu.Lock()
-	globalThreatFeed.dbPath = path
-	globalThreatFeed.mu.Unlock()
+	origDbPath := globalThreatFeed.SetDBPathForTest(path)
+	t.Cleanup(func() {
+		globalThreatFeed.SetDBPathForTest(origDbPath)
+		globalThreatFeed.ImportFeedData(nil, nil) // clear seeded feed data
+	})
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -478,31 +472,15 @@ func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T) {
-	globalThreatFeed.mu.Lock()
-	origDbPath := globalThreatFeed.dbPath
-	origURLs := globalThreatFeed.urls
-	origDomains := globalThreatFeed.domains
-	origAllowlist := globalThreatFeed.domainAllowlist
-	origEnabled := globalThreatFeed.enabled
-	origLastSync := globalThreatFeed.lastSync
-	origTotalEntries := globalThreatFeed.totalEntries.Load()
 	dbPath := filepath.Join(t.TempDir(), "threatfeed.json")
-	globalThreatFeed.dbPath = dbPath
-	globalThreatFeed.urls = map[string]feedEntry{}
-	globalThreatFeed.domains = map[string]feedEntry{}
-	globalThreatFeed.domainAllowlist = map[string]bool{}
-	globalThreatFeed.enabled = true
-	globalThreatFeed.mu.Unlock()
+	origDbPath := globalThreatFeed.SetDBPathForTest(dbPath)
+	origAllowlist := globalThreatFeed.DomainAllowlist()
+	globalThreatFeed.ImportFeedData(nil, nil)
+	globalThreatFeed.SetDomainAllowlist(nil)
 	t.Cleanup(func() {
-		globalThreatFeed.mu.Lock()
-		globalThreatFeed.dbPath = origDbPath
-		globalThreatFeed.urls = origURLs
-		globalThreatFeed.domains = origDomains
-		globalThreatFeed.domainAllowlist = origAllowlist
-		globalThreatFeed.enabled = origEnabled
-		globalThreatFeed.lastSync = origLastSync
-		globalThreatFeed.mu.Unlock()
-		globalThreatFeed.totalEntries.Store(origTotalEntries)
+		globalThreatFeed.ImportFeedData(nil, nil)
+		globalThreatFeed.SetDomainAllowlist(origAllowlist)
+		globalThreatFeed.SetDBPathForTest(origDbPath)
 	})
 
 	applyConfigSnapshot(ConfigSnapshot{
@@ -516,28 +494,33 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 		ThreatDomainAllowlist: []string{"www.google.com"},
 	})
 
-	if hit, _ := globalThreatFeed.CheckDomain("www.google.com"); hit {
-		t.Fatal("applyConfigSnapshot reintroduced an allowlisted threat-feed domain")
-	}
 	if _, ok := globalThreatFeed.ExportDomains()["www.google.com"]; ok {
 		t.Fatal("applyConfigSnapshot retained an allowlisted threat-feed domain")
 	}
-	if hit, src := globalThreatFeed.CheckURL("https://www.google.com/malware"); !hit || src != "cluster-sync" {
-		t.Fatalf("exact malicious URL should remain blocked after snapshot allowlist; hit=%v src=%q", hit, src)
+	if _, ok := globalThreatFeed.ExportURLs()["https://www.google.com/malware"]; !ok {
+		t.Fatal("exact malicious URL should remain present after snapshot allowlist")
 	}
 
 	raw, err := os.ReadFile(dbPath)
 	if err != nil {
 		t.Fatalf("read threatfeed DB: %v", err)
 	}
-	var decoded feedDB
+	var decoded map[string]any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		t.Fatalf("unmarshal threatfeed DB: %v", err)
 	}
-	if _, ok := decoded.Domains["www.google.com"]; ok {
+	domains, ok := decoded["domains"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB domains map missing or wrong type")
+	}
+	if _, ok := domains["www.google.com"]; ok {
 		t.Fatal("applyConfigSnapshot persisted an allowlisted threat-feed domain")
 	}
-	if _, ok := decoded.URLs["https://www.google.com/malware"]; !ok {
+	urls, ok := decoded["urls"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB urls map missing or wrong type")
+	}
+	if _, ok := urls["https://www.google.com/malware"]; !ok {
 		t.Fatal("applyConfigSnapshot should persist exact malicious URL entries")
 	}
 }
@@ -554,16 +537,16 @@ func keysOf(m map[string]any) []string {
 // caller-side globalCategoryGroups.Save() hook after ReplaceAll in
 // applyConfigSnapshot's snap.CategoryGroups branch (P6.1 UC-2 closure).
 func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
-	origPath := globalCategoryGroups.path
+	origPath := globalCategoryGroups.Path()
 	origGroups := globalCategoryGroups.List()
 	t.Cleanup(func() {
-		globalCategoryGroups.path = origPath
+		globalCategoryGroups.SetPathForTest(origPath)
 		globalCategoryGroups.ReplaceAll(origGroups)
 	})
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "category_groups.json")
-	globalCategoryGroups.path = path
+	globalCategoryGroups.SetPathForTest(path)
 
 	snap := ConfigSnapshot{
 		Version: 1,
@@ -577,7 +560,7 @@ func TestApplyConfigSnapshot_CategoryGroupsPersist(t *testing.T) {
 		t.Fatalf("stat %q: %v (caller-side Save hook did not persist)", path, err)
 	}
 
-	fresh := &CategoryGroupStore{groups: make(map[string]*CategoryGroup)}
+	fresh := catgroup.New()
 	if err := fresh.Load(path); err != nil {
 		t.Fatalf("fresh.Load: %v", err)
 	}

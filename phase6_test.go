@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // ── P0.2: RFC 7230 hop-by-hop headers ───────────────────────────────────────
@@ -74,7 +76,7 @@ func TestGeoIPFailClosed(t *testing.T) {
 // ── P0.5: Cert cache LRU + TTL ─────────────────────────────────────────────
 
 func TestCertCacheTTLExpiry(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
@@ -90,9 +92,9 @@ func TestCertCacheTTLExpiry(t *testing.T) {
 	}
 
 	// Manually expire the cache entry.
-	cm.mu.Lock()
-	cm.cache["ttl-test.example.com"].createdAt = time.Now().Add(-2 * certCacheTTL)
-	cm.mu.Unlock()
+	if !cm.AgeCacheEntryForTest("ttl-test.example.com", time.Now().Add(-2*ca.CacheTTL)) {
+		t.Fatal("expected the freshly-signed entry to be present in the cache")
+	}
 
 	// Requesting again should re-sign (new cert).
 	cert2, err := cm.GetCert(hello)
@@ -105,21 +107,20 @@ func TestCertCacheTTLExpiry(t *testing.T) {
 }
 
 func TestCertCacheLRUEviction(t *testing.T) {
-	cm := &CertManager{cache: map[string]*certCacheEntry{}}
+	cm := ca.New()
 	if err := cm.InitCA(); err != nil {
 		t.Fatalf("InitCA: %v", err)
 	}
 
 	// Pre-fill cache to exactly the limit with unique entries.
 	now := time.Now()
-	for i := 0; i < certCacheMaxSize; i++ {
+	for i := 0; i < ca.CacheMaxSize; i++ {
 		host := fmt.Sprintf("host-%d.example.com", i)
-		cm.cache[host] = &certCacheEntry{cert: &tls.Certificate{}, createdAt: now}
-		cm.cacheOrder = append(cm.cacheOrder, host)
+		cm.SeedCacheEntryForTest(host, &tls.Certificate{}, now)
 	}
 
-	if cm.CertCacheLen() != certCacheMaxSize {
-		t.Fatalf("expected %d cached entries, got %d", certCacheMaxSize, cm.CertCacheLen())
+	if cm.CertCacheLen() != ca.CacheMaxSize {
+		t.Fatalf("expected %d cached entries, got %d", ca.CacheMaxSize, cm.CertCacheLen())
 	}
 
 	// Adding one more should trigger eviction of oldest 10%.
@@ -130,8 +131,8 @@ func TestCertCacheLRUEviction(t *testing.T) {
 	}
 
 	// After eviction: cache should be smaller than max (evicted 10% then added 1).
-	if cm.CertCacheLen() > certCacheMaxSize {
-		t.Errorf("cache should not exceed %d entries after eviction, got %d", certCacheMaxSize, cm.CertCacheLen())
+	if cm.CertCacheLen() > ca.CacheMaxSize {
+		t.Errorf("cache should not exceed %d entries after eviction, got %d", ca.CacheMaxSize, cm.CertCacheLen())
 	}
 }
 

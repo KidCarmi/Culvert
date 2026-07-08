@@ -7,14 +7,24 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/totp"
 	"github.com/crewjam/saml"
 )
+
+// setupCompleteMu serializes apiSetupComplete's "is setup already done?"
+// check against its own writes. The endpoint is intentionally public
+// (reachable before any admin account exists), so without this lock two
+// concurrent POSTs can both observe !cfg.IsConfigured() before either call
+// finishes, letting more than one caller provision an admin credential —
+// each one landing in the uiUsers RBAC roster as a permanent, independently
+// usable admin login.
+var setupCompleteMu sync.Mutex
 
 // POST /api/auth/login — validate admin credentials, set session cookie.
 // When TOTP is enrolled for the user, a first-pass response of {"totp_required":true}
@@ -33,8 +43,15 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	// Account lockout check — before any credential verification.
-	if locked, secs := loginLimiter.Check(body.User); locked {
+	// RISK-019: resolve the real client behind a configured trusted proxy, so
+	// an L7 proxy that collapses peer IPs can't let one attacker lock out every
+	// admin (falls back to the direct peer when no trusted proxy is set).
+	clientIP := realClientIP(r)
+	// Account lockout check — before any credential verification. Two-tier
+	// (RISK-012): the (IP, user) pair lock plus the trusted-IP-bypassed
+	// account lock, so a remote attacker can no longer lock the real admin
+	// out by spamming failures for their username.
+	if locked, secs := loginLimiter.Check(clientIP, body.User); locked {
 		auditEvent(r, "auth.lockout", body.User, fmt.Sprintf("blocked — %ds remaining", secs))
 		go fireAlert("auth_lockout", AlertPayload{
 			Actor:  body.User,
@@ -46,7 +63,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, ok := cfg.VerifyUIUser(body.User, body.Pass)
-	if !cfg.AuthEnabled() {
+	if !cfg.IsConfigured() {
 		role, ok = RoleAdmin, true
 	}
 	if ok {
@@ -59,12 +76,12 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 			}
 			secret := cfg.GetTOTPSecret(body.User)
 			lastCounter := cfg.GetTOTPLastCounter(body.User)
-			totpOK, matchedCounter := verifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
+			totpOK, matchedCounter := totp.VerifyTOTPReturnCounter(secret, body.TOTP, time.Now().Unix(), lastCounter)
 			if totpOK {
 				// Persist the matched counter to close the replay window for
 				// this step and all earlier steps within the skew tolerance.
 				cfg.SetTOTPLastCounter(body.User, matchedCounter)
-				cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+				cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
 			} else {
 				// Try backup codes.
 				if !cfg.ConsumeBackupCode(body.User, body.TOTP) {
@@ -72,14 +89,14 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 					// an attacker who has (or guesses) a valid password can
 					// brute-force the 6-digit OTP (1M possibilities) with
 					// only the 300 ms delay as a barrier.
-					nowLocked := loginLimiter.RecordFailure(body.User)
-					cfg.SaveUIUsersFile() //nolint:errcheck — best-effort persist
+					nowLocked := loginLimiter.RecordFailure(clientIP, body.User)
+					cfg.SaveUIUsersFile() //nolint:errcheck // best-effort persist
 					auditEvent(r, "auth.totp.fail", body.User,
 						fmt.Sprintf("invalid TOTP, locked=%v, attempts_left=%d",
-							nowLocked, loginLimiter.AttemptsLeft(body.User)))
+							nowLocked, loginLimiter.AttemptsLeft(clientIP, body.User)))
 					time.Sleep(300 * time.Millisecond)
 					if nowLocked {
-						_, secs := loginLimiter.Check(body.User)
+						_, secs := loginLimiter.Check(clientIP, body.User)
 						http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
 						return
 					}
@@ -90,7 +107,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 				cfg.SaveUIUsersFile() //nolint:errcheck
 			}
 		}
-		loginLimiter.RecordSuccess(body.User)
+		loginLimiter.RecordSuccess(clientIP, body.User)
 		// Clear any pre-existing session cookie before issuing a new one
 		// to prevent session fixation attacks (defense-in-depth).
 		clearUISessionCookie(w, r)
@@ -102,13 +119,13 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
 		return
 	}
-	nowLocked := loginLimiter.RecordFailure(body.User)
+	nowLocked := loginLimiter.RecordFailure(clientIP, body.User)
 	auditEvent(r, "auth.login.fail", body.User,
 		fmt.Sprintf("invalid credentials, locked=%v, attempts_left=%d",
-			nowLocked, loginLimiter.AttemptsLeft(body.User)))
+			nowLocked, loginLimiter.AttemptsLeft(clientIP, body.User)))
 	time.Sleep(300 * time.Millisecond) // slow down brute-force
 	if nowLocked {
-		_, secs := loginLimiter.Check(body.User)
+		_, secs := loginLimiter.Check(clientIP, body.User)
 		http.Error(w, LockoutMsg(secs), http.StatusTooManyRequests)
 		return
 	}
@@ -121,7 +138,7 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !cfg.AuthEnabled() {
+	if !cfg.IsConfigured() {
 		jsonOK(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
@@ -316,7 +333,7 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	jsonOK(w, map[string]any{"needsSetup": !cfg.AuthEnabled()})
+	jsonOK(w, map[string]any{"needsSetup": !cfg.IsConfigured()})
 }
 
 // POST /api/setup/complete — sets the initial admin credential or enables unauth mode.
@@ -330,19 +347,30 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// S4: Rate-limit setup endpoint to prevent brute-force race during initial setup window.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
-	setupKey := "setup:" + ip
-	if locked, secs := loginLimiter.Check(setupKey); locked {
+	// RISK-019: trusted-proxy-aware client IP (falls back to the direct peer).
+	ip := realClientIP(r)
+	// Setup runs BEFORE any admin account exists, so it must use the
+	// PAIR-ONLY limiter (CheckPair/RecordPairFailure): pure per-IP rate
+	// limiting with no account-tier aggregation. Routing it through the
+	// two-tier Check would let a handful of IPs push the shared
+	// accounts["setup"] counter to the account cap and globally lock the
+	// bootstrap flow — the very lockout-as-DoS RISK-012 fixes (and there is
+	// no RecordSuccess here to ever build a trust grant that would bypass it).
+	const setupKey = "setup"
+	if locked, secs := loginLimiter.CheckPair(ip, setupKey); locked {
 		http.Error(w, fmt.Sprintf("too many attempts, locked for %ds", secs), http.StatusTooManyRequests)
 		return
 	}
-	if cfg.AuthEnabled() {
+	// Fast, lock-free rejection for the common "already done" case. Body
+	// decode/validation below must happen BEFORE setupCompleteMu is taken —
+	// otherwise a client that stalls or drips its request body could
+	// monopolize the lock and block the legitimate first-time setup request
+	// during the bootstrap window.
+	if cfg.IsConfigured() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
+
 	var body struct {
 		User   string `json:"user"`
 		Pass   string `json:"pass"`
@@ -353,25 +381,40 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Unauth (open proxy) mode — skip credential requirements.
+	if !body.Unauth {
+		body.User = strings.TrimSpace(body.User)
+		if len(body.User) < 1 || len(body.User) > 64 {
+			loginLimiter.RecordPairFailure(ip, setupKey)
+			http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
+			return
+		}
+		if err := validatePasswordComplexity(body.Pass); err != nil {
+			loginLimiter.RecordPairFailure(ip, setupKey)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Authoritative re-check under setupCompleteMu: the fast check above is
+	// racy by design (no lock held during body decode/validation), so a
+	// concurrent request may have completed setup in the meantime. Only the
+	// lock-held check below — held across the check and the write — decides
+	// whether this request is allowed to mutate cfg.
+	setupCompleteMu.Lock()
+	defer setupCompleteMu.Unlock()
+	if cfg.IsConfigured() {
+		http.Error(w, "setup already complete", http.StatusForbidden)
+		return
+	}
+
+	// Open (no-credential) mode — set the global default to Exempt.
 	if body.Unauth {
-		cfg.SetUnauthMode(true)
-		auditEvent(r, "setup.complete", "system", "unauth mode enabled — proxy requires no credentials")
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		auditEvent(r, "setup.complete", "system", "open mode (defaultAuthOutcome=Exempt) — unmatched traffic requires no credentials")
 		jsonOK(w, map[string]any{"ok": true, "unauth": true})
 		return
 	}
 
-	body.User = strings.TrimSpace(body.User)
-	if len(body.User) < 1 || len(body.User) > 64 {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, "username must be 1-64 characters", http.StatusBadRequest)
-		return
-	}
-	if err := validatePasswordComplexity(body.Pass); err != nil {
-		loginLimiter.RecordFailure(setupKey)
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	if err := cfg.SetAuth(body.User, body.Pass); err != nil {
 		http.Error(w, "internal error: "+err.Error(), http.StatusInternalServerError)
 		return

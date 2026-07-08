@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -20,6 +17,10 @@ import (
 	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // ─── Uptime ───────────────────────────────────────────────────────────────────
@@ -111,38 +112,9 @@ func tsGet() (total, allowed, blocked []int64) {
 
 // ─── Request log ──────────────────────────────────────────────────────────────
 
-type LogEntry struct {
-	TS          int64  `json:"ts"`
-	Time        string `json:"time"`
-	IP          string `json:"ip"`
-	Identity    string `json:"identity,omitempty"` // authenticated username/email, empty if unauthenticated
-	Method      string `json:"method"`
-	Host        string `json:"host"`
-	URI         string `json:"uri,omitempty"`       // full request URL (host+path, no query); only set when the matched rule has LogFullURI
-	Status      string `json:"status"`              // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
-	Level       string `json:"level"`               // INFO | WARN | ERROR
-	RuleMatched string `json:"ruleMatched"`         // policy rule name that matched, if any
-	ActionTaken string `json:"actionTaken"`         // policy action taken, if any
-	BytesSent   int64  `json:"bytesSent,omitempty"` // bytes sent to upstream (request body)
-	BytesRecv   int64  `json:"bytesRecv,omitempty"` // bytes received from upstream (response body)
-	SSLAction   string `json:"sslAction,omitempty"` // "inspect", "bypass", or empty (non-CONNECT)
-
-	// Normalized authentication-policy SIEM fields (Phase 0 seam, §1.8; the
-	// auth_* observability block is finalized in Phase 1 Slice 5). Declared as the
-	// durable SIEM contract but populated only when an auth decision supplies them
-	// — all are omitempty so wire output stays byte-identical for requests with no
-	// auth decision. NO identity is carried in the auth_* block: an Exempt decision
-	// is logged by outcome + rule id/name (+ low-cardinality subject predicate
-	// types and the matched rule's subject schema version) only.
-	SchemaVersion         int      `json:"schema_version,omitempty"`           // event schema version
-	AuthSource            string   `json:"auth_source,omitempty"`              // categorical: idp|local|oidc:x|saml:x|exempt|unauth
-	AuthOutcome           string   `json:"auth_outcome,omitempty"`             // Stage-1 outcome (e.g. "Exempt"); "" = none
-	AuthPolicyRuleID      string   `json:"auth_policy_rule_id,omitempty"`      // ULID of matched Stage-1 rule
-	AuthPolicyRuleName    string   `json:"auth_policy_rule_name,omitempty"`    // display name of matched Stage-1 rule
-	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // ULID of matched Stage-2 rule
-	AuthSubjectMatchTypes []string `json:"auth_subject_match_types,omitempty"` // low-cardinality predicate type names (e.g. ["cidr"])
-	AuthSchemaVersion     int      `json:"auth_schema_version,omitempty"`      // matched rule's SubjectMatch schema version
-}
+// LogEntry moved to internal/logstore (logstore.Entry) with the history-store
+// extraction (ADR-0002); the alias in logstore.go keeps every unqualified use
+// — ring, JSONL writer, SSE feed, SIEM fields — source-compatible.
 
 // AuthLogFields carries the low-cardinality Stage-1 authentication-policy
 // observability fields attached to a request log entry. The zero value adds
@@ -168,1284 +140,69 @@ func (a AuthLogFields) applyTo(e *LogEntry) {
 	e.AuthSchemaVersion = a.SchemaVersion
 }
 
-func levelForStatus(status string) string {
-	switch status {
-	case "OK", "POLICY_ALLOW":
-		return "INFO"
-	case "BLOCKED", "THREAT_BLOCKED", "FILE_BLOCKED", "SCAN_BLOCKED",
-		"DPI_BLOCKED", "POLYGLOT_BLOCKED", "CDR_BLOCKED", "CDR_SANITIZED",
-		"RATE_LIMITED", "IP_BLOCKED",
-		"POLICY_BLOCK", "POLICY_DROP", "POLICY_REDIRECT", "POLICY_DEFAULT_DENY":
-		return "WARN"
-	default: // AUTH_FAIL, CDR_ERROR, and anything unexpected
-		return "ERROR"
-	}
-}
-
-const maxLogs = 5000
-
+// The request-log engine (ring + persistent JSONL layer + TTL read cache +
+// levelForStatus) moved to internal/reqlog (ADR-0002, store.go decomposition
+// Phase C). main keeps AuthLogFields above (welded to the frozen AuthOutcome
+// contract), the recordRequest*/persistLogEntry fan-out below, and the API
+// handlers — all through these aliases. Shutdown closes the file via
+// reqlog.Close() (main.go); the ring/read caps live on the package
+// (reqlog.MaxRing, reqlog.MaxPersistentReturn).
 var (
-	logsMu sync.Mutex
-	logs   []LogEntry
+	levelForStatus           = reqlog.LevelForStatus
+	logAdd                   = reqlog.Add
+	logGet                   = reqlog.Get
+	initRequestLog           = reqlog.Init
+	requestLogReadPersistent = reqlog.ReadPersistent
 )
 
-// ─── Persistent JSONL request log ────────────────────────────────────────────
-
-var (
-	requestLogWriter   io.Writer // *rotatingFile; nil = file persistence disabled
-	requestLogCloser   io.Closer
-	requestLogFilePath string // path to JSONL file for paginated reads; "" = disabled
-)
-
-// requestLogMaxPersistentReturn caps the newest-N entries returned from the
-// persistent JSONL request log so admin queries remain bounded regardless of
-// the on-disk rotation size. Roughly one day of traffic at ~100 req/s.
-const requestLogMaxPersistentReturn = 20000
-
-// Persistent request-log failure counters. A full disk or corrupt file must
-// not silently destroy the request history — both are counted, surfaced via
-// /metrics, /api/stats, and /healthz, and logged once (not per occurrence).
-var (
-	statReqLogWriteErrors  int64 // failed JSONL marshals/writes in logAdd
-	statReqLogSkippedLines int64 // corrupt JSONL lines skipped on read
-)
-
-// reqLogReadCache memoises the parsed persistent log for a short TTL so N
-// concurrent dashboard pollers share one file parse instead of each re-reading
-// up to requestLogMaxPersistentReturn JSON lines per request. Keyed by path so
-// a re-init (config change, tests) never serves entries from the old file.
-// Cached entries are shared read-only between callers — never mutate them.
-var reqLogReadCache struct {
-	mu      sync.Mutex
-	path    string
-	expires time.Time
-	entries []LogEntry
-}
-
-// requestLogReadCacheTTL bounds staleness; the dashboard polls every 3 s.
-const requestLogReadCacheTTL = 2 * time.Second
-
-// initRequestLog opens a rotating JSONL file for persistent request logging.
-// Each LogEntry is appended as a single JSON line. The file rotates at maxMB.
-// If path is empty this is a no-op (backwards-compatible).
-func initRequestLog(path string, maxMB int) error {
-	if path == "" {
-		return nil
-	}
-	if maxMB <= 0 {
-		maxMB = 100
-	}
-	rf, err := newRotatingFile(path, maxMB)
-	if err != nil {
-		return fmt.Errorf("request log open %s: %w", path, err)
-	}
-	requestLogWriter = rf
-	requestLogCloser = rf
-	requestLogFilePath = path
-
-	// Drop any cached parse from a previous file.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.path = ""
-	reqLogReadCache.entries = nil
-	reqLogReadCache.mu.Unlock()
-	return nil
-}
-
-// requestLogReadPersistent streams the persistent JSONL request log file and
-// returns the newest-first slice of parsed entries, capped at
-// requestLogMaxPersistentReturn so memory stays bounded regardless of file
-// size. Callers should apply their own filter + pagination loop on top — the
-// same loop they use on the in-memory ring buffer — so there is a single
-// filter code path to maintain.
-//
-// Returns (nil, nil) when persistence is disabled (no file configured) or
-// when the file has not yet been created. Only the active (non-rotated) log
-// file is consulted; the rotated ".1" archive is intentionally skipped to
-// keep each query bounded to one rotation window.
-func requestLogReadPersistent() ([]LogEntry, error) {
-	path := requestLogFilePath
-	if path == "" {
-		return nil, nil
-	}
-	// Serialise readers through the cache lock: the first poller parses the
-	// file, concurrent pollers wait and then reuse the fresh cached result.
-	reqLogReadCache.mu.Lock()
-	defer reqLogReadCache.mu.Unlock()
-	if reqLogReadCache.path == path && time.Now().Before(reqLogReadCache.expires) {
-		return reqLogReadCache.entries, nil
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("request log open: %w", err)
-	}
-	defer f.Close() //nolint:errcheck -- read-only close
-
-	sc := bufio.NewScanner(f)
-	// SSL-inspected entries with long identity/rule strings occasionally
-	// exceed the 64 KB default scanner buffer; lift the ceiling to 1 MB.
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	// Amortized O(N) truncate-to-cap: grow up to 2× cap, then drop the oldest
-	// half. Peak memory is ~2× cap parsed structs (~8 MB at cap=20k).
-	const cap_ = requestLogMaxPersistentReturn
-	buf := make([]LogEntry, 0, 2*cap_)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var e LogEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			// Count corrupt lines instead of dropping them invisibly; log only
-			// the first so a damaged file cannot flood the logger.
-			if atomic.AddInt64(&statReqLogSkippedLines, 1) == 1 {
-				logger.Printf("WARN request log: skipping corrupt JSONL line (further occurrences counted silently): %v", err)
-			}
-			continue
-		}
-		buf = append(buf, e)
-		if len(buf) >= 2*cap_ {
-			copy(buf, buf[len(buf)-cap_:])
-			buf = buf[:cap_]
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("request log scan: %w", err)
-	}
-	if len(buf) > cap_ {
-		buf = buf[len(buf)-cap_:]
-	}
-	// Reverse in place to newest-first.
-	for i, j := 0, len(buf)-1; i < j; i, j = i+1, j-1 {
-		buf[i], buf[j] = buf[j], buf[i]
-	}
-	reqLogReadCache.path = path
-	reqLogReadCache.expires = time.Now().Add(requestLogReadCacheTTL)
-	reqLogReadCache.entries = buf
-	return buf, nil
-}
-
-func logAdd(e LogEntry) {
-	logsMu.Lock()
-	logs = append(logs, e)
-	if len(logs) > maxLogs {
-		logs = logs[len(logs)-maxLogs:]
-	}
-	logsMu.Unlock()
-
-	// Persist to JSONL file (outside the lock to avoid blocking callers).
-	if w := requestLogWriter; w != nil {
-		b, err := json.Marshal(e)
-		if err == nil {
-			b = append(b, '\n')
-			_, err = w.Write(b)
-		}
-		if err != nil {
-			// A full disk must not silently destroy the request history:
-			// count every failure, log only the first to avoid flooding.
-			if atomic.AddInt64(&statReqLogWriteErrors, 1) == 1 {
-				logger.Printf("ERROR request log: persistent write failed (further failures counted silently): %v", err)
-			}
-		}
-	}
-
-	// Persist to the queryable history store (async, non-blocking, nil-safe).
-	// Atomic load so a runtime enable/disable swap is race-free on the hot path.
-	globalLogStore.Load().Add(e)
-}
-
-func logGet() []LogEntry {
-	logsMu.Lock()
-	cp := make([]LogEntry, len(logs))
-	copy(cp, logs)
-	logsMu.Unlock()
-	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
-		cp[i], cp[j] = cp[j], cp[i]
-	}
-	return cp
+// The queryable-history hook: the closure performs the same lock-free atomic
+// load the pre-extraction inline code did, so a runtime enable/disable swap
+// of the history store stays race-free on the hot path (logStore.Add is
+// nil-receiver-safe).
+func init() {
+	reqlog.SetHistory(func(e LogEntry) { globalLogStore.Load().Add(e) })
 }
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
-//
-// AuditEntry captures every configuration change made through the UI/API so
-// operators can answer "Who changed What, and When?" — a core SOC requirement.
-//
-// Actor is the client IP of the UI caller.  When the UI gains its own
-// authentication layer the Actor field will be upgraded to a username.
-// Action follows a "resource.verb" naming scheme (e.g. "policy.add").
+// The audit engine (ring + JSONL persistence + DP→CP push queue) moved to
+// internal/audit (ADR-0002, store.go decomposition Phase B). main keeps the
+// request wrappers (ui_helpers.go), the C2c middleware, the API handlers,
+// and the CP push loop — all through these aliases. The SIEM hook is wired
+// once below (the closure reads the runtime-configured syslog forwarder at
+// call time); DP mode is set by the cluster wiring via audit.SetDPMode.
 
-type AuditEntry struct {
-	TS     int64  `json:"ts"`               // Unix milliseconds
-	Time   string `json:"time"`             // human-readable "2006-01-02 15:04:05"
-	Actor  string `json:"actor"`            // client IP (or authenticated username)
-	Action string `json:"action"`           // "policy.add" | "blocklist.remove" | …
-	Object string `json:"object"`           // the specific item that changed
-	Detail string `json:"detail"`           // extra context (never contains credentials)
-	Before string `json:"before,omitempty"` // JSON snapshot before the change
-	After  string `json:"after,omitempty"`  // JSON snapshot after the change
+// AuditEntry is re-exposed unqualified (engine type is audit.Entry).
+type AuditEntry = audit.Entry
+
+// maxAuditLogs is re-exposed for tests (engine const is audit.MaxRing).
+const maxAuditLogs = audit.MaxRing
+
+func init() {
+	audit.SetSIEM(func(e audit.Entry) {
+		if globalSyslog != nil {
+			globalSyslog.WriteAudit(e)
+		}
+	})
 }
 
-const maxAuditLogs = 500
-
+// Engine funcs re-exposed under their original names.
 var (
-	auditMu          sync.Mutex
-	auditLog         []AuditEntry
-	auditLogFile     io.Writer // persistent JSONL file; nil = in-memory only
-	auditCloser      io.Closer // close on shutdown
-	auditLogFilePath string    // path to JSONL file for paginated reads
+	auditAdd                = audit.Add
+	auditGet                = audit.Get
+	auditGetMemory          = audit.GetMemory
+	auditGetPersistent      = audit.GetPersistent
+	drainPendingAuditEvents = audit.Drain
+	requeueAuditEvents      = audit.Requeue
 )
 
-// clusterRoleIsDP is set to true when this node is a Data Plane in a cluster.
-// Enables audit event queuing for centralized logging on the Control Plane.
-var clusterRoleIsDP atomic.Bool
-
-// InitAuditLog opens path for append-only JSONL persistence with rotation.
-// Existing entries are loaded into the in-memory ring buffer on startup.
-// If path is empty this is a no-op (backwards-compatible).
-// F18: Rotates at 50 MB (same as system log) to prevent unbounded disk growth.
-func InitAuditLog(path string) error {
-	if path == "" {
-		return nil
-	}
-	// Load existing entries first.
-	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-			if line == "" {
-				continue
-			}
-			var e AuditEntry
-			if json.Unmarshal([]byte(line), &e) == nil {
-				auditLog = append(auditLog, e)
-			}
-		}
-		if len(auditLog) > maxAuditLogs {
-			auditLog = auditLog[len(auditLog)-maxAuditLogs:]
-		}
-	}
-	rf, err := newRotatingFile(path, 50) // 50 MB max before rotation
-	if err != nil {
-		return fmt.Errorf("audit log open %s: %w", path, err)
-	}
-	auditLogFile = rf
-	auditCloser = rf
-	auditLogFilePath = path
-	return nil
-}
-
-// auditGetPersistent reads the JSONL audit log file with pagination.
-// Returns entries newest-first. If from/to are non-zero, filters by timestamp.
-// Falls back to in-memory buffer if no file is configured.
-func auditGetPersistent(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
-	if auditLogFilePath == "" {
-		all := auditGet()
-		// Apply timestamp filters.
-		if fromTS > 0 || toTS > 0 {
-			filtered := make([]AuditEntry, 0, len(all))
-			for i := range all {
-				if fromTS > 0 && all[i].TS < fromTS {
-					continue
-				}
-				if toTS > 0 && all[i].TS > toTS {
-					continue
-				}
-				filtered = append(filtered, all[i])
-			}
-			all = filtered
-		}
-		total := len(all)
-		if offset >= total {
-			return nil, total
-		}
-		end := offset + limit
-		if end > total {
-			end = total
-		}
-		return all[offset:end], total
-	}
-
-	data, err := os.ReadFile(auditLogFilePath)
-	if err != nil {
-		return auditGet(), 0
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	// Parse all entries.
-	entries := make([]AuditEntry, 0, len(lines))
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		var e AuditEntry
-		if json.Unmarshal([]byte(line), &e) == nil {
-			if fromTS > 0 && e.TS < fromTS {
-				continue
-			}
-			if toTS > 0 && e.TS > toTS {
-				continue
-			}
-			entries = append(entries, e)
-		}
-	}
-	// Reverse to newest-first.
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
-	}
-	total := len(entries)
-	if offset >= total {
-		return nil, total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	return entries[offset:end], total
-}
-
-// auditAdd appends an entry to the in-memory ring buffer and, when configured,
-// to the persistent JSONL file and the syslog forwarder.
-func auditAdd(e AuditEntry) {
-	auditMu.Lock()
-	auditLog = append(auditLog, e)
-	if len(auditLog) > maxAuditLogs {
-		auditLog = auditLog[len(auditLog)-maxAuditLogs:]
-	}
-	f := auditLogFile
-	auditMu.Unlock()
-
-	// Persist to JSONL file (outside the lock to avoid blocking callers).
-	if f != nil {
-		if b, err := json.Marshal(e); err == nil {
-			b = append(b, '\n')
-			f.Write(b) //nolint:errcheck
-		}
-	}
-	// Forward to syslog/SIEM if configured.
-	if globalSyslog != nil {
-		globalSyslog.WriteAudit(e)
-	}
-	// Queue for CP push when running as Data Plane.
-	if clusterRoleIsDP.Load() {
-		queueAuditForCluster(e)
-	}
-}
-
-// ─── Pending audit events for Data Plane → Control Plane push ───────────────
-
-var (
-	pendingAuditMu     sync.Mutex
-	pendingAuditEvents []AuditEntry
-)
-
-// queueAuditForCluster adds an audit event to the pending queue for CP push.
-// Called by auditAdd when running in data-plane mode.
-func queueAuditForCluster(e AuditEntry) {
-	pendingAuditMu.Lock()
-	pendingAuditEvents = append(pendingAuditEvents, e)
-	// Cap at 1000 to prevent unbounded growth if CP is unreachable.
-	if len(pendingAuditEvents) > 1000 {
-		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
-	}
-	pendingAuditMu.Unlock()
-}
-
-// drainPendingAuditEvents returns and clears the pending audit event queue.
-func drainPendingAuditEvents() []AuditEntry {
-	pendingAuditMu.Lock()
-	defer pendingAuditMu.Unlock()
-	if len(pendingAuditEvents) == 0 {
-		return nil
-	}
-	events := pendingAuditEvents
-	pendingAuditEvents = nil
-	return events
-}
-
-// requeueAuditEvents prepends failed events back into the pending queue
-// so they are retried on the next push interval instead of being lost.
-func requeueAuditEvents(events []AuditEntry) {
-	pendingAuditMu.Lock()
-	// Prepend old events before any new ones that arrived since drain.
-	pendingAuditEvents = append(events, pendingAuditEvents...)
-	// Cap at 1000 (keep newest).
-	if len(pendingAuditEvents) > 1000 {
-		pendingAuditEvents = pendingAuditEvents[len(pendingAuditEvents)-1000:]
-	}
-	pendingAuditMu.Unlock()
-}
-
-// auditGet returns a newest-first snapshot of the audit log.
-func auditGet() []AuditEntry {
-	auditMu.Lock()
-	cp := make([]AuditEntry, len(auditLog))
-	copy(cp, auditLog)
-	auditMu.Unlock()
-	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
-		cp[i], cp[j] = cp[j], cp[i]
-	}
-	return cp
-}
-
-// auditGetMemory returns paginated, optionally time-filtered entries from the
-// in-memory ring buffer (newest-first).
-func auditGetMemory(offset, limit int, fromTS, toTS int64) ([]AuditEntry, int) {
-	all := auditGet()
-	if fromTS > 0 || toTS > 0 {
-		filtered := make([]AuditEntry, 0, len(all))
-		for i := range all {
-			if fromTS > 0 && all[i].TS < fromTS {
-				continue
-			}
-			if toTS > 0 && all[i].TS > toTS {
-				continue
-			}
-			filtered = append(filtered, all[i])
-		}
-		all = filtered
-	}
-	total := len(all)
-	if offset >= total {
-		return nil, total
-	}
-	end := offset + limit
-	if end > total {
-		end = total
-	}
-	return all[offset:end], total
-}
+// InitAuditLog opens path for append-only JSONL audit persistence.
+func InitAuditLog(path string) error { return audit.Init(path) }
 
 // ─── Blocklist ────────────────────────────────────────────────────────────────
-
-// Blocklist holds two separate maps for O(1) host lookups:
-//   - exact:     e.g. "ads.example.com"
-//   - wildcards: keyed by dot-prefix, e.g. ".example.com" (from "*.example.com")
-//
-// IsBlocked walks the host's own dot-labels to probe the wildcards map, so
-// lookup cost is O(labels) ≈ O(1) for real-world domain names, regardless of
-// how many wildcard rules are loaded.
-// BlocklistEntry is a single blocklist host with its origin.
-type BlocklistEntry struct {
-	Host   string `json:"host"`
-	Source string `json:"source"`         // "manual" or "feed"
-	Feed   string `json:"feed,omitempty"` // feed URL that imported this entry, when known
-}
-
-type Blocklist struct {
-	mu         sync.RWMutex
-	exact      map[string]bool   // exact hostnames
-	wildcards  map[string]bool   // dot-prefixes: ".example.com"
-	manual     map[string]bool   // subset added by an admin (not the feed)
-	exceptions map[string]bool   // hosts that are NEVER blocked, even if listed
-	feedSrc    map[string]string // host → feed URL attribution (lazily initialized)
-	path       string
-	mode       string // "block" (default) or "allow"
-}
-
-var bl = &Blocklist{
-	exact:      map[string]bool{},
-	wildcards:  map[string]bool{},
-	manual:     map[string]bool{},
-	exceptions: map[string]bool{},
-}
-
-func (b *Blocklist) Mode() string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.mode == "allow" {
-		return "allow"
-	}
-	return "block"
-}
-
-func (b *Blocklist) SetMode(mode string) {
-	if mode != "allow" {
-		mode = "block"
-	}
-	b.mu.Lock()
-	b.mode = mode
-	b.mu.Unlock()
-	b.saveMode()
-}
-
-// saveMode persists the mode to a sidecar file (<blocklist>.mode).
-func (b *Blocklist) saveMode() {
-	if b.path == "" {
-		return
-	}
-	_ = atomicWriteFile(b.path+".mode", []byte(b.mode), 0o600)
-}
-
-// loadHostSidecar reads a one-host-per-line sidecar (".manual" /
-// ".exceptions"), warning on lines that don't look like hostnames
-// (D1.2-flag-F4) but accepting them anyway. lower controls whether
-// lines are lowercased (exceptions yes, manual no — preserving the
-// pre-extraction byte-for-byte behavior of each loop).
-func loadHostSidecar(path, kind string, lower bool) map[string]bool {
-	out := map[string]bool{}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return out
-	}
-	for i, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if lower {
-			line = strings.ToLower(line)
-		}
-		if line == "" {
-			continue
-		}
-		if !looksLikeHostname(line) {
-			logger.Printf("Loader: blocklist.%s: line %d at %q does not look like a hostname: %q — accepting anyway (D1.2-flag-F4)", kind, i+1, sanitizeLog(path), sanitizeLog(line))
-		}
-		out[line] = true
-	}
-	return out
-}
-
-// loadFeedSources reads the ".sources" attribution sidecar (host → feed URL).
-func loadFeedSources(path string) map[string]string {
-	feedSrc := map[string]string{}
-	if data, err := os.ReadFile(path); err == nil {
-		if jerr := json.Unmarshal(data, &feedSrc); jerr != nil {
-			logger.Printf("Loader: blocklist.sources: unparseable %q: %v — attribution reset", sanitizeLog(path), jerr)
-			feedSrc = map[string]string{}
-		}
-	}
-	return feedSrc
-}
-
-// scanBlocklistEntries reads the main blocklist file, normalizing every line
-// (see normalizeBlocklistLine). Entries stored verbatim by pre-normalization
-// feed imports ("0.0.0.0 ads.example") are repaired into blockable hostnames;
-// unblockable junk rows are dropped, with one summary log line.
-func scanBlocklistEntries(f io.Reader, path string) (exact, wildcards map[string]bool, err error) {
-	exact = map[string]bool{}
-	wildcards = map[string]bool{}
-	repaired := 0
-	dropped := 0
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		raw := sc.Text()
-		line, ok := normalizeBlocklistLine(raw)
-		if !ok {
-			if t := strings.TrimSpace(raw); t != "" && !strings.HasPrefix(t, "#") {
-				dropped++ // junk entry from a pre-normalization feed import
-			}
-			continue
-		}
-		if line != strings.ToLower(strings.TrimSpace(raw)) {
-			repaired++ // e.g. "0.0.0.0 ads.example" stored verbatim by old imports
-		}
-		if strings.HasPrefix(line, "*.") {
-			wildcards[line[1:]] = true
-		} else {
-			exact[line] = true
-		}
-	}
-	if repaired > 0 || dropped > 0 {
-		logger.Printf("Blocklist: normalized %d hosts-format entries and dropped %d unblockable entries from %q (pre-normalization feed import); file rewritten on next save", repaired, dropped, sanitizeLog(path))
-	}
-	return exact, wildcards, sc.Err()
-}
-
-func (b *Blocklist) Load(path string) error {
-	b.path = path
-	// Load mode sidecar.
-	if data, err := os.ReadFile(path + ".mode"); err == nil {
-		m := strings.TrimSpace(string(data))
-		switch {
-		case m == "allow":
-			b.mode = "allow"
-		case m != "":
-			// D1.1h: anything other than "allow" silently keeps the
-			// default ("block"). Surface it so operators can see typos
-			// or case mistakes; behavior unchanged.
-			logger.Printf("Loader: blocklist.mode: unrecognized value %q at %q, mode left at default (D1.2-flag-F3)", sanitizeLog(m), sanitizeLog(path+".mode"))
-		}
-	}
-	// Sidecars: admin attribution, never-block exceptions, feed attribution.
-	manual := loadHostSidecar(path+".manual", "manual", false)
-	exceptions := loadHostSidecar(path+".exceptions", "exceptions", true)
-	feedSrc := loadFeedSources(path + ".sources")
-
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	exact, wildcards, scanErr := scanBlocklistEntries(f, path)
-
-	b.mu.Lock()
-	b.exact = exact
-	b.wildcards = wildcards
-	b.manual = manual
-	b.exceptions = exceptions
-	b.feedSrc = feedSrc
-	b.mu.Unlock()
-	return scanErr
-}
-
-func (b *Blocklist) Save() {
-	if b.path == "" {
-		return
-	}
-	b.mu.RLock()
-	var buf strings.Builder
-	for h := range b.exact {
-		buf.WriteString(h)
-		buf.WriteByte('\n')
-	}
-	for suffix := range b.wildcards {
-		// ".example.com" → "*.example.com"
-		buf.WriteByte('*')
-		buf.WriteString(suffix)
-		buf.WriteByte('\n')
-	}
-	// Feed-source attribution sidecar, pruned to currently-listed,
-	// non-manual entries so removed hosts don't accumulate stale rows.
-	sources := map[string]string{}
-	for h, src := range b.feedSrc {
-		if b.manual[h] {
-			continue
-		}
-		if strings.HasPrefix(h, "*.") {
-			if !b.wildcards[h[1:]] {
-				continue
-			}
-		} else if !b.exact[h] {
-			continue
-		}
-		sources[h] = src
-	}
-	path := b.path
-	b.mu.RUnlock()
-	// CL-1 / Bucket-4 durability hardening: atomicWriteFile gives
-	// unique tmp + chmod + fsync(file) + rename + best-effort
-	// fsync(parent dir) — replaces the previous os.OpenFile+os.Rename
-	// path which was atomic-via-rename but NOT fsynced.
-	_ = atomicWriteFile(path, []byte(buf.String()), 0o600)
-	if data, err := json.Marshal(sources); err == nil {
-		_ = atomicWriteFile(path+".sources", data, 0o600)
-	}
-}
-
-// isListed reports whether host matches any entry in the list (mode-agnostic).
-func (b *Blocklist) isListed(host string) bool {
-	if b.exact[host] {
-		return true
-	}
-	for i, ch := range host {
-		if ch == '.' && b.wildcards[host[i:]] {
-			return true
-		}
-	}
-	return b.wildcards["."+host]
-}
-
-// isExcepted returns true when host or any of its parent domains is in the
-// exceptions list. Supports exact hosts, parent-domain inheritance, and
-// wildcard entries (stored as "*.example.com").
-// Must be called with b.mu held (at least RLock).
-func (b *Blocklist) isExcepted(host string) bool {
-	if b.exceptions[host] {
-		return true
-	}
-	// Check if a wildcard exception covers this exact host
-	// e.g. "*.raw.githubusercontent.com" should match "raw.githubusercontent.com"
-	if b.exceptions["*."+host] {
-		return true
-	}
-	// Walk parent domains: sub.example.com → example.com → com
-	// Each dot boundary is also checked as a wildcard pattern *.parent.
-	for i, ch := range host {
-		if ch == '.' {
-			parent := host[i+1:]
-			if b.exceptions[parent] {
-				return true
-			}
-			// e.g. "*.example.com" stored literally in exceptions
-			if b.exceptions["*."+parent] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// AddException marks host as permanently exempt from blocking.
-// Feed syncs will still add the host to the blocklist, but IsBlocked will
-// always return false for it.
-func (b *Blocklist) AddException(host string) {
-	host = normalizeHost(strings.TrimSpace(host))
-	if host == "" {
-		return
-	}
-	// Warn on overly broad exceptions that may exempt many domains.
-	bare := strings.TrimPrefix(host, "*.")
-	parts := strings.Split(bare, ".")
-	if len(parts) <= 1 || (len(parts) == 2 && strings.HasPrefix(host, "*.")) {
-		logWarnf("Blocklist: broad exception added: %q — may exempt many domains", sanitizeLog(host))
-	}
-	b.mu.Lock()
-	b.exceptions[host] = true
-	b.mu.Unlock()
-	b.saveExceptions()
-}
-
-// RemoveException removes an exception, allowing the host to be blocked again.
-func (b *Blocklist) RemoveException(host string) {
-	host = strings.ToLower(strings.TrimSpace(host))
-	b.mu.Lock()
-	delete(b.exceptions, host)
-	b.mu.Unlock()
-	b.saveExceptions()
-}
-
-// ListExceptions returns a sorted list of all exception hosts.
-func (b *Blocklist) ListExceptions() []string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]string, 0, len(b.exceptions))
-	for h := range b.exceptions {
-		out = append(out, h)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// saveExceptions persists the exceptions set to a sidecar file.
-func (b *Blocklist) saveExceptions() {
-	if b.path == "" {
-		return
-	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	var sb strings.Builder
-	for h := range b.exceptions {
-		fmt.Fprintln(&sb, h)
-	}
-	_ = atomicWriteFile(b.path+".exceptions", []byte(sb.String()), 0o600)
-}
-
-// looksLikeHostname returns true if s plausibly resembles a hostname.
-// Used only by Blocklist.Load for D1.1h observability logging — the
-// loader still accepts arbitrary lines regardless. The check is
-// intentionally loose: just enough to flag obviously-not-a-host
-// content (whitespace, special chars, control bytes).
-func looksLikeHostname(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '.' || r == '-' || r == '_' || r == '*':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// IsBlocked reports whether a request to host should be blocked.
-// In "block" mode (default): listed hosts are blocked.
-// In "allow" mode:           only listed hosts are allowed; all others blocked.
-// Exceptions always pass through regardless of mode or list membership.
-func (b *Blocklist) IsBlocked(host string) bool {
-	host = normalizeHost(host)
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.isExcepted(host) {
-		return false
-	}
-	listed := b.isListed(host)
-	if b.mode == "allow" {
-		return !listed
-	}
-	return listed
-}
-
-func (b *Blocklist) Add(host string) {
-	host = strings.ToLower(strings.TrimSpace(host))
-	b.mu.Lock()
-	if strings.HasPrefix(host, "*.") {
-		b.wildcards[host[1:]] = true
-	} else {
-		b.exact[host] = true
-	}
-	b.mu.Unlock()
-}
-
-// ReplaceFeedEntries replaces the feed-pushed entries (exact +
-// wildcards) in place, leaving DP-local state (path, mode, manual,
-// exceptions) intact. Used by applyConfigSnapshot to avoid the
-// wholesale-replacement pattern that previously zeroed those
-// local fields and orphaned the persistence path. Per-host parsing
-// mirrors Add: "*.example.com" → wildcard, otherwise → exact.
-//
-// IMPORTANT: AddManual (store.go:847–857) writes admin-added hosts
-// to BOTH the metadata map (b.manual) AND the enforcement maps
-// (b.exact / b.wildcards). The enforcement maps are what IsBlocked
-// consults; b.manual is just the attribution set. We therefore
-// re-inject every b.manual host into the new enforcement maps
-// before the swap so admin-added blocks survive every cluster
-// sync. Without this re-injection (pre-fix and my first-pass
-// ReplaceFeedEntries had the same defect; flagged by Codex on
-// PR #249), admin manual blocks would silently disappear from
-// enforcement on every snapshot apply.
-func (b *Blocklist) ReplaceFeedEntries(hosts []string) {
-	newExact := map[string]bool{}
-	newWildcards := map[string]bool{}
-	for _, h := range hosts {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h == "" {
-			continue
-		}
-		if strings.HasPrefix(h, "*.") {
-			newWildcards[h[1:]] = true
-		} else {
-			newExact[h] = true
-		}
-	}
-	b.mu.Lock()
-	// Re-inject admin-added manual entries into the enforcement
-	// maps. b.manual is the attribution set; the entries are also
-	// normalised at AddManual time so no further trim/lowercase is
-	// needed here.
-	for h := range b.manual {
-		if strings.HasPrefix(h, "*.") {
-			newWildcards[h[1:]] = true
-		} else {
-			newExact[h] = true
-		}
-	}
-	b.exact = newExact
-	b.wildcards = newWildcards
-	b.mu.Unlock()
-}
-
-// AddManual adds a host and marks it as manually managed by an admin.
-// Unlike Add (used by the feed syncer), this persists both the source
-// attribution (the .manual sidecar via saveManual) AND the enforcement
-// state (the main blocklist file via Save). The dual save makes the call
-// self-durable so a caller path that bails before its own deferred Save
-// (e.g. the apiBlocklist POST handler returning early on an invalid
-// wildcard mid-loop, ui_policy.go) cannot leave manual entries in
-// memory + sidecar but missing from the main file — which would not
-// survive restart, because Load reads the main file into b.exact /
-// b.wildcards (the maps IsBlocked consults) and the .manual sidecar
-// only restores attribution metadata.
-//
-// For bulk admin requests, prefer AddManualBulk: it does one save for
-// N hosts instead of N saves, avoiding the O(hosts × blocklist-size)
-// rewrite when the main file is large (e.g. a feed-backed blocklist
-// with hundreds of thousands of entries). Codex P2 review on PR #283.
-func (b *Blocklist) AddManual(host string) {
-	host = strings.ToLower(strings.TrimSpace(host))
-	b.mu.Lock()
-	if strings.HasPrefix(host, "*.") {
-		b.wildcards[host[1:]] = true
-	} else {
-		b.exact[host] = true
-	}
-	b.manual[host] = true
-	b.mu.Unlock()
-	b.saveManual()
-	b.Save()
-}
-
-// AddManualBulk adds multiple hosts as manually-managed admin entries
-// under a single write lock with a single saveManual + single Save call,
-// instead of one save per host. Use this for bulk admin requests; the
-// per-host normalization and dedupe match AddManual exactly (lowercase
-// + trim, empty hosts skipped, "*." → wildcard, otherwise exact). The
-// caller is responsible for any validation (length cap, wildcard
-// format) before invoking this method — invalid entries reaching here
-// are silently accepted, mirroring AddManual.
-//
-// Returns the number of unique normalized entries actually stored by
-// THIS call — i.e. hosts whose admin attribution (b.manual) went from
-// false to true. Within-batch duplicates count once; cross-call repeats
-// of an already-attributed host count as 0. This matches the caller's
-// expectation that "added: N" in the API response and audit line
-// reflects net new admin entries, not raw non-empty input count. A
-// zero return means no on-disk write happens, so calling with an empty
-// or all-blank slice (or an all-duplicates slice) is a cheap no-op.
-//
-// Added per the Codex P2 review on PR #283: with per-call Save() inside
-// AddManual, a bulk POST of N hosts to a feed-backed blocklist rewrote
-// the entire main file N times (O(hosts × blocklist-size) disk work).
-// This save-once path preserves the durability guarantee while keeping
-// bulk cost O(blocklist-size).
-func (b *Blocklist) AddManualBulk(hosts []string) int {
-	if len(hosts) == 0 {
-		return 0
-	}
-	added := 0
-	// dirty tracks whether ANY map (b.exact, b.wildcards, b.manual)
-	// flipped a key from false to true during this call. Save() must
-	// run on any flip — not only on a b.manual flip — so that recovery
-	// paths (e.g. a pre-fix-era stale main file where b.manual still
-	// has an entry but b.exact lost it) re-persist the now-corrected
-	// enforcement state. added is kept separate because it only counts
-	// net new admin attributions (b.manual false→true), which is the
-	// honest "stored by this call" number the API response and audit
-	// line should report.
-	dirty := false
-	b.mu.Lock()
-	for _, host := range hosts {
-		host = strings.ToLower(strings.TrimSpace(host))
-		if host == "" {
-			continue
-		}
-		if strings.HasPrefix(host, "*.") {
-			if !b.wildcards[host[1:]] {
-				b.wildcards[host[1:]] = true
-				dirty = true
-			}
-		} else {
-			if !b.exact[host] {
-				b.exact[host] = true
-				dirty = true
-			}
-		}
-		if !b.manual[host] {
-			b.manual[host] = true
-			dirty = true
-			added++
-		}
-	}
-	b.mu.Unlock()
-	if dirty {
-		b.saveManual()
-		b.Save()
-	}
-	return added
-}
-
-// saveManual persists the set of manually-added hosts to a sidecar file.
-func (b *Blocklist) saveManual() {
-	if b.path == "" {
-		return
-	}
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	var sb strings.Builder
-	for h := range b.manual {
-		fmt.Fprintln(&sb, h)
-	}
-	_ = atomicWriteFile(b.path+".manual", []byte(sb.String()), 0o600)
-}
-
-func (b *Blocklist) Remove(host string) {
-	host = strings.ToLower(strings.TrimSpace(host))
-	b.mu.Lock()
-	if strings.HasPrefix(host, "*.") {
-		delete(b.wildcards, host[1:])
-	} else {
-		delete(b.exact, host)
-	}
-	delete(b.manual, host)
-	delete(b.feedSrc, host)
-	b.mu.Unlock()
-	b.saveManual()
-}
-
-func (b *Blocklist) List() []string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]string, 0, len(b.exact)+len(b.wildcards))
-	for h := range b.exact {
-		out = append(out, h)
-	}
-	for suffix := range b.wildcards {
-		out = append(out, "*"+suffix)
-	}
-	return out
-}
-
-// ListWithSource returns all blocklist entries annotated with their origin:
-// "manual" if added by an admin via the UI/API, "feed" if imported from a feed.
-func (b *Blocklist) ListWithSource() []BlocklistEntry {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]BlocklistEntry, 0, len(b.exact)+len(b.wildcards))
-	for h := range b.exact {
-		src, feed := "feed", b.feedSrc[h]
-		if b.manual[h] {
-			src, feed = "manual", ""
-		}
-		out = append(out, BlocklistEntry{Host: h, Source: src, Feed: feed})
-	}
-	for suffix := range b.wildcards {
-		h := "*" + suffix
-		src, feed := "feed", b.feedSrc[h]
-		if b.manual[h] {
-			src, feed = "manual", ""
-		}
-		out = append(out, BlocklistEntry{Host: h, Source: src, Feed: feed})
-	}
-	return out
-}
-
-func (b *Blocklist) Count() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.exact) + len(b.wildcards)
-}
-
-// MergeFromLines adds all valid host entries from lines to the blocklist and
-// saves it. Existing entries are NOT removed — safe to call on a live blocklist.
-// ClearAll removes all blocklist entries (exact, wildcard, manual) but preserves
-// exceptions and mode. Used by config import "replace" mode.
-func (b *Blocklist) ClearAll() {
-	b.mu.Lock()
-	b.exact = map[string]bool{}
-	b.wildcards = map[string]bool{}
-	b.manual = map[string]bool{}
-	b.feedSrc = map[string]string{}
-	b.mu.Unlock()
-}
-
-// RemoveByFeedSource removes every entry attributed to feedURL (cascade
-// delete when the admin removes a feed AND opts to purge its imports).
-// Admin-added (manual) entries always survive. Returns the removed count.
-func (b *Blocklist) RemoveByFeedSource(feedURL string) int {
-	b.mu.Lock()
-	removed := 0
-	for h, src := range b.feedSrc {
-		if src != feedURL || b.manual[h] {
-			continue
-		}
-		if strings.HasPrefix(h, "*.") {
-			if b.wildcards[h[1:]] {
-				delete(b.wildcards, h[1:])
-				removed++
-			}
-		} else if b.exact[h] {
-			delete(b.exact, h)
-			removed++
-		}
-		delete(b.feedSrc, h)
-	}
-	b.mu.Unlock()
-	if removed > 0 {
-		b.Save()
-	}
-	return removed
-}
-
-// CountByFeedSource reports how many currently-listed, non-manual entries
-// are attributed to feedURL (the number a cascade delete would remove).
-func (b *Blocklist) CountByFeedSource(feedURL string) int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	n := 0
-	for h, src := range b.feedSrc {
-		if src != feedURL || b.manual[h] {
-			continue
-		}
-		if strings.HasPrefix(h, "*.") {
-			if b.wildcards[h[1:]] {
-				n++
-			}
-		} else if b.exact[h] {
-			n++
-		}
-	}
-	return n
-}
-
-// SnapshotFeedSources returns a copy of the per-entry feed attribution map.
-// Taken before a wholesale rebuild (config rollback / import-replace) so
-// RestoreFeedSources can re-stamp surviving entries afterwards.
-func (b *Blocklist) SnapshotFeedSources() map[string]string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	snap := make(map[string]string, len(b.feedSrc))
-	for h, src := range b.feedSrc {
-		snap[h] = src
-	}
-	return snap
-}
-
-// RestoreFeedSources re-stamps feed attribution onto currently-listed,
-// non-manual entries after a wholesale rebuild. Config rollback and
-// import-replace go through Remove/ClearAll + Add, which would otherwise
-// strand every feed entry as "unknown origin" — making them prey for the
-// unattributed-cleanup operation (Codex P1, PR #447). Attribution already
-// present (e.g. re-stamped by a sync mid-rebuild) is not overwritten.
-func (b *Blocklist) RestoreFeedSources(snap map[string]string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.feedSrc == nil {
-		b.feedSrc = map[string]string{}
-	}
-	for h, src := range snap {
-		if b.manual[h] {
-			continue
-		}
-		if strings.HasPrefix(h, "*.") {
-			if !b.wildcards[h[1:]] {
-				continue
-			}
-		} else if !b.exact[h] {
-			continue
-		}
-		if _, exists := b.feedSrc[h]; !exists {
-			b.feedSrc[h] = src
-		}
-	}
-}
-
-// RemoveUnattributedFeedEntries removes every feed-owned entry with no
-// recorded source — the legacy cohort imported before per-feed attribution
-// existed and no longer present in any current feed (a host still carried
-// by a configured feed is re-stamped on every sync, so it never stays
-// unattributed for long). Admin-added entries always survive. Returns the
-// removed count.
-func (b *Blocklist) RemoveUnattributedFeedEntries() int {
-	b.mu.Lock()
-	removed := 0
-	for h := range b.exact {
-		if b.manual[h] || b.feedSrc[h] != "" {
-			continue
-		}
-		delete(b.exact, h)
-		removed++
-	}
-	for suffix := range b.wildcards {
-		h := "*" + suffix
-		if b.manual[h] || b.feedSrc[h] != "" {
-			continue
-		}
-		delete(b.wildcards, suffix)
-		removed++
-	}
-	b.mu.Unlock()
-	if removed > 0 {
-		b.Save()
-	}
-	return removed
-}
-
-// hostsFileBoilerplate lists names that appear in the standard header of
-// /etc/hosts-format feeds (e.g. StevenBlack). They are never legitimately
-// blockable upstream hosts, so hosts-format lines naming them are skipped.
-var hostsFileBoilerplate = map[string]bool{
-	"localhost": true, "localhost.localdomain": true, "local": true,
-	"broadcasthost": true, "ip6-localhost": true, "ip6-loopback": true,
-	"ip6-localnet": true, "ip6-mcastprefix": true, "ip6-allnodes": true,
-	"ip6-allrouters": true, "ip6-allhosts": true,
-}
-
-// normalizeBlocklistLine extracts the blockable host from one feed or
-// blocklist-file line. It handles plain domain lists, /etc/hosts format
-// ("0.0.0.0 domain" / "127.0.0.1 domain"), inline comments, accidental
-// schemes, and trailing paths/ports. Returns ok=false for lines that carry
-// no blockable host (comments, hosts-file boilerplate, unspecified/loopback
-// IPs). Wildcard entries ("*.example.com") pass through untouched.
-func normalizeBlocklistLine(raw string) (string, bool) {
-	line := strings.TrimSpace(raw)
-	if line == "" || strings.HasPrefix(line, "#") {
-		return "", false
-	}
-	// Inline comment: "0.0.0.0 ads.example # comment".
-	if i := strings.Index(line, "#"); i >= 0 {
-		line = strings.TrimSpace(line[:i])
-	}
-	// /etc/hosts format: "<ip> <host> [aliases…]" — take the first host.
-	hostsFormat := false
-	if fields := strings.Fields(line); len(fields) == 0 {
-		return "", false
-	} else if len(fields) >= 2 && net.ParseIP(fields[0]) != nil {
-		line = fields[1]
-		hostsFormat = true
-	} else {
-		line = fields[0]
-	}
-	// Strip scheme if someone accidentally includes it.
-	if i := strings.Index(line, "://"); i >= 0 {
-		line = line[i+3:]
-	}
-	// Strip path/query/port.
-	if i := strings.IndexAny(line, "/:?"); i >= 0 {
-		line = line[:i]
-	}
-	line = strings.ToLower(line)
-	// Canonicalize FQDN trailing dot ("example.com." ≡ "example.com") so
-	// both spellings can't coexist as near-duplicate entries.
-	line = strings.TrimSuffix(line, ".")
-	if line == "" {
-		return "", false
-	}
-	// "0.0.0.0 0.0.0.0" and friends: an unspecified/loopback IP is not a
-	// blockable upstream host.
-	if ip := net.ParseIP(line); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
-		return "", false
-	}
-	if hostsFormat && hostsFileBoilerplate[line] {
-		return "", false
-	}
-	return line, true
-}
-
-// Lines starting with '#' or empty are skipped; /etc/hosts-format lines are
-// normalized to their hostname (see normalizeBlocklistLine).
-// source is the feed URL recorded as per-entry attribution ("" = none).
-// Returns the number of newly-added entries.
-func (b *Blocklist) MergeFromLines(lines []string, source string) int {
-	added := 0
-	attributed := false
-	b.mu.Lock()
-	for _, raw := range lines {
-		line, ok := normalizeBlocklistLine(raw)
-		if !ok {
-			continue
-		}
-		if strings.HasPrefix(line, "*.") {
-			key := line[1:] // ".example.com"
-			if !b.wildcards[key] {
-				b.wildcards[key] = true
-				added++
-			}
-		} else {
-			if !b.exact[line] {
-				b.exact[line] = true
-				added++
-			}
-		}
-		// Stamp attribution on feed-owned entries (also retroactively on
-		// re-sync, so pre-attribution entries converge). Admin-added
-		// entries keep their "manual" badge — ListWithSource checks
-		// b.manual first. attributed only flips on an actual change so
-		// steady-state re-syncs (already attributed, nothing new) don't
-		// trigger a full-file rewrite.
-		if source != "" && !b.manual[line] {
-			if b.feedSrc == nil {
-				b.feedSrc = map[string]string{}
-			}
-			if b.feedSrc[line] != source {
-				b.feedSrc[line] = source
-				attributed = true
-			}
-		}
-	}
-	b.mu.Unlock()
-	// attributed alone must also save: a re-sync that only stamps
-	// attribution on already-listed hosts (e.g. entries repaired by Load
-	// or imported before the .sources sidecar existed) would otherwise
-	// hold the attribution in memory only and lose it on restart
-	// (Codex P2, PR #438).
-	if added > 0 || attributed {
-		b.Save()
-	}
-	return added
-}
+// The Blocklist engine moved to internal/blocklist (ADR-0002, store.go
+// decomposition Phase A); blocklist_vars.go carries the aliases + the
+// process-wide singleton. The hot-path matcher (IsBlocked), the sidecar
+// persistence, feed attribution, and NormalizeLine all live in the package.
 
 // ─── Auth cache ───────────────────────────────────────────────────────────────
 //
@@ -1583,9 +340,12 @@ type Config struct {
 	// over the local bcrypt credentials for Verify calls.
 	provider AuthProvider
 
-	// unauthMode marks setup as complete without requiring credentials.
-	// When true the proxy forwards all traffic without any authentication check.
-	unauthMode bool
+	// defaultAuthOutcome is the SINGLE authoritative global Stage-1 default,
+	// applied only on no-match (see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md).
+	// OutcomeExempt == open unmatched traffic; OutcomeDefault == auth required
+	// (fail-closed; empty normalizes to Default). Read via DefaultAuthOutcome(),
+	// set via SetDefaultAuthOutcome() — the only API/UI/cluster/diagnostics path.
+	defaultAuthOutcome AuthOutcome
 
 	// uiUsers holds the multi-user admin roster with per-user roles.
 	// When nil/empty, falls back to the legacy single-user (user/passHash).
@@ -1645,6 +405,13 @@ func (c *Config) SetAuth(user, pass string) error {
 	return nil
 }
 
+// dummyBcryptHash is a fixed bcrypt hash (cost = DefaultCost, matching stored
+// credential hashes) used to equalise local-auth timing on a username miss
+// (RISK-008). Without it, a wrong username returns instantly while a correct
+// username pays the ~bcrypt cost, leaking which usernames exist via a timing
+// oracle. Computed once at init; the input is always valid so the error is nil.
+var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("culvert-timing-equaliser"), bcrypt.DefaultCost)
+
 // VerifyAuth checks credentials against the active auth backend:
 //   - External provider (LDAP / OIDC) if configured, otherwise
 //   - Local bcrypt hash with a short-lived cache.
@@ -1665,6 +432,10 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 		return true // auth disabled
 	}
 	if user != storedUser {
+		// RISK-008: equalise timing with the correct-username path so a wrong
+		// username is indistinguishable from a wrong password — defeats
+		// username enumeration via a timing oracle.
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
 		return false
 	}
 	if ok, hit := c.cache.get(user, pass); hit {
@@ -1675,34 +446,107 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 	return ok
 }
 
-// AuthEnabled returns true when any form of authentication is active,
-// or when unauthMode is explicitly set (setup is considered complete).
+// AuthEnabled returns true when any form of authentication is active, or when
+// the global default is open/Exempt (setup is considered complete). The
+// `defaultAuthOutcome == OutcomeExempt` term is the behavior-identical successor
+// of the legacy `unauthMode` term (Slice 2); the SOCKS5 coupling is intentionally
+// preserved here and decoupled later (Slice 5).
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.unauthMode
+	return c.user != "" || c.provider != nil
 }
 
-// UnauthMode returns true when the proxy is explicitly configured to run
-// without authentication (open proxy mode, setup is still considered done).
-func (c *Config) UnauthMode() bool {
+// IsConfigured reports whether initial setup is complete: a credential backend
+// exists OR the operator deliberately chose the open default (Exempt). The admin
+// UI and setup flow gate on this — NOT AuthEnabled — so that open mode keeps the
+// admin UI gated and makes setup one-time (Slice 5).
+func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.unauthMode
+	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt
 }
 
-// SetUnauthMode enables or disables explicit unauthenticated (open) mode.
-func (c *Config) SetUnauthMode(enabled bool) {
+// DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
+// no-match (Slice 3 runtime wiring). Fail-closed: only OutcomeExempt is returned
+// as Exempt; any other/empty value normalizes to OutcomeDefault.
+func (c *Config) DefaultAuthOutcome() AuthOutcome {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.defaultAuthOutcome == OutcomeExempt {
+		return OutcomeExempt
+	}
+	return OutcomeDefault
+}
+
+// SetDefaultAuthOutcome sets the authoritative global Stage-1 default applied on
+// no-match, fail-closed: any value other than OutcomeExempt normalizes to
+// OutcomeDefault. Persists so the setting survives restarts. This is the only
+// setter for the global default.
+func (c *Config) SetDefaultAuthOutcome(outcome AuthOutcome) {
+	resolved := OutcomeDefault
+	if outcome == OutcomeExempt {
+		resolved = OutcomeExempt
+	}
 	c.mu.Lock()
-	c.unauthMode = enabled
+	c.defaultAuthOutcome = resolved
 	c.mu.Unlock()
-	if enabled {
-		logger.Printf("Auth: mode UNAUTH (open proxy, no credentials required)")
+	if resolved == OutcomeExempt {
+		logger.Printf("Auth: default authentication = Open unmatched traffic (defaultAuthOutcome=Exempt)")
+	} else {
+		logger.Printf("Auth: default authentication = Require authentication (defaultAuthOutcome=Default)")
 	}
 	// Persist so the setting survives restarts.
 	if err := c.SaveUIUsersFile(); err != nil {
-		logWarnf("Auth: failed to persist unauthMode: %v", err)
+		logWarnf("Auth: failed to persist defaultAuthOutcome: %v", err)
 	}
+}
+
+// normalizeDefaultAuthOutcome maps a persisted string to a valid global default,
+// fail-closed: only the exact canonical values "Exempt"/"Default" are accepted;
+// anything else (unknown, empty, miscased, whitespace-padded, or a reserved
+// future value such as "CredentialRequired") resolves to OutcomeDefault. The
+// bool reports whether the input was a recognized canonical value.
+func normalizeDefaultAuthOutcome(s string) (AuthOutcome, bool) {
+	switch strings.TrimSpace(s) {
+	case string(OutcomeExempt):
+		return OutcomeExempt, true
+	case string(OutcomeDefault):
+		return OutcomeDefault, true
+	default:
+		return OutcomeDefault, false
+	}
+}
+
+// resolveLoadedDefaultAuthOutcome computes the authoritative global default from
+// a loaded envelope (Slice 2 migration; see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md
+// §3). When default_auth_outcome is present it wins (fail-closed-normalized) and
+// the legacy unauth_mode mirror is ignored; otherwise it migrates one-way from
+// the legacy bool (true⇒Exempt, false/absent/bare-array⇒Default). Deterministic
+// and idempotent. Early returns keep LoadUIUsersFile flat.
+func resolveLoadedDefaultAuthOutcome(env uiUsersFileEnvelope) AuthOutcome {
+	// Key present (non-nil) ⇒ authoritative, even when empty: an empty or
+	// otherwise non-canonical value fails closed to Default and the legacy
+	// mirror is NOT consulted (a present-but-empty field must never reopen).
+	if env.DefaultAuthOutcome != nil {
+		raw := *env.DefaultAuthOutcome
+		outcome, ok := normalizeDefaultAuthOutcome(raw)
+		if !ok {
+			logWarnf("Loader: ui_users.json: invalid default_auth_outcome %q — failing closed to %q",
+				sanitizeLog(raw), string(OutcomeDefault))
+		} else if env.UnauthMode != (outcome == OutcomeExempt) {
+			// Both fields present and disagreeing: default_auth_outcome is
+			// authoritative; surface the (bounded-window) drift for debugging.
+			logWarnf("Loader: ui_users.json: default_auth_outcome=%q disagrees with legacy unauth_mode=%v — using default_auth_outcome (authoritative)",
+				string(outcome), env.UnauthMode)
+		}
+		return outcome
+	}
+	// Key absent ⇒ one-way legacy migration from the mirror.
+	if env.UnauthMode {
+		return OutcomeExempt
+	}
+	return OutcomeDefault
 }
 
 // ─── UI multi-user admin management ──────────────────────────────────────────
@@ -1807,6 +651,18 @@ type uiUserRecord struct {
 // uiUsersFileEnvelope is the on-disk JSON structure that wraps the user
 // roster along with global settings that must survive restarts.
 type uiUsersFileEnvelope struct {
+	// DefaultAuthOutcome is the single authoritative persisted global Stage-1
+	// default. A POINTER so the loader can distinguish "key absent" (nil ⇒
+	// migrate from the legacy mirror) from "key present but empty/invalid"
+	// (non-nil "" ⇒ fail closed to Default, never reopen). Written explicitly on
+	// every save (always non-nil) so "Default" round-trips and migration is
+	// idempotent. See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md.
+	DefaultAuthOutcome *string `json:"default_auth_outcome"`
+	// UnauthMode is a READ-ONLY import-compatibility input (Slice 5). It is
+	// NEVER written and is consulted ONLY by resolveLoadedDefaultAuthOutcome when
+	// default_auth_outcome is absent (a pre-Slice-2 config), mapping it once to
+	// defaultAuthOutcome. When default_auth_outcome is present it ALWAYS wins,
+	// even if the two conflict. Not part of the active architecture.
 	UnauthMode bool           `json:"unauth_mode,omitempty"`
 	Users      []uiUserRecord `json:"users"`
 }
@@ -1836,9 +692,11 @@ func (c *Config) LoadUIUsersFile() error {
 	} else if err := json.Unmarshal(data, &records); err != nil {
 		return err
 	}
+	resolved := resolveLoadedDefaultAuthOutcome(env)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.unauthMode = env.UnauthMode
+	c.defaultAuthOutcome = resolved
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
 	}
@@ -1868,9 +726,18 @@ func (c *Config) LoadUIUsersFile() error {
 func (c *Config) SaveUIUsersFile() error {
 	c.mu.RLock()
 	path := c.uiUsersFile
+	// Canonicalize for serialization: an unset in-memory value persists as the
+	// fail-closed Default. default_auth_outcome is the ONLY field written (Slice
+	// 5); the legacy unauth_mode mirror is no longer written (read-only import
+	// compat only). See AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md §2.
+	outcome := c.defaultAuthOutcome
+	if outcome == "" {
+		outcome = OutcomeDefault
+	}
+	authoritative := string(outcome)
 	env := uiUsersFileEnvelope{
-		UnauthMode: c.unauthMode,
-		Users:      make([]uiUserRecord, 0, len(c.uiUsers)),
+		DefaultAuthOutcome: &authoritative,
+		Users:              make([]uiUserRecord, 0, len(c.uiUsers)),
 	}
 	for name, u := range c.uiUsers {
 		env.Users = append(env.Users, uiUserRecord{
@@ -1890,11 +757,11 @@ func (c *Config) SaveUIUsersFile() error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// AtomicWrite (unique temp + fsync) rather than a fixed ".tmp" +
+	// rename: concurrent admin mutations save from separate handler
+	// goroutines, and a shared temp name lets two writers interleave into
+	// the same file before one renames the torn result over the roster.
+	return fileutil.AtomicWrite(path, data, 0o600)
 }
 
 // VerifyUIUser checks credentials against the admin user roster and returns
@@ -2135,7 +1002,7 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 // captured request URL (host+path, no query) or "" when not logged.
 func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
 	recordStats(ip, host, status, ruleMatched, actionTaken)
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, bytesSent, bytesRecv, 0, sslAction, uri, auth)
 }
 
 // recordRequestLogOnly writes a request-log entry WITHOUT the stats/alert/
@@ -2144,13 +1011,59 @@ func recordRequestFull(ip, method, host, status, ruleMatched, actionTaken, ident
 // allow path, so counting each inner request again would inflate statTotal
 // (a CONNECT carrying N requests would count as 1+N).
 func recordRequestLogOnly(ip, method, host, status, ruleMatched, actionTaken, identity, sslAction, uri string, auth AuthLogFields) {
-	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, sslAction, uri, auth)
+	persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity, 0, 0, 0, sslAction, uri, auth)
+}
+
+// recordTunnelBytes folds a raw tunnel's relayed bytes into the global byte
+// counters. This is ALWAYS done for an allowed tunnel, independent of the
+// per-rule "log traffic" flag: that flag is a feed-volume control, not a
+// stats-accounting control. Raw tunnels are the dominant traffic class and
+// were previously invisible in the bytes dashboard (only SSL-inspected bodies
+// were counted). Split out from persistence so a quiet-rule tunnel still
+// updates the byte totals even when it writes no feed entry.
+func recordTunnelBytes(bytesSent, bytesRecv int64) {
+	atomic.AddInt64(&statBytesSent, bytesSent)
+	atomic.AddInt64(&statBytesRecv, bytesRecv)
+}
+
+// persistTunnelClose writes the per-connection TUNNEL_CLOSED feed entry (byte
+// counts + lifetime). Log-only — the tunnel was already stats-counted by the
+// allow path when it was established, so running the stats fan-out again would
+// double-count statTotal/topHosts. Byte counters are handled separately by
+// recordTunnelBytes so they are not tied to the log gate.
+func persistTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{})
+}
+
+// recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
+// unconditionally. Used by the always-logged paths (SOCKS5) and tests.
+func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv)
+	persistTunnelClose(ip, method, host, identity, ruleMatched, bytesSent, bytesRecv, start, sslAction)
+}
+
+// recordTunnelCloseGated is the raw-relay call-site helper. It ALWAYS folds the
+// bytes into the global counters, then applies the per-rule "log traffic" gate
+// to the FEED ENTRY only (mirroring the OK entry recorded at allow time —
+// LogTraffic=false suppresses the entry but not the byte accounting). A nil
+// match (no rule matched, default-allow) always logs.
+func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
+	if match != nil && !ruleLogsTraffic(match.Rule) {
+		return
+	}
+	ruleName := ""
+	if match != nil && match.Rule != nil {
+		ruleName = match.Rule.Name
+	}
+	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,
-// history store, and syslog — the logging half shared by recordRequestFull and
-// recordRequestLogOnly.
-func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv int64, sslAction, uri string, auth AuthLogFields) {
+// history store, and syslog — the logging half shared by recordRequestFull,
+// recordRequestLogOnly, and recordTunnelClose.
+func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv, durationMs int64, sslAction, uri string, auth AuthLogFields) {
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
@@ -2165,6 +1078,7 @@ func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identit
 		ActionTaken: actionTaken,
 		BytesSent:   bytesSent,
 		BytesRecv:   bytesRecv,
+		DurationMs:  durationMs,
 		SSLAction:   sslAction,
 	}
 	auth.applyTo(&entry)
@@ -2184,16 +1098,60 @@ type HostStat struct {
 }
 
 type hostCounter struct {
-	mu    sync.Mutex
-	hosts map[string]int64
+	mu           sync.Mutex
+	hosts        map[string]int64
+	pendingDecay int // new-host drops since the last decay pass (amortization)
 }
 
 var topHosts = &hostCounter{hosts: map[string]int64{}}
 
+// topHostsMaxEntries bounds the number of distinct hostnames the top-hosts
+// counter tracks. The hostname is attacker-controllable (any client can
+// request arbitrarily many distinct hosts), so without a bound the map is an
+// unbounded memory-exhaustion DoS. A var (not const) so tests can lower it.
+var topHostsMaxEntries = 10000
+
 func (hc *hostCounter) Record(host string) {
 	hc.mu.Lock()
-	hc.hosts[host]++
-	hc.mu.Unlock()
+	defer hc.mu.Unlock()
+	if _, ok := hc.hosts[host]; ok {
+		hc.hosts[host]++ // already tracked — always count, never gated
+		return
+	}
+	if len(hc.hosts) >= topHostsMaxEntries {
+		// At capacity with a NEW host. Decaying (halve all counts, drop those
+		// that reach zero) evicts cold entries — including high-cardinality
+		// count-1 junk from a flood — so continuously-reinforced heavy hitters
+		// survive (each decay only halves them, and their ongoing traffic tops
+		// them back up) while a host that has gone silent correctly ages out.
+		// Decay is O(n), so amortize it to at most once per topHostsMaxEntries
+		// new-host drops; between passes newcomers are dropped in O(1). Net:
+		// strict memory bound + amortized O(1) per call.
+		hc.pendingDecay++
+		if hc.pendingDecay < topHostsMaxEntries {
+			return
+		}
+		hc.pendingDecay = 0
+		hc.decayLocked()
+		if len(hc.hosts) >= topHostsMaxEntries {
+			return // still saturated with hot hosts — drop the newcomer
+		}
+	}
+	hc.hosts[host] = 1
+}
+
+// decayLocked halves every count and deletes entries that reach zero. Caller
+// holds hc.mu. This is the eviction primitive: cold entries (low counts) fall
+// out while heavy hitters persist, keeping the top-N ranking meaningful.
+func (hc *hostCounter) decayLocked() {
+	for h, c := range hc.hosts {
+		c /= 2
+		if c == 0 {
+			delete(hc.hosts, h)
+		} else {
+			hc.hosts[h] = c
+		}
+	}
 }
 
 // Top returns the n most-requested hosts, sorted descending by count.

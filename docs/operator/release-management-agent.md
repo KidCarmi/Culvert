@@ -1,9 +1,13 @@
 # Wiring Release Management to the maintenance agent (without the Docker socket)
 
 The admin UI's **Release Management** panel drives catalog dispatch through the
-host-side `culvert-maint` agent. By default the proxy container has no route to
-that agent, so the panel shows **"Agent unreachable"**. This page explains the
-model and the supported, isolation-preserving way to wire them together.
+host-side `culvert-maint` agent. On a normal quick-start install,
+`scripts/install.sh` wires the local agent automatically after validating the
+Docker and host posture. This page explains the model, what the installer
+checks, and the manual path for custom deployments.
+
+For the long-term trusted catalog roadmap, see
+[`enterprise-release-catalog-plan.md`](enterprise-release-catalog-plan.md).
 
 > **The maintenance-agent socket is not the Docker socket.** This wiring mounts
 > the agent's own `/v1` API socket — never `/var/run/docker.sock`. The agent is
@@ -18,26 +22,46 @@ Admin UI / API ──► Release Management API ──► culvert-maint agent /v
 
 - The Release Management API (`release_api.go`) runs **inside the proxy
   container** and calls the agent over HTTP on a Unix-domain socket.
-- The agent authenticates every caller with `SO_PEERCRED` against `allow_peers`,
-  is read-only in the current slice, and performs Docker actions **only** through
-  the path-locked sudoers allowlist (`/etc/sudoers.d/culvert-maint`).
+- The agent authenticates every caller with `SO_PEERCRED` against `allow_peers`
+  and performs Docker actions **only** through the path-locked sudoers allowlist
+  (`/etc/sudoers.d/culvert-maint`).
 - So reaching the agent grants the proxy the agent's **narrow allowlisted
   surface**, not the Docker daemon. A compromised proxy cannot exceed it.
 
-## Why "Agent unreachable" appears
+## Automatic local wiring
 
-The agent's socket lives on the **host** (`/run/culvert-maint/culvert-maint.sock`).
-The proxy runs in a **container** and, by default, the stock `docker-compose.yml`
-neither mounts that socket nor sets `CULVERT_MAINT_AGENT_URL`. The in-container
-client therefore dials a socket that does not exist inside the container.
+The quick-start installer attempts local Release Management wiring by default.
+It succeeds only when all safety checks pass:
 
-(The separate "No catalog loaded (available: false)" line is expected until a
-release catalog is seeded into `/data/release_catalog`.)
+- Docker is rootful and `userns-remap` is not enabled.
+- The proxy container is running and has a non-root numeric UID.
+- The proxy container does **not** mount any Docker socket.
+- The `culvert-maint` group, config, sudoers file, default socket path, and
+  compose project path all match the install.
+- The maintenance-agent `proxy_repo` matches the release dispatch repository.
+- The installer can authorize exactly the proxy UID in `allow_peers`, start the
+  agent, verify `/v1/health`, and mount only `/run/culvert-maint` into the proxy
+  with `docker-compose.maint-agent.yml`.
 
-## Supported wiring (Unix socket, opt-in)
+If any check fails, the installer leaves Release Management unwired and prints a
+warning. Culvert still runs; the Release Management panel may show
+**"Agent unreachable"** until an operator completes the custom wiring below.
 
-This is host-local — it opens **no network port**. It requires two
-deployment-specific identity facts to line up.
+The separate "No catalog loaded (available: false)" state is expected until a
+trusted release catalog is published into `/data/release_catalog`. The installer
+does not download or seed unsigned catalogs.
+
+To opt out of automatic wiring:
+
+```bash
+CULVERT_SKIP_RELEASE_AGENT_WIRING=1 bash scripts/install.sh
+```
+
+## Manual/custom wiring
+
+Use this section for rootless Docker, `userns-remap`, non-standard compose
+layouts, remote agents, or hardened hosts where the installer correctly refused
+to infer the peer UID. This is host-local and opens **no network port**.
 
 ### 1. Find the `culvert-maint` group GID
 
@@ -49,14 +73,14 @@ echo "$CULVERT_MAINT_GID"
 The proxy must be in this group to connect to the `0660 culvert-maint:culvert-maint`
 socket. The override adds it via `group_add`.
 
-### 2. Authorize the proxy's UID in the agent
+### 2. Authorize the proxy UID in the agent
 
 The agent's `allow_peers` is **UID-based**. Find the proxy container's host UID
 and add it:
 
 ```bash
 docker compose exec proxy id -u          # e.g. 100
-sudoedit /etc/culvert-maint/config.toml  # allow_peers = [100, ...]
+sudoedit /etc/culvert-maint/config.toml  # allow_peers = ["100", ...]
 sudo systemctl restart culvert-maint
 ```
 
@@ -64,6 +88,7 @@ sudo systemctl restart culvert-maint
 > equals the host UID the agent sees over `SO_PEERCRED`. If you run with
 > `userns-remap`, use the remapped host UID instead. Prefer **numeric** UIDs —
 > the agent's static build cannot resolve NSS/LDAP usernames.
+> Do not add `root`, groups, or wildcard-style entries for the proxy.
 
 ### 3. Bring the stack up with the override
 
@@ -92,14 +117,14 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 > UI is the functional check. To hit `/v1/health` directly from the host, the
 > caller must **both** be able to open the `0660 culvert-maint:culvert-maint`
 > socket (the kernel checks this on `connect()`, before `allow_peers`) **and**
-> have its UID in `allow_peers`. Simplest is **root** — it opens the socket
-> directly, so just add `"root"` to `allow_peers`:
+> have its UID in `allow_peers`. Use the same numeric proxy UID and the
+> `culvert-maint` group; do not add `root` just for probing:
 > ```bash
-> sudo curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
+> PROXY_UID=$(docker compose exec -T proxy id -u)
+> MAINT_GID=$(getent group culvert-maint | cut -d: -f3)
+> sudo -u "#${PROXY_UID}" -g "#${MAINT_GID}" \
+>   curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
 > ```
-> A non-root probe user must additionally be a member of the `culvert-maint`
-> group (e.g. `sudo -u <user> -g culvert-maint curl …`, with `<user>`'s UID in
-> `allow_peers`).
 
 ## Troubleshooting
 

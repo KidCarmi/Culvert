@@ -118,5 +118,6 @@ with its tests, passes the D0/C1/C1.5/C2/C2c/C4 parity suites, the full suite,
 - Per-rule provider pinning (`providerRefs` activation) — Phase 3.
 - `SSORequired` — Phase 3.
 - SOCKS5 enforcement (RFC 1929 mapping) — Phase 3+.
-- `defaultAuthOutcome` / retirement of `authRequired`+`UnauthMode` — Phase 4,
-  alone, as its own program.
+- `defaultAuthOutcome` / retirement of `authRequired`+`UnauthMode` — **now
+  active** as its own program; frozen contract in
+  `AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md` (Slices 1–5).

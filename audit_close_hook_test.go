@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // snapshotLateShutdownGlobals saves and zeroes every package-level handle
@@ -29,16 +32,11 @@ import (
 func snapshotLateShutdownGlobals(t *testing.T) {
 	t.Helper()
 
-	// Audit log globals (store.go).
-	oldAuditFile := auditLogFile
-	oldAuditCloser := auditCloser
-	oldAuditPath := auditLogFilePath
-	oldAuditLog := auditLog
+	// Audit engine state (internal/audit).
+	restoreAudit := audit.ResetForTest()
 
-	// Request log globals (store.go).
-	oldReqWriter := requestLogWriter
-	oldReqCloser := requestLogCloser
-	oldReqPath := requestLogFilePath
+	// Request-log persistence (internal/reqlog).
+	restoreReqlog := reqlog.SwapPersistenceForTest()
 
 	// Syslog (syslog.go).
 	oldSyslog := globalSyslog
@@ -51,32 +49,13 @@ func snapshotLateShutdownGlobals(t *testing.T) {
 	// what other tests left behind.
 	oldActiveConns := atomic.LoadInt64(&activeConns)
 
-	auditLogFile = nil
-	auditCloser = nil
-	auditLogFilePath = ""
-	auditMu.Lock()
-	auditLog = nil
-	auditMu.Unlock()
-
-	requestLogWriter = nil
-	requestLogCloser = nil
-	requestLogFilePath = ""
-
 	globalSyslog = nil
 	communityDB = nil
 	atomic.StoreInt64(&activeConns, 0)
 
 	t.Cleanup(func() {
-		auditLogFile = oldAuditFile
-		auditCloser = oldAuditCloser
-		auditLogFilePath = oldAuditPath
-		auditMu.Lock()
-		auditLog = oldAuditLog
-		auditMu.Unlock()
-
-		requestLogWriter = oldReqWriter
-		requestLogCloser = oldReqCloser
-		requestLogFilePath = oldReqPath
+		restoreAudit()
+		restoreReqlog()
 
 		globalSyslog = oldSyslog
 		communityDB = oldCommunityDB
@@ -105,8 +84,8 @@ func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
 	if err := InitAuditLog(path); err != nil {
 		t.Fatalf("InitAuditLog: %v", err)
 	}
-	if auditCloser == nil {
-		t.Fatal("InitAuditLog did not set auditCloser")
+	if !audit.PersistActive() {
+		t.Fatal("InitAuditLog did not wire the persistent closer")
 	}
 
 	// Unique discriminator: TEST-NET-2 reserved IP + per-run nanosecond
@@ -135,10 +114,9 @@ func TestAuditLogCloseHook_RoundTrip(t *testing.T) {
 		t.Fatalf("late.RunAll: %v", err)
 	}
 
-	// auditCloser has just been closed by the hook. Clear it so the
-	// snapshot cleanup doesn't attempt a double-close on the *os.File.
-	auditCloser = nil
-	auditLogFile = nil
+	// The persistent handle has just been closed by the hook. Clear it so
+	// the snapshot cleanup / a later Close cannot double-close the *os.File.
+	audit.ClearPersistForTest()
 
 	// Read the file back from disk and assert our unique discriminator
 	// was persisted.
@@ -163,7 +141,7 @@ func TestAuditLogCloseHook_NilCloserIsNoOp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := late.RunAll(ctx); err != nil {
-		t.Fatalf("late.RunAll with nil auditCloser: %v", err)
+		t.Fatalf("late.RunAll with no audit persistence: %v", err)
 	}
 }
 

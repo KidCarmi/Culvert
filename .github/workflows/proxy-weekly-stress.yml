@@ -1,0 +1,170 @@
+# Proxy Weekly Stress / Resilience (CI quality program — PR-3)
+#
+# First weekly resilience tier — heavier, NON-BLOCKING, pure Go (no k6, no
+# nginx, no public internet; hermetic in-process fixtures + the shipped binary).
+# Three jobs:
+#
+#   stress      in-process resilience suite under -race (tunnel churn, slow /
+#               broken upstream, policy churn) + goroutine/RSS/active-conn leak
+#               detection, with pprof capture
+#   restart     restart-under-traffic against the shipped binary (graceful
+#               SIGTERM drain + fresh-instance recovery while load flows)
+#   benchgate   deterministic allocation-regression gate (testing.Benchmark,
+#               allocs/op) + a benchstat ns/op diff vs the PR-2 baseline (the
+#               diff is informational; the alloc gate is the hard pass/fail)
+#
+# Advisory only until stability is proven; not wired as a required check. See
+# docs/ci/proxy-quality-architecture.md.
+
+name: Proxy Weekly Stress
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # 05:00 UTC Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+jobs:
+  stress:
+    name: In-process resilience (-race, leak detection, pprof)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Stress suite (-race)
+        id: stress
+        env:
+          CULVERT_STRESS_CHURN_ROUNDS: "15"
+          CULVERT_STRESS_CHURN_TUNNELS: "25"
+          CULVERT_STRESS_PERSISTENT_TUNNELS: "15"
+          CULVERT_STRESS_SLOW_CONCURRENCY: "50"
+          CULVERT_STRESS_BROKEN_REQS: "40"
+          CULVERT_STRESS_POLICY_MUTATIONS: "300"
+          CULVERT_STRESS_POLICY_CLIENTS: "40"
+          CULVERT_STRESS_POLICY_REQS: "40"
+          CULVERT_STRESS_PPROF: ${{ github.workspace }}/pprof
+        run: |
+          set -o pipefail
+          go test -race -tags proxystress -run 'TestProxyStress_' -v -timeout 20m . 2>&1 | tee stress.log
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## In-process Resilience"
+            echo ""
+            [ "${{ steps.stress.outcome }}" = "success" ] && echo "✅ Tunnel churn / slow / broken upstream / policy churn held with no goroutine·RSS·active-conn leak (under -race)." || echo "❌ See \`stress.log\` (goroutine dumps + leak details inline)."
+            echo ""
+            echo '```'
+            grep -E 'churn complete|policy churn|slow upstream|resources:' stress.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload stress log + pprof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-stress
+          path: |
+            stress.log
+            pprof/
+          retention-days: 21
+
+  restart:
+    name: Restart-under-traffic (shipped binary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Prepare /data
+        run: |
+          sudo mkdir -p /data
+          sudo chown "$USER" /data
+
+      - name: Build binary once
+        run: CGO_ENABLED=0 go build -o culvert .
+
+      - name: Restart-under-traffic
+        id: restart
+        env:
+          CULVERT_BIN: ${{ github.workspace }}/culvert
+        run: |
+          set -o pipefail
+          go test -tags proxybinload -run 'TestBinaryRestart_' -v -timeout 10m . 2>&1 | tee restart.log
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Restart-Under-Traffic"
+            echo ""
+            [ "${{ steps.restart.outcome }}" = "success" ] && echo "✅ Binary drained gracefully on SIGTERM and a fresh instance recovered while traffic flowed." || echo "❌ See \`restart.log\` (binary log dumped on failure)."
+            echo ""
+            echo '```'
+            grep -E 'restart-under-traffic' restart.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload restart log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-restart
+          path: restart.log
+          retention-days: 21
+
+  benchgate:
+    name: Benchmark regression gate (allocs/op + benchstat diff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      # Hard gate: deterministic allocs/op vs the PR-2 baseline bounds.
+      - name: Allocation-regression gate
+        id: gate
+        run: |
+          set -o pipefail
+          go test -tags benchgate -run 'TestBenchGate_' -v -timeout 10m . 2>&1 | tee benchgate.log
+
+      # Informational: benchstat ns/op delta vs committed baseline (ns/op is
+      # hardware-sensitive, so this is a diff artifact, not a gate).
+      - name: benchstat diff vs PR-2 baseline
+        if: always()
+        run: |
+          go install golang.org/x/perf/cmd/benchstat@latest
+          go test -run '^$' -bench 'BenchmarkPolicy|BenchmarkScrub|BenchmarkUpstreamInspect' -benchmem -benchtime=1000x . | tee bench-new.txt
+          "$(go env GOPATH)/bin/benchstat" testdata/bench/policy-baseline.txt bench-new.txt | tee bench-compare.txt || true
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmark Regression Gate"
+            echo ""
+            [ "${{ steps.gate.outcome }}" = "success" ] && echo "✅ No per-op allocation regression on the policy / scrub hot paths." || echo "❌ Allocation regression — see \`benchgate.log\`."
+            echo ""
+            echo "### benchstat vs PR-2 baseline (ns/op informational)"
+            echo '```'
+            cat bench-compare.txt 2>/dev/null || echo "(benchstat diff unavailable)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-benchgate
+          path: |
+            benchgate.log
+            bench-new.txt
+            bench-compare.txt
+          retention-days: 30

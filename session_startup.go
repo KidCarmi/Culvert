@@ -7,6 +7,8 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // loadSession applies cfg: seed the random session secret, override it
@@ -18,7 +20,7 @@ func loadSession(cfg sessionStartupConfig) error {
 	initSessionSecretFromConfig(cfg.Secret) // overrides random if config provides one
 
 	if cfg.RevocationsFile != "" {
-		revocationFilePath = cfg.RevocationsFile
+		session.SetRevocationsPath(cfg.RevocationsFile)
 		if err := sessionRevoked.LoadRevocations(); err != nil {
 			return fmt.Errorf("load revocations: %w", err)
 		}

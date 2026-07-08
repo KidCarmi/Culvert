@@ -41,17 +41,6 @@ type ScanRequest struct {
 	ContentType string `json:"content_type,omitempty"` // for DPI text filtering
 }
 
-// ScanResponse is the JSON response from the scan service.
-type ScanResponse struct {
-	Clean      bool   `json:"clean"`
-	Blocked    bool   `json:"blocked"`
-	Reason     string `json:"reason,omitempty"`
-	Source     string `json:"source,omitempty"`      // "clamav", "yara", "dpi"
-	Hash       string `json:"hash,omitempty"`        // SHA-256 of scanned content
-	DPIPattern string `json:"dpi_pattern,omitempty"` // matched DPI pattern
-	ElapsedMS  int64  `json:"elapsed_ms"`
-}
-
 var statScanSvcRequests int64
 
 // NewScanService creates a scan sidecar server bound to addr.

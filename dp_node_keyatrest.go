@@ -37,6 +37,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // dpNodeKeyEncryptEnvVar opts DP node key encryption in (opt-in-first).
@@ -65,36 +68,37 @@ func dpNodeKeyEncryptionEnabled() bool {
 // (model C) takes precedence; otherwise a local file KEK at <keydir>/dp-node.kek
 // (model B, auto-generated 0600 on first use). Deterministic; no I/O until the
 // KEK is actually needed.
-func dpNodeKEKProvider(keyPath string) KEKProvider {
+func dpNodeKEKProvider(keyPath string) *secret.Provider {
 	dir := filepath.Dir(keyPath)
 	if dir == "" {
 		dir = "."
 	}
-	return resolveKEKProvider(envKEKName, filepath.Join(dir, dpNodeKEKFileName))
+	return secret.ResolveProvider(secret.EnvKEKName, filepath.Join(dir, dpNodeKEKFileName))
 }
 
-// decryptDPNodeKey returns the plaintext key PEM for raw on-disk DP key bytes.
+// openDPNodeKey returns an opaque Sealed handle for raw on-disk DP key bytes.
 // If the bytes are a PSCA envelope it decrypts with the resolved KEK and fails
 // closed on any error (missing/wrong KEK, corrupt ciphertext/tag) — the caller
-// must NOT regenerate/re-enroll on failure. Plaintext bytes pass through
+// must NOT regenerate/re-enroll on failure. Plaintext bytes are wrapped
 // unchanged. The returned bool reports whether the on-disk form was encrypted.
-func decryptDPNodeKey(keyPath string, rawKey []byte) (plainPEM []byte, wasEncrypted bool, err error) {
-	if !isEncryptedKeyFile(rawKey) {
-		return rawKey, false, nil
-	}
-	plain, derr := decryptWithKEK(rawKey, dpNodeKEKProvider(keyPath))
+// Callers reach the plaintext only via Sealed.WithPlaintext (zeroized on
+// return), so raw DP key bytes never cross back into package main as a []byte.
+func openDPNodeKey(keyPath string, rawKey []byte) (*secret.Sealed, bool, error) {
+	sealed, wasEncrypted, derr := secret.OpenOrPlaintext(rawKey, dpNodeKEKProvider(keyPath))
 	if derr != nil {
 		// Deliberately generic: no key material, no KEK detail.
 		auditKeyAtRest(auditKeyAtRestUnlockFailed, keyAtRestObjDPNode)
-		return nil, true, fmt.Errorf("DP node key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
+		return nil, wasEncrypted, fmt.Errorf("DP node key: cannot decrypt at-rest key (KEK missing/wrong or file corrupt)")
 	}
-	return plain, true, nil
+	return sealed, wasEncrypted, nil
 }
 
 // loadDPNodeKeyPair reads the DP cert (always plaintext) and the DP key
 // (decrypting if it is a PSCA envelope) and assembles a tls.Certificate. This
 // replaces a direct tls.LoadX509KeyPair so the key read becomes encryption-aware
-// while the cert read is unchanged.
+// while the cert read is unchanged. The decrypted key stays inside the
+// WithPlaintext closure (zeroized on return) — tls.X509KeyPair parses it into a
+// key object and retains no reference to the PEM bytes.
 func loadDPNodeKeyPair(certFile, keyFile string) (tls.Certificate, error) {
 	certPEM, err := os.ReadFile(filepath.Clean(certFile)) // cert is public, plaintext PEM
 	if err != nil {
@@ -104,12 +108,19 @@ func loadDPNodeKeyPair(certFile, keyFile string) (tls.Certificate, error) {
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("DP node key read: %w", err)
 	}
-	keyPEM, _, err := decryptDPNodeKey(keyFile, rawKey)
+	sealed, _, err := openDPNodeKey(keyFile, rawKey)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
+	var cert tls.Certificate
+	if err := sealed.WithPlaintext(func(keyPEM []byte) error {
+		c, e := tls.X509KeyPair(certPEM, keyPEM)
+		if e != nil {
+			return e
+		}
+		cert = c
+		return nil
+	}); err != nil {
 		return tls.Certificate{}, err
 	}
 	return cert, nil
@@ -120,9 +131,9 @@ func loadDPNodeKeyPair(certFile, keyFile string) (tls.Certificate, error) {
 // branches write 0600 atomically.
 func writeDPNodeKey(keyPath string, plainKeyPEM []byte) error {
 	if dpNodeKeyEncryptionEnabled() {
-		return writeEncryptedFile(keyPath, plainKeyPEM, dpNodeKEKProvider(keyPath))
+		return secret.SealToFile(keyPath, plainKeyPEM, dpNodeKEKProvider(keyPath))
 	}
-	return atomicWriteFile(keyPath, plainKeyPEM, 0o600)
+	return fileutil.AtomicWrite(keyPath, plainKeyPEM, 0o600)
 }
 
 // maybeMigrateDPNodeKey migrates an existing plaintext DP node key at keyPath to
@@ -176,10 +187,10 @@ func migrateDPNodeKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err error)
 	p := dpNodeKEKProvider(keyPath)
 	bakPath := keyPath + ".plaintext.bak"
 
-	if err := atomicWriteFile(bakPath, plainKeyPEM, 0o600); err != nil {
+	if err := fileutil.AtomicWrite(bakPath, plainKeyPEM, 0o600); err != nil {
 		return fmt.Errorf("DP node key migration: quarantine plaintext: %w", err)
 	}
-	if err := writeEncryptedFile(keyPath, plainKeyPEM, p); err != nil {
+	if err := secret.SealToFile(keyPath, plainKeyPEM, p); err != nil {
 		_ = restoreDPNodeKeyPlaintext(keyPath, bakPath)
 		return fmt.Errorf("DP node key migration: encrypt+write: %w", err)
 	}
@@ -193,19 +204,22 @@ func migrateDPNodeKeyToEncrypted(keyPath string, plainKeyPEM []byte) (err error)
 }
 
 // verifyEncryptedDPNodeKey re-reads keyPath, decrypts it, parses the key, and
-// confirms the decrypted bytes match the source plaintext.
-func verifyEncryptedDPNodeKey(keyPath string, wantPlainPEM []byte, p KEKProvider) error {
-	got, err := readEncryptedFile(keyPath, p)
+// confirms the decrypted bytes match the source plaintext. The decrypted bytes
+// stay inside the WithPlaintext closure and are zeroized on return.
+func verifyEncryptedDPNodeKey(keyPath string, wantPlainPEM []byte, p *secret.Provider) error {
+	sealed, err := secret.OpenFile(keyPath, p)
 	if err != nil {
 		return err
 	}
-	if err := parseAnyPrivateKeyPEM(got); err != nil {
-		return fmt.Errorf("decrypted key does not parse: %w", err)
-	}
-	if !bytes.Equal(got, wantPlainPEM) {
-		return errors.New("decrypted key does not match source")
-	}
-	return nil
+	return sealed.WithPlaintext(func(got []byte) error {
+		if err := parseAnyPrivateKeyPEM(got); err != nil {
+			return fmt.Errorf("decrypted key does not parse: %w", err)
+		}
+		if !bytes.Equal(got, wantPlainPEM) {
+			return errors.New("decrypted key does not match source")
+		}
+		return nil
+	})
 }
 
 // parseAnyPrivateKeyPEM verifies that pemBytes contains a private key in any
@@ -236,5 +250,5 @@ func restoreDPNodeKeyPlaintext(keyPath, bakPath string) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(keyPath, data, 0o600)
+	return fileutil.AtomicWrite(keyPath, data, 0o600)
 }

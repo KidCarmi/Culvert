@@ -3,7 +3,7 @@ package main
 // Live-feed quick-win regression tests:
 //   - apiEvents must END the stream when the hub evicts it as a slow client
 //     (receiving from the closed channel used to busy-spin at 100% CPU).
-//   - apiEvents must reject new connections at the sseMaxClients cap.
+//   - apiEvents must reject new connections at the hub connection cap.
 //   - broadcast evictions are counted (culvert_sse_evictions_total).
 //   - /api/logs clamps the limit query parameter.
 //   - persistent request-log write failures and corrupt lines are counted.
@@ -11,46 +11,40 @@ package main
 //   - mid-stream auth re-validation (sseAuthStillValid) basics.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // isolateLogRing swaps the in-memory request-log ring for an empty one and
 // restores it on cleanup so logAdd side-effects don't leak across tests.
 func isolateLogRing(t *testing.T) {
 	t.Helper()
-	logsMu.Lock()
-	oldLogs := logs
-	logs = nil
-	logsMu.Unlock()
-	t.Cleanup(func() {
-		logsMu.Lock()
-		logs = oldLogs
-		logsMu.Unlock()
-	})
+	t.Cleanup(reqlog.SwapRingForTest())
 }
+
+// resetRequestLogState unwires the persistent request log engine state so
+// tests can safely re-init without leaking file handles or paths across
+// tests. Safe to call whether or not persistence was initialised.
+func resetRequestLogState() { reqlog.ResetForTest() }
 
 func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Snapshot pre-existing hub clients so we only touch the one this test adds.
-	hub.mu.Lock()
-	before := make(map[chan []byte]struct{}, len(hub.clients))
-	for ch := range hub.clients {
+	before := make(map[chan []byte]struct{})
+	for _, ch := range hub.ClientsForTest() {
 		before[ch] = struct{}{}
 	}
-	hub.mu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -61,14 +55,12 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 	var target chan []byte
 	deadline := time.Now().Add(2 * time.Second)
 	for target == nil && time.Now().Before(deadline) {
-		hub.mu.Lock()
-		for ch := range hub.clients {
+		for _, ch := range hub.ClientsForTest() {
 			if _, ok := before[ch]; !ok {
 				target = ch
 				break
 			}
 		}
-		hub.mu.Unlock()
 		if target == nil {
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -77,11 +69,8 @@ func TestApiEvents_EvictedClientEndsStream(t *testing.T) {
 		t.Fatal("apiEvents never registered a channel with the hub")
 	}
 
-	// Simulate the hub evicting this client as too slow (broadcast's B21 path).
-	hub.mu.Lock()
-	close(target)
-	delete(hub.clients, target)
-	hub.mu.Unlock()
+	// Simulate the hub evicting this client as too slow (Broadcast's B21 path).
+	hub.EvictForTest(target)
 
 	select {
 	case <-done:
@@ -131,14 +120,14 @@ func TestApiEvents_WriteErrorEndsStream(t *testing.T) {
 func TestApiEvents_ClientCapRejects(t *testing.T) {
 	// Occupy one slot so the cap (set to current occupancy) is already full.
 	dummy := make(chan []byte, 1)
-	if !hub.register(dummy) {
+	if !hub.Register(dummy) {
 		t.Fatal("dummy register failed")
 	}
-	t.Cleanup(func() { hub.unregister(dummy) })
+	t.Cleanup(func() { hub.Unregister(dummy) })
 
-	oldMax := atomic.LoadInt64(&sseMaxClients)
-	atomic.StoreInt64(&sseMaxClients, int64(hub.ClientCount()))
-	t.Cleanup(func() { atomic.StoreInt64(&sseMaxClients, oldMax) })
+	oldMax := hub.MaxClients()
+	hub.SetMaxClients(int64(hub.ClientCount()))
+	t.Cleanup(func() { hub.SetMaxClients(oldMax) })
 
 	// Bounded context: if the cap fails to reject, the handler streams until
 	// the deadline instead of hanging the test forever.
@@ -153,21 +142,6 @@ func TestApiEvents_ClientCapRejects(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("503 cap rejection should carry a Retry-After header")
-	}
-}
-
-func TestSSEHub_Broadcast_EvictionCounted(t *testing.T) {
-	h := &sseHub{clients: make(map[chan []byte]struct{})}
-	ch := make(chan []byte) // unbuffered — always "full", triggers eviction
-	h.register(ch)
-
-	before := atomic.LoadInt64(&statSSEEvicted)
-	h.broadcast([]byte("x"))
-	if got := atomic.LoadInt64(&statSSEEvicted); got != before+1 {
-		t.Errorf("statSSEEvicted = %d, want %d", got, before+1)
-	}
-	if h.ClientCount() != 0 {
-		t.Error("evicted client should be removed from the hub")
 	}
 }
 
@@ -231,92 +205,9 @@ func TestApiLogs_LimitClamped(t *testing.T) {
 	}
 }
 
-type failingLogWriter struct{}
-
-func (failingLogWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
-
-func TestLogAdd_CountsWriteErrors(t *testing.T) {
-	isolateLogRing(t)
-	oldWriter := requestLogWriter
-	requestLogWriter = failingLogWriter{}
-	t.Cleanup(func() { requestLogWriter = oldWriter })
-
-	before := atomic.LoadInt64(&statReqLogWriteErrors)
-	logAdd(LogEntry{TS: 1, Method: "GET", Host: "x.example.com", Status: "OK"})
-	if got := atomic.LoadInt64(&statReqLogWriteErrors); got != before+1 {
-		t.Errorf("statReqLogWriteErrors = %d, want %d", got, before+1)
-	}
-}
-
-func TestRequestLogReadPersistent_CountsCorruptLines(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-
-	good1, _ := json.Marshal(LogEntry{TS: 1, Host: "a.example.com", Status: "OK"})
-	good2, _ := json.Marshal(LogEntry{TS: 2, Host: "b.example.com", Status: "OK"})
-	content := bytes.Join([][]byte{good1, []byte("{corrupt-not-json"), good2, nil}, []byte("\n"))
-
-	path := filepath.Join(t.TempDir(), "request.jsonl")
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	requestLogFilePath = path
-
-	before := atomic.LoadInt64(&statReqLogSkippedLines)
-	entries, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("requestLogReadPersistent: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Errorf("parsed %d entries, want 2 (corrupt line skipped)", len(entries))
-	}
-	if got := atomic.LoadInt64(&statReqLogSkippedLines); got != before+1 {
-		t.Errorf("statReqLogSkippedLines = %d, want %d", got, before+1)
-	}
-}
-
-func TestRequestLogReadPersistent_CachedWithinTTL(t *testing.T) {
-	t.Cleanup(resetRequestLogState)
-	isolateLogRing(t)
-
-	dir := t.TempDir()
-	if err := initRequestLog(filepath.Join(dir, "request.jsonl"), 10); err != nil {
-		t.Fatalf("initRequestLog: %v", err)
-	}
-	logAdd(LogEntry{TS: 1, Host: "a.example.com", Status: "OK"})
-
-	first, err := requestLogReadPersistent()
-	if err != nil || len(first) != 1 {
-		t.Fatalf("first read: entries=%d err=%v, want 1 entry", len(first), err)
-	}
-
-	// Pin the cache expiry far into the future so the "cached" assertion below
-	// can't flake if a slow CI host lets the 2 s TTL lapse between statements.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.expires = time.Now().Add(time.Hour)
-	reqLogReadCache.mu.Unlock()
-
-	// A write inside the TTL window is intentionally not visible yet.
-	logAdd(LogEntry{TS: 2, Host: "b.example.com", Status: "OK"})
-	cached, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("cached read: %v", err)
-	}
-	if len(cached) != 1 {
-		t.Fatalf("cached read returned %d entries, want 1 (TTL cache)", len(cached))
-	}
-
-	// Expire the cache → fresh parse sees both entries.
-	reqLogReadCache.mu.Lock()
-	reqLogReadCache.expires = time.Time{}
-	reqLogReadCache.mu.Unlock()
-	fresh, err := requestLogReadPersistent()
-	if err != nil {
-		t.Fatalf("fresh read: %v", err)
-	}
-	if len(fresh) != 2 {
-		t.Fatalf("fresh read returned %d entries, want 2 after cache expiry", len(fresh))
-	}
-}
+// The write-error / corrupt-line counter tests and the TTL read-cache test
+// moved to internal/reqlog (ADR-0002, store.go decomposition Phase C) — they
+// exercise engine internals through the package's named test seams.
 
 func TestMetrics_LiveFeedExposition(t *testing.T) {
 	oldToken := metricsToken

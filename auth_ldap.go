@@ -87,6 +87,9 @@ func NewLDAPAuth(cfg LDAPConfig) (*LDAPAuth, error) {
 	if strings.HasPrefix(strings.ToLower(cfg.URL), "ldap://") && !cfg.StartTLS {
 		logWarnf("LDAP: using plaintext ldap:// without StartTLS — credentials will be transmitted unencrypted. Use ldaps:// or set start_tls: true")
 	}
+	if cfg.TLSSkipVerify {
+		logWarnf("LDAP: TLS certificate verification DISABLED (tls_skip_verify) — credentials traverse an unverified channel vulnerable to MITM; intended for self-signed dev directories only") // RISK-009
+	}
 	return &LDAPAuth{cfg: cfg, ttl: ttl, cache: map[string]*ldapCacheEntry{}}, nil
 }
 
@@ -119,7 +122,7 @@ func (a *LDAPAuth) Verify(username, password string) bool {
 }
 
 func (a *LDAPAuth) verify(username, password string) bool {
-	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} //nolint:gosec // TLSSkipVerify is an explicit admin opt-in for self-signed LDAP certs
+	tlsCfg := &tls.Config{InsecureSkipVerify: a.cfg.TLSSkipVerify} // #nosec G402 -- TLSSkipVerify is an explicit admin opt-in for self-signed LDAP certs
 
 	// Dial with timeout to prevent DoS from hung LDAP servers.
 	conn, err := ldap.DialURL(a.cfg.URL,

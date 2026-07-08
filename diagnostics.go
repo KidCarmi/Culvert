@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // OperatorContract is the aggregated, operator-visible health verdict for
@@ -122,7 +125,7 @@ func storageWritability() string {
 // sessionSecretSet reports whether the admin session HMAC key has been
 // initialised. Boolean only — the secret value is never returned or logged.
 func sessionSecretSet() bool {
-	return len(sessionSecret) >= 32
+	return len(session.SigningKey()) >= 32
 }
 
 // buildOperatorContract assembles the full diagnostics report.
@@ -146,7 +149,7 @@ func buildOperatorContract() OperatorContract {
 		checkDPLastGoodConfigSnapshot(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
-		checkUnauthMode(),
+		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
 		checkUpdaterURL(),
 		checkConfigSnapshotValidator(),
@@ -158,12 +161,15 @@ func buildOperatorContract() OperatorContract {
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
-	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(),
-		cfg != nil && cfg.UnauthMode(), hasCredentialCapableProvider())...)
+	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
 	// SSORequired risk diagnostics + auth-rule shadow/overlap diagnostics (Phase 3
 	// Slice 5). Report-only; contribute nothing when no SSO/auth rules apply.
-	checks = append(checks, authSSORequiredDiagnostics(policyStore.List(), cfg != nil && cfg.UnauthMode())...)
+	checks = append(checks, authSSORequiredDiagnostics(policyStore.List())...)
 	checks = append(checks, authRuleShadowDiagnostics(policyStore.List())...)
+	// Slice 3 (S2): scoped CR/SSO rules now ENFORCE under defaultAuthOutcome=Exempt
+	// (they were dead under the legacy UnauthMode). Surface that migration risk.
+	checks = append(checks, authDefaultExemptMigrationDiagnostics(policyStore.List(),
+		cfg != nil && cfg.DefaultAuthOutcome() == OutcomeExempt)...)
 	return OperatorContract{
 		Verdict:     rollUpVerdict(checks),
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -172,7 +178,7 @@ func buildOperatorContract() OperatorContract {
 }
 
 func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
-	if !clusterRoleIsDP.Load() {
+	if !audit.DPMode() {
 		return OperatorContractCheck{
 			Code:    "dp_last_known_good_config",
 			Status:  diagOK,
@@ -509,22 +515,22 @@ func hasNonBaseURLComponents(u *url.URL) bool {
 	return u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil
 }
 
-// checkUnauthMode is a visible WARN when the proxy is in unauthenticated
-// pass-through mode. Per scope, we surface the risk — we never remove the
-// operator's freedom to run this way.
-func checkUnauthMode() OperatorContractCheck {
-	if cfg != nil && cfg.UnauthMode() {
+// checkDefaultAuthOpen is a visible WARN when the global default authentication
+// is Open unmatched traffic (defaultAuthOutcome=Exempt). Report-only — we never
+// remove the operator's freedom to run this way.
+func checkDefaultAuthOpen() OperatorContractCheck {
+	if cfg != nil && cfg.DefaultAuthOutcome() == OutcomeExempt {
 		return OperatorContractCheck{
-			Code:           "unauth_mode",
+			Code:           "default_auth_open",
 			Status:         diagWarn,
-			Message:        "proxy is running in unauthenticated mode — no client credentials required",
-			OperatorAction: "If clients should authenticate, disable Unauth Mode under Settings; otherwise rely on policy rules to gate access.",
+			Message:        "default authentication is Open unmatched traffic — traffic that matches no auth rule is admitted without credentials (not Allow; Stage-2 policy still governs)",
+			OperatorAction: "Set default authentication to Require under Settings if unmatched traffic should authenticate; otherwise rely on policy rules to gate access.",
 		}
 	}
 	return OperatorContractCheck{
-		Code:    "unauth_mode",
+		Code:    "default_auth_open",
 		Status:  diagOK,
-		Message: "client authentication enforced (or no IdP configured)",
+		Message: "default authentication requires credentials for unmatched traffic (or no IdP configured)",
 	}
 }
 
@@ -628,7 +634,7 @@ type configVersionSummary struct {
 // summarizeLatestConfigVersion is the production entry point used by
 // the diagnostics handler. It scans configVersionsDir.
 func summarizeLatestConfigVersion() configVersionSummary {
-	return summarizeLatestConfigVersionAt(configVersionsDir)
+	return summarizeLatestConfigVersionAt(configVersions.Dir())
 }
 
 // summarizeLatestConfigVersionAt is the dir-parameterised inner form.
@@ -866,13 +872,15 @@ func authExemptDiagnostics(rules []PolicyRule, defaultAction PolicyAction) []Ope
 // ruleset plus the two environmental facts it needs, so it is testable without
 // globals (buildOperatorContract supplies the live values):
 //
-//   - unauthMode: CR rules cannot fire while the proxy runs in UnauthMode (the
-//     whole auth gate is skipped), so they are dead rules → WARN.
 //   - hasCredProvider: whether any credential-capable validator is configured. CR
 //     rules with no such validator would challenge (407) covered requests forever
 //     → FAIL. SAML alone does NOT count (it cannot validate a presented in-band
 //     credential — see hasCredentialCapableProvider).
-func authCredentialRequiredDiagnostics(rules []PolicyRule, unauthMode, hasCredProvider bool) []OperatorContractCheck {
+//
+// Slice 3 (S2): the legacy "dead under UnauthMode" WARN is removed — CR rules now
+// ENFORCE under defaultAuthOutcome=Exempt. The migration risk is surfaced by
+// authDefaultExemptMigrationDiagnostics instead.
+func authCredentialRequiredDiagnostics(rules []PolicyRule, hasCredProvider bool) []OperatorContractCheck {
 	var names []string
 	for i := range rules {
 		r := &rules[i]
@@ -891,14 +899,6 @@ func authCredentialRequiredDiagnostics(rules []PolicyRule, unauthMode, hasCredPr
 		return nil
 	}
 	var checks []OperatorContractCheck
-	if unauthMode {
-		checks = append(checks, OperatorContractCheck{
-			Code:           "auth_cr_dead_under_unauth_mode",
-			Status:         diagWarn,
-			Message:        "CredentialRequired rules cannot fire while the proxy is in UnauthMode (the auth gate is skipped): " + strings.Join(names, ", "),
-			OperatorAction: "Disable UnauthMode under Settings if these rules should enforce authentication, or remove the rules.",
-		})
-	}
 	if !hasCredProvider {
 		checks = append(checks, OperatorContractCheck{
 			Code:           "auth_cr_no_credential_provider",
@@ -908,6 +908,41 @@ func authCredentialRequiredDiagnostics(rules []PolicyRule, unauthMode, hasCredPr
 		})
 	}
 	return checks
+}
+
+// authDefaultExemptMigrationDiagnostics warns that scoped CredentialRequired /
+// SSORequired rules — which were DEAD under the legacy UnauthMode — now ENFORCE
+// for matching traffic under defaultAuthOutcome=Exempt (Slice 3 / S2). Report-
+// only; fires only when the global default is Exempt and ≥1 enabled, non-expired
+// CR/SSO rule exists. Pure over an explicit ruleset + the one environmental fact.
+func authDefaultExemptMigrationDiagnostics(rules []PolicyRule, defaultExempt bool) []OperatorContractCheck {
+	if !defaultExempt {
+		return nil
+	}
+	var names []string
+	for i := range rules {
+		r := &rules[i]
+		if ruleTypeOf(r) != ruleTypeAuth || r.Auth == nil {
+			continue
+		}
+		if r.Auth.Outcome != OutcomeCredentialRequired && r.Auth.Outcome != OutcomeSSORequired {
+			continue
+		}
+		// Disabled / expired rules cannot fire — never surface them.
+		if !ruleIsEnabled(r) || !authRuleNotExpired(r.Auth) {
+			continue
+		}
+		names = append(names, r.Name)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return []OperatorContractCheck{{
+		Code:           "auth_default_exempt_rules_now_enforce",
+		Status:         diagWarn,
+		Message:        "The global default authentication is Open unmatched traffic (defaultAuthOutcome=Exempt). Scoped CredentialRequired/SSORequired rules still ENFORCE for matching traffic — auth rules evaluate first; the global default applies only on no-match: " + strings.Join(names, ", "),
+		OperatorAction: "Confirm these rules should enforce. To restore fully-open behavior remove them; to require authentication globally, set the default authentication to Required.",
+	}}
 }
 
 // hasCredentialCapableProvider reports whether any validator that can verify a

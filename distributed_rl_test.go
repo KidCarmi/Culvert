@@ -1,10 +1,13 @@
 package main
 
 import (
-	"net/http"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/otlp"
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // ─── generateTraceparent ────────────────────────────────────────────────────
@@ -65,66 +68,8 @@ func TestDetectProtocolName(t *testing.T) {
 	}
 }
 
-// ─── syslog formatMsg ───────────────────────────────────────────────────────
-
-func TestSyslogFormatMsg_RFC3164(t *testing.T) {
-	sw := &syslogWriter{
-		host:   "testhost",
-		tag:    "culvert",
-		format: "rfc3164",
-		pid:    "1234",
-	}
-	msg := sw.formatMsg(14, "hello world")
-	if !strings.HasPrefix(msg, "<14>") {
-		t.Fatalf("RFC3164 should start with <14>, got %q", msg)
-	}
-	if !strings.Contains(msg, "testhost") {
-		t.Fatal("should contain hostname")
-	}
-	if !strings.Contains(msg, "culvert:") {
-		t.Fatal("should contain tag with colon")
-	}
-	if !strings.Contains(msg, "hello world") {
-		t.Fatal("should contain message body")
-	}
-}
-
-func TestSyslogFormatMsg_RFC5424(t *testing.T) {
-	sw := &syslogWriter{
-		host:   "testhost",
-		tag:    "culvert",
-		format: "rfc5424",
-		pid:    "5678",
-	}
-	msg := sw.formatMsg(13, "audit event")
-	// RFC5424: <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
-	if !strings.HasPrefix(msg, "<13>1 ") {
-		t.Fatalf("RFC5424 should start with <13>1, got %q", msg)
-	}
-	if !strings.Contains(msg, "testhost") {
-		t.Fatal("should contain hostname")
-	}
-	if !strings.Contains(msg, "culvert") {
-		t.Fatal("should contain app-name")
-	}
-	if !strings.Contains(msg, "5678") {
-		t.Fatal("should contain PID")
-	}
-	if !strings.Contains(msg, "audit event") {
-		t.Fatal("should contain message body")
-	}
-	// Should contain RFC3339 timestamp
-	if !strings.Contains(msg, "T") {
-		t.Fatal("RFC5424 timestamp should be RFC3339 format")
-	}
-}
-
-func TestSyslogFormat_Getter(t *testing.T) {
-	sw := &syslogWriter{format: "rfc5424"}
-	if sw.Format() != "rfc5424" {
-		t.Fatalf("Format() = %q, want rfc5424", sw.Format())
-	}
-}
+// syslog formatMsg/Format tests moved to internal/syslog (ADR-0002) — they use
+// the unexported formatMsg + struct fields, now in package syslog.
 
 // ─── clusterCountStore ──────────────────────────────────────────────────────
 
@@ -318,8 +263,8 @@ func TestBodyNeedsBuffering(t *testing.T) {
 	}()
 
 	// No scanners active.
-	dpiScanner = &ContentScanner{maxBytes: 1 << 20}
-	globalSecScanner = &SecurityScanner{cache: newHashCache(100, 0)}
+	dpiScanner = newContentScanner(1 << 20)
+	globalSecScanner = secscan.New(secscan.Deps{Cache: newHashCache(100, 0)})
 	if bodyNeedsBuffering("text/html") {
 		t.Fatal("should not buffer when no scanners active")
 	}
@@ -342,15 +287,15 @@ func TestMaxScanBufferBytes_DPIvsSec(t *testing.T) {
 		globalSecScanner = origSec
 	}()
 
-	dpiScanner = &ContentScanner{maxBytes: 2 << 20}
-	globalSecScanner = &SecurityScanner{maxBytes: 5 << 20, cache: newHashCache(100, 0)}
+	dpiScanner = newContentScanner(2 << 20)
+	globalSecScanner = secscan.New(secscan.Deps{MaxBytes: 5 << 20, Cache: newHashCache(100, 0)})
 
 	got := maxScanBufferBytes()
 	if got != 5<<20 {
 		t.Fatalf("maxScanBufferBytes = %d, want %d", got, 5<<20)
 	}
 
-	dpiScanner.maxBytes = 10 << 20
+	dpiScanner = newContentScanner(10 << 20)
 	got = maxScanBufferBytes()
 	if got != 10<<20 {
 		t.Fatalf("maxScanBufferBytes = %d, want %d (DPI larger)", got, 10<<20)
@@ -373,7 +318,7 @@ func TestSafeScanBody_NilOnEmpty(t *testing.T) {
 func TestSafeDPIScan_NoPatterns(t *testing.T) {
 	origDPI := dpiScanner
 	defer func() { dpiScanner = origDPI }()
-	dpiScanner = &ContentScanner{maxBytes: 1 << 20}
+	dpiScanner = newContentScanner(1 << 20)
 
 	pattern, matched := safeDPIScan([]byte("hello world"))
 	if matched {
@@ -384,10 +329,7 @@ func TestSafeDPIScan_NoPatterns(t *testing.T) {
 // ─── OTLP exporter ────────────────────────────────────────────────────────
 
 func TestOTLPExporter_ConfigureAndStop(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour, // long interval to avoid push
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
+	o := otlp.NewMetrics(nil)
 	// Initially disabled.
 	if o.Enabled() {
 		t.Fatal("should be disabled initially")
@@ -413,10 +355,7 @@ func TestOTLPExporter_ConfigureAndStop(t *testing.T) {
 }
 
 func TestOTLPExporter_ConfigureEmpty(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour,
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
+	o := otlp.NewMetrics(nil)
 	// Empty endpoint should be a no-op.
 	o.Configure("", nil)
 	if o.Enabled() {
@@ -424,26 +363,8 @@ func TestOTLPExporter_ConfigureEmpty(t *testing.T) {
 	}
 }
 
-func TestValidOTLPEndpoint_Regexp(t *testing.T) {
-	tests := []struct {
-		url  string
-		want bool
-	}{
-		{"http://collector:4318", true},
-		{"https://otel.example.com", true},
-		{"http://10.0.0.1:4318", true},
-		{"ftp://bad.example.com", false},
-		{"", false},
-		{"not-a-url", false},
-		{"http://", false},
-	}
-	for _, tc := range tests {
-		got := validOTLPEndpoint.MatchString(tc.url)
-		if got != tc.want {
-			t.Errorf("validOTLPEndpoint(%q) = %v, want %v", tc.url, got, tc.want)
-		}
-	}
-}
+// TestValidOTLPEndpoint_Regexp moved to internal/otlp (the endpoint
+// validator is package-internal since the extraction).
 
 func TestOTLPCounterMetrics(t *testing.T) {
 	now := "1234567890"
@@ -527,11 +448,7 @@ func TestOTLPRuleMetrics_Empty(t *testing.T) {
 }
 
 func TestOTLPBuildPayload(t *testing.T) {
-	o := &OTLPExporter{
-		interval: 1 * time.Hour,
-		client:   &http.Client{Timeout: 1 * time.Second},
-	}
-	payload := o.buildPayload()
+	payload := otlp.Envelope(culvertMetricsSnapshot(fmt.Sprintf("%d", time.Now().UnixNano())))
 	if len(payload.ResourceMetrics) != 1 {
 		t.Fatalf("expected 1 resource metric, got %d", len(payload.ResourceMetrics))
 	}
@@ -546,69 +463,7 @@ func TestOTLPBuildPayload(t *testing.T) {
 }
 
 // ─── Session revocation export/merge ───────────────────────────────────────
-
-func TestExportRevocations_FiltersExpired(t *testing.T) {
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	// Add one valid and one expired token.
-	rl.tokens["valid-token"] = time.Now().Add(1 * time.Hour)
-	rl.tokens["expired-token"] = time.Now().Add(-1 * time.Hour)
-
-	entries := rl.ExportRevocations()
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 entry (expired filtered), got %d", len(entries))
-	}
-	if entries[0].Token != "valid-token" {
-		t.Fatalf("expected valid-token, got %q", entries[0].Token)
-	}
-	// Expired token should have been cleaned up.
-	if _, exists := rl.tokens["expired-token"]; exists {
-		t.Fatal("expired token should be removed from map")
-	}
-}
-
-func TestMergeRevocations(t *testing.T) {
-	rl := &revocationList{tokens: map[string]time.Time{}}
-	// Pre-existing token.
-	rl.tokens["existing"] = time.Now().Add(1 * time.Hour)
-
-	entries := []RevocationEntry{
-		{Token: "new-token", Expiry: time.Now().Add(1 * time.Hour).Unix()},
-		{Token: "existing", Expiry: time.Now().Add(2 * time.Hour).Unix()}, // duplicate
-		{Token: "expired", Expiry: time.Now().Add(-1 * time.Hour).Unix()}, // expired
-	}
-	added := rl.MergeRevocations(entries)
-	if added != 1 {
-		t.Fatalf("expected 1 added, got %d", added)
-	}
-	if rl.Count() != 2 {
-		t.Fatalf("expected 2 total, got %d", rl.Count())
-	}
-}
-
-// ─── Audit event queue ─────────────────────────────────────────────────────
-
-func TestAuditEventQueue(t *testing.T) {
-	// Drain any existing events.
-	drainPendingAuditEvents()
-
-	// Queue some events.
-	queueAuditForCluster(AuditEntry{Action: "test1"})
-	queueAuditForCluster(AuditEntry{Action: "test2"})
-
-	events := drainPendingAuditEvents()
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(events))
-	}
-	if events[0].Action != "test1" || events[1].Action != "test2" {
-		t.Fatal("events out of order")
-	}
-
-	// Second drain should be empty.
-	events = drainPendingAuditEvents()
-	if events != nil {
-		t.Fatalf("expected nil after drain, got %d events", len(events))
-	}
-}
+// (Moved to internal/session with the ADR-0002 extraction.)
 
 // ─── clusterAuditLog ──────────────────────────────────────────────────────
 

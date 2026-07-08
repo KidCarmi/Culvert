@@ -1,66 +1,41 @@
 package main
 
-// logStore is a Badger-backed, time-ordered persistent request-log history.
-//
-// It complements the two existing surfaces rather than replacing them:
-//   - the in-memory ring (store.go `logs`) backs the live tail / SSE feed;
-//   - the JSONL writer (initRequestLog) remains for plain-text export;
-//   - this store is the queryable, retention-managed HISTORY that survives
-//     restart and supports deep pagination ("page 20 = yesterday").
-//
-// Storage: BadgerDB v4 (already vendored for catdb.go — no new dependency).
-//
-// Key layout:   8-byte big-endian unix-millis ++ 4-byte big-endian seq  (12 B)
-//   The timestamp prefix keeps entries in chronological order so a reverse
-//   iterator yields newest-first; the seq disambiguates entries within the
-//   same millisecond and preserves insertion order.
-// Value layout: JSON-encoded LogEntry.
-//
-// Retention is two-dimensional, matching the admin's choice (time + size):
-//   - Age: a per-key Badger TTL (native, reliable). Expired entries are
-//     skipped on read and reclaimed during compaction/GC.
-//   - Size: a best-effort janitor that, when the on-disk size exceeds the cap,
-//     deletes the oldest entries in bounded batches and runs value-log GC.
-//     On-disk size accounting in an LSM store is lazy, so the size cap
-//     converges over a few janitor passes rather than instantly.
+// logstore.go — package-main orchestration for the Badger-backed request-log
+// history, whose engine moved to internal/logstore (ADR-0002). The package
+// owns the store (key layout, async write loop, query/stats/retention, the
+// priority-aware deletion passes, encryption-at-rest) and the dropped/pruned
+// counters. main keeps the process-wide singleton and the enable/disable/
+// purge lifecycle, the desired-retention memory, the dir/passphrase startup
+// state, and the health/usage/estimate/retention views (they read main-side
+// stats and the disk guard). The engine's two inversion points: the
+// minimal-mode hook (logguard's state, injected at open) and RunRetention
+// returning its results so the janitor in logguard records the audit event.
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"math"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-	"golang.org/x/crypto/pbkdf2"
+	"github.com/KidCarmi/Culvert/internal/logstore"
 )
 
-const logStoreKeyLen = 12 // 8-byte ts(ms) + 4-byte seq
+// logStore and LogEntry are re-exposed unqualified (engine types are
+// logstore.Store / logstore.Entry).
+type (
+	logStore = logstore.Store
+	LogEntry = logstore.Entry
+)
 
-// logStoreScanCap bounds the number of entries any single query or stats scan
-// will walk, so a pathological time range cannot pin a core.
-const logStoreScanCap = 500000
+// errLogStoreEncMismatch is re-exposed for the retention API handler.
+var errLogStoreEncMismatch = logstore.ErrEncMismatch
 
-// logStorePruneBatch is the number of oldest entries the size janitor deletes
-// per pass. A package var (not const) so tests can lower it.
-var logStorePruneBatch = 10000
-
-// logStoreMaxQueryLimit caps a single Query's page size so a caller-supplied
-// limit cannot drive an excessive result count.
-const logStoreMaxQueryLimit = 10000
-
-// logStoreQueryAllocHint is the fixed initial capacity for a query result
-// slice. Constant (not the user-supplied limit) so the allocation size never
-// depends on user input; append grows it as needed.
-const logStoreQueryAllocHint = 256
+// logEntryLowPriority is re-exposed for logguard's minimal-mode path and its
+// tests (engine func is logstore.LowPriority).
+var logEntryLowPriority = logstore.LowPriority
 
 // globalLogStore is the process-wide history store; nil-pointer when disabled.
 // It is an atomic pointer so the request hot path reads it lock-free and the
@@ -71,44 +46,9 @@ var globalLogStore atomic.Pointer[logStore]
 // from the GUI (no path argument needed). Set once at startup from the data dir.
 var logStoreDir string
 
-// History-store encryption-at-rest (Badger AES). The key is derived from a
-// passphrase via PBKDF2-SHA256 (mirroring the CA bundle, ca.go) and a random
-// per-store salt persisted in a sidecar file so the key is stable across
-// restarts. logStorePassphrase is set once at startup from the environment;
-// empty = encryption off (saving still allowed, opt-in, with a UI warning).
-const (
-	logStoreEncIters   = 600_000 // matches ca.go pbkdf2Iter (NIST SP 800-132)
-	logStoreEncSaltLen = 32
-	logStoreEncKeyLen  = 32 // AES-256
-)
-
+// logStorePassphrase is set once at startup from the environment; empty =
+// encryption off (saving still allowed, opt-in, with a UI warning).
 var logStorePassphrase string
-
-// errLogStoreEncMismatch is returned when an existing store can't be opened with
-// the configured key (passphrase added/changed, or store was plaintext). The
-// remediation is to purge the on-disk store and re-enable.
-var errLogStoreEncMismatch = errors.New("saved logs use a different encryption key")
-
-// logStoreEncKey derives the AES key from the configured passphrase plus a
-// persistent random salt (sidecar file dir+".salt"). Returns (nil, nil) when no
-// passphrase is configured (encryption disabled).
-func logStoreEncKey(dir, passphrase string) ([]byte, error) {
-	if passphrase == "" {
-		return nil, nil
-	}
-	saltPath := dir + ".salt"
-	salt, err := os.ReadFile(saltPath) //nolint:gosec // path is server-configured
-	if err != nil || len(salt) != logStoreEncSaltLen {
-		salt = make([]byte, logStoreEncSaltLen)
-		if _, e := rand.Read(salt); e != nil {
-			return nil, fmt.Errorf("logstore salt: %w", e)
-		}
-		if e := os.WriteFile(saltPath, salt, 0o600); e != nil {
-			return nil, fmt.Errorf("write logstore salt: %w", e)
-		}
-	}
-	return pbkdf2.Key([]byte(passphrase), salt, logStoreEncIters, logStoreEncKeyLen, sha256.New), nil
-}
 
 // logStoreEncryptionAvailable reports whether a passphrase is configured (so a
 // newly created store would be encrypted).
@@ -134,15 +74,30 @@ func getLogStoreDesired() (days int, gb float64) {
 	return logStoreLastDays, logStoreLastGB
 }
 
-var (
-	statLogStoreDropped int64 // entries dropped because the async queue was full
-	statLogStorePruned  int64 // entries deleted by the size-cap janitor
-)
-
 // logStoreEnableMu serialises enable/disable lifecycle transitions so two
 // concurrent admin requests can't race to open/close the store (e.g. a
 // double-clicked toggle). Reads of globalLogStore stay lock-free (atomic).
 var logStoreEnableMu sync.Mutex
+
+// openLogStore opens (or creates) the history store, converting the admin's
+// retention settings (days, GB) into the internal TTL/byte limits, deriving
+// the encryption key from the configured passphrase, and wiring logguard's
+// minimal-mode state as the engine's emergency hook.
+func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, error) {
+	var ttl time.Duration
+	if retentionDays > 0 {
+		ttl = time.Duration(retentionDays) * 24 * time.Hour
+	}
+	var maxBytes int64
+	if maxGB > 0 {
+		maxBytes = int64(maxGB * (1 << 30))
+	}
+	encKey, err := logstore.EncKey(dir, logStorePassphrase)
+	if err != nil {
+		return nil, err
+	}
+	return logstore.OpenTTL(dir, ttl, maxBytes, encKey, minimalMode)
+}
 
 // enableLogStore opens (or re-uses) the history store and publishes it as the
 // global store, starting the size janitor under a per-store context so it stops
@@ -165,7 +120,7 @@ func enableLogStore(ctx context.Context, dir string, days int, gb float64) error
 		return err
 	}
 	jctx, cancel := context.WithCancel(ctx)
-	ls.cancelJanitor = cancel
+	ls.SetCancelJanitor(cancel)
 	startLogStoreRetention(jctx, ls, time.Minute)
 	globalLogStore.Store(ls)
 	setLogStoreDesired(days, gb)
@@ -190,7 +145,7 @@ func purgeLogStore() error {
 	logStoreEnableMu.Lock()
 	defer logStoreEnableMu.Unlock()
 	if ls := globalLogStore.Load(); ls != nil {
-		return ls.purgeAll()
+		return ls.PurgeAll()
 	}
 	if logStoreDir == "" {
 		return nil
@@ -200,439 +155,6 @@ func purgeLogStore() error {
 	}
 	_ = os.Remove(logStoreDir + ".salt") // regenerated on next enable
 	return nil
-}
-
-type logStore struct {
-	db *badger.DB
-
-	// ttlNanos (age limit) and maxBytes (size cap) are runtime-adjustable from
-	// the admin UI, so they are accessed atomically. 0 disables that dimension.
-	ttlNanos int64 // atomic
-	maxBytes int64 // atomic
-
-	// bytesUsed is the tracked logical size (key+value bytes) used by the size
-	// cap. It is reconciled from disk on open, incremented on write, and
-	// decremented on prune. Badger's own db.Size() lags writes (memtable/WAL
-	// aren't counted until compaction), so it is unusable as a prompt trigger;
-	// the logical counter is deterministic. TTL-expired entries are not
-	// decremented, so the counter can drift slightly high over time — which
-	// prunes marginally early, the safe direction for a hard ceiling.
-	bytesUsed int64 // atomic
-
-	seq uint32 // atomic; disambiguates same-millisecond entries
-	ch  chan LogEntry
-	wg  sync.WaitGroup
-
-	// cancelJanitor stops this store's retention janitor goroutine; called by
-	// Close so a disable/enable cycle doesn't leak janitor goroutines.
-	cancelJanitor context.CancelFunc
-
-	// closeMu guards the closed flag and the send/close of ch. Add and
-	// RunRetention take it for reading (they may run concurrently); Close takes
-	// it for writing so it cannot close the channel — or the *badger.DB — while
-	// an Add send or a retention pass is in flight (prevents a send-on-closed
-	// channel panic and use of a closed DB during shutdown).
-	closeMu sync.RWMutex
-	closed  bool
-
-	encrypted bool // AES-at-rest enabled (immutable after open)
-}
-
-// Encrypted reports whether this store is encrypted at rest. Nil-safe.
-func (s *logStore) Encrypted() bool { return s != nil && s.encrypted }
-
-// openLogStore opens (or creates) the history store, converting the admin's
-// retention settings (days, GB) into the internal TTL/byte limits.
-func openLogStore(dir string, retentionDays int, maxGB float64) (*logStore, error) {
-	var ttl time.Duration
-	if retentionDays > 0 {
-		ttl = time.Duration(retentionDays) * 24 * time.Hour
-	}
-	var maxBytes int64
-	if maxGB > 0 {
-		maxBytes = int64(maxGB * (1 << 30))
-	}
-	encKey, err := logStoreEncKey(dir, logStorePassphrase)
-	if err != nil {
-		return nil, err
-	}
-	return openLogStoreTTL(dir, ttl, maxBytes, encKey)
-}
-
-// openLogStoreTTL is the low-level constructor used directly by tests so they
-// can pass sub-day TTLs, tiny byte caps, and an optional encryption key (nil =
-// unencrypted).
-func openLogStoreTTL(dir string, ttl time.Duration, maxBytes int64, encKey []byte) (*logStore, error) {
-	opts := badger.DefaultOptions(dir).
-		WithValueLogFileSize(128 << 20). // bound peak mmap inside containers
-		WithLogger(nil)                  // proxy's own logger handles output
-	if len(encKey) > 0 {
-		// Badger requires an index cache when encryption is enabled.
-		opts = opts.WithEncryptionKey(encKey).WithIndexCacheSize(16 << 20)
-	}
-	db, err := badger.Open(opts)
-	if err != nil {
-		// A key/plaintext mismatch (passphrase added, changed, lost, or salt
-		// gone) surfaces here; map it to a clear, actionable sentinel so the
-		// handler can guide the admin to purge rather than echo a raw Badger
-		// error. Match the exported sentinels first, with a string fallback.
-		if errors.Is(err, badger.ErrEncryptionKeyMismatch) ||
-			errors.Is(err, badger.ErrInvalidEncryptionKey) ||
-			strings.Contains(strings.ToLower(err.Error()), "encrypt") {
-			return nil, errLogStoreEncMismatch
-		}
-		return nil, err
-	}
-	s := &logStore{
-		db:        db,
-		ch:        make(chan LogEntry, 4096),
-		encrypted: len(encKey) > 0,
-	}
-	if ttl > 0 {
-		s.ttlNanos = int64(ttl)
-	}
-	s.maxBytes = maxBytes
-	// Reconcile the logical byte counter from any data already on disk so the
-	// size cap is correct immediately after a restart (bounded by the scan cap).
-	s.bytesUsed = s.scanLogicalBytes()
-	s.wg.Add(1)
-	go s.writeLoop()
-	return s, nil
-}
-
-// itemLogicalSize is the bytesUsed contribution of one stored entry: key bytes
-// plus value bytes. It MUST match the flush-time accounting (len(key)+len(val))
-// so reconcile-on-open, flush increments, and prune decrements all use the same
-// measure — otherwise the size cap drifts. ValueSize reads the entry meta, not
-// the value log, so it is cheap with PrefetchValues=false.
-func itemLogicalSize(item *badger.Item) int64 {
-	return int64(len(item.Key())) + item.ValueSize()
-}
-
-// scanLogicalBytes sums the key+value bytes of stored entries (bounded by the
-// scan cap) — no value fetch required. Called once at open before the store is
-// published, so it needs no close guard.
-func (s *logStore) scanLogicalBytes() int64 {
-	var total int64
-	_ = s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		n := 0
-		for it.Rewind(); it.Valid(); it.Next() {
-			total += itemLogicalSize(it.Item())
-			n++
-			if n >= logStoreScanCap {
-				break
-			}
-		}
-		return nil
-	})
-	return total
-}
-
-func logStoreKey(tsMs int64, seq uint32) []byte {
-	k := make([]byte, logStoreKeyLen)
-	binary.BigEndian.PutUint64(k[0:8], uint64(tsMs)) // #nosec G115 -- ts is positive millis
-	binary.BigEndian.PutUint32(k[8:12], seq)
-	return k
-}
-
-func logStoreKeyTS(k []byte) int64 {
-	if len(k) < 8 {
-		return 0
-	}
-	return int64(binary.BigEndian.Uint64(k[0:8])) // #nosec G115 -- round-trips logStoreKey
-}
-
-// Add enqueues an entry for asynchronous batched persistence. It never blocks
-// the caller (the proxy hot path): a full queue drops the entry and bumps a
-// counter rather than stalling request handling.
-func (s *logStore) Add(e LogEntry) {
-	if s == nil {
-		return
-	}
-	// Emergency minimal mode: stop persisting low-priority (access/traffic)
-	// entries so the store stops growing under disk pressure; keep security
-	// (WARN/ERROR) events. The in-memory live feed still receives everything.
-	if minimalMode() && logEntryLowPriority(e.Level) {
-		return
-	}
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return
-	}
-	select {
-	case s.ch <- e:
-	default:
-		atomic.AddInt64(&statLogStoreDropped, 1)
-	}
-}
-
-// writeLoop drains the queue, batching writes and flushing on a timer so the
-// store keeps up with bursty traffic without a fsync per entry.
-func (s *logStore) writeLoop() {
-	defer s.wg.Done()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	batch := make([]LogEntry, 0, 256)
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		wb := s.db.NewWriteBatch()
-		var added int64
-		for i := range batch {
-			b, err := json.Marshal(batch[i])
-			if err != nil {
-				continue
-			}
-			key := logStoreKey(batch[i].TS, atomic.AddUint32(&s.seq, 1))
-			ent := badger.NewEntry(key, b)
-			if ttl := time.Duration(atomic.LoadInt64(&s.ttlNanos)); ttl > 0 {
-				ent = ent.WithTTL(ttl)
-			}
-			_ = wb.SetEntry(ent)
-			added += int64(len(key) + len(b))
-		}
-		if err := wb.Flush(); err != nil {
-			logger.Printf("WARN logstore: batch flush: %v", err)
-			batch = batch[:0]
-			return
-		}
-		atomic.AddInt64(&s.bytesUsed, added)
-		batch = batch[:0]
-	}
-
-	for {
-		select {
-		case e, ok := <-s.ch:
-			if !ok {
-				flush()
-				return
-			}
-			batch = append(batch, e)
-			if len(batch) >= 256 {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		}
-	}
-}
-
-// Close drains pending writes and closes the database. Safe to call once.
-func (s *logStore) Close() error {
-	if s == nil {
-		return nil
-	}
-	s.closeMu.Lock()
-	if s.closed {
-		s.closeMu.Unlock()
-		return nil
-	}
-	s.closed = true
-	close(s.ch)
-	s.closeMu.Unlock()
-	if s.cancelJanitor != nil {
-		s.cancelJanitor() // stop the retention janitor (no leak on disable)
-	}
-	// Wait outside the lock: writeLoop coordinates via the channel close + wg
-	// (it never takes closeMu), and any in-flight Add/RunRetention released
-	// their read lock before Close acquired the write lock.
-	s.wg.Wait()
-	return s.db.Close()
-}
-
-// purgeAll deletes all stored history (Badger DropAll) and resets the byte
-// counter. The store stays open and usable. Held under the read lock so Close
-// cannot close the DB mid-purge.
-func (s *logStore) purgeAll() error {
-	if s == nil {
-		return nil
-	}
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return nil
-	}
-	if err := s.db.DropAll(); err != nil {
-		return err
-	}
-	atomic.StoreInt64(&s.bytesUsed, 0)
-	return nil
-}
-
-// Query returns up to limit entries newest-first within [fromMs, toMs],
-// applying filter, skipping offset, and reporting the total number of matches
-// in the window (capped at logStoreScanCap). offset/limit over a frozen time
-// window give stable deep pagination. fromMs<=0 means "from the beginning",
-// toMs<=0 means "up to now".
-func (s *logStore) Query(fromMs, toMs int64, offset, limit int, filter func(*LogEntry) bool) ([]LogEntry, int, error) {
-	if s == nil {
-		return nil, 0, nil
-	}
-	// Read lock for the whole transaction so Close can't close the DB mid-query
-	// (use-after-close guard).
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return nil, 0, nil
-	}
-	if toMs <= 0 {
-		toMs = math.MaxInt64
-	}
-	if limit <= 0 {
-		limit = 1000
-	}
-	// Bound the result count at the store layer (defense in depth; the API also
-	// clamps). The loop below stops at len(out) == limit.
-	if limit > logStoreMaxQueryLimit {
-		limit = logStoreMaxQueryLimit
-	}
-	// Fixed initial capacity (not the caller-supplied limit) so the allocation
-	// size never depends on user input — append grows as needed, still bounded
-	// by limit in the loop (CWE-770/789).
-	out := make([]LogEntry, 0, logStoreQueryAllocHint)
-	total := 0
-	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.Reverse = true
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		seek := logStoreKey(toMs, math.MaxUint32)
-		scanned := 0
-		for it.Seek(seek); it.Valid(); it.Next() {
-			item := it.Item()
-			if logStoreKeyTS(item.Key()) < fromMs {
-				break
-			}
-			scanned++
-			if scanned > logStoreScanCap {
-				break
-			}
-			var e LogEntry
-			if err := item.Value(func(v []byte) error { return json.Unmarshal(v, &e) }); err != nil {
-				continue
-			}
-			if filter != nil && !filter(&e) {
-				continue
-			}
-			if total >= offset && len(out) < limit {
-				out = append(out, e)
-			}
-			total++
-		}
-		return nil
-	})
-	return out, total, err
-}
-
-// logStoreStats reports current usage for the admin retention panel.
-type logStoreStats struct {
-	Bytes    int64 `json:"bytes"`              // on-disk size (LSM + value log)
-	Count    int64 `json:"count"`              // entries scanned (capped)
-	Capped   bool  `json:"capped"`             // true when Count hit the scan cap
-	OldestMs int64 `json:"oldestMs,omitempty"` // timestamp of the oldest entry
-}
-
-// Stats returns the tracked logical usage plus a bounded entry count and the
-// oldest timestamp. Bytes is the same logical counter the size cap uses (see
-// the bytesUsed field comment). The count scan is bounded by logStoreScanCap
-// so a huge store cannot make the panel expensive.
-func (s *logStore) Stats() logStoreStats {
-	var st logStoreStats
-	if s == nil {
-		return st
-	}
-	// Read lock so Close can't close the DB mid-scan (use-after-close guard).
-	s.closeMu.RLock()
-	defer s.closeMu.RUnlock()
-	if s.closed {
-		return st
-	}
-	st.Bytes = atomic.LoadInt64(&s.bytesUsed)
-	_ = s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		first := true
-		for it.Rewind(); it.Valid(); it.Next() {
-			if first {
-				st.OldestMs = logStoreKeyTS(it.Item().KeyCopy(nil))
-				first = false
-			}
-			st.Count++
-			if st.Count >= logStoreScanCap {
-				st.Capped = true
-				break
-			}
-		}
-		return nil
-	})
-	return st
-}
-
-// RunRetention enforces the size cap: when the tracked size exceeds maxBytes it
-// removes entries (low-priority first) until back under the cap, audits the
-// cleanup, and runs value-log GC. Age retention is handled natively by per-key
-// TTL. One bounded pass per call; the janitor calls it on a timer so the cap
-// converges across passes despite lazy LSM size accounting.
-func (s *logStore) RunRetention() {
-	if s == nil {
-		return
-	}
-	maxBytes := atomic.LoadInt64(&s.maxBytes)
-	if maxBytes <= 0 {
-		return
-	}
-	used := atomic.LoadInt64(&s.bytesUsed)
-	if used <= maxBytes {
-		return
-	}
-	freed, count, levels := s.cleanupBytes(used - maxBytes)
-	recordPressureCleanup("max log storage exceeded", freed, count, levels)
-}
-
-// SetRetention updates the retention policy at runtime. The new TTL applies to
-// newly written entries only (Badger TTL is fixed per key at write time); the
-// size cap takes effect on the next janitor pass. days<=0 disables age expiry;
-// gb<=0 disables the size cap.
-func (s *logStore) SetRetention(days int, gb float64) {
-	if s == nil {
-		return
-	}
-	var ttlNanos int64
-	if days > 0 {
-		ttlNanos = int64(time.Duration(days) * 24 * time.Hour)
-	}
-	var maxBytes int64
-	if gb > 0 {
-		maxBytes = int64(gb * (1 << 30))
-	}
-	atomic.StoreInt64(&s.ttlNanos, ttlNanos)
-	atomic.StoreInt64(&s.maxBytes, maxBytes)
-}
-
-// RetentionDays returns the current age limit in whole days (0 = no limit).
-func (s *logStore) RetentionDays() int {
-	if s == nil {
-		return 0
-	}
-	return int(time.Duration(atomic.LoadInt64(&s.ttlNanos)) / (24 * time.Hour))
-}
-
-// RetentionMaxGB returns the current size cap in GB (0 = no limit).
-func (s *logStore) RetentionMaxGB() float64 {
-	if s == nil {
-		return 0
-	}
-	return float64(atomic.LoadInt64(&s.maxBytes)) / (1 << 30)
 }
 
 // logStoreHealth reports CHEAP history-store usage for the frequently-polled
@@ -647,9 +169,9 @@ func logStoreHealth() map[string]any {
 	}
 	return map[string]any{
 		"enabled": true,
-		"bytes":   atomic.LoadInt64(&ls.bytesUsed),
-		"dropped": atomic.LoadInt64(&statLogStoreDropped),
-		"pruned":  atomic.LoadInt64(&statLogStorePruned),
+		"bytes":   ls.BytesUsed(),
+		"dropped": logstore.Dropped(),
+		"pruned":  logstore.Pruned(),
 	}
 }
 

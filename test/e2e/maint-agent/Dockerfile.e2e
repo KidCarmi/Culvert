@@ -1,0 +1,45 @@
+# Fast proxy image for the maintenance-agent E2E.
+#
+# Differences from the production Dockerfile:
+#   - NO GeoIP download stage (db-ip.com is often blocked on CI runners and is
+#     irrelevant to the update flow).
+#   - A BUILD_VARIANT build-arg baked into the binary (`-X main.version`), the
+#     /app/VERSION file, and an image LABEL so two builds (v1, v2) produce
+#     DISTINCT content digests deterministically. We cannot fabricate a
+#     `repo@sha256:` via `docker tag`; the agent's resolve_target/pull/verify
+#     compare REAL registry digests, so the two versions must genuinely differ.
+#   - wget is present (alpine base) for the compose healthcheck.
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG BUILD_VARIANT=v1
+RUN : "${BUILD_VARIANT}" \
+    && echo "e2e-${BUILD_VARIANT}" > /app/VERSION \
+    && go mod tidy \
+    && CGO_ENABLED=0 GOOS=linux go build \
+       -ldflags="-s -w -X main.version=e2e-${BUILD_VARIANT}" -o culvert .
+
+FROM alpine:3.22
+ARG BUILD_VARIANT=v1
+# The label + file make the two image variants differ in content, so their
+# registry digests differ. The label is applied LAST so the layer it adds is
+# distinct per variant.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates tzdata wget \
+    && addgroup -S proxy && adduser -S proxy -G proxy \
+    && mkdir -p /data /backup && chown proxy:proxy /data /backup
+USER proxy
+WORKDIR /app
+COPY --from=builder --chown=proxy:proxy /app/culvert .
+COPY --from=builder --chown=proxy:proxy /app/VERSION ./VERSION
+VOLUME ["/data"]
+EXPOSE 8080 9090
+# The LABEL is applied LAST so the layer/config it adds is distinct per variant.
+# Combined with the per-variant binary (-X main.version) and VERSION file, this
+# guarantees v1 and v2 carry different registry digests. (No extra RUN marker:
+# writing under /app would need a root-owned writable dir after USER proxy.)
+LABEL culvert.e2e.variant="${BUILD_VARIANT}"
+ENTRYPOINT ["./culvert"]
