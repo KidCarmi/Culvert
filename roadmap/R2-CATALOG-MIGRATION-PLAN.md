@@ -1608,9 +1608,139 @@ Pages, and make **no customer-facing cutover**.
 
 ---
 
-*This plan has completed two independent security-architecture review rounds; see
-`roadmap/R2-CATALOG-MIGRATION-REVIEW.md`. §11 resolves the fleet-bricking P0s;
-§12 converts the second-round residuals (signing surface, trust durability,
-version-counter correctness, graduation ordering, real DR independence) into
-binding pre-go-live gates. Implementation remains gated on these; the current
-GitHub Pages flow is untouched.*
+---
+
+## 13. Sign-off amendments (third review — conditional production approval)
+
+The third review round returned a **conditional production sign-off** (YES for a
+Palo Alto customer-facing security-appliance update channel) once §11 + §12 are
+green, and moved the scorecard to **Security 9 / Reliability 8 / Operability 7 /
+Maintainability 7 / Scalability 8 / DR 8 / Release-Eng 9**. Approval is
+conditioned on three bounded amendments — two of which correct places where a
+§12 gate's *stated* exit criterion does **not** fully close the blocker — plus a
+strong scoping recommendation. These are binding on the plan.
+
+### Amendment 1 (Condition 1) — GATE-C needs an audited break-glass version allocation
+
+GATE-C's fail-closed rule (C-3: "never invent/guess/reset a version; abort on
+counter unavailability") is correct for *integrity* but trades it for a
+**response-time risk**: a wedged/unreachable counter object would **block an
+emergency `revoke`** — exactly the retraction you need during a CVE Sev1. Add:
+
+- **C-6 — Dual-control audited break-glass allocation.** When the CAS primitive
+  is unavailable, a **two-person, logged** override may allocate a version
+  **strictly greater than the last observed** value (never a reset, never a
+  guess-below). Usable **only** for revocation/incident response, audited, and
+  alerted. This keeps the fail-closed integrity posture while ensuring the
+  counter can never become the thing that stops a security response.
+
+### Amendment 2 (Condition 2) — correct GATE-B's B-1 threat model; B-2 is the real exit criterion
+
+**B-1 as written overstates its benefit and the code contradicts it.** The claim
+"dual-serving both sidecars means a Sigstore incident no longer disables Release
+Management because the appliance accepts either" is **false under the shipped
+`artifact-owns-outcome` rule** (`verifyIndexSignature`,
+`release_catalog_verify.go` — Sigstore is tried first; only a **true
+`fs.ErrNotExist`** on `.sigstore` falls through to ed25519; a **present-but-invalid**
+`.sigstore` is a hard `schemeReject` that never consults ed25519). During a real
+Fulcio/Rekor incident or a baked-root-aging gap, the served `.sigstore` is
+*present but fails verification* → reject → ed25519 is **never tried** → Release
+Management is **still disabled**. Dual-serving only helps when `.sigstore` is
+genuinely **absent**. Making a valid ed25519 rescue a present-but-invalid
+`.sigstore` would **reopen the strip-one-sig downgrade** the design deliberately
+closed — so we must **not** do that. Corrections:
+
+- **B-1 reframed:** its real value is a **migrate-off-Sigstore escape hatch** (the
+  org can cut over to the ed25519 scheme by *removing* the `.sigstore` sidecar
+  from newly-published catalogs), **not** live-incident failover while both
+  sidecars are served. Documentation must not tell operators ed25519 provides
+  hot failover during a Sigstore outage — it does not.
+- **B-2 is the true GATE-B exit criterion** for durability: ship a fresh TUF
+  `trusted_root.json` in **every** release build + the build-time
+  "root not within N days of expiry" check. That is what actually prevents a
+  long-lived appliance from failing to verify newly-signed catalogs after a
+  Sigstore key rotation. GATE-B passes on **B-2 green** (B-1 is the escape hatch,
+  B-1a its custody).
+- **B-1a reconciled with the resign cron:** "dual-control for *use*" cannot
+  coexist with the **unattended weekly resign** (which must sign with no human
+  present). Reconcile explicitly: a **scoped KMS/HSM automation principal** signs
+  (single-purpose, index-signing only, rate-limited, audited); **human
+  dual-control governs key *lifecycle*** (creation, rotation, export,
+  destruction), **not each signing call**. State this in the custody attestation
+  or the resign cron cannot run.
+
+### Amendment 3 (Condition 3) — bind A-2 detection to a response MTTR, and keep apply operator-confirmed
+
+Detection (A-2 Rekor monitor) without a bound response is theater: a
+valid-identity malicious catalog auto-propagates to the fleet's **offer** surface
+within the ~1h refresh window before an alert is actioned. Today the backstop is
+that **dispatch/apply is operator-confirmed, not auto-apply** (§9.12) — a human
+sits between "offered" and "installed." Make this explicit and load-bearing:
+
+- **A-4 — Paging response with a target MTTR.** A-2's alert must page an on-call
+  with a documented **revoke runbook** and a **target MTTR shorter than the
+  refresh interval**. Detection is only complete with a bound response.
+- **A-5 — Operator-confirmed apply is a security control, not just a default.**
+  Apply **stays operator-confirmed** unless/until A-4's response leg (MTTR <
+  refresh interval) is hardened. **If auto-apply is ever introduced, GATE-A's
+  response leg becomes a hard precondition** — otherwise GATE-A silently stops
+  being sufficient (detection would no longer outrun propagation-to-install).
+
+### Amendment 4 (recommendation, not a blocker) — ship `stable`-only first; defer rings + the CAS counter
+
+The reviewer's primary over-engineering finding: **the entire GATE-C
+distributed-CAS counter, GATE-D graduation machinery, `history/v<N>/`, and the new
+publish-path SPOF exist only because rings share a global version space — and
+rings do not exist yet.** Today the catalog is single-ring, single-entry,
+single-writer, published a few times a year (`ci.yml:442-452`). Recommended
+initial cutover:
+
+- **Cut over `stable`-only** with a **trivial single-writer** version rule
+  (`next = max(tag_count, last_published) + 1`; the resign/revoke writers are the
+  same CI, serialized by the existing release concurrency). No cross-ring counter,
+  no CAS, no graduation tooling, no repoint-preflight needed at go-live.
+- **Adopt the full multi-ring design (and thus GATE-C/D in force) only when a
+  second ring is a real requirement.** The gates are *correct if you build
+  rings*; the meta-question is whether rings are needed at go-live at all — and
+  they are not. This reaches production sooner, with far less new critical-path
+  code, and is strictly safer.
+- If the team nonetheless ships rings from day one, GATE-C (incl. C-5 concurrency
+  test + C-6 break-glass) and GATE-D are **required** and the reviewer still
+  signs — but `stable`-only is the recommended, lower-risk path.
+
+### Operational-burden acceptance (explicit)
+
+Each gate closes a risk by adding a **standing operated asset**: an HSM/KMS
+ed25519 key, a Rekor monitor (which itself needs **liveness alerting** — a blind
+monitor is undetected compromise), a stateful counter/DO (rings only), and a
+second independently-credentialed origin. Net security is positive, but
+Operability only reaches 7 because this machinery must be *run* to the standard
+the gates assume. **Before go-live, confirm the team can operate all of it** —
+otherwise descope per Amendment 4.
+
+### Final disposition
+
+| Item | State |
+|---|---|
+| §11 (P0-1/2/3) | Designed — resolves fleet-bricking defects |
+| §12 GATE-A/B/C/D | Binding pre-go-live gates |
+| §13 Amendments 1–3 | Binding conditions on the production sign-off |
+| §13 Amendment 4 | Recommended: `stable`-only first, defer rings + CAS counter |
+| **Verdict** | **Conditional production sign-off (YES)** for Palo Alto customer-facing use, once §11 + §12 are green and Amendments 1–3 are folded in. Ship `stable`-only first (Amendment 4) for the lowest-risk path. |
+
+Residual worst-case (successful CI/OIDC compromise minting a valid-identity
+catalog) is held by the layered posture the gates assume: **prevention** (A-1
+ruleset) + **detection** (A-2/A-4 monitor→page) + **human-in-loop** (A-5
+operator-confirmed apply) + **recoverability** (C-6 break-glass revoke). That
+layering is the reason the channel is approvable for a security vendor.
+
+---
+
+*This plan has completed three independent security-architecture review rounds
+(`roadmap/R2-CATALOG-MIGRATION-REVIEW.md`). §11 resolves the fleet-bricking P0s;
+§12 converts the second-round residuals into binding pre-go-live gates; §13 folds
+in the third-round sign-off conditions (break-glass revoke, corrected B-1
+threat model with B-2 as the durability exit, detection→response MTTR + retained
+operator-confirmed apply) and the `stable`-only descoping recommendation. Result:
+conditional production sign-off. Implementation remains gated on these; the
+current GitHub Pages flow is untouched.*
