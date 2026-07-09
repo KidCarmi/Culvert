@@ -31,12 +31,24 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		clamStatus = globalSecScanner.ClamAVStatus()
 	}
 
+	// SSL inspection state (CHAOS-06): a CA that was configured but failed
+	// to load leaves the gateway serving TLS as tunnel-only bypass — that
+	// degradation must be visible to monitoring, not just a startup log line.
+	sslInspection := "ready"
+	if !certMgr.Ready() {
+		sslInspection = "unavailable"
+		if sslInspectionLoadFailure() != "" {
+			sslInspection = "load_failed"
+		}
+	}
+
 	type healthResponse struct {
 		Status            string `json:"status"`
 		Uptime            string `json:"uptime"`
 		Version           string `json:"version"`
 		ClamAV            string `json:"clamav"`
 		CAExpiresDays     int    `json:"ca_expires_days"`
+		SSLInspection     string `json:"ssl_inspection"`
 		ThreatFeedEntries int64  `json:"threat_feed_entries"`
 	}
 	resp := healthResponse{
@@ -45,6 +57,7 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Version:           version,
 		ClamAV:            clamStatus,
 		CAExpiresDays:     caExpiresDays,
+		SSLInspection:     sslInspection,
 		ThreatFeedEntries: tfEntries,
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -75,9 +88,14 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	allOK := true
 
 	// 1. CA: report status but don't fail readiness — proxy still works
-	// as a plain forward proxy if the CA didn't load.
+	// as a plain forward proxy if the CA didn't load. A configured-but-
+	// failed load is surfaced as a failing (non-gating) check so the
+	// degradation is visible to probes instead of the row silently
+	// disappearing (CHAOS-06); posture (report-only) mirrors policy_loaded.
 	if certMgr.Ready() {
 		checks["ca"] = &checkResult{Status: "ok"}
+	} else if detail := sslInspectionLoadFailure(); detail != "" {
+		checks["ca"] = &checkResult{Status: "fail", Detail: detail}
 	}
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.

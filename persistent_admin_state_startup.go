@@ -28,9 +28,12 @@ import "context"
 //     which copies persisted counters back into PolicyRule.HitCount and must
 //     run AFTER the policy store is loaded (initPolicy precedes this slice in
 //     main()).
-//  6. LoadAdminSettings LAST — it restores GUI-saved state (e.g. re-enables
+//  6. LoadAdminSettings — it restores GUI-saved state (e.g. re-enables
 //     the log store) and therefore must run after the subsystems it toggles
 //     have been initialised earlier in startup.
+//  7. flushStartupAlerts LAST — earlier init slices (e.g. the Root-CA load,
+//     CHAOS-06) queue alerts via deferStartupAlert because the webhook store
+//     only becomes real at step 4; the flush delivers them now that it is.
 func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context.Context) {
 	probeStorageWritability()
 	initConfigVersioning()
@@ -40,4 +43,5 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	startHitCounterPersistence(ctx, cfg.HitCountersPath)
 	RestoreHitCounts()
 	LoadAdminSettings(cfg.AdminSettingsPath)
+	flushStartupAlerts()
 }

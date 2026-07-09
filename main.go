@@ -1100,6 +1100,10 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 		return fmt.Errorf("gRPC listen address is required")
 	}
 
+	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
+	// publish so a restarted (or HA-promoted) CP never re-issues version
+	// numbers at or below what running DPs have already seen.
+	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
 	globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {

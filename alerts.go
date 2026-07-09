@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
 )
@@ -45,4 +46,56 @@ var validateWebhookURL = alerts.ValidateURL
 // process-wide store (resolved on every pass).
 func startAlertRetryLoop(ctx context.Context) {
 	alerts.StartRetryLoop(ctx, func() *alerts.Store { return globalAlertStore })
+}
+
+// ── Deferred startup alerts ──────────────────────────────────────────────────
+//
+// Alert webhooks load from disk in loadPersistentAdminState — the LAST
+// startup slice — so an alert fired by an earlier init (e.g. the Root-CA
+// load failure in loadRootCA, CHAOS-06) would fan out to an empty webhook
+// list and vanish. deferStartupAlert queues such alerts until
+// flushStartupAlerts runs after the webhook store is initialised; after the
+// flush it degrades to a plain fireAlert passthrough.
+
+// startupAlertFire is the flush/passthrough delivery sink — a seam so tests
+// can observe delivery without a live webhook endpoint (mirrors the
+// configSnapshotValidatorOK pattern).
+var startupAlertFire = fireAlert
+
+var (
+	startupAlertMu      sync.Mutex
+	startupAlertQueue   []queuedStartupAlert
+	startupAlertFlushed bool
+)
+
+type queuedStartupAlert struct {
+	event   string
+	payload AlertPayload
+}
+
+// deferStartupAlert fires event immediately when the startup flush has
+// already happened, and queues it otherwise. Safe from any init order.
+func deferStartupAlert(event string, payload AlertPayload) {
+	startupAlertMu.Lock()
+	if !startupAlertFlushed {
+		startupAlertQueue = append(startupAlertQueue, queuedStartupAlert{event, payload})
+		startupAlertMu.Unlock()
+		return
+	}
+	startupAlertMu.Unlock()
+	startupAlertFire(event, payload)
+}
+
+// flushStartupAlerts delivers every queued startup alert. Called once from
+// loadPersistentAdminState after globalAlertStore.Init has loaded the
+// persisted webhooks.
+func flushStartupAlerts() {
+	startupAlertMu.Lock()
+	queued := startupAlertQueue
+	startupAlertQueue = nil
+	startupAlertFlushed = true
+	startupAlertMu.Unlock()
+	for _, q := range queued {
+		startupAlertFire(q.event, q.payload)
+	}
 }

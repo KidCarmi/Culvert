@@ -15,6 +15,7 @@ package alerts
 //   "policy_block"          — PBAC policy blocked a request
 //   "auth_lockout"          — admin UI brute-force lockout
 //   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
+//   "ca_load_failed"        — Root CA load/init failed at startup: SSL inspection disabled (fail-open)
 //   "cluster_updated"       — cluster rolling update completed successfully
 //   "cluster_update_halted" — cluster rolling update halted due to error budget
 //   "update_available"      — background version check detected a new release
