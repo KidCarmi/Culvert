@@ -494,11 +494,20 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 		ThreatDomainAllowlist: []string{"www.google.com"},
 	})
 
-	if _, ok := globalThreatFeed.ExportDomains()["www.google.com"]; ok {
-		t.Fatal("applyConfigSnapshot retained an allowlisted threat-feed domain")
+	if hit, _ := globalThreatFeed.CheckDomain("www.google.com"); hit {
+		t.Fatal("allowlisted snapshot domain should not block while the exception is active")
+	}
+	if _, ok := globalThreatFeed.ExportDomains()["www.google.com"]; !ok {
+		t.Fatal("applyConfigSnapshot should retain allowlisted domain threat intel")
 	}
 	if _, ok := globalThreatFeed.ExportURLs()["https://www.google.com/malware"]; !ok {
 		t.Fatal("exact malicious URL should remain present after snapshot allowlist")
+	}
+	if err := globalThreatFeed.RemoveDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := globalThreatFeed.CheckDomain("www.google.com"); !hit || src != "cluster-sync" {
+		t.Fatalf("removing snapshot allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
 	}
 
 	raw, err := os.ReadFile(dbPath)
@@ -513,8 +522,8 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 	if !ok {
 		t.Fatalf("on-disk feedDB domains map missing or wrong type")
 	}
-	if _, ok := domains["www.google.com"]; ok {
-		t.Fatal("applyConfigSnapshot persisted an allowlisted threat-feed domain")
+	if _, ok := domains["www.google.com"]; !ok {
+		t.Fatal("applyConfigSnapshot should persist allowlisted domain threat intel")
 	}
 	urls, ok := decoded["urls"].(map[string]any)
 	if !ok {

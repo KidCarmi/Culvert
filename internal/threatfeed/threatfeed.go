@@ -216,7 +216,6 @@ func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []strin
 	carryForward(newDomains, tf.domains, replacedSources)
 	tf.urls = newURLs
 	tf.domains = newDomains
-	tf.pruneAllowlistedDomainsLocked()
 	tf.lastSync = now
 	if len(failures) == 0 {
 		tf.lastSuccess = now
@@ -380,7 +379,6 @@ func (tf *Feed) SetDomainAllowlist(domains []string) error {
 			tf.domainAllowlist[d] = true
 		}
 	}
-	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
@@ -402,7 +400,6 @@ func (tf *Feed) AddDomainAllowlist(domain string) error {
 		tf.domainAllowlist = make(map[string]bool)
 	}
 	tf.domainAllowlist[domain] = true
-	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
@@ -432,8 +429,9 @@ func (tf *Feed) RemoveDomainAllowlist(domain string) error {
 
 // fetchTextFeed downloads a plain-text URL list (one URL per line; lines
 // beginning with '#' are comments) and populates the urls and domains maps.
-// Allowlisted domains are only recorded at the URL level, not the domain
-// level, to avoid blocking entire platforms due to one bad file.
+// Allowlisted domains are still recorded as threat intel; the allowlist only
+// masks domain-level blocking at lookup time so removal re-enables the block
+// immediately without waiting for another sync.
 //
 // A method (pre-extraction it was a package function reading the
 // globalThreatFeed singleton for the allowlist check): the only caller is
@@ -473,9 +471,7 @@ func (tf *Feed) fetchTextFeed(feedURL, source string, urls, domains map[string]e
 		}
 		e := entry{Source: source, AddedAt: now}
 		urls[normURL] = e
-		if !tf.DomainAllowlisted(host) {
-			domains[host] = e
-		}
+		domains[host] = e
 		count++
 	}
 	return count, sc.Err()
@@ -527,12 +523,6 @@ func normaliseDomain(domain string) string {
 func canonicalHost(host string) string {
 	host = hostutil.StripHostPort(strings.ToLower(strings.TrimSpace(host)))
 	return hostutil.NormalizeHost(host)
-}
-
-func (tf *Feed) pruneAllowlistedDomainsLocked() {
-	for d := range tf.domainAllowlist {
-		delete(tf.domains, d)
-	}
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -587,7 +577,6 @@ func (tf *Feed) loadFromDisk(path string) error {
 			}
 		}
 	}
-	tf.pruneAllowlistedDomainsLocked()
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(db.URLs)))
 
@@ -683,7 +672,6 @@ func (tf *Feed) ImportFeedData(urls map[string]int64, domains map[string]int64) 
 	tf.mu.Lock()
 	tf.urls = newURLs
 	tf.domains = newDomains
-	tf.pruneAllowlistedDomainsLocked()
 	tf.lastSync = time.Now()
 	tf.mu.Unlock()
 	tf.totalEntries.Store(int64(len(newURLs)))
