@@ -27,6 +27,8 @@ func TestReleaseGUI_PanelAndNavRender(t *testing.T) {
 		`id="view-releases"`,          // view panel
 		`id="release-dispatch-modal"`, // dispatch modal
 		`id="rel-catalog"`,            // catalog container
+		`id="rel-verify-banner"`,      // break-glass verify-mode banner (permissive/disabled)
+		`renderVerifyModeBanner`,      // wired renderer
 		`id="rel-current"`,            // current card
 		`id="rel-status"`,             // status container
 		`data-click="releaseDispatchOpen"`,

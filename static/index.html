@@ -3670,6 +3670,7 @@ Firefox (all platforms):
               <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
               <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
             </div>
+            <div id="rel-verify-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:6px;font-size:.8rem;font-weight:600"></div>
             <div id="rel-catalog" style="font-size:.85rem"><div style="color:var(--muted)">Loading…</div></div>
           </div>
 
@@ -9784,10 +9785,29 @@ function relChannelBadge(c) {
   return '<span style="display:inline-block;padding:2px 7px;border-radius:999px;font-size:.68rem;font-weight:700;background:rgba(20,184,166,.15);color:#2dd4bf;margin-right:4px">' + escHtml(c) + '</span>';
 }
 
+// renderVerifyModeBanner surfaces the CULVERT_RELEASE_CATALOG_VERIFY break-glass
+// override in the GUI — permissive/disabled accept an unsigned catalog and were
+// previously visible only in the /api/releases response and startup logs.
+function renderVerifyModeBanner(d) {
+  const el = document.getElementById('rel-verify-banner');
+  if (!el) return;
+  const mode = d && d.verify_mode;
+  if (!mode || mode === 'enforce') { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const isDisabled = mode === 'disabled';
+  el.style.display = 'block';
+  el.style.background = isDisabled ? 'rgba(220,38,38,.12)' : 'rgba(245,158,11,.12)';
+  el.style.color = isDisabled ? 'var(--danger)' : 'var(--warn,#f59e0b)';
+  el.style.border = '1px solid ' + (isDisabled ? 'var(--danger)' : 'var(--warn,#f59e0b)');
+  el.innerHTML = '⚠ Catalog signature verification is <strong>' + escHtml(mode.toUpperCase()) + '</strong> (break-glass override via CULVERT_RELEASE_CATALOG_VERIFY) — '
+    + (isDisabled ? 'catalog signatures are NOT verified at all.' : 'unsigned catalogs are accepted.')
+    + ' Unset the override to return to enforce mode.';
+}
+
 function renderReleaseCatalog(d, box, meta) {
   box = box || document.getElementById('rel-catalog');
   meta = meta || document.getElementById('rel-catalog-meta');
   if (!box) return;
+  renderVerifyModeBanner(d);
   if (!d || d.available !== true) {
     box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
     if (meta) meta.textContent = '';
