@@ -38,7 +38,7 @@ var d0AdminOnlyCases = []d0AdminOnlyCase{
 		method:  http.MethodPut,
 		path:    "/api/settings/unauth-mode",
 		body:    `{"enabled":false}`,
-		handler: apiUnauthMode,
+		handler: apiDefaultAuthOutcome,
 	},
 	{
 		name:    "ca/rotate POST",

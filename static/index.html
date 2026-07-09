@@ -6758,7 +6758,7 @@ async function setDefaultAuthOutcome() {
   const outcome = sel ? sel.value : 'Default';
   const statusEl = document.getElementById('s-default-auth-save-status');
   try {
-    await api('/api/settings/unauth-mode', {
+    await api('/api/settings/default-auth-outcome', {
       method: 'PUT', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({defaultAuthOutcome: outcome})
     });

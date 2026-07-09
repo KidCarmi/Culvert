@@ -1128,12 +1128,13 @@ func apiSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PUT /api/settings/unauth-mode — set the global default authentication behavior.
-// (Route name is legacy; the contract is the defaultAuthOutcome string. Scoped
-// auth rules always evaluate first; this default applies only to unmatched
-// traffic, and Exempt is NOT an allow — Stage-2 policy and default-deny still
-// apply.) Accepts {"defaultAuthOutcome":"Default"|"Exempt"}.
-func apiUnauthMode(w http.ResponseWriter, r *http.Request) {
+// PUT /api/settings/default-auth-outcome — set the global default authentication
+// behavior. (Also reachable at the legacy /api/settings/unauth-mode path, kept
+// as a back-compat alias.) Scoped auth rules always evaluate first; this
+// default applies only to unmatched traffic, and Exempt is NOT an allow —
+// Stage-2 policy and default-deny still apply.) Accepts
+// {"defaultAuthOutcome":"Default"|"Exempt"}.
+func apiDefaultAuthOutcome(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1575,12 +1576,13 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
 
 	// ── Auth / network / session settings ─────────────────────────────────
-	mux.HandleFunc("/api/settings/unauth-mode", apiUnauthMode)  // PUT — toggle proxy auth requirement
-	mux.HandleFunc("/api/settings/log-level", apiLogLevel)      // GET/PUT runtime log level
-	mux.HandleFunc("/api/settings/network", apiNetworkSettings) // GET/POST network & TLS settings
-	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)   // GET/POST session TTL (hours)
-	mux.HandleFunc("/api/session-secret", apiSessionSecret)     // GET/POST shared signing key
-	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)          // GET/POST UI access IP allowlist
+	mux.HandleFunc("/api/settings/default-auth-outcome", apiDefaultAuthOutcome) // PUT — toggle proxy auth requirement
+	mux.HandleFunc("/api/settings/unauth-mode", apiDefaultAuthOutcome)          // PUT — legacy alias, kept for back-compat
+	mux.HandleFunc("/api/settings/log-level", apiLogLevel)                      // GET/PUT runtime log level
+	mux.HandleFunc("/api/settings/network", apiNetworkSettings)                 // GET/POST network & TLS settings
+	mux.HandleFunc("/api/session-timeout", apiSessionTimeout)                   // GET/POST session TTL (hours)
+	mux.HandleFunc("/api/session-secret", apiSessionSecret)                     // GET/POST shared signing key
+	mux.HandleFunc("/api/ui-allow-ips", apiUIAllowIPs)                          // GET/POST UI access IP allowlist
 
 	// ── Syslog / logger / metrics / OTLP / connlimit (handlers in
 	// dedicated files, registered here per Option A). ─────────────────────

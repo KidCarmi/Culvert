@@ -39,8 +39,10 @@ import (
 //   - 142 — Live Feed added /api/logs/purge.
 //   - 143 — Catalog refresh added /api/releases/catalog-refresh.
 //   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote.
+//   - 145 — Terminology governance: added canonical /api/settings/default-auth-outcome
+//     alongside the retained legacy /api/settings/unauth-mode alias.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 144
+	const want = 145
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

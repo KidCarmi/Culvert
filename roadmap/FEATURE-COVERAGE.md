@@ -15,7 +15,7 @@
 | 9 | Identity Providers | `idproviders` | `/api/idp`, `/api/idp/discover`, `/api/idp/{id}`, `/api/idp/{id}/groups` | FULL |
 | 10 | PAC File | `pac` | `/api/pac-config`, `/proxy.pac` | FULL |
 | 11 | Certificates | `certificates` | `/api/ca-cert`, `/api/certs/upload`, `/api/ssl-bypass`, `/api/content-scan`, `/api/ocsp`, `/api/ca/key-provider` | FULL |
-| 12 | Settings | `settings` | `/api/settings`, `/api/settings/unauth-mode`, `/api/session-timeout`, `/api/ui-allow-ips`, `/api/syslog`, `/api/config/export`, `/api/config/import`, `/api/metrics-config`, `/api/logger`, `/api/geoip`, `/api/blockpage`, `/api/otel` | FULL |
+| 12 | Settings | `settings` | `/api/settings`, `/api/settings/default-auth-outcome` (legacy alias `/api/settings/unauth-mode`), `/api/session-timeout`, `/api/ui-allow-ips`, `/api/syslog`, `/api/config/export`, `/api/config/import`, `/api/metrics-config`, `/api/logger`, `/api/geoip`, `/api/blockpage`, `/api/otel` | FULL |
 | 13 | Policy Tester | `policy-tester` | `/api/policy/test` | FULL |
 | 14 | Audit Log | `audit` | `/api/audit` | FULL |
 | 15 | Users | `users` | `/api/auth/users` | FULL |
@@ -52,7 +52,7 @@
 
 | Feature | API | Status |
 |---------|-----|--------|
-| Unauth mode | `/api/settings/unauth-mode` | FULL |
+| Default authentication outcome | `/api/settings/default-auth-outcome` (legacy alias `/api/settings/unauth-mode`) | FULL |
 | Session timeout | `/api/session-timeout` | FULL |
 | UI allow IPs | `/api/ui-allow-ips` | FULL |
 | Syslog / SIEM | `/api/syslog` | FULL — address, format (RFC 3164/5424) |

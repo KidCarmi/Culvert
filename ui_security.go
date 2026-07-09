@@ -947,11 +947,11 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		}
 		dpiScanner.SetBypassHosts(req.Hosts)
 		dpiScanner.Save()
-		auditEvent(r, "security.dpi_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
+		auditEvent(r, "security.content_scan_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
 		// Bypass hosts are in the rollback surface as of
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
-		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
+		saveConfigVersion(sessionAdmin(r), "security.content_scan_bypass")
 		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
