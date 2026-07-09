@@ -916,6 +916,15 @@ patch_allow_peers_numeric_uid() {
         patched=2
         next
       }
+      if (line ~ /\[[[:space:]]*\][[:space:]]*$/) {
+        # Empty array (e.g. "allow_peers = []"): the generic append below
+        # always prepends a comma, which would leave a leading ", " with no
+        # preceding element ("[, \"uid\"]") — invalid TOML.
+        sub(/\[[[:space:]]*\][[:space:]]*$/, "[\"" uid "\"]", line)
+        print line
+        patched=1
+        next
+      }
       sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", line)
       print line
       patched=1
