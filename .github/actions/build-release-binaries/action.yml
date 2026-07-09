@@ -14,9 +14,9 @@
 #
 # NOTE: checkout + setup-go-cache must run in the calling job BEFORE this action
 # (a local composite is resolved from the already-checked-out tree, and the Go
-# toolchain must already be installed). The maint toolchain is 1.25.11 too:
+# toolchain must already be installed). The maint toolchain follows root go.mod:
 # setup-go-cache pins the root go.mod version and GOTOOLCHAIN selects it for the
-# maint module (root 1.25.11 ≥ maint's `go 1.25`) — do NOT override
+# maint module (root 1.26.5 >= maint's `go 1.25`) — do NOT override
 # go-version-file to the maint module or the toolchains drift.
 # ─────────────────────────────────────────────────────────────────────────────
 name: "Build release binaries"
