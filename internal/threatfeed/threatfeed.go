@@ -593,12 +593,14 @@ func (tf *Feed) saveToDisk() error {
 		allowlist = append(allowlist, d)
 	}
 	sort.Strings(allowlist)
+	urls := cloneEntries(tf.urls)
+	domains := cloneEntries(tf.domains)
 	db := feedDB{
 		LastSync:        tf.lastSync,
 		LastSuccess:     tf.lastSuccess,
 		LastSyncErr:     tf.lastSyncErr,
-		URLs:            tf.urls,
-		Domains:         tf.domains,
+		URLs:            urls,
+		Domains:         domains,
 		DomainAllowlist: allowlist,
 	}
 	tf.mu.RUnlock()
@@ -612,6 +614,14 @@ func (tf *Feed) saveToDisk() error {
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.2 SC-4).
 	return fileutil.AtomicWrite(tf.dbPath, data, 0o600)
+}
+
+func cloneEntries(in map[string]entry) map[string]entry {
+	out := make(map[string]entry, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // Save is the caller-facing wrapper around saveToDisk. Used by paths
