@@ -31,10 +31,13 @@ resource "github_repository_ruleset" "v_tag_protection" {
     }
   }
 
-  # The rules block is required (MinItems 1).
+  # Protect existing release tags WITHOUT blocking creation: ci.yml's auto-tag job
+  # (github-actions[bot] pushing the next vX.Y.Z via GITHUB_TOKEN) must be able to
+  # create v* tags, and this ruleset declares no bypass_actors — so `creation`/`update`
+  # are intentionally left disabled. Block deletion + non-fast-forward (force-move)
+  # only. (An owner who wants to restrict WHO may create release tags adds a
+  # `bypass_actors` block for the release automation instead of enabling `creation`.)
   rules {
-    creation         = true
-    update           = true
     deletion         = true
     non_fast_forward = true
   }

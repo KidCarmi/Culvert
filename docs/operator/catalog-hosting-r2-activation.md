@@ -61,6 +61,24 @@ Create these on the repository (Settings → Secrets and variables → Actions).
 | `R2_PUBLIC_BASE` | verify + confirm (e.g. `https://catalog.<your-domain>`) |
 | `R2_PUBLISH_ENABLED` | the dormant gate — **leave unset until the last step** |
 
+> **Scope note — the `release` environment does NOT gate these R2 credentials.** The
+> publisher reads `secrets.R2_*` / `secrets.CF_*` as **repository** Actions secrets and
+> does not declare `environment: release`, so the protected `release` environment
+> (Step 4) and its reviewers do **not** approval-gate an R2 publish. The `release`
+> environment protects the GitHub release/deploy surface generally; it is not, as
+> shipped, a gate on the R2 publisher. Treat the R2/CF secrets as
+> repository-secret-tier (a merged edit to `publish-catalog-r2.yml` can use them once
+> `R2_PUBLISH_ENABLED=true` — hence the Step 3 CODEOWNERS recommendation).
+>
+> **Optional hardening — gate each R2 publish behind reviewer approval.** If you want
+> every R2 publish to require a `release`-environment reviewer, move the six secrets to
+> **environment secrets** on the `release` environment and add `environment: release`
+> to the `publish` job in `publish-catalog-r2.yml`. Trade-off: this changes R2
+> publishing from automated (on tag) to **approval-gated** — the `workflow_run`-driven
+> job will pause pending a reviewer, and the environment's deployment policy must
+> permit the default-branch context the publisher runs in. This is a deliberate
+> product choice (deferred here; not enabled by the skeleton).
+
 ## Step 3 — Add the public-base host to the publisher's egress allow-list (merged edit)
 
 The publisher runs `harden-runner` with `egress-policy: block`. Its allow-list already
@@ -82,7 +100,10 @@ copy of the workflow, so the change only takes effect once merged.
 
 Ensure the protected `release` environment (+ reviewers) and the `v*` tag ruleset are
 in place (the `deploy/terraform/` skeleton declares both; `terraform apply` or
-configure by hand).
+configure by hand). The `v*` ruleset blocks **deletion + force-move** of release tags
+but **allows creation** so the auto-tag job can push new `vX.Y.Z` tags. As noted in
+Step 2, the `release` environment does not, as shipped, gate the R2 publisher — see the
+optional-hardening note there to change that.
 
 ## Step 5 — Enable
 

@@ -10,7 +10,8 @@ provision the R2 / GitHub guardrails — see
 
 - `cloudflare_r2_bucket` — the release-catalog bucket.
 - `github_repository_environment "release"` — the protected deploy environment + reviewers.
-- `github_repository_ruleset` — `v*` tag protection (no out-of-policy create/delete/force-push).
+- `github_repository_ruleset` — `v*` tag protection (blocks **delete + force-move**;
+  creation stays allowed so the auto-tag release job can push new `vX.Y.Z` tags).
 
 Version-sensitive / owner-specific guardrails — R2 **custom domain**, cache rules,
 Smart Tiered Cache, disabling `r2.dev` — are intentionally left as **TODO comments**
