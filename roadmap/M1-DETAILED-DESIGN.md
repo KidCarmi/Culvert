@@ -1,4 +1,9 @@
-# M1 — Dual-publish verification, production refresh, detection, re-sign — Detailed Design (v1)
+# M1 — Dual-publish verification, production refresh, detection, re-sign — Detailed Design (v2, post design-review)
+
+> **v2 note:** three independent design reviews (security/trust, release-ops/CI,
+> appliance-runtime) returned approve-with-fixes with 2 BLOCKING + 5 HIGH findings.
+> §9 records every finding and its binding resolution; where §1–§4 conflict with §9,
+> **§9 wins**. Slice D is GATED on the two BLOCKING security fixes.
 
 **Milestone:** M1 (post-M0 acceptance, `roadmap/M0-ACTIVATION-EVIDENCE.md`).
 **Scope (frozen by owner):** (1) dual-publish verification, (2) production HTTP
@@ -150,3 +155,47 @@ restorable by re-publish — proven in M0).
 6. Does dispatching ci.yml at a tag with `resign=true` interact safely with the
    tag-path guards (`require-gate.sh` asserts on the tagged commit — re-runs should
    still pass) and the docker/auto-tag jobs (must be skipped on resign)?
+
+## 9. Design-review findings & binding resolutions (v2)
+
+Three independent reviews; every BLOCKING/HIGH/MED resolved below. These decisions
+override §1–§4 where they differ.
+
+### Slice D (re-sign) — GATED on SEC-F1 + SEC-F2
+
+| Finding | Sev | Binding resolution |
+|---|---|---|
+| SEC-F1 — resign path signs content from a MUTABLE release asset (keyless signing oracle: attacker with contents:write swaps the bundle, cron signs it) | **BLOCKING** | The ci.yml resign job (1) verifies the downloaded bundle's EXISTING `index.json.sigstore` against the baked root + pinned identity (expiry-tolerant) BEFORE reading any field; (2) takes `version` from `github.ref_name` only; (3) keeps the `cosign verify` of the extracted `list_digest` vs `release_identity.env`. `resign_created_at` and all entry facts come ONLY from the signature-verified release bundle (never the served R2 index — OPS-F6 concurs: origin is untrusted transport). |
+| SEC-F2 — old-tag re-sign = unbounded freshness extension / live pin (fresh prefix self-satisfies the digest guard; CI runner floor=0) | **BLOCKING** | (a) latest-tag enforcement INSIDE ci.yml's resign job: `fetch-depth:0`, assert `github.ref_name` == highest `v*` by `sort -V`, fail closed (holds even for old-tag dispatches); (b) publisher-side monotonic binding on the resign input: before promote, fetch LIVE `release-catalog/index.json` and require staged `catalog_version` ≥ live, and on equality identical entries + strictly newer `generated_at` (also closes OPS-F5's auto-tag race). |
+| OPS-F1 — bare dispatch-at-tag re-runs the WHOLE pipeline (re-pushes image tags with a new digest; softprops OVERWRITES the original release asset) | HIGH | ci.yml fails fast on `workflow_dispatch` at a tag ref unless `resign == true`; resign uses a DEDICATED `catalog-resign` job with no `needs: [docker]` (no `if:` spaghetti on the release jobs); resign asset name stays distinct so softprops adds, never replaces. |
+| OPS-F2 — multi-asset glob: 2nd resign picks the OLDEST resign; 1st resign bricks manual R2 republish of the original tag (glob → resign bundle → immutable-prefix digest-guard abort) | HIGH | Resign job PRUNES the superseded `-r*` asset (release carries exactly original + latest resign); ALL publish/verify paths select assets by EXACT name (`culvert-release-catalog-<tag>.tar.gz` for releases; `<tag>-r<YYYYMMDD>.tar.gz` passed as an explicit dispatch input for resigns). Closes open question 3. |
+| OPS-F3 / open Q4 — Pages must be re-dispatched on resign or the dual-publish check goes permanently red | HIGH | Weekly flow re-dispatches Pages (workflow file itself untouched — M3 boundary intact; with pruning, its existing pick sees ≤2 assets). Slice A's expected digest = the LATEST bundle's. |
+| OPS-F4 — resign CI completion triggers NEITHER publisher (`workflow_run.event=='push'` gates) | MED | The scheduler owns sequencing: dispatch ci.yml@tag → poll the created run (by ref+event+created_at) to SUCCESS (bounded, fail-closed, alert on timeout) → dispatch R2 (resign input, exact asset name) → dispatch Pages → trigger the Slice A verify. Publishers' workflow_run guards are NOT widened. |
+| OPS-F6 — gate resign inputs: parse the bundle in Go; `EXPECT_DIGEST` unset silently disables the digest assert | MED | Extend `resolveGateSpec` to accept a bundle path (Go-side parse of the signature-verified bundle); resign asserts regenerated `list_digest` == source bundle's. |
+| SEC-F4 — same-version replay between coexisting re-signs (>= floor is blind to it) | MED | Appliance ratchet extends to `(catalog_version, generated_at)` in `release_catalog_state.json`: equal version requires strictly newer `generated_at` to install. |
+| SEC-F5 / OPS-F8 — silent re-sign failure invisible ~150d; "5 retries" is really ~4 | MED | Slice A weekly check also asserts live `generated_at` age ≤ 2× resign cadence (publish-side canary, red + alert on breach). Appliance stale alert stays as backstop. |
+| SEC-F7 — v* tag CREATION restriction becomes load-bearing once tag-dispatch is a signing event | LOW | Owner action recorded as an M1-4 activation precondition: add `creation=true` + `bypass_actors` (actions bot) to the `v-tag-protection` ruleset. Documented in the M1-4 PR + runbook; not code. |
+
+### Slices A–C
+
+| Finding | Sev | Binding resolution |
+|---|---|---|
+| RT-H1 — loop-local failure state diverges from the manual endpoint (missed `recovered`, stale `/api/releases`) | HIGH | Shared `refreshStatus{lastAt,lastOK,lastErr,consecutiveFailures}` on `releaseManager` behind its OWN mutex, updated by one `rm.runRefresh(ctx, trigger)` wrapper used by BOTH the loop and `apiReleaseCatalogRefresh`; alert transitions computed there; stores only the redacted error string. |
+| RT-H2 — stale alert re-fires every 6h (engine dedupe is 30s) | HIGH | Once-per-threshold-crossing latch in `refreshStatus` (fire on not-stale→stale transition); latch reset on restart accepted + documented. Refresh-failing alert likewise fires on the ≥N transition only, `recovered` on the first success after (answers open Q2; OPS-F8 concurs). |
+| RT-M1 — background-services slice is the wrong home (runs before webhooks + rm exist) | MED | Loop starts from `loadReleaseManagement` (lifecycle ctx plumbed in); resolves the manager at tick time; first tick after one jittered interval (startup auto-seed covers t=0). |
+| RT-M2 — "ETag 304 no-op" is false today (new provider per call) | MED | One long-lived `HTTPCatalogProvider` constructed in `loadReleaseManagement`; `rm.refresh` closes over it (real 304s; no per-tick catalog-dir rewrite). |
+| RT-M3 — `rm.refresh` discards its context | MED | Thread caller ctx (`context.WithTimeout(ctx, httpCatalogDefaultTimeout)`); loop = `NewTimer` + `select {ctx.Done, timer.C}`, re-jittered per iteration. |
+| RT-M4 — single-flight mutex ALREADY exists (`refreshMu` in the closure) | MED | No second mutex; loop just calls the wrapper. Manual endpoint may `TryLock` → "refresh already in progress" (nice-to-have). |
+| RT-M5 / open Q6 — config-surface shape | MED | **Minimal-compliant for M1:** read-once `CULVERT_RELEASE_REFRESH_INTERVAL` + YAML `release.refresh_interval`, resolved in the existing `resolveReleaseStartupConfigFrom` (pure, param-passed); surfaced READ-ONLY in `/api/releases` + Release panel (matches the recorded `CULVERT_RELEASE_*` GUI-parity deferral). No AdminSettings field ⇒ no `configSurfaces` row, no `saveConfigVersion`. |
+| RT-L1 — no Prometheus client lib | LOW | Hand-written exposition per metrics.go pattern: two atomic counters for `culvert_release_catalog_refresh_total{result}`; `culvert_release_catalog_expires_in_seconds` computed at scrape time from the holder. |
+| RT-L2/L3/L4 | LOW | Gate the loop on `catalogURL != "" && VerifyEnforce`, tolerate `rm == nil` per tick; restart counter-reset documented in §3 + runbook; CP/DP posture: node-local by design for M1 (no ConfigSnapshot sync — keeps the DEBT-006 walls untouched), stated in §2. |
+| OPS-F7 / SEC-F6c / open Q1 — Slice A placement | LOW | **Separate `workflow_run` verify workflow** (`verify-dual-publish.yml`): permission isolation (`contents: read`, NO secrets, NO id-token — pinned by an invariant test), scheduler-triggerable on resigns, and keeps `publish-catalog-r2.yml` byte-unchanged until M1-4's additive resign input (resolves the §7 inconsistency). Push-path trigger: workflow_run on the R2 publisher's completion + bounded Pages-lag retry (~10 min); resign-path: scheduler-sequenced, not timer-based. |
+
+### PR plan (v2)
+
+| PR | Contents |
+|---|---|
+| M1-1 | `verify-dual-publish.yml` (separate workflow) + secret-name-contract invariant + workflow-invariant extensions (verify workflow: no secrets/id-token) |
+| M1-2 | Refresh loop (long-lived provider, ctx threading, `runRefresh` wrapper + `refreshStatus`) + config resolver + read-only API/panel surface + tests |
+| M1-3 | Alert transitions/latches + metrics + status fields + tests |
+| M1-4 | Re-sign: scheduler (poll/sequence) + ci.yml fail-fast + dedicated `catalog-resign` job (verify-before-resign, latest-tag assert, prune, exact names) + R2 resign input (monotonic live binding) + `(version, generated_at)` ratchet + gate resign envs + invariant extensions. **Declared: M1-4 also amends M1-1's verify workflow (resign asset selection + expected-digest definition).** Owner precondition: v* creation restriction (SEC-F7). |
