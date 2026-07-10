@@ -1,6 +1,7 @@
 package ocsp
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -121,6 +123,100 @@ func TestOCSPChecker_CacheResult(t *testing.T) {
 	e := oc.cache["serial-123"]
 	if !e.revoked {
 		t.Fatal("should be marked revoked")
+	}
+}
+
+// makeLeafWithResponder builds an issuer + leaf pair whose leaf lists the
+// given OCSP responder URL. Returns the DER bytes (leaf first, issuer
+// second — the rawCerts wire order).
+func makeLeafWithResponder(t *testing.T, responderURL string) [][]byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(100),
+		Subject:               pkix.Name{CommonName: "chaos-issuer"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	issuerDER, err := x509.CreateCertificate(rand.Reader, issuerTmpl, issuerTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(101),
+		Subject:      pkix.Name{CommonName: "chaos-leaf"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		OCSPServer:   []string{responderURL},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, issuerTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return [][]byte{leafDER, issuerDER}
+}
+
+// unreachableResponderURL returns a URL on a port that is guaranteed closed
+// (bound then released), so responder queries fail fast with no network.
+func unreachableResponderURL(t *testing.T) string {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return "http://" + addr
+}
+
+// TestOCSPChecker_IndeterminateVerdictShortTTL is the CHAOS-04 regression:
+// an all-responders-unreachable verdict must fail closed (error returned)
+// but be cached on indeterminateTTL, not the 1h cacheTTL — otherwise a
+// seconds-long responder blip hard-fails all TLS to the affected upstream
+// for an hour after the responder recovers.
+func TestOCSPChecker_IndeterminateVerdictShortTTL(t *testing.T) {
+	oc := New()
+	oc.Enable()
+	rawCerts := makeLeafWithResponder(t, unreachableResponderURL(t))
+
+	if err := oc.VerifyPeerCertificate(rawCerts, nil); err == nil {
+		t.Fatal("unreachable responder must fail closed (want error, got nil)")
+	}
+
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := oc.cache[leaf.SerialNumber.Text(16)]
+	if !ok {
+		t.Fatal("indeterminate verdict should be cached")
+	}
+	if !entry.revoked {
+		t.Fatal("indeterminate verdict must remain fail-closed (revoked=true)")
+	}
+	remaining := time.Until(entry.expiresAt)
+	if remaining > indeterminateTTL {
+		t.Fatalf("indeterminate verdict cached for %v — want <= %v (CHAOS-04 outage amplification)", remaining, indeterminateTTL)
+	}
+	if remaining <= 0 {
+		t.Fatal("indeterminate verdict should still be cached for the short TTL")
+	}
+
+	// Within the short TTL the cached fail-closed verdict still rejects.
+	if err := oc.VerifyPeerCertificate(rawCerts, nil); err == nil {
+		t.Fatal("cached indeterminate verdict must still fail closed within its TTL")
+	}
+
+	// Once the short TTL lapses, the checker re-queries instead of serving
+	// the stale outage verdict (simulated by expiring the entry).
+	oc.cache[leaf.SerialNumber.Text(16)].expiresAt = time.Now().Add(-time.Second)
+	if _, _, found := oc.checkCached(leaf.SerialNumber.Text(16)); found {
+		t.Fatal("expired indeterminate verdict must not be served from cache")
 	}
 }
 

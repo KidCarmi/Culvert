@@ -47,9 +47,16 @@ type cacheEntry struct {
 }
 
 const (
-	cacheTTL     = 1 * time.Hour
-	cacheMaxSize = 5000
-	queryTimeout = 5 * time.Second
+	cacheTTL = 1 * time.Hour
+	// indeterminateTTL bounds how long a fail-closed "all responders
+	// unreachable" verdict is cached. The verdict stays fail-closed
+	// (connections are rejected), but recovery must track the dependency,
+	// not the cache: a seconds-long responder blip previously hard-failed
+	// all TLS to the affected upstream for the full 1h cacheTTL, identical
+	// to a genuine revocation (CHAOS-04 outage amplification).
+	indeterminateTTL = 2 * time.Minute
+	cacheMaxSize     = 5000
+	queryTimeout     = 5 * time.Second
 )
 
 // New returns a Checker with an empty verdict cache (disabled until Enable).
@@ -131,7 +138,11 @@ func (oc *Checker) checkCached(serialHex string) (revoked, failClosed, found boo
 	return false, false, false
 }
 
-// cacheResult stores an OCSP result with TTL and evicts if needed.
+// cacheResult stores an OCSP result and evicts if needed. The TTL is chosen
+// from failClosed: a fail-closed verdict (all responders unreachable) is cached
+// on the short indeterminateTTL so outage recovery tracks the responder rather
+// than being pinned for the full cacheTTL; confirmed verdicts (revoked or good)
+// keep the full cacheTTL.
 func (oc *Checker) cacheResult(serialHex string, revoked, failClosed bool) {
 	oc.mu.Lock()
 	if len(oc.cache) >= cacheMaxSize {
@@ -153,10 +164,14 @@ func (oc *Checker) cacheResult(serialHex string, revoked, failClosed bool) {
 			}
 		}
 	}
+	ttl := cacheTTL
+	if failClosed {
+		ttl = indeterminateTTL
+	}
 	oc.cache[serialHex] = &cacheEntry{
 		revoked:    revoked,
 		failClosed: failClosed,
-		expiresAt:  time.Now().Add(cacheTTL),
+		expiresAt:  time.Now().Add(ttl),
 	}
 	oc.mu.Unlock()
 }
@@ -196,10 +211,17 @@ func (oc *Checker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*
 		return nil
 	}
 
+	// checkResponders increments the fail-closed / revoked counters on this
+	// first-miss path; cacheResult picks the short indeterminateTTL when the
+	// verdict is fail-closed so outage recovery follows the responder, not the
+	// full cacheTTL, while still rejecting the connection (revoked=true).
 	revoked, failClosed := oc.checkResponders(leaf, issuer)
 	oc.cacheResult(serialHex, revoked, failClosed)
 
 	if revoked {
+		if failClosed {
+			return fmt.Errorf("ocsp: certificate %s revocation status unavailable (all responders unreachable) — failing closed", serialHex)
+		}
 		return fmt.Errorf("ocsp: certificate %s is revoked", serialHex)
 	}
 	return nil
@@ -210,8 +232,9 @@ func (oc *Checker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*
 // acceptance of certificates when revocation status cannot be determined.
 // failClosed reports whether that revoked verdict came from the outage path
 // (all responders unreachable) rather than a confirmed revocation, so the
-// caller can cache the reason. This first-miss path increments the counters;
-// the caller re-increments on subsequent cached fail-closed hits.
+// caller can both cache the reason on the short indeterminateTTL and keep the
+// fail-closed observability current. This first-miss path increments the
+// counters; the caller re-increments on subsequent cached fail-closed hits.
 func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) (revoked, failClosed bool) {
 	anyResponded := false
 	for _, responderURL := range leaf.OCSPServer {

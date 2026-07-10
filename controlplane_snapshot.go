@@ -171,10 +171,111 @@ type ConfigStore struct {
 	mu      sync.RWMutex
 	snap    ConfigSnapshot
 	version int64
-	subs    []chan struct{}
+	// versionPath, when non-empty, is the durable floor file for version
+	// (CHAOS-01). Armed by armVersionPersistence at CP activation; empty in
+	// DP-only processes and in tests that build a bare ConfigStore.
+	versionPath string
+	subs        []chan struct{}
 }
 
 var globalConfigStore = &ConfigStore{}
+
+// cpConfigVersionFile persists the CP's published config-version counter
+// (CHAOS-01). Without it, ConfigStore.version restarted at 0 on every CP
+// restart while long-running DPs still held the pre-restart value — the
+// DP-side "snap.Version <= lastVersion" short-circuit then silently
+// suppressed ALL post-restart config changes (new blocks included) until
+// the counter caught back up, with no log line or metric on either side.
+const cpConfigVersionFile = "cp_config_version.json"
+
+type cpConfigVersionState struct {
+	Version int64 `json:"version"`
+}
+
+// replicatedLeaderConfigVersion is the highest config-snapshot Version an HA
+// standby has replicated from its leader (CHAOS-01 — HA-promotion follow-up).
+// applyHABundle ratchets it forward; armVersionPersistence folds it into the
+// version-floor seed so a freshly promoted standby publishes strictly above
+// every version the old leader ever issued.
+//
+// Why the wall-clock seed alone is not enough on promotion: the promoted node
+// was a standby, so its own cp_config_version.json floor is absent/stale and
+// its ConfigStore.version never advanced (applyConfigSnapshot does not touch
+// it). If the standby's clock lags the old leader, OR the leader's counter
+// outran elapsed seconds (many rapid config updates), the reseed would land at
+// or below the DPs' lastVersion and each DP's fetchAndApply would silently
+// short-circuit (snap.Version <= lastVersion), applying NO post-failover config.
+var replicatedLeaderConfigVersion atomic.Int64
+
+// noteReplicatedLeaderVersion raises the replicated-leader-version watermark
+// (monotonic; never lowers). Called by applyHABundle with the leader's bundle
+// Version so a later promotion can seed the version floor above it.
+func noteReplicatedLeaderVersion(v int64) {
+	for {
+		cur := replicatedLeaderConfigVersion.Load()
+		if v <= cur {
+			return
+		}
+		if replicatedLeaderConfigVersion.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
+// armVersionPersistence seeds the version counter with
+// max(current, persisted floor, wall clock, replicated leader version) and
+// enables floor persistence on every subsequent Update. The seeds are
+// complementary fail-safes: the persisted floor survives clock rollback (VM
+// snapshot restore, NTP step-back); the wall-clock seed survives a deleted or
+// corrupt floor file; and the replicated-leader-version seed makes a freshly
+// promoted HA standby publish above the old leader's independent counter even
+// when the standby's own floor is absent/stale and its clock lags the leader.
+// A corrupt/unreadable floor is therefore recoverable, not fatal.
+func (s *ConfigStore) armVersionPersistence(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.versionPath = path
+	seed := time.Now().Unix()
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		var st cpConfigVersionState
+		if jerr := json.Unmarshal(data, &st); jerr != nil {
+			logger.Printf("ControlPlane: config-version floor %s corrupt (%v) — reseeding from clock", path, jerr)
+		} else if st.Version > seed {
+			seed = st.Version
+		}
+	case !os.IsNotExist(err):
+		logger.Printf("ControlPlane: config-version floor read failed (%v) — reseeding from clock", err)
+	}
+	// Fold in the leader version this node replicated as a standby (0 when it
+	// never was one) so a promotion's first publish clears everything the old
+	// leader issued — the DP short-circuit guard depends on it.
+	if rv := replicatedLeaderConfigVersion.Load(); rv > seed {
+		seed = rv
+	}
+	if seed > s.version {
+		s.version = seed
+	}
+}
+
+// persistVersionLocked writes the version floor. Called with s.mu held so
+// floors are written in version order (a lower version can never land after
+// a higher one). Config updates are admin-action-rate, so the fsync under
+// the lock is not a hot-path cost. Failure is non-fatal: the wall-clock
+// seed in armVersionPersistence recovers monotonicity on the next restart.
+func (s *ConfigStore) persistVersionLocked() {
+	if s.versionPath == "" {
+		return
+	}
+	data, err := json.Marshal(cpConfigVersionState{Version: s.version})
+	if err == nil {
+		err = atomicWriteFile(s.versionPath, data, 0o600)
+	}
+	if err != nil {
+		logger.Printf("ControlPlane: config-version floor persist failed: %v", err)
+	}
+}
 
 const dpLastGoodConfigSnapshotFile = "dp_last_config_snapshot.json"
 
@@ -195,6 +296,7 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) {
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.snap = snap
+	s.persistVersionLocked()
 	subs := append([]chan struct{}{}, s.subs...)
 	s.mu.Unlock()
 

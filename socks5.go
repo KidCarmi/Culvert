@@ -16,9 +16,12 @@ import (
 // the listener, which causes Accept to return net.ErrClosed; the serve loop
 // treats that as the expected stop signal and returns. P1.5 / S4.SOCKS5.
 //
-// Out of scope here: in-flight SOCKS5 tunnels are NOT drained on Stop —
-// they continue running on their own per-conn 30s deadlines (set in
-// handleSOCKS5). Graceful tunnel drain is tracked separately for Phase 2.
+// Out of scope here: in-flight SOCKS5 tunnels are NOT drained on Stop.
+// The per-conn 30s deadline set in handleSOCKS5 covers only the
+// handshake/negotiation phase — it is cleared before the relay starts, so
+// an established tunnel runs until either peer closes (no idle deadline;
+// tracked as CHAOS-03). Graceful tunnel drain is tracked separately for
+// Phase 2.
 type socks5Server struct {
 	ln   net.Listener
 	done chan struct{}
@@ -253,6 +256,18 @@ func handleSOCKS5(conn net.Conn) {
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+
+	// ── Connection limit per IP ──────────────────────────────────────────────
+	// Symmetric with handleRequest (proxy.go): SOCKS5 tunnels hold goroutines
+	// and FDs for their full lifetime, so they must consume the same per-IP
+	// budget as HTTP/CONNECT — otherwise one IP can exhaust the process with
+	// idle tunnels the limiter was configured to prevent (CHAOS-02).
+	if !connLimiter.Acquire(clientIP) {
+		recordRequest(clientIP, "SOCKS5", "", "CONN_LIMITED", "", "", "", "")
+		logger.Printf("SOCKS5 CONN_LIMITED %s", clientIP)
+		return
+	}
+	defer connLimiter.Release(clientIP)
 
 	// ── IP filter ────────────────────────────────────────────────────────────
 	if !ipf.Allowed(clientIP) {
