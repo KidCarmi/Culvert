@@ -87,6 +87,14 @@ func (h *CatalogHolder) GetCatalog() *Catalog {
 // through GetCatalog so the two never disagree.
 func (h *CatalogHolder) HasCatalog() bool { return h.GetCatalog() != nil }
 
+// PublishedRaw returns the currently-published catalog WITHOUT the use-time
+// expiry hide — an expired-but-still-published catalog is returned as-is.
+// OBSERVABILITY ONLY (M1-3): the freshness watchdog and the expiry gauge must
+// keep seeing a catalog after it lapses (a hidden catalog is exactly the
+// condition they exist to report). Never use this for serving or dispatch —
+// GetCatalog remains the sole read path for anything that acts on the catalog.
+func (h *CatalogHolder) PublishedRaw() *Catalog { return h.cur.Load() }
+
 // store atomically publishes an already-verified, immutable *Catalog. It is the
 // single publish primitive: every caller (Reload here, the Refresher in P1.5b)
 // MUST have run the bytes through LoadVerifiedCatalog first. Kept unexported so

@@ -9871,7 +9871,10 @@ function renderReleaseCatalog(d, box, meta) {
   renderReleaseTrustBadge(d);
   renderReleaseOrigin(d);
   if (!d || d.available !== true) {
-    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
+    // Surface the server's reason — "installed catalog expired" (M1-3) is an
+    // actionable state, not the generic empty one.
+    const why = (d && d.reason) ? escHtml(d.reason) : 'available: false';
+    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (' + why + '). A seeded or refreshed catalog will appear here.</div>';
     if (meta) meta.textContent = '';
     populateReleaseDispatchReleases([]);
     return;

@@ -26,10 +26,12 @@ package main
 // GUI-parity rule does not apply).
 //
 // Alerts fire through releaseAlertFire (test seam). The default is
-// deferStartupAlert: before loadPersistentAdminState flushes the queue it
-// buffers (webhooks are not loaded yet at release-wiring time), after the
-// flush it degrades to a plain fireAlert passthrough; Dispatch itself is
-// always non-blocking, so calling it under a caller's goroutine is safe.
+// deferStartupAlert — in the CURRENT startup order (loadPersistentAdminState
+// precedes loadReleaseManagement in main.go) it is already a plain fireAlert
+// passthrough at wiring time; the queue path is deliberate ordering
+// robustness, not a live dependency, so a future startup reorder cannot
+// silently drop a boot alert. Dispatch itself is always non-blocking, so
+// firing on a caller's goroutine is safe.
 //
 // Prometheus (RT-L1, hand-written per the metrics.go pattern):
 //   culvert_release_catalog_refresh_total{result="success"|"failure"}
@@ -45,6 +47,8 @@ import (
 const (
 	// releaseCatalogStaleThreshold: fire release_catalog_stale when the
 	// installed catalog expires within this window (design §3: default 30d).
+	// NOTE: the Release panel hardcodes the same 30-day boundary for its warn
+	// color (static/index.html, renderReleaseOrigin) — change both together.
 	releaseCatalogStaleThreshold = 30 * 24 * time.Hour
 	// releaseRefreshFailingThreshold: fire release_catalog_refresh_failing on
 	// the Nth CONSECUTIVE refresh failure (design §3: default 3).
@@ -55,6 +59,17 @@ const (
 // deferStartupAlert queues until the webhook store is loaded, then passes
 // through to fireAlert; Dispatch is non-blocking either way.
 var releaseAlertFire = deferStartupAlert
+
+// alertHost labels release alerts with the effective catalog origin; the stale
+// watchdog is about the INSTALLED catalog, so with outbound fetch disabled
+// (catalog_url_source=disabled ⇒ empty origin) it falls back to a fixed label
+// instead of an empty Host field.
+func (rm *releaseManager) alertHost() string {
+	if rm.catalogOrigin != "" {
+		return rm.catalogOrigin
+	}
+	return "local-catalog"
+}
 
 // Refresh-outcome counters for culvert_release_catalog_refresh_total.
 // Process-lifetime, not persisted (refresh cadence makes restarts visible
@@ -75,7 +90,7 @@ func (rm *releaseManager) evaluateRefreshTransitions(err error) []AlertPayload {
 			rm.refreshFailingLatched = true
 			out = append(out, AlertPayload{
 				Event: "release_catalog_refresh_failing",
-				Host:  rm.catalogOrigin,
+				Host:  rm.alertHost(),
 				Detail: fmt.Sprintf("%d consecutive release-catalog refresh failures (last: %s)",
 					rm.refreshStatus.ConsecutiveFailures, rm.refreshStatus.LastErr),
 				Source: "release",
@@ -90,7 +105,7 @@ func (rm *releaseManager) evaluateRefreshTransitions(err error) []AlertPayload {
 		rm.refreshFailingLatched = false
 		out = append(out, AlertPayload{
 			Event:  "release_catalog_recovered",
-			Host:   rm.catalogOrigin,
+			Host:   rm.alertHost(),
 			Detail: "release-catalog refresh succeeded after repeated failures",
 			Source: "release",
 		})
@@ -118,25 +133,28 @@ func (rm *releaseManager) evalStale(expiresAt, now time.Time) []AlertPayload {
 	rm.staleLatched = true
 	return []AlertPayload{{
 		Event: "release_catalog_stale",
-		Host:  rm.catalogOrigin,
+		Host:  rm.alertHost(),
 		Detail: fmt.Sprintf("release catalog expires %s (%.1f days remaining; threshold %.0f days) — re-sign pipeline may be failing",
 			expiresAt.UTC().Format(time.RFC3339), remaining.Hours()/24, releaseCatalogStaleThreshold.Hours()/24),
 		Source: "release",
 	}}
 }
 
-// evaluateCatalogFreshness runs one stale evaluation against the currently
-// INSTALLED catalog (the holder-published one — a failed refresh leaves it in
-// place, which is exactly the catalog whose expiry matters). No catalog ⇒ no
-// evaluation and the latch is left untouched (reads degrade to
-// available:false; staleness of nothing is meaningless). Called from
-// runRefresh (every loop tick — incl. 304 no-ops — and every manual refresh)
-// and once at startup wiring.
+// evaluateCatalogFreshness runs one stale evaluation against the RAW published
+// catalog (rm.observeCatalog → holder.PublishedRaw — a failed refresh leaves it
+// in place, and an EXPIRED catalog stays visible here even though GetCatalog
+// hides it from serving, so the watchdog keeps firing state past the lapse
+// instead of going blind at exactly the terminal moment — impl review MED-1).
+// No published catalog ⇒ no evaluation and the latch is left untouched (reads
+// degrade to available:false; staleness of nothing is meaningless — the
+// boot-after-lapse case, where Reload refuses the expired dir, is alerted
+// separately at wiring). Called from runRefresh (every loop tick — incl. 304
+// no-ops — and every manual refresh) and once at startup wiring.
 func (rm *releaseManager) evaluateCatalogFreshness() {
-	if rm.svc == nil {
+	if rm.observeCatalog == nil {
 		return
 	}
-	cat := rm.svc.catalog()
+	cat := rm.observeCatalog()
 	if cat == nil {
 		return
 	}
@@ -155,9 +173,11 @@ func (rm *releaseManager) evaluateCatalogFreshness() {
 
 // releaseCatalogWritePrometheus appends the M1-3 release-catalog metrics
 // (called from handleMetrics). The expiry gauge is computed at scrape time
-// from the installed catalog and omitted when no catalog (or no expiry) is
-// published — an absent series is a clearer "nothing installed" signal than a
-// fake zero (which Prometheus would read as "expired").
+// from the RAW published catalog (observability accessor — an expired catalog
+// keeps exporting a NEGATIVE value instead of vanishing, so "just expired" and
+// "nothing installed" stay distinguishable) and omitted only when no catalog
+// (or no expiry) is published — an absent series is a clearer "nothing
+// installed" signal than a fake zero.
 func releaseCatalogWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_release_catalog_refresh_total Release-catalog refresh outcomes (startup, loop, and manual)\n")
 	w.WriteString("# TYPE culvert_release_catalog_refresh_total counter\n")
@@ -165,10 +185,10 @@ func releaseCatalogWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "culvert_release_catalog_refresh_total{result=\"failure\"} %d\n", atomic.LoadInt64(&statReleaseRefreshFailure))
 
 	rm := currentReleaseManager()
-	if rm == nil || rm.svc == nil {
+	if rm == nil || rm.observeCatalog == nil {
 		return
 	}
-	cat := rm.svc.catalog()
+	cat := rm.observeCatalog()
 	if cat == nil {
 		return
 	}

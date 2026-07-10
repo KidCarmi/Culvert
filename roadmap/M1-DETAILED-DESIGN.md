@@ -100,6 +100,26 @@ regression. Plus two M0-activation regression guards (one already shipped).
   `expires_at` on `/api/releases`; Release-panel origin strip gains the expiry
   row with warn color inside the 30d threshold.
 
+### 3.2 M1-3 implementation review (2026-07-10) — fixes folded in
+
+Independent review verdict: **ship-with-fixes** (no BLOCKING/HIGH; concurrency,
+wiring order, metrics-shape, GUI-XSS, and design compliance all traced clean).
+Accepted findings + enforcement per the §10 rule:
+
+| Finding | Sev | Fix | Enforcement |
+| --- | --- | --- | --- |
+| Expired catalog invisible to detection in enforce mode (`GetCatalog` hides it at use time ⇒ watchdog/gauge went blind at exactly the terminal moment; boot-after-lapse never alerted) | MED | `holder.PublishedRaw()` observability accessor (`rm.observeCatalog`) for the watchdog + gauge + API expired-reason (`reason:"installed catalog expired"`, negative `expires_in_days`); boot-after-lapse (Reload refuses expired dir) fires a latched `release_catalog_stale` at wiring | `TestReleaseExpiry_RuntimeLapseStaysObservable`, `TestStaleAlert_BootAfterLapse` |
+| Evaluation WIRING not test-enforced (deleting the startup/runRefresh eval calls stayed green) | MED | — (wiring was correct; tests were missing) | `TestStaleAlert_FiresAtStartupWiring`, `TestStaleAlert_EvaluatedOnRunRefresh` |
+| `expires_in_days` truncated toward zero (12h past expiry read "0 days", not EXPIRED) | LOW | `math.Floor` | asserted in `TestReleaseExpiry_RuntimeLapseStaysObservable` (−2 not −1 at 36h past) |
+| Stale startup-ordering comments (webhooks actually load BEFORE release wiring; `deferStartupAlert` is passthrough there) | LOW | comments corrected — the queue path is ordering robustness, not a live dependency | doc-only |
+| Empty alert `Host` with fetch disabled; UI hardcodes the 30d threshold | LOW | `alertHost()` fallback (`local-catalog`); cross-referencing comments on the Go constant + panel | doc/code-only |
+
+**Recorded residual (accepted-by-design):** a refresh that installs a *newer but
+still-stale* catalog (stale A → stale B) does not re-alert — the latch re-arms
+only on a fresh crossing, consistent with once-per-crossing; a re-sign pipeline
+that limps along extending expiry by <30d each week alerts once, not weekly.
+Revisit only if M1-4's cadence gate (SEC-F5) proves insufficient.
+
 ## 4. Slice D — Weekly no-bump re-sign + 180-day freshness (PR M1-4, most complex)
 
 **Goal:** the served catalog’s `expires_at` never lapses even with no releases.

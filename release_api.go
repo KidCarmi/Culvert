@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -84,6 +85,13 @@ type releaseManager struct {
 	// re-fires a still-active alert once.
 	refreshFailingLatched bool // release_catalog_refresh_failing fired, no success since
 	staleLatched          bool // release_catalog_stale fired, catalog still within threshold
+	// observeCatalog returns the RAW published catalog for observability (the
+	// stale watchdog + expiry gauge + expired-state API surfacing), bypassing
+	// GetCatalog's use-time expiry hide — an expired catalog must stay VISIBLE
+	// to detection precisely when it becomes invisible to serving/dispatch
+	// (M1-3 impl review MED-1). Set at wiring to holder.PublishedRaw; nil ⇒ no
+	// observability source (permissive unit fixtures).
+	observeCatalog func() *Catalog
 	// refreshRunMu serializes the WHOLE runRefresh (refresh call + status fold) so
 	// two overlapping callers cannot record outcomes out of order (a stale success
 	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
@@ -312,6 +320,19 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 			"reason":      "no catalog published",
 			"verify_mode": rm.verifyMode.String(),
 		}
+		// M1-3: distinguish "just expired" (a catalog IS published but hidden by
+		// the use-time freshness gate) from "nothing installed" — the raw
+		// observability accessor still sees it, so the admin learns WHY reads
+		// degraded and the panel can render the EXPIRED state (impl review MED-1).
+		if rm.observeCatalog != nil {
+			if raw := rm.observeCatalog(); raw != nil {
+				if exp := raw.ExpiresAt(); !exp.IsZero() && time.Now().After(exp) {
+					unavail["reason"] = "installed catalog expired"
+					unavail["expires_at"] = exp.UTC().Format(time.RFC3339)
+					unavail["expires_in_days"] = int(math.Floor(time.Until(exp).Hours() / 24))
+				}
+			}
+		}
 		if rm.trustSchemes != "" {
 			unavail["trust_schemes"] = rm.trustSchemes
 		}
@@ -334,9 +355,10 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	if exp := cat.ExpiresAt(); !exp.IsZero() {
 		out["expires_at"] = exp.UTC().Format(time.RFC3339)
-		// GUI parity for the M1-3 freshness watchdog: whole days remaining
-		// (floor; negative = already expired), rendered in the Release panel.
-		out["expires_in_days"] = int(time.Until(exp).Hours() / 24)
+		// GUI parity for the M1-3 freshness watchdog: whole days remaining,
+		// rendered in the Release panel. True floor — 12h past expiry must read
+		// -1 ("EXPIRED"), not truncate to 0 ("0 days left").
+		out["expires_in_days"] = int(math.Floor(time.Until(exp).Hours() / 24))
 	}
 	rm.addRefreshFields(out)
 	jsonOK(w, out)

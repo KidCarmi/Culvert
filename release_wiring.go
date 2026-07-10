@@ -354,8 +354,14 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// BEST-EFFORT startup load so a catalog already seeded/cached in cfg.catalogDir
 	// is usable immediately (and survives restarts). A failure (no catalog, or one
 	// that fails verification / freshness / rollback) is the normal no-catalog
-	// state: reads degrade to {available:false}.
+	// state: reads degrade to {available:false}. The specific expired-refusal is
+	// remembered: booting AFTER the catalog lapsed leaves the holder empty, so the
+	// runtime freshness watchdog has nothing to evaluate — the boot-after-lapse
+	// stale alert below is the only signal for that terminal case (impl review
+	// MED-1).
+	startupReloadExpired := false
 	if err := holder.Reload(); err != nil {
+		startupReloadExpired = errors.Is(err, errCatalogExpired)
 		logger.Printf("release management: no catalog loaded from %q (%v); reads report available:false until a trusted one is present",
 			sanitizeLog(cfg.catalogDir), err)
 	}
@@ -376,6 +382,10 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		// Host only (never the full override URL — it may carry presigned creds).
 		rm.catalogOrigin = seedHost(cfg.catalogURL)
 	}
+	// Observability accessor (M1-3): the stale watchdog + expiry gauge read the
+	// RAW published catalog so an expired one stays visible to detection after
+	// GetCatalog starts hiding it from serving/dispatch.
+	rm.observeCatalog = holder.PublishedRaw
 	// Surface the boot-time seed outcome right away (M1-2 review HIGH). Folded via
 	// the SAME shared status the loop/manual refresh use, tagged "startup".
 	if startupSeedAttempted {
@@ -462,10 +472,29 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	setReleaseManager(rm)
 	// M1-3 freshness watchdog: evaluate the installed catalog's expiry ONCE at
 	// boot so an already-stale appliance alerts immediately instead of one full
-	// refresh interval later. Fires via deferStartupAlert (webhooks load in a
-	// later startup slice); the restart-refire caveat is documented in
-	// release_alerts.go.
+	// refresh interval later (restart-refire caveat documented in
+	// release_alerts.go; the deferStartupAlert seam is ordering-robust —
+	// currently a passthrough since webhooks load before this wiring runs).
 	rm.evaluateCatalogFreshness()
+	// Boot-after-lapse (impl review MED-1): the startup Reload REFUSED an
+	// expired on-disk catalog, so the holder is empty and the runtime watchdog
+	// above has nothing to see — fire the stale alert here (latched: the state
+	// is by definition already past the crossing) so the terminal case the
+	// 180-day watchdog exists for is never silent.
+	if startupReloadExpired {
+		rm.statusMu.Lock()
+		already := rm.staleLatched
+		rm.staleLatched = true
+		rm.statusMu.Unlock()
+		if !already {
+			releaseAlertFire("release_catalog_stale", AlertPayload{
+				Event:  "release_catalog_stale",
+				Host:   rm.alertHost(),
+				Detail: "on-disk release catalog is already EXPIRED (refused at load; reads report available:false) — re-sign pipeline may have been failing while this appliance was down",
+				Source: "release",
+			})
+		}
+	}
 	// Periodic production refresh (M1-2): started HERE — after the manager, its
 	// refresh seam, and the alert webhooks exist (RT-M1) — on the app lifecycle
 	// context, and only when a catalog origin is configured in enforce mode
