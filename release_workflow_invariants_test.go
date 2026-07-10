@@ -321,10 +321,19 @@ func assertPromoteNotBypassable(t *testing.T, promote wfStep) {
 
 const dualVerifyWorkflowPath = ".github/workflows/verify-dual-publish.yml"
 
-var wfRefRE = regexp.MustCompile(`(secrets|vars)\.([A-Za-z0-9_]+)`)
+// wfExprRE extracts `${{ … }}` expression blocks (multi-line: folded `if: >-`
+// gates span lines); wfRefRE finds every secrets./vars. reference INSIDE them.
+// Scanning only real expressions — never raw file text — means a COMMENT naming
+// `vars.R2_PUBLISH_ENABLED` cannot satisfy the contract (the vacuity the M1-1
+// impl review flagged: the publisher's header comments already name the vars, so
+// a raw-text scan would stay green after the real reference was deleted).
+var (
+	wfExprRE = regexp.MustCompile(`(?s)\$\{\{.*?\}\}`)
+	wfRefRE  = regexp.MustCompile(`(secrets|vars)\.([A-Za-z0-9_]+)`)
+)
 
-// wfRefSets extracts the exact sets of `secrets.*` / `vars.*` names referenced
-// anywhere in a workflow file (raw text — catches env:, if:, run:, with: alike).
+// wfRefSets extracts the exact sets of `secrets.*` / `vars.*` names referenced in
+// a workflow file's `${{ … }}` expressions (env:, if:, with: alike).
 func wfRefSets(t *testing.T, path string) (secretSet, varSet map[string]bool) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -332,11 +341,13 @@ func wfRefSets(t *testing.T, path string) (secretSet, varSet map[string]bool) {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	secretSet, varSet = map[string]bool{}, map[string]bool{}
-	for _, m := range wfRefRE.FindAllStringSubmatch(string(raw), -1) {
-		if m[1] == "secrets" {
-			secretSet[m[2]] = true
-		} else {
-			varSet[m[2]] = true
+	for _, expr := range wfExprRE.FindAllString(string(raw), -1) {
+		for _, m := range wfRefRE.FindAllStringSubmatch(expr, -1) {
+			if m[1] == "secrets" {
+				secretSet[m[2]] = true
+			} else {
+				varSet[m[2]] = true
+			}
 		}
 	}
 	return secretSet, varSet
@@ -408,13 +419,26 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 		}
 	}
 
-	// Exact-name asset selection: the glob form must not appear; the exact form must.
-	text := string(raw)
-	if strings.Contains(text, "culvert-release-catalog-*") {
-		t.Fatal("verify workflow must download assets by EXACT name, never the culvert-release-catalog-* glob (OPS-F2)")
+	// Exact-name asset selection, checked in the REAL download context (a comment
+	// can't satisfy it): every `--pattern` argument in run: bodies must be
+	// wildcard-free, and the exact tag-derived pattern must be the one used.
+	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
+	exactSeen := false
+	for _, job := range doc.Jobs {
+		for i := range job.Steps {
+			for _, m := range patternRE.FindAllStringSubmatch(runScript(job.Steps[i].Run), -1) {
+				arg := strings.Trim(m[1], `"'`)
+				if strings.ContainsAny(arg, "*?[") {
+					t.Fatalf("verify workflow must download assets by EXACT name, never a glob (OPS-F2); got --pattern %q", arg)
+				}
+				if arg == "culvert-release-catalog-${TAG}.tar.gz" {
+					exactSeen = true
+				}
+			}
+		}
 	}
-	if !strings.Contains(text, `culvert-release-catalog-${TAG}.tar.gz`) {
-		t.Fatal("verify workflow must select the release bundle by exact tag-derived name")
+	if !exactSeen {
+		t.Fatal("verify workflow must select the release bundle via --pattern \"culvert-release-catalog-${TAG}.tar.gz\" (exact tag-derived name)")
 	}
 
 	// Both origin served-verify steps must carry the enforcing pass-proof (M0 posture).

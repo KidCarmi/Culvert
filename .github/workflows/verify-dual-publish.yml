@@ -12,8 +12,8 @@ name: Verify Dual Publish (Pages + R2)
 #
 # Triggers:
 #   - workflow_run on "Publish Release Catalog (R2)" completion — the push path.
-#     Skipped-publisher completions (branch CI) are filtered by the same
-#     head_branch v-prefix guard the publisher uses.
+#     Publisher runs whose publish job was gated off conclude `skipped`, so the
+#     conclusion==success guard filters branch-CI and dormant completions.
 #   - workflow_dispatch — manual/scheduler use (M1-4's resign flow sequences this
 #     after both publishers).
 #
@@ -42,15 +42,17 @@ concurrency:
 jobs:
   verify:
     name: Verify Pages + R2 serve the verified catalog
-    timeout-minutes: 20
+    timeout-minutes: 30
     runs-on: ubuntu-latest
-    # Proceed for manual dispatch, or when the R2 publisher run completed
-    # successfully for a TAG (head_branch v-prefix mirrors the publisher's gate;
-    # branch-CI completions where the publish job was skipped are filtered out).
+    # Proceed for manual dispatch, or when the R2 publisher run completed with
+    # conclusion SUCCESS. Do NOT filter on the publisher run's head_branch: a
+    # downstream workflow_run's head_branch is always `main` (the tag does not
+    # propagate through the chain — verified empirically). Publisher runs whose
+    # publish job was gated off conclude `skipped`, so `success` alone filters
+    # branch-CI and dormant completions.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event.workflow_run.conclusion == 'success' &&
-           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+          github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
     steps:
@@ -82,10 +84,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
-          WR_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          TAG="${IN_TAG:-$WR_TAG}"
+          # workflow_run events carry NO usable tag (the publisher run's own
+          # head_branch is always `main`), so the expected content is the LATEST
+          # release's bundle. Race note: with two tags in flight the newer release
+          # may win the lookup while the older publish just completed — the retry
+          # windows below absorb it; M1-4's scheduler passes the tag explicitly.
+          TAG="${IN_TAG:-}"
           if [ -z "$TAG" ]; then
             TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
           fi
@@ -103,15 +109,21 @@ jobs:
           echo "want=$WANT" >> "$GITHUB_OUTPUT"
           echo "Expected index sha256 for $TAG: $WANT"
 
-      # R2 must already serve the expected bytes (the publisher's confirm step ran).
-      - name: Compare R2 origin
+      # R2 must already serve the expected bytes (the publisher's confirm step ran) —
+      # but CF purge is eventually consistent across POPs and this runner is a
+      # different egress point, so mirror the publisher's confirm pattern:
+      # no-cache header + bounded backoff, never a single-shot RED.
+      - name: Compare R2 origin (bounded CDN-consistency retry)
         env:
           WANT: ${{ steps.expect.outputs.want }}
         run: |
           set -euo pipefail
-          GOT="$(curl -fsS https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')"
-          [ "$GOT" = "$WANT" ] || { echo "FATAL: R2 divergence: got $GOT want $WANT"; exit 1; }
-          echo "R2 origin matches ($WANT)"
+          for i in 1 2 3 4 5; do
+            GOT="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || GOT=""
+            if [ "$GOT" = "$WANT" ]; then echo "R2 origin matches ($WANT)"; exit 0; fi
+            echo "attempt $i/5: r2=$GOT want=$WANT — retrying"; sleep $((i*i))
+          done
+          echo "FATAL: R2 divergence: got '$GOT' want '$WANT'"; exit 1
 
       # Pages may lag its own deploy pipeline: bounded retry (~10 min) before RED.
       - name: Compare Pages origin (bounded Pages-lag retry)
