@@ -87,7 +87,7 @@ activation** (kept dormant) and **M2** (repo-private, protected env/ruleset).
 | PR | Scope | Status | Branch | Findings (design) | Findings (impl) | Tests | Evidence |
 |---|---|---|---|---|---|---|---|
 | M0-PR1 | Deterministic spec + version authority | PR open (babysitting) | `…-m0-foundation` | 4 reviews; 1 BLOCKING + 4 HIGH resolved in design v2 §14 (version→semver, vars-gate, baked-root gate, 2 modes, UTC-Z) | 3 reviews: security CLEAN; +1 MEDIUM floor-transition (→ 1e9 scheme-base), 2 MEDIUM validator-drift + gate-entrypoint-untested, edges — all fixed | version encoding (monotonic/collision/bounds/leading-zero/0.0.0), idempotency, UTC-Z, resign-identity, expired-guard, gate-parity, overrides; vet + -race clean, -count=2 -shuffle=on green | code core: release_spec.go + tests + gate rewire + ci.yml deterministic spec step |
-| M0-PR2 | Served-catalog verifier + local origin harness | Design + planning-review (impl gated on PR1 merge) | `…-m0-served-verify` (from main) | — | — | — | — |
+| M0-PR2 | Served-catalog verification (drive real autoSeedCatalog over HTTP) | Implemented; post-impl review | `…-m0-served-verify` (rebased on merged main) | 3 reviews; HIGH (drive real autoSeedCatalog) + baked-root-fail-closed-local + artifact-owns-outcome-over-HTTP + no-seam + reuse-fixtures + SetStageBase — all in design v2 §11 | — | Contract (valid installs; tamper/expired/rollback/malformed reject, dest untouched) + baked-root fail-closed + artifact-owns-outcome over HTTP; race+shuffle x2 clean | release_catalog_served_test.go |
 
 **M0-PR2 dependency decision (explicit):** PR2 is **independent of PR1** — it edits
 `release_catalog_http_test.go` (+ a new served-verify test) with **zero file or
