@@ -67,6 +67,15 @@ type HTTPCatalogProvider struct {
 	mu           sync.Mutex
 	lastETag     string
 	lastModified string
+	// pending* hold the validators of the LAST STAGED (not yet accepted) fetch.
+	// Stage records them here; CommitValidators promotes them to live ONLY after
+	// the caller's full seed succeeded (verify + freshness + rollback + swap +
+	// reload). Committing inside Stage — before the gate — let a REJECTED
+	// catalog's ETag turn every later refresh into a 304 "success" that reset
+	// failure counters and never self-healed (M1-2 impl review, HIGH).
+	pendingETag    string
+	pendingLastMod string
+	pendingLive    bool
 }
 
 // NewHTTPCatalogProvider builds a provider for baseURL (http or https). trust is
@@ -224,7 +233,7 @@ func (p *HTTPCatalogProvider) Stage(ctx context.Context) (stagingDir string, err
 		return "", err
 	}
 
-	p.storeValidators(etag, lastMod)
+	p.stashValidators(etag, lastMod)
 	committed = true
 	return stage, nil
 }
@@ -417,9 +426,33 @@ func (p *HTTPCatalogProvider) doGet(ctx context.Context, rel string, decorate fu
 	return nil, fmt.Errorf("release catalog: GET %s: %w", rel, lastErr)
 }
 
-func (p *HTTPCatalogProvider) storeValidators(etag, lastMod string) {
+// stashValidators records the just-staged fetch's validators as PENDING; they
+// become live only via CommitValidators after the caller's seed fully succeeds.
+func (p *HTTPCatalogProvider) stashValidators(etag, lastMod string) {
 	p.mu.Lock()
-	p.lastETag, p.lastModified = etag, lastMod
+	p.pendingETag, p.pendingLastMod, p.pendingLive = etag, lastMod, true
+	p.mu.Unlock()
+}
+
+// CommitValidators promotes the pending validators to live so the NEXT fetch is
+// conditional. Call only after a fully successful seed (a 304 tick has no pending
+// validators — the call is then a no-op, keeping the previous live ones).
+func (p *HTTPCatalogProvider) CommitValidators() {
+	p.mu.Lock()
+	if p.pendingLive {
+		p.lastETag, p.lastModified = p.pendingETag, p.pendingLastMod
+		p.pendingETag, p.pendingLastMod, p.pendingLive = "", "", false
+	}
+	p.mu.Unlock()
+}
+
+// InvalidateValidators clears live AND pending validators so the next fetch is a
+// full re-download — the self-heal path when a seed or the post-304 on-disk
+// reload fails (a held ETag must never mask a bad origin or a corrupted dir).
+func (p *HTTPCatalogProvider) InvalidateValidators() {
+	p.mu.Lock()
+	p.lastETag, p.lastModified = "", ""
+	p.pendingETag, p.pendingLastMod, p.pendingLive = "", "", false
 	p.mu.Unlock()
 }
 

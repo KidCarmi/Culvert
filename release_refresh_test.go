@@ -133,3 +133,56 @@ func TestRunCatalogRefreshLoop_TicksAndStops(t *testing.T) {
 		t.Fatal("nil-manager loop did not stop")
 	}
 }
+
+// HIGH-fix enforcement (M1-2 impl review): a REJECTED catalog's ETag must never
+// arm a 304 — validators are pending-only until an explicit CommitValidators
+// after a fully successful seed, and InvalidateValidators forces a re-download.
+// Without the fix, tick 2 here would 304 into a FALSE SUCCESS (nil), resetting
+// failure counters and hiding the bad origin from M1-3's alerting.
+func TestRefresh_RejectedCatalogETagNotCommitted(t *testing.T) {
+	priv, trust, base := seedFixture(t)
+	cfg, _ := autoSeedCfg(t, base, trust)
+	if err := (freshnessPolicy{enabled: true, statePath: cfg.statePath}).writeVersionFloor(5); err != nil {
+		t.Fatal(err)
+	}
+	// Rollback-refused catalog (version 4 < floor 5) served WITH an ETag.
+	files := signedCatalogFiles(t, priv, freshValidSource("2099-01-01T00:00:00Z", 4))
+	f := &fakeCatalogServer{files: files, etag: `"v4"`}
+	p, _ := newHTTPProvider(t, f, trust)
+	p.stageBase = base
+
+	// Tick 1: full fetch, seed REJECTED (rollback). The closure invalidates on
+	// failure — mirror that here.
+	if err := autoSeedCatalog(context.Background(), p, cfg); !errors.Is(err, errCatalogRollback) {
+		t.Fatalf("tick 1: want errCatalogRollback, got %v", err)
+	}
+	p.InvalidateValidators()
+
+	// Tick 2 must RE-DOWNLOAD and re-reject — NOT 304 into a nil false success.
+	if err := autoSeedCatalog(context.Background(), p, cfg); !errors.Is(err, errCatalogRollback) {
+		t.Fatalf("tick 2: want errCatalogRollback again (re-download + re-reject), got %v", err)
+	}
+}
+
+// Validators must be pending-only: a successful Stage with NO explicit commit
+// leaves the next fetch unconditional (no If-None-Match ⇒ no 304).
+func TestRefresh_ValidatorsPendingUntilCommit(t *testing.T) {
+	priv, trust, base := seedFixture(t)
+	files := signedCatalogFiles(t, priv, freshValidSource("2099-01-01T00:00:00Z", 3))
+	f := &fakeCatalogServer{files: files, etag: `"v3"`}
+	p, _ := newHTTPProvider(t, f, trust)
+	p.stageBase = base
+
+	if _, err := p.Stage(context.Background()); err != nil {
+		t.Fatalf("stage 1: %v", err)
+	}
+	// NO CommitValidators: the second Stage must be a full fetch, not a 304.
+	if _, err := p.Stage(context.Background()); errors.Is(err, errCatalogUnchanged) {
+		t.Fatal("second Stage returned 304/unchanged although validators were never committed")
+	}
+	// After an explicit commit, the conditional request works as before.
+	p.CommitValidators()
+	if _, err := p.Stage(context.Background()); !errors.Is(err, errCatalogUnchanged) {
+		t.Fatalf("post-commit Stage: want errCatalogUnchanged, got %v", err)
+	}
+}

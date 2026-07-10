@@ -265,6 +265,9 @@ func TestHTTPProvider_UnchangedCatalog304(t *testing.T) {
 	_ = os.RemoveAll(dir)
 	manifestsAfterFirst := f.manifestGET.Load()
 
+	// Validators go live only after the caller's seed succeeds (M1-2): commit as
+	// the successful-seed flow does before the conditional refetch.
+	p.CommitValidators()
 	// Second fetch sends If-None-Match → 304 → unchanged sentinel, no new work.
 	if _, err := p.Stage(context.Background()); !errors.Is(err, errCatalogUnchanged) {
 		t.Fatalf("second Stage: err = %v; want errCatalogUnchanged", err)

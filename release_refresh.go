@@ -54,7 +54,7 @@ func runCatalogRefreshLoop(ctx context.Context, interval time.Duration, getRM fu
 		if rm := getRM(); rm != nil && rm.refresh != nil {
 			if err := rm.runRefresh(ctx, "loop"); err != nil {
 				if logger != nil {
-					logger.Printf("release catalog: periodic refresh failed (catalog unchanged): %s", sanitizeLog(err.Error()))
+					logger.Printf("release catalog: periodic refresh failed (existing catalog untouched): %s", sanitizeLog(err.Error()))
 				}
 			}
 		}

@@ -332,19 +332,39 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		defer refreshMu.Unlock()
 		if seedProv != nil {
 			if err := runAutoSeed(ctx, seedProv, cfg, trust); err != nil {
+				// A rejected seed must never leave its ETag armed: the next tick
+				// has to re-download, not 304 into a false success (impl review HIGH).
+				seedProv.InvalidateValidators()
 				return errors.New(redactSeedError(err, cfg.catalogURL))
 			}
 		}
-		return holder.Reload()
+		if err := holder.Reload(); err != nil {
+			if seedProv != nil {
+				// Post-304 (or post-swap) on-disk failure: drop validators so the
+				// next tick fully re-downloads and self-heals a corrupted dir.
+				seedProv.InvalidateValidators()
+			}
+			// Reload errors carry local data-dir paths; refreshStatus.LastErr is
+			// viewer-readable via /api/releases, so log the detail and surface a
+			// fixed message (impl review LOW).
+			logger.Printf("release catalog: on-disk reload failed: %v", err)
+			return errors.New("release catalog: on-disk catalog reload failed (see server log)")
+		}
+		if seedProv != nil {
+			seedProv.CommitValidators()
+		}
+		return nil
 	}
-	rm.refreshInterval = cfg.refreshInterval
 	setReleaseManager(rm)
 	// Periodic production refresh (M1-2): started HERE — after the manager, its
 	// refresh seam, and the alert webhooks exist (RT-M1) — on the app lifecycle
 	// context, and only when a catalog origin is configured in enforce mode
 	// (RT-L2; in permissive mode a tick would be a pointless disk re-read).
+	// rm.refreshInterval is set ONLY when the loop actually starts, so
+	// /api/releases never advertises a cadence that does not exist.
 	if seedProv != nil && cfg.refreshInterval > 0 {
-		go runCatalogRefreshLoop(appLifecycleCtx, cfg.refreshInterval, currentReleaseManager)
+		rm.refreshInterval = cfg.refreshInterval
+		go runCatalogRefreshLoop(resolveLifecycleCtx(), cfg.refreshInterval, currentReleaseManager)
 	}
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)

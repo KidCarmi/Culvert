@@ -72,6 +72,11 @@ type releaseManager struct {
 	// redacts before returning; viewers read this via /api/releases).
 	statusMu      sync.Mutex
 	refreshStatus refreshStatus
+	// refreshRunMu serializes the WHOLE runRefresh (refresh call + status fold) so
+	// two overlapping callers cannot record outcomes out of order (a stale success
+	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
+	// still guards reads, so /api/releases never blocks behind an in-flight fetch.
+	refreshRunMu sync.Mutex
 }
 
 // refreshStatus records the most recent catalog-refresh outcome (M1-2).
@@ -87,6 +92,8 @@ type refreshStatus struct {
 // and folds the outcome into the shared status under statusMu. Alert-transition
 // logic hangs off this record in M1-3.
 func (rm *releaseManager) runRefresh(ctx context.Context, trigger string) error {
+	rm.refreshRunMu.Lock()
+	defer rm.refreshRunMu.Unlock()
 	err := rm.refresh(ctx)
 	rm.statusMu.Lock()
 	defer rm.statusMu.Unlock()
