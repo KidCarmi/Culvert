@@ -44,6 +44,23 @@ func dpReadFile(t *testing.T, path string) []byte {
 	return b
 }
 
+// dpOpenPlain decrypts raw via openDPNodeKey and returns a COPY of the plaintext
+// (for assertion) plus wasEncrypted. Fails the test on decrypt error.
+func dpOpenPlain(t *testing.T, keyPath string, raw []byte) (plain []byte, wasEnc bool) {
+	t.Helper()
+	sealed, wasEnc, err := openDPNodeKey(keyPath, raw)
+	if err != nil {
+		t.Fatalf("openDPNodeKey: %v", err)
+	}
+	if werr := sealed.WithPlaintext(func(b []byte) error {
+		plain = append(plain, b...)
+		return nil
+	}); werr != nil {
+		t.Fatalf("WithPlaintext: %v", werr)
+	}
+	return plain, wasEnc
+}
+
 // TestDPNodeKey_PlaintextWriteWhenDisabled: writeDPNodeKey stays plaintext when
 // encryption is disabled (unchanged behavior).
 func TestDPNodeKey_PlaintextWriteWhenDisabled(t *testing.T) {
@@ -91,9 +108,9 @@ func TestDPNodeKey_EncryptedWriteWhenEnabled(t *testing.T) {
 		t.Fatalf("expected KEK file: %v", err)
 	}
 	// Decrypt round-trip.
-	got, wasEnc, err := decryptDPNodeKey(keyPath, raw)
-	if err != nil || !wasEnc {
-		t.Fatalf("decrypt: err=%v wasEnc=%v", err, wasEnc)
+	got, wasEnc := dpOpenPlain(t, keyPath, raw)
+	if !wasEnc {
+		t.Fatal("expected wasEncrypted for envelope")
 	}
 	if !bytes.Equal(got, plain) {
 		t.Fatal("decrypted key does not match original")
@@ -110,10 +127,7 @@ func TestDPNodeKey_PlaintextLoadsWhenDisabled(t *testing.T) {
 	if err := os.WriteFile(keyPath, plain, 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	got, wasEnc, err := decryptDPNodeKey(keyPath, dpReadFile(t, keyPath))
-	if err != nil {
-		t.Fatalf("decryptDPNodeKey(plaintext): %v", err)
-	}
+	got, wasEnc := dpOpenPlain(t, keyPath, dpReadFile(t, keyPath))
 	if wasEnc {
 		t.Fatal("plaintext key reported as encrypted")
 	}
@@ -180,7 +194,7 @@ func TestDPNodeKey_MissingKEKFailsClosed(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, dpNodeKEKFileName)); err != nil {
 		t.Fatalf("remove kek: %v", err)
 	}
-	_, _, err := decryptDPNodeKey(keyPath, dpReadFile(t, keyPath))
+	_, _, err := openDPNodeKey(keyPath, dpReadFile(t, keyPath))
 	if err == nil {
 		t.Fatal("expected fail-closed with missing KEK")
 	}
@@ -200,7 +214,7 @@ func TestDPNodeKey_WrongKEKFailsClosed(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	t.Setenv(envKEKName, "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
-	if _, _, err := decryptDPNodeKey(keyPath, dpReadFile(t, keyPath)); err == nil {
+	if _, _, err := openDPNodeKey(keyPath, dpReadFile(t, keyPath)); err == nil {
 		t.Fatal("expected fail-closed with wrong KEK")
 	}
 }
@@ -216,7 +230,7 @@ func TestDPNodeKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 	}
 	enc := dpReadFile(t, keyPath)
 	enc[len(enc)-1] ^= 0xFF
-	if _, _, err := decryptDPNodeKey(keyPath, enc); err == nil {
+	if _, _, err := openDPNodeKey(keyPath, enc); err == nil {
 		t.Fatal("expected fail-closed on corrupted ciphertext")
 	}
 }
@@ -285,10 +299,7 @@ func TestDPNodeKey_MigrationAcceptsNonECKey(t *testing.T) {
 		t.Fatal("non-EC key not encrypted after migration")
 	}
 	// Decrypt round-trips back to the original PKCS#8 PEM.
-	got, _, err := decryptDPNodeKey(keyPath, dpReadFile(t, keyPath))
-	if err != nil {
-		t.Fatalf("decrypt migrated non-EC key: %v", err)
-	}
+	got, _ := dpOpenPlain(t, keyPath, dpReadFile(t, keyPath))
 	if !bytes.Equal(got, plain) {
 		t.Fatal("decrypted non-EC key does not match original")
 	}

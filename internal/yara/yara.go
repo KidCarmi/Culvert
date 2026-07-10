@@ -30,16 +30,18 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
 type yaraStringDef struct {
-	id      string         // variable identifier, e.g. "$a"
-	literal []byte         // non-nil for literal / hex patterns
-	re      *regexp.Regexp // non-nil for regex patterns
-	noCase  bool           // case-insensitive match for literal strings
+	id           string         // variable identifier, e.g. "$a"
+	literal      []byte         // non-nil for literal / hex patterns
+	literalLower []byte         // bytes.ToLower(literal), precomputed when noCase
+	re           *regexp.Regexp // non-nil for regex patterns
+	noCase       bool           // case-insensitive match for literal strings
 }
 
 type yaraCondKind int
@@ -355,16 +357,10 @@ func (y *RuleSet) WriteRule(name, src string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return warnings, fmt.Errorf("create rules dir: %w", err)
 	}
-	tmp := path + ".tmp"
-	// #nosec G304,G306,G703 -- tmp is derived from a path validated by
-	// resolveRulePath; 0600 is already used, G306 lint is a false positive.
-	if err := os.WriteFile(tmp, []byte(src), 0o600); err != nil {
-		return warnings, fmt.Errorf("write tmp: %w", err)
-	}
-	// #nosec G304,G703 -- both arguments flow from resolveRulePath.
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // #nosec G104,G304,G703 -- cleanup of our own tmp file
-		return warnings, fmt.Errorf("rename: %w", err)
+	// #nosec G304,G703 -- path is validated by resolveRulePath; no
+	// user-controlled component.
+	if err := fileutil.AtomicWrite(path, []byte(src), 0o600); err != nil {
+		return warnings, err
 	}
 
 	// Reload the whole directory so the new rule takes effect immediately.
@@ -396,15 +392,38 @@ func (y *RuleSet) SetDir(dir string) {
 	y.mu.Unlock()
 }
 
+// scanCtx carries the per-scan body plus a lazily-computed ASCII/Unicode
+// lowercased copy of it, so a nocase-heavy ruleset lowercases the body at most
+// ONCE per Match instead of once per nocase string (perf). It is built once in
+// Match and threaded by POINTER — passing it by value would drop the lowerSet
+// memoization at every call boundary and re-lower the body per string.
+type scanCtx struct {
+	data     []byte
+	lower    []byte
+	lowerSet bool
+}
+
+// lowerData returns bytes.ToLower(data), computing it at most once. bytes.ToLower
+// is Unicode-aware; it is used deliberately to stay byte-for-byte identical to
+// the pre-refactor nocase match — do NOT swap it for an ASCII-only fold.
+func (c *scanCtx) lowerData() []byte {
+	if !c.lowerSet {
+		c.lower = bytes.ToLower(c.data)
+		c.lowerSet = true
+	}
+	return c.lower
+}
+
 // Match returns the names of every rule that matches data.
 func (y *RuleSet) Match(data []byte) []string {
 	y.mu.RLock()
 	rules := y.rules
 	y.mu.RUnlock()
 
+	ctx := &scanCtx{data: data}
 	var matched []string
 	for i := range rules {
-		if evalYARARule(&rules[i], data) {
+		if evalYARARule(&rules[i], ctx) {
 			matched = append(matched, rules[i].name)
 		}
 	}
@@ -413,30 +432,32 @@ func (y *RuleSet) Match(data []byte) []string {
 
 // ── Rule evaluation ───────────────────────────────────────────────────────────
 
-func evalYARARule(r *yaraCompiledRule, data []byte) bool {
-	hit := make(map[string]bool, len(r.strings))
-	for _, s := range r.strings {
-		hit[s.id] = matchYARAString(&s, data)
-	}
+func evalYARARule(r *yaraCompiledRule, ctx *scanCtx) bool {
 	switch r.condKind {
 	case yaraAnyOfThem:
-		for _, v := range hit {
-			if v {
+		// True iff ANY string matches — short-circuit, no per-rule map alloc.
+		for i := range r.strings {
+			if matchYARAString(&r.strings[i], ctx) {
 				return true
 			}
 		}
 		return false
 	case yaraAllOfThem:
-		if len(hit) == 0 {
+		// True iff EVERY string matches (and there is at least one).
+		if len(r.strings) == 0 {
 			return false
 		}
-		for _, v := range hit {
-			if !v {
+		for i := range r.strings {
+			if !matchYARAString(&r.strings[i], ctx) {
 				return false
 			}
 		}
 		return true
-	default: // yaraBoolExpr
+	default: // yaraBoolExpr — needs id→bool lookup, so build the hit map here only
+		hit := make(map[string]bool, len(r.strings))
+		for i := range r.strings {
+			hit[r.strings[i].id] = matchYARAString(&r.strings[i], ctx)
+		}
 		return evalBoolCondition(r.condExpr, hit)
 	}
 }
@@ -519,15 +540,29 @@ func SetOnSaturation(v string) { yaraOnSaturationVar.Store(v) }
 // SetAlertDegraded toggles degraded-mode alerting.
 func SetAlertDegraded(v bool) { yaraAlertDegradedVar.Store(v) }
 
-func matchYARAString(s *yaraStringDef, data []byte) bool {
+// yaraStringIDExists reports whether defs already contains a string with id.
+// Used to skip duplicate ids at parse time so evaluation is deterministic.
+func yaraStringIDExists(defs []yaraStringDef, id string) bool {
+	for i := range defs {
+		if defs[i].id == id {
+			return true
+		}
+	}
+	return false
+}
+
+func matchYARAString(s *yaraStringDef, ctx *scanCtx) bool {
 	if s.re != nil {
 		timeout := time.Duration(GetTimeoutSecs()) * time.Second
-		return matchRegexWithTimeout(s.re, data, timeout)
+		return matchRegexWithTimeout(s.re, ctx.data, timeout)
 	}
 	if s.noCase {
-		return bytes.Contains(bytes.ToLower(data), bytes.ToLower(s.literal))
+		// Body lowercased at most once per scan (ctx.lowerData); literalLower
+		// precomputed at parse time. Equivalent to the former
+		// bytes.Contains(bytes.ToLower(data), bytes.ToLower(literal)).
+		return bytes.Contains(ctx.lowerData(), s.literalLower)
 	}
-	return bytes.Contains(data, s.literal)
+	return bytes.Contains(ctx.data, s.literal)
 }
 
 // yaraInflight tracks abandoned regex goroutines to prevent unbounded accumulation.
@@ -846,7 +881,17 @@ func parseYARARule(lines []string, start int) (yaraCompiledRule, int, error) {
 			switch section {
 			case "strings":
 				if sd, err := parseYARAStringDef(raw); err == nil {
-					rule.strings = append(rule.strings, sd)
+					if yaraStringIDExists(rule.strings, sd.id) {
+						// Real YARA rejects duplicate string identifiers; this
+						// lenient parser skips the dup (first wins) so evaluation
+						// is deterministic and identical across all condition
+						// kinds. CWE-117: sanitize admin-supplied name/id inline.
+						safeName := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(name, "\n", "_"), "\r", "_"), "\t", "_")
+						safeID := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(sd.id, "\n", "_"), "\r", "_"), "\t", "_")
+						obs.Printf("YARA: rule %q: duplicate string id %q ignored", safeName, safeID)
+					} else {
+						rule.strings = append(rule.strings, sd)
+					}
 				} else {
 					// CWE-117: rule name and error text may contain admin-
 					// supplied content via WriteRule; strip CR/LF/TAB and
@@ -904,6 +949,9 @@ func parseYARAStringDef(line string) (yaraStringDef, error) {
 		}
 		sd.literal = []byte(val)
 		sd.noCase = strings.Contains(mods, "nocase")
+		if sd.noCase {
+			sd.literalLower = bytes.ToLower(sd.literal)
+		}
 
 	case strings.HasPrefix(rest, "/"):
 		re, err := parseYARARegex(rest)

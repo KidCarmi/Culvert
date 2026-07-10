@@ -396,7 +396,10 @@ sync, and the admin dashboard (Data Plane nodes keep serving proxy traffic on
 their last-known-good config if the CP goes down — see "What Syncs Between
 Nodes" above — but no new config or enrollments land until it's back).
 
-Run a second Control Plane as a standby with `-ha-join <leader-cp>:50051`. By
+Run a second Control Plane as a standby with `-ha-join <leader-cp>:50051
+-ha-token <enrollment-token>` (both are required — a node given `-ha-join`
+without `-ha-token` will not enter HA standby; the UI-generated deploy command
+already includes the token). By
 default, a lost leader requires **manual** promotion of the standby
 (`-ha-auto-failover` is off by default — a 2-node pair alone can't safely
 tell "leader is dead" apart from "network partition"). For **safe automatic**

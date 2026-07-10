@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
@@ -49,9 +50,16 @@ type entry struct {
 
 // feedDB is the on-disk persistence format.
 type feedDB struct {
-	LastSync time.Time        `json:"last_sync"`
-	URLs     map[string]entry `json:"urls"`
-	Domains  map[string]entry `json:"domains"`
+	LastSync time.Time `json:"last_sync"`
+	// LastSuccess and LastSyncErr persist the SyncStatus fields across
+	// restarts. Both are omitempty so a DB written before these fields
+	// existed loads as zero/"" — loadFromDisk treats that legacy shape as
+	// "LastSync was itself a success" (matching the pre-SyncStatus
+	// behavior, where a successful sync was the only thing ever recorded).
+	LastSuccess time.Time        `json:"last_success,omitempty"`
+	LastSyncErr string           `json:"last_sync_err,omitempty"`
+	URLs        map[string]entry `json:"urls"`
+	Domains     map[string]entry `json:"domains"`
 	// DomainAllowlist persists the admin-managed allowlist. Tag has NO
 	// `omitempty` so an admin-cleared (zero-entry) allowlist serializes
 	// as `"domain_allowlist": []` and round-trips through loadFromDisk
@@ -71,8 +79,11 @@ type Feed struct {
 	domainAllowlist map[string]bool  // domains exempt from domain-level blocking
 	dbPath          string
 	syncInterval    time.Duration
-	lastSync        time.Time
+	lastSync        time.Time // time of the most recent sync attempt, success or failure
+	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
+	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
+	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
 	enabled         bool
 }
 
@@ -94,6 +105,16 @@ const (
 	feedUserAgent   = "Culvert/1.0 (+https://github.com/KidCarmi/Claude-Test)"
 	feedHTTPTimeout = 60 * time.Second
 	maxFeedLines    = 500_000 // safety cap per feed to limit memory usage
+
+	// Source names stamped on entries. Each feed's name appears in exactly
+	// two places (the fetch call and the replacedSources bookkeeping in
+	// Sync), both via these constants — carryForward's keep-by-exclusion
+	// depends on the strings matching exactly, so they must never be
+	// spelled inline. "cluster-sync" (ImportFeedData) is deliberately NOT
+	// here: it is never a local fetch source, which is what makes those
+	// entries survive local syncs.
+	sourceURLhaus   = "urlhaus"
+	sourceOpenPhish = "openphish"
 )
 
 // Init configures the feed manager and loads any persisted DB from disk.
@@ -151,33 +172,93 @@ func (tf *Feed) Sync() {
 	obs.Debugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
+	var failures []string
+	replacedSources := make(map[string]bool, 2)
 
-	n, err := tf.fetchTextFeed(urlHausTextFeed, "urlhaus", newURLs, newDomains)
-	if err != nil {
-		obs.Printf("ThreatFeed: URLhaus sync failed: %v", err)
+	if ok, fail := tf.fetchFeedInto(urlHausTextFeed, sourceURLhaus, "URLhaus", newURLs, newDomains); ok {
+		replacedSources[sourceURLhaus] = true
 	} else {
-		obs.Printf("ThreatFeed: URLhaus %d entries", n)
+		failures = append(failures, fail)
+	}
+	if ok, fail := tf.fetchFeedInto(openPhishFeed, sourceOpenPhish, "OpenPhish", newURLs, newDomains); ok {
+		replacedSources[sourceOpenPhish] = true
+	} else {
+		failures = append(failures, fail)
 	}
 
-	n, err = tf.fetchTextFeed(openPhishFeed, "openphish", newURLs, newDomains)
-	if err != nil {
-		obs.Printf("ThreatFeed: OpenPhish sync failed: %v", err)
-	} else {
-		obs.Printf("ThreatFeed: OpenPhish %d entries", n)
-	}
-
-	tf.mu.Lock()
-	tf.urls = newURLs
-	tf.domains = newDomains
-	tf.lastSync = time.Now()
-	tf.mu.Unlock()
-	tf.totalEntries.Store(int64(len(newURLs)))
+	tf.applySync(newURLs, newDomains, failures, replacedSources, time.Now())
 
 	obs.Printf("ThreatFeed: sync complete — %d unique URLs, %d unique domains", len(newURLs), len(newDomains))
 
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save to disk failed: %v", err)
+		}
+	}
+}
+
+// applySync installs freshly-fetched feed tables. Only entries owned by a
+// feed that fetched CLEANLY this sync (replacedSources) are replaced; every
+// other previous entry is carried forward. That covers two failure classes:
+//   - a feed whose fetch failed keeps its last-known-good entries — otherwise
+//     one sync with both feeds unreachable would wipe the entire threat DB in
+//     memory AND on disk (Sync persists right after), silently disabling
+//     threat-feed blocking until the next successful sync;
+//   - entries a local fetch never owns — the DP's "cluster-sync" import
+//     (ImportFeedData) — survive local syncs instead of being wiped until the
+//     next CP snapshot re-imports them.
+//
+// A feed that fetched cleanly is always fully replaced, so its stale entries
+// still age out; cluster-sync entries are refreshed wholesale by
+// ImportFeedData on every snapshot apply.
+func (tf *Feed) applySync(newURLs, newDomains map[string]entry, failures []string, replacedSources map[string]bool, now time.Time) {
+	tf.mu.Lock()
+	carryForward(newURLs, tf.urls, replacedSources)
+	carryForward(newDomains, tf.domains, replacedSources)
+	tf.urls = newURLs
+	tf.domains = newDomains
+	tf.lastSync = now
+	if len(failures) == 0 {
+		tf.lastSuccess = now
+		tf.lastSyncErr = ""
+	} else {
+		tf.lastSyncErr = strings.Join(failures, "; ")
+	}
+	tf.mu.Unlock()
+	tf.totalEntries.Store(int64(len(newURLs)))
+}
+
+// fetchFeedInto fetches one feed into the fresh maps and reports whether the
+// result should REPLACE that source's previous entries. A fetch error keeps
+// last-known-good via carryForward — and so does a ZERO-entry "success": an
+// HTTP 200 maintenance page or empty/truncated-at-a-line-boundary body
+// returns (0, nil) from fetchTextFeed, and these public feeds are never
+// legitimately empty, so treating it as clean would wipe the feed the same
+// way a hard error used to (caught by review on PR #587).
+func (tf *Feed) fetchFeedInto(feedURL, source, label string, urls, domains map[string]entry) (replaced bool, failure string) {
+	n, err := tf.fetchTextFeed(feedURL, source, urls, domains)
+	if err != nil {
+		obs.Printf("ThreatFeed: %s sync failed: %v", label, err)
+		return false, fmt.Sprintf("%s: %v", label, err)
+	}
+	if n == 0 {
+		obs.Printf("ThreatFeed: %s returned 0 entries — keeping previous data", label)
+		return false, label + ": returned 0 entries"
+	}
+	obs.Printf("ThreatFeed: %s %d entries", label, n)
+	return true, ""
+}
+
+// carryForward copies into dst the entries of old whose Source is NOT in
+// replaced (feeds that fetched cleanly this sync). Fresh entries win on key
+// collision.
+func carryForward(dst, old map[string]entry, replaced map[string]bool) {
+	for k, e := range old {
+		if replaced[e.Source] {
+			continue
+		}
+		if _, ok := dst[k]; !ok {
+			dst[k] = e
 		}
 	}
 }
@@ -200,7 +281,14 @@ func (tf *Feed) CheckURL(rawURL string) (malicious bool, source string) {
 	}
 	if host != "" {
 		if e, ok := tf.domains[host]; ok {
-			return true, e.Source
+			if tf.domainAllowlist[host] {
+				// A real domain-level threat entry suppressed by the
+				// allowlist — a security-control bypass, counted so an
+				// operator can see the allowlist overriding live intel.
+				tf.maskedHits.Add(1)
+			} else {
+				return true, e.Source
+			}
 		}
 	}
 	return false, ""
@@ -212,15 +300,33 @@ func (tf *Feed) CheckDomain(domain string) (malicious bool, source string) {
 	if !tf.Enabled() {
 		return false, ""
 	}
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	domain = normaliseDomain(domain)
+	if domain == "" {
+		return false, ""
+	}
 
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 
-	if e, ok := tf.domains[domain]; ok {
-		return true, e.Source
+	e, ok := tf.domains[domain]
+	if !ok {
+		return false, ""
 	}
-	return false, ""
+	if tf.domainAllowlist[domain] {
+		// Suppressed by the allowlist — count the bypass (see CheckURL).
+		tf.maskedHits.Add(1)
+		return false, ""
+	}
+	return true, e.Source
+}
+
+// AllowlistMaskedTotal returns the cumulative count of domain-level threat
+// hits suppressed by the domain allowlist since process start. A rising
+// value means the allowlist is actively overriding live threat intel —
+// worth an operator's attention (the exemption may be too broad, or an
+// allowlisted platform is now hosting malware at the domain level).
+func (tf *Feed) AllowlistMaskedTotal() int64 {
+	return tf.maskedHits.Load()
 }
 
 // Enabled reports whether the feed is active.
@@ -235,6 +341,19 @@ func (tf *Feed) Stats() (int64, time.Time, time.Duration) {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	return tf.totalEntries.Load(), tf.lastSync, tf.syncInterval
+}
+
+// SyncStatus reports whether the most recent sync fetched every feed
+// cleanly, the time of the last fully-successful sync (which may lag
+// lastSync from Stats if recent attempts have been failing), and a
+// summary of the most recent failure (empty when the last sync succeeded).
+// lastSync updates on every attempt regardless of outcome, so relying on
+// Stats alone lets a persistently-failing feed hide behind a
+// perpetually-fresh timestamp.
+func (tf *Feed) SyncStatus() (ok bool, lastSuccess time.Time, errSummary string) {
+	tf.mu.RLock()
+	defer tf.mu.RUnlock()
+	return tf.lastSyncErr == "", tf.lastSuccess, tf.lastSyncErr
 }
 
 // defaultDomainAllowlist seeds the threat-feed domain allowlist with popular
@@ -255,9 +374,10 @@ var defaultDomainAllowlist = []string{
 // DomainAllowlisted reports whether a domain is on the threat-feed allowlist
 // (domain-level blocking skipped; URL-level blocking still applies).
 func (tf *Feed) DomainAllowlisted(domain string) bool {
+	domain = normaliseDomain(domain)
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
-	return tf.domainAllowlist[strings.ToLower(domain)]
+	return tf.domainAllowlist[domain]
 }
 
 // DomainAllowlist returns the current allowlist entries sorted.
@@ -273,11 +393,11 @@ func (tf *Feed) DomainAllowlist() []string {
 }
 
 // SetDomainAllowlist replaces the entire allowlist and persists to disk.
-func (tf *Feed) SetDomainAllowlist(domains []string) {
+func (tf *Feed) SetDomainAllowlist(domains []string) error {
 	tf.mu.Lock()
 	tf.domainAllowlist = make(map[string]bool, len(domains))
 	for _, d := range domains {
-		d = strings.ToLower(strings.TrimSpace(d))
+		d = normaliseDomain(d)
 		if d != "" {
 			tf.domainAllowlist[d] = true
 		}
@@ -286,45 +406,55 @@ func (tf *Feed) SetDomainAllowlist(domains []string) {
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // AddDomainAllowlist adds a domain to the allowlist and persists.
-func (tf *Feed) AddDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) AddDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	if domain == "" {
-		return
+		return nil
 	}
 	tf.mu.Lock()
+	if tf.domainAllowlist == nil {
+		tf.domainAllowlist = make(map[string]bool)
+	}
 	tf.domainAllowlist[domain] = true
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // RemoveDomainAllowlist removes a domain from the allowlist and persists.
-func (tf *Feed) RemoveDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) RemoveDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	tf.mu.Lock()
 	delete(tf.domainAllowlist, domain)
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // ── Feed fetching ─────────────────────────────────────────────────────────────
 
 // fetchTextFeed downloads a plain-text URL list (one URL per line; lines
 // beginning with '#' are comments) and populates the urls and domains maps.
-// Allowlisted domains are only recorded at the URL level, not the domain
-// level, to avoid blocking entire platforms due to one bad file.
+// Allowlisted domains are still recorded as threat intel; the allowlist only
+// masks domain-level blocking at lookup time so removal re-enables the block
+// immediately without waiting for another sync.
 //
 // A method (pre-extraction it was a package function reading the
 // globalThreatFeed singleton for the allowlist check): the only caller is
@@ -364,9 +494,7 @@ func (tf *Feed) fetchTextFeed(feedURL, source string, urls, domains map[string]e
 		}
 		e := entry{Source: source, AddedAt: now}
 		urls[normURL] = e
-		if !tf.DomainAllowlisted(host) {
-			domains[host] = e
-		}
+		domains[host] = e
 		count++
 	}
 	return count, sc.Err()
@@ -384,7 +512,7 @@ func NormaliseURL(raw string) (norm, host string) {
 	if err != nil || u.Host == "" {
 		return "", ""
 	}
-	host = strings.ToLower(u.Hostname())
+	host = canonicalHost(u.Hostname())
 	if host == "" {
 		return "", ""
 	}
@@ -396,6 +524,36 @@ func NormaliseURL(raw string) (norm, host string) {
 	norm = strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
 	norm = strings.TrimRight(norm, "/")
 	return norm, host
+}
+
+func normaliseDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return ""
+	}
+	if strings.Contains(domain, "://") {
+		u, err := url.Parse(domain)
+		if err != nil || u.Host == "" {
+			return ""
+		}
+		domain = u.Host
+	} else if strings.Contains(domain, "/") {
+		// URL- or path-shaped input MUST yield a host. Falling through
+		// to canonicalHost with the raw string would mint an unmatchable
+		// key like "10.0.0.1/24" — a silent no-op security exception
+		// that persists, syncs to DPs, and is counted in the audit.
+		_, host := NormaliseURL(domain)
+		if host == "" {
+			return ""
+		}
+		domain = host
+	}
+	return canonicalHost(domain)
+}
+
+func canonicalHost(host string) string {
+	host = hostutil.StripHostPort(strings.ToLower(strings.TrimSpace(host)))
+	return hostutil.NormalizeHost(host)
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -418,11 +576,44 @@ func (tf *Feed) loadFromDisk(path string) error {
 	if db.Domains == nil {
 		db.Domains = make(map[string]entry)
 	}
+	// Re-canonicalize legacy keys (one-time upgrade cost, load only). DBs
+	// written before host canonicalization (IDNA/punycode, trailing dots)
+	// carry keys the canonicalized lookups in CheckURL/CheckDomain would
+	// no longer match — without this rekey those entries silently stop
+	// blocking until the next feed sync rewrites the maps. A key that
+	// fails canonicalization keeps its original form (fail-safe: the
+	// entry is retained and matches exactly as it did before).
+	urls := make(map[string]entry, len(db.URLs))
+	for k, v := range db.URLs {
+		if nk, _ := NormaliseURL(k); nk != "" {
+			urls[nk] = v
+		} else {
+			urls[k] = v
+		}
+	}
+	domains := make(map[string]entry, len(db.Domains))
+	for k, v := range db.Domains {
+		if nk := normaliseDomain(k); nk != "" {
+			domains[nk] = v
+		} else {
+			domains[k] = v
+		}
+	}
 
 	tf.mu.Lock()
-	tf.urls = db.URLs
-	tf.domains = db.Domains
+	tf.urls = urls
+	tf.domains = domains
 	tf.lastSync = db.LastSync
+	tf.lastSyncErr = db.LastSyncErr
+	switch {
+	case !db.LastSuccess.IsZero():
+		tf.lastSuccess = db.LastSuccess
+	case db.LastSyncErr == "":
+		// Legacy DB (saved before LastSuccess existed) or a DB saved by a
+		// clean sync before this field was ever set: LastSync IS the last
+		// success, so back-fill it rather than reporting "never synced".
+		tf.lastSuccess = db.LastSync
+	}
 	// Restore the persisted allowlist. The guard keys on nil, not
 	// len()==0, so an admin-cleared explicit-empty `[]` (saved as
 	// `"domain_allowlist": []` per the no-omitempty tag) replaces the
@@ -435,14 +626,18 @@ func (tf *Feed) loadFromDisk(path string) error {
 	if db.DomainAllowlist != nil {
 		tf.domainAllowlist = make(map[string]bool, len(db.DomainAllowlist))
 		for _, d := range db.DomainAllowlist {
-			tf.domainAllowlist[strings.ToLower(d)] = true
+			if d = normaliseDomain(d); d != "" {
+				tf.domainAllowlist[d] = true
+			}
 		}
 	}
 	tf.mu.Unlock()
-	tf.totalEntries.Store(int64(len(db.URLs)))
+	// Count the post-rekey map, not db.URLs — rekey collisions (a legacy
+	// Unicode key alongside its punycode twin) shrink the map.
+	tf.totalEntries.Store(int64(len(urls)))
 
 	obs.Printf("ThreatFeed: loaded %d URLs from %s (last sync: %s)",
-		len(db.URLs), path, db.LastSync.Format(time.RFC3339))
+		len(urls), path, db.LastSync.Format(time.RFC3339))
 	return nil
 }
 
@@ -453,10 +648,26 @@ func (tf *Feed) saveToDisk() error {
 		allowlist = append(allowlist, d)
 	}
 	sort.Strings(allowlist)
+	// The persisted `domains` key keeps its pre-masking meaning — "hosts
+	// a lookup may block" — so currently-allowlisted hosts are filtered
+	// OUT on disk. Older binaries have no lookup-time allowlist mask;
+	// persisting masked hosts would make a binary rollback hard-block
+	// allowlisted platforms (github.com etc. routinely appear in
+	// URLhaus). The in-memory map retains them, so while this process
+	// lives, removing an allowlist entry re-blocks immediately; across a
+	// restart the masked intel is rebuilt by the next sync/import.
+	domains := make(map[string]entry, len(tf.domains))
+	for d, e := range tf.domains {
+		if !tf.domainAllowlist[d] {
+			domains[d] = e
+		}
+	}
 	db := feedDB{
 		LastSync:        tf.lastSync,
+		LastSuccess:     tf.lastSuccess,
+		LastSyncErr:     tf.lastSyncErr,
 		URLs:            tf.urls,
-		Domains:         tf.domains,
+		Domains:         domains,
 		DomainAllowlist: allowlist,
 	}
 	tf.mu.RUnlock()
@@ -502,11 +713,21 @@ func (tf *Feed) ExportURLs() map[string]int64 {
 
 // ExportDomains returns a copy of the domain threat map as domain→unix-timestamp.
 // Used by the Control Plane to include feed data in config sync.
+//
+// Currently-allowlisted hosts are excluded: the ThreatFeedDomains wire field
+// keeps its pre-masking meaning ("hosts a lookup may block") because DP nodes
+// running an older binary have no lookup-time allowlist mask — exporting
+// masked hosts would make a mixed-version rolling upgrade (new CP, old DPs)
+// hard-block allowlisted platforms fleet-wide. New DPs lose nothing: their
+// own allowlist (synced separately) masks these hosts at lookup anyway.
 func (tf *Feed) ExportDomains() map[string]int64 {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	out := make(map[string]int64, len(tf.domains))
 	for d, e := range tf.domains {
+		if tf.domainAllowlist[d] {
+			continue
+		}
 		out[d] = e.AddedAt.Unix()
 	}
 	return out
@@ -518,10 +739,21 @@ func (tf *Feed) ExportDomains() map[string]int64 {
 func (tf *Feed) ImportFeedData(urls map[string]int64, domains map[string]int64) {
 	newURLs := make(map[string]entry, len(urls))
 	for u, ts := range urls {
+		// Re-canonicalize keys from an older CP (Unicode hosts, trailing
+		// dots) so exact-URL entries stay reachable by the canonicalized
+		// CheckURL lookup; keep the original key when canonicalization
+		// fails (fail-safe, mirrors loadFromDisk).
+		if nu, _ := NormaliseURL(u); nu != "" {
+			u = nu
+		}
 		newURLs[u] = entry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
 	}
 	newDomains := make(map[string]entry, len(domains))
 	for d, ts := range domains {
+		d = normaliseDomain(d)
+		if d == "" {
+			continue
+		}
 		newDomains[d] = entry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
 	}
 	tf.mu.Lock()
@@ -559,6 +791,21 @@ func (tf *Feed) SetDBPathForTest(path string) (old string) {
 	tf.mu.Lock()
 	old = tf.dbPath
 	tf.dbPath = path
+	tf.mu.Unlock()
+	return old
+}
+
+// SetEnabledForTest toggles the feed's enabled flag and returns the previous
+// value. Test support for main-side tests that assert CheckURL/CheckDomain
+// verdicts on the process-wide feed: outside tests the flag is only set by
+// Init, so a test that needs positive verdicts must enable the feed itself
+// (and restore the old value in cleanup) instead of depending on whether an
+// earlier test happened to run Init — that ordering dependence is exactly
+// what the shuffle/determinism gate flags.
+func (tf *Feed) SetEnabledForTest(enabled bool) (old bool) {
+	tf.mu.Lock()
+	old = tf.enabled
+	tf.enabled = enabled
 	tf.mu.Unlock()
 	return old
 }

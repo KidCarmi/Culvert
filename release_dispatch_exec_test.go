@@ -205,6 +205,27 @@ func TestExec_FailedNotRolledBackNeedsAttn(t *testing.T) {
 	}
 }
 
+// TestExec_AgentUnreachableAfterUpdate proves the self-heal classification: an
+// apply the agent reports SUCCEEDED, followed by a TRANSPORT failure on the
+// post-verify /v1/status read (the anchor read having succeeded), is surfaced as
+// the distinct agent_unreachable_after_update detail — the fingerprint of a
+// recreate that dropped the CP↔agent socket — rather than a generic
+// post_verify_read_failed. It stays FAILED_NEEDS_ATTN so it still alerts.
+func TestExec_AgentUnreachableAfterUpdate(t *testing.T) {
+	cat := mustLoad(t, validSource())
+	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	agent := &fakeAgent{
+		applyOpID:   "op-uar",
+		waitState:   agentStateSucceeded,
+		runningSeq:  [][]string{{dispatchRepo + "@" + digB}},                   // anchor read ok
+		runningErrs: []error{nil, errors.New("dial unix: connection refused")}, // post-verify read: transport failure
+	}
+	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
+	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, detailAgentUnreachableAfterUpdate) {
+		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/%s", res.Terminal, res.Detail, detailAgentUnreachableAfterUpdate)
+	}
+}
+
 func TestExec_WatchTimeoutNeedsAttn(t *testing.T) {
 	cat := mustLoad(t, validSource())
 	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
@@ -342,9 +363,13 @@ func TestExec_AnchorReadFailureRefusesBeforeApply(t *testing.T) {
 func TestExec_PostVerifyReadFailureAfterSucceeded(t *testing.T) {
 	cat := mustLoad(t, validSource())
 	plan := planTo(t, cat, DispatchConfig{ProxyRepo: dispatchRepo}, nil)
+	// A DETERMINISTIC (non-transient, 4xx) post-read failure after a succeeded
+	// op stays the generic post_verify_read_failed — it is NOT the socket-loss
+	// fingerprint (that is a TRANSPORT failure, covered by
+	// TestExec_AgentUnreachableAfterUpdate).
 	agent := &fakeAgent{applyOpID: "op-pv1", waitState: agentStateSucceeded,
-		runningSeq:  [][]string{nil},                         // anchor (call 0) ok
-		runningErrs: []error{nil, errors.New("status gone")}} // post (call 1) errors
+		runningSeq:  [][]string{nil},                                                // anchor (call 0) ok
+		runningErrs: []error{nil, &agentHTTPError{Status: 400, Path: "/v1/status"}}} // post (call 1): deterministic 4xx
 	res, _ := newExec(agent, nil).Execute(context.Background(), plan)
 	if res.Terminal != TerminalFailedNeedsAttn || !strings.HasPrefix(res.Detail, "post_verify_read_failed") {
 		t.Fatalf("terminal=%s detail=%q; want failed_needs_attn/post_verify_read_failed", res.Terminal, res.Detail)

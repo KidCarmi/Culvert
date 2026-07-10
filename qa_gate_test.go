@@ -453,12 +453,12 @@ func TestAPIAuthLogin_TOTPFailureRecordsLockout(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg.DeleteUIUser(user)
-		loginLimiter.RecordSuccess(user)
+		loginLimiter.ResetUser(user)
 	})
-	loginLimiter.RecordSuccess(user)
+	loginLimiter.ResetUser(user)
 	initSecret(t)
 
-	before := loginLimiter.AttemptsLeft(user)
+	before := loginLimiter.AttemptsLeft("127.0.0.1", user)
 
 	w := httptest.NewRecorder()
 	body := map[string]string{"user": user, "pass": pass, "totp": "000000"}
@@ -467,7 +467,7 @@ func TestAPIAuthLogin_TOTPFailureRecordsLockout(t *testing.T) {
 	if w.Code != http.StatusUnauthorized && w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 401/429 for bad TOTP, got %d body=%s", w.Code, w.Body.String())
 	}
-	after := loginLimiter.AttemptsLeft(user)
+	after := loginLimiter.AttemptsLeft("127.0.0.1", user)
 	if after >= before {
 		t.Fatalf("TOTP failure did not consume a lockout attempt: before=%d after=%d — "+
 			"regression of the OTP brute-force fix", before, after)

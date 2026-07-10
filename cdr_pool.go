@@ -348,7 +348,7 @@ func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*c
 			break
 		}
 	}
-	ca, cert, key, err := loadCDRCertBundle(inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath)
+	ca, cert, keySealed, err := loadCDRCertBundle(inst.CACertPath, inst.ClientCertPath, inst.ClientKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("cert load: %w", err)
 	}
@@ -357,7 +357,6 @@ func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*c
 		ServerFingerprintHx: inst.ServerFingerprint,
 		CACertPEM:           ca,
 		ClientCertPEM:       cert,
-		ClientKeyPEM:        key,
 	}
 	// Carry forward an active dual-pin window so the dialled client
 	// accepts EITHER fingerprint until the grace window expires.
@@ -373,8 +372,19 @@ func dialEnrolledInstance(inst *CDREnrolledInstance, cfg CDRConfig, oldPool []*c
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
 	}
-	client, derr := NewCDRClient(clientCfg)
-	if derr != nil {
+	// The client key stays sealed until NewCDRClient parses it into a
+	// tls.Certificate (tls.X509KeyPair) inside the closure; the plaintext is
+	// zeroized on return and NewCDRClient retains no reference to the PEM bytes.
+	var client *CDRClient
+	if derr := keySealed.WithPlaintext(func(key []byte) error {
+		clientCfg.ClientKeyPEM = key
+		c, e := NewCDRClient(clientCfg)
+		if e != nil {
+			return e
+		}
+		client = c
+		return nil
+	}); derr != nil {
 		return nil, fmt.Errorf("dial: %w", derr)
 	}
 	if carriedBreaker == nil {
@@ -394,26 +404,41 @@ func dialSingleFromConfig(cfg CDRConfig) (*cdrPooledClient, error) {
 		Endpoint:            cfg.Endpoint,
 		ServerFingerprintHx: cfg.ServerFingerprint,
 	}
-	if cfg.CertsDir != "" {
-		ca, cert, key, err := loadCDRCertBundle(
-			cfg.CertsDir+"/ca.pem",
-			cfg.CertsDir+"/client.pem",
-			cfg.CertsDir+"/client.key",
-		)
-		if err != nil {
-			return nil, err
-		}
-		clientCfg.CACertPEM = ca
-		clientCfg.ClientCertPEM = cert
-		clientCfg.ClientKeyPEM = key
-	}
+	// Timeout/chunk are independent of the certs; set them first so both the
+	// keyed and keyless NewCDRClient paths below see them.
 	if cfg.TimeoutSec > 0 {
 		clientCfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
 	}
 	if cfg.ChunkSizeKB > 0 {
 		clientCfg.ChunkSize = cfg.ChunkSizeKB * 1024
 	}
-	client, err := NewCDRClient(clientCfg)
+	var client *CDRClient
+	var err error
+	if cfg.CertsDir != "" {
+		ca, cert, keySealed, lerr := loadCDRCertBundle(
+			cfg.CertsDir+"/ca.pem",
+			cfg.CertsDir+"/client.pem",
+			cfg.CertsDir+"/client.key",
+		)
+		if lerr != nil {
+			return nil, lerr
+		}
+		clientCfg.CACertPEM = ca
+		clientCfg.ClientCertPEM = cert
+		// Key stays sealed until NewCDRClient parses it into a tls.Certificate;
+		// zeroized on return (see dialEnrolledInstance).
+		err = keySealed.WithPlaintext(func(key []byte) error {
+			clientCfg.ClientKeyPEM = key
+			c, e := NewCDRClient(clientCfg)
+			if e != nil {
+				return e
+			}
+			client = c
+			return nil
+		})
+	} else {
+		client, err = NewCDRClient(clientCfg)
+	}
 	if err != nil {
 		return nil, err
 	}

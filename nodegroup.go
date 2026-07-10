@@ -138,7 +138,7 @@ func deleteNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "group not found", http.StatusNotFound)
 		return
 	}
-	auditEvent(r, "nodegroup.delete", sanitizeLog(name), "deleted")
+	auditEvent(r, "nodegroup.remove", sanitizeLog(name), "deleted")
 	jsonOK(w, map[string]any{"ok": true})
 }
 

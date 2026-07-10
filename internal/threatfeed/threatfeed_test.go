@@ -3,6 +3,7 @@ package threatfeed
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -62,9 +63,10 @@ func TestNormaliseFeedURL_TrailingSlash(t *testing.T) {
 
 func newEnabledFeed() *Feed {
 	tf := &Feed{
-		urls:    make(map[string]entry),
-		domains: make(map[string]entry),
-		enabled: true,
+		urls:            make(map[string]entry),
+		domains:         make(map[string]entry),
+		domainAllowlist: make(map[string]bool),
+		enabled:         true,
 	}
 	tf.totalEntries.Store(0)
 	return tf
@@ -158,6 +160,255 @@ func TestThreatFeed_CheckDomain_Miss(t *testing.T) {
 	}
 }
 
+func TestThreatFeed_DomainAllowlistMasksDomainButKeepsThreatIntelAndURLBlock(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.urls["https://www.google.com/malware"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["www.google.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.AddDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("allowlisted domain should not be blocked by stale domain map")
+	}
+	if _, ok := tf.domains["www.google.com"]; !ok {
+		t.Fatal("allowlisting should preserve domain-level threat intel")
+	}
+	if hit, src := tf.CheckURL("https://www.google.com/malware?utm=ignored"); !hit || src != "urlhaus" {
+		t.Fatalf("exact malicious URL must remain blocked after domain allowlist; hit=%v src=%q", hit, src)
+	}
+	if err := tf.RemoveDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "urlhaus" {
+		t.Fatalf("removing allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_CheckDomainAllowlistDefendsAgainstStaleDomainMap(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domainAllowlist["www.google.com"] = true
+	tf.domains["www.google.com"] = entry{Source: "openphish", AddedAt: time.Now()}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("CheckDomain should honor allowlist even if stale domain entry remains")
+	}
+	if hit, _ := tf.CheckURL("https://www.google.com/anything"); hit {
+		t.Fatal("CheckURL domain fallback should honor allowlist when no exact URL is present")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistNormalizesOperatorInputs(t *testing.T) {
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{
+		" HTTPS://WWW.Google.COM:443/some/path ",
+		"www.google.com.",
+	}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	got := tf.DomainAllowlist()
+	if len(got) != 1 || got[0] != "www.google.com" {
+		t.Fatalf("normalized allowlist = %v, want [www.google.com]", got)
+	}
+	if !tf.DomainAllowlisted("https://www.google.com:443/other") {
+		t.Fatal("DomainAllowlisted should normalize URL-shaped operator input")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistIsExactHost(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domains["www.google.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	if err := tf.SetDomainAllowlist([]string{"google.com"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "urlhaus" {
+		t.Fatalf("bare-domain allowlist should not suppress subdomain hits; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_DomainAllowlistCanonicalizesIDNConsistently(t *testing.T) {
+	tf := newEnabledFeed()
+	const asciiHost = "xn--bcher-kva.example"
+	tf.domains[asciiHost] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.SetDomainAllowlist([]string{"b\u00fccher.example"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	if got := tf.DomainAllowlist(); len(got) != 1 || got[0] != asciiHost {
+		t.Fatalf("IDN allowlist normalized to %v, want [%s]", got, asciiHost)
+	}
+	if hit, _ := tf.CheckDomain(asciiHost); hit {
+		t.Fatal("punycode domain hit should be suppressed by equivalent Unicode allowlist entry")
+	}
+	if hit, _ := tf.CheckURL("https://b\u00fccher.example/anything"); hit {
+		t.Fatal("URL host canonicalization should match the domain allowlist")
+	}
+}
+
+func TestThreatFeed_SetDomainAllowlistReturnsPersistenceError(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.dbPath = filepath.Join(t.TempDir(), "missing-parent", "feed.json")
+
+	if err := tf.SetDomainAllowlist([]string{"persist-error.example"}); err == nil {
+		t.Fatal("SetDomainAllowlist should return persistence errors")
+	}
+	if !tf.DomainAllowlisted("persist-error.example") {
+		t.Fatal("allowlist should still apply in memory when persistence fails")
+	}
+}
+
+func TestThreatFeed_SaveAndExportExcludeMaskedDomains(t *testing.T) {
+	// The on-disk `domains` key and the ExportDomains wire surface keep
+	// the pre-masking meaning "hosts a lookup may block": old binaries
+	// (rollback) and old DPs (mixed-version rolling upgrade) have no
+	// lookup-time allowlist mask, so masked hosts must never reach them.
+	// In-memory retention still guarantees immediate re-block on removal.
+	tf := newEnabledFeed()
+	tf.dbPath = filepath.Join(t.TempDir(), "feed.json")
+	tf.urls["https://masked.example/malware"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["masked.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["evil.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.AddDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+
+	exported := tf.ExportDomains()
+	if _, ok := exported["masked.example"]; ok {
+		t.Fatal("ExportDomains must exclude allowlisted hosts")
+	}
+	if _, ok := exported["evil.example"]; !ok {
+		t.Fatal("ExportDomains must keep non-allowlisted hosts")
+	}
+
+	raw, err := os.ReadFile(tf.dbPath)
+	if err != nil {
+		t.Fatalf("read DB: %v", err)
+	}
+	var db feedDB
+	if err := json.Unmarshal(raw, &db); err != nil {
+		t.Fatalf("unmarshal DB: %v", err)
+	}
+	if _, ok := db.Domains["masked.example"]; ok {
+		t.Fatal("persisted domains must exclude allowlisted hosts (rollback safety)")
+	}
+	if _, ok := db.Domains["evil.example"]; !ok {
+		t.Fatal("persisted domains must keep non-allowlisted hosts")
+	}
+	if _, ok := db.URLs["https://masked.example/malware"]; !ok {
+		t.Fatal("exact-URL entries persist regardless of the domain allowlist")
+	}
+
+	// Memory retains the masked entry → removal re-blocks immediately.
+	if _, ok := tf.domains["masked.example"]; !ok {
+		t.Fatal("in-memory domains must retain masked hosts")
+	}
+	if err := tf.RemoveDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, _ := tf.CheckDomain("masked.example"); !hit {
+		t.Fatal("removal must re-enable the domain block immediately")
+	}
+}
+
+func TestThreatFeed_AllowlistMaskedCounter(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domains["masked.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["evil.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	if err := tf.AddDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+	if got := tf.AllowlistMaskedTotal(); got != 0 {
+		t.Fatalf("masked counter should start at 0, got %d", got)
+	}
+
+	// A suppressed real hit increments; a clean allow and a real block do not.
+	if hit, _ := tf.CheckDomain("masked.example"); hit {
+		t.Fatal("allowlisted host must not block")
+	}
+	if hit, _ := tf.CheckURL("http://masked.example/x"); hit {
+		t.Fatal("allowlisted host must not block via URL fallback")
+	}
+	if hit, _ := tf.CheckDomain("evil.example"); !hit {
+		t.Fatal("non-allowlisted threat must still block")
+	}
+	if hit, _ := tf.CheckDomain("clean.example"); hit {
+		t.Fatal("clean host must not block")
+	}
+	// masked.example counted once via CheckDomain + once via CheckURL = 2;
+	// evil.example (real block) and clean.example (no entry) add nothing.
+	if got := tf.AllowlistMaskedTotal(); got != 2 {
+		t.Fatalf("masked counter = %d, want 2 (one per suppressed lookup)", got)
+	}
+}
+
+func TestThreatFeed_ImportFeedDataRecanonicalizesURLKeys(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.ImportFeedData(
+		map[string]int64{"http://bücher.example/x": 1700000000},
+		nil,
+	)
+	if hit, src := tf.CheckURL("http://xn--bcher-kva.example/x"); !hit || src != "cluster-sync" {
+		t.Fatalf("URL key from an older CP should be canonicalized at import; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_NormaliseDomainRejectsHostlessPathInput(t *testing.T) {
+	// Path-shaped input whose host extraction fails must be rejected, not
+	// stored as an unmatchable garbage key (a silent no-op exception that
+	// would persist, sync to DPs, and inflate the audit count).
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{"10.0.0.1/24", "http://"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+	if got := tf.DomainAllowlist(); len(got) != 0 {
+		t.Fatalf("hostless path/scheme inputs should be rejected; stored %v", got)
+	}
+}
+
+func TestThreatFeed_LoadFromDiskRecanonicalizesLegacyKeys(t *testing.T) {
+	// A DB written by a pre-canonicalization binary can carry Unicode-IDN
+	// and trailing-dot keys. loadFromDisk must rekey them so the
+	// canonicalized lookups keep blocking across the upgrade instead of
+	// failing open until the next feed sync.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "threatfeed.json")
+	legacy := `{
+		"last_sync": "2026-01-01T00:00:00Z",
+		"urls": {"http://bücher.example/malware": {"source": "urlhaus", "added_at": "2026-01-01T00:00:00Z"}},
+		"domains": {
+			"bücher.example": {"source": "urlhaus", "added_at": "2026-01-01T00:00:00Z"},
+			"evil.example.": {"source": "openphish", "added_at": "2026-01-01T00:00:00Z"},
+			"": {"source": "openphish", "added_at": "2026-01-01T00:00:00Z"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy DB: %v", err)
+	}
+
+	tf := New()
+	tf.Init(path, time.Hour)
+
+	if hit, src := tf.CheckDomain("xn--bcher-kva.example"); !hit || src != "urlhaus" {
+		t.Fatalf("legacy Unicode domain key should match punycode lookup after load; hit=%v src=%q", hit, src)
+	}
+	if hit, _ := tf.CheckDomain("evil.example"); !hit {
+		t.Fatal("legacy trailing-dot domain key should match after load")
+	}
+	if hit, src := tf.CheckURL("http://xn--bcher-kva.example/malware"); !hit || src != "urlhaus" {
+		t.Fatalf("legacy Unicode URL key should match canonicalized lookup after load; hit=%v src=%q", hit, src)
+	}
+	// The unkeyable empty entry is retained under its original key
+	// (fail-safe), never dropped.
+	if _, ok := tf.domains[""]; !ok {
+		t.Fatal("un-canonicalizable legacy key should be retained, not dropped")
+	}
+}
+
 func TestThreatFeed_CheckDomain_Disabled(t *testing.T) {
 	tf := &Feed{
 		urls:    make(map[string]entry),
@@ -202,6 +453,65 @@ func TestThreatFeed_LoadFromDisk_Valid(t *testing.T) {
 	if _, ok := tf.urls["http://evil.com/bad"]; !ok {
 		t.Error("loadFromDisk should populate URLs map")
 	}
+	// Legacy DB shape (no LastSuccess/LastSyncErr): back-fill lastSuccess
+	// from LastSync so a pre-SyncStatus save still reports "last synced OK
+	// at <time>" instead of "never synced successfully".
+	if ok, lastSuccess, errSummary := tf.SyncStatus(); !ok || errSummary != "" || !lastSuccess.Equal(db.LastSync) {
+		t.Errorf("SyncStatus after loading legacy DB = (%v, %v, %q), want (true, %v, \"\")", ok, lastSuccess, errSummary, db.LastSync)
+	}
+}
+
+func TestThreatFeed_SaveLoad_PersistsSyncFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/feed.json"
+
+	tf := newEnabledFeed()
+	tf.dbPath = path
+	tf.urls["http://evil.com/bad"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.lastSync = time.Now()
+	tf.lastSyncErr = "OpenPhish: HTTP 503 from https://openphish.com/feed.txt"
+	// lastSuccess left zero: this feed has never synced cleanly.
+	if err := tf.saveToDisk(); err != nil {
+		t.Fatalf("saveToDisk error: %v", err)
+	}
+
+	reloaded := newEnabledFeed()
+	if err := reloaded.loadFromDisk(path); err != nil {
+		t.Fatalf("loadFromDisk error: %v", err)
+	}
+	ok, lastSuccess, errSummary := reloaded.SyncStatus()
+	if ok {
+		t.Error("SyncStatus after reloading a failed-sync DB should report ok=false")
+	}
+	if errSummary != tf.lastSyncErr {
+		t.Errorf("SyncStatus errSummary = %q, want %q", errSummary, tf.lastSyncErr)
+	}
+	if !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus lastSuccess = %v, want zero (feed never synced cleanly)", lastSuccess)
+	}
+}
+
+func TestThreatFeed_SaveLoad_PersistsSyncSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/feed.json"
+
+	tf := newEnabledFeed()
+	tf.dbPath = path
+	success := time.Now().Add(-2 * time.Hour)
+	tf.lastSync = success
+	tf.lastSuccess = success
+	if err := tf.saveToDisk(); err != nil {
+		t.Fatalf("saveToDisk error: %v", err)
+	}
+
+	reloaded := newEnabledFeed()
+	if err := reloaded.loadFromDisk(path); err != nil {
+		t.Fatalf("loadFromDisk error: %v", err)
+	}
+	ok, lastSuccess, errSummary := reloaded.SyncStatus()
+	if !ok || errSummary != "" || !lastSuccess.Equal(success) {
+		t.Errorf("SyncStatus after reloading a successful-sync DB = (%v, %v, %q), want (true, %v, \"\")", ok, lastSuccess, errSummary, success)
+	}
 }
 
 func TestThreatFeed_LoadFromDisk_BadJSON(t *testing.T) {
@@ -225,6 +535,46 @@ func TestThreatFeed_Stats(t *testing.T) {
 	count, _, _ := tf.Stats()
 	if count != 42 {
 		t.Errorf("Stats count = %d, want 42", count)
+	}
+}
+
+func TestThreatFeed_SyncStatus_DefaultOK(t *testing.T) {
+	tf := newEnabledFeed()
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if !ok || errSummary != "" || !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus on fresh feed = (%v, %v, %q), want (true, zero, \"\")", ok, lastSuccess, errSummary)
+	}
+}
+
+func TestThreatFeed_SyncStatus_ReflectsFailure(t *testing.T) {
+	tf := newEnabledFeed()
+	// Simulate what Sync() records on a failed attempt: lastSync always
+	// advances, but lastSuccess only does when every feed fetched cleanly.
+	tf.lastSync = time.Now()
+	tf.lastSyncErr = "URLhaus: HTTP 503 from https://urlhaus.abuse.ch/downloads/text/"
+
+	ok, lastSuccess, errSummary := tf.SyncStatus()
+	if ok {
+		t.Error("SyncStatus ok = true, want false after a recorded failure")
+	}
+	if errSummary == "" {
+		t.Error("SyncStatus errSummary is empty, want the recorded failure")
+	}
+	if !lastSuccess.IsZero() {
+		t.Errorf("SyncStatus lastSuccess = %v, want zero (feed has never synced cleanly)", lastSuccess)
+	}
+
+	// A subsequent clean sync clears the error and records the success time.
+	now := time.Now()
+	tf.mu.Lock()
+	tf.lastSync = now
+	tf.lastSuccess = now
+	tf.lastSyncErr = ""
+	tf.mu.Unlock()
+
+	ok, lastSuccess, errSummary = tf.SyncStatus()
+	if !ok || errSummary != "" || lastSuccess.IsZero() {
+		t.Errorf("SyncStatus after recovery = (%v, %v, %q), want (true, non-zero, \"\")", ok, lastSuccess, errSummary)
 	}
 }
 
@@ -282,5 +632,39 @@ func TestThreatFeed_ImportFeedData(t *testing.T) {
 	}
 	if tf.domains["new-domain.com"].Source != "cluster-sync" {
 		t.Errorf("source = %q, want cluster-sync", tf.domains["new-domain.com"].Source)
+	}
+}
+
+func TestThreatFeed_ImportFeedDataPreservesDomainAllowlistAndURLBlocks(t *testing.T) {
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{"https://www.google.com:443/path"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	tf.ImportFeedData(
+		map[string]int64{"https://www.google.com/malware": 1700000000},
+		map[string]int64{
+			"WWW.Google.COM:443": 1700000001,
+			"evil.example.com":   1700000002,
+		},
+	)
+
+	if _, ok := tf.domains["www.google.com"]; !ok {
+		t.Fatal("ImportFeedData should retain allowlisted domain threat intel")
+	}
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("allowlisted imported domain should not block")
+	}
+	if hit, src := tf.CheckURL("https://www.google.com/malware"); !hit || src != "cluster-sync" {
+		t.Fatalf("exact malicious URL should remain blocked; hit=%v src=%q", hit, src)
+	}
+	if hit, src := tf.CheckDomain("evil.example.com"); !hit || src != "cluster-sync" {
+		t.Fatalf("non-allowlisted imported domain should still block; hit=%v src=%q", hit, src)
+	}
+	if err := tf.RemoveDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "cluster-sync" {
+		t.Fatalf("removing imported-domain allowlist should immediately re-enable block; hit=%v src=%q", hit, src)
 	}
 }

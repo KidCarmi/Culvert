@@ -57,6 +57,17 @@ var SignLatencyObserver func(seconds float64)
 // fire the cert-rotation alert and bump the rotation counter. nil ⇒ no-op.
 var RotationObserver func(oldExpiry, newExpiry time.Time)
 
+// CAChangedObserver is invoked (with mu NOT held) whenever the active Root CA
+// key/cert changes at runtime — InitCA (fresh generation, incl. the manual
+// force-rotate API and the InitCA inside RotateIfNeeded) and LoadCustomCA
+// (admin-uploaded CA). Publish-once: package main wires it to flush the
+// client-facing MITM session-ticket keys so a TLS 1.3 client cannot RESUME a
+// session authenticated under the previous CA (the PSK path never re-runs
+// GetCertificate). nil ⇒ no-op. Startup-time calls are harmless (no sessions
+// exist yet). This is intentionally distinct from RotationObserver, which is
+// dual-CA-overlap-specific and does not fire on InitCA/LoadCustomCA.
+var CAChangedObserver func()
+
 // certCacheEntry pairs a leaf certificate with its creation timestamp for TTL.
 type certCacheEntry struct {
 	cert      *tls.Certificate
@@ -76,8 +87,20 @@ type Manager struct {
 	caCert      *x509.Certificate
 	caKey       *ecdsa.PrivateKey
 	keyProvider KeyProvider // optional external HSM/KMS signer
-	cache       map[string]*certCacheEntry
-	cacheOrder  []string // insertion order for LRU eviction
+	// leafKey is the process-wide key reused by EVERY forged leaf (perf F3).
+	// Generated once, lazily, on first sign; independent of the CA, so it
+	// survives CA rotation unchanged. Sharing one key removes a P-256 keygen
+	// from every cache-miss handshake — the dominant signLeaf cost — with no
+	// trust change: the leaf private key never leaves the proxy, and anyone
+	// able to extract it gains nothing beyond what the co-located CA key
+	// already grants. That co-location rationale holds because signLeaf signs
+	// with caKey directly and never routes through the KeyProvider/HSM seam; if
+	// leaf signing is ever wired to an HSM, revisit this — the in-memory leaf
+	// key would then be a strictly weaker secret than the HSM-held CA key.
+	// Read-mostly; guarded by mu like the rest of the struct.
+	leafKey    *ecdsa.PrivateKey
+	cache      map[string]*certCacheEntry
+	cacheOrder []string // insertion order for LRU eviction
 
 	// Leaf-cache effectiveness counters (CA-2). Lock-free; no identity data.
 	cacheHits   atomic.Int64
@@ -156,6 +179,9 @@ func (cm *Manager) InitCA() error {
 	cm.cache = map[string]*certCacheEntry{}
 	cm.cacheOrder = nil // clear leaf cache on CA change
 	cm.mu.Unlock()
+	if CAChangedObserver != nil {
+		CAChangedObserver()
+	}
 	return nil
 }
 
@@ -451,6 +477,9 @@ func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
 	cm.cache = map[string]*certCacheEntry{}
 	cm.cacheOrder = nil
 	cm.mu.Unlock()
+	if CAChangedObserver != nil {
+		CAChangedObserver()
+	}
 	return nil
 }
 
@@ -718,6 +747,28 @@ func (cm *Manager) ClearCache() {
 	cm.mu.Unlock()
 }
 
+// sharedLeafKey returns the process-wide leaf key (perf F3), generating it once
+// on first use with double-checked locking. Every forged leaf reuses this key;
+// see the leafKey field comment for why that is safe.
+func (cm *Manager) sharedLeafKey() (*ecdsa.PrivateKey, error) {
+	cm.mu.RLock()
+	k := cm.leafKey
+	cm.mu.RUnlock()
+	if k != nil {
+		return k, nil
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.leafKey == nil { // re-check: another goroutine may have won the race
+		nk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+		cm.leafKey = nk
+	}
+	return cm.leafKey, nil
+}
+
 // signLeaf creates and signs a leaf TLS certificate for the given hostname.
 // When dual-CA overlap is active, the secondary (old) CA cert is included in
 // the certificate chain so clients trusting either CA can validate.
@@ -733,7 +784,7 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	}
 	cm.mu.RUnlock()
 
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafKey, err := cm.sharedLeafKey()
 	if err != nil {
 		return nil, err
 	}
@@ -754,24 +805,27 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
-	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	leaf, err := x509.ParseCertificate(certDER)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build PEM chain: leaf cert + primary CA + (optional) secondary CA.
-	var chainPEM []byte
-	chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})...)
+	// Assemble the tls.Certificate directly from DER (perf F3) instead of
+	// round-tripping through PEM + tls.X509KeyPair, which would re-marshal the
+	// key, PEM-encode the chain, then parse it all back. The chain is leaf +
+	// (optional) secondary CA; the primary CA is a trust anchor the client
+	// already has, so it is intentionally not sent. PublicKey ↔ PrivateKey
+	// consistency is guaranteed by construction (the template was signed with
+	// leafKey.PublicKey), so skipping X509KeyPair's key-match check is safe.
+	chain := [][]byte{certDER}
 	if len(secondaryCertRaw) > 0 {
-		chainPEM = append(chainPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: secondaryCertRaw})...)
+		chain = append(chain, secondaryCertRaw)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	tlsCert, err := tls.X509KeyPair(chainPEM, keyPEM)
-	if err != nil {
-		return nil, err
-	}
-	return &tlsCert, nil
+	return &tls.Certificate{
+		Certificate: chain,
+		PrivateKey:  leafKey,
+		Leaf:        leaf,
+	}, nil
 }
 
 // ── Test hooks ────────────────────────────────────────────────────────────────

@@ -144,7 +144,7 @@ func TestSlice8_AdminCRUDLifecycle(t *testing.T) {
 	if got := len(listAuthRules()); got != 0 {
 		t.Errorf("rule not deleted, %d remain", got)
 	}
-	mustFindAudit(t, "authpolicy.delete", "slice8-lifecycle")
+	mustFindAudit(t, "authpolicy.remove", "slice8-lifecycle")
 }
 
 // mustFindAudit scans the audit ring for an entry by action+object (content

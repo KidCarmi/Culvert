@@ -566,8 +566,25 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		globalThreatFeed.SetDomainAllowlist(body.Domains)
+		if err := globalThreatFeed.SetDomainAllowlist(body.Domains); err != nil {
+			// The allowlist is already live in memory (fail-safe apply,
+			// same posture as the DP snapshot path) — until restart it
+			// bypasses domain-level threat blocking even though the
+			// client sees a 500. That transient bypass must stay
+			// attributable, so record a distinct audit action instead
+			// of silently dropping the trail with the success entry.
+			auditEvent(r, "threatfeed.allowlist.update_unpersisted",
+				fmt.Sprintf("%d domain(s) applied in memory; persist failed", len(globalThreatFeed.DomainAllowlist())), "")
+			http.Error(w, "domain allowlist applied in memory but failed to persist", http.StatusInternalServerError)
+			return
+		}
 		logger.Printf("ThreatFeed: domain allowlist updated (%d entries)", len(body.Domains))
+		// Push the change to DP nodes now (mirrors the IdP handlers in
+		// ui_auth.go). Without a version bump DPs keep enforcing the OLD
+		// allowlist until some unrelated admin action publishes a
+		// snapshot — the exact "unblock this false positive NOW" latency
+		// this control exists to remove. No-op when not running as CP.
+		publishCurrentConfigSnapshot()
 		// Closes the audit gap flagged by
 		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
 		// ui_routes_meta.go:291 ("no direct auditEvent observed"). The
@@ -584,8 +601,9 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// empty, dedupes via map), so the audit reflects what was actually
 		// stored — raw len(body.Domains) over-reports when clients send
 		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
-		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", len(globalThreatFeed.DomainAllowlist())), "")
-		jsonOK(w, map[string]any{"ok": true, "count": len(body.Domains)})
+		count := len(globalThreatFeed.DomainAllowlist())
+		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", count), "")
+		jsonOK(w, map[string]any{"ok": true, "count": count})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -614,7 +632,7 @@ func apiSecYARAReload(w http.ResponseWriter, r *http.Request) {
 	// is re-scanned under the new rule set. Without this, new rules don't
 	// apply to previously-cached content until the 1-hour TTL expires.
 	globalSecScanner.CacheClear()
-	auditEvent(r, "security.yara-reload", dir, "YARA rules reloaded and hash cache cleared")
+	auditEvent(r, "security.yara_reload", dir, "YARA rules reloaded and hash cache cleared")
 	jsonOK(w, map[string]any{
 		"yara_rules":    globalYARA.Count(),
 		"directory":     dir,
@@ -699,7 +717,7 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 		yaraSetOnTimeout(body.OnTimeout)
 		yaraSetOnSaturation(body.OnSaturation)
 		yaraSetAlertDegraded(body.AlertDegraded)
-		auditEventDiff(r, "security.yara-settings", "yara_engine", "", prev, yaraSettingsMap())
+		auditEventDiff(r, "security.yara_settings", "yara_engine", "", prev, yaraSettingsMap())
 		adminSettingsSave()
 		// Intentionally NOT calling saveConfigVersion: YARA engine
 		// settings are out of the rollback surface by design (D-sec,
@@ -783,7 +801,7 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 		}
 		// Hash cache must be cleared on any rule change (Tier 1.1 applies to CRUD).
 		globalSecScanner.CacheClear()
-		auditEvent(r, "security.yara-write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
+		auditEvent(r, "security.yara_write", req.Name, fmt.Sprintf("%d warning(s)", len(warnings)))
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Rules are filesystem
@@ -813,10 +831,10 @@ func apiSecYARARules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalSecScanner.CacheClear()
-		auditEvent(r, "security.yara-delete", name, "rule removed and cache cleared")
+		auditEvent(r, "security.yara_remove", name, "rule removed and cache cleared")
 		// Intentionally NOT calling saveConfigVersion: YARA rule files
 		// are out of the rollback surface by design (D-ops,
-		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara-write branch.
+		// CONFIG-VERSIONING-TRIAGE.md §4.2). See the yara_write branch.
 		jsonOK(w, map[string]any{
 			"deleted":       name,
 			"yara_rules":    globalYARA.Count(),
@@ -903,7 +921,7 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 		if err := globalScanExclusions.Save(); err != nil {
 			logger.Printf("ScanExclusions: save error: %v", err)
 		}
-		auditEvent(r, "security.scan-exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
+		auditEvent(r, "security.scan_exclusions", "update", fmt.Sprintf("%d hash(es), %d host(s)", len(req.Hashes), len(req.Hosts)))
 		// Intentionally NOT calling saveConfigVersion: scan exclusions
 		// are out of the rollback surface by design (D-sec,
 		// CONFIG-VERSIONING-TRIAGE.md §4.2). Exclusions are
@@ -947,11 +965,11 @@ func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
 		}
 		dpiScanner.SetBypassHosts(req.Hosts)
 		dpiScanner.Save()
-		auditEvent(r, "security.dpi-bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
+		auditEvent(r, "security.dpi_bypass", "update", fmt.Sprintf("%d host(s)", len(req.Hosts)))
 		// Bypass hosts are in the rollback surface as of
 		// roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md (configBackup
 		// .ContentScanBypassHosts); snapshot so rollback restores them.
-		saveConfigVersion(sessionAdmin(r), "security.dpi-bypass")
+		saveConfigVersion(sessionAdmin(r), "security.dpi_bypass")
 		jsonOK(w, map[string]any{"hosts": dpiScanner.BypassHosts()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

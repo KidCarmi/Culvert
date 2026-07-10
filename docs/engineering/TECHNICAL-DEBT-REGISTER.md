@@ -1,6 +1,6 @@
 # Culvert Technical Debt Register
 
-> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-04 (drift sync)
+> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-05 (drift sync)
 >
 > Debt = a structural shortcut that raises the cost of future change. Runtime/supply-chain hazards
 > live in the [Technical Risk Register](./TECHNICAL-RISK-REGISTER.md). Each item is framed as
@@ -9,15 +9,15 @@
 
 | ID | Sev | Title | Principal location |
 |---|---|---|---|
-| DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 44 pkgs), root shims/globals remain | 172 root `.go` files (non-test) |
+| DEBT-001 | MEDIUM ↓ | Flat root namespace — engines extracted (ADR-0002 COMPLETE, 48 pkgs), root shims/globals remain | 184 root `.go` files (non-test) — ↑ from the DEBT-003 god-file splits (cohesion up, not new debt) |
 | DEBT-002 | ✅ CLOSED | `handleRequest` was ~497 lines / cyclo 73 on the hottest security path | `proxy.go` — decomposed 2026-06-28 |
-| DEBT-003 | MEDIUM | God-files (3 over 1,800 LOC; `store.go` halved by extraction) | `controlplane.go` (2,236), `main.go` (1,990), `proxy.go` (1,901) |
-| DEBT-004 | MEDIUM | `configBackup` god-struct with 3 divergent memberships | `ui_policy.go:736`, `configversion.go` |
+| DEBT-003 | ✅ CLOSED | God-files split (2026-07-04): `controlplane.go` 2,240→341, `proxy.go` 1,901→727, `main.go` 1,990→1,211. No non-generated `.go` file > ~1,300 LOC | — |
+| DEBT-004 | ✅ CLOSED | `configBackup` god-struct with 3 divergent memberships | walled by the `config_surfaces.go` registry + `config_surfaces_test.go` reflection parity (the "membership table" this item recommended) |
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
-| DEBT-006 | MEDIUM | `ConfigSnapshot` (33-field) CP→DP god-DTO | `controlplane.go:1508 applyConfigSnapshot` |
+| DEBT-006 | ✅ CLOSED | `ConfigSnapshot` (34-field) CP→DP god-DTO | walled by capture/apply/redaction/wire-wipe parity (2026-07-05); `config_surfaces_test.go` |
 | DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
 | DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
-| DEBT-009 | LOW | Three durability layers for config can drift | `config.go`, `admin_settings.go`, `configversion.go` |
+| DEBT-009 | LOW ↓ | Three durability layers for config can drift — ownership now registry-declared; effective-config visibility remains | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
 
 ---
@@ -52,7 +52,7 @@
   added 2026-07-04 under the standing recorded-design rule — + 4 seams +
   `halease`), engines own logic/state/persistence, and `main` is reduced to composition roots,
   shims, and aliases (per `CLAUDE.md`, corroborated by `ls internal`). `store.go` halved
-  (2,313 → 1,171 LOC). What REMAINS of the principal: 172 root non-test `.go` files still share
+  (2,313 → 1,171 LOC). What REMAINS of the principal: 184 root non-test `.go` files still share
   one namespace, and the shim/alias globals still bridge into the engines — the blast-radius and
   race-surface interest is much reduced but not zero. **Severity HIGH → MEDIUM.** Direction per
   `CLAUDE.md`: new engines go to `internal/` with a recorded design; do not re-inline shipped ones.
@@ -84,21 +84,68 @@
   (`handleHTTP` gocognit 32, `handleWebSocket` funlen, `handleTunnelInspect` 57) are separate
   functions, out of scope here; candidates for a future targeted pass if prioritised.
 
-## DEBT-003 — God-files · MEDIUM
-- **2026-07-04 (re-measured):** `controlplane.go` (2,236 — *grew* since June, now the largest),
-  `main.go` (1,990, was 2,367), `proxy.go` (1,901, roughly flat), `store.go` (**1,171**, was
-  2,313 — halved by the ADR-0002 blocklist/audit/reqlog extractions). Merge-conflict magnets;
-  exceed reviewer working memory. `controlplane.go` is the one moving in the wrong direction —
-  every cluster feature lands there (same force as DEBT-006); it should be the next split target.
-  **Complexity L (staged).**
+## DEBT-003 — God-files · ✅ CLOSED 2026-07-04
+- **`controlplane.go` SPLIT (2026-07-04):** the flagged next target — 2,240 LOC, the one file
+  *growing* (every cluster feature landed there) — decomposed into five cohesive same-package
+  files along the CP/DP boundary the file's own header described: `controlplane.go` (341 — service
+  def + the CP-side rate-limit/revocation/audit aggregators + enrollment rate-limiting),
+  `controlplane_snapshot.go` (678 — ConfigSnapshot/ConfigStore + the applyConfigSnapshot / DP
+  last-good / CurrentConfigSnapshot lifecycle), `controlplane_server.go` (677 — CP gRPC server +
+  all RPC handlers), `controlplane_client.go` (439 — DP gRPC client + poll/gossip loops),
+  `controlplane_tls.go` (147 — shared mTLS + cert-pool rebuild). **Pure move, zero behaviour
+  change:** verified by an identical 102-declaration set before/after (no add/loss/dup);
+  build/vet/gofmt clean; controlplane-adjacent suites green under `-race`. No file over 1,800 LOC
+  references `controlplane.go` any more.
+- **`proxy.go` SPLIT (2026-07-04):** the flagged next candidate — 1,901 LOC on the hot path —
+  decomposed into four cohesive same-package files along the handler boundary: `proxy.go` (727 —
+  the request-dispatch pipeline `handleRequest` + its DEBT-002 helpers, policy-action state,
+  `scrubForwardedHeaders`, `sanitizeLog`; now the composition root only), `proxy_tunnel.go` (796 —
+  CONNECT/WebSocket/tunnel relay: `relayBufPool`, `relayCounted`/`bidiRelayCounted`,
+  `handleTunnel`/`handleTunnelBypass`/`handleTunnelInspect`, `handleWebSocket`, `applyUpstreamProxy`,
+  hop-by-hop stripping), `proxy_http.go` (209 — plain-HTTP forward `handleHTTP` + request-body
+  limits + SSL-inspect stall detection), `proxy_portal.go` (197 — captive/SSO portal resolution,
+  proxy-auth parsing, safe-redirect validation). **Pure move, zero behaviour change:** verified by
+  an identical 52-declaration set before/after (no add/loss/dup); build/vet/gofmt clean; the hot-path
+  race suite (Proxy|Tunnel|WebSocket|Relay|HandleHTTP|HandleRequest|Mitm|Inspect|Policy|Auth|Scrub|
+  HopHeader|Portal|SSO|Bypass) green under `-race`; `BenchmarkPolicyEvaluate_*` allocs/op unchanged.
+- **`main.go` SPLIT (2026-07-04):** the last god-file — 1,990 LOC — decomposed into four cohesive
+  same-package files along the lifecycle boundary: `main.go` (1,211 — composition root: entrypoint,
+  flag parsing, the 24 `init*` startup shims, proxy-server wiring, signal handling), `main_shutdown.go`
+  (241 — the graceful-shutdown sequence + shutdown-order constants + early/late hook registration +
+  `drainActiveTunnels`), `healthcheck.go` (159 — `handleHealth`/`handleReady`/`configSnapshotValidatorOK`),
+  `dp_enrollment.go` (385 — the DP-side enrollment client + `startDataPlane` + DP cert-renewal loop,
+  distinct from the CP-side `enrollment.go`). **Pure move, zero behaviour change:** identical
+  86-declaration set before/after (modulo one gofmt comment realignment); build/vet/gofmt clean;
+  the enrollment/control-plane/health suites green.
+- **DEBT-003 CLOSED.** All three flagged god-files split; no non-generated `.go` file exceeds ~1,300 LOC.
+  **Follow-up (RESOLVED 2026-07-05):** the diff-scoped golangci gate had re-surfaced ~19 legacy
+  findings on the *moved* lines (grandfathered under `--new-from-rev` while they sat in the origin
+  files). Trivial ones were fixed in place with the split (errcheck `//nolint` explanations,
+  `rangeValCopy` → index-range, `net.Listen` → `ListenConfig.Listen`, named results, unused-param
+  `_`). The four handler-complexity findings (`handleHTTP` gocognit/cyclop/funlen, the `nestif`
+  blocks in `proxy_tunnel.go`/`proxy_http.go`) were then retired by a dedicated
+  **handler-decomposition pass** (deliberately its own change, not bundled into the mechanical
+  split): `handleHTTP` → `blockedByResponseHeaders`/`serveHTTPFileBlock`/`scanHTTPResponseBody`;
+  `handleTunnelInspect` → `inspectFileBlocked`/`inspectCDBlocked`/`scanInspectBody`/
+  `inspectMagicBlock`. Semantic-equivalence refactor (not a pure move) — gated by a 3× pre-push
+  review (equivalence, correctness, adversarial red-team; all clean; the one review note — a
+  double-read of `globalRemoteScanner.Enabled()` — fixed by hoisting a single read), the De Morgan
+  scan-guard truth-tabled, hot-path race suite + MITM e2e green, allocs/op unchanged. **All four
+  complexity `//nolint` suppressions removed**; diff-scoped lint is 0 issues.
 
-## DEBT-004 — `configBackup` god-struct · MEDIUM
-- One 25-field struct (`ui_policy.go:736`) serves export/import, version rollback, and restart
+## DEBT-004 — `configBackup` god-struct · ✅ CLOSED 2026-07-05 (walled)
+- **Was:** one struct (`ui_policy.go`) served export/import, version rollback, and restart
   durability — each with a *different* intended field subset encoded only in prose (CLAUDE.md
-  "Finding 10.3"). `RateLimitExempt` is already half-migrated, so the surfaces are out of sync.
-- **Interest:** adding a config field means remembering to wire it into N hand-curated functions
-  across 3 files. **Recommendation:** explicit per-surface types or a generated membership table.
-  **Complexity M.**
+  "Finding 10.3"), so a field addition had to be hand-wired into N functions across 3 files and
+  `RateLimitExempt` had already drifted half-migrated.
+- **Resolution:** the recommended "generated membership table" shipped as the
+  `config_surfaces.go` registry (its header comment explicitly names DEBT-004/006/009 as its
+  charge). `config_surfaces_test.go` enforces it via reflection: forward/reverse parity (every
+  field claimed by exactly one row, every binding resolves to a real field), diff-nil-guard ⇔
+  apply-nil-skip parity, per-field diff coverage, Sensitive invariants, and a full-surface rollback
+  round-trip. Adding a config field now fails CI until it is registered on the correct surfaces —
+  the drift is a compile-adjacent test failure, not a prose hope. The CP→DP `ConfigSnapshot`
+  surface was walled the same way under DEBT-006 (capture/apply/redaction/wire-wipe/owner parity).
 
 ## DEBT-005 — Hand-wired 30-init DI in `main.go` · ✅ CLOSED 2026-07-04
 - **Was:** startup was 30 `init*` functions invoked in sequence with cross-dependencies expressed
@@ -112,10 +159,30 @@
   entry was charging. `startDataPlane` is deliberately not a slice (runtime wiring, not config
   resolution — recorded decision). Residual ordering risk is accepted as ordinary structure.
 
-## DEBT-006 — `ConfigSnapshot` god-DTO · MEDIUM
-- A 33-field struct is the CP→DP contract, applied by a 206-line `applyConfigSnapshot`
-  (`controlplane.go:1508`). Every cluster-aware feature must thread a field through both. High
-  coupling between unrelated subsystems and the distribution layer. **Complexity M.**
+## DEBT-006 — `ConfigSnapshot` god-DTO · ✅ CLOSED 2026-07-05 (walled, not restructured)
+- **Was:** a 34-field struct is the CP→DP contract, threaded by hand through FOUR places nothing
+  forced to agree — the struct (+ `omitempty` choice), `CurrentConfigSnapshot` (capture),
+  `validateConfigSnapshot` (H5 caps), and the `applySnapshot*` fan-out. A field added to
+  struct+capture but not `apply` = a silently-unsynced setting; not `validate` = an uncapped
+  memory-DoS; a capture/apply empty-semantics mismatch = a delete that doesn't replicate. All
+  silent until a cluster misbehaves.
+- **Resolution — parity wall (mirrors DEBT-004), design-reviewed then shipped in 3 slices:** the DTO
+  is NOT restructured (it crosses the wire + ADR-0005 fence-epoch boundary; compat is frozen).
+  Instead `config_surfaces_test.go` now enforces, via reflection + AST over `config_surfaces.go`:
+  - **capture parity** — every field assigned in `CurrentConfigSnapshot` ∪ `ConfigStore.Update`;
+  - **apply parity** — every field with a DP effect read in `applySnapshot*`/`fetchAndApply`, keyed
+    on `Apply != semNA || AppliesOnDP` so `Epoch` (the `dpObserveEpoch` fence ratchet, `kindMeta`)
+    is verified — the design-review gap where mislabeling a fence field would exempt it;
+  - **redaction parity** — every `Sensitive` synced field zeroed in the `!callerIsEnrolledNode`
+    GetConfig block (the `SessionHMAC`/`IdPProfiles` secret-leak guard);
+  - **wire-wipe parity** — `WireWipeCapable` ⇔ no `omitempty` (only `RateLimitExempt` propagates an
+    empty-slice clear; the other 12 `semNilSkipEmptyWipe` slices keep `omitempty`, so their
+    `[]`-wipe is intentionally wire-dead — pinned, not surprising).
+  Each wall proven to bite by negative test. **Known-unclosed, recorded not walled:** wrong-owner
+  capture/apply wiring, `applySnapshot*` ordering, cap magnitude. Authority + audit trail:
+  `roadmap/DEBT-006-configsnapshot-parity-plan.md` (incl. the 5 design-review corrections). Adding
+  a synced field now fails CI until it is registered, captured, applied, capped, redacted (if
+  secret), and wire-consistent.
 
 ## DEBT-007 — No e2e MITM test · ✅ CLOSED 2026-07-04 (verified)
 - **Was:** the flagship decrypt→scan→re-encrypt→block relay was tested only in pieces; no test
@@ -139,10 +206,15 @@
   all 5 alerts at once — the correct fix, vs. bumping deps in soon-deleted code. **Priority raised
   in practice** by the alert pressure, even though the structural debt itself is LOW.
 
-## DEBT-009 — Three config durability layers · LOW
+## DEBT-009 — Three config durability layers · LOW ↓ (partially addressed)
 - CLI flags / YAML / `admin_settings.json` can hold different values for the same setting; which
-  wins is non-obvious. Documented but operationally confusing. **Recommendation:** a single
-  precedence doc + a diagnostics endpoint that shows effective-vs-source for each setting.
+  wins is non-obvious. Documented but operationally confusing.
+- **Partial (2026-07-05):** the *membership/ownership* half is now declared — the
+  `config_surfaces.go` registry records which surface owns each setting (`AdminDurable`/`Rollback`
+  flags + the `…Saved` sentinel semantics), and DEBT-004's parity tests enforce it. What REMAINS is
+  the *precedence-visibility* half: no diagnostics endpoint shows effective-vs-source per setting at
+  runtime, so an operator still can't see which layer won. **Recommendation (residual):** a single
+  precedence doc + an effective-config diagnostics endpoint. **Complexity S.**
 
 ## DEBT-010 — Coverage floor / delta gate · ✅ CLOSED 2026-07-04 (drift sync)
 - **Was:** global floor 55% while a `code-review.yml` comment said 60%; the coverage delta gate

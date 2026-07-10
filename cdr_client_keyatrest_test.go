@@ -40,6 +40,23 @@ func cdrReadFile(t *testing.T, path string) []byte {
 	return b
 }
 
+// cdrOpenPlain decrypts raw via openCDRClientKey and returns a COPY of the
+// plaintext (for assertion) plus wasEncrypted. Fails the test on decrypt error.
+func cdrOpenPlain(t *testing.T, keyPath string, raw []byte) (plain []byte, wasEnc bool) {
+	t.Helper()
+	sealed, wasEnc, err := openCDRClientKey(keyPath, raw)
+	if err != nil {
+		t.Fatalf("openCDRClientKey: %v", err)
+	}
+	if werr := sealed.WithPlaintext(func(b []byte) error {
+		plain = append(plain, b...)
+		return nil
+	}); werr != nil {
+		t.Fatalf("WithPlaintext: %v", werr)
+	}
+	return plain, wasEnc
+}
+
 // TestCDRClientKey_PlaintextWriteWhenDisabled: encode is a passthrough when
 // disabled (existing plaintext behavior).
 func TestCDRClientKey_PlaintextWriteWhenDisabled(t *testing.T) {
@@ -86,9 +103,9 @@ func TestCDRClientKey_EncryptedWriteWhenEnabled(t *testing.T) {
 	if _, err := os.Stat(keyPath + cdrClientKEKSuffix); err != nil {
 		t.Fatalf("expected per-key KEK file: %v", err)
 	}
-	got, wasEnc, err := decryptCDRClientKey(keyPath, cdrReadFile(t, keyPath))
-	if err != nil || !wasEnc {
-		t.Fatalf("decrypt: err=%v wasEnc=%v", err, wasEnc)
+	got, wasEnc := cdrOpenPlain(t, keyPath, cdrReadFile(t, keyPath))
+	if !wasEnc {
+		t.Fatal("expected wasEncrypted for envelope")
 	}
 	if !bytes.Equal(got, plain) {
 		t.Fatal("decrypted key mismatch")
@@ -105,10 +122,7 @@ func TestCDRClientKey_PlaintextLoadsWhenDisabled(t *testing.T) {
 	if err := os.WriteFile(keyPath, plain, 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	got, wasEnc, err := decryptCDRClientKey(keyPath, cdrReadFile(t, keyPath))
-	if err != nil {
-		t.Fatalf("decrypt plaintext: %v", err)
-	}
+	got, wasEnc := cdrOpenPlain(t, keyPath, cdrReadFile(t, keyPath))
 	if wasEnc {
 		t.Fatal("plaintext reported as encrypted")
 	}
@@ -144,15 +158,20 @@ func TestCDRClientKey_LoadBundleDecryptsKey(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
-	ca, cert, key, err := loadCDRCertBundle(caPath, certPath, keyPath)
+	ca, cert, keySealed, err := loadCDRCertBundle(caPath, certPath, keyPath)
 	if err != nil {
 		t.Fatalf("loadCDRCertBundle: %v", err)
 	}
 	if !bytes.Equal(ca, caPEM) || !bytes.Equal(cert, certPEM) {
 		t.Fatal("cert/CA must be returned unchanged (plaintext)")
 	}
-	if !bytes.Equal(key, plainKey) {
-		t.Fatal("returned key is not the decrypted plaintext")
+	if werr := keySealed.WithPlaintext(func(key []byte) error {
+		if !bytes.Equal(key, plainKey) {
+			t.Fatal("returned key is not the decrypted plaintext")
+		}
+		return nil
+	}); werr != nil {
+		t.Fatalf("WithPlaintext: %v", werr)
 	}
 }
 
@@ -174,7 +193,7 @@ func TestCDRClientKey_MissingKEKFailsClosed(t *testing.T) {
 	if err := os.Remove(keyPath + cdrClientKEKSuffix); err != nil {
 		t.Fatalf("remove kek: %v", err)
 	}
-	if _, _, derr := decryptCDRClientKey(keyPath, cdrReadFile(t, keyPath)); derr == nil {
+	if _, _, derr := openCDRClientKey(keyPath, cdrReadFile(t, keyPath)); derr == nil {
 		t.Fatal("expected fail-closed with missing KEK")
 	}
 	if !bytes.Equal(encBefore, cdrReadFile(t, keyPath)) {
@@ -196,7 +215,7 @@ func TestCDRClientKey_WrongKEKFailsClosed(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	t.Setenv(envKEKName, "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
-	if _, _, derr := decryptCDRClientKey(keyPath, cdrReadFile(t, keyPath)); derr == nil {
+	if _, _, derr := openCDRClientKey(keyPath, cdrReadFile(t, keyPath)); derr == nil {
 		t.Fatal("expected fail-closed with wrong KEK")
 	}
 }
@@ -212,7 +231,7 @@ func TestCDRClientKey_CorruptedCiphertextFailsClosed(t *testing.T) {
 		t.Fatalf("encode: %v", err)
 	}
 	enc[len(enc)-1] ^= 0xFF
-	if _, _, derr := decryptCDRClientKey(keyPath, enc); derr == nil {
+	if _, _, derr := openCDRClientKey(keyPath, enc); derr == nil {
 		t.Fatal("expected fail-closed on corrupted ciphertext")
 	}
 }
@@ -364,17 +383,17 @@ func TestCDRClientKey_InstanceIsolation(t *testing.T) {
 		t.Fatalf("kek b: %v", err)
 	}
 	// Each decrypts with its own KEK.
-	if got, _, err := decryptCDRClientKey(keyA, encA); err != nil || !bytes.Equal(got, plainA) {
-		t.Fatalf("decrypt a: err=%v match=%v", err, bytes.Equal(got, plainA))
+	if got, _ := cdrOpenPlain(t, keyA, encA); !bytes.Equal(got, plainA) {
+		t.Fatal("decrypt a: plaintext mismatch")
 	}
-	if got, _, err := decryptCDRClientKey(keyB, encB); err != nil || !bytes.Equal(got, plainB) {
-		t.Fatalf("decrypt b: err=%v match=%v", err, bytes.Equal(got, plainB))
+	if got, _ := cdrOpenPlain(t, keyB, encB); !bytes.Equal(got, plainB) {
+		t.Fatal("decrypt b: plaintext mismatch")
 	}
 	// Cross-decrypt must fail: A's envelope under B's KEK path.
 	if err := os.WriteFile(keyB, encA, 0o600); err != nil {
 		t.Fatalf("overwrite b with a's envelope: %v", err)
 	}
-	if _, _, err := decryptCDRClientKey(keyB, encA); err == nil {
+	if _, _, err := openCDRClientKey(keyB, encA); err == nil {
 		t.Fatal("expected cross-instance decrypt to fail (independent KEKs)")
 	}
 }

@@ -25,6 +25,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
 // ─── Instance model ─────────────────────────────────────────────────────────
@@ -137,12 +140,8 @@ func (r *CDRInstanceRegistry) Save() error {
 	if err != nil {
 		return fmt.Errorf("cdr instances: marshal: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("cdr instances: write %q: %w", sanitizeLog(tmp), err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("cdr instances: rename: %w", err)
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		return fmt.Errorf("cdr instances: %w", err)
 	}
 	return nil
 }
@@ -395,7 +394,7 @@ func shutdownCDRClient() {
 // cdrCertBundle is the set of PEM blobs + naming context loaded from a
 // loadCDRCertBundle reads the three PEM files from disk, validating that
 // none contain path traversal and all exist.
-func loadCDRCertBundle(caPath, certPath, keyPath string) (ca, cert, key []byte, err error) {
+func loadCDRCertBundle(caPath, certPath, keyPath string) (ca, cert []byte, keySealed *secret.Sealed, err error) {
 	for _, p := range []string{caPath, certPath, keyPath} {
 		if strings.Contains(p, "..") {
 			return nil, nil, nil, fmt.Errorf("cdr certs: path traversal: %q", sanitizeLog(p))
@@ -410,22 +409,24 @@ func loadCDRCertBundle(caPath, certPath, keyPath string) (ca, cert, key []byte, 
 	if rerr != nil {
 		return nil, nil, nil, fmt.Errorf("cdr certs: read client cert: %w", rerr)
 	}
-	key, rerr = os.ReadFile(filepath.Clean(keyPath))
+	rawKey, rerr := os.ReadFile(filepath.Clean(keyPath))
 	if rerr != nil {
 		return nil, nil, nil, fmt.Errorf("cdr certs: read client key: %w", rerr)
 	}
 	// CA-3: opt-in one-time migration of an existing plaintext client key to
 	// encrypted-at-rest for THIS instance's key file (no-op when disabled,
 	// missing, or already encrypted). Done before decrypt so the returned key
-	// is plaintext regardless.
+	// is plaintext regardless (rawKey holds the pre-migration bytes).
 	if merr := maybeMigrateCDRClientKey(keyPath); merr != nil {
 		return nil, nil, nil, fmt.Errorf("cdr certs: client key at-rest: %w", merr)
 	}
 	// CA-3: decrypt the client key if it is a PSCA envelope (content-driven,
 	// fail closed). Plaintext passes through. Cert + CA stay plaintext certs.
-	plainKey, _, derr := decryptCDRClientKey(keyPath, key)
+	// The returned Sealed keeps the key opaque until the caller assembles the
+	// TLS client inside WithPlaintext.
+	sealed, _, derr := openCDRClientKey(keyPath, rawKey)
 	if derr != nil {
 		return nil, nil, nil, fmt.Errorf("cdr certs: %w", derr)
 	}
-	return ca, cert, plainKey, nil
+	return ca, cert, sealed, nil
 }

@@ -29,7 +29,8 @@ import (
 // regardless of rule count. The bound is therefore a constant, not a function of
 // rule count — any reintroduction of per-rule allocation fails this gate.
 func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
-	// Post-optimization: 1 alloc/op (the single per-request host normalization),
+	// Post-optimization: 2 allocs/op (the per-request host normalization + the
+	// per-request client-IP parse feeding the precomputed-CIDR fast path),
 	// independent of rule count. Headroom of a few absorbs runtime noise while
 	// still catching an O(rules) regression immediately.
 	const maxAllocs int64 = 4
@@ -47,6 +48,64 @@ func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
 			t.Errorf("REGRESSION: Evaluate rules=%d allocates %d/op, exceeds constant bound %d — "+
 				"per-rule allocation has returned to the policy hot path (host/pattern re-normalization?). "+
 				"See docs/ci/proxy-quality-architecture.md §8a.", rules, allocs, maxAllocs)
+		}
+	}
+}
+
+// TestBenchGate_UpstreamInspectTLSConfigAllocs locks in the shared-root-pool
+// contract on the SSL-inspect upstream leg. Before the optimization every
+// inspected CONNECT tunnel called x509.SystemCertPool(), which clones the
+// cached system pool per call — 162 allocs/op and ~26.7 KB/op measured with a
+// standard Linux ca-certificates bundle. With upstreamVerifyRoots the steady
+// state is the single tls.Config allocation; any reintroduction of a per-tunnel
+// pool clone blows through the constant bound immediately.
+func TestBenchGate_UpstreamInspectTLSConfigAllocs(t *testing.T) {
+	const maxAllocs int64 = 4 // steady state 1 (the tls.Config); pre-fix 162
+	// Warm the once-loaded pool so the measurement is steady state, not the
+	// first-call pool load.
+	if cfg := upstreamInspectTLSConfig("warm.example.com", false); cfg.RootCAs == nil {
+		t.Fatal("nil RootCAs on the verifying path")
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			cfg := upstreamInspectTLSConfig("origin.example.com", false)
+			if cfg.RootCAs == nil {
+				b.Fatal("nil RootCAs on the verifying path")
+			}
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("upstreamInspectTLSConfig: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: upstreamInspectTLSConfig allocates %d/op, exceeds bound %d — "+
+			"a per-tunnel system-cert-pool clone (x509.SystemCertPool per call) has returned to the SSL-inspect hot path", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_PolicyEvalCIDRAllocs locks in the O(1)-allocation scan over
+// source-scoped (CIDR) rulesets. Before the srcIPNet precompute, every rule
+// with a CIDR SourceIP re-ran net.ParseCIDR + net.ParseIP per request (~4
+// allocs/rule — 4002 allocs/op measured at 1000 rules); it is now a Contains()
+// on the precomputed *net.IPNet with the client IP parsed once per Evaluate.
+// The bound is a constant, not a function of rule count — any reintroduction
+// of per-rule parsing fails this gate.
+func TestBenchGate_PolicyEvalCIDRAllocs(t *testing.T) {
+	const maxAllocs int64 = 4 // steady state 2 (host normalization + client-IP parse)
+	for _, rules := range []int{10, 100, 1000} {
+		ps := buildCIDRPolicyStore(rules)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("Evaluate CIDR rules=%d: %d allocs/op (bound %d), %d ns/op", rules, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: Evaluate CIDR rules=%d allocates %d/op, exceeds constant bound %d — "+
+				"per-rule CIDR/client-IP parsing has returned to the policy hot path (srcIPNet precompute bypassed?)",
+				rules, allocs, maxAllocs)
 		}
 	}
 }

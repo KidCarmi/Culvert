@@ -17,24 +17,61 @@ import (
 // prevents IDN homograph attacks where visually similar Unicode characters
 // (e.g., Cyrillic 'а' vs Latin 'a') bypass blocklists and policy rules.
 //
-// Returns the lowercased, IDNA-normalized host. If normalization fails
-// (e.g., the host is an IP address or already ASCII), the input is returned
-// lowercased — fail-open for usability since most hosts are pure ASCII.
+// Returns the lowercased, IDNA-normalized host. If normalization fails the
+// input is returned lowercased — fail-open, which is acceptable ONLY for
+// canonicalizing admin-entered patterns and store keys (a pattern that fails
+// IDNA simply matches literally, so nothing is admitted that a valid pattern
+// would have blocked). Request-path host validation must use
+// NormalizeHostStrict so a malformed host is REJECTED, not passed through
+// (RISK-013).
 func NormalizeHost(host string) string {
+	norm, ok := NormalizeHostStrict(host)
+	if !ok {
+		return strings.ToLower(strings.TrimSuffix(host, "."))
+	}
+	return norm
+}
+
+// NormalizeHostStrict is NormalizeHost's fail-closed core: it reports
+// ok=false when IDNA conversion fails instead of falling back to the raw
+// input. Security gates on the request path (proxy dispatch, SOCKS5) use it
+// to reject hosts that cannot be canonicalized — a host the normalizer
+// cannot map to canonical ASCII would otherwise flow into FQDN/blocklist/
+// category matching un-normalized, and a fail-open in the canonicalization
+// step is exactly the asymmetry evasion techniques target (RISK-013).
+// Empty input returns ok=true: emptiness is a separate upstream validity
+// concern, and rejecting it here would change unrelated dispatch behavior.
+func NormalizeHostStrict(host string) (norm string, ok bool) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if host == "" {
-		return host
+		return host, true
 	}
-	// Skip IDNA for IP addresses and already-pure-ASCII hostnames
-	// (fast path — avoids allocation for the common case).
-	if net.ParseIP(host) != nil {
-		return host
+	// IP literals have no IDNA form — accept them explicitly. This covers both
+	// the bare form ("2001:db8::1") and the BRACKETED IPv6 form
+	// ("[2001:db8::1]"), which reaches here on the default-port HTTP path
+	// (r.Host carries brackets when no port is present) and from the SOCKS5
+	// IPv6 ATYP. We do NOT rely on idna.ToASCII leniently passing a bracketed
+	// string (it happens to today, but that is accidental and could tighten in
+	// a future x/net) — the strict gate must accept valid IPv6 literals by
+	// construction. Return the ORIGINAL host so downstream matchers see the
+	// shape they already expect.
+	if net.ParseIP(host) != nil || net.ParseIP(stripIPv6Brackets(host)) != nil {
+		return host, true
 	}
 	ascii, err := idna.ToASCII(host)
 	if err != nil {
-		return host // fail-open: return lowercased original
+		return "", false
 	}
-	return strings.ToLower(ascii)
+	return strings.ToLower(ascii), true
+}
+
+// stripIPv6Brackets removes a single matched surrounding [ ] pair (the
+// bracketed-IPv6-literal shape), leaving any other input untouched.
+func stripIPv6Brackets(h string) string {
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		return h[1 : len(h)-1]
+	}
+	return h
 }
 
 // MatchFQDN reports whether host matches pattern under the proxy's canonical

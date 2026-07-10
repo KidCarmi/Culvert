@@ -16,6 +16,12 @@ import (
 func normalizeHost(host string) string { return hostutil.NormalizeHost(host) }
 func stripHostPort(host string) string { return hostutil.StripHostPort(host) }
 
+// normalizeHostStrict is the fail-closed variant used by the request-path
+// dispatch gates (handleRequest, SOCKS5): ok=false means the host cannot be
+// IDNA-canonicalized and the request must be REJECTED rather than evaluated
+// against policy/blocklist with an un-normalized host (RISK-013).
+func normalizeHostStrict(host string) (string, bool) { return hostutil.NormalizeHostStrict(host) }
+
 // ─── SSRF guard (moved to internal/ssrf, ADR-0002) ──────────────────────────
 // The CIDR table, DNS-cached host check, and connect-time dialer control live
 // in internal/ssrf. These thin wrappers keep every unqualified call site (and

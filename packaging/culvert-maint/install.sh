@@ -90,15 +90,19 @@ sed_escape_replacement() {
 
 # Read a TOML basic-string value:  key = "value"  (any leading whitespace,
 # any spacing around =). Ignores commented lines. Prints empty if absent.
+# Strips everything from the FIRST "=" (not FS="="'s second field) so an "="
+# embedded in the value itself is not truncated, and cuts the value at its
+# closing quote so a trailing inline "# comment" after the string does not
+# leak into the extracted value.
 extract_toml_string() {
     awk -v k="$1" '
-        BEGIN { FS="=" }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
-            v=$2
-            sub(/^[[:space:]]*"/,"",v)
-            sub(/"[[:space:]]*$/,"",v)
-            print v
+            line=$0
+            sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
+            sub(/^"/, "", line)
+            sub(/".*$/, "", line)
+            print line
             exit
         }
     ' "$CONFIG_DEST"
@@ -139,10 +143,12 @@ done
 # download/verify scratch dirs from §1b. Declared before the trap so `set -u`
 # never trips on an unset name inside the handler.
 RENDERED_SUDOERS=""
+RENDERED_SUDOERS_TMP=""
 CLEAN_DL_DIR=""
 CLEAN_VERIFY_DIR=""
 cleanup() {
     [ -n "$RENDERED_SUDOERS" ] && rm -f "$RENDERED_SUDOERS"
+    [ -n "$RENDERED_SUDOERS_TMP" ] && rm -f "$RENDERED_SUDOERS_TMP"
     [ -n "$CLEAN_DL_DIR" ] && rm -rf "$CLEAN_DL_DIR"
     [ -n "$CLEAN_VERIFY_DIR" ] && rm -rf "$CLEAN_VERIFY_DIR"
     return 0
@@ -365,6 +371,57 @@ case "$COMPOSE_FILE" in
 esac
 reject_unsafe "compose_file" "$COMPOSE_FILE"
 
+# compose_override_file (optional, socket-persist): a second `-f` merged onto the
+# proxy-recreate ONLY, so an opt-in override (the maintenance-agent socket wiring)
+# survives an agent-driven recreate. When set it flows into a sudoers literal, so
+# validate it STRICTER than compose_file: bare filename, not "." / "..", no unsafe
+# chars, and distinct from compose_file. Empty ⇒ single-`-f` recreate; the
+# {compose_override_path} sudoers line is DELETED (see the render step below).
+COMPOSE_OVERRIDE_FILE=$(extract_toml_string compose_override_file)
+if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
+    case "$COMPOSE_OVERRIDE_FILE" in
+        "." | "..")   die "compose_override_file must not be '.' or '..', got '$COMPOSE_OVERRIDE_FILE'" ;;
+        */* | *\\* )  die "compose_override_file must be a bare filename (no slash or backslash), got '$COMPOSE_OVERRIDE_FILE'" ;;
+    esac
+    [ "$COMPOSE_OVERRIDE_FILE" != "$COMPOSE_FILE" ] || \
+        die "compose_override_file must differ from compose_file, got '$COMPOSE_OVERRIDE_FILE'"
+    reject_unsafe "compose_override_file" "$COMPOSE_OVERRIDE_FILE"
+    # reject_unsafe covers whitespace/quotes/pipe/control; the override name also
+    # becomes a sudoers literal + an argv token, so reject the remaining shell
+    # metacharacters too. This matches the Go agent's config.Load/runner.New set
+    # exactly, so a value that installs here also starts the agent (fail FAST at
+    # install rather than at agent startup).
+    case "$COMPOSE_OVERRIDE_FILE" in
+        *';'* | *'&'* | *'$'* | *'`'* | *'<'* | *'>'* | *'*'* | *'?'* | *'('* | *')'* | *'{'* | *'}'* )
+            die "compose_override_file must not contain shell metacharacters, got '$COMPOSE_OVERRIDE_FILE'" ;;
+    esac
+    # The override FILE must exist in the project dir. If it is configured but
+    # absent, every agent-driven recreate runs `docker compose -f <base> -f
+    # <missing> up -d`, which docker rejects with "no such file or directory" —
+    # so an update/rollback would hard-fail (worse than not configuring it at
+    # all). Warn loudly; the file is operator-managed (may be added before the
+    # first dispatch), so this does not hard-fail the install.
+    if [ ! -f "$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE" ]; then
+        warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but"
+        warn "$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE does not exist. Every agent-driven"
+        warn "recreate will hard-fail (docker: no such file) until it is present."
+    fi
+    # The agent runs `docker compose` with a SCRUBBED environment, so any
+    # ${VAR} / ${VAR:?...} the override interpolates (e.g. the socket override's
+    # ${CULVERT_MAINT_GID}) MUST be resolvable from <compose_project_dir>/.env —
+    # compose auto-loads that file. A required-but-unset var makes every
+    # agent-driven recreate hard-fail. The ${VAR:?} colon form also trips on an
+    # EMPTY value, so check for the KEY, not just the file. Warn loudly; the
+    # operator owns the .env.
+    if [ ! -f "$PROJECT_DIR/.env" ] || ! grep -Eq '^CULVERT_MAINT_GID=.+' "$PROJECT_DIR/.env" 2>/dev/null; then
+        warn "compose_override_file is set ($COMPOSE_OVERRIDE_FILE) but CULVERT_MAINT_GID"
+        warn "is not present in $PROJECT_DIR/.env. The agent runs compose with a scrubbed"
+        warn "env, so the socket override's \${CULVERT_MAINT_GID:?...} must be in that .env"
+        warn "or every agent-driven recreate will hard-fail. Set it before dispatching:"
+        warn "  echo \"CULVERT_MAINT_GID=\$(getent group culvert-maint | cut -d: -f3)\" >> $PROJECT_DIR/.env"
+    fi
+fi
+
 # Seed the fixed pinned image tag (P1.4) BEFORE flipping the sudo boundary.
 # docker-compose.yml resolves `image: culvert/proxy:pinned` (no env var). That
 # LOCAL tag must exist before the next `docker compose up` or the stack fails
@@ -397,15 +454,31 @@ fi
 
 COMPOSE_PATH="$PROJECT_DIR/$COMPOSE_FILE"
 RENDERED_SUDOERS=$(mktemp)
+RENDERED_SUDOERS_TMP=$(mktemp)
 
-# Substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets the
-# path/registry slashes pass through unescaped.
+# Pass 1 — substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets
+# the path/registry slashes pass through unescaped.
 sed -e "s|{compose_path}|$(sed_escape_replacement "$COMPOSE_PATH")|g" \
     -e "s|{proxy_repo}|$(sed_escape_replacement "$PROXY_REPO")|g" \
-    "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS"
+    "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS_TMP"
+
+# Pass 2 — the compose.up allowlist has a second, override-carrying form bound to
+# {compose_override_path}. When an override is configured, render that placeholder
+# to its absolute path; when it is NOT, DELETE the line entirely — otherwise the
+# unresolved placeholder would trip the leftover-placeholder guard below (and a
+# host with no override must never carry that extra allowlisted form). POSIX sh:
+# no arrays, so this is a plain if/else over two one-line sed programs.
+if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
+    COMPOSE_OVERRIDE_PATH="$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE"
+    sed "s|{compose_override_path}|$(sed_escape_replacement "$COMPOSE_OVERRIDE_PATH")|g" \
+        "$RENDERED_SUDOERS_TMP" > "$RENDERED_SUDOERS"
+else
+    sed '/{compose_override_path}/d' "$RENDERED_SUDOERS_TMP" > "$RENDERED_SUDOERS"
+fi
+rm -f "$RENDERED_SUDOERS_TMP"
 
 # Refuse to install a sudoers file with any leftover placeholder.
-if grep -qE '\{compose_path\}|\{compose_file\}|\{compose_project_dir\}|\{proxy_repo\}' "$RENDERED_SUDOERS"; then
+if grep -qE '\{compose_path\}|\{compose_file\}|\{compose_project_dir\}|\{compose_override_path\}|\{proxy_repo\}' "$RENDERED_SUDOERS"; then
     warn "rendered sudoers file still contains placeholders:"
     grep -nE '\{compose_|\{proxy_repo\}' "$RENDERED_SUDOERS" >&2
     die "refusing to install an unrendered sudoers file"

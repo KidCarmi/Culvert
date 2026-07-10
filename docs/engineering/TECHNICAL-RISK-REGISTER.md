@@ -1,6 +1,6 @@
 # Culvert Technical Risk Register
 
-> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-06-28
+> **Owner:** Chief Engineering Advisor · **Status:** Living · **Last review:** 2026-07-05 (drift sync)
 >
 > Risks are things that can go wrong in production or in the supply chain. Structural shortcuts
 > live in the [Technical Debt Register](./TECHNICAL-DEBT-REGISTER.md). Some items appear in both
@@ -25,9 +25,10 @@
 | RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
 | RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
-| RISK-012 | LOW | OPEN | Account lockout is username-keyed (lockout-as-DoS) | `lockout.go:36,60` |
+| RISK-012 | LOW | ✅ CLOSED | Account lockout is username-keyed (lockout-as-DoS) | two-tier (IP,user)+account keying w/ trusted-IP bypass (2026-07-05); adversarially reviewed 2× |
+| RISK-019 | MEDIUM | ✅ CLOSED | Admin-UI per-IP logic keys on direct peer IP; no trusted-proxy XFF extraction (lockout collapses behind an L7 proxy) | trusted-proxy `realClientIP` (2026-07-05); adversarially reviewed |
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
-| RISK-013 | LOW | OPEN | `normalizeHost` IDNA failure is fail-open | `security.go:34-37` |
+| RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
 
 ---
 
@@ -277,8 +278,14 @@
   updater sidecar; the proxy never verifies the pulled image's signature or digest. The Sigstore
   machinery verifies *catalogs*, not the image the updater pulls.
 - **Impact:** A compromised/misconfigured updater can run an arbitrary image with no proxy-side defense.
-- **Recommendation:** Verify a pinned digest/signature in-binary before accepting an applied update.
-  **Complexity M.**
+- **Resolution path (clarified 2026-07-05):** this gap is **inherent to the legacy tag-based updater
+  sidecar**, and its correct fix is *migration, not a patch* — the replacement path already has what
+  this asks for (the catalog + maintenance-agent flow pins by digest, `docker pull …@sha256:`, and
+  verifies keyless Sigstore signatures with catalog↔image identity parity, P2b-2b). Bolting a
+  verifier onto `apiUpdateApply` would harden code scheduled for deletion under **DEBT-008**
+  (active removal). So RISK-010 closes when the updater is retired (same move that closes
+  RISK-ACC-1), NOT by editing `update.go`. Stays OPEN until the production catalog cutover completes.
+  **Complexity M (as migration, tracked under DEBT-008).**
 
 ## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · OPEN
 - **Current state:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushes the previous tag
@@ -288,9 +295,73 @@
   mixed-version cluster.
 - **Recommendation:** Post-rollback health verification + failure-path tests. **Complexity M.**
 
-## RISK-012 — Username-keyed lockout (DoS) · LOW · OPEN
-- `lockout.go:36,60`: an attacker who knows an admin username can deliberately lock it out; restart
-  clears all lockouts (also the informal break-glass). Consider IP+user keying. **Complexity S.**
+## RISK-012 — Username-keyed lockout (DoS) · LOW · ✅ CLOSED 2026-07-05
+- **Was:** `internal/lockout` keyed the login lockout by username ONLY, so any remote party who
+  knew (or guessed) an admin username could send 5 unauthenticated login POSTs and lock that
+  admin out globally — lockout-as-DoS.
+- **Fix (two-tier keying, `internal/lockout/lockout.go`):**
+  - **Tier 1 — pair lock:** 5 failures from one `(clientIP, username)` pair locks THAT pair for
+    15m. A username-flood now locks only the attacker's own pair; the real admin's IP is
+    untouched.
+  - **Tier 2 — account lock:** 20 failures for a username across ALL IPs locks the account, as a
+    backstop against distributed/IP-rotating brute force — but client IPs that previously logged
+    in successfully (trusted, `TrustTTL=30d`, bounded `trustMaxIPs=8`) BYPASS the account lock, so
+    the flood cannot lock out a returning admin from a known-good IP.
+  - `clientIP` is the direct peer (`net.SplitHostPort(r.RemoteAddr)`), NOT `X-Forwarded-For` — so
+    an attacker on a directly-exposed deployment cannot spoof the key to evade their own pair lock
+    or forge a victim's trusted IP.
+  - Setup endpoint uses the **pair-only** path (`CheckPair`/`RecordPairFailure`) — pure per-IP,
+    no account tier — because there is no account to protect pre-provisioning and an account-wide
+    counter on the reserved `"setup"` user would let a few IPs globally block bootstrap (the exact
+    DoS class; caught by adversarial review as F1 and fixed before merge).
+- **Adversarially reviewed (2×) before merge.** Core mechanics (lock math, `secondsRemaining`,
+  concurrency under one mutex, trust-grant integrity, Cleanup coverage of both maps + trust set)
+  verified sound and test-pinned (`lockout_test.go` two-tier + pair-only regression guards).
+- **Accepted residuals (documented, not defects):**
+  - *Brute-force budget* — an attacker with ≥4 IPs gets 20 password guesses before any lock (vs 5
+    under the old scheme); bcrypt + the 300 ms per-attempt delay remain the real barrier, and 20
+    is the chosen midpoint between brute-force resistance and DoS-lockout risk. A paced attacker
+    staying under the window cap is an inherent property of any windowed counter.
+  - *Untrusted-IP admin during an active flood* — a fresh-deploy / new-location admin with no live
+    trust grant can still be caught by the account lock during a distributed flood (re-trippable
+    every 15m). Strictly better than the username-only original; inherent to IP-based keying.
+  - *Reverse-proxy topologies* — **CLOSED via RISK-019** (2026-07-05): the trusted-proxy-aware
+    `realClientIP` now feeds the lockout keys, so behind a configured trusted proxy the tiers key on
+    the real client again instead of collapsing onto the proxy IP.
+
+## RISK-019 — Admin-UI per-IP logic keys on the direct peer IP (no trusted-proxy extraction) · MEDIUM · ✅ CLOSED 2026-07-05
+- **Was:** the admin UI derived client IP from `r.RemoteAddr` everywhere (login lockout, admin-API
+  rate limiter, admin-IP allowlist, audit actor). Behind an L7 proxy that terminates TCP, every
+  request presented the proxy's IP, so the RISK-012 two-tier lockout collapsed toward one shared
+  pair (5 failures lock the admin globally) and per-IP rate limiting / audit attribution lost
+  meaning — uncorrectable via config.
+- **Fix:** `realclientip.go::realClientIP(r)` — a trusted-proxy-aware resolver. It returns the
+  direct peer UNLESS that peer is in a configured trusted-proxy CIDR set (`trustedProxyNets`), in
+  which case it returns the rightmost `X-Forwarded-For` hop NOT in the trusted set (the real client
+  behind the proxy chain). Empty set = always the direct peer. **The gate is the whole security
+  argument:** a direct attacker's peer is not in the trusted set, so their `X-Forwarded-For` is
+  never honored — they cannot forge a victim's IP or evade their own lockout (pinned by
+  `TestRealClientIP_SpoofDefense`). Adopted at all admin-side sites: `apiAuthLogin`,
+  `apiSetupComplete`, the `apiLimiter` gate + `uiIPGuardMiddleware` allowlist (`ui_middleware.go`),
+  `auditActor` (`ui_helpers.go`), and the cluster error-budget audit actor (`update_cluster.go`).
+  The proxy DATA path (`handleRequest`'s `rl`/`connLimiter`/`ipf`) is deliberately untouched — those
+  are direct client connections, not behind the admin reverse proxy.
+- **Config (full GUI parity):** `-trusted-proxy-cidrs` flag + `proxy.trusted_proxy_cidrs` YAML seed;
+  `POST/GET /api/settings/network` (`trusted_proxy_cidrs`); admin-durable via
+  `AdminSettings.TrustedProxyCIDRs`; UI field in the Network & TLS panel; `trusted_proxy_cidrs`
+  config-surface row (admin-durable only — per-node proxy topology, deliberately NOT cluster-synced).
+  Invalid CIDRs reject the whole update (API) or fail safe to "no trust" (startup/admin_settings).
+- **Adversarially reviewed before merge** (spoof defense, XFF parsing, the `uiIPGuard` allowlist
+  bypass path — all DEFEATED; the review confirmed the allowlist is *tightened*, not weakened).
+  Two review findings fixed in the same change: **F1** — an empty persisted trust list now wipes a
+  YAML seed via a `TrustedProxyCIDRsSaved` sentinel (a security control must not fail toward *more*
+  trust on restart); **F2** — `realClientIP` returns the canonical `ip.String()` so a non-canonical
+  XFF spelling (`::ffff:1.2.3.4`) can't fork the per-IP lockout key. Both pinned by tests.
+- **Accepted residual (F3, operational):** the trust contract assumes the configured proxy
+  actually sets/overwrites `X-Forwarded-For`. If an operator trusts a proxy that forwards a
+  client-supplied XFF verbatim, or that never sets XFF (collapsing every request onto the proxy IP),
+  the protection degrades — this is a deployment misconfiguration outside the code's control,
+  flagged in the `config.example.yaml` / API-field guidance.
 
 ## RISK-018 — Leaked HA standby goroutine races test logger swaps · LOW · ✅ CLOSED 2026-07-04
 - **Root cause (narrower than first mapped):** three `ha_failover_test.go` tests seeded
@@ -323,9 +394,28 @@
   goroutines on the HA suite. **Complexity S.** Not attempted inside PR #560 (out of that PR's
   diff; HA test lifecycle deserves its own reviewed change).
 
-## RISK-013 — `normalizeHost` IDNA fail-open · LOW · OPEN
-- `security.go:34-37`: on IDNA error the original host is returned, potentially letting a malformed/
-  homograph host evade an FQDN rule. Narrow but a fail-open in a security-relevant normalization step.
+## RISK-013 — `normalizeHost` IDNA fail-open · LOW · ✅ CLOSED 2026-07-05
+- **Was:** `hostutil.NormalizeHost` returned the raw lowercased host on `idna.ToASCII` error, so a
+  host with an invalid punycode label flowed un-normalized into every downstream matcher
+  (blocklist, threat feed, policy FQDN, URL category) — a fail-open in a security-relevant
+  canonicalization step.
+- **Fix:** a fail-CLOSED core `hostutil.NormalizeHostStrict(host) (norm, ok)` returns `ok=false`
+  on IDNA failure. The request-path dispatch gates call it and REJECT before any matcher runs:
+  `handleRequest` (`proxy.go`, HTTP 400 `INVALID_HOST`, BEFORE `preDispatchBlocked` and
+  `policyStore.Evaluate`) and the SOCKS5 handler (`socks5.go`, reply 0x02). `NormalizeHost`
+  (still fail-open) is retained ONLY for admin-entered PATTERNS and store keys, where literal
+  fallback matching is acceptable — it now delegates to the strict core.
+- **Adversarially reviewed before merge:** the gate closes the asymmetry on every primary path
+  (HTTP/CONNECT/WebSocket via `handleRequest`; SOCKS5), with no false-positive DoS (the IDNA
+  failure set is invalid-punycode only — IPv6, underscores, hyphens, trailing dot, Unicode all
+  pass). Empirically probed; no legitimate client emits invalid punycode.
+- **Accepted residual (LOW, tracked):** the CDR inner-request evaluation
+  (`cdr_proxy.go` `cdrPolicyStore.Evaluate(..., req.Host, ...)`) still normalizes the decrypted
+  INNER `Host` fail-open. Not a blocklist/policy/threat bypass (those decided on the gated OUTER
+  host), and inner-`Host` CDR matching is independently spoofable with any VALID host, so the
+  IDNA-invalid vector adds only marginal risk. Fix if pursued: gate `req.Host` with
+  `normalizeHostStrict` inside the inspect inner loop (fail the CDR decision closed), or key CDR
+  policy on the gated outer `hostOnly`.
 
 ---
 
@@ -383,3 +473,15 @@
   legacy (no etcd) deployments keep the ADR-0004 safe-manual default. Residuals accepted + documented:
   bounded-LWW window ≤TTL on partition (F4 option A) and the legacy opt-in flag, both in
   `docs/operator/ha-lease-failover.md`.
+
+- **2026-07-05** — **RISK-012 + RISK-013 CLOSED (one focused security PR).**
+  RISK-012: two-tier `(clientIP,username)`-pair + account lockout with trusted-IP bypass
+  (`internal/lockout`), replacing username-only keying that let a remote party lock an admin out
+  with 5 unauthenticated POSTs. RISK-013: fail-closed `NormalizeHostStrict` gate at the proxy +
+  SOCKS5 dispatch, replacing the fail-open IDNA normalization that let an invalid-punycode host
+  reach every matcher un-normalized. Each fix adversarially reviewed before merge (RISK-012 by two
+  independent reviewers). The RISK-012 review caught a real HIGH regression pre-merge — the setup
+  endpoint's reserved `"setup"` user aggregating into the account tier (global bootstrap DoS) —
+  fixed with a pair-only limiter path. New **RISK-019** (MEDIUM, OPEN) filed for the cross-cutting
+  trusted-proxy client-IP gap the review surfaced (F4). RISK-013 review recorded one LOW residual
+  (CDR inner-`Host` fail-open). Full `-race ./...` green.

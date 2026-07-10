@@ -41,18 +41,30 @@ func (r *RotatingFile) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.size+int64(len(p)) > r.maxBytes {
+	if r.file != nil && r.size+int64(len(p)) > r.maxBytes {
 		r.file.Close()
+		r.file = nil
+		r.size = 0
 		// Remove any previous rotated file before renaming the current one.
 		// This prevents unbounded growth from accumulating stale .1 files.
 		_ = os.Remove(r.path + ".1")
 		_ = os.Rename(r.path, r.path+".1")
-		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	}
+	if r.file == nil {
+		// Fresh open after rotation — or a reopen retry after a rotation
+		// whose reopen failed (e.g. disk full). Retrying here, OUTSIDE the
+		// rotation branch, is load-bearing: re-entering rotation on the next
+		// write would os.Remove the just-rotated .1 archive, destroying the
+		// only surviving copy of the log data.
+		f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return 0, err
 		}
 		r.file = f
 		r.size = 0
+		if info, statErr := f.Stat(); statErr == nil {
+			r.size = info.Size()
+		}
 	}
 
 	n, err := r.file.Write(p)
@@ -62,5 +74,12 @@ func (r *RotatingFile) Write(p []byte) (int, error) {
 
 // Close closes the underlying file.
 func (r *RotatingFile) Close() error {
-	return r.file.Close()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
 }

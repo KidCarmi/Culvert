@@ -27,6 +27,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // catalogClockSkew is the tolerance applied to expires_at so a CP whose clock is
@@ -178,9 +180,9 @@ func (p freshnessPolicy) writeVersionFloor(v int) error {
 	if err := os.MkdirAll(filepath.Dir(p.statePath), 0o750); err != nil {
 		return err
 	}
-	tmp := p.statePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p.statePath)
+	// AtomicWrite (unique temp + fsync): the reader is deliberately
+	// fail-closed, but a power-loss-reverted (unfsynced) floor file would
+	// silently reopen the signed-catalog downgrade window this floor exists
+	// to close.
+	return fileutil.AtomicWrite(p.statePath, b, 0o600)
 }

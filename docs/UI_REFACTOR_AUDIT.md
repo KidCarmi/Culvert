@@ -107,9 +107,9 @@ Counts below are derived from `ui.go:103-274`.
 | `POST /api/ca/rotate` | `apiCARotate` | Two-step token (`pendingCARotation`) |
 | `POST /api/cluster/revoke` | `apiClusterRevoke` | Removes a node from cluster |
 | `POST /api/cluster/mode` | `apiClusterMode` | Switches CP/DP role |
-| `POST /api/config/import` | `apiConfigImport` | Restores config snapshot |
-| `POST /api/session-secret` | `apiSessionSecret` | Rotates cookie HMAC key |
-| `PUT /api/settings/unauth-mode` | `apiUnauthMode` | Disables proxy auth |
+| `POST /api/config/import` | `apiConfigImport` | Imports exported config |
+| `POST /api/session-secret` | `apiSessionSecret` | Rotates session signing key |
+| `PUT /api/settings/unauth-mode` | `apiUnauthMode` | Sets default authentication outcome (require/open on no-match) |
 | `POST /api/auth/users` | `apiAuthUsers` | RBAC user CRUD |
 
 These endpoints already require auth via `uiAuthMiddleware`; most call

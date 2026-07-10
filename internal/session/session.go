@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -269,11 +271,10 @@ func (r *RevocationList) SaveRevocations() error {
 	if err != nil {
 		return fmt.Errorf("marshal revocations: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write revocations: %w", err)
-	}
-	return os.Rename(tmp, path)
+	// AtomicWrite (unique temp + fsync): a torn or power-loss-reverted
+	// revocation file would resurrect revoked session cookies until their
+	// natural expiry.
+	return fileutil.AtomicWrite(path, data, 0o600)
 }
 
 // LoadRevocations reads revocations from disk and merges them.

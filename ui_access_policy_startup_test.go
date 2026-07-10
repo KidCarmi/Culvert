@@ -57,7 +57,7 @@ func TestResolveUIAccessPolicyStartupConfig_CopiesAllFields(t *testing.T) {
 	}
 	fc.Proxy.BaseURL = "https://proxy.example"
 	fc.Proxy.IdPProfilesFile = "/etc/culvert/idp.json"
-	got := resolveUIAccessPolicyStartupConfig(fc, "192.168.1.0/24", "")
+	got := resolveUIAccessPolicyStartupConfig(fc, "192.168.1.0/24", "", "")
 	if got.AllowIPCLI != "192.168.1.0/24" {
 		t.Errorf("AllowIPCLI: got %q", got.AllowIPCLI)
 	}
@@ -78,14 +78,14 @@ func TestResolveUIAccessPolicyStartupConfig_CopiesAllFields(t *testing.T) {
 func TestResolveUIAccessPolicyStartupConfig_HasOIDCFromRegistryOnly(t *testing.T) {
 	fc := &FileConfig{}
 	fc.Proxy.IdPProfilesFile = "/etc/culvert/idp.json"
-	got := resolveUIAccessPolicyStartupConfig(fc, "", "")
+	got := resolveUIAccessPolicyStartupConfig(fc, "", "", "")
 	if !got.HasOIDCOrSAML {
 		t.Errorf("HasOIDCOrSAML: expected true (registry file alone)")
 	}
 }
 
 func TestResolveUIAccessPolicyStartupConfig_HasOIDCFalse(t *testing.T) {
-	got := resolveUIAccessPolicyStartupConfig(&FileConfig{}, "", "")
+	got := resolveUIAccessPolicyStartupConfig(&FileConfig{}, "", "", "")
 	if got.HasOIDCOrSAML {
 		t.Errorf("HasOIDCOrSAML: expected false")
 	}
@@ -94,7 +94,7 @@ func TestResolveUIAccessPolicyStartupConfig_HasOIDCFalse(t *testing.T) {
 func TestResolveUIAccessPolicyStartupConfig_IdPProfilesCLIOverridesYAML(t *testing.T) {
 	fc := &FileConfig{}
 	fc.Proxy.IdPProfilesFile = "/etc/culvert/idp.json"
-	got := resolveUIAccessPolicyStartupConfig(fc, "", "/data/idp_profiles.json")
+	got := resolveUIAccessPolicyStartupConfig(fc, "", "", "/data/idp_profiles.json")
 	if got.IdPProfilesFile != "/data/idp_profiles.json" {
 		t.Errorf("IdPProfilesFile: got %q, want CLI value to win", got.IdPProfilesFile)
 	}
@@ -104,7 +104,7 @@ func TestResolveUIAccessPolicyStartupConfig_IdPProfilesCLIOverridesYAML(t *testi
 }
 
 func TestResolveUIAccessPolicyStartupConfig_IdPProfilesCLIOnly(t *testing.T) {
-	got := resolveUIAccessPolicyStartupConfig(&FileConfig{}, "", "/data/idp_profiles.json")
+	got := resolveUIAccessPolicyStartupConfig(&FileConfig{}, "", "", "/data/idp_profiles.json")
 	if got.IdPProfilesFile != "/data/idp_profiles.json" {
 		t.Errorf("IdPProfilesFile: got %q", got.IdPProfilesFile)
 	}

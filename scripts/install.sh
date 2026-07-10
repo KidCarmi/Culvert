@@ -566,13 +566,27 @@ dump_compose_diagnostics() {
 ###############################################################################
 # Encryption-at-rest passphrase
 ###############################################################################
-# is_fresh_deployment — true when this looks like a first-time install: the
-# proxy-data Docker volume does not exist yet (Docker creates it on the first
-# `docker compose up`). Any docker error => treat as NOT fresh (conservative).
+# is_fresh_deployment — true when this looks like a first-time install: THIS
+# install directory's own proxy-data Docker volume does not exist yet (Docker
+# creates it on the first `docker compose up`). Resolves the REAL volume name
+# via `docker compose config` (run from $INSTALL_DIR, our cwd since the `cd`
+# above) instead of guessing it — Compose only labels volumes it creates with
+# com.docker.compose.project/.volume (NOT a working-directory label), so
+# matching by label alone can't distinguish this project from another compose
+# project on the same host that also declares a "proxy-data" volume. Asking
+# Compose for the resolved name applies whatever project-naming it would
+# actually use (directory basename, COMPOSE_PROJECT_NAME, or an explicit
+# `name:`) and lets us check that exact volume for existence. Any docker/
+# compose error => treat as NOT fresh (conservative).
 is_fresh_deployment() {
-  local vols
-  vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null)" || return 1
-  ! grep -qE '(^|_)proxy-data$' <<<"$vols"
+  local resolved_name
+  resolved_name="$(sudo docker compose config 2>/dev/null | awk '
+    /^volumes:/ { invol=1; next }
+    invol && /^  proxy-data:/ { inpd=1; next }
+    inpd && /^    name:/ { print $2; exit }
+  ')"
+  [[ -n "$resolved_name" ]] || return 1
+  ! sudo docker volume inspect "$resolved_name" >/dev/null 2>&1
 }
 
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
@@ -849,14 +863,19 @@ ensure_agent_traversal() {
 
 maint_toml_string() {
   local key="$1" file="${2:-/etc/culvert-maint/config.toml}"
+  # Strip from the first quote onward (rather than requiring the closing
+  # quote to be the last non-blank character on the line) so a normal
+  # trailing inline TOML comment — e.g. `key = "value"  # comment` — doesn't
+  # leak into the extracted value. Mirrors extract_toml_string() in
+  # packaging/culvert-maint/install.sh.
   sudo awk -v k="$key" '
-    BEGIN { FS="=" }
     /^[[:space:]]*#/ { next }
     $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
-      v=$2
-      sub(/^[[:space:]]*"/, "", v)
-      sub(/"[[:space:]]*$/, "", v)
-      print v
+      line=$0
+      sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
+      sub(/^"/, "", line)
+      sub(/".*$/, "", line)
+      print line
       exit
     }
   ' "$file" 2>/dev/null
@@ -997,13 +1016,53 @@ wire_release_agent_for_compose() {
   env_put CULVERT_MAINT_GID "$maint_gid" "$INSTALL_DIR/.env"
   env_put CULVERT_RELEASE_PROXY_REPO "$release_repo" "$INSTALL_DIR/.env"
 
+  # Persist the maintenance-socket override so AGENT-DRIVEN recreates keep the
+  # socket. Without this, the agent recreates the proxy with a single `-f`
+  # (sudoers-bound) and drops the override's socket mount — after the first
+  # update the CP can no longer reach the agent. compose_override_file carries
+  # docker-compose.maint-agent.yml as a second `-f` on the recreate ONLY. The
+  # ${CULVERT_MAINT_GID} it needs is resolved from $INSTALL_DIR/.env (written
+  # above) because the agent runs compose with a scrubbed env. Only when the
+  # override file is actually present. Set BEFORE the sudoers re-render so the
+  # override allowlist line is rendered too.
+  if [[ -f "$INSTALL_DIR/docker-compose.maint-agent.yml" ]]; then
+    # Delete ANY existing form (TOML allows `key=v` and `key = v`) then append the
+    # canonical line. A grep(prefix)+sed(` = ` only) pair would MISS a spaceless
+    # `compose_override_file="old"`: grep matches so the append is skipped, but the
+    # spaced sed does not replace it, leaving the stale value — the socket would
+    # then be dropped on the next update, the exact failure this persists against.
+    sudo sed -i '/^[[:space:]]*compose_override_file[[:space:]]*=/d' "$cfg"
+    # Ensure the file ends in a newline BEFORE appending — but only add one when
+    # it does not already (tail -c1 is empty iff the last byte is a newline, since
+    # $() strips a trailing newline). This is idempotent (no blank-line buildup on
+    # re-runs) AND safe against a hand-edited config.toml whose last line lacks a
+    # trailing newline (without this, the key would glue onto that line and the
+    # maint installer would not render the two-`-f` sudoers rule).
+    if [[ -n "$(tail -c1 "$cfg" 2>/dev/null)" ]]; then
+      printf '\n' | sudo tee -a "$cfg" >/dev/null
+    fi
+    printf 'compose_override_file = "docker-compose.maint-agent.yml"\n' | sudo tee -a "$cfg" >/dev/null
+    info "Maintenance agent will carry docker-compose.maint-agent.yml on recreate (socket survives updates)."
+  fi
+
   # Re-render sudoers after the config patch, then start the service.
   if ! sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" /usr/local/bin/culvert-maint; then
     warn "Release Management auto-wiring skipped: maint-agent sudoers/config re-render failed."
     return 0
   fi
-  if ! sudo systemctl enable --now culvert-maint >/dev/null 2>&1; then
-    warn "Release Management auto-wiring skipped: could not start culvert-maint."
+  # enable (idempotent) + RESTART, not `enable --now`: on a re-run/upgrade where
+  # the agent is ALREADY running, `--now` only starts a stopped unit — it does
+  # NOT reload the config.toml this function just patched. The agent reads its
+  # config ONCE at startup, so both the allow_peers patch AND compose_override_file
+  # would be ignored by the running process, and it would keep recreating with a
+  # single `-f` (dropping the socket) until a manual restart. `restart` also
+  # starts a stopped unit, so it is correct for first-install and upgrade alike.
+  if ! sudo systemctl enable culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not enable culvert-maint."
+    return 0
+  fi
+  if ! sudo systemctl restart culvert-maint >/dev/null 2>&1; then
+    warn "Release Management auto-wiring skipped: could not (re)start culvert-maint."
     return 0
   fi
 

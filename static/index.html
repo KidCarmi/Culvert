@@ -1739,12 +1739,12 @@ Firefox (all platforms):
           </div>
         </div>
 
-      <!-- Backup & Restore -->
+      <!-- Config Export / Import -->
       <div class="panel" style="margin-top:18px">
-        <div class="panel-header"><span class="panel-title">Backup &amp; Restore</span></div>
+        <div class="panel-header"><span class="panel-title">Config Export / Import</span></div>
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px">
-            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file.<br>
+            Export all configuration (policy rules, blocklist, rewrites, SSL bypass, security settings) as a portable JSON file. To roll back a recent config change instead, use Config Versions below; for full disaster-recovery backup/restore of <code>/data</code>, see the <code>cli</code> service in <code>docker-compose.yml</code>.<br>
             <strong style="color:var(--red)">Note:</strong> Admin credentials are not exported for security reasons.
           </p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -1754,7 +1754,7 @@ Firefox (all platforms):
               <input type="file" accept=".json" style="display:none" data-change="importConfig">
             </label>
           </div>
-          <div id="backup-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+          <div id="config-export-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
           <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -1860,6 +1860,13 @@ Firefox (all platforms):
             </label>
             <p style="font-size:.72rem;color:var(--muted);margin-top:4px">
               Enable only when running behind a trusted reverse proxy. When disabled, X-Forwarded-Host/Proto headers are ignored.
+            </p>
+          </div>
+          <div class="form-group" style="margin-top:14px">
+            <label class="form-label" for="s-trusted-proxies">Trusted proxy IPs/CIDRs (admin-UI client IP)</label>
+            <input type="text" class="input" style="width:100%" id="s-trusted-proxies" placeholder="Comma-separated, e.g. 10.0.0.0/8,192.168.1.5">
+            <p style="font-size:.72rem;color:var(--muted);margin-top:4px">
+              Reverse proxies whose <code>X-Forwarded-For</code> is trusted to resolve the real client IP for login lockout, admin-API rate limiting, the admin-IP allowlist, and audit attribution. Only requests arriving directly from one of these addresses have their X-Forwarded-For honored; empty = always use the direct peer IP (spoofing-safe default).
             </p>
           </div>
           <button class="btn" style="margin-top:10px" data-click="saveNetworkTLS">Save Network Settings</button>
@@ -2189,7 +2196,7 @@ Firefox (all platforms):
               <input type="text" class="input" style="width:100%" id="pol-src-id" placeholder="alice">
             </div>
             <div>
-              <label class="form-label">Auth Provider <span style="color:var(--muted);font-weight:400">(for group filter)</span></label>
+              <label class="form-label">Group Provider Filter <span style="color:var(--muted);font-weight:400">(narrows Source Group search)</span></label>
               <select class="select" style="width:100%" id="pol-src-provider" data-change="loadPolicyGroupOptions">
                 <option value="">Any provider</option>
               </select>
@@ -2581,7 +2588,7 @@ Firefox (all platforms):
       <div style="margin-bottom:14px">
         <p style="font-size:.82rem;color:var(--muted);margin:0;line-height:1.6">
           Create named extension profiles and assign them to policy rules via <strong>File Extension Profile</strong>.
-          The <strong>Global Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
+          The <strong>Global File Extension Block List</strong> below applies to <em>all</em> traffic regardless of policy rules.
         </p>
       </div>
 
@@ -2616,10 +2623,10 @@ Firefox (all platforms):
         </div>
       </div>
 
-      <!-- Global Block List (existing flat list) -->
+      <!-- Global File Extension Block List (existing flat list) -->
       <div style="display:grid;grid-template-columns:300px 1fr;gap:18px;align-items:start">
         <div class="panel">
-          <div class="panel-header"><span class="panel-title">Global Block List</span></div>
+          <div class="panel-header"><span class="panel-title">Global File Extension Block List</span></div>
           <div class="panel-body">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:14px">
               Extensions here are blocked for ALL traffic. Independent of policy rules.
@@ -4911,14 +4918,14 @@ async function toggleBlocklistMode() {
   }
 }
 
-// ── Config Backup / Restore ──────────────────────────────────────────────
+// ── Config Export / Import ────────────────────────────────────────────────
 async function exportConfig() {
   const r = await fetch('/api/config/export');
   if (!r.ok) { toast('Export failed: ' + await r.text(), 'error'); return; }
   const blob = await r.blob();
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'culvert-backup.json';
+  a.download = 'culvert-config-export.json';
   a.click();
 }
 
@@ -4939,7 +4946,7 @@ async function importConfig(input) {
   if (!file) return;
   const ok = await confirmAction('Import Configuration', 'Imported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.', 'Import');
   if (!ok) { input.value = ''; return; }
-  const statusEl = document.getElementById('backup-status');
+  const statusEl = document.getElementById('config-export-status');
   statusEl.style.display = 'none';
   try {
     const text = await file.text();
@@ -4952,7 +4959,7 @@ async function importConfig(input) {
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
       statusEl.style.cssText = 'display:block;color:var(--green)';
-      statusEl.textContent = `✓ Configuration restored (backup from ${data.exportedAt || 'unknown date'})`;
+      statusEl.textContent = `✓ Configuration imported (exported ${data.exportedAt || 'unknown date'})`;
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
     } else {
@@ -5002,13 +5009,33 @@ async function diffConfigVersions(from, to) {
     }
     let html = `<div style="padding:10px;background:var(--surface);border-radius:6px"><strong style="font-size:.85rem">Diff: v${from} → v${to}</strong><table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Field</th><th>From</th><th>To</th></tr></thead><tbody>`;
     data.changes.forEach(c => {
-      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${escHtml(String(c.from))}</td><td style="color:var(--green)">${escHtml(String(c.to))}</td></tr>`;
+      html += `<tr><td>${escHtml(c.field)}</td><td style="color:var(--red)">${fmtDiffCell(c.from)}</td><td style="color:var(--green)">${fmtDiffCell(c.to)}</td></tr>`;
     });
     html += '</tbody></table></div>';
     el.innerHTML = html;
   } catch (err) {
     el.innerHTML = `<em style="color:var(--red)">Diff failed: ${escHtml(err.message)}</em>`;
   }
+}
+
+// fmtDiffCell renders one side of a config-diff cell. Scalar fields
+// (default_action, blocklist_mode, rate_limit_rpm, …) arrive as plain
+// strings/numbers; list & struct fields (file_block_extensions, blocklist,
+// policy_rules, category_groups, …) arrive as objects shaped
+// {count, added?, removed?, changed?} from diffStringList/diffPolicyRules/
+// diffCategoryGroups/diffURLCategories (configversion.go). A naive String()
+// on those objects prints "[object Object]"; unpack them into a readable
+// "N items · added/removed/changed: …" summary instead. Returns HTML-safe
+// text (element values are individually escaped).
+function fmtDiffCell(v) {
+  if (v === null || v === undefined) return '<span style="color:var(--muted)">—</span>';
+  if (typeof v !== 'object') return escHtml(String(v));
+  const bits = [];
+  if (typeof v.count === 'number') bits.push(`${v.count} item${v.count === 1 ? '' : 's'}`);
+  if (Array.isArray(v.added)   && v.added.length)   bits.push(`added: ${v.added.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.removed) && v.removed.length) bits.push(`removed: ${v.removed.map(escHtml).join(', ')}`);
+  if (Array.isArray(v.changed) && v.changed.length) bits.push(`changed: ${v.changed.map(escHtml).join(', ')}`);
+  return bits.length ? bits.join(' · ') : escHtml(JSON.stringify(v));
 }
 
 async function rollbackConfigVersion(version) {
@@ -6013,7 +6040,15 @@ async function loadSecScanStatus() {
     const fe = document.getElementById('sec-feed-entries');
     if (fe) fe.textContent = s.threat_feed_entries != null ? s.threat_feed_entries.toLocaleString() + ' entries' : '—';
     const fs = document.getElementById('sec-feed-sync');
-    if (fs) fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+    if (fs) {
+      if (s.threat_feed_sync_ok === false) {
+        const since = s.threat_feed_last_success ? new Date(s.threat_feed_last_success).toLocaleString() : 'never';
+        fs.innerHTML = '<span style="color:var(--red)" title="' + escHtml(s.threat_feed_sync_error || '') + '">sync failing</span> · last good sync: ' + escHtml(since);
+      } else {
+        fs.style.color = '';
+        fs.textContent = s.threat_feed_last_sync ? 'Last sync: ' + new Date(s.threat_feed_last_sync).toLocaleTimeString() : '';
+      }
+    }
     const fb = document.getElementById('sec-feed-blocked');
     if (fb) fb.textContent = s.stat_feed_blocked ? s.stat_feed_blocked + ' blocked' : '';
 
@@ -6787,6 +6822,7 @@ async function loadSettings() {
     document.getElementById('s-base-url').value = n.base_url || '';
     document.getElementById('s-ui-sans').value = (n.ui_sans || []).join(', ');
     document.getElementById('s-trust-fwd').checked = !!n.trust_forwarded_headers;
+    document.getElementById('s-trusted-proxies').value = (n.trusted_proxy_cidrs || []).join(', ');
   } catch(e) { console.error(e); }
 }
 
@@ -7298,12 +7334,14 @@ async function saveNetworkTLS() {
   const baseURL = document.getElementById('s-base-url').value.trim();
   const sansRaw = document.getElementById('s-ui-sans').value.trim();
   const trustFwd = document.getElementById('s-trust-fwd').checked;
+  const proxiesRaw = document.getElementById('s-trusted-proxies').value.trim();
   const uiSans = sansRaw ? sansRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const trustedProxies = proxiesRaw ? proxiesRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
   try {
     await api('/api/settings/network', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd })
+      body: JSON.stringify({ base_url: baseURL, ui_sans: uiSans, trust_forwarded_headers: trustFwd, trusted_proxy_cidrs: trustedProxies })
     });
     const el = document.getElementById('s-network-status');
     el.textContent = 'Saved. TLS SAN changes require restart.';
@@ -9196,7 +9234,7 @@ function onGroupFocus() {
   const pid = document.getElementById('pol-src-provider').value;
   if (!pid) {
     const dd = document.getElementById('pol-src-group-dropdown');
-    dd.innerHTML = '<div class="picker-empty">Select an Auth Provider first</div>';
+    dd.innerHTML = '<div class="picker-empty">Select a Group Provider Filter first</div>';
     dd.style.display = '';
     return;
   }

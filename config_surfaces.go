@@ -61,6 +61,13 @@ type surfaceBinding struct {
 	Field    string // exact Go field name; reflection-verified by the parity test
 	Apply    emptySemantics
 	Redacted bool // true when the capture/export accessor strips secret material
+	// AppliesOnDP marks a ConfigSnapshot binding that the Data Plane consumes
+	// but whose consumption is NOT an empty-value config apply (so Apply stays
+	// semNA). Today the sole case is Epoch — read by dpObserveEpoch as the
+	// ADR-0005 fence ratchet, not applied as configuration. SnapshotApplyParity
+	// keys "must be consumed on the DP" on (Apply != semNA || AppliesOnDP), so a
+	// fence/rotation field mislabeled kindMeta is still apply-verified.
+	AppliesOnDP bool
 }
 
 // configSurfaceRow is one logical setting spanning up to three structs.
@@ -78,8 +85,17 @@ type configSurfaceRow struct {
 	ClusterSynced  bool      // pushed CP→DP in ConfigSnapshot
 	Sensitive      bool      // may carry secret material (never Rollback; Export only via Redacted accessor)
 	SnapshotCap    int       // validateConfigSnapshot cap for the ConfigSnapshot slice/map binding (0 = scalar / not synced)
-	Note           string    // constraint the flags can't express (ordering, validation, known gaps)
-	Bindings       []surfaceBinding
+	// WireWipeCapable marks a semNilSkipEmptyWipe ConfigSnapshot slice whose
+	// EMPTY state must actually propagate CP→DP (clearing the last entry wipes
+	// the DP's copy). That requires the JSON tag to OMIT `omitempty` — else Go
+	// drops a non-nil empty slice on the wire and the DP reads it as nil→skip,
+	// keeping stale state. Today only rate_limit_exempt. Every OTHER
+	// semNilSkipEmptyWipe field keeps `omitempty`, so its []-wipe is
+	// intentionally wire-dead (an operator clearing the list must push a
+	// non-empty replacement); SnapshotWireWipe pins both postures.
+	WireWipeCapable bool
+	Note            string // constraint the flags can't express (ordering, validation, known gaps)
+	Bindings        []surfaceBinding
 }
 
 // configSurfaces is the registry. Ordering: meta rows, then the
@@ -97,7 +113,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Version"}}},
 	{ID: "snapshot_epoch", Kind: kindMeta,
 		Note:     "ADR-0005 fencing epoch; DPs CAS-ratchet and reject stale-epoch snapshots",
-		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch"}}},
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "Epoch", AppliesOnDP: true}}},
 	{ID: "snapshot_updated_at", Kind: kindMeta,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "UpdatedAt"}}},
 	{ID: "policy_version", Kind: kindMeta,
@@ -192,7 +208,8 @@ var configSurfaces = []configSurfaceRow{
 			{Struct: "ConfigSnapshot", Field: "RateLimitRPM", Apply: semAlwaysReplace}}},
 	{ID: "rate_limit_exempt", Kind: kindConfig, Owner: "rl",
 		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "rate_limit_exempt", DiffNilGuarded: true,
-		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRateLimitExempt,
+		AdminDurable: true, ClusterSynced: true, SnapshotCap: maxSnapRateLimitExempt, WireWipeCapable: true,
+		Note: "the one wire-wipe-capable synced slice: NO omitempty so an empty list clears DP exemptions; CurrentConfigSnapshot sends non-nil",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "RateLimitExempt", Apply: semNilSkipEmptyWipe},
 			{Struct: "AdminSettings", Field: "RateLimitExemptions"},
@@ -288,6 +305,9 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SessionTimeoutHours"}}},
 	{ID: "ui_allow_ips", Kind: kindConfig, Owner: "uiIPGuard", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UIAllowIPs"}}},
+	{ID: "trusted_proxy_cidrs", Kind: kindConfig, Owner: "trustedProxyNets", AdminDurable: true,
+		Note:     "RISK-019 reverse-proxy trust set for admin-UI client-IP; admin-durable only (per-node topology), NOT cluster-synced; empty len-guarded apply",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRs"}}},
 	{ID: "base_url", Kind: kindConfig, Owner: "proxyBaseURL", AdminDurable: true, ClusterSynced: true,
 		Bindings: []surfaceBinding{
 			{Struct: "AdminSettings", Field: "BaseURL"},
@@ -326,6 +346,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedsSaved"}}},
 	{ID: "upstream_proxies_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "UpstreamProxiesSaved"}}},
+	{ID: "trusted_proxy_cidrs_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,
@@ -346,7 +368,8 @@ var configSurfaces = []configSurfaceRow{
 		ClusterSynced: true, SnapshotCap: maxSnapThreatFeedDomains,
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatFeedDomains", Apply: semSkipIfZero}}},
 	{ID: "threat_domain_allowlist", Kind: kindConfig, Owner: "globalThreatFeed",
-		ClusterSynced: true, SnapshotCap: maxSnapDomainAllowlist,
+		ClusterSynced: true, SnapshotCap: maxSnapDomainAllowlist, WireWipeCapable: true,
+		Note:     "no omitempty: the allowlist gates lookup verdicts, so an admin's full clear must reach DPs (stale allowlist = fail-open mask)",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ThreatDomainAllowlist", Apply: semNilSkipEmptyWipe}}},
 	{ID: "session_hmac", Kind: kindConfig, Owner: "session", Sensitive: true, ClusterSynced: true,
 		Note:     "deliberate secret sync (cross-node sessions); redacted for unenrolled GetConfig callers; hex ≥32B validated on apply",

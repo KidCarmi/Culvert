@@ -1,0 +1,54 @@
+# Reference config for the appliance-catalog-update E2E
+# (.github/workflows/appliance-catalog-update-e2e.yml). The workflow renders the
+# live copy with @@PLACEHOLDER@@ tokens substituted (project dir, socket path,
+# runner uid). Kept here as documentation-of-record; see
+# cmd/culvert-maint/internal/config/config.go for the authoritative schema.
+#
+# This is the SAME host-side maintenance agent used by the maint-agent E2E; the
+# only difference is that here the Control Plane that dispatches upgrades runs
+# INSIDE the proxy container the agent recreates (the real appliance topology),
+# so the agent's socket is bind-mounted into that container and reachable at
+# unix:///run/culvert-maint/culvert-maint.sock (see the compose file).
+
+# docker_group_lab: run `docker compose` WITHOUT sudo (the runner user is in the
+# docker group). The agent logs a "root-equivalent" WARN — expected in CI.
+privilege_mode = "docker_group_lab"
+
+# Absolute dir holding docker-compose.catalog-e2e.yml + the rendered .env; the
+# agent chdir's here for every compose invocation (compose auto-loads .env).
+compose_project_dir = "@@PROJECT_DIR@@"
+# Bare filename (no path separator) within compose_project_dir.
+compose_file = "docker-compose.catalog-e2e.yml"
+
+# UDS the Control Plane (in-container) + any curl client connect to. It lives in
+# a host DIRECTORY that is bind-mounted into the proxy container, so the socket
+# file appears at /run/culvert-maint/culvert-maint.sock inside the container.
+socket_path = "@@SOCK_PATH@@"
+# State dir for operations/<op_id>.log + audit.jsonl. Host-side, survives the
+# proxy container recreate (the agent is a host process, not a container).
+state_dir = "@@STATE_DIR@@"
+
+# Repo the pinned pull/tag bind to. Must be a BARE repo (no tag, no @digest); a
+# registry host:port colon before the first '/' is allowed. Matches the seeded
+# catalog's image.repo and the CP's CULVERT_RELEASE_PROXY_REPO.
+proxy_repo = "127.0.0.1:5000/culvert"
+# image_allowlist MUST match the local registry repo. Accepts a tag or an
+# @sha256:<64hex> digest of exactly this repo.
+image_allowlist = "^127\\.0\\.0\\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$"
+
+# SO_PEERCRED allowlist: the runner's own numeric uid. Both the curl client AND
+# the in-container Control Plane connect as this uid (the container runs with
+# `user: <runner-uid>` and host userns is off in CI, so the peer uid matches).
+allow_peers = ["@@RUNNER_UID@@"]
+
+# Health gate target: the proxy data-plane port published on host loopback.
+health_base_url = "http://127.0.0.1:8080"
+health_path = "/health"
+ready_path = "/ready"
+
+# Bounded so the rollback-on-failed-health phase (a deliberately unhealthy image)
+# trips the health gate and inline-rolls-back within a couple of minutes rather
+# than the multi-minute default. A local-registry pull + container recreate of a
+# healthy image completes well inside this window.
+operation_timeout = "12m"
+stage_timeout = "150s"

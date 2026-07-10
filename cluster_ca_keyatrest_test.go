@@ -326,7 +326,7 @@ func TestClusterCAKey_FailedMigrationPreservesReadableBak(t *testing.T) {
 	// Force migration failure: point the model-B KEK at an unwritable location
 	// by making the KEK path a directory (CreateTemp in it is fine, but we make
 	// the *key dir's* kek path a directory so KEK generation fails). Simpler:
-	// use an env KEK that is malformed so encryptWithKEK fails.
+	// use an env KEK that is malformed so key encryption (secret.Seal) fails.
 	t.Setenv(clusterCAEncryptEnvVar, "1")
 	t.Setenv(envKEKName, "not-valid-hex-kek")
 

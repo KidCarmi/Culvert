@@ -289,6 +289,17 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
+	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
+	// Mirror of the handleRequest gate: a destination that cannot be
+	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
+	if _, ok := normalizeHostStrict(host); !ok {
+		atomic.AddInt64(&statBlocked, 1)
+		socks5Reply(conn, 0x02)
+		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
+		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
+		return
+	}
+
 	// ── Blocklist check ───────────────────────────────────────────────────────
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)

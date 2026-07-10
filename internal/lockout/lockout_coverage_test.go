@@ -12,25 +12,25 @@ func TestNewLoginLimiter_FreshState(t *testing.T) {
 	if l == nil {
 		t.Fatal("NewLoginLimiter returned nil")
 	}
-	if locked, _ := l.Check("nobody"); locked {
+	if locked, _ := l.Check("203.0.113.1", "nobody"); locked {
 		t.Error("a fresh limiter must not report anyone locked")
 	}
-	if got := l.AttemptsLeft("nobody"); got != MaxAttempts {
+	if got := l.AttemptsLeft("203.0.113.1", "nobody"); got != MaxAttempts {
 		t.Errorf("AttemptsLeft on unknown user = %d, want %d", got, MaxAttempts)
 	}
 }
 
 func TestAttemptsLeft_DecrementsAndFloors(t *testing.T) {
 	l := NewLoginLimiter()
-	l.RecordFailure("u")
-	if got := l.AttemptsLeft("u"); got != MaxAttempts-1 {
+	l.RecordFailure("203.0.113.1", "u")
+	if got := l.AttemptsLeft("203.0.113.1", "u"); got != MaxAttempts-1 {
 		t.Errorf("AttemptsLeft after 1 failure = %d, want %d", got, MaxAttempts-1)
 	}
 	// Drive past the lock threshold; AttemptsLeft floors at 0.
 	for range MaxAttempts + 2 {
-		l.RecordFailure("u")
+		l.RecordFailure("203.0.113.1", "u")
 	}
-	if got := l.AttemptsLeft("u"); got != 0 {
+	if got := l.AttemptsLeft("203.0.113.1", "u"); got != 0 {
 		t.Errorf("AttemptsLeft when locked = %d, want 0", got)
 	}
 }
@@ -38,24 +38,24 @@ func TestAttemptsLeft_DecrementsAndFloors(t *testing.T) {
 func TestSnapshotAndClear_RestoresState(t *testing.T) {
 	l := NewLoginLimiter()
 	for range MaxAttempts {
-		l.RecordFailure("victim")
+		l.RecordFailure("203.0.113.1", "victim")
 	}
-	if locked, _ := l.Check("victim"); !locked {
+	if locked, _ := l.Check("203.0.113.1", "victim"); !locked {
 		t.Fatal("precondition: victim should be locked after MaxAttempts failures")
 	}
 
 	restore := l.SnapshotAndClear()
 	// After clear, the limiter is empty.
-	if locked, _ := l.Check("victim"); locked {
+	if locked, _ := l.Check("203.0.113.1", "victim"); locked {
 		t.Error("SnapshotAndClear should leave an empty limiter (victim not locked)")
 	}
-	if got := l.AttemptsLeft("victim"); got != MaxAttempts {
+	if got := l.AttemptsLeft("203.0.113.1", "victim"); got != MaxAttempts {
 		t.Errorf("after clear AttemptsLeft = %d, want %d", got, MaxAttempts)
 	}
 
 	restore()
 	// After restore, the captured locked state is back.
-	if locked, _ := l.Check("victim"); !locked {
+	if locked, _ := l.Check("203.0.113.1", "victim"); !locked {
 		t.Error("restore() should bring back the locked state")
 	}
 }
