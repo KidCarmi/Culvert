@@ -75,8 +75,8 @@ activation** (kept dormant) and **M2** (repo-private, protected env/ruleset).
 
 | Milestone | Status | Branch | PR | Blocker |
 |---|---|---|---|---|
-| **M0 — Foundation & Safety** | **Planning** | `claude/release-platform-m0-foundation` (+ per-PR branches) | — | Planning-review findings pending |
-| M1 — Dual-publish + refresh + detection | Not started | — | — | M0 |
+| **M0 — Foundation & Safety** | **✅ COMPLETE (impl + operational validation)** | 5 PRs merged (#628 #629 #630 #631 #632) + activation PRs #633 #634 | acceptance: `roadmap/M0-ACTIVATION-EVIDENCE.md` | — |
+| M1 — Dual-publish + refresh + detection | **Unblocked — next** | — | — | — (M0 accepted 2026-07-10) |
 | M2 — Default switch + repo-private | Not started | — | — | M1 + owner |
 | M3 — Trust durability + Pages retirement | Not started | — | — | M2 + owner |
 | M4 — Emergency ops + Console + telemetry | Not started | — | — | M2 |
