@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,11 +197,10 @@ func TestGenerateReleaseCatalog_DigestPinnedNeverTag(t *testing.T) {
 // shipped artifact), and asserts every release's list_digest equals the pushed
 // digest. Outside CI (env unset) it is skipped.
 func TestReleaseCatalogGate(t *testing.T) {
-	specPath := os.Getenv("CULVERT_RELEASE_GEN_SPEC")
-	if specPath == "" {
-		t.Skip("release gate: set CULVERT_RELEASE_GEN_SPEC to run (CI only)")
+	spec, ok := resolveGateSpec(t)
+	if !ok {
+		t.Skip("release gate: set CULVERT_RELEASE_SPEC_VERSION (+COMMIT_ISO/DIGEST/REPO) or CULVERT_RELEASE_GEN_SPEC to run (CI only)")
 	}
-	spec := readGenSpec(t, specPath)
 	bundle, err := generateReleaseCatalog(spec)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -225,6 +225,37 @@ func TestReleaseCatalogGate(t *testing.T) {
 
 	assertGatePushedDigest(t, spec)
 	emitGateBundle(t, bundle)
+}
+
+// resolveGateSpec builds the gate's release spec from deterministic env inputs via
+// buildReleaseSpec (the preferred path — timestamp/version derivation lives in tested
+// Go, not CI shell), falling back to a pre-built JSON file for backward compatibility.
+// Returns ok=false when neither is configured (local runs skip the gate).
+func resolveGateSpec(t *testing.T) (releaseCatalogSpec, bool) {
+	t.Helper()
+	if v := os.Getenv("CULVERT_RELEASE_SPEC_VERSION"); v != "" {
+		platforms := []string{"linux/amd64", "linux/arm64"}
+		if p := os.Getenv("CULVERT_RELEASE_SPEC_PLATFORMS"); p != "" {
+			platforms = strings.Split(p, ",")
+		}
+		spec, err := buildReleaseSpec(SpecInputs{
+			Version:    v,
+			Repo:       os.Getenv("CULVERT_RELEASE_SPEC_REPO"),
+			ListDigest: os.Getenv("CULVERT_RELEASE_SPEC_DIGEST"),
+			Platforms:  platforms,
+			Mode:       specModeRelease,
+			CommitISO:  os.Getenv("CULVERT_RELEASE_SPEC_COMMIT_ISO"),
+			Now:        os.Getenv("CULVERT_RELEASE_SPEC_NOW"), // optional dead-on-arrival guard
+		})
+		if err != nil {
+			t.Fatalf("buildReleaseSpec from env: %v", err)
+		}
+		return spec, true
+	}
+	if path := os.Getenv("CULVERT_RELEASE_GEN_SPEC"); path != "" {
+		return readGenSpec(t, path), true
+	}
+	return releaseCatalogSpec{}, false
 }
 
 // readGenSpec reads + parses the CI-provided generator spec.
