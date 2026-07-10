@@ -145,6 +145,12 @@ func TestDomainAllowlist_PUT_PersistenceFailureReturnsError(t *testing.T) {
 	if hasMatchingAuditEntry(auditGet(), "198.51.100.64", "threatfeed.allowlist.update", "1 domain(s)", baselineTS) {
 		t.Fatalf("persistence failure should not record a success audit entry")
 	}
+	// The allowlist IS live in memory after the failure (fail-safe apply),
+	// which bypasses domain-level threat blocking until restart — that
+	// transient state must stay attributable in the audit ring.
+	if !hasMatchingAuditEntry(auditGet(), "198.51.100.64", "threatfeed.allowlist.update_unpersisted", "1 domain(s) applied in memory; persist failed", baselineTS) {
+		t.Fatalf("persistence failure should record an applied-but-unpersisted audit entry")
+	}
 }
 
 // TestDomainAllowlist_PUT_InvalidJSON_NoAuditEntry pins that the audit

@@ -567,6 +567,14 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := globalThreatFeed.SetDomainAllowlist(body.Domains); err != nil {
+			// The allowlist is already live in memory (fail-safe apply,
+			// same posture as the DP snapshot path) — until restart it
+			// bypasses domain-level threat blocking even though the
+			// client sees a 500. That transient bypass must stay
+			// attributable, so record a distinct audit action instead
+			// of silently dropping the trail with the success entry.
+			auditEvent(r, "threatfeed.allowlist.update_unpersisted",
+				fmt.Sprintf("%d domain(s) applied in memory; persist failed", len(globalThreatFeed.DomainAllowlist())), "")
 			http.Error(w, "domain allowlist applied in memory but failed to persist", http.StatusInternalServerError)
 			return
 		}
