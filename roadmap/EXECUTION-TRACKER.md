@@ -82,7 +82,7 @@ activation** (kept dormant) and **M2** (repo-private, protected env/ruleset).
 ### M0 PR plan
 | PR | Scope | Status | Branch | Findings (design) | Findings (impl) | Tests | Evidence |
 |---|---|---|---|---|---|---|---|
-| M0-PR1 | Deterministic spec + version authority | Implementing | `…-m0-foundation` | 4 reviews consolidated; 1 BLOCKING + 4 HIGH resolved in M0 design v2 (§14) — version→semver-encoding, vars-gate, baked-root served gate, two spec modes, UTC-Z | — | — | — |
+| M0-PR1 | Deterministic spec + version authority | PR open (babysitting) | `…-m0-foundation` | 4 reviews; 1 BLOCKING + 4 HIGH resolved in design v2 §14 (version→semver, vars-gate, baked-root gate, 2 modes, UTC-Z) | 3 reviews: security CLEAN; +1 MEDIUM floor-transition (→ 1e9 scheme-base), 2 MEDIUM validator-drift + gate-entrypoint-untested, edges — all fixed | version encoding (monotonic/collision/bounds/leading-zero/0.0.0), idempotency, UTC-Z, resign-identity, expired-guard, gate-parity, overrides; vet + -race clean, -count=2 -shuffle=on green | code core: release_spec.go + tests + gate rewire + ci.yml deterministic spec step |
 | M0-PR2 | Served-catalog verifier + local origin harness | Planned | — | — | — | — | — |
 | M0-PR3 | Dormant R2 stage→verify→promote workflow | Planned | — | — | — | — | — |
 | M0-PR4 | Legacy update-path retirement | Planned | — | — | — | — | — |
