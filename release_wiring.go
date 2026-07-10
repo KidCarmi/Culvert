@@ -316,33 +316,55 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// URL, so a presigned/credentialed CULVERT_RELEASE_CATALOG_URL would otherwise
 	// leak into the API response and audit log (startup redacts the same way).
 	var refreshMu sync.Mutex
-	// Long-lived provider (M1-2 / RT-M2): constructed ONCE so conditional-request
-	// state (ETag/Last-Modified) survives across refreshes. A guard/URL error here
-	// leaves seedProv nil; refresh then degrades to a reload-only (and the startup
-	// seed above already logged the same failure).
+	// Long-lived provider (M1-2 / RT-M2), constructed LAZILY with retry: the SSRF
+	// preflight resolves DNS, and a transient boot-time resolution failure must not
+	// disable refresh until restart (Codex review) — each refresh retries
+	// construction until it succeeds, then the ONE provider is cached so
+	// conditional-request state (ETag/Last-Modified) survives across refreshes.
+	// Serialization: the boot probe below runs before any goroutine exists; every
+	// later call happens under refreshMu.
+	wantSeed := cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce
 	var seedProv *HTTPCatalogProvider
-	if cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce {
-		var provErr error
-		if seedProv, provErr = newCatalogSeedProvider(cfg, trust); provErr != nil {
-			logger.Printf("release catalog: refresh provider unavailable: %s", sanitizeLog(redactSeedError(provErr, cfg.catalogURL)))
+	getSeedProv := func() (*HTTPCatalogProvider, error) {
+		if seedProv != nil {
+			return seedProv, nil
+		}
+		p, err := newCatalogSeedProvider(cfg, trust)
+		if err != nil {
+			return nil, err
+		}
+		seedProv = p
+		return p, nil
+	}
+	if wantSeed {
+		if _, err := getSeedProv(); err != nil {
+			logger.Printf("release catalog: refresh provider unavailable (will retry on refresh): %s",
+				sanitizeLog(redactSeedError(err, cfg.catalogURL)))
 		}
 	}
 	rm.refresh = func(ctx context.Context) error {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
-		if seedProv != nil {
-			if err := runAutoSeed(ctx, seedProv, cfg, trust); err != nil {
+		var prov *HTTPCatalogProvider
+		if wantSeed {
+			// A configured origin that cannot be reached is a SURFACED failure
+			// (counted in refreshStatus), never a silent reload-only degrade.
+			var provErr error
+			if prov, provErr = getSeedProv(); provErr != nil {
+				return errors.New(redactSeedError(provErr, cfg.catalogURL))
+			}
+			if err := runAutoSeed(ctx, prov, cfg, trust); err != nil {
 				// A rejected seed must never leave its ETag armed: the next tick
 				// has to re-download, not 304 into a false success (impl review HIGH).
-				seedProv.InvalidateValidators()
+				prov.InvalidateValidators()
 				return errors.New(redactSeedError(err, cfg.catalogURL))
 			}
 		}
 		if err := holder.Reload(); err != nil {
-			if seedProv != nil {
+			if prov != nil {
 				// Post-304 (or post-swap) on-disk failure: drop validators so the
 				// next tick fully re-downloads and self-heals a corrupted dir.
-				seedProv.InvalidateValidators()
+				prov.InvalidateValidators()
 			}
 			// Reload errors carry local data-dir paths; refreshStatus.LastErr is
 			// viewer-readable via /api/releases, so log the detail and surface a
@@ -350,8 +372,8 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 			logger.Printf("release catalog: on-disk reload failed: %v", err)
 			return errors.New("release catalog: on-disk catalog reload failed (see server log)")
 		}
-		if seedProv != nil {
-			seedProv.CommitValidators()
+		if prov != nil {
+			prov.CommitValidators()
 		}
 		return nil
 	}
@@ -362,7 +384,7 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// (RT-L2; in permissive mode a tick would be a pointless disk re-read).
 	// rm.refreshInterval is set ONLY when the loop actually starts, so
 	// /api/releases never advertises a cadence that does not exist.
-	if seedProv != nil && cfg.refreshInterval > 0 {
+	if wantSeed && cfg.refreshInterval > 0 {
 		rm.refreshInterval = cfg.refreshInterval
 		go runCatalogRefreshLoop(resolveLifecycleCtx(), cfg.refreshInterval, currentReleaseManager)
 	}
