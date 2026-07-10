@@ -85,6 +85,85 @@ func BenchmarkPolicyEvaluate_MatchLast(b *testing.B) {
 	}
 }
 
+// buildCIDRPolicyStore returns a store with n access rules whose SourceIP is a
+// CIDR the benchmark client IP (203.0.113.7) FALLS INSIDE, so every rule passes
+// the source check and proceeds to the (non-matching) FQDN check. This is the
+// worst case for source-scoped rulesets — every rule pays the full CIDR match —
+// and mirrors how enterprise deployments scope rules by client subnet.
+func buildCIDRPolicyStore(n int) *PolicyStore {
+	ps := &PolicyStore{}
+	rules := make([]PolicyRule, n)
+	for i := 0; i < n; i++ {
+		rules[i] = PolicyRule{
+			Priority: i + 1,
+			Name:     fmt.Sprintf("cidr-rule-%d", i),
+			SourceIP: "203.0.113.0/24",
+			DestFQDN: fmt.Sprintf("no-match-%d.example.invalid", i),
+			Action:   ActionAllow,
+		}
+	}
+	ps.ReplaceAll(rules)
+	return ps
+}
+
+// BenchmarkPolicyEvaluate_CIDRRules measures the full scan over source-scoped
+// (CIDR) rules. Before the srcIPNet precompute this re-parsed the rule's CIDR
+// (net.ParseCIDR) AND the client IP (net.ParseIP) per rule per request; after,
+// the scan is a Contains() on a precomputed *net.IPNet with the client IP
+// parsed once per Evaluate.
+func BenchmarkPolicyEvaluate_CIDRRules(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		ps := buildCIDRPolicyStore(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if m := ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil); m != nil {
+					b.Fatalf("expected no match (default deny), got rule %q", m.Rule.Name)
+				}
+			}
+		})
+	}
+}
+
+// buildScheduledPolicyStore returns a store with n access rules carrying an
+// always-active schedule pinned to a non-UTC timezone, so every rule passes the
+// schedule check and proceeds to the (non-matching) FQDN check.
+func buildScheduledPolicyStore(n int) *PolicyStore {
+	ps := &PolicyStore{}
+	rules := make([]PolicyRule, n)
+	for i := 0; i < n; i++ {
+		rules[i] = PolicyRule{
+			Priority: i + 1,
+			Name:     fmt.Sprintf("sched-rule-%d", i),
+			DestFQDN: fmt.Sprintf("no-match-%d.example.invalid", i),
+			Schedule: &PolicySchedule{TimeStart: "00:00", TimeEnd: "23:59", Timezone: "America/New_York"},
+			Action:   ActionAllow,
+		}
+	}
+	ps.ReplaceAll(rules)
+	return ps
+}
+
+// BenchmarkPolicyEvaluate_ScheduledRules measures the full scan over rules with
+// a timezone-pinned schedule. Before the shared location cache, matchSchedule
+// called time.LoadLocation per rule per request — an uncached tzdata DISK READ
+// on the proxy hot path.
+func BenchmarkPolicyEvaluate_ScheduledRules(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		ps := buildScheduledPolicyStore(n)
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if m := ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil); m != nil {
+					b.Fatalf("expected no match (default deny), got rule %q", m.Rule.Name)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkScrubForwardedHeaders measures the per-request header-scrub hot path
 // (X-Forwarded-For / X-Real-IP private-IP stripping + X-User-Identity removal),
 // run for every forwarded HTTP request.
