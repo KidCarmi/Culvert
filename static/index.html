@@ -1143,8 +1143,8 @@ tr.dragging  { opacity: .4; }
 
           <!-- Scan exclusions (Tier 3.3) -->
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
-            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Scan Exclusions</div>
-            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Known-good SHA-256 hashes and hostnames bypass all body scanning (ClamAV + YARA). Useful for internal content mirrors and false-positive remediation.</div>
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Full Content Scan Exclusions (ClamAV + YARA)</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Known-good SHA-256 hashes and hostnames skip all body scanning — both ClamAV and YARA. Broader than the DPI-only bypass below. Useful for internal content mirrors and false-positive remediation.</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div>
                 <div style="font-size:.78rem;font-weight:600;margin-bottom:4px">Excluded hosts</div>
@@ -1163,8 +1163,8 @@ tr.dragging  { opacity: .4; }
 
           <!-- DPI bypass hosts (Tier 3.4) -->
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
-            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">DPI Bypass Hosts</div>
-            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Hosts listed here skip DPI regex scanning entirely but still flow through ClamAV + YARA + policy engine.</div>
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">DPI-Only Bypass Hosts</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Hosts listed here skip only DPI regex scanning — ClamAV, YARA, and the policy engine still apply. Narrower than the full content scan exclusions above.</div>
             <textarea id="sec-dpi-bypass" rows="4" placeholder="one host per line" style="width:100%;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.78rem;font-family:ui-monospace,monospace"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px">
               <button class="btn ghost sm" data-click="saveDPIBypass">💾 Save bypass list</button>
@@ -1629,7 +1629,7 @@ tr.dragging  { opacity: .4; }
         </div>
         <div class="panel-body">
           <p class="hint">
-            Domains listed here bypass TLS interception entirely — traffic passes through opaque. Useful for banking, certificate-pinned apps, and internal CAs.
+            Domains listed here bypass SSL inspection entirely — traffic passes through opaque. Useful for banking, certificate-pinned apps, and internal CAs.
             Supports exact domains (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">api.example.com</code>), wildcards (<code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">*.example.com</code>), and regex (prefix <code style="font-size:.78rem;background:var(--surface2);padding:1px 5px;border-radius:4px">~</code>).
           </p>
           <div class="add-row" style="margin-bottom:12px">
@@ -3136,7 +3136,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-lease-val">—</div><div class="stat-label">Fencing Lease</div></div>
             </div>
             <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
-              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease.
+              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease. The <strong>Term</strong> tile above equals the epoch of the currently-held fencing lease (ADR-0005: term = a held lease's epoch). In a failure state where no lease is held — e.g. a leader that restarted and cannot reacquire the etcd lease, running read-only — the lease card shows <code>epoch 0</code> while <strong>Term</strong> retains the last synced value, so the two can differ precisely when you are diagnosing a fencing problem.
             </p>
             <!-- Manual failover: shown only when this node is a standby -->
             <div id="ha-promote-row" style="display:none;margin-bottom:16px">
