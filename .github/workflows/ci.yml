@@ -640,14 +640,20 @@ jobs:
             echo "       (re-signing an old tag would extend a superseded release's freshness)"; exit 1
           }
       # Resolve the resign facts once (a single UTC date avoids a midnight
-      # rollover splitting the asset name across steps).
+      # rollover splitting the asset name across steps). RESIGN_NOW is derived
+      # from the DATE ONLY (midnight UTC), not the wall clock: the asset name
+      # and the R2 history prefix are date-keyed and the staged prefix is
+      # create-only immutable, so a same-day retry must reproduce byte-identical
+      # catalog content or the publisher's digest guard bricks the retry
+      # (Codex review P2 on PR #640). Same date ⇒ same generated_at/expires_at
+      # ⇒ same bytes (the generator is deterministic).
       - name: Resolve re-sign facts
         id: rfacts
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/resign-out"; mkdir -p "$OUT"
           {
-            echo "now=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "now=$(date -u +%Y-%m-%d)T00:00:00Z"
             echo "rdate=$(date -u +%Y%m%d)"
             echo "out=$OUT"
           } >> "$GITHUB_OUTPUT"
@@ -711,16 +717,23 @@ jobs:
           tar -C "$OUT" -czf "$RUNNER_TEMP/$NAME" index.json index.json.sigstore manifests
           echo "bundle=$RUNNER_TEMP/$NAME" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
-      # OPS-F2: the release carries exactly ORIGINAL + LATEST resign. Prune
-      # superseded -r* assets BEFORE attaching the new one; a same-day re-run
-      # is idempotent via --clobber.
-      - name: Prune superseded resign assets + attach the new one
+      # OPS-F2: the release carries exactly ORIGINAL + LATEST resign. Upload the
+      # NEW bundle FIRST, prune superseded -r* assets only after the upload
+      # succeeded — pruning first would strand the live origins with no matching
+      # release asset if the upload then failed, turning the verify workflow RED
+      # against a healthy catalog (Codex review P2 on PR #640). A same-day
+      # re-run is idempotent: the deterministic bytes + --clobber replace the
+      # same-named asset in place.
+      - name: Attach the new resign bundle, then prune superseded ones
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
           NEW_NAME: ${{ steps.rpkg.outputs.name }}
         run: |
           set -euo pipefail
+          gh release upload "$REF_NAME" "${{ steps.rpkg.outputs.bundle }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "attached $NEW_NAME"
           gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets[].name' \
             | grep -E "^culvert-release-catalog-.+-r[0-9]{8}\.tar\.gz$" > old_resigns.txt || true
@@ -729,9 +742,6 @@ jobs:
             echo "pruning superseded resign asset: $a"
             gh release delete-asset "$REF_NAME" "$a" --repo "$GITHUB_REPOSITORY" --yes
           done < old_resigns.txt
-          gh release upload "$REF_NAME" "${{ steps.rpkg.outputs.bundle }}" \
-            --repo "$GITHUB_REPOSITORY" --clobber
-          echo "attached $NEW_NAME"
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────
   # On every push to main, fetch the latest semver tag, bump the patch

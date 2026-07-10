@@ -317,6 +317,13 @@ jobs:
             fi
             echo "FATAL: could not read the live origin index (fail-closed):"; cat get_err.txt; exit 1
           fi
+          # Idempotent no-op: re-publishing the EXACT live bytes (a same-day
+          # retry after a fully successful promote — resign bytes are
+          # date-deterministic) is harmless and must stay green; the
+          # strictly-newer rule below applies only to DIFFERING content.
+          if [ "$(sha256sum live_index.json | awk '{print $1}')" = "$(cat stage/.index.sha256)" ]; then
+            echo "staged index is byte-identical to the live index — idempotent re-publish, binding satisfied"; exit 0
+          fi
           LIVE_V="$(jq -r '.catalog_version // 0' live_index.json)"
           LIVE_G="$(jq -r '.generated_at // ""' live_index.json)"
           LIVE_R="$(jq -cS '.releases' live_index.json)"

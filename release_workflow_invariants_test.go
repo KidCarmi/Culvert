@@ -537,14 +537,30 @@ func loadWorkflow(t *testing.T, path string) wfDoc {
 // TestResignCIInvariants pins ci.yml's re-sign surface.
 func TestResignCIInvariants(t *testing.T) {
 	doc := loadWorkflow(t, ciWorkflowPath)
+	assertResignDispatchGuards(t, doc)
 
-	// OPS-F1: the fail-fast guard job exists — dispatch-at-tag scoped, and its
-	// step genuinely exits 1 on a bare (resign != true) dispatch.
+	// The dedicated resign job: dispatch+tag+resign-gated, NO docker dependency.
+	resign, ok := doc.Jobs["catalog-resign"]
+	if !ok {
+		t.Fatal("ci.yml must carry the catalog-resign job")
+	}
+	if !runContainsAll(resign.If, "workflow_dispatch", "refs/tags/v", "inputs.resign") {
+		t.Fatalf("catalog-resign must require a resign tag dispatch; got if: %q", resign.If)
+	}
+	assertResignStepOrder(t, resign)
+	assertNoGlobPatterns(t, "catalog-resign", resign)
+}
+
+// assertResignDispatchGuards pins BOTH halves of OPS-F1: the loud fail-fast
+// guard job AND docker's structural tag-dispatch skip (which skips the whole
+// needs-chain, so a dispatched tag run can never overwrite release assets).
+func assertResignDispatchGuards(t *testing.T, doc wfDoc) {
+	t.Helper()
 	guard, ok := doc.Jobs["resign-dispatch-guard"]
 	if !ok {
 		t.Fatal("OPS-F1: ci.yml must carry the resign-dispatch-guard job (bare tag dispatches must fail loudly)")
 	}
-	if !strings.Contains(guard.If, "workflow_dispatch") || !strings.Contains(guard.If, "refs/tags/") {
+	if !runContainsAll(guard.If, "workflow_dispatch", "refs/tags/") {
 		t.Fatalf("guard job must be scoped to tag-ref dispatches; got if: %q", guard.If)
 	}
 	guardEnforces := false
@@ -556,9 +572,6 @@ func TestResignCIInvariants(t *testing.T) {
 	if !guardEnforces {
 		t.Fatal("OPS-F1: the guard step must exit 1 when resign != true")
 	}
-
-	// OPS-F1 structural half: docker skips tag dispatches, so a dispatched tag
-	// run can never reach the release job's asset overwrite.
 	docker, ok := doc.Jobs["docker"]
 	if !ok {
 		t.Fatal("ci.yml docker job missing")
@@ -566,19 +579,15 @@ func TestResignCIInvariants(t *testing.T) {
 	if !runContainsAll(docker.If, "workflow_dispatch", "refs/tags/", "!(") {
 		t.Fatalf("docker must exclude tag-ref dispatches (needs-chain skip); got if: %q", docker.If)
 	}
+}
 
-	// The dedicated resign job: dispatch+tag+resign-gated, NO docker dependency.
-	resign, ok := doc.Jobs["catalog-resign"]
-	if !ok {
-		t.Fatal("ci.yml must carry the catalog-resign job")
-	}
-	if !runContainsAll(resign.If, "workflow_dispatch", "refs/tags/v", "inputs.resign") {
-		t.Fatalf("catalog-resign must require a resign tag dispatch; got if: %q", resign.If)
-	}
-
-	// SEC-F1 + SEC-F2a + OPS-F2 step ordering inside catalog-resign, located by
-	// signature. THE load-bearing order: latest-tag assert and the verifying
-	// gate both run BEFORE cosign signs anything; prune comes last.
+// assertResignStepOrder pins the SEC-F1 + SEC-F2a + OPS-F2 step ordering inside
+// catalog-resign, located by run-body signature (-1 sentinel ⇒ missing step
+// FAILS, never vacuously passes). THE load-bearing order: the latest-tag assert
+// and the verifying gate both run BEFORE cosign signs anything; the
+// attach+prune step comes last.
+func assertResignStepOrder(t *testing.T, resign wfJob) {
+	t.Helper()
 	latest, download, gate, sign, keyless, prune := -1, -1, -1, -1, -1, -1
 	for i := range resign.Steps {
 		run := runScript(resign.Steps[i].Run)
@@ -612,16 +621,21 @@ func TestResignCIInvariants(t *testing.T) {
 	if prune == -1 {
 		t.Fatal("OPS-F2: the superseded-resign prune step is missing (multi-asset globs would mis-pick)")
 	}
-	if !(latest < download && download < gate && gate < sign && sign < keyless && keyless < prune) {
+	ordered := latest < download && download < gate && gate < sign && sign < keyless && keyless < prune
+	if !ordered {
 		t.Fatalf("catalog-resign step order violated: latest(%d) < download(%d) < gate(%d) < sign(%d) < keyless(%d) < prune(%d) required (verify must precede sign — SEC-F1)",
 			latest, download, gate, sign, keyless, prune)
 	}
-	// OPS-F2: no glob --pattern anywhere in the resign job.
+}
+
+// assertNoGlobPatterns: no glob --pattern anywhere in the job (OPS-F2).
+func assertNoGlobPatterns(t *testing.T, name string, job wfJob) {
+	t.Helper()
 	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
-	for i := range resign.Steps {
-		for _, m := range patternRE.FindAllStringSubmatch(runScript(resign.Steps[i].Run), -1) {
+	for i := range job.Steps {
+		for _, m := range patternRE.FindAllStringSubmatch(runScript(job.Steps[i].Run), -1) {
 			if arg := strings.Trim(m[1], `"'`); strings.ContainsAny(arg, "*?[") {
-				t.Fatalf("catalog-resign must download by exact name, never a glob; got --pattern %q", arg)
+				t.Fatalf("%s must download by exact name, never a glob; got --pattern %q", name, arg)
 			}
 		}
 	}
@@ -649,7 +663,8 @@ func TestResignR2PublisherInvariants(t *testing.T) {
 	if bindIdx == -1 {
 		t.Fatal("SEC-F2b: the monotonic live-binding step is missing from the R2 publisher (a resign could roll the live pointer backward)")
 	}
-	if !(verifyIdx != -1 && promoteIdx != -1 && verifyIdx < bindIdx && bindIdx < promoteIdx) {
+	bindOrdered := verifyIdx != -1 && promoteIdx != -1 && verifyIdx < bindIdx && bindIdx < promoteIdx
+	if !bindOrdered {
 		t.Fatalf("SEC-F2b binding must sit between verify(%d) and promote(%d); got bind(%d)", verifyIdx, promoteIdx, bindIdx)
 	}
 	bind := job.Steps[bindIdx]
@@ -661,16 +676,10 @@ func TestResignR2PublisherInvariants(t *testing.T) {
 	}
 	// OPS-F2 (M1-4 extension): the publisher downloads by exact name — no glob
 	// --pattern, and the resign asset name is validated by the anchored regex.
-	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
+	assertNoGlobPatterns(t, "R2 publisher", job)
 	anchored := false
 	for i := range job.Steps {
-		run := runScript(job.Steps[i].Run)
-		for _, m := range patternRE.FindAllStringSubmatch(run, -1) {
-			if arg := strings.Trim(m[1], `"'`); strings.ContainsAny(arg, "*?[") {
-				t.Fatalf("R2 publisher must download assets by exact name, never a glob (OPS-F2); got --pattern %q", arg)
-			}
-		}
-		if strings.Contains(run, `-r[0-9]{8}\.tar\.gz$`) {
+		if strings.Contains(runScript(job.Steps[i].Run), `-r[0-9]{8}\.tar\.gz$`) {
 			anchored = true
 		}
 	}

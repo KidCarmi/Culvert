@@ -215,6 +215,15 @@ tags so the latest-tag assert holds for tag-ref checkouts). Accepted findings:
 | Scheduler run-discovery relies on `gh run list --branch <tag>` matching tag-dispatched runs | LOW (recorded) | Fail-closed either way (no run found ⇒ FATAL timeout); CONFIRM on the first production run — a mismatch breaks the flow loudly, not silently | runbook first-run checklist |
 | Inline trailing comments could in principle fake step-locating signatures in the invariant tests | LOW/INFO (accepted residual) | full-line stripping covers the realistic misorder; malicious edits are caught in review | known limitation, recorded |
 
+Post-PR Codex review (P2, both accepted): (a) **same-day retry brick** — the
+date-keyed asset/prefix collided with second-granularity `generated_at`, so a
+retry after a partial R2 stage hit the immutable-prefix digest guard; fixed by
+deriving `RESIGN_NOW` from the DATE ONLY (midnight UTC ⇒ byte-identical
+same-day bytes) plus a byte-equal idempotent no-op in the SEC-F2b binding for
+full-success retries. (b) **prune-before-upload** stranded the live origins
+with no matching release asset on an upload failure; the attach step now
+uploads first and prunes after.
+
 ## 5. M0-activation regression guards
 
 - **Quoted allow-list token:** SHIPPED (PR #634, `assertEgressAllowListWellFormed`,
