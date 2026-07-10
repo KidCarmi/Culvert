@@ -45,19 +45,41 @@ func runCatalogRefreshLoop(ctx context.Context, interval time.Duration, getRM fu
 	}
 	timer := time.NewTimer(jitteredInterval(interval))
 	defer timer.Stop()
+	// Each tick body is recover-guarded (refreshLoopTick): this loop is the
+	// SOLE runtime driver of both catalog refresh and the M1-3 freshness
+	// watchdog (evaluateCatalogFreshness runs inside runRefresh), so a panic
+	// anywhere in the fetch/verify/reload path must cost one tick, not kill
+	// refresh + stale-alerting for the rest of the process lifetime
+	// (CHAOS-R1, 2026-07-10 review). runRefresh's lock releases are deferred,
+	// so recovery here cannot strand refreshRunMu/statusMu.
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
 		}
-		if rm := getRM(); rm != nil && rm.refresh != nil {
-			if err := rm.runRefresh(ctx, "loop"); err != nil {
-				if logger != nil {
-					logger.Printf("release catalog: periodic refresh failed (existing catalog untouched): %s", sanitizeLog(err.Error()))
-				}
+		refreshLoopTick(ctx, getRM)
+		timer.Reset(jitteredInterval(interval))
+	}
+}
+
+// refreshLoopTick runs ONE refresh attempt with panic containment. A recovered
+// panic is logged and counted as nothing more than a missed tick — the existing
+// catalog is untouched (the auto-seed path only swaps on full success) and the
+// next tick runs normally.
+func refreshLoopTick(ctx context.Context, getRM func() *releaseManager) {
+	defer func() {
+		if r := recover(); r != nil {
+			if logger != nil {
+				logger.Printf("release catalog: periodic refresh tick panicked (recovered, loop continues): %v", r)
 			}
 		}
-		timer.Reset(jitteredInterval(interval))
+	}()
+	if rm := getRM(); rm != nil && rm.refresh != nil {
+		if err := rm.runRefresh(ctx, "loop"); err != nil {
+			if logger != nil {
+				logger.Printf("release catalog: periodic refresh failed (existing catalog untouched): %s", sanitizeLog(err.Error()))
+			}
+		}
 	}
 }

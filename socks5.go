@@ -373,10 +373,16 @@ func socks5Relay(client, dest net.Conn, clientIP, host string) {
 	// Byte counts: each direction is written by exactly one goroutine before
 	// its done-send and read only after both receives (channel happens-before).
 	var toDest, toClient int64
+	// Idle-bounded via the shared tunnel helper (CHAOS-03): both directions
+	// share one activity stamp, so a half-open peer that never sends again is
+	// reaped after tunnelIdleTimeout instead of pinning goroutines + FDs
+	// forever. Each direction reads its own peer conn, so the idle deadline
+	// anchors on src itself. This also moves SOCKS5 onto the pooled relay
+	// buffers the other tunnel paths use.
+	shared := newTunnelActivityStamp()
 	done := make(chan struct{}, 2)
 	relay := func(dst, src net.Conn, count *int64) {
-		n, _ := io.Copy(dst, src) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
-		*count = n
+		*count = idleCopyCounted(dst, src, src, shared)
 		done <- struct{}{}
 	}
 	go relay(dest, client, &toDest)
