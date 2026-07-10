@@ -118,6 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
           WR_TAG: ${{ github.event.workflow_run.head_branch }}
+          WR_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           TAG="${IN_TAG:-$WR_TAG}"
@@ -127,11 +128,28 @@ jobs:
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
           fi
-          # Confirm TAG is an actual tag ref (fails for a branch named 'v…').
-          gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null \
+          # Resolve the tag's TARGET COMMIT (fails for a branch named 'v…'; deref an
+          # annotated tag to its commit).
+          REF_JSON="$(gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG")" \
             || { echo "FATAL: '$TAG' is not a tag ref"; exit 1; }
+          OBJ_TYPE="$(printf '%s' "$REF_JSON" | jq -r .object.type)"
+          TAG_SHA="$(printf '%s' "$REF_JSON" | jq -r .object.sha)"
+          if [ "$OBJ_TYPE" = "tag" ]; then
+            TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$TAG_SHA" --jq .object.sha)"
+          fi
+          # For a workflow_run trigger, PROVE the triggering CI run was the tag build,
+          # not a push to a branch that merely shares the tag's name (which would
+          # re-promote / DOWNGRADE the live catalog). The head_branch `v`-prefix +
+          # tag-exists checks alone don't establish this.
+          if [ "${GITHUB_EVENT_NAME:-}" = "workflow_run" ]; then
+            test -n "$WR_SHA" || { echo "FATAL: workflow_run head_sha missing"; exit 1; }
+            [ "$TAG_SHA" = "$WR_SHA" ] || {
+              echo "FATAL: triggering run sha $WR_SHA != tag $TAG target $TAG_SHA"
+              echo "       (a push to a branch named like a tag cannot promote it)"; exit 1
+            }
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Publishing catalog from release $TAG"
+          echo "Publishing catalog from release $TAG (target $TAG_SHA)"
 
       # Pull the signed bundle attached to the Release and unpack it. Refuse an
       # unsigned bundle (structural precheck only — the TRUST decision is the verify
@@ -254,16 +272,18 @@ jobs:
               --copy-source "$R2_BUCKET/$src" --key "$dst" \
               --endpoint-url "$R2_S3_ENDPOINT" "$@" >/dev/null
           }
-          # Index is ETag-pinned to the verified staged object.
-          copy_obj "$PREFIX/index.json" "release-catalog/index.json" --copy-source-if-match "$INDEX_ETAG"
-          copy_obj "$PREFIX/index.json.sigstore" "release-catalog/index.json.sigstore"
-          # Promote the manifest set THIS run staged (the local stage/manifests/ set),
-          # not a live list-objects-v2 (which prints the literal 'None' on an empty
-          # result and caps at 1000 keys). The verified index pins each manifest digest.
+          # Promote sidecars + manifests FIRST; the live index.json (the pointer the
+          # CP reads) is the FINAL write, so a client polling mid-promote never sees a
+          # new index referencing an old/absent signature or manifest.
+          # Manifest set from THIS run's local stage/manifests/ (not a live
+          # list-objects-v2, which prints the literal 'None' on empty + caps at 1000).
           while IFS= read -r m; do
             name="$(basename "$m")"
             copy_obj "$PREFIX/manifests/$name" "release-catalog/manifests/$name"
           done < <(find stage/manifests -type f)
+          copy_obj "$PREFIX/index.json.sigstore" "release-catalog/index.json.sigstore"
+          # Index LAST, ETag-pinned to the verified staged object.
+          copy_obj "$PREFIX/index.json" "release-catalog/index.json" --copy-source-if-match "$INDEX_ETAG"
 
       # Cache-bust the live pointer and confirm the promoted digest is served. Cloudflare
       # purge + re-fetch is eventually consistent and query-string busts are ignored by

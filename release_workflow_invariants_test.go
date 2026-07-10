@@ -23,7 +23,7 @@ import (
 //     references `secrets.` / `secrets[` (unavailable in `if:`; pinned robustly);
 //   - stage (create-only) → verify → promote EXIST and are ordered, the verify step
 //     proves a non-skip PASS and has no `continue-on-error`, and the promote step
-//     has no `if: always()` bypass — so verify genuinely gates promotion.
+//     has no status-override bypass — so verify genuinely gates promotion.
 
 const r2WorkflowPath = ".github/workflows/publish-catalog-r2.yml"
 
@@ -111,6 +111,17 @@ func isTruthy(v interface{}) bool {
 	}
 }
 
+// runContainsAll reports whether run contains every substring (positive form,
+// avoids a De-Morgan'able negated-OR chain).
+func runContainsAll(run string, subs ...string) bool {
+	for _, s := range subs {
+		if !strings.Contains(run, s) {
+			return false
+		}
+	}
+	return true
+}
+
 func loadR2Workflow(t *testing.T) wfDoc {
 	t.Helper()
 	raw, err := os.ReadFile(r2WorkflowPath)
@@ -129,8 +140,15 @@ func loadR2Workflow(t *testing.T) wfDoc {
 
 func TestWorkflowInvariants(t *testing.T) {
 	doc := loadR2Workflow(t)
+	assertNoElevatedPermissions(t, doc)
+	assertNoSecretsInAnyIf(t, doc)
+	assertStageVerifyPromote(t, requirePublishJob(t, doc))
+}
 
-	// ── permissions: no id-token anywhere; explicit restrictive top level ──────
+// assertNoElevatedPermissions: an explicit restrictive top-level `permissions` (an
+// absent block inherits a broad default) and no job grants id-token or contents:write.
+func assertNoElevatedPermissions(t *testing.T, doc wfDoc) {
+	t.Helper()
 	if doc.Permissions == nil {
 		t.Fatal("top-level permissions must be present and restrictive (absent inherits a broad default)")
 	}
@@ -148,21 +166,27 @@ func TestWorkflowInvariants(t *testing.T) {
 			t.Fatalf("job %q grants contents:write; must be read-only", name)
 		}
 	}
+}
 
-	// ── every `if:` uses vars, never secrets.* (job- AND step-level) ───────────
-	assertNoSecretsInIf := func(where, expr string) {
+// assertNoSecretsInAnyIf: no `if:` (job- or step-level) references secrets.* — the
+// dormant gate must key on vars (secrets.* is unavailable in if: anyway).
+func assertNoSecretsInAnyIf(t *testing.T, doc wfDoc) {
+	t.Helper()
+	check := func(where, expr string) {
 		if strings.Contains(expr, "secrets.") || strings.Contains(expr, "secrets[") {
 			t.Fatalf("%s `if:` references secrets (unavailable in if:, and the dormant gate must key on vars): %q", where, expr)
 		}
 	}
 	for name, job := range doc.Jobs {
-		assertNoSecretsInIf("job "+name, job.If)
+		check("job "+name, job.If)
 		for i := range job.Steps {
-			assertNoSecretsInIf("job "+name+" step", job.Steps[i].If)
+			check("job "+name+" step", job.Steps[i].If)
 		}
 	}
+}
 
-	// ── the publish job: dormant vars-gate + stage→verify→promote invariants ───
+func requirePublishJob(t *testing.T, doc wfDoc) wfJob {
+	t.Helper()
 	job, ok := doc.Jobs["publish"]
 	if !ok {
 		t.Fatal("expected a `publish` job in the R2 workflow")
@@ -170,27 +194,33 @@ func TestWorkflowInvariants(t *testing.T) {
 	if !strings.Contains(job.If, "vars.R2_PUBLISH_ENABLED") {
 		t.Fatalf("publish job gate must key on vars.R2_PUBLISH_ENABLED (dormant switch); got %q", job.If)
 	}
+	return job
+}
 
-	// Locate the load-bearing steps by their run-body signatures. Missing step ⇒
-	// index stays -1 ⇒ the existence assertions below FAIL (no vacuous pass).
-	stageIdx, verifyIdx, promoteIdx := -1, -1, -1
+// findLoadBearingSteps returns the stage/verify/promote step indices (or -1 each) by
+// their run-body signatures. A missing step keeps its index at -1 so the caller's
+// existence checks FAIL (no vacuous pass). First match wins.
+func findLoadBearingSteps(job wfJob) (stageIdx, verifyIdx, promoteIdx int) {
+	stageIdx, verifyIdx, promoteIdx = -1, -1, -1
 	for i := range job.Steps {
 		run := runScript(job.Steps[i].Run)
 		switch {
-		case strings.Contains(run, "put-object") && strings.Contains(run, "--if-none-match"):
-			if stageIdx == -1 {
-				stageIdx = i
-			}
-		case strings.Contains(run, "TestServedVerify_BakedRootGate"):
-			if verifyIdx == -1 {
-				verifyIdx = i
-			}
-		case strings.Contains(run, "copy-object"):
-			if promoteIdx == -1 {
-				promoteIdx = i
-			}
+		case stageIdx == -1 && strings.Contains(run, "put-object") && strings.Contains(run, "--if-none-match"):
+			stageIdx = i
+		case verifyIdx == -1 && strings.Contains(run, "TestServedVerify_BakedRootGate"):
+			verifyIdx = i
+		case promoteIdx == -1 && strings.Contains(run, "copy-object"):
+			promoteIdx = i
 		}
 	}
+	return stageIdx, verifyIdx, promoteIdx
+}
+
+// assertStageVerifyPromote: the three load-bearing steps EXIST and are ordered
+// stage → verify → promote, and verify genuinely gates promotion.
+func assertStageVerifyPromote(t *testing.T, job wfJob) {
+	t.Helper()
+	stageIdx, verifyIdx, promoteIdx := findLoadBearingSteps(job)
 	if stageIdx == -1 {
 		t.Fatal("no create-only staging step (put-object --if-none-match) found — immutable-history guard missing")
 	}
@@ -200,40 +230,40 @@ func TestWorkflowInvariants(t *testing.T) {
 	if promoteIdx == -1 {
 		t.Fatal("no promote step (copy-object) found")
 	}
-
-	// Ordering: stage before verify before promote (verify must gate promotion).
-	if !(stageIdx < verifyIdx && verifyIdx < promoteIdx) {
+	if stageIdx >= verifyIdx || verifyIdx >= promoteIdx {
 		t.Fatalf("steps must be ordered stage(%d) < verify(%d) < promote(%d)", stageIdx, verifyIdx, promoteIdx)
 	}
+	assertVerifyGates(t, job.Steps[verifyIdx])
+	assertPromoteNotBypassable(t, job.Steps[promoteIdx])
+}
 
-	// Verify step must actually gate: no continue-on-error, must prove a non-skip
-	// PASS (go test -json + an "Action":"pass" assertion, not a bare `go test` that
-	// exits 0 on a t.Skip when the served URL is unset — the fail-open hazard).
-	verify := job.Steps[verifyIdx]
+// assertVerifyGates: the verify step has no continue-on-error and proves a non-skip
+// PASS via an ENFORCING pipeline (`go test -json` + `jq -e`/`--exit-status` on an
+// Action==pass record + `exit 1`) — not merely the right words (an `echo "… Action
+// pass"` keeps the substrings while defeating the gate, the fail-open we guard).
+func assertVerifyGates(t *testing.T, verify wfStep) {
+	t.Helper()
 	if isTruthy(verify.ContinueOnError) {
 		t.Fatal("verify step has continue-on-error — a verify failure must HARD-STOP before promote")
 	}
-	// The pass-proof must be an ENFORCING pipeline, not merely the right words: a real
-	// `go test -json` piped into a `jq -e`/`--exit-status` check on an Action==pass
-	// record AND an `exit 1` on the same step. (An `echo "... Action pass"` would keep
-	// the substrings while defeating the gate — the fail-open this test exists to stop.)
-	hasEnforcingJQ := strings.Contains(verify.Run, "jq -e") || strings.Contains(verify.Run, "--exit-status")
-	if !strings.Contains(verify.Run, "-json") || !hasEnforcingJQ ||
-		!strings.Contains(verify.Run, "exit 1") ||
-		!strings.Contains(verify.Run, "Action") || !strings.Contains(verify.Run, "pass") {
+	enforcingJQ := strings.Contains(verify.Run, "jq -e") || strings.Contains(verify.Run, "--exit-status")
+	enforcedPass := enforcingJQ && runContainsAll(verify.Run, "-json", "exit 1", "Action", "pass")
+	if !enforcedPass {
 		t.Fatal("verify step must ENFORCE a non-skip PASS: `go test -json` + `jq -e`/`--exit-status` on Action==pass + `exit 1` (else a skipped test fails OPEN)")
 	}
 	if !strings.Contains(verify.Run, "CULVERT_RELEASE_SERVED_URL") {
 		t.Fatal("verify step must set/require CULVERT_RELEASE_SERVED_URL (else the gate silently skips)")
 	}
+}
 
-	// Promote must be reachable ONLY on the implicit success() gate. Reject ANY status
-	// override that would run it after a FAILED verify — always(), !cancelled(),
-	// cancelled(), failure(), success() || failure() — not just always().
-	promoteIf := job.Steps[promoteIdx].If
+// assertPromoteNotBypassable: promote runs ONLY on the implicit success() gate. Reject
+// any status override that would run it after a FAILED verify — always(), !cancelled(),
+// cancelled(), failure(), success() || failure() — not just always().
+func assertPromoteNotBypassable(t *testing.T, promote wfStep) {
+	t.Helper()
 	for _, bad := range []string{"always", "cancelled", "failure"} {
-		if strings.Contains(promoteIf, bad) {
-			t.Fatalf("promote step `if:` must not reference %q — it must run only after a successful verify; got %q", bad, promoteIf)
+		if strings.Contains(promote.If, bad) {
+			t.Fatalf("promote step `if:` must not reference %q — it must run only after a successful verify; got %q", bad, promote.If)
 		}
 	}
 }

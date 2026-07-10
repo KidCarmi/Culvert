@@ -310,6 +310,14 @@ resolved:
 | SEC-impl — harden-runner allow-list omits the owner's `R2_PUBLIC_BASE` host (fail-CLOSED, but non-functional until added) | LOW | Documented as a hard activation must-do (PR5 runbook); fail-closed by construction. |
 | SEC-impl — ETag round-trip for `--copy-source-if-match` (quoting) | LOW | Single-PUT index ⇒ md5-hex ETag (no multipart caveat); flagged for a live smoke at activation (PR5). |
 
+**Post-open PR review (Codex, P2) + CI lint:**
+
+| Finding | Sev | Resolution |
+|---|---|---|
+| Codex — gate admits a push to a branch NAMED like a tag (`v1.2.3`); the tag-ref check only proves such a tag EXISTS, not that the triggering run WAS the tag build ⇒ re-promote/DOWNGRADE | P2→fixed | On the `workflow_run` path the resolve-tag step now derefs the tag to its target commit and requires `workflow_run.head_sha == tag target sha` (annotated tags dereffed). A branch push can no longer promote a same-named tag. |
+| Codex — promoting `index.json` BEFORE its sidecars exposes the live pointer with an old/absent signature+manifests to a mid-promote poller | P2→fixed | Promote order reversed: manifests → `index.json.sigstore` → `index.json` LAST (the live pointer is the final write). |
+| CI golangci-lint — `gocognit` 42 > 30 on `TestWorkflowInvariants`; `QF1001` De Morgan | gate→fixed | Test decomposed into per-concern helpers (`assertNoElevatedPermissions`/`assertNoSecretsInAnyIf`/`assertStageVerifyPromote`/`assertVerifyGates`/`assertPromoteNotBypassable`); negated-AND conditions rewritten to positive form. |
+
 Both reviews independently CONFIRMED sound: the verify gate is genuinely fail-closed
 under `set -euo pipefail` (compile/test failure or a skip both block promote), no
 `id-token`/pwn-request (default-branch checkout, `persist-credentials: false`), no
