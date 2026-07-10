@@ -1064,10 +1064,11 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 
-// listAccessRules returns the Stage-2 access rules from the policy store, in
-// priority order. Stage-1 auth rules are excluded — they are managed via
-// /api/authpolicy and keep their priorities through every access-side reorder.
-func listAccessRules() []PolicyRule {
+// listPolicyRules returns the Stage-2 policy rules (the GUI/API "Policy Rule"
+// concept) from the policy store, in priority order. Stage-1 auth rules are
+// excluded — they are managed via /api/authpolicy and keep their priorities
+// through every policy-side reorder.
+func listPolicyRules() []PolicyRule {
 	rules := policyStore.List()
 	out := make([]PolicyRule, 0, len(rules))
 	for i := range rules {
@@ -1101,7 +1102,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 	// permutes access rules among their own slots and never touches an auth rule
 	// (no operator/admin escalation). Rejecting any auth priority — and any
 	// partial/stale list — keeps the permutation well-defined.
-	access := listAccessRules()
+	access := listPolicyRules()
 	accessPris := make(map[int]bool, len(access))
 	for i := range access {
 		accessPris[access[i].Priority] = true
@@ -1217,7 +1218,7 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 	// and keep their priorities, so an access move never crosses or renumbers one
 	// (no operator/admin escalation). Moving an auth rule via this endpoint is
 	// rejected because buildMovedPriorities won't find it among the access rules.
-	access := listAccessRules()
+	access := listPolicyRules()
 	if len(access) == 0 {
 		http.Error(w, "no rules to reorder", http.StatusBadRequest)
 		return

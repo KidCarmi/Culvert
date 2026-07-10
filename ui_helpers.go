@@ -148,10 +148,12 @@ func validatePolicyRule(rule PolicyRule, existingRules []PolicyRule, editPriorit
 	return validateAccessRule(rule)
 }
 
-// validateAccessRule validates a Stage-2 access rule. SubjectMatch and Auth
-// specs are rejected here: SubjectMatch is not yet enforced by Evaluate (so it
-// would fail open on an access rule), and an auth spec only belongs on auth
-// rules.
+// validateAccessRule validates the Stage-2 subset of a policy rule (RuleType
+// "" or "access" — named "access" rather than "policy" to stay distinct from
+// the validatePolicyRule dispatcher above, which covers both Stage-1 and
+// Stage-2). SubjectMatch and Auth specs are rejected here: SubjectMatch is
+// not yet enforced by Evaluate (so it would fail open on an access rule), and
+// an auth spec only belongs on auth rules.
 func validateAccessRule(rule PolicyRule) error {
 	if rule.Auth != nil {
 		return fmt.Errorf(`auth spec is only valid on ruleType "auth" rules`)
