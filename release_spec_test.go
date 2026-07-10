@@ -33,15 +33,26 @@ func TestCatalogVersionFromSemver(t *testing.T) {
 		return n
 	}
 
-	// Deterministic exact encodings.
-	if got := must("1.4.3"); got != 1_004_003 {
-		t.Errorf("v1.4.3 encoded %d, want 1004003", got)
+	// Deterministic exact encodings (base offset + major*1e6 + minor*1e3 + patch).
+	if got := must("1.4.3"); got != catalogVersionSchemeBase+1_004_003 {
+		t.Errorf("v1.4.3 encoded %d, want %d", got, catalogVersionSchemeBase+1_004_003)
 	}
-	if got := must("0.0.1"); got != 1 {
-		t.Errorf("v0.0.1 encoded %d, want 1 (must be ≥1)", got)
+	if got := must("0.0.1"); got != catalogVersionSchemeBase+1 {
+		t.Errorf("v0.0.1 encoded %d, want %d", got, catalogVersionSchemeBase+1)
 	}
-	if got := must("0.0.16"); got != 16 {
-		t.Errorf("v0.0.16 encoded %d, want 16", got)
+	if got := must("0.0.16"); got != catalogVersionSchemeBase+16 {
+		t.Errorf("v0.0.16 encoded %d, want %d", got, catalogVersionSchemeBase+16)
+	}
+	// Component boundary: 999 passes (only ≥1000 is rejected).
+	if got := must("0.0.999"); got != catalogVersionSchemeBase+999 {
+		t.Errorf("v0.0.999 encoded %d, want %d", got, catalogVersionSchemeBase+999)
+	}
+
+	// Migration-safety: every semver encoding dwarfs any legacy count-based floor
+	// (retired scheme was (count of v* tags)+1, realistically < 1e5), so the
+	// count→semver transition only ever moves the floor UP, never a false rollback.
+	if must("0.0.1") <= 100_000 {
+		t.Errorf("smallest semver encoding %d must exceed any plausible count-based floor", must("0.0.1"))
 	}
 
 	// Monotonic in release order.
@@ -71,8 +82,12 @@ func TestCatalogVersionFromSemver(t *testing.T) {
 		seen[n] = v
 	}
 
-	// Fail-closed cases.
-	for _, bad := range []string{"1.4", "1.4.3.2", "1.4.3-rc.1", "v1.4.3", "1.4.1000", "1.1000.0", "1000.0.0", "", "x.y.z"} {
+	// Fail-closed cases — incl. leading zeros (must match the generator's strict
+	// core, not accept 01.4.3) and 0.0.0 (not a real release).
+	for _, bad := range []string{
+		"1.4", "1.4.3.2", "1.4.3-rc.1", "v1.4.3", "1.4.1000", "1.1000.0", "1000.0.0",
+		"", "x.y.z", "01.4.3", "1.04.3", "1.4.03", "0.0.0",
+	} {
 		if _, err := catalogVersionFromSemver(bad); err == nil {
 			t.Errorf("catalogVersionFromSemver(%q): expected error, got nil", bad)
 		}
@@ -204,6 +219,70 @@ func TestReleaseSpec_OldTagExpiredGuard(t *testing.T) {
 	fresh.Now = "2026-07-08T00:00:00Z"
 	if _, err := buildReleaseSpec(fresh); err != nil {
 		t.Fatalf("fresh tag rejected by guard: %v", err)
+	}
+}
+
+// TestReleaseSpec_NowGuardBoundary proves the dead-on-arrival guard rejects at the
+// exact boundary (expires_at == now ⇒ !After ⇒ reject) and admits one second later.
+func TestReleaseSpec_NowGuardBoundary(t *testing.T) {
+	in := releaseInputs("0.1.0", "2026-01-01T00:00:00Z") // +180d = 2026-06-30T00:00:00Z
+	in.Now = "2026-06-30T00:00:00Z"                      // exactly expiry
+	if _, err := buildReleaseSpec(in); err == nil {
+		t.Errorf("expected rejection when expires_at == now (boundary)")
+	}
+	in.Now = "2026-06-29T23:59:59Z" // one second before expiry
+	if _, err := buildReleaseSpec(in); err != nil {
+		t.Errorf("one second before expiry should pass: %v", err)
+	}
+}
+
+// TestReleaseSpec_ResignNormalizesCreatedAt proves a non-Zulu original created_at is
+// normalized to UTC "Z" on the resign path (the resign-side normalizeUTC).
+func TestReleaseSpec_ResignNormalizesCreatedAt(t *testing.T) {
+	spec, err := buildReleaseSpec(SpecInputs{
+		Version:         "1.4.3",
+		Repo:            testRepo,
+		ListDigest:      testDigest,
+		Platforms:       []string{"linux/amd64"},
+		Mode:            specModeResign,
+		ResignNow:       "2026-10-01T09:00:00+02:00", // 07:00Z
+		ResignCreatedAt: "2026-07-08T14:30:00+02:00", // 12:30Z
+	})
+	if err != nil {
+		t.Fatalf("resign build: %v", err)
+	}
+	if spec.GeneratedAt != "2026-10-01T07:00:00Z" {
+		t.Errorf("resign generated_at not UTC-Z: %q", spec.GeneratedAt)
+	}
+	if spec.Entries[0].CreatedAt != "2026-07-08T12:30:00Z" {
+		t.Errorf("resign created_at not UTC-Z: %q", spec.Entries[0].CreatedAt)
+	}
+}
+
+// TestReleaseSpec_OverridesAndExpiry exercises the caller-supplied severity/channels
+// branch and the ExpiryDays override (+ negative fail-closed).
+func TestReleaseSpec_OverridesAndExpiry(t *testing.T) {
+	in := releaseInputs("2.1.0", "2026-01-01T00:00:00Z")
+	in.Severity = string(SeverityCritical)
+	in.Channels = []Channel{ChannelCritical}
+	in.ExpiryDays = 30
+	spec, err := buildReleaseSpec(in)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if spec.Entries[0].Severity != string(SeverityCritical) {
+		t.Errorf("severity override ignored: %q", spec.Entries[0].Severity)
+	}
+	if len(spec.Entries[0].Channels) != 1 || spec.Entries[0].Channels[0] != ChannelCritical {
+		t.Errorf("channels override ignored: %v", spec.Entries[0].Channels)
+	}
+	if spec.ExpiresAt != "2026-01-31T00:00:00Z" {
+		t.Errorf("ExpiryDays=30 override wrong: %q", spec.ExpiresAt)
+	}
+
+	in.ExpiryDays = -5
+	if _, err := buildReleaseSpec(in); err == nil {
+		t.Errorf("negative ExpiryDays must fail closed")
 	}
 }
 

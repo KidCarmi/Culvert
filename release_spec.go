@@ -25,8 +25,13 @@
 //     reuses its version (same semver), so "re-sign does not allocate" holds by
 //     construction.
 //
-// generateReleaseCatalog (release_gen.go) remains the SOLE validator; this file
-// only assembles + normalizes the spec the generator consumes.
+// buildReleaseSpec validates only its DERIVATION inputs (required fields, a strict
+// GA semver for the version encoding, timestamp parseability, the expiry/dead-on-
+// arrival guards); all OUTPUT-shape/semantic validation (repo format, digest,
+// channel-known, created_at) stays in generateReleaseCatalog (release_gen.go), which
+// remains the sole shape validator. The strict semver core here is deliberately no
+// looser than the generator's, so this file never accepts a version the generator
+// would reject.
 package main
 
 import (
@@ -47,16 +52,25 @@ const (
 )
 
 // catalogVersionComponentMax bounds each semver component in the version encoding
-// (major*1_000_000 + minor*1_000 + patch). A component ≥ this would collide with
-// the next-higher component's range, so it is rejected fail-closed. The bound is
-// revisited when pre-release/ring semantics are added (deferred).
+// (base + major*1_000_000 + minor*1_000 + patch). A component ≥ this would collide
+// with the next-higher component's range, so it is rejected fail-closed. The bound
+// is revisited when pre-release/ring semantics are added (deferred).
 const catalogVersionComponentMax = 1000
 
-// catalogVersionCoreRE captures the numeric major.minor.patch core of a version.
-// Stable-ring releases are GA (no pre-release/build metadata); a pre-release suffix
-// is rejected by catalogVersionFromSemver (fail-closed) — the encoding for
-// pre-releases lands with the ring work.
-var catalogVersionCoreRE = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`)
+// catalogVersionSchemeBase offsets every semver-encoded catalog_version so it always
+// exceeds any legacy count-based floor. The retired scheme was `(count of v* tags)+1`
+// — which counts ALL v* tags (incl. pre-release/rc), so a persisted count-based floor
+// could exceed a low semver patch number (e.g. floor 61 while v0.0.41 encodes 41),
+// making an appliance refuse a valid release as a rollback. With the base offset the
+// smallest semver encoding (base+1) dwarfs any realistic count floor (< ~1e5), so the
+// count→semver migration only ever moves the floor UP. int64 easily holds base + <1e9.
+const catalogVersionSchemeBase = 1_000_000_000
+
+// catalogVersionCoreRE captures the STRICT numeric major.minor.patch core — no
+// leading zeros — matching the numeric core of the generator's catalogSemverRE
+// (release_catalog.go), so buildReleaseSpec never accepts a version the generator
+// would later reject. Pre-release/build metadata is rejected (stable ring is GA only).
+var catalogVersionCoreRE = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
 
 // SpecInputs are the immutable, deterministic inputs to buildReleaseSpec.
 type SpecInputs struct {
@@ -195,21 +209,30 @@ func specTimestamps(in SpecInputs) (generatedAt, createdAt string, err error) {
 func catalogVersionFromSemver(version string) (int, error) {
 	m := catalogVersionCoreRE.FindStringSubmatch(version)
 	if m == nil {
-		return 0, fmt.Errorf("release spec: version %q is not a plain GA semver X.Y.Z (pre-release/build not allowed on the stable ring)", version)
+		return 0, fmt.Errorf("release spec: version %q is not a plain GA semver X.Y.Z (no leading zeros, no pre-release/build; stable ring is GA only)", version)
 	}
-	major, _ := strconv.Atoi(m[1])
-	minor, _ := strconv.Atoi(m[2])
-	patch, _ := strconv.Atoi(m[3])
-	for _, c := range [][2]interface{}{{"major", major}, {"minor", minor}, {"patch", patch}} {
-		if c[1].(int) >= catalogVersionComponentMax {
-			return 0, fmt.Errorf("release spec: version %q %s component %d exceeds encoding bound %d", version, c[0], c[1].(int), catalogVersionComponentMax)
-		}
+	major, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, fmt.Errorf("release spec: version %q major %q: %w", version, m[1], err)
 	}
-	v := major*catalogVersionComponentMax*catalogVersionComponentMax + minor*catalogVersionComponentMax + patch
-	if v < 1 {
-		return 0, fmt.Errorf("release spec: version %q encodes to catalog_version %d (< 1)", version, v)
+	minor, err := strconv.Atoi(m[2])
+	if err != nil {
+		return 0, fmt.Errorf("release spec: version %q minor %q: %w", version, m[2], err)
 	}
-	return v, nil
+	patch, err := strconv.Atoi(m[3])
+	if err != nil {
+		return 0, fmt.Errorf("release spec: version %q patch %q: %w", version, m[3], err)
+	}
+	if major >= catalogVersionComponentMax || minor >= catalogVersionComponentMax || patch >= catalogVersionComponentMax {
+		return 0, fmt.Errorf("release spec: version %q has a component ≥ encoding bound %d", version, catalogVersionComponentMax)
+	}
+	if major == 0 && minor == 0 && patch == 0 {
+		return 0, fmt.Errorf("release spec: version %q (0.0.0) is not a real release", version)
+	}
+	return catalogVersionSchemeBase +
+		major*catalogVersionComponentMax*catalogVersionComponentMax +
+		minor*catalogVersionComponentMax +
+		patch, nil
 }
 
 // deriveExpiry returns generatedAt + days, formatted as UTC "Z". generatedAt must
