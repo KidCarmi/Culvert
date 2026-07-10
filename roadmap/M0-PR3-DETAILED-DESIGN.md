@@ -288,7 +288,31 @@ is resolved in the implementation below.
 | OPS — activation presupposes a non-expired latest release (M0→M1 window) | LOW | Documented; freshness gate fails closed (no promote) — activation needs a fresh release or the M1 re-sign cron (PR5 runbook). |
 | OPS/SEC — staging prefix (`history/stable/**`) must be publicly served for verify | MED (activation) | Documented as a PR5 activation precondition (public custom domain must cover BOTH staging and live). |
 
-**Non-vacuousness evidence:** `TestWorkflowInvariants` was run against four unsafe
+**Non-vacuousness evidence:** `TestWorkflowInvariants` was run against SIX unsafe
 mutations of the workflow — a job `id-token: write`, a top-level `write-all`, a
-deleted verify step, and a `continue-on-error` verify — and FAILED on each, then
-passed on the restored file.
+deleted verify step, a `continue-on-error` verify, a `promote if: ${{ !cancelled() }}`
+bypass, and a non-enforcing `echo` pass-proof — and FAILED on each, then passed on
+the restored file.
+
+## 13. Implementation-review findings & resolutions
+
+Two independent implementation reviews of the ACTUAL code (adversarial security on
+the workflow-as-written; correctness on the test + shell). Both **fix-first**; all
+resolved:
+
+| Finding | Sev | Resolution |
+|---|---|---|
+| SEC-impl — create-only **412-continue trusts a pre-existing origin object** it never compared to this run's downloaded bundle (stale-but-signed **substitution/downgrade**; unrecoverable **bricked republish**) | **MED→fixed** | Stage step now GETs the origin `index.json` and asserts its sha256 == `stage/.index.sha256` (the downloaded Release bundle) **before** verify/promote; mismatch ⇒ loud abort. Also closes "live overwritten before validated" (promote now runs only on a digest-proven-equal origin). |
+| TEST-impl — promote-gate bypass via **non-`always()` conditions** (`!cancelled()`, `failure()`, `success() || failure()`) passed the test | **HIGH→fixed** | Promote `if:` now rejected if it references `always`/`cancelled`/`failure` (must be empty or success-only). Proven by a mutation test. |
+| TEST-impl — **pass-proof was substring-presence only**; an `echo "… Action pass"` kept the tokens while defeating the gate | **MED→fixed** | Verify assertion now requires an ENFORCING pipeline: `-json` + `jq -e`/`--exit-status` + `exit 1` co-present. Proven by a mutation test. |
+| OPS/SEC-impl — manifest promote via `list-objects-v2` emits literal `None` on empty + caps at 1000 keys | LOW→fixed | Promote iterates the LOCAL staged manifest set (`find stage/manifests`), not a live list. |
+| TEST-impl — step signatures live in `.Run` incl. shell comments (a comment could false-match/misorder) | LOW→fixed | `runScript` strips full-line shell comments before signature matching. |
+| SEC-impl — harden-runner allow-list omits the owner's `R2_PUBLIC_BASE` host (fail-CLOSED, but non-functional until added) | LOW | Documented as a hard activation must-do (PR5 runbook); fail-closed by construction. |
+| SEC-impl — ETag round-trip for `--copy-source-if-match` (quoting) | LOW | Single-PUT index ⇒ md5-hex ETag (no multipart caveat); flagged for a live smoke at activation (PR5). |
+
+Both reviews independently CONFIRMED sound: the verify gate is genuinely fail-closed
+under `set -euo pipefail` (compile/test failure or a skip both block promote), no
+`id-token`/pwn-request (default-branch checkout, `persist-credentials: false`), no
+shell injection (tag env-passed + strict regex + tag-ref confirm), and goccy/go-yaml
+decodes every mapping shape to `map[string]interface{}` (the test's type switch is
+complete; `-shuffle=on` map-order cannot change PASS/FAIL).

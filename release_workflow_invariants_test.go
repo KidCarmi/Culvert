@@ -85,6 +85,21 @@ func toStr(v interface{}) string {
 	return ""
 }
 
+// runScript returns a step's run body with full-line shell comments removed, so a
+// `# … put-object … --if-none-match …` comment in an UNRELATED step cannot false-match
+// a load-bearing step signature and misorder the stage/verify/promote indices.
+func runScript(run string) string {
+	var b strings.Builder
+	for _, ln := range strings.Split(run, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			continue
+		}
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func isTruthy(v interface{}) bool {
 	switch t := v.(type) {
 	case bool:
@@ -160,7 +175,7 @@ func TestWorkflowInvariants(t *testing.T) {
 	// index stays -1 ⇒ the existence assertions below FAIL (no vacuous pass).
 	stageIdx, verifyIdx, promoteIdx := -1, -1, -1
 	for i := range job.Steps {
-		run := job.Steps[i].Run
+		run := runScript(job.Steps[i].Run)
 		switch {
 		case strings.Contains(run, "put-object") && strings.Contains(run, "--if-none-match"):
 			if stageIdx == -1 {
@@ -198,20 +213,27 @@ func TestWorkflowInvariants(t *testing.T) {
 	if isTruthy(verify.ContinueOnError) {
 		t.Fatal("verify step has continue-on-error — a verify failure must HARD-STOP before promote")
 	}
-	// Require the pass-proof triad — `go test -json` plus an assertion on the JSON
-	// `Action` == `pass` record. A fail-open bare `go test` (which exits 0 on a
-	// t.Skip) contains none of these, so this cannot be satisfied by accident.
-	if !strings.Contains(verify.Run, "-json") ||
-		!strings.Contains(verify.Run, "Action") ||
-		!strings.Contains(verify.Run, "pass") {
-		t.Fatal("verify step must assert a non-skip PASS via `go test -json` + an Action==pass check (else a skipped test fails OPEN)")
+	// The pass-proof must be an ENFORCING pipeline, not merely the right words: a real
+	// `go test -json` piped into a `jq -e`/`--exit-status` check on an Action==pass
+	// record AND an `exit 1` on the same step. (An `echo "... Action pass"` would keep
+	// the substrings while defeating the gate — the fail-open this test exists to stop.)
+	hasEnforcingJQ := strings.Contains(verify.Run, "jq -e") || strings.Contains(verify.Run, "--exit-status")
+	if !strings.Contains(verify.Run, "-json") || !hasEnforcingJQ ||
+		!strings.Contains(verify.Run, "exit 1") ||
+		!strings.Contains(verify.Run, "Action") || !strings.Contains(verify.Run, "pass") {
+		t.Fatal("verify step must ENFORCE a non-skip PASS: `go test -json` + `jq -e`/`--exit-status` on Action==pass + `exit 1` (else a skipped test fails OPEN)")
 	}
 	if !strings.Contains(verify.Run, "CULVERT_RELEASE_SERVED_URL") {
 		t.Fatal("verify step must set/require CULVERT_RELEASE_SERVED_URL (else the gate silently skips)")
 	}
 
-	// Promote step must not be reachable via an always()/bypass condition.
-	if strings.Contains(job.Steps[promoteIdx].If, "always()") {
-		t.Fatal("promote step must not use if: always() — it must run only after a successful verify")
+	// Promote must be reachable ONLY on the implicit success() gate. Reject ANY status
+	// override that would run it after a FAILED verify — always(), !cancelled(),
+	// cancelled(), failure(), success() || failure() — not just always().
+	promoteIf := job.Steps[promoteIdx].If
+	for _, bad := range []string{"always", "cancelled", "failure"} {
+		if strings.Contains(promoteIf, bad) {
+			t.Fatalf("promote step `if:` must not reference %q — it must run only after a successful verify; got %q", bad, promoteIf)
+		}
 	}
 }

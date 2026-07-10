@@ -188,8 +188,24 @@ jobs:
           while IFS= read -r m; do
             put_create_only "$m" "$PREFIX/manifests/$(basename "$m")"
           done < <(find stage/manifests -type f)
-          # Bind promote to the exact staged object: capture the origin ETag now
-          # (works whether we just created it or it pre-existed via 412).
+          # CRITICAL substitution/brick guard: the 412 "already staged" path above
+          # trusts a PRE-EXISTING origin object. An actor with R2 write could have
+          # pre-placed a DIFFERENT but validly-signed (e.g. stale) catalog at this
+          # key; it would verify (real signature) and get promoted — a downgrade/pin
+          # attack — and a divergent first upload would brick re-publish forever.
+          # Fetch the origin index and assert it byte-matches the bundle THIS run
+          # downloaded from the Release, BEFORE verify/promote. Mismatch ⇒ loud abort.
+          aws s3api get-object --bucket "$R2_BUCKET" --key "$PREFIX/index.json" \
+            --endpoint-url "$R2_S3_ENDPOINT" origin_index.json >/dev/null
+          GOT="$(sha256sum origin_index.json | awk '{print $1}')"
+          WANT="$(cat stage/.index.sha256)"
+          [ "$GOT" = "$WANT" ] || {
+            echo "FATAL: staged origin index ($GOT) != release bundle ($WANT) for $TAG"
+            echo "       possible substitution or a divergent prior stage — refusing to promote"
+            exit 1
+          }
+          # Bind promote to the exact (now digest-verified) staged object: capture the
+          # origin ETag (works whether we just created it or it pre-existed via 412).
           ETAG="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$PREFIX/index.json" \
                     --endpoint-url "$R2_S3_ENDPOINT" --query ETag --output text)"
           test -n "$ETAG" || { echo "FATAL: could not read staged index ETag"; exit 1; }
@@ -241,10 +257,13 @@ jobs:
           # Index is ETag-pinned to the verified staged object.
           copy_obj "$PREFIX/index.json" "release-catalog/index.json" --copy-source-if-match "$INDEX_ETAG"
           copy_obj "$PREFIX/index.json.sigstore" "release-catalog/index.json.sigstore"
-          while IFS= read -r key; do
-            copy_obj "$key" "release-catalog/manifests/$(basename "$key")"
-          done < <(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$PREFIX/manifests/" \
-                     --endpoint-url "$R2_S3_ENDPOINT" --query 'Contents[].Key' --output text | tr '\t' '\n')
+          # Promote the manifest set THIS run staged (the local stage/manifests/ set),
+          # not a live list-objects-v2 (which prints the literal 'None' on an empty
+          # result and caps at 1000 keys). The verified index pins each manifest digest.
+          while IFS= read -r m; do
+            name="$(basename "$m")"
+            copy_obj "$PREFIX/manifests/$name" "release-catalog/manifests/$name"
+          done < <(find stage/manifests -type f)
 
       # Cache-bust the live pointer and confirm the promoted digest is served. Cloudflare
       # purge + re-fetch is eventually consistent and query-string busts are ignored by
