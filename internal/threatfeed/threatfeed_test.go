@@ -261,6 +261,45 @@ func TestThreatFeed_SetDomainAllowlistReturnsPersistenceError(t *testing.T) {
 	}
 }
 
+func TestThreatFeed_LoadFromDiskRecanonicalizesLegacyKeys(t *testing.T) {
+	// A DB written by a pre-canonicalization binary can carry Unicode-IDN
+	// and trailing-dot keys. loadFromDisk must rekey them so the
+	// canonicalized lookups keep blocking across the upgrade instead of
+	// failing open until the next feed sync.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "threatfeed.json")
+	legacy := `{
+		"last_sync": "2026-01-01T00:00:00Z",
+		"urls": {"http://bücher.example/malware": {"source": "urlhaus", "added_at": "2026-01-01T00:00:00Z"}},
+		"domains": {
+			"bücher.example": {"source": "urlhaus", "added_at": "2026-01-01T00:00:00Z"},
+			"evil.example.": {"source": "openphish", "added_at": "2026-01-01T00:00:00Z"},
+			"": {"source": "openphish", "added_at": "2026-01-01T00:00:00Z"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy DB: %v", err)
+	}
+
+	tf := New()
+	tf.Init(path, time.Hour)
+
+	if hit, src := tf.CheckDomain("xn--bcher-kva.example"); !hit || src != "urlhaus" {
+		t.Fatalf("legacy Unicode domain key should match punycode lookup after load; hit=%v src=%q", hit, src)
+	}
+	if hit, _ := tf.CheckDomain("evil.example"); !hit {
+		t.Fatal("legacy trailing-dot domain key should match after load")
+	}
+	if hit, src := tf.CheckURL("http://xn--bcher-kva.example/malware"); !hit || src != "urlhaus" {
+		t.Fatalf("legacy Unicode URL key should match canonicalized lookup after load; hit=%v src=%q", hit, src)
+	}
+	// The unkeyable empty entry is retained under its original key
+	// (fail-safe), never dropped.
+	if _, ok := tf.domains[""]; !ok {
+		t.Fatal("un-canonicalizable legacy key should be retained, not dropped")
+	}
+}
+
 func TestThreatFeed_CheckDomain_Disabled(t *testing.T) {
 	tf := &Feed{
 		urls:    make(map[string]entry),

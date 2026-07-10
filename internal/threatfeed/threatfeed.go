@@ -545,10 +545,33 @@ func (tf *Feed) loadFromDisk(path string) error {
 	if db.Domains == nil {
 		db.Domains = make(map[string]entry)
 	}
+	// Re-canonicalize legacy keys (one-time upgrade cost, load only). DBs
+	// written before host canonicalization (IDNA/punycode, trailing dots)
+	// carry keys the canonicalized lookups in CheckURL/CheckDomain would
+	// no longer match — without this rekey those entries silently stop
+	// blocking until the next feed sync rewrites the maps. A key that
+	// fails canonicalization keeps its original form (fail-safe: the
+	// entry is retained and matches exactly as it did before).
+	urls := make(map[string]entry, len(db.URLs))
+	for k, v := range db.URLs {
+		if nk, _ := NormaliseURL(k); nk != "" {
+			urls[nk] = v
+		} else {
+			urls[k] = v
+		}
+	}
+	domains := make(map[string]entry, len(db.Domains))
+	for k, v := range db.Domains {
+		if nk := normaliseDomain(k); nk != "" {
+			domains[nk] = v
+		} else {
+			domains[k] = v
+		}
+	}
 
 	tf.mu.Lock()
-	tf.urls = db.URLs
-	tf.domains = db.Domains
+	tf.urls = urls
+	tf.domains = domains
 	tf.lastSync = db.LastSync
 	tf.lastSyncErr = db.LastSyncErr
 	switch {
