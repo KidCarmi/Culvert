@@ -33,6 +33,12 @@ type wfStep struct {
 	Run             string      `yaml:"run"`
 	If              string      `yaml:"if"`
 	ContinueOnError interface{} `yaml:"continue-on-error"`
+	With            wfStepWith  `yaml:"with"`
+}
+
+type wfStepWith struct {
+	AllowedEndpoints string `yaml:"allowed-endpoints"`
+	EgressPolicy     string `yaml:"egress-policy"`
 }
 
 type wfJob struct {
@@ -142,7 +148,49 @@ func TestWorkflowInvariants(t *testing.T) {
 	doc := loadR2Workflow(t)
 	assertNoElevatedPermissions(t, doc)
 	assertNoSecretsInAnyIf(t, doc)
-	assertStageVerifyPromote(t, requirePublishJob(t, doc))
+	job := requirePublishJob(t, doc)
+	assertStageVerifyPromote(t, job)
+	assertEgressAllowListWellFormed(t, job)
+}
+
+// assertEgressAllowListWellFormed pins the M0-activation outage class: inside a YAML
+// block scalar, a quoted allow-list entry like "*.r2.cloudflarestorage.com:443" keeps
+// its quotes as LITERAL characters, so harden-runner matches nothing and blocks the
+// endpoint (the first live publish failed exactly this way). Every token must be bare
+// host:port — no quote characters — and the endpoints the publisher's steps actually
+// contact must be present.
+func assertEgressAllowListWellFormed(t *testing.T, job wfJob) {
+	t.Helper()
+	var allowed string
+	for i := range job.Steps {
+		if strings.Contains(job.Steps[i].Uses, "harden-runner") {
+			allowed = job.Steps[i].With.AllowedEndpoints
+			if job.Steps[i].With.EgressPolicy != "block" {
+				t.Fatalf("harden-runner egress-policy must be block; got %q", job.Steps[i].With.EgressPolicy)
+			}
+			break
+		}
+	}
+	if strings.TrimSpace(allowed) == "" {
+		t.Fatal("no harden-runner allowed-endpoints found in the publish job")
+	}
+	for _, tok := range strings.Fields(allowed) {
+		if strings.ContainsAny(tok, `"'`) {
+			t.Fatalf("allow-list token %q contains a quote character — inside a block scalar the quotes are LITERAL and harden-runner will block the endpoint", tok)
+		}
+		if !strings.Contains(tok, ":") {
+			t.Fatalf("allow-list token %q is missing a :port", tok)
+		}
+	}
+	for _, must := range []string{
+		"*.r2.cloudflarestorage.com:443", // stage/promote (aws s3api)
+		"api.cloudflare.com:443",         // cache purge
+		"api.github.com:443",             // gh release download / tag resolve
+	} {
+		if !strings.Contains(allowed, must) {
+			t.Fatalf("allow-list is missing required endpoint %q", must)
+		}
+	}
 }
 
 // assertNoElevatedPermissions: an explicit restrictive top-level `permissions` (an
