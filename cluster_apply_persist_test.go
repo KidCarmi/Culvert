@@ -509,19 +509,20 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 	if hit, src := globalThreatFeed.CheckURL(badURL); !hit || src != "cluster-sync" {
 		t.Fatalf("exact malicious URL must stay blocked despite the domain allowlist; hit=%v src=%q", hit, src)
 	}
-	if _, ok := globalThreatFeed.ExportDomains()[badHost]; !ok {
-		t.Fatal("applyConfigSnapshot should retain allowlisted domain threat intel")
+	// Legacy-compat surfaces exclude masked hosts: ExportDomains feeds the
+	// CP→DP wire field and the on-disk `domains` key feeds old binaries on
+	// rollback — both keep the pre-masking meaning "hosts a lookup may
+	// block", so allowlisted hosts must NOT appear there (an old binary has
+	// no lookup-time mask and would hard-block them).
+	if _, ok := globalThreatFeed.ExportDomains()[badHost]; ok {
+		t.Fatal("ExportDomains must exclude allowlisted hosts (mixed-version rolling-upgrade safety)")
 	}
 	if _, ok := globalThreatFeed.ExportURLs()[badURL]; !ok {
 		t.Fatal("exact malicious URL should remain present after snapshot allowlist")
 	}
-	if err := globalThreatFeed.RemoveDomainAllowlist(badHost); err != nil {
-		t.Fatalf("RemoveDomainAllowlist: %v", err)
-	}
-	if hit, src := globalThreatFeed.CheckDomain(badHost); !hit || src != "cluster-sync" {
-		t.Fatalf("removing snapshot allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
-	}
 
+	// Read the DB BEFORE removing the exemption — removal auto-persists
+	// again and legitimately re-adds the (now unmasked) host.
 	raw, err := os.ReadFile(dbPath)
 	if err != nil {
 		t.Fatalf("read threatfeed DB: %v", err)
@@ -534,8 +535,8 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 	if !ok {
 		t.Fatalf("on-disk feedDB domains map missing or wrong type")
 	}
-	if _, ok := domains[badHost]; !ok {
-		t.Fatal("applyConfigSnapshot should persist allowlisted domain threat intel")
+	if _, ok := domains[badHost]; ok {
+		t.Fatal("on-disk domains must exclude allowlisted hosts (binary-rollback safety)")
 	}
 	urls, ok := decoded["urls"].(map[string]any)
 	if !ok {
@@ -543,6 +544,19 @@ func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T
 	}
 	if _, ok := urls[badURL]; !ok {
 		t.Fatal("applyConfigSnapshot should persist exact malicious URL entries")
+	}
+
+	// In-memory retention: removing the exemption re-blocks IMMEDIATELY —
+	// no waiting for the next feed sync to repopulate the domain map — and
+	// the host returns to the legacy-compat surfaces.
+	if err := globalThreatFeed.RemoveDomainAllowlist(badHost); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := globalThreatFeed.CheckDomain(badHost); !hit || src != "cluster-sync" {
+		t.Fatalf("removing snapshot allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
+	}
+	if _, ok := globalThreatFeed.ExportDomains()[badHost]; !ok {
+		t.Fatal("ExportDomains should include the host again after allowlist removal")
 	}
 }
 

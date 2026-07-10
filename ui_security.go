@@ -579,6 +579,12 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Printf("ThreatFeed: domain allowlist updated (%d entries)", len(body.Domains))
+		// Push the change to DP nodes now (mirrors the IdP handlers in
+		// ui_auth.go). Without a version bump DPs keep enforcing the OLD
+		// allowlist until some unrelated admin action publishes a
+		// snapshot — the exact "unblock this false positive NOW" latency
+		// this control exists to remove. No-op when not running as CP.
+		publishCurrentConfigSnapshot()
 		// Closes the audit gap flagged by
 		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
 		// ui_routes_meta.go:291 ("no direct auditEvent observed"). The

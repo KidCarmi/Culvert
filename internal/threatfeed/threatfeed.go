@@ -509,13 +509,21 @@ func normaliseDomain(domain string) string {
 		return ""
 	}
 	if strings.Contains(domain, "://") {
-		if u, err := url.Parse(domain); err == nil && u.Host != "" {
-			domain = u.Host
+		u, err := url.Parse(domain)
+		if err != nil || u.Host == "" {
+			return ""
 		}
+		domain = u.Host
 	} else if strings.Contains(domain, "/") {
-		if _, host := NormaliseURL(domain); host != "" {
-			domain = host
+		// URL- or path-shaped input MUST yield a host. Falling through
+		// to canonicalHost with the raw string would mint an unmatchable
+		// key like "10.0.0.1/24" — a silent no-op security exception
+		// that persists, syncs to DPs, and is counted in the audit.
+		_, host := NormaliseURL(domain)
+		if host == "" {
+			return ""
 		}
+		domain = host
 	}
 	return canonicalHost(domain)
 }
@@ -601,10 +609,12 @@ func (tf *Feed) loadFromDisk(path string) error {
 		}
 	}
 	tf.mu.Unlock()
-	tf.totalEntries.Store(int64(len(db.URLs)))
+	// Count the post-rekey map, not db.URLs — rekey collisions (a legacy
+	// Unicode key alongside its punycode twin) shrink the map.
+	tf.totalEntries.Store(int64(len(urls)))
 
 	obs.Printf("ThreatFeed: loaded %d URLs from %s (last sync: %s)",
-		len(db.URLs), path, db.LastSync.Format(time.RFC3339))
+		len(urls), path, db.LastSync.Format(time.RFC3339))
 	return nil
 }
 
@@ -615,12 +625,26 @@ func (tf *Feed) saveToDisk() error {
 		allowlist = append(allowlist, d)
 	}
 	sort.Strings(allowlist)
+	// The persisted `domains` key keeps its pre-masking meaning — "hosts
+	// a lookup may block" — so currently-allowlisted hosts are filtered
+	// OUT on disk. Older binaries have no lookup-time allowlist mask;
+	// persisting masked hosts would make a binary rollback hard-block
+	// allowlisted platforms (github.com etc. routinely appear in
+	// URLhaus). The in-memory map retains them, so while this process
+	// lives, removing an allowlist entry re-blocks immediately; across a
+	// restart the masked intel is rebuilt by the next sync/import.
+	domains := make(map[string]entry, len(tf.domains))
+	for d, e := range tf.domains {
+		if !tf.domainAllowlist[d] {
+			domains[d] = e
+		}
+	}
 	db := feedDB{
 		LastSync:        tf.lastSync,
 		LastSuccess:     tf.lastSuccess,
 		LastSyncErr:     tf.lastSyncErr,
 		URLs:            tf.urls,
-		Domains:         tf.domains,
+		Domains:         domains,
 		DomainAllowlist: allowlist,
 	}
 	tf.mu.RUnlock()
@@ -666,11 +690,21 @@ func (tf *Feed) ExportURLs() map[string]int64 {
 
 // ExportDomains returns a copy of the domain threat map as domain→unix-timestamp.
 // Used by the Control Plane to include feed data in config sync.
+//
+// Currently-allowlisted hosts are excluded: the ThreatFeedDomains wire field
+// keeps its pre-masking meaning ("hosts a lookup may block") because DP nodes
+// running an older binary have no lookup-time allowlist mask — exporting
+// masked hosts would make a mixed-version rolling upgrade (new CP, old DPs)
+// hard-block allowlisted platforms fleet-wide. New DPs lose nothing: their
+// own allowlist (synced separately) masks these hosts at lookup anyway.
 func (tf *Feed) ExportDomains() map[string]int64 {
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 	out := make(map[string]int64, len(tf.domains))
 	for d, e := range tf.domains {
+		if tf.domainAllowlist[d] {
+			continue
+		}
 		out[d] = e.AddedAt.Unix()
 	}
 	return out
@@ -682,6 +716,13 @@ func (tf *Feed) ExportDomains() map[string]int64 {
 func (tf *Feed) ImportFeedData(urls map[string]int64, domains map[string]int64) {
 	newURLs := make(map[string]entry, len(urls))
 	for u, ts := range urls {
+		// Re-canonicalize keys from an older CP (Unicode hosts, trailing
+		// dots) so exact-URL entries stay reachable by the canonicalized
+		// CheckURL lookup; keep the original key when canonicalization
+		// fails (fail-safe, mirrors loadFromDisk).
+		if nu, _ := NormaliseURL(u); nu != "" {
+			u = nu
+		}
 		newURLs[u] = entry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
 	}
 	newDomains := make(map[string]entry, len(domains))

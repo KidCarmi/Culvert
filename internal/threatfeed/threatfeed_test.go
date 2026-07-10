@@ -261,6 +261,84 @@ func TestThreatFeed_SetDomainAllowlistReturnsPersistenceError(t *testing.T) {
 	}
 }
 
+func TestThreatFeed_SaveAndExportExcludeMaskedDomains(t *testing.T) {
+	// The on-disk `domains` key and the ExportDomains wire surface keep
+	// the pre-masking meaning "hosts a lookup may block": old binaries
+	// (rollback) and old DPs (mixed-version rolling upgrade) have no
+	// lookup-time allowlist mask, so masked hosts must never reach them.
+	// In-memory retention still guarantees immediate re-block on removal.
+	tf := newEnabledFeed()
+	tf.dbPath = filepath.Join(t.TempDir(), "feed.json")
+	tf.urls["https://masked.example/malware"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["masked.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["evil.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.AddDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+
+	exported := tf.ExportDomains()
+	if _, ok := exported["masked.example"]; ok {
+		t.Fatal("ExportDomains must exclude allowlisted hosts")
+	}
+	if _, ok := exported["evil.example"]; !ok {
+		t.Fatal("ExportDomains must keep non-allowlisted hosts")
+	}
+
+	raw, err := os.ReadFile(tf.dbPath)
+	if err != nil {
+		t.Fatalf("read DB: %v", err)
+	}
+	var db feedDB
+	if err := json.Unmarshal(raw, &db); err != nil {
+		t.Fatalf("unmarshal DB: %v", err)
+	}
+	if _, ok := db.Domains["masked.example"]; ok {
+		t.Fatal("persisted domains must exclude allowlisted hosts (rollback safety)")
+	}
+	if _, ok := db.Domains["evil.example"]; !ok {
+		t.Fatal("persisted domains must keep non-allowlisted hosts")
+	}
+	if _, ok := db.URLs["https://masked.example/malware"]; !ok {
+		t.Fatal("exact-URL entries persist regardless of the domain allowlist")
+	}
+
+	// Memory retains the masked entry → removal re-blocks immediately.
+	if _, ok := tf.domains["masked.example"]; !ok {
+		t.Fatal("in-memory domains must retain masked hosts")
+	}
+	if err := tf.RemoveDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, _ := tf.CheckDomain("masked.example"); !hit {
+		t.Fatal("removal must re-enable the domain block immediately")
+	}
+}
+
+func TestThreatFeed_ImportFeedDataRecanonicalizesURLKeys(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.ImportFeedData(
+		map[string]int64{"http://bücher.example/x": 1700000000},
+		nil,
+	)
+	if hit, src := tf.CheckURL("http://xn--bcher-kva.example/x"); !hit || src != "cluster-sync" {
+		t.Fatalf("URL key from an older CP should be canonicalized at import; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_NormaliseDomainRejectsHostlessPathInput(t *testing.T) {
+	// Path-shaped input whose host extraction fails must be rejected, not
+	// stored as an unmatchable garbage key (a silent no-op exception that
+	// would persist, sync to DPs, and inflate the audit count).
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{"10.0.0.1/24", "http://"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+	if got := tf.DomainAllowlist(); len(got) != 0 {
+		t.Fatalf("hostless path/scheme inputs should be rejected; stored %v", got)
+	}
+}
+
 func TestThreatFeed_LoadFromDiskRecanonicalizesLegacyKeys(t *testing.T) {
 	// A DB written by a pre-canonicalization binary can carry Unicode-IDN
 	// and trailing-dot keys. loadFromDisk must rekey them so the
