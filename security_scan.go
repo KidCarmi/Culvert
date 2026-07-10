@@ -219,6 +219,7 @@ func secScanStatusMap() map[string]interface{} {
 			m["threat_feed_sync_error"] = feedErr
 		}
 		m["stat_feed_blocked"] = counters.ThreatFeedBlocked
+		m["threat_feed_allowlist_masked"] = globalThreatFeed.AllowlistMaskedTotal()
 		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
 		m["stat_remote_scan_fail"] = counters.RemoteScanFail
 		return m
@@ -254,6 +255,8 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_timeout":        counters.ScanTimeout,    // Tier 1.2
 		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
+
+		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}
 	// ClamAV engine + signature-database version (Finding 4.3), so operators
 	// can see whether virus definitions are current. Absent when ClamAV is

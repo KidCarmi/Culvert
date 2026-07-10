@@ -8587,6 +8587,7 @@ async function tick() {
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();
   if (currentView === 'cluster')   loadCluster();
+  if (currentView === 'upstream')  loadUpstream(); // keep the circuit-breaker "retry in Ns" ETA live
 }
 
 function startTick() {

@@ -471,6 +471,95 @@ func TestApplyConfigSnapshot_ThreatFeedPersist(t *testing.T) {
 	}
 }
 
+func TestApplyConfigSnapshot_ThreatFeedAllowlistAppliedBeforeImport(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "threatfeed.json")
+	origDbPath := globalThreatFeed.SetDBPathForTest(dbPath)
+	origAllowlist := globalThreatFeed.DomainAllowlist()
+	// CheckURL/CheckDomain return early when the feed is disabled; enable it
+	// explicitly so the positive-verdict assertions below don't depend on
+	// whether an earlier test happened to run Init (shuffle determinism).
+	origEnabled := globalThreatFeed.SetEnabledForTest(true)
+	globalThreatFeed.ImportFeedData(nil, nil)
+	_ = globalThreatFeed.SetDomainAllowlist(nil)
+	t.Cleanup(func() {
+		globalThreatFeed.ImportFeedData(nil, nil)
+		_ = globalThreatFeed.SetDomainAllowlist(origAllowlist)
+		globalThreatFeed.SetEnabledForTest(origEnabled)
+		globalThreatFeed.SetDBPathForTest(origDbPath)
+	})
+
+	const (
+		badURL  = "https://allowlisted-snap.example/malware"
+		badHost = "allowlisted-snap.example"
+	)
+	applyConfigSnapshot(ConfigSnapshot{
+		Version: 1,
+		ThreatFeedURLs: map[string]int64{
+			badURL: 1700000000,
+		},
+		ThreatFeedDomains: map[string]int64{
+			badHost: 1700000001,
+		},
+		ThreatDomainAllowlist: []string{badHost},
+	})
+
+	if hit, _ := globalThreatFeed.CheckDomain(badHost); hit {
+		t.Fatal("allowlisted snapshot domain should not block while the exception is active")
+	}
+	if hit, src := globalThreatFeed.CheckURL(badURL); !hit || src != "cluster-sync" {
+		t.Fatalf("exact malicious URL must stay blocked despite the domain allowlist; hit=%v src=%q", hit, src)
+	}
+	// Legacy-compat surfaces exclude masked hosts: ExportDomains feeds the
+	// CP→DP wire field and the on-disk `domains` key feeds old binaries on
+	// rollback — both keep the pre-masking meaning "hosts a lookup may
+	// block", so allowlisted hosts must NOT appear there (an old binary has
+	// no lookup-time mask and would hard-block them).
+	if _, ok := globalThreatFeed.ExportDomains()[badHost]; ok {
+		t.Fatal("ExportDomains must exclude allowlisted hosts (mixed-version rolling-upgrade safety)")
+	}
+	if _, ok := globalThreatFeed.ExportURLs()[badURL]; !ok {
+		t.Fatal("exact malicious URL should remain present after snapshot allowlist")
+	}
+
+	// Read the DB BEFORE removing the exemption — removal auto-persists
+	// again and legitimately re-adds the (now unmasked) host.
+	raw, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read threatfeed DB: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal threatfeed DB: %v", err)
+	}
+	domains, ok := decoded["domains"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB domains map missing or wrong type")
+	}
+	if _, ok := domains[badHost]; ok {
+		t.Fatal("on-disk domains must exclude allowlisted hosts (binary-rollback safety)")
+	}
+	urls, ok := decoded["urls"].(map[string]any)
+	if !ok {
+		t.Fatalf("on-disk feedDB urls map missing or wrong type")
+	}
+	if _, ok := urls[badURL]; !ok {
+		t.Fatal("applyConfigSnapshot should persist exact malicious URL entries")
+	}
+
+	// In-memory retention: removing the exemption re-blocks IMMEDIATELY —
+	// no waiting for the next feed sync to repopulate the domain map — and
+	// the host returns to the legacy-compat surfaces.
+	if err := globalThreatFeed.RemoveDomainAllowlist(badHost); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := globalThreatFeed.CheckDomain(badHost); !hit || src != "cluster-sync" {
+		t.Fatalf("removing snapshot allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
+	}
+	if _, ok := globalThreatFeed.ExportDomains()[badHost]; !ok {
+		t.Fatal("ExportDomains should include the host again after allowlist removal")
+	}
+}
+
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
