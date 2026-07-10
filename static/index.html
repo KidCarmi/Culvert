@@ -3671,10 +3671,12 @@ Firefox (all platforms):
 
           <!-- Catalog -->
           <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface)">
-            <div style="display:flex;align-items:center;margin-bottom:8px">
+            <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
               <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
+              <span id="rel-trust-badge" style="font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:99px" title="Catalog signature verification mode"></span>
               <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
             </div>
+            <div id="rel-trust-warning" style="display:none;font-size:.78rem;color:var(--warn,#f59e0b);background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:6px;padding:6px 10px;margin-bottom:8px"></div>
             <div id="rel-catalog" style="font-size:.85rem"><div style="color:var(--muted)">Loading…</div></div>
           </div>
 
@@ -9789,10 +9791,34 @@ function relChannelBadge(c) {
   return '<span style="display:inline-block;padding:2px 7px;border-radius:999px;font-size:.68rem;font-weight:700;background:rgba(20,184,166,.15);color:#2dd4bf;margin-right:4px">' + escHtml(c) + '</span>';
 }
 
+// renderReleaseTrustBadge surfaces the catalog signature-verification mode
+// (enforce / permissive / disabled) that the server already computes at
+// startup but otherwise only logs — permissive/disabled are break-glass
+// states (unsigned catalogs accepted) that an admin should never have to
+// discover via SSH/log-reading.
+function renderReleaseTrustBadge(d) {
+  const badge = document.getElementById('rel-trust-badge');
+  const warn = document.getElementById('rel-trust-warning');
+  if (!badge) return;
+  const mode = ((d && d.verify_mode) || 'unknown').toLowerCase();
+  const breakGlass = mode === 'permissive' || mode === 'disabled';
+  badge.textContent = 'Trust: ' + mode.toUpperCase() + (breakGlass ? ' (break-glass)' : '');
+  badge.style.background = breakGlass ? 'rgba(239,68,68,.15)' : 'rgba(34,197,94,.15)';
+  badge.style.color = breakGlass ? 'var(--red)' : 'var(--green)';
+  if (!warn) return;
+  if (!breakGlass) { warn.style.display = 'none'; warn.textContent = ''; return; }
+  const detail = mode === 'disabled'
+    ? 'Signature verification is DISABLED — catalogs load without any authenticity check.'
+    : 'Signature verification is PERMISSIVE — unsigned catalogs are accepted (a present-but-invalid signature is still rejected).';
+  warn.textContent = '⚠ ' + detail + ' Set CULVERT_RELEASE_CATALOG_VERIFY=enforce (and configure trust roots) to restore full verification.';
+  warn.style.display = '';
+}
+
 function renderReleaseCatalog(d, box, meta) {
   box = box || document.getElementById('rel-catalog');
   meta = meta || document.getElementById('rel-catalog-meta');
   if (!box) return;
+  renderReleaseTrustBadge(d);
   if (!d || d.available !== true) {
     box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
     if (meta) meta.textContent = '';
