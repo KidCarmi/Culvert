@@ -138,3 +138,25 @@ changes.
    "declarations-only + no invented detail," or should they be fully declared?
 4. `setup-terraform` vs `setup-opentofu` — which toolchain does CI standardize on?
 5. Egress **audit** vs **block** for the new lane (provider downloads).
+
+## 7. Planning-review findings & resolutions
+
+Two independent planning reviews (Terraform-schema specialist; CI-wiring/docs/scope).
+Both **approve-with-fixes**; all resolved.
+
+| Finding | Sev | Resolution |
+|---|---|---|
+| Aggregate anti-rot gap: the terraform job must be in `deep-gate-approved.needs` or its red result is invisible to the required check (defeats TEST-M6) | **HIGH** | `- terraform` added to `deep-gate-approved.needs`; verified the job runs required-if-triggered, skipped-passes via `needs-verdict`. |
+| `github_repository_ruleset` required nested shape (target/enforcement + `ref_name` needs BOTH include+exclude + required `rules {}`) | **HIGH** | `github.tf` authored to the exact validate-safe shape; `exclude = []` present. |
+| `github_repository_environment.deployment_branch_policy` requires BOTH booleans; reviewers are `list(number)` | **HIGH** | Both booleans set; reviewer vars typed `list(number)`. |
+| Pin cloudflare **v4.52** (not the churny v5) + `github ~> 6.0`; exact source namespaces | **HIGH** | `versions.tf` pins `cloudflare/cloudflare ~> 4.52`, `integrations/github ~> 6.0`. |
+| Classify wiring must touch all six sites (outputs, all-true loop, init default, case, self-escalation, emit loop) — miss the emit loop ⇒ silent skip (rot); miss the init default ⇒ unbound-var classify failure | **MED** | All six wired + the informational echo; verified via YAML parse. |
+| Runbook secret miscount ("5" vs the real **6 secrets + 2 vars**) | **MED** | Runbook Step 2 tables 6 secrets + 2 vars. |
+| Runbook allow-list step: the required host is the `R2_PUBLIC_BASE` custom domain (not the already-wildcarded S3 endpoint), and it's a **merged** workflow-file edit | **MED** | Step 3 reworded accordingly + CODEOWNERS note. |
+| `CF_CACHE_PURGE_TOKEN` scope; releases must carry the signed bundle | LOW | Token scope (Zone→Cache Purge, proxied zone) + signed-bundle precondition documented. |
+| Credential-free provider blocks validate clean; no placeholder defaults needed; `terraform_wrapper: false`; audit egress + provider-download hosts | confirm | Implemented as advised. |
+
+**Residual risk (documented):** the HCL was authored WITHOUT a local `terraform
+validate` (environment egress policy blocks the toolchain download). The CI lane is the
+authoritative first validation; fmt alignment + any schema drift are closed via
+batched CI iteration.
