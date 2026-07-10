@@ -398,7 +398,6 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 	if len(secretSet) != 0 {
 		t.Fatalf("verify workflow must reference NO secrets; found %v", secretSet)
 	}
-
 	raw, err := os.ReadFile(dualVerifyWorkflowPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)
@@ -407,6 +406,14 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parse %s: %v", dualVerifyWorkflowPath, err)
 	}
+	assertVerifyWorkflowCredentialFree(t, doc)
+	assertExactAssetSelection(t, doc)
+	assertServedVerifyPassProofs(t, doc, 2)
+}
+
+// assertVerifyWorkflowCredentialFree: contents:read only, no id-token anywhere.
+func assertVerifyWorkflowCredentialFree(t *testing.T, doc wfDoc) {
+	t.Helper()
 	if doc.Permissions == nil {
 		t.Fatal("verify workflow needs an explicit restrictive top-level permissions block")
 	}
@@ -418,10 +425,13 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 			t.Fatalf("verify workflow job %q must be contents:read only with NO id-token", name)
 		}
 	}
+}
 
-	// Exact-name asset selection, checked in the REAL download context (a comment
-	// can't satisfy it): every `--pattern` argument in run: bodies must be
-	// wildcard-free, and the exact tag-derived pattern must be the one used.
+// assertExactAssetSelection: every `--pattern` argument in run: bodies is
+// wildcard-free, and the exact tag-derived pattern is the one used — checked in
+// the REAL download context so a comment cannot satisfy it (OPS-F2).
+func assertExactAssetSelection(t *testing.T, doc wfDoc) {
+	t.Helper()
 	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
 	exactSeen := false
 	for _, job := range doc.Jobs {
@@ -440,23 +450,28 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 	if !exactSeen {
 		t.Fatal("verify workflow must select the release bundle via --pattern \"culvert-release-catalog-${TAG}.tar.gz\" (exact tag-derived name)")
 	}
+}
 
-	// Both origin served-verify steps must carry the enforcing pass-proof (M0 posture).
+// assertServedVerifyPassProofs: exactly n baked-root served-verify steps, each
+// carrying the enforcing pass-proof (M0 posture: -json + jq -e + exit 1).
+func assertServedVerifyPassProofs(t *testing.T, doc wfDoc, n int) {
+	t.Helper()
 	passProof := 0
 	for _, job := range doc.Jobs {
 		for i := range job.Steps {
 			run := job.Steps[i].Run
-			if strings.Contains(run, "TestServedVerify_BakedRootGate") {
-				enforcing := (strings.Contains(run, "jq -e") || strings.Contains(run, "--exit-status")) &&
-					runContainsAll(run, "-json", "exit 1", "Action", "pass")
-				if !enforcing {
-					t.Fatalf("served-verify step lacks the enforcing pass-proof: %q", job.Steps[i].Name)
-				}
-				passProof++
+			if !strings.Contains(run, "TestServedVerify_BakedRootGate") {
+				continue
 			}
+			enforcing := (strings.Contains(run, "jq -e") || strings.Contains(run, "--exit-status")) &&
+				runContainsAll(run, "-json", "exit 1", "Action", "pass")
+			if !enforcing {
+				t.Fatalf("served-verify step lacks the enforcing pass-proof: %q", job.Steps[i].Name)
+			}
+			passProof++
 		}
 	}
-	if passProof != 2 {
-		t.Fatalf("expected exactly 2 baked-root served-verify steps (R2 + Pages); found %d", passProof)
+	if passProof != n {
+		t.Fatalf("expected exactly %d baked-root served-verify steps; found %d", n, passProof)
 	}
 }
