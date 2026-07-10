@@ -73,6 +73,33 @@ regression. Plus two M0-activation regression guards (one already shipped).
   canary; appliance-side “canary” here = the stale/failing alerts above. No rings,
   no percentage rollout (out of scope).
 
+### 3.1 Implementation decisions (M1-3, 2026-07-10)
+
+- **Latches (RT-H2)** live on `releaseManager` under `statusMu` (no new stores):
+  `refreshFailingLatched` + `staleLatched`. Transitions are computed under the
+  lock and FIRED after unlock (`release_alerts.go`). Enforcement:
+  `TestStaleAlert_OncePerCrossing` + `TestRefreshFailingAlert_TransitionsOnly`.
+- **`recovered` pairs with a fired `refresh_failing`** — a sub-threshold blip
+  (fail, fail, success) is completely silent; transitions only, no per-evaluation
+  noise (answers §2 Q2 as reviewed).
+- **Stale evaluation points:** every `runRefresh` (loop ticks incl. 304 no-ops +
+  manual refresh) + ONCE at startup wiring — an appliance booting with an
+  already-stale catalog alerts immediately, via `deferStartupAlert` (webhooks
+  load in a later startup slice; queue-then-flush). Restart re-fires a
+  still-active alert once (latch reset on restart — accepted + documented).
+- **Alert seam:** `releaseAlertFire` (defaults to `deferStartupAlert`; Dispatch
+  is non-blocking) so the latch tests capture synchronously.
+- **Thresholds are constants** (30d / 3 failures) — recorded deferral: not a
+  config option, so the GUI-parity rule doesn't bite; an env/GUI knob waits for
+  a deployment that needs one.
+- **Metrics (RT-L1):** `releaseCatalogWritePrometheus` appender in
+  `handleMetrics`; the expiry gauge is scrape-time from the installed catalog
+  and OMITTED when no catalog/expiry is published (absent series beats a fake 0,
+  which Prometheus would read as "expired").
+- **API/GUI:** `expires_in_days` (floor; negative = expired) next to
+  `expires_at` on `/api/releases`; Release-panel origin strip gains the expiry
+  row with warn color inside the 30d threshold.
+
 ## 4. Slice D — Weekly no-bump re-sign + 180-day freshness (PR M1-4, most complex)
 
 **Goal:** the served catalog’s `expires_at` never lapses even with no releases.

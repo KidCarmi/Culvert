@@ -460,6 +460,12 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 		return nil
 	}
 	setReleaseManager(rm)
+	// M1-3 freshness watchdog: evaluate the installed catalog's expiry ONCE at
+	// boot so an already-stale appliance alerts immediately instead of one full
+	// refresh interval later. Fires via deferStartupAlert (webhooks load in a
+	// later startup slice); the restart-refire caveat is documented in
+	// release_alerts.go.
+	rm.evaluateCatalogFreshness()
 	// Periodic production refresh (M1-2): started HERE — after the manager, its
 	// refresh seam, and the alert webhooks exist (RT-M1) — on the app lifecycle
 	// context, and only when a catalog origin is configured in enforce mode
