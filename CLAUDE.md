@@ -87,10 +87,10 @@ go test -coverprofile=coverage.out ./...    # coverage report
 
 ```bash
 # Minimal
-./culvert -port :8080 -ui-port :9090
+./culvert -port 8080 -ui-port 9090
 
 # With SSL inspection
-CULVERT_CA_PASSPHRASE=mysecret ./culvert -port :8080 -ui-port :9090 -ca-path /data/ca.bundle
+CULVERT_CA_PASSPHRASE=mysecret ./culvert -port 8080 -ui-port 9090 -ca-path /data/ca.bundle
 
 # Docker
 docker compose up -d
