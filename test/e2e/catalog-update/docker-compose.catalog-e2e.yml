@@ -41,6 +41,10 @@ services:
       # Enforce-by-default trust: a present trust root arms VerifyEnforce, so an
       # unsigned/tampered/expired catalog is refused (read AND dispatch paths).
       - CULVERT_RELEASE_CATALOG_VERIFY=enforce
+      # Disable the outbound catalog fetch: this E2E drives the LOCALLY seeded
+      # catalog lifecycle. Without this the M1-2 baked default origin would
+      # auto-seed the live upstream catalog over the seeded fixture in enforce mode.
+      - CULVERT_RELEASE_CATALOG_URL=off
       - "CULVERT_RELEASE_CATALOG_TRUST_KEYS=${E2E_TRUST_KEYS}"
       # The repo the catalog's image.repo must match (else RefusedRepoMismatch)
       # and that the agent pull binds to.

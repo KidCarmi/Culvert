@@ -241,6 +241,13 @@ func TestLoadReleaseManagement_UnsignedNotAutoTrusted(t *testing.T) {
 	cfg := resolveReleaseStartupConfigFrom(func(string) string { return "" })
 	cfg.catalogDir = dir
 	cfg.statePath = filepath.Join(t.TempDir(), "state.json")
+	// Hermetic (M1-2): the baked default origin would otherwise make
+	// loadReleaseManagement auto-seed from catalog.culvertlabs.com in enforce mode,
+	// fetching the REAL signed catalog and overwriting the unsigned dir under test
+	// (an available:true false-pass that flakes on runner egress). This test is
+	// about on-disk trust, not auto-seed, so disable the fetch.
+	cfg.catalogURL = ""
+	cfg.catalogURLSource = catalogURLSourceDisabled
 	loadReleaseManagement(cfg)
 	if currentReleaseManager() == nil {
 		t.Fatal("manager should be enabled (baked Sigstore root ⇒ enforce mode)")
@@ -342,5 +349,158 @@ func TestLoadReleaseManagement_PublishesAndGraceful(t *testing.T) {
 	loadReleaseManagement(releaseStartupConfig{proxyRepo: "", catalogDir: "/tmp/x", maintURL: "", verifyMode: VerifyPermissive})
 	if currentReleaseManager() != nil {
 		t.Fatal("invalid proxy_repo must leave the manager unpublished (503), not panic")
+	}
+}
+
+// ─── M1-2 product revision: baked default catalog origin ──────────────────────
+// Owner-required behaviors: default resolution, override precedence, empty
+// fallback, mirror URLs verbatim, the trust-safe disable sentinel, and origin
+// never affecting trust.
+
+func TestResolveCatalogURL_DefaultWhenUnset(t *testing.T) {
+	cfg := resolveReleaseStartupConfigFrom(func(string) string { return "" })
+	if cfg.catalogURL != defaultReleaseCatalogURL || cfg.catalogURLSource != catalogURLSourceDefault {
+		t.Fatalf("unset env must resolve the baked default; got %q (source=%q)",
+			cfg.catalogURL, cfg.catalogURLSource)
+	}
+}
+
+func TestResolveCatalogURL_OverridePrecedence(t *testing.T) {
+	cfg := resolveReleaseStartupConfigFrom(func(k string) string {
+		if k == envReleaseCatalogURL {
+			return "https://staging.example.com/catalog"
+		}
+		return ""
+	})
+	if cfg.catalogURL != "https://staging.example.com/catalog" || cfg.catalogURLSource != catalogURLSourceOverride {
+		t.Fatalf("explicit override must win; got %q (source=%q)", cfg.catalogURL, cfg.catalogURLSource)
+	}
+}
+
+func TestResolveCatalogURL_EmptyOverrideFallsBack(t *testing.T) {
+	for _, v := range []string{"", "   ", "\t"} {
+		url, source := resolveCatalogURL(v)
+		if url != defaultReleaseCatalogURL || source != catalogURLSourceDefault {
+			t.Fatalf("empty/whitespace override %q must fall back to the default; got %q (source=%q)", v, url, source)
+		}
+	}
+}
+
+func TestResolveCatalogURL_MirrorURLVerbatim(t *testing.T) {
+	// Air-gap/internal-mirror override is used VERBATIM at resolution time (the
+	// SSRF guard applies at provider construction, by design — see the
+	// defaultReleaseCatalogURL doc comment for the recorded private-IP constraint).
+	mirror := "https://catalog-mirror.corp.example.com/releases"
+	url, source := resolveCatalogURL(mirror)
+	if url != mirror || source != catalogURLSourceOverride {
+		t.Fatalf("mirror override must be used verbatim; got %q (source=%q)", url, source)
+	}
+}
+
+// The trust-SAFE opt-out (M1-2 review HIGH): a disable sentinel stops outbound
+// fetch (empty URL ⇒ wantSeed false) WITHOUT touching trust — the only prior way
+// to silence the fetch was CULVERT_RELEASE_CATALOG_VERIFY=permissive/disabled,
+// which weakens the trust channel. Verify mode/roots stay identical to the default.
+func TestResolveCatalogURL_DisableSentinel(t *testing.T) {
+	for _, v := range []string{"off", "none", "disabled", "OFF", " Disabled "} {
+		url, source := resolveCatalogURL(v)
+		if url != "" || source != catalogURLSourceDisabled {
+			t.Fatalf("disable sentinel %q must yield no fetch; got url=%q source=%q", v, url, source)
+		}
+	}
+	// Trust is untouched by disabling the fetch: mode + roots match the default.
+	base := resolveReleaseStartupConfigFrom(func(string) string { return "" })
+	off := resolveReleaseStartupConfigFrom(func(k string) string {
+		if k == envReleaseCatalogURL {
+			return "off"
+		}
+		return ""
+	})
+	if off.catalogURL != "" || off.catalogURLSource != catalogURLSourceDisabled {
+		t.Fatalf("disabled config must carry no origin; got url=%q source=%q", off.catalogURL, off.catalogURLSource)
+	}
+	if off.verifyMode != base.verifyMode || len(off.trustKeys) != len(base.trustKeys) || off.sigstoreActive != base.sigstoreActive {
+		t.Fatal("disabling the fetch must NOT change the trust posture (mode/roots/sigstore)")
+	}
+}
+
+// Changing the origin must NEVER change trust: verify mode and the trust
+// material are identical whether the origin is the default or an override, and
+// enforce mode stays enforced on overridden origins. (Byte-level proof that a
+// served origin cannot bypass verification is the TestServedVerify_* suite,
+// which drives the same trust store against arbitrary origins.)
+func TestCatalogURLSource_DoesNotAffectTrust(t *testing.T) {
+	base := func(k string) string { return "" }
+	withOverride := func(k string) string {
+		if k == envReleaseCatalogURL {
+			return "https://mirror.example.net/catalog"
+		}
+		return ""
+	}
+	a := resolveReleaseStartupConfigFrom(base)
+	b := resolveReleaseStartupConfigFrom(withOverride)
+	if a.verifyMode != b.verifyMode {
+		t.Fatalf("verify mode changed with origin: %v vs %v", a.verifyMode, b.verifyMode)
+	}
+	if len(a.trustKeys) != len(b.trustKeys) || a.sigstoreActive != b.sigstoreActive {
+		t.Fatal("trust material changed with origin — the origin must never affect trusted roots/identities")
+	}
+	// With the baked Sigstore root present, the default build is enforce mode: an
+	// overridden origin therefore still requires full verification.
+	if b.sigstoreActive && b.verifyMode != VerifyEnforce {
+		t.Fatalf("override origin must remain enforce with the baked root; got %v", b.verifyMode)
+	}
+}
+
+// M1-2 review HIGH (UX): a boot-time seed failure on a default/enforce appliance
+// must be visible on /api/releases IMMEDIATELY (trigger "startup"), not only after
+// the first periodic tick ~one interval later. Here the origin is SSRF-rejected
+// (a private host), so the startup seed fails with NO network, and the failure
+// must appear in refreshStatus/last_refresh right after wiring.
+func TestLoadReleaseManagement_StartupSeedFailureRecorded(t *testing.T) {
+	t.Cleanup(func() { setReleaseManager(nil) })
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	setReleaseManager(nil)
+	loadReleaseManagement(releaseStartupConfig{
+		proxyRepo:  defaultReleaseProxyRepo,
+		catalogDir: filepath.Join(base, "release_catalog"),
+		statePath:  filepath.Join(base, "state.json"),
+		maintURL:   "",
+		verifyMode: VerifyEnforce,
+		trustKeys:  []TrustKey{{KeyID: "startup-test", Alg: catalogSigAlg, PublicKey: pub}},
+		// Private host ⇒ the SSRF guard rejects the seed before any dial: a
+		// deterministic, network-free startup-seed failure.
+		catalogURL:       "https://127.0.0.1/release-catalog",
+		catalogURLSource: catalogURLSourceOverride,
+	})
+	rm := currentReleaseManager()
+	if rm == nil {
+		t.Fatal("enforce wiring with roots must still publish a manager (seed failure is non-fatal)")
+	}
+	st := rm.refreshStatusSnapshot()
+	if st.LastAt.IsZero() || st.LastTrigger != "startup" || st.LastOK {
+		t.Fatalf("startup seed failure not recorded as an immediate failure: %+v", st)
+	}
+	if st.ConsecutiveFailures != 1 {
+		t.Fatalf("startup failure must count once; got %d", st.ConsecutiveFailures)
+	}
+	// The immediate failure is visible on the read API (no ~6h blind window), and
+	// the redacted error must not leak the origin path.
+	rec := httptest.NewRecorder()
+	apiReleases(rec, releaseReq(http.MethodGet, "/api/releases", nil, RoleViewer))
+	body := decodeBody(t, rec)
+	lr, ok := body["last_refresh"].(map[string]any)
+	if !ok {
+		t.Fatalf("last_refresh missing from /api/releases: %s", rec.Body.String())
+	}
+	if lr["last_trigger"] != "startup" || lr["last_ok"] != false {
+		t.Fatalf("last_refresh does not show the startup failure: %v", lr)
+	}
+	if src := body["catalog_url_source"]; src != catalogURLSourceOverride {
+		t.Fatalf("catalog_url_source = %v; want override", src)
 	}
 }

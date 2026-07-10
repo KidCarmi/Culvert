@@ -64,6 +64,13 @@ type releaseManager struct {
 	// refreshInterval is the periodic refresh cadence this manager was wired with
 	// (M1-2), surfaced read-only on GET /api/releases. 0 ⇒ loop disabled.
 	refreshInterval time.Duration
+	// catalogOrigin is the HOST of the effective catalog origin and
+	// catalogURLSource says whether it is the baked default or an operator
+	// override (M1-2 product revision) — both read-only on GET /api/releases.
+	// Host-only for overrides: a presigned/credentialed override URL must never
+	// reach viewers; the full URL is shown only for the public baked default.
+	catalogOrigin    string
+	catalogURLSource string // "default" | "override"
 	// refreshStatus is the SHARED outcome record for BOTH refresh callers — the
 	// periodic loop and the manual admin endpoint (M1-2 / RT-H1: loop-local state
 	// diverges the moment an admin fixes the origin and refreshes by hand). Guarded
@@ -84,31 +91,40 @@ type refreshStatus struct {
 	LastAt              time.Time `json:"last_at"`
 	LastOK              bool      `json:"last_ok"`
 	LastErr             string    `json:"last_error,omitempty"`
-	LastTrigger         string    `json:"last_trigger,omitempty"` // "loop" | "manual"
+	LastTrigger         string    `json:"last_trigger,omitempty"` // "startup" | "loop" | "manual"
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 }
 
 // runRefresh is the ONE entry point both refresh callers use: it runs rm.refresh
-// and folds the outcome into the shared status under statusMu. Alert-transition
-// logic hangs off this record in M1-3.
+// and folds the outcome into the shared status. Alert-transition logic hangs off
+// this record in M1-3.
 func (rm *releaseManager) runRefresh(ctx context.Context, trigger string) error {
 	rm.refreshRunMu.Lock()
 	defer rm.refreshRunMu.Unlock()
 	err := rm.refresh(ctx)
+	rm.recordRefreshOutcome(trigger, err)
+	return err
+}
+
+// recordRefreshOutcome folds one refresh outcome into the shared status under
+// statusMu. Extracted from runRefresh so the startup auto-seed can record its
+// outcome directly (it runs before the manager's refresh seam is invoked, and
+// re-running rm.refresh at boot would double-fetch). err MUST already be redacted
+// — LastErr is viewer-readable via /api/releases.
+func (rm *releaseManager) recordRefreshOutcome(trigger string, err error) {
 	rm.statusMu.Lock()
 	defer rm.statusMu.Unlock()
 	rm.refreshStatus.LastAt = time.Now()
 	rm.refreshStatus.LastTrigger = trigger
 	if err != nil {
 		rm.refreshStatus.LastOK = false
-		rm.refreshStatus.LastErr = err.Error() // already redacted by rm.refresh
+		rm.refreshStatus.LastErr = err.Error()
 		rm.refreshStatus.ConsecutiveFailures++
-		return err
+		return
 	}
 	rm.refreshStatus.LastOK = true
 	rm.refreshStatus.LastErr = ""
 	rm.refreshStatus.ConsecutiveFailures = 0
-	return nil
 }
 
 // refreshStatusSnapshot returns a copy of the shared status for read paths.
@@ -310,6 +326,18 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 func (rm *releaseManager) addRefreshFields(out map[string]any) {
 	if rm.refreshInterval > 0 {
 		out["refresh_interval"] = rm.refreshInterval.String()
+	}
+	if rm.catalogURLSource != "" {
+		out["catalog_url_source"] = rm.catalogURLSource
+		if rm.catalogOrigin != "" {
+			// Host only for overrides; omitted entirely when fetch is disabled.
+			out["catalog_origin"] = rm.catalogOrigin
+		}
+		if rm.catalogURLSource == catalogURLSourceDefault {
+			// Safe to show the full URL: it is the public baked constant, not an
+			// operator-supplied value that might carry credentials.
+			out["catalog_url"] = defaultReleaseCatalogURL
+		}
 	}
 	if st := rm.refreshStatusSnapshot(); !st.LastAt.IsZero() {
 		out["last_refresh"] = st
