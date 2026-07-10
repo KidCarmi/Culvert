@@ -396,20 +396,24 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		}
 	}
 
+	if snap.ThreatDomainAllowlist != nil {
+		// Apply the domain allowlist first so ImportFeedData can suppress
+		// stale domain-level hits while preserving exact malicious URLs.
+		if err := globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist); err != nil {
+			logger.Printf("DataPlane: threat feed domain allowlist applied in memory but failed to persist: %v", err)
+		}
+	}
+
 	// Threat feed data (only if populated — can be large).
 	if len(snap.ThreatFeedURLs) > 0 || len(snap.ThreatFeedDomains) > 0 {
 		globalThreatFeed.ImportFeedData(snap.ThreatFeedURLs, snap.ThreatFeedDomains)
 		// P3.4 caller-side persist (Bucket-4 fsync-safe Save hardened
 		// in PR #246). ImportFeedData does NOT auto-persist;
-		// SetDomainAllowlist below DOES, so the Save call is paired
+		// SetDomainAllowlist above DOES, so the Save call is paired
 		// only with ImportFeedData here.
 		globalThreatFeed.Save()
 		logger.Printf("DataPlane: imported threat feed (%d URLs, %d domains)",
 			len(snap.ThreatFeedURLs), len(snap.ThreatFeedDomains))
-	}
-	if snap.ThreatDomainAllowlist != nil {
-		// SetDomainAllowlist auto-persists internally (threatfeed.go:266).
-		globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist)
 	}
 
 	applySnapshotSessionSecret(snap)

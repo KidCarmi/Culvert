@@ -566,7 +566,10 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		globalThreatFeed.SetDomainAllowlist(body.Domains)
+		if err := globalThreatFeed.SetDomainAllowlist(body.Domains); err != nil {
+			http.Error(w, "domain allowlist applied in memory but failed to persist", http.StatusInternalServerError)
+			return
+		}
 		logger.Printf("ThreatFeed: domain allowlist updated (%d entries)", len(body.Domains))
 		// Closes the audit gap flagged by
 		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
@@ -584,8 +587,9 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// empty, dedupes via map), so the audit reflects what was actually
 		// stored — raw len(body.Domains) over-reports when clients send
 		// blanks, duplicates, or case/whitespace variants (Codex P2 on PR #284).
-		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", len(globalThreatFeed.DomainAllowlist())), "")
-		jsonOK(w, map[string]any{"ok": true, "count": len(body.Domains)})
+		count := len(globalThreatFeed.DomainAllowlist())
+		auditEvent(r, "threatfeed.allowlist.update", fmt.Sprintf("%d domain(s)", count), "")
+		jsonOK(w, map[string]any{"ok": true, "count": count})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

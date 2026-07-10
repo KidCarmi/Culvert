@@ -3,6 +3,7 @@ package threatfeed
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -62,9 +63,10 @@ func TestNormaliseFeedURL_TrailingSlash(t *testing.T) {
 
 func newEnabledFeed() *Feed {
 	tf := &Feed{
-		urls:    make(map[string]entry),
-		domains: make(map[string]entry),
-		enabled: true,
+		urls:            make(map[string]entry),
+		domains:         make(map[string]entry),
+		domainAllowlist: make(map[string]bool),
+		enabled:         true,
 	}
 	tf.totalEntries.Store(0)
 	return tf
@@ -155,6 +157,107 @@ func TestThreatFeed_CheckDomain_Miss(t *testing.T) {
 	hit, _ := tf.CheckDomain("clean.example.com")
 	if hit {
 		t.Error("CheckDomain should not flag unknown domain")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistMasksDomainButKeepsThreatIntelAndURLBlock(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.urls["https://www.google.com/malware"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["www.google.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.AddDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("allowlisted domain should not be blocked by stale domain map")
+	}
+	if _, ok := tf.domains["www.google.com"]; !ok {
+		t.Fatal("allowlisting should preserve domain-level threat intel")
+	}
+	if hit, src := tf.CheckURL("https://www.google.com/malware?utm=ignored"); !hit || src != "urlhaus" {
+		t.Fatalf("exact malicious URL must remain blocked after domain allowlist; hit=%v src=%q", hit, src)
+	}
+	if err := tf.RemoveDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "urlhaus" {
+		t.Fatalf("removing allowlist should immediately re-enable domain block; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_CheckDomainAllowlistDefendsAgainstStaleDomainMap(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domainAllowlist["www.google.com"] = true
+	tf.domains["www.google.com"] = entry{Source: "openphish", AddedAt: time.Now()}
+
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("CheckDomain should honor allowlist even if stale domain entry remains")
+	}
+	if hit, _ := tf.CheckURL("https://www.google.com/anything"); hit {
+		t.Fatal("CheckURL domain fallback should honor allowlist when no exact URL is present")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistNormalizesOperatorInputs(t *testing.T) {
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{
+		" HTTPS://WWW.Google.COM:443/some/path ",
+		"www.google.com.",
+	}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	got := tf.DomainAllowlist()
+	if len(got) != 1 || got[0] != "www.google.com" {
+		t.Fatalf("normalized allowlist = %v, want [www.google.com]", got)
+	}
+	if !tf.DomainAllowlisted("https://www.google.com:443/other") {
+		t.Fatal("DomainAllowlisted should normalize URL-shaped operator input")
+	}
+}
+
+func TestThreatFeed_DomainAllowlistIsExactHost(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domains["www.google.com"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	if err := tf.SetDomainAllowlist([]string{"google.com"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "urlhaus" {
+		t.Fatalf("bare-domain allowlist should not suppress subdomain hits; hit=%v src=%q", hit, src)
+	}
+}
+
+func TestThreatFeed_DomainAllowlistCanonicalizesIDNConsistently(t *testing.T) {
+	tf := newEnabledFeed()
+	const asciiHost = "xn--bcher-kva.example"
+	tf.domains[asciiHost] = entry{Source: "urlhaus", AddedAt: time.Now()}
+
+	if err := tf.SetDomainAllowlist([]string{"b\u00fccher.example"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	if got := tf.DomainAllowlist(); len(got) != 1 || got[0] != asciiHost {
+		t.Fatalf("IDN allowlist normalized to %v, want [%s]", got, asciiHost)
+	}
+	if hit, _ := tf.CheckDomain(asciiHost); hit {
+		t.Fatal("punycode domain hit should be suppressed by equivalent Unicode allowlist entry")
+	}
+	if hit, _ := tf.CheckURL("https://b\u00fccher.example/anything"); hit {
+		t.Fatal("URL host canonicalization should match the domain allowlist")
+	}
+}
+
+func TestThreatFeed_SetDomainAllowlistReturnsPersistenceError(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.dbPath = filepath.Join(t.TempDir(), "missing-parent", "feed.json")
+
+	if err := tf.SetDomainAllowlist([]string{"persist-error.example"}); err == nil {
+		t.Fatal("SetDomainAllowlist should return persistence errors")
+	}
+	if !tf.DomainAllowlisted("persist-error.example") {
+		t.Fatal("allowlist should still apply in memory when persistence fails")
 	}
 }
 
@@ -381,5 +484,39 @@ func TestThreatFeed_ImportFeedData(t *testing.T) {
 	}
 	if tf.domains["new-domain.com"].Source != "cluster-sync" {
 		t.Errorf("source = %q, want cluster-sync", tf.domains["new-domain.com"].Source)
+	}
+}
+
+func TestThreatFeed_ImportFeedDataPreservesDomainAllowlistAndURLBlocks(t *testing.T) {
+	tf := newEnabledFeed()
+	if err := tf.SetDomainAllowlist([]string{"https://www.google.com:443/path"}); err != nil {
+		t.Fatalf("SetDomainAllowlist: %v", err)
+	}
+
+	tf.ImportFeedData(
+		map[string]int64{"https://www.google.com/malware": 1700000000},
+		map[string]int64{
+			"WWW.Google.COM:443": 1700000001,
+			"evil.example.com":   1700000002,
+		},
+	)
+
+	if _, ok := tf.domains["www.google.com"]; !ok {
+		t.Fatal("ImportFeedData should retain allowlisted domain threat intel")
+	}
+	if hit, _ := tf.CheckDomain("www.google.com"); hit {
+		t.Fatal("allowlisted imported domain should not block")
+	}
+	if hit, src := tf.CheckURL("https://www.google.com/malware"); !hit || src != "cluster-sync" {
+		t.Fatalf("exact malicious URL should remain blocked; hit=%v src=%q", hit, src)
+	}
+	if hit, src := tf.CheckDomain("evil.example.com"); !hit || src != "cluster-sync" {
+		t.Fatalf("non-allowlisted imported domain should still block; hit=%v src=%q", hit, src)
+	}
+	if err := tf.RemoveDomainAllowlist("www.google.com"); err != nil {
+		t.Fatalf("RemoveDomainAllowlist: %v", err)
+	}
+	if hit, src := tf.CheckDomain("www.google.com"); !hit || src != "cluster-sync" {
+		t.Fatalf("removing imported-domain allowlist should immediately re-enable block; hit=%v src=%q", hit, src)
 	}
 }

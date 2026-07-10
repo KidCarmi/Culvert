@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
@@ -278,7 +279,7 @@ func (tf *Feed) CheckURL(rawURL string) (malicious bool, source string) {
 		}
 	}
 	if host != "" {
-		if e, ok := tf.domains[host]; ok {
+		if e, ok := tf.domains[host]; ok && !tf.domainAllowlist[host] {
 			return true, e.Source
 		}
 	}
@@ -291,11 +292,14 @@ func (tf *Feed) CheckDomain(domain string) (malicious bool, source string) {
 	if !tf.Enabled() {
 		return false, ""
 	}
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	domain = normaliseDomain(domain)
 
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 
+	if domain == "" || tf.domainAllowlist[domain] {
+		return false, ""
+	}
 	if e, ok := tf.domains[domain]; ok {
 		return true, e.Source
 	}
@@ -347,9 +351,10 @@ var defaultDomainAllowlist = []string{
 // DomainAllowlisted reports whether a domain is on the threat-feed allowlist
 // (domain-level blocking skipped; URL-level blocking still applies).
 func (tf *Feed) DomainAllowlisted(domain string) bool {
+	domain = normaliseDomain(domain)
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
-	return tf.domainAllowlist[strings.ToLower(domain)]
+	return tf.domainAllowlist[domain]
 }
 
 // DomainAllowlist returns the current allowlist entries sorted.
@@ -365,11 +370,11 @@ func (tf *Feed) DomainAllowlist() []string {
 }
 
 // SetDomainAllowlist replaces the entire allowlist and persists to disk.
-func (tf *Feed) SetDomainAllowlist(domains []string) {
+func (tf *Feed) SetDomainAllowlist(domains []string) error {
 	tf.mu.Lock()
 	tf.domainAllowlist = make(map[string]bool, len(domains))
 	for _, d := range domains {
-		d = strings.ToLower(strings.TrimSpace(d))
+		d = normaliseDomain(d)
 		if d != "" {
 			tf.domainAllowlist[d] = true
 		}
@@ -378,45 +383,55 @@ func (tf *Feed) SetDomainAllowlist(domains []string) {
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // AddDomainAllowlist adds a domain to the allowlist and persists.
-func (tf *Feed) AddDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) AddDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	if domain == "" {
-		return
+		return nil
 	}
 	tf.mu.Lock()
+	if tf.domainAllowlist == nil {
+		tf.domainAllowlist = make(map[string]bool)
+	}
 	tf.domainAllowlist[domain] = true
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // RemoveDomainAllowlist removes a domain from the allowlist and persists.
-func (tf *Feed) RemoveDomainAllowlist(domain string) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
+func (tf *Feed) RemoveDomainAllowlist(domain string) error {
+	domain = normaliseDomain(domain)
 	tf.mu.Lock()
 	delete(tf.domainAllowlist, domain)
 	tf.mu.Unlock()
 	if tf.dbPath != "" {
 		if err := tf.saveToDisk(); err != nil {
 			obs.Printf("ThreatFeed: save allowlist failed: %v", err)
+			return err
 		}
 	}
+	return nil
 }
 
 // ── Feed fetching ─────────────────────────────────────────────────────────────
 
 // fetchTextFeed downloads a plain-text URL list (one URL per line; lines
 // beginning with '#' are comments) and populates the urls and domains maps.
-// Allowlisted domains are only recorded at the URL level, not the domain
-// level, to avoid blocking entire platforms due to one bad file.
+// Allowlisted domains are still recorded as threat intel; the allowlist only
+// masks domain-level blocking at lookup time so removal re-enables the block
+// immediately without waiting for another sync.
 //
 // A method (pre-extraction it was a package function reading the
 // globalThreatFeed singleton for the allowlist check): the only caller is
@@ -456,9 +471,7 @@ func (tf *Feed) fetchTextFeed(feedURL, source string, urls, domains map[string]e
 		}
 		e := entry{Source: source, AddedAt: now}
 		urls[normURL] = e
-		if !tf.DomainAllowlisted(host) {
-			domains[host] = e
-		}
+		domains[host] = e
 		count++
 	}
 	return count, sc.Err()
@@ -476,7 +489,7 @@ func NormaliseURL(raw string) (norm, host string) {
 	if err != nil || u.Host == "" {
 		return "", ""
 	}
-	host = strings.ToLower(u.Hostname())
+	host = canonicalHost(u.Hostname())
 	if host == "" {
 		return "", ""
 	}
@@ -488,6 +501,28 @@ func NormaliseURL(raw string) (norm, host string) {
 	norm = strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
 	norm = strings.TrimRight(norm, "/")
 	return norm, host
+}
+
+func normaliseDomain(domain string) string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return ""
+	}
+	if strings.Contains(domain, "://") {
+		if u, err := url.Parse(domain); err == nil && u.Host != "" {
+			domain = u.Host
+		}
+	} else if strings.Contains(domain, "/") {
+		if _, host := NormaliseURL(domain); host != "" {
+			domain = host
+		}
+	}
+	return canonicalHost(domain)
+}
+
+func canonicalHost(host string) string {
+	host = hostutil.StripHostPort(strings.ToLower(strings.TrimSpace(host)))
+	return hostutil.NormalizeHost(host)
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────
@@ -537,7 +572,9 @@ func (tf *Feed) loadFromDisk(path string) error {
 	if db.DomainAllowlist != nil {
 		tf.domainAllowlist = make(map[string]bool, len(db.DomainAllowlist))
 		for _, d := range db.DomainAllowlist {
-			tf.domainAllowlist[strings.ToLower(d)] = true
+			if d = normaliseDomain(d); d != "" {
+				tf.domainAllowlist[d] = true
+			}
 		}
 	}
 	tf.mu.Unlock()
@@ -626,6 +663,10 @@ func (tf *Feed) ImportFeedData(urls map[string]int64, domains map[string]int64) 
 	}
 	newDomains := make(map[string]entry, len(domains))
 	for d, ts := range domains {
+		d = normaliseDomain(d)
+		if d == "" {
+			continue
+		}
 		newDomains[d] = entry{Source: "cluster-sync", AddedAt: time.Unix(ts, 0)}
 	}
 	tf.mu.Lock()
@@ -663,6 +704,21 @@ func (tf *Feed) SetDBPathForTest(path string) (old string) {
 	tf.mu.Lock()
 	old = tf.dbPath
 	tf.dbPath = path
+	tf.mu.Unlock()
+	return old
+}
+
+// SetEnabledForTest toggles the feed's enabled flag and returns the previous
+// value. Test support for main-side tests that assert CheckURL/CheckDomain
+// verdicts on the process-wide feed: outside tests the flag is only set by
+// Init, so a test that needs positive verdicts must enable the feed itself
+// (and restore the old value in cleanup) instead of depending on whether an
+// earlier test happened to run Init — that ordering dependence is exactly
+// what the shuffle/determinism gate flags.
+func (tf *Feed) SetEnabledForTest(enabled bool) (old bool) {
+	tf.mu.Lock()
+	old = tf.enabled
+	tf.enabled = enabled
 	tf.mu.Unlock()
 	return old
 }

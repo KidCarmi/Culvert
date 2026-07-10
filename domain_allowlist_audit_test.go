@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -115,6 +116,34 @@ func TestDomainAllowlist_PUT_AuditCountIsNormalized(t *testing.T) {
 			}
 		}
 		t.Fatalf("audit object did not reflect the normalized stored count; want \"1 domain(s)\", got %q — raw-length audit count regressed (Codex P2 on PR #284)", actualObject)
+	}
+}
+
+func TestDomainAllowlist_PUT_PersistenceFailureReturnsError(t *testing.T) {
+	snapshotGlobalThreatFeedForAudit(t)
+	origPath := globalThreatFeed.SetDBPathForTest(filepath.Join(t.TempDir(), "missing-parent", "feed.json"))
+	t.Cleanup(func() {
+		globalThreatFeed.SetDBPathForTest(origPath)
+	})
+	baselineTS := time.Now().UnixMilli()
+
+	body, _ := json.Marshal(map[string]any{"domains": []string{"persist-error.example"}})
+	req := httptest.NewRequest(http.MethodPut, "/api/security-scan/feeds/domain-allowlist", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.64:0"
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+
+	rec := httptest.NewRecorder()
+	apiDomainAllowlist(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("PUT with persistence failure: got %d, want 500 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !globalThreatFeed.DomainAllowlisted("persist-error.example") {
+		t.Fatal("allowlist should still apply in memory when persistence fails")
+	}
+	if hasMatchingAuditEntry(auditGet(), "198.51.100.64", "threatfeed.allowlist.update", "1 domain(s)", baselineTS) {
+		t.Fatalf("persistence failure should not record a success audit entry")
 	}
 }
 
