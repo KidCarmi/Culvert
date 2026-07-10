@@ -64,6 +64,12 @@ const (
 	// official identity. Break-glass / fork-mirror use only; env-only (GUI-parity
 	// deferral, same as the other CULVERT_RELEASE_* vars).
 	envReleaseSigstoreIdentity = "CULVERT_RELEASE_SIGSTORE_IDENTITY"
+
+	// envReleaseRefreshInterval sets the periodic catalog refresh cadence (M1-2).
+	// Go duration string ("6h", "90m"); unset/invalid ⇒ the 6h default. Env-only,
+	// matching the CULVERT_RELEASE_* family precedent (recorded GUI-parity
+	// deferral); surfaced read-only on GET /api/releases.
+	envReleaseRefreshInterval = "CULVERT_RELEASE_REFRESH_INTERVAL"
 	// envReleaseSigstoreTrustedRoot is the OPTIONAL path to a custom Sigstore TUF
 	// trusted_root.json (P2b). Unset ⇒ the baked embed (empty in OSS ⇒ scheme
 	// dormant). PUBLIC trust material only — never private keys.
@@ -79,19 +85,20 @@ const (
 var bakedReleaseTrustKeysJSON = ""
 
 type releaseStartupConfig struct {
-	proxyRepo      string
-	catalogDir     string
-	statePath      string     // persisted rollback version floor (sibling of catalogDir)
-	maintURL       string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
-	catalogURL     string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
-	trustKeys      []TrustKey // baked roots ∪ operator-configured roots
-	trustKeysErr   error
-	sigstore       *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
-	sigstoreActive bool              // true ⇒ a Sigstore trusted root is present
-	sigstoreWarn   string            // loud one-line note (identity set without a root) ("" ⇒ none)
-	sigstoreErr    error             // fatal Sigstore config error ⇒ Release Management disabled
-	verifyMode     VerifyMode
-	verifyModeWarn string // loud break-glass message to log once at startup ("" ⇒ none)
+	proxyRepo       string
+	catalogDir      string
+	statePath       string     // persisted rollback version floor (sibling of catalogDir)
+	maintURL        string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	catalogURL      string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
+	trustKeys       []TrustKey // baked roots ∪ operator-configured roots
+	trustKeysErr    error
+	sigstore        *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
+	sigstoreActive  bool              // true ⇒ a Sigstore trusted root is present
+	sigstoreWarn    string            // loud one-line note (identity set without a root) ("" ⇒ none)
+	sigstoreErr     error             // fatal Sigstore config error ⇒ Release Management disabled
+	verifyMode      VerifyMode
+	verifyModeWarn  string        // loud break-glass message to log once at startup ("" ⇒ none)
+	refreshInterval time.Duration // periodic catalog refresh cadence (M1-2); 0 ⇒ loop disabled
 }
 
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
@@ -122,21 +129,46 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 		nSchemes++
 	}
 	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), nSchemes)
+	interval := resolveRefreshInterval(getenv(envReleaseRefreshInterval))
 	return releaseStartupConfig{
-		proxyRepo:      proxyRepo,
-		catalogDir:     catalogDir,
-		statePath:      filepath.Join(dataDir, "release_catalog_state.json"),
-		maintURL:       maintURL,
-		catalogURL:     strings.TrimSpace(getenv(envReleaseCatalogURL)),
-		trustKeys:      keys,
-		trustKeysErr:   keysErr,
-		sigstore:       sig.verifier,
-		sigstoreActive: sig.active,
-		sigstoreWarn:   sig.warn,
-		sigstoreErr:    sig.err,
-		verifyMode:     mode,
-		verifyModeWarn: warn,
+		proxyRepo:       proxyRepo,
+		catalogDir:      catalogDir,
+		statePath:       filepath.Join(dataDir, "release_catalog_state.json"),
+		maintURL:        maintURL,
+		catalogURL:      strings.TrimSpace(getenv(envReleaseCatalogURL)),
+		trustKeys:       keys,
+		trustKeysErr:    keysErr,
+		sigstore:        sig.verifier,
+		sigstoreActive:  sig.active,
+		sigstoreWarn:    sig.warn,
+		sigstoreErr:     sig.err,
+		verifyMode:      mode,
+		verifyModeWarn:  warn,
+		refreshInterval: interval,
 	}
+}
+
+// defaultRefreshInterval is the periodic catalog refresh cadence when
+// CULVERT_RELEASE_REFRESH_INTERVAL is unset. Six hours keeps appliances within
+// half a day of a new/re-signed catalog without meaningful origin load.
+const defaultRefreshInterval = 6 * time.Hour
+
+// resolveRefreshInterval parses the refresh cadence. Pure. Unset or invalid ⇒
+// the default (fail-safe: a typo must not disable the freshness loop); a value
+// below 1m is clamped to 1m (defense against hammering the origin).
+func resolveRefreshInterval(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return defaultRefreshInterval
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return defaultRefreshInterval
+	}
+	if d < time.Minute {
+		return time.Minute
+	}
+	return d
 }
 
 // combinedReleaseTrustKeys merges the BAKED roots with the operator-configured
@@ -284,17 +316,36 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// URL, so a presigned/credentialed CULVERT_RELEASE_CATALOG_URL would otherwise
 	// leak into the API response and audit log (startup redacts the same way).
 	var refreshMu sync.Mutex
-	rm.refresh = func(_ context.Context) error {
+	// Long-lived provider (M1-2 / RT-M2): constructed ONCE so conditional-request
+	// state (ETag/Last-Modified) survives across refreshes. A guard/URL error here
+	// leaves seedProv nil; refresh then degrades to a reload-only (and the startup
+	// seed above already logged the same failure).
+	var seedProv *HTTPCatalogProvider
+	if cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce {
+		var provErr error
+		if seedProv, provErr = newCatalogSeedProvider(cfg, trust); provErr != nil {
+			logger.Printf("release catalog: refresh provider unavailable: %s", sanitizeLog(redactSeedError(provErr, cfg.catalogURL)))
+		}
+	}
+	rm.refresh = func(ctx context.Context) error {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
-		if cfg.catalogURL != "" && cfg.verifyMode == VerifyEnforce {
-			if err := runStartupAutoSeed(cfg, trust); err != nil {
+		if seedProv != nil {
+			if err := runAutoSeed(ctx, seedProv, cfg, trust); err != nil {
 				return errors.New(redactSeedError(err, cfg.catalogURL))
 			}
 		}
 		return holder.Reload()
 	}
+	rm.refreshInterval = cfg.refreshInterval
 	setReleaseManager(rm)
+	// Periodic production refresh (M1-2): started HERE — after the manager, its
+	// refresh seam, and the alert webhooks exist (RT-M1) — on the app lifecycle
+	// context, and only when a catalog origin is configured in enforce mode
+	// (RT-L2; in permissive mode a tick would be a pointless disk re-read).
+	if seedProv != nil && cfg.refreshInterval > 0 {
+		go runCatalogRefreshLoop(appLifecycleCtx, cfg.refreshInterval, currentReleaseManager)
+	}
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)
 }
@@ -314,35 +365,40 @@ func trustSchemes(cfg releaseStartupConfig) string {
 	return strings.Join(schemes, "+")
 }
 
-// runStartupAutoSeed performs one verified auto-seed from cfg.catalogURL. It
-// applies an inline SSRF guard (url.Parse + scheme + isPrivateHost) BEFORE any
-// outbound request — defense-in-depth on top of the provider's dial-time guard —
-// stages onto the data-dir filesystem (so the final rename is atomic), and runs
-// the auto-seed under a bounded timeout. Non-fatal: the caller logs the error.
-func runStartupAutoSeed(cfg releaseStartupConfig, trust TrustStore) error {
+// newCatalogSeedProvider builds the LONG-LIVED HTTP provider for cfg.catalogURL:
+// inline SSRF guard (url.Parse + scheme + isPrivateHost) BEFORE any outbound
+// request — defense-in-depth on top of the provider's dial-time guard — staged
+// onto the data-dir filesystem (so the final rename is atomic). One provider is
+// constructed per process (M1-2 / RT-M2) so its ETag/Last-Modified state persists
+// across refreshes and an unchanged origin is a genuine 304 no-op instead of a
+// full re-download + catalog-dir rewrite every tick.
+func newCatalogSeedProvider(cfg releaseStartupConfig, trust TrustStore) (*HTTPCatalogProvider, error) {
 	u, err := url.Parse(cfg.catalogURL)
 	if err != nil {
-		return fmt.Errorf("%s: %w", envReleaseCatalogURL, err)
+		return nil, fmt.Errorf("%s: %w", envReleaseCatalogURL, err)
 	}
 	if u.Scheme != "https" && u.Scheme != "http" {
-		return fmt.Errorf("%s scheme %q must be http or https", envReleaseCatalogURL, u.Scheme)
+		return nil, fmt.Errorf("%s scheme %q must be http or https", envReleaseCatalogURL, u.Scheme)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("%s has no host", envReleaseCatalogURL)
+		return nil, fmt.Errorf("%s has no host", envReleaseCatalogURL)
 	}
 	if err := isPrivateHost(u.Host); err != nil {
-		return fmt.Errorf("%s host rejected (SSRF guard): %w", envReleaseCatalogURL, err)
+		return nil, fmt.Errorf("%s host rejected (SSRF guard): %w", envReleaseCatalogURL, err)
 	}
-
 	prov, err := NewHTTPCatalogProvider(cfg.catalogURL, trust)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// Stage onto the SAME filesystem as the destination so the swap rename is
-	// atomic (release_catalog lives directly under the data dir).
 	prov.SetStageBase(filepath.Dir(cfg.catalogDir))
+	return prov, nil
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), httpCatalogDefaultTimeout)
+// runAutoSeed performs one verified auto-seed via the long-lived provider under a
+// bounded timeout derived from the CALLER's context (M1-2 / RT-M3: shutdown or a
+// cancelled admin request aborts an in-flight fetch). Non-fatal: callers log.
+func runAutoSeed(ctx context.Context, prov *HTTPCatalogProvider, cfg releaseStartupConfig, trust TrustStore) error {
+	ctx, cancel := context.WithTimeout(ctx, httpCatalogDefaultTimeout)
 	defer cancel()
 	return autoSeedCatalog(ctx, prov, autoSeedConfig{
 		catalogDir: cfg.catalogDir,
@@ -350,6 +406,17 @@ func runStartupAutoSeed(cfg releaseStartupConfig, trust TrustStore) error {
 		trust:      trust,
 		skew:       catalogClockSkew,
 	})
+}
+
+// runStartupAutoSeed keeps the startup call shape: build the guard-checked
+// provider and run one seed. (Startup constructs its own provider; the long-lived
+// one used by refresh is created in loadReleaseManagement.)
+func runStartupAutoSeed(cfg releaseStartupConfig, trust TrustStore) error {
+	prov, err := newCatalogSeedProvider(cfg, trust)
+	if err != nil {
+		return err
+	}
+	return runAutoSeed(context.Background(), prov, cfg, trust)
 }
 
 // seedHost returns just the host of a seed URL for log lines, so userinfo/query
