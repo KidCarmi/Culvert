@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -79,6 +80,18 @@ type releaseManager struct {
 	// redacts before returning; viewers read this via /api/releases).
 	statusMu      sync.Mutex
 	refreshStatus refreshStatus
+	// M1-3 once-per-crossing alert latches (RT-H2), guarded by statusMu. Reset
+	// on restart (accepted + documented in release_alerts.go): a restart
+	// re-fires a still-active alert once.
+	refreshFailingLatched bool // release_catalog_refresh_failing fired, no success since
+	staleLatched          bool // release_catalog_stale fired, catalog still within threshold
+	// observeCatalog returns the RAW published catalog for observability (the
+	// stale watchdog + expiry gauge + expired-state API surfacing), bypassing
+	// GetCatalog's use-time expiry hide — an expired catalog must stay VISIBLE
+	// to detection precisely when it becomes invisible to serving/dispatch
+	// (M1-3 impl review MED-1). Set at wiring to holder.PublishedRaw; nil ⇒ no
+	// observability source (permissive unit fixtures).
+	observeCatalog func() *Catalog
 	// refreshRunMu serializes the WHOLE runRefresh (refresh call + status fold) so
 	// two overlapping callers cannot record outcomes out of order (a stale success
 	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
@@ -95,36 +108,50 @@ type refreshStatus struct {
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 }
 
-// runRefresh is the ONE entry point both refresh callers use: it runs rm.refresh
-// and folds the outcome into the shared status. Alert-transition logic hangs off
-// this record in M1-3.
+// runRefresh is the ONE entry point both refresh callers use: it runs rm.refresh,
+// folds the outcome into the shared status (with the M1-3 failing/recovered
+// alert transitions), and runs one catalog-freshness (stale) evaluation — so
+// every loop tick, including 304 no-ops, re-checks the installed catalog's
+// expiry (the freshness watchdog must fire even when the origin never changes).
 func (rm *releaseManager) runRefresh(ctx context.Context, trigger string) error {
 	rm.refreshRunMu.Lock()
 	defer rm.refreshRunMu.Unlock()
 	err := rm.refresh(ctx)
 	rm.recordRefreshOutcome(trigger, err)
+	rm.evaluateCatalogFreshness()
 	return err
 }
 
 // recordRefreshOutcome folds one refresh outcome into the shared status under
-// statusMu. Extracted from runRefresh so the startup auto-seed can record its
-// outcome directly (it runs before the manager's refresh seam is invoked, and
-// re-running rm.refresh at boot would double-fetch). err MUST already be redacted
-// — LastErr is viewer-readable via /api/releases.
+// statusMu, advances the refresh_total metrics, and fires any failing/recovered
+// alert transition (computed under the lock, emitted after unlock). Extracted
+// from runRefresh so the startup auto-seed can record its outcome directly (it
+// runs before the manager's refresh seam is invoked, and re-running rm.refresh
+// at boot would double-fetch). err MUST already be redacted — LastErr is
+// viewer-readable via /api/releases and alert Detail reaches webhooks.
 func (rm *releaseManager) recordRefreshOutcome(trigger string, err error) {
+	if err != nil {
+		atomic.AddInt64(&statReleaseRefreshFailure, 1)
+	} else {
+		atomic.AddInt64(&statReleaseRefreshSuccess, 1)
+	}
 	rm.statusMu.Lock()
-	defer rm.statusMu.Unlock()
 	rm.refreshStatus.LastAt = time.Now()
 	rm.refreshStatus.LastTrigger = trigger
 	if err != nil {
 		rm.refreshStatus.LastOK = false
 		rm.refreshStatus.LastErr = err.Error()
 		rm.refreshStatus.ConsecutiveFailures++
-		return
+	} else {
+		rm.refreshStatus.LastOK = true
+		rm.refreshStatus.LastErr = ""
+		rm.refreshStatus.ConsecutiveFailures = 0
 	}
-	rm.refreshStatus.LastOK = true
-	rm.refreshStatus.LastErr = ""
-	rm.refreshStatus.ConsecutiveFailures = 0
+	events := rm.evaluateRefreshTransitions(err)
+	rm.statusMu.Unlock()
+	for _, p := range events {
+		releaseAlertFire(p.Event, p)
+	}
 }
 
 // refreshStatusSnapshot returns a copy of the shared status for read paths.
@@ -293,6 +320,19 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 			"reason":      "no catalog published",
 			"verify_mode": rm.verifyMode.String(),
 		}
+		// M1-3: distinguish "just expired" (a catalog IS published but hidden by
+		// the use-time freshness gate) from "nothing installed" — the raw
+		// observability accessor still sees it, so the admin learns WHY reads
+		// degraded and the panel can render the EXPIRED state (impl review MED-1).
+		if rm.observeCatalog != nil {
+			if raw := rm.observeCatalog(); raw != nil {
+				if exp := raw.ExpiresAt(); !exp.IsZero() && time.Now().After(exp) {
+					unavail["reason"] = "installed catalog expired"
+					unavail["expires_at"] = exp.UTC().Format(time.RFC3339)
+					unavail["expires_in_days"] = int(math.Floor(time.Until(exp).Hours() / 24))
+				}
+			}
+		}
 		if rm.trustSchemes != "" {
 			unavail["trust_schemes"] = rm.trustSchemes
 		}
@@ -315,6 +355,10 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	}
 	if exp := cat.ExpiresAt(); !exp.IsZero() {
 		out["expires_at"] = exp.UTC().Format(time.RFC3339)
+		// GUI parity for the M1-3 freshness watchdog: whole days remaining,
+		// rendered in the Release panel. True floor — 12h past expiry must read
+		// -1 ("EXPIRED"), not truncate to 0 ("0 days left").
+		out["expires_in_days"] = int(math.Floor(time.Until(exp).Hours() / 24))
 	}
 	rm.addRefreshFields(out)
 	jsonOK(w, out)

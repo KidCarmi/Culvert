@@ -421,5 +421,6 @@ culvert_auth_sso_required_total %d
 	clusterWritePrometheus(&ruleMetBuf)
 	cdrWritePrometheus(&ruleMetBuf)
 	liveFeedWritePrometheus(&ruleMetBuf)
+	releaseCatalogWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }

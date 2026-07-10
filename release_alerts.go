@@ -1,0 +1,200 @@
+package main
+
+// Release-catalog detection / canary / alerting (M1-3, design §3 Slice C).
+//
+// Operators learn about catalog problems from alerts, not outages. Three alert
+// events ride the existing fireAlert seam:
+//
+//   release_catalog_stale           — the INSTALLED catalog's expires_at is
+//                                     within releaseCatalogStaleThreshold (30d)
+//                                     of now: the 180-day freshness watchdog.
+//                                     The backstop for a silently-failing weekly
+//                                     re-sign (M1-4) — fires with ~5 weekly
+//                                     retries left before the catalog lapses.
+//   release_catalog_refresh_failing — releaseRefreshFailingThreshold (3)
+//                                     CONSECUTIVE refresh failures.
+//   release_catalog_recovered       — the first refresh success after a
+//                                     refresh_failing alert.
+//
+// RT-H2 (§10): each alert fires ONCE PER THRESHOLD CROSSING, not per evaluation
+// — the engine's 30s dedup would otherwise re-fire stale every 6h tick for a
+// month. Latches live on releaseManager under statusMu (no new stores); they
+// reset on restart, so a restart re-fires an still-active alert once (accepted
+// + documented — an operator restarting a stale appliance gets one reminder,
+// not silence). Thresholds are constants for M1 (recorded deferral: no
+// env/GUI knob until a deployment needs one — not a config option, so the
+// GUI-parity rule does not apply).
+//
+// Alerts fire through releaseAlertFire (test seam). The default is
+// deferStartupAlert — in the CURRENT startup order (loadPersistentAdminState
+// precedes loadReleaseManagement in main.go) it is already a plain fireAlert
+// passthrough at wiring time; the queue path is deliberate ordering
+// robustness, not a live dependency, so a future startup reorder cannot
+// silently drop a boot alert. Dispatch itself is always non-blocking, so
+// firing on a caller's goroutine is safe.
+//
+// Prometheus (RT-L1, hand-written per the metrics.go pattern):
+//   culvert_release_catalog_refresh_total{result="success"|"failure"}
+//   culvert_release_catalog_expires_in_seconds (scrape-time, from the holder)
+
+import (
+	"fmt"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	// releaseCatalogStaleThreshold: fire release_catalog_stale when the
+	// installed catalog expires within this window (design §3: default 30d).
+	// NOTE: the Release panel hardcodes the same 30-day boundary for its warn
+	// color (static/index.html, renderReleaseOrigin) — change both together.
+	releaseCatalogStaleThreshold = 30 * 24 * time.Hour
+	// releaseRefreshFailingThreshold: fire release_catalog_refresh_failing on
+	// the Nth CONSECUTIVE refresh failure (design §3: default 3).
+	releaseRefreshFailingThreshold = 3
+)
+
+// releaseAlertFire is the alert-emission seam (tests swap in a recorder).
+// deferStartupAlert queues until the webhook store is loaded, then passes
+// through to fireAlert; Dispatch is non-blocking either way.
+var releaseAlertFire = deferStartupAlert
+
+// alertHost labels release alerts with the effective catalog origin; the stale
+// watchdog is about the INSTALLED catalog, so with outbound fetch disabled
+// (catalog_url_source=disabled ⇒ empty origin) it falls back to a fixed label
+// instead of an empty Host field.
+func (rm *releaseManager) alertHost() string {
+	if rm.catalogOrigin != "" {
+		return rm.catalogOrigin
+	}
+	return "local-catalog"
+}
+
+// Refresh-outcome counters for culvert_release_catalog_refresh_total.
+// Process-lifetime, not persisted (refresh cadence makes restarts visible
+// anyway; the catalog state itself is the durable record).
+var (
+	statReleaseRefreshSuccess int64
+	statReleaseRefreshFailure int64
+)
+
+// evaluateRefreshTransitions computes the failing/recovered latch transitions
+// for one refresh outcome. MUST be called with rm.statusMu held (it reads the
+// just-folded ConsecutiveFailures and mutates the latch); it returns the
+// events to fire so the caller can emit them AFTER releasing the lock.
+func (rm *releaseManager) evaluateRefreshTransitions(err error) []AlertPayload {
+	var out []AlertPayload
+	if err != nil {
+		if rm.refreshStatus.ConsecutiveFailures >= releaseRefreshFailingThreshold && !rm.refreshFailingLatched {
+			rm.refreshFailingLatched = true
+			out = append(out, AlertPayload{
+				Event: "release_catalog_refresh_failing",
+				Host:  rm.alertHost(),
+				Detail: fmt.Sprintf("%d consecutive release-catalog refresh failures (last: %s)",
+					rm.refreshStatus.ConsecutiveFailures, rm.refreshStatus.LastErr),
+				Source: "release",
+			})
+		}
+		return out
+	}
+	// Success: recovered pairs with a fired refresh_failing — a single blip
+	// failure→success below the threshold stays silent (RT-H2: transitions
+	// only, no per-evaluation noise).
+	if rm.refreshFailingLatched {
+		rm.refreshFailingLatched = false
+		out = append(out, AlertPayload{
+			Event:  "release_catalog_recovered",
+			Host:   rm.alertHost(),
+			Detail: "release-catalog refresh succeeded after repeated failures",
+			Source: "release",
+		})
+	}
+	return out
+}
+
+// evalStale computes the stale-latch transition for one freshness evaluation
+// against the given expiry. Pure over (expiresAt, now) so the RT-H2 latch is
+// unit-testable without a fake clock plumbed through the manager. MUST be
+// called with rm.statusMu held; returns the events to fire after unlock.
+//
+//   - stale (expires within threshold, incl. already expired) + not latched
+//     ⇒ latch + fire once. Further stale evaluations are silent.
+//   - fresh ⇒ re-arm the latch (crossing back re-enables the next crossing).
+func (rm *releaseManager) evalStale(expiresAt, now time.Time) []AlertPayload {
+	remaining := expiresAt.Sub(now)
+	if remaining >= releaseCatalogStaleThreshold {
+		rm.staleLatched = false
+		return nil
+	}
+	if rm.staleLatched {
+		return nil
+	}
+	rm.staleLatched = true
+	return []AlertPayload{{
+		Event: "release_catalog_stale",
+		Host:  rm.alertHost(),
+		Detail: fmt.Sprintf("release catalog expires %s (%.1f days remaining; threshold %.0f days) — re-sign pipeline may be failing",
+			expiresAt.UTC().Format(time.RFC3339), remaining.Hours()/24, releaseCatalogStaleThreshold.Hours()/24),
+		Source: "release",
+	}}
+}
+
+// evaluateCatalogFreshness runs one stale evaluation against the RAW published
+// catalog (rm.observeCatalog → holder.PublishedRaw — a failed refresh leaves it
+// in place, and an EXPIRED catalog stays visible here even though GetCatalog
+// hides it from serving, so the watchdog keeps firing state past the lapse
+// instead of going blind at exactly the terminal moment — impl review MED-1).
+// No published catalog ⇒ no evaluation and the latch is left untouched (reads
+// degrade to available:false; staleness of nothing is meaningless — the
+// boot-after-lapse case, where Reload refuses the expired dir, is alerted
+// separately at wiring). Called from runRefresh (every loop tick — incl. 304
+// no-ops — and every manual refresh) and once at startup wiring.
+func (rm *releaseManager) evaluateCatalogFreshness() {
+	if rm.observeCatalog == nil {
+		return
+	}
+	cat := rm.observeCatalog()
+	if cat == nil {
+		return
+	}
+	exp := cat.ExpiresAt()
+	if exp.IsZero() {
+		// Permissive/legacy catalogs may carry no expiry — nothing to watch.
+		return
+	}
+	rm.statusMu.Lock()
+	events := rm.evalStale(exp, time.Now())
+	rm.statusMu.Unlock()
+	for _, p := range events {
+		releaseAlertFire(p.Event, p)
+	}
+}
+
+// releaseCatalogWritePrometheus appends the M1-3 release-catalog metrics
+// (called from handleMetrics). The expiry gauge is computed at scrape time
+// from the RAW published catalog (observability accessor — an expired catalog
+// keeps exporting a NEGATIVE value instead of vanishing, so "just expired" and
+// "nothing installed" stay distinguishable) and omitted only when no catalog
+// (or no expiry) is published — an absent series is a clearer "nothing
+// installed" signal than a fake zero.
+func releaseCatalogWritePrometheus(w *strings.Builder) {
+	w.WriteString("\n# HELP culvert_release_catalog_refresh_total Release-catalog refresh outcomes (startup, loop, and manual)\n")
+	w.WriteString("# TYPE culvert_release_catalog_refresh_total counter\n")
+	fmt.Fprintf(w, "culvert_release_catalog_refresh_total{result=\"success\"} %d\n", atomic.LoadInt64(&statReleaseRefreshSuccess))
+	fmt.Fprintf(w, "culvert_release_catalog_refresh_total{result=\"failure\"} %d\n", atomic.LoadInt64(&statReleaseRefreshFailure))
+
+	rm := currentReleaseManager()
+	if rm == nil || rm.observeCatalog == nil {
+		return
+	}
+	cat := rm.observeCatalog()
+	if cat == nil {
+		return
+	}
+	if exp := cat.ExpiresAt(); !exp.IsZero() {
+		w.WriteString("\n# HELP culvert_release_catalog_expires_in_seconds Seconds until the installed release catalog expires (negative = already expired)\n")
+		w.WriteString("# TYPE culvert_release_catalog_expires_in_seconds gauge\n")
+		fmt.Fprintf(w, "culvert_release_catalog_expires_in_seconds %.0f\n", time.Until(exp).Seconds())
+	}
+}

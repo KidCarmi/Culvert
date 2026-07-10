@@ -9839,6 +9839,15 @@ function renderReleaseOrigin(d) {
   if (d.refresh_interval) {
     rows.push('<div><strong>Auto-refresh:</strong> every ' + escHtml(d.refresh_interval) + ' <span style="color:var(--muted)">(±10% jitter)</span></div>');
   }
+  // M1-3 freshness watchdog: days until the installed catalog expires. Warn
+  // color inside the 30-day stale threshold (matches release_catalog_stale).
+  if (typeof d.expires_in_days === 'number') {
+    const days = d.expires_in_days;
+    const stale = days < 30;
+    const label = days < 0 ? 'EXPIRED ' + escHtml(String(-days)) + 'd ago' : escHtml(String(days)) + ' days';
+    rows.push('<div><strong>Catalog expires in:</strong> <span style="color:' + (stale ? 'var(--warn,#f59e0b)' : 'var(--muted)') + '">' + label
+      + (stale ? ' ⚠ (stale threshold 30d — check the re-sign pipeline)' : '') + '</span></div>');
+  }
   const lr = d.last_refresh;
   if (lr && lr.last_at) {
     const ok = lr.last_ok === true;
@@ -9862,7 +9871,10 @@ function renderReleaseCatalog(d, box, meta) {
   renderReleaseTrustBadge(d);
   renderReleaseOrigin(d);
   if (!d || d.available !== true) {
-    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
+    // Surface the server's reason — "installed catalog expired" (M1-3) is an
+    // actionable state, not the generic empty one.
+    const why = (d && d.reason) ? escHtml(d.reason) : 'available: false';
+    box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (' + why + '). A seeded or refreshed catalog will appear here.</div>';
     if (meta) meta.textContent = '';
     populateReleaseDispatchReleases([]);
     return;
@@ -11666,6 +11678,12 @@ function showCPUpdatingOverlay() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cert_expiry"> Cert expiry</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ca_load_failed"> CA load failed</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="update_available"> Update available</label>
+        <!-- M1-3 release-catalog detection events: the store filters on exact
+             event names (or "*"), so events missing here would be silently
+             filtered for GUI-managed webhooks (Codex review on PR #639). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_stale"> Release catalog stale</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_refresh_failing"> Release refresh failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_recovered"> Release refresh recovered</label>
       </div>
     </div>
     <div class="form-group">
