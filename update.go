@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -66,7 +67,7 @@ func (u *updateInfo) snapshot() map[string]any {
 		// Surface the legacy-fallback gate so the UI can show "legacy GitHub-tags
 		// fallback disabled" — the discoverable answer for an operator who stops
 		// seeing updates (GUI-parity for the env-only break-glass switch).
-		"legacy_gh_tag_check": legacyGhTagCheck,
+		"legacy_gh_tag_check": legacyGhTagCheck.Load(),
 	}
 }
 
@@ -321,9 +322,10 @@ const envLegacyGhTagCheck = "CULVERT_LEGACY_GH_TAG_CHECK"
 // DEFAULT false (OFF): the update path makes NO unauthenticated GitHub API call, so a
 // private-repo build cannot 404-brick here. It is write-once at startup
 // (applyLegacyGhTagCheckEnv, called from startUpdateChecker) and read-only thereafter,
-// so the background update-checker goroutine reads it race-free.
+// so the background update-checker goroutine reads it race-free. atomic.Bool because
+// snapshot() (an HTTP-handler goroutine) reads it without the updateInfo mutex.
 var (
-	legacyGhTagCheck     bool
+	legacyGhTagCheck     atomic.Bool
 	legacyGhTagCheckNote string
 )
 
@@ -355,7 +357,9 @@ func resolveLegacyGhTagCheck(v string) (enabled bool, note string) {
 // applyLegacyGhTagCheckEnv resolves the gate from the environment into the package
 // vars. Called once at startup (startUpdateChecker); getenv is a seam for tests.
 func applyLegacyGhTagCheckEnv(getenv func(string) string) {
-	legacyGhTagCheck, legacyGhTagCheckNote = resolveLegacyGhTagCheck(getenv(envLegacyGhTagCheck))
+	enabled, note := resolveLegacyGhTagCheck(getenv(envLegacyGhTagCheck))
+	legacyGhTagCheck.Store(enabled)
+	legacyGhTagCheckNote = note
 }
 
 // maybeGitHubTagFallback consults the legacy gate and only THEN dials GitHub. It
@@ -368,7 +372,7 @@ func maybeGitHubTagFallback(curLatest string, curAvailable bool, cleanVer string
 	if curAvailable || cleanVer == "dev" {
 		return latest, available, false // registry already has an update, or unversioned build
 	}
-	if !legacyGhTagCheck {
+	if !legacyGhTagCheck.Load() {
 		legacyFallbackHintOnce.Do(func() {
 			if logger != nil {
 				logger.Printf("Update: registry reports no newer version and the legacy GitHub-tags fallback is DISABLED; set %s=true if updates are expected but not shown", envLegacyGhTagCheck)

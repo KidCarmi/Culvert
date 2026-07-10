@@ -151,4 +151,11 @@ Two independent planning reviews (correctness/testability; behavior/scope). Both
 | Discoverability: an operator who stops seeing updates has only a boot log | MED | Gate state surfaced in `/api/update/status` (`legacy_gh_tag_check`); env added to CLAUDE.md; a one-shot runtime hint fires when the disabled fallback could have mattered. |
 | "Reduced visibility" overstated — registry path untouched + ci.yml now publishes semver image tags | LOW | Code comment + PR body now state the Docker-registry check remains the live path; default-off covers only a CI-regression edge case. |
 | Objective is the runtime update path, not install scripts (`internal/bootstrap` still curls api.github.com) | LOW | Scoped explicitly in CLAUDE.md + the PR body; install-script fetches are M2. |
-| Truthy accept-set / concurrency / retain-posture / rollback | LOW/confirm | `1/true/yes/on` (fail-safe OFF otherwise); write-once-at-startup read is race-free; retain+break-glass and rollback confirmed sound. |
+| Truthy accept-set / concurrency / retain-posture / rollback | LOW/confirm | `1/true/yes/on` (fail-safe OFF otherwise); retain+break-glass and rollback confirmed sound. |
+
+**Implementation review (1 agent) — verdict ship-as-is; one opportunistic fix applied:**
+
+| Finding | Sev | Resolution |
+|---|---|---|
+| `snapshot()` (HTTP-handler goroutine) reads the `legacyGhTagCheck` package bool without the `updateInfo` mutex that guards the rest of the struct — a real (benign, write-once) cross-goroutine data race vs the startup write | MED | `legacyGhTagCheck` is now `atomic.Bool` (`Store` at startup, `Load` in `maybeGitHubTagFallback`/`snapshot()`); tests use `.Store/.Load` with save/restore. |
+| ON path byte-identical, default no-dial, tests clean, source-scan sound, no double-dial | confirm | Verified by the reviewer against the actual diff. |

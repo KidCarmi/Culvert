@@ -36,8 +36,8 @@ func TestResolveLegacyGhTagCheck(t *testing.T) {
 }
 
 func TestApplyLegacyGhTagCheckEnv(t *testing.T) {
-	origGate, origNote := legacyGhTagCheck, legacyGhTagCheckNote
-	t.Cleanup(func() { legacyGhTagCheck, legacyGhTagCheckNote = origGate, origNote })
+	origGate, origNote := legacyGhTagCheck.Load(), legacyGhTagCheckNote
+	t.Cleanup(func() { legacyGhTagCheck.Store(origGate); legacyGhTagCheckNote = origNote })
 
 	applyLegacyGhTagCheckEnv(func(k string) string {
 		if k == envLegacyGhTagCheck {
@@ -45,11 +45,11 @@ func TestApplyLegacyGhTagCheckEnv(t *testing.T) {
 		}
 		return ""
 	})
-	if !legacyGhTagCheck {
+	if !legacyGhTagCheck.Load() {
 		t.Fatal("env=true should enable the gate")
 	}
 	applyLegacyGhTagCheckEnv(func(string) string { return "" })
-	if legacyGhTagCheck {
+	if legacyGhTagCheck.Load() {
 		t.Fatal("unset env should disable the gate (default OFF)")
 	}
 }
@@ -57,10 +57,10 @@ func TestApplyLegacyGhTagCheckEnv(t *testing.T) {
 // withFallbackSpy installs a counting dial spy + sets the gate, restoring both after.
 func withFallbackSpy(t *testing.T, enabled bool, ret string) *int {
 	t.Helper()
-	origGate, origFn := legacyGhTagCheck, checkGitHubLatestTagFn
-	t.Cleanup(func() { legacyGhTagCheck, checkGitHubLatestTagFn = origGate, origFn })
+	origGate, origFn := legacyGhTagCheck.Load(), checkGitHubLatestTagFn
+	t.Cleanup(func() { legacyGhTagCheck.Store(origGate); checkGitHubLatestTagFn = origFn })
 	calls := 0
-	legacyGhTagCheck = enabled
+	legacyGhTagCheck.Store(enabled)
 	checkGitHubLatestTagFn = func() string { calls++; return ret }
 	return &calls
 }
