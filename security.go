@@ -216,7 +216,7 @@ func newRateLimiter() *RateLimiter {
 	return r
 }
 
-// IsExempt returns true if the IP is in the rate-limit whitelist.
+// IsExempt returns true if the IP is in the rate-limit exempt list.
 func (r *RateLimiter) IsExempt(ip string) bool {
 	r.exemptMu.RLock()
 	defer r.exemptMu.RUnlock()
@@ -235,7 +235,7 @@ func (r *RateLimiter) IsExempt(ip string) bool {
 	return false
 }
 
-// AddExemption adds an IP or CIDR to the rate-limit whitelist.
+// AddExemption adds an IP or CIDR to the rate-limit exempt list.
 func (r *RateLimiter) AddExemption(entry string) error {
 	r.exemptMu.Lock()
 	defer r.exemptMu.Unlock()
@@ -250,7 +250,7 @@ func (r *RateLimiter) AddExemption(entry string) error {
 	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
 }
 
-// RemoveExemption removes an IP or CIDR from the rate-limit whitelist.
+// RemoveExemption removes an IP or CIDR from the rate-limit exempt list.
 func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptMu.Lock()
 	defer r.exemptMu.Unlock()
@@ -264,8 +264,8 @@ func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptNets = filtered
 }
 
-// ReplaceExemptions atomically replaces the entire rate-limit whitelist.
-// Invalid entries are skipped; a nil or empty slice clears the whitelist.
+// ReplaceExemptions atomically replaces the entire rate-limit exempt list.
+// Invalid entries are skipped; a nil or empty slice clears the exempt list.
 // The new IP/CIDR structures are built OUTSIDE the lock and swapped under a
 // single Lock, so a concurrent IsExempt reader never observes a partial or
 // stale-mixed state. Used by applyConfigBackup for config-version rollback
@@ -288,7 +288,7 @@ func (r *RateLimiter) ReplaceExemptions(entries []string) {
 	r.exemptMu.Unlock()
 }
 
-// ListExemptions returns all rate-limit whitelist entries.
+// ListExemptions returns all rate-limit exempt list entries.
 func (r *RateLimiter) ListExemptions() []string {
 	r.exemptMu.RLock()
 	defer r.exemptMu.RUnlock()

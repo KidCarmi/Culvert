@@ -355,6 +355,10 @@ culvert_threat_feed_blocked_total %d
 # TYPE culvert_threat_feed_entries gauge
 culvert_threat_feed_entries %d
 
+# HELP culvert_threat_feed_allowlist_masked_total Domain-level threat hits suppressed by the domain allowlist
+# TYPE culvert_threat_feed_allowlist_masked_total counter
+culvert_threat_feed_allowlist_masked_total %d
+
 # HELP culvert_scan_cache_hits_total Total SHA256 scan-cache hits (decision reused without rescanning)
 # TYPE culvert_scan_cache_hits_total counter
 culvert_scan_cache_hits_total %d
@@ -397,6 +401,7 @@ culvert_auth_sso_required_total %d
 		yaraBlocked,
 		feedBlocked,
 		feedEntries,
+		globalThreatFeed.AllowlistMaskedTotal(),
 		cacheHits,
 		cacheMisses,
 		int64(cacheSize),

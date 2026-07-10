@@ -28,7 +28,7 @@ type ConfigSnapshot struct {
 	IPFilterMode          string   `json:"ip_filter_mode"`
 	IPList                []string `json:"ip_list"`
 	RateLimitRPM          int      `json:"rate_limit_rpm"`
-	RateLimitExempt       []string `json:"rate_limit_exempt"` // IP/CIDR rate-limit whitelist; nil→skip, []→clear on DP. NO omitempty: an empty list must serialize as [] so removing the last exemption propagates as a clear, not a skip.
+	RateLimitExempt       []string `json:"rate_limit_exempt"` // IP/CIDR rate-limit exempt list; nil→skip, []→clear on DP. NO omitempty: an empty list must serialize as [] so removing the last exemption propagates as a clear, not a skip.
 	AuthEnabled           bool     `json:"auth_enabled"`
 	DefaultAuthOutcome    string   `json:"default_auth_outcome"` // "Default" | "Exempt"; informational (DP does not apply it)
 	ProxyBaseURL          string   `json:"proxy_base_url,omitempty"`
@@ -57,9 +57,16 @@ type ConfigSnapshot struct {
 	PACExclusions []string `json:"pac_exclusions,omitempty"`
 
 	// Threat feed sync: include feed data so DPs don't fetch independently.
+	// ThreatDomainAllowlist deliberately has NO omitempty: an admin-cleared
+	// (zero-entry) allowlist must serialize as `[]` and propagate as an
+	// explicit wipe — the allowlist now gates CheckURL/CheckDomain verdicts
+	// at lookup time, so a DP left holding a stale allowlist would keep
+	// masking domains the CP no longer exempts (fail-open). Mirrors the
+	// RateLimitExempt WireWipeCapable precedent and the feedDB
+	// DomainAllowlist no-omitempty fix (§3.3).
 	ThreatFeedURLs        map[string]int64 `json:"threat_feed_urls,omitempty"`
 	ThreatFeedDomains     map[string]int64 `json:"threat_feed_domains,omitempty"`
-	ThreatDomainAllowlist []string         `json:"threat_domain_allowlist,omitempty"`
+	ThreatDomainAllowlist []string         `json:"threat_domain_allowlist"`
 
 	// Session secret sync: shared HMAC key so sessions are valid across nodes.
 	SessionHMAC string `json:"session_hmac,omitempty"`
@@ -396,20 +403,29 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 		}
 	}
 
+	if snap.ThreatDomainAllowlist != nil {
+		// Allowlist masking happens at LOOKUP time (CheckURL/CheckDomain);
+		// ImportFeedData does not consult the allowlist. Applying the
+		// allowlist first merely closes the transient window where a
+		// freshly imported domain could block before its exemption lands.
+		// The nil-guard keeps snapshots from an older CP (field omitted)
+		// from wiping the DP's allowlist; a new CP always sends the field
+		// (no omitempty), so an explicit `[]` clear DOES propagate.
+		if err := globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist); err != nil {
+			logger.Printf("DataPlane: threat feed domain allowlist applied in memory but failed to persist: %v", err)
+		}
+	}
+
 	// Threat feed data (only if populated — can be large).
 	if len(snap.ThreatFeedURLs) > 0 || len(snap.ThreatFeedDomains) > 0 {
 		globalThreatFeed.ImportFeedData(snap.ThreatFeedURLs, snap.ThreatFeedDomains)
 		// P3.4 caller-side persist (Bucket-4 fsync-safe Save hardened
 		// in PR #246). ImportFeedData does NOT auto-persist;
-		// SetDomainAllowlist below DOES, so the Save call is paired
+		// SetDomainAllowlist above DOES, so the Save call is paired
 		// only with ImportFeedData here.
 		globalThreatFeed.Save()
 		logger.Printf("DataPlane: imported threat feed (%d URLs, %d domains)",
 			len(snap.ThreatFeedURLs), len(snap.ThreatFeedDomains))
-	}
-	if snap.ThreatDomainAllowlist != nil {
-		// SetDomainAllowlist auto-persists internally (threatfeed.go:266).
-		globalThreatFeed.SetDomainAllowlist(snap.ThreatDomainAllowlist)
 	}
 
 	applySnapshotSessionSecret(snap)

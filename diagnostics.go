@@ -387,7 +387,7 @@ func checkClusterPosture() OperatorContractCheck {
 			Code:           "cluster_posture",
 			Status:         diagWarn,
 			Message:        "cluster running in explicitly-insecure mode — gRPC traffic is not encrypted",
-			OperatorAction: "Provide TLS certificates via --cluster-grpc-cert/--cluster-grpc-key/--cluster-grpc-ca and remove --cluster-insecure to harden the control plane.",
+			OperatorAction: "Provide TLS certificates via -cp-grpc-cert/-cp-grpc-key/-cp-grpc-ca (Control Plane) and -dp-cert/-dp-key/-dp-ca (Data Plane), then remove --cluster-insecure to harden the cluster.",
 		}
 	}
 	return OperatorContractCheck{
