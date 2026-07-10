@@ -17,7 +17,7 @@ package main
 //   3. EmptySnapshotWipes — explicit [] wipes live bypass list.
 //   4. EmptyMarshalsAsArray — zero-bypass serializes as [], not null.
 //   5. HandlerPUT_CreatesConfigVersion — apiContentScanBypass PUT
-//      produces a "security.content_scan_bypass" envelope.
+//      produces a "security.dpi_bypass" envelope.
 //   6. SingleEnvelopeAfterApply — on-disk content_scan.json contains
 //      BOTH patterns and bypass_hosts after a combined apply (single
 //      Save, no intermediate state).
@@ -172,7 +172,7 @@ func TestAPIContentScanBypass_PUT_CreatesConfigVersion(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body: %s)", w.Code, w.Body.String())
 	}
-	assertConfigVersionWithAction(t, tmp, "security.content_scan_bypass")
+	assertConfigVersionWithAction(t, tmp, "security.dpi_bypass")
 }
 
 // assertConfigVersionWithAction fails the test unless some envelope in
