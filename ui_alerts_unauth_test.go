@@ -1,7 +1,7 @@
 package main
 
 // ui_alerts_unauth_test.go — HTTP handler tests for apiAlertsWebhooks
-// and apiUnauthMode, which were previously at 0% coverage.
+// and apiDefaultAuthOutcome, which were previously at 0% coverage.
 
 import (
 	"bytes"
@@ -145,15 +145,15 @@ func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
 	}
 }
 
-// ── apiUnauthMode ─────────────────────────────────────────────────────────────
+// ── apiDefaultAuthOutcome ─────────────────────────────────────────────────────────────
 
-func TestAPIUnauthMode_SetDefaultAuthOutcome(t *testing.T) {
+func TestAPIDefaultAuthOutcome_SetDefaultAuthOutcome(t *testing.T) {
 	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
 
 	// Exempt (open unmatched traffic).
-	req := adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Exempt"}`)
+	req := adminRequest(http.MethodPut, "/api/settings/default-auth-outcome", `{"defaultAuthOutcome":"Exempt"}`)
 	w := httptest.NewRecorder()
-	apiUnauthMode(w, req)
+	apiDefaultAuthOutcome(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Exempt: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
@@ -162,9 +162,9 @@ func TestAPIUnauthMode_SetDefaultAuthOutcome(t *testing.T) {
 	}
 
 	// Default (require authentication).
-	req = adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Default"}`)
+	req = adminRequest(http.MethodPut, "/api/settings/default-auth-outcome", `{"defaultAuthOutcome":"Default"}`)
 	w = httptest.NewRecorder()
-	apiUnauthMode(w, req)
+	apiDefaultAuthOutcome(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("Default: expected 200, got %d", w.Code)
 	}
@@ -173,9 +173,9 @@ func TestAPIUnauthMode_SetDefaultAuthOutcome(t *testing.T) {
 	}
 
 	// Invalid value → 400, state unchanged.
-	req = adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"CredentialRequired"}`)
+	req = adminRequest(http.MethodPut, "/api/settings/default-auth-outcome", `{"defaultAuthOutcome":"CredentialRequired"}`)
 	w = httptest.NewRecorder()
-	apiUnauthMode(w, req)
+	apiDefaultAuthOutcome(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("invalid outcome: expected 400, got %d", w.Code)
 	}
@@ -184,20 +184,38 @@ func TestAPIUnauthMode_SetDefaultAuthOutcome(t *testing.T) {
 	}
 }
 
-func TestAPIUnauthMode_WrongMethod(t *testing.T) {
-	req := adminRequest(http.MethodGet, "/api/settings/unauth-mode", "")
+// TestAPIDefaultAuthOutcome_LegacyAliasPath pins that the retired
+// /api/settings/unauth-mode path keeps working as a back-compat alias for
+// existing integrations/scripts, even though the canonical path is now
+// /api/settings/default-auth-outcome.
+func TestAPIDefaultAuthOutcome_LegacyAliasPath(t *testing.T) {
+	t.Cleanup(func() { cfg.SetDefaultAuthOutcome(OutcomeDefault) })
+
+	req := adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Exempt"}`)
 	w := httptest.NewRecorder()
-	apiUnauthMode(w, req)
+	apiDefaultAuthOutcome(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("legacy alias: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if cfg.DefaultAuthOutcome() != OutcomeExempt {
+		t.Error("legacy alias should still apply defaultAuthOutcome")
+	}
+}
+
+func TestAPIDefaultAuthOutcome_WrongMethod(t *testing.T) {
+	req := adminRequest(http.MethodGet, "/api/settings/default-auth-outcome", "")
+	w := httptest.NewRecorder()
+	apiDefaultAuthOutcome(w, req)
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", w.Code)
 	}
 }
 
-func TestAPIUnauthMode_BadJSON(t *testing.T) {
-	req := adminRequest(http.MethodPut, "/api/settings/unauth-mode", "not-json")
+func TestAPIDefaultAuthOutcome_BadJSON(t *testing.T) {
+	req := adminRequest(http.MethodPut, "/api/settings/default-auth-outcome", "not-json")
 	w := httptest.NewRecorder()
-	apiUnauthMode(w, req)
+	apiDefaultAuthOutcome(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)

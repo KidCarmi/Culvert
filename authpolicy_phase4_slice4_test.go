@@ -44,7 +44,7 @@ func TestP4S4_API_PutPersistsAndValidates(t *testing.T) {
 
 	for _, v := range []string{"Exempt", "Default"} {
 		w := httptest.NewRecorder()
-		apiUnauthMode(w, adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"`+v+`"}`))
+		apiDefaultAuthOutcome(w, adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"`+v+`"}`))
 		if w.Code != http.StatusOK {
 			t.Fatalf("PUT %s = %d: %s", v, w.Code, w.Body.String())
 		}
@@ -55,7 +55,7 @@ func TestP4S4_API_PutPersistsAndValidates(t *testing.T) {
 	// Invalid values rejected, state unchanged.
 	for _, v := range []string{"", "open", "CredentialRequired", "SSORequired", "exempt"} {
 		w := httptest.NewRecorder()
-		apiUnauthMode(w, adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"`+v+`"}`))
+		apiDefaultAuthOutcome(w, adminRequest(http.MethodPut, "/api/settings/unauth-mode", `{"defaultAuthOutcome":"`+v+`"}`))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("PUT invalid %q = %d, want 400", v, w.Code)
 		}
@@ -68,7 +68,7 @@ func TestP4S4_API_RBAC(t *testing.T) {
 	for _, role := range []UIRole{RoleViewer, RoleOperator} {
 		w := httptest.NewRecorder()
 		req := jsonReq(http.MethodPut, "/api/settings/unauth-mode", map[string]any{"defaultAuthOutcome": "Exempt"})
-		apiUnauthMode(w, withRoleCtx(req, role))
+		apiDefaultAuthOutcome(w, withRoleCtx(req, role))
 		if w.Code != http.StatusForbidden {
 			t.Errorf("role %v: PUT = %d, want 403", role, w.Code)
 		}

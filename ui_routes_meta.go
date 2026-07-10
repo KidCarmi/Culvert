@@ -406,8 +406,10 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/config/diff", Handler: "apiConfigDiff", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
-	{Path: "/api/settings/unauth-mode", Handler: "apiUnauthMode", Domain: "settings", Public: false,
+	{Path: "/api/settings/default-auth-outcome", Handler: "apiDefaultAuthOutcome", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/settings/unauth-mode", Handler: "apiDefaultAuthOutcome", Domain: "settings", Public: false,
+		Methods: []uiRouteMethod{{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "legacy alias for /api/settings/default-auth-outcome"}}},
 	{Path: "/api/settings/log-level", Handler: "apiLogLevel", Domain: "settings", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

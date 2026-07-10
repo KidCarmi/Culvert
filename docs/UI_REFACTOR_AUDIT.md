@@ -109,7 +109,7 @@ Counts below are derived from `ui.go:103-274`.
 | `POST /api/cluster/mode` | `apiClusterMode` | Switches CP/DP role |
 | `POST /api/config/import` | `apiConfigImport` | Imports exported config |
 | `POST /api/session-secret` | `apiSessionSecret` | Rotates session signing key |
-| `PUT /api/settings/unauth-mode` | `apiUnauthMode` | Sets default authentication outcome (require/open on no-match) |
+| `PUT /api/settings/default-auth-outcome` | `apiDefaultAuthOutcome` | Sets default authentication outcome (require/open on no-match); legacy alias `/api/settings/unauth-mode` retained for back-compat |
 | `POST /api/auth/users` | `apiAuthUsers` | RBAC user CRUD |
 
 These endpoints already require auth via `uiAuthMiddleware`; most call
