@@ -398,6 +398,19 @@ func TestDualVerifyWorkflowInvariants(t *testing.T) {
 	if len(secretSet) != 0 {
 		t.Fatalf("verify workflow must reference NO secrets; found %v", secretSet)
 	}
+	// The zero-secrets contract must also catch NON-dot access forms —
+	// secrets['X'], secrets[format(...)], toJSON(secrets) — which the name-set
+	// scanner cannot enumerate (Codex review): for this workflow ANY mention of
+	// the secrets context inside an expression is a violation.
+	rawExpr, err := os.ReadFile(dualVerifyWorkflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)
+	}
+	for _, expr := range wfExprRE.FindAllString(string(rawExpr), -1) {
+		if regexp.MustCompile(`\bsecrets\b`).MatchString(expr) {
+			t.Fatalf("verify workflow expression mentions the secrets context (any access form is a violation): %q", expr)
+		}
+	}
 	raw, err := os.ReadFile(dualVerifyWorkflowPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)

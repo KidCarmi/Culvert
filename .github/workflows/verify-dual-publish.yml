@@ -18,8 +18,9 @@ name: Verify Dual Publish (Pages + R2)
 #     after both publishers).
 #
 # Divergence or verify failure ⇒ RED run (operator signal; M1-3 wires alerting).
-# Pages deploys via its own workflow_run pipeline and can lag the R2 publisher, so
-# the Pages comparison retries bounded (~10 min) before declaring divergence.
+# Pages/CDN can lag the publishers, and with two tags in flight the older publish
+# can complete after the newer release exists — the convergence loop re-resolves
+# the latest release each round (bounded ~12 min) so neither case false-diverges.
 
 on:
   workflow_run:
@@ -76,68 +77,42 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cache
 
-      # Resolve the tag and download its signed bundle by EXACT asset name (never a
-      # glob — OPS-F2: with multiple catalog assets a glob pick is order-dependent).
-      # The bundle's index digest is the EXPECTED content both origins must serve.
-      - name: Resolve tag + expected digest (exact asset name)
-        id: expect
+      # Resolve the expected content and CONVERGE: both origins must serve the
+      # release bundle's exact bytes. The tag is re-resolved to the LATEST release
+      # each round (a downstream workflow_run carries no usable tag, and with two
+      # tags in flight a fixed first-resolution would false-diverge while the newer
+      # publishes converge); an explicit dispatch tag pins it instead. Assets are
+      # downloaded by EXACT name, never a glob (OPS-F2). Bounded ~12 min, then RED.
+      - name: Converge — both origins serve the latest release bundle
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          # workflow_run events carry NO usable tag (the publisher run's own
-          # head_branch is always `main`), so the expected content is the LATEST
-          # release's bundle. Race note: with two tags in flight the newer release
-          # may win the lookup while the older publish just completed — the retry
-          # windows below absorb it; M1-4's scheduler passes the tag explicitly.
-          TAG="${IN_TAG:-}"
-          if [ -z "$TAG" ]; then
-            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
-          fi
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
-          fi
-          mkdir -p bundle
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern "culvert-release-catalog-${TAG}.tar.gz" --dir bundle
-          tar xzf "bundle/culvert-release-catalog-${TAG}.tar.gz" -C bundle
-          test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
-          test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
-          WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "want=$WANT" >> "$GITHUB_OUTPUT"
-          echo "Expected index sha256 for $TAG: $WANT"
-
-      # R2 must already serve the expected bytes (the publisher's confirm step ran) —
-      # but CF purge is eventually consistent across POPs and this runner is a
-      # different egress point, so mirror the publisher's confirm pattern:
-      # no-cache header + bounded backoff, never a single-shot RED.
-      - name: Compare R2 origin (bounded CDN-consistency retry)
-        env:
-          WANT: ${{ steps.expect.outputs.want }}
-        run: |
-          set -euo pipefail
-          for i in 1 2 3 4 5; do
-            GOT="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || GOT=""
-            if [ "$GOT" = "$WANT" ]; then echo "R2 origin matches ($WANT)"; exit 0; fi
-            echo "attempt $i/5: r2=$GOT want=$WANT — retrying"; sleep $((i*i))
-          done
-          echo "FATAL: R2 divergence: got '$GOT' want '$WANT'"; exit 1
-
-      # Pages may lag its own deploy pipeline: bounded retry (~10 min) before RED.
-      - name: Compare Pages origin (bounded Pages-lag retry)
-        env:
-          WANT: ${{ steps.expect.outputs.want }}
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 20); do
-            GOT="$(curl -fsS "https://kidcarmi.github.io/Culvert/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
-            if [ "$GOT" = "$WANT" ]; then echo "Pages origin matches ($WANT)"; exit 0; fi
-            echo "attempt $i/20: pages=$GOT want=$WANT — waiting 30s for Pages deploy"
+          for attempt in $(seq 1 24); do
+            TAG="${IN_TAG:-}"
+            if [ -z "$TAG" ]; then
+              TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+            fi
+            if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
+            fi
+            rm -rf bundle && mkdir -p bundle
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "culvert-release-catalog-${TAG}.tar.gz" --dir bundle
+            tar xzf "bundle/culvert-release-catalog-${TAG}.tar.gz" -C bundle
+            test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
+            test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
+            WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
+            R2="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || R2=""
+            PAGES="$(curl -fsS https://kidcarmi.github.io/Culvert/release-catalog/index.json | sha256sum | awk '{print $1}')" || PAGES=""
+            if [ "$R2" = "$WANT" ] && [ "$PAGES" = "$WANT" ]; then
+              echo "Both origins match release $TAG ($WANT)"; exit 0
+            fi
+            echo "attempt $attempt/24: tag=$TAG want=$WANT r2=$R2 pages=$PAGES — waiting 30s"
             sleep 30
           done
-          echo "FATAL: Pages divergence persisted past the lag window"; exit 1
+          echo "FATAL: origins did not converge to the latest release bundle"; exit 1
 
       # Both origins byte-match the bundle; now prove the SERVED bytes verify through
       # the REAL in-binary baked-root path (pinned identity, enforce mode) — for EACH
