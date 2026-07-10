@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -313,5 +314,125 @@ func assertPromoteNotBypassable(t *testing.T, promote wfStep) {
 		if strings.Contains(promote.If, bad) {
 			t.Fatalf("promote step `if:` must not reference %q — it must run only after a successful verify; got %q", bad, promote.If)
 		}
+	}
+}
+
+// ─── M1-1: secret-name contract + credential-free dual-publish verify ─────────
+
+const dualVerifyWorkflowPath = ".github/workflows/verify-dual-publish.yml"
+
+var wfRefRE = regexp.MustCompile(`(secrets|vars)\.([A-Za-z0-9_]+)`)
+
+// wfRefSets extracts the exact sets of `secrets.*` / `vars.*` names referenced
+// anywhere in a workflow file (raw text — catches env:, if:, run:, with: alike).
+func wfRefSets(t *testing.T, path string) (secretSet, varSet map[string]bool) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	secretSet, varSet = map[string]bool{}, map[string]bool{}
+	for _, m := range wfRefRE.FindAllStringSubmatch(string(raw), -1) {
+		if m[1] == "secrets" {
+			secretSet[m[2]] = true
+		} else {
+			varSet[m[2]] = true
+		}
+	}
+	return secretSet, varSet
+}
+
+func assertSetEquals(t *testing.T, what string, got map[string]bool, want []string) {
+	t.Helper()
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("%s: missing required reference %q (contract drift — update the workflow AND the runbook together)", what, w)
+		}
+	}
+	wantSet := map[string]bool{}
+	for _, w := range want {
+		wantSet[w] = true
+	}
+	for g := range got {
+		if !wantSet[g] {
+			t.Errorf("%s: unexpected reference %q (contract drift — a rename/addition must update the documented contract)", what, g)
+		}
+	}
+}
+
+// TestPublisherSecretContract pins the R2 publisher's exact secret/var reference
+// sets — the M0-activation "secret-name drift" regression guard (an operator
+// configured R2_ACCOUNT_ID-style names while the workflow read R2_S3_*; the run
+// failed closed but the mismatch was only caught by manual preflight). Drift in
+// EITHER direction now fails CI, keeping workflow + runbook in lock-step.
+func TestPublisherSecretContract(t *testing.T) {
+	secretSet, varSet := wfRefSets(t, r2WorkflowPath)
+	assertSetEquals(t, "publish-catalog-r2.yml secrets", secretSet, []string{
+		"R2_S3_ENDPOINT", "R2_S3_ACCESS_KEY_ID", "R2_S3_SECRET_ACCESS_KEY",
+		"R2_BUCKET", "CF_ZONE_ID", "CF_CACHE_PURGE_TOKEN",
+	})
+	assertSetEquals(t, "publish-catalog-r2.yml vars", varSet, []string{
+		"R2_PUBLISH_ENABLED", "R2_PUBLIC_BASE",
+	})
+}
+
+// TestDualVerifyWorkflowInvariants pins the M1-1 verify workflow's security
+// contract: a VERIFY workflow must not be able to publish. Zero `secrets.*`
+// references (the ambient github.token is not a secrets ref), no id-token at any
+// permission level, contents at most read, EXACT-name asset selection (OPS-F2:
+// a culvert-release-catalog-* glob pick is order-dependent once resign assets
+// exist), and both served-verify steps carry the enforcing pass-proof.
+func TestDualVerifyWorkflowInvariants(t *testing.T) {
+	secretSet, _ := wfRefSets(t, dualVerifyWorkflowPath)
+	if len(secretSet) != 0 {
+		t.Fatalf("verify workflow must reference NO secrets; found %v", secretSet)
+	}
+
+	raw, err := os.ReadFile(dualVerifyWorkflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", dualVerifyWorkflowPath, err)
+	}
+	var doc wfDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", dualVerifyWorkflowPath, err)
+	}
+	if doc.Permissions == nil {
+		t.Fatal("verify workflow needs an explicit restrictive top-level permissions block")
+	}
+	if permsGrantIDToken(doc.Permissions) || permsContentsWritable(doc.Permissions) {
+		t.Fatal("verify workflow must be contents:read only with NO id-token")
+	}
+	for name, job := range doc.Jobs {
+		if permsGrantIDToken(job.Permissions) || permsContentsWritable(job.Permissions) {
+			t.Fatalf("verify workflow job %q must be contents:read only with NO id-token", name)
+		}
+	}
+
+	// Exact-name asset selection: the glob form must not appear; the exact form must.
+	text := string(raw)
+	if strings.Contains(text, "culvert-release-catalog-*") {
+		t.Fatal("verify workflow must download assets by EXACT name, never the culvert-release-catalog-* glob (OPS-F2)")
+	}
+	if !strings.Contains(text, `culvert-release-catalog-${TAG}.tar.gz`) {
+		t.Fatal("verify workflow must select the release bundle by exact tag-derived name")
+	}
+
+	// Both origin served-verify steps must carry the enforcing pass-proof (M0 posture).
+	passProof := 0
+	for _, job := range doc.Jobs {
+		for i := range job.Steps {
+			run := job.Steps[i].Run
+			if strings.Contains(run, "TestServedVerify_BakedRootGate") {
+				enforcing := (strings.Contains(run, "jq -e") || strings.Contains(run, "--exit-status")) &&
+					runContainsAll(run, "-json", "exit 1", "Action", "pass")
+				if !enforcing {
+					t.Fatalf("served-verify step lacks the enforcing pass-proof: %q", job.Steps[i].Name)
+				}
+				passProof++
+			}
+		}
+	}
+	if passProof != 2 {
+		t.Fatalf("expected exactly 2 baked-root served-verify steps (R2 + Pages); found %d", passProof)
 	}
 }

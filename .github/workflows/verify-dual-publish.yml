@@ -1,0 +1,146 @@
+name: Verify Dual Publish (Pages + R2)
+
+# M1-1 (Slice A): after the R2 publisher completes for a release, PROVE that BOTH
+# public origins — GitHub Pages and Cloudflare R2 — serve the SAME catalog as the
+# release's signed bundle, and that those served bytes verify through the REAL
+# in-binary baked-root path. Read-only: this workflow never mutates either origin.
+#
+# SECURITY INVARIANTS (pinned by TestWorkflowInvariants):
+#   - contents: read only; NO id-token; NO `secrets.*` reference anywhere (the only
+#     token used is the ambient `github.token` to download the public release asset;
+#     origins are public HTTPS). A verify workflow must not be able to publish.
+#
+# Triggers:
+#   - workflow_run on "Publish Release Catalog (R2)" completion — the push path.
+#     Skipped-publisher completions (branch CI) are filtered by the same
+#     head_branch v-prefix guard the publisher uses.
+#   - workflow_dispatch — manual/scheduler use (M1-4's resign flow sequences this
+#     after both publishers).
+#
+# Divergence or verify failure ⇒ RED run (operator signal; M1-3 wires alerting).
+# Pages deploys via its own workflow_run pipeline and can lag the R2 publisher, so
+# the Pages comparison retries bounded (~10 min) before declaring divergence.
+
+on:
+  workflow_run:
+    workflows: ["Publish Release Catalog (R2)"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose bundle is the expected content (default: latest release)."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-dual-publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify Pages + R2 serve the verified catalog
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    # Proceed for manual dispatch, or when the R2 publisher run completed
+    # successfully for a TAG (head_branch v-prefix mirrors the publisher's gate;
+    # branch-CI completions where the publish job was skipped are filtered out).
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           startsWith(github.event.workflow_run.head_branch, 'v')) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            catalog.culvertlabs.com:443
+            kidcarmi.github.io:443
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cache
+
+      # Resolve the tag and download its signed bundle by EXACT asset name (never a
+      # glob — OPS-F2: with multiple catalog assets a glob pick is order-dependent).
+      # The bundle's index digest is the EXPECTED content both origins must serve.
+      - name: Resolve tag + expected digest (exact asset name)
+        id: expect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_TAG: ${{ github.event.inputs.tag }}
+          WR_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          TAG="${IN_TAG:-$WR_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
+          fi
+          mkdir -p bundle
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "culvert-release-catalog-${TAG}.tar.gz" --dir bundle
+          tar xzf "bundle/culvert-release-catalog-${TAG}.tar.gz" -C bundle
+          test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
+          test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
+          WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "want=$WANT" >> "$GITHUB_OUTPUT"
+          echo "Expected index sha256 for $TAG: $WANT"
+
+      # R2 must already serve the expected bytes (the publisher's confirm step ran).
+      - name: Compare R2 origin
+        env:
+          WANT: ${{ steps.expect.outputs.want }}
+        run: |
+          set -euo pipefail
+          GOT="$(curl -fsS https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')"
+          [ "$GOT" = "$WANT" ] || { echo "FATAL: R2 divergence: got $GOT want $WANT"; exit 1; }
+          echo "R2 origin matches ($WANT)"
+
+      # Pages may lag its own deploy pipeline: bounded retry (~10 min) before RED.
+      - name: Compare Pages origin (bounded Pages-lag retry)
+        env:
+          WANT: ${{ steps.expect.outputs.want }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            GOT="$(curl -fsS "https://kidcarmi.github.io/Culvert/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            if [ "$GOT" = "$WANT" ]; then echo "Pages origin matches ($WANT)"; exit 0; fi
+            echo "attempt $i/20: pages=$GOT want=$WANT — waiting 30s for Pages deploy"
+            sleep 30
+          done
+          echo "FATAL: Pages divergence persisted past the lag window"; exit 1
+
+      # Both origins byte-match the bundle; now prove the SERVED bytes verify through
+      # the REAL in-binary baked-root path (pinned identity, enforce mode) — for EACH
+      # origin, with the fail-open-proof pass assertion (M0 posture).
+      - name: Baked-root served verify — R2 origin (must PASS, not skip)
+        run: |
+          set -euo pipefail
+          export CULVERT_RELEASE_SERVED_URL="https://catalog.culvertlabs.com/release-catalog"
+          go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify-r2.jsonl
+          jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify-r2.jsonl >/dev/null \
+            || { echo "FATAL: R2 served verify did not PASS"; exit 1; }
+      - name: Baked-root served verify — Pages origin (must PASS, not skip)
+        run: |
+          set -euo pipefail
+          export CULVERT_RELEASE_SERVED_URL="https://kidcarmi.github.io/Culvert/release-catalog"
+          go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify-pages.jsonl
+          jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify-pages.jsonl >/dev/null \
+            || { echo "FATAL: Pages served verify did not PASS"; exit 1; }
