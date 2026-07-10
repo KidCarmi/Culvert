@@ -108,6 +108,26 @@ func (cb *CircuitBreaker) Params() (threshold int, timeout time.Duration) {
 	return int(cb.threshold), cb.timeout
 }
 
+// Failures returns the current consecutive-failure count. Exported for admin
+// API / diagnostics surfacing; not used on the request path.
+func (cb *CircuitBreaker) Failures() int64 {
+	return cb.failures.Load()
+}
+
+// OpenedAt returns when the circuit last tripped open (zero Time if it has
+// never opened, or has since been reset by RecordSuccess). Exported for admin
+// API / diagnostics surfacing; not used on the request path.
+func (cb *CircuitBreaker) OpenedAt() time.Time {
+	if circuitState(cb.state.Load()) == circuitClosed {
+		return time.Time{}
+	}
+	ms := cb.openedAt.Load()
+	if ms == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
 // State returns the current circuit state name.
 func (cb *CircuitBreaker) State() string {
 	switch circuitState(cb.state.Load()) {
@@ -247,11 +267,20 @@ func (p *Pool) List() []Status {
 	defer p.mu.RUnlock()
 	out := make([]Status, len(p.proxies))
 	for i, up := range p.proxies {
-		out[i] = Status{
-			URL:     up.URL.Redacted(),
-			Healthy: up.Healthy.Load(),
-			Circuit: up.CB.State(),
+		st := Status{
+			URL:      up.URL.Redacted(),
+			Healthy:  up.Healthy.Load(),
+			Circuit:  up.CB.State(),
+			Failures: up.CB.Failures(),
 		}
+		if opened := up.CB.OpenedAt(); !opened.IsZero() {
+			st.OpenedAtMs = opened.UnixMilli()
+			_, timeout := up.CB.Params()
+			if remaining := timeout - time.Since(opened); remaining > 0 {
+				st.RetryAfterMs = remaining.Milliseconds()
+			}
+		}
+		out[i] = st
 	}
 	return out
 }
@@ -358,6 +387,15 @@ type Status struct {
 	URL     string `json:"url"`
 	Healthy bool   `json:"healthy"`
 	Circuit string `json:"circuit"`
+	// Failures is the current consecutive-failure count tracked by the
+	// circuit breaker (resets to 0 on RecordSuccess).
+	Failures int64 `json:"failures"`
+	// OpenedAtMs is when the circuit last tripped open, as Unix
+	// milliseconds; 0 when the circuit is closed.
+	OpenedAtMs int64 `json:"openedAtMs,omitempty"`
+	// RetryAfterMs is the remaining time (ms) until the breaker allows a
+	// half-open probe; 0 when the circuit is not open.
+	RetryAfterMs int64 `json:"retryAfterMs,omitempty"`
 }
 
 // FormatSummary returns a log-friendly summary like "2 proxies (parent1:3128, parent2:3128)".

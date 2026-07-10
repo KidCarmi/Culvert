@@ -68,6 +68,40 @@ func TestCircuitBreaker_TransitionsToHalfOpen(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_FailuresAndOpenedAt(t *testing.T) {
+	cb := newCircuitBreaker(2, time.Minute)
+	if got := cb.Failures(); got != 0 {
+		t.Fatalf("Failures() = %d, want 0 before any failure", got)
+	}
+	if !cb.OpenedAt().IsZero() {
+		t.Fatal("OpenedAt() should be zero while closed")
+	}
+
+	cb.RecordFailure()
+	if got := cb.Failures(); got != 1 {
+		t.Fatalf("Failures() = %d, want 1", got)
+	}
+	if !cb.OpenedAt().IsZero() {
+		t.Fatal("OpenedAt() should still be zero before threshold is reached")
+	}
+
+	cb.RecordFailure() // threshold=2 reached → opens
+	if got := cb.Failures(); got != 2 {
+		t.Fatalf("Failures() = %d, want 2", got)
+	}
+	if cb.OpenedAt().IsZero() {
+		t.Fatal("OpenedAt() should be non-zero once the circuit opens")
+	}
+
+	cb.RecordSuccess()
+	if got := cb.Failures(); got != 0 {
+		t.Fatalf("Failures() = %d, want 0 after RecordSuccess", got)
+	}
+	if !cb.OpenedAt().IsZero() {
+		t.Fatal("OpenedAt() should reset to zero once the circuit closes again")
+	}
+}
+
 func TestCircuitBreaker_DefaultThresholdAndTimeout(t *testing.T) {
 	cb := newCircuitBreaker(0, 0) // defaults
 	if cb.threshold != 5 {
@@ -122,6 +156,41 @@ func TestPool_Configure(t *testing.T) {
 		if s.Circuit != "closed" {
 			t.Fatalf("circuit = %q, want closed", s.Circuit)
 		}
+	}
+}
+
+func TestPool_ListSurfacesCircuitDiagnostics(t *testing.T) {
+	pool := &Pool{}
+	pool.Configure([]Entry{{URL: "http://proxy1.test:3128"}}, 2, time.Minute)
+
+	list := pool.List()
+	if len(list) != 1 {
+		t.Fatalf("list length = %d, want 1", len(list))
+	}
+	if list[0].Failures != 0 || list[0].OpenedAtMs != 0 || list[0].RetryAfterMs != 0 {
+		t.Fatalf("fresh proxy should report zero diagnostics, got %+v", list[0])
+	}
+
+	// Trip the breaker directly (mirrors what health-check failures do).
+	pool.mu.RLock()
+	cb := pool.proxies[0].CB
+	pool.mu.RUnlock()
+	cb.RecordFailure()
+	cb.RecordFailure() // threshold=2 → opens
+
+	list = pool.List()
+	s := list[0]
+	if s.Circuit != "open" {
+		t.Fatalf("circuit = %q, want open", s.Circuit)
+	}
+	if s.Failures != 2 {
+		t.Fatalf("Failures = %d, want 2", s.Failures)
+	}
+	if s.OpenedAtMs == 0 {
+		t.Fatal("OpenedAtMs should be non-zero once the circuit is open")
+	}
+	if s.RetryAfterMs == 0 {
+		t.Fatal("RetryAfterMs should be non-zero immediately after opening (timeout=1m)")
 	}
 }
 

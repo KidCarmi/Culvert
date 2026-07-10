@@ -8594,6 +8594,7 @@ async function tick() {
   if (currentView === 'rewrite')   fetchRewrite();
   if (currentView === 'policy')    fetchPolicy();
   if (currentView === 'cluster')   loadCluster();
+  if (currentView === 'upstream')  loadUpstream(); // keep the circuit-breaker "retry in Ns" ETA live
 }
 
 function startTick() {
@@ -10205,7 +10206,7 @@ function renderUpstream() {
   tbody.innerHTML = upstreamData.map((p,i) => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p.url)}</td>
     <td><span class="badge ${p.healthy?'ok':'blocked'}">${p.healthy?'Healthy':'Down'}</span></td>
-    <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span></td>
+    <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span>${p.circuit==='closed'?'':`<div style="font-size:.72rem;color:var(--muted);margin-top:2px">${p.failures||0} failure${p.failures===1?'':'s'}${p.retryAfterMs?`, retry in ${Math.ceil(p.retryAfterMs/1000)}s`:''}</div>`}</td>
     <td><button class="btn sm danger" data-click="removeUpstreamProxy" data-arg="${i}">Remove</button></td>
   </tr>`).join('');
 }
