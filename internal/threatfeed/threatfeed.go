@@ -83,6 +83,7 @@ type Feed struct {
 	lastSuccess     time.Time // time of the most recent sync where every feed fetched cleanly
 	lastSyncErr     string    // summary of the most recent failure(s); empty when the last sync fully succeeded
 	totalEntries    atomic.Int64
+	maskedHits      atomic.Int64 // domain hits suppressed by the allowlist (security-bypass observability)
 	enabled         bool
 }
 
@@ -279,8 +280,15 @@ func (tf *Feed) CheckURL(rawURL string) (malicious bool, source string) {
 		}
 	}
 	if host != "" {
-		if e, ok := tf.domains[host]; ok && !tf.domainAllowlist[host] {
-			return true, e.Source
+		if e, ok := tf.domains[host]; ok {
+			if tf.domainAllowlist[host] {
+				// A real domain-level threat entry suppressed by the
+				// allowlist — a security-control bypass, counted so an
+				// operator can see the allowlist overriding live intel.
+				tf.maskedHits.Add(1)
+			} else {
+				return true, e.Source
+			}
 		}
 	}
 	return false, ""
@@ -293,17 +301,32 @@ func (tf *Feed) CheckDomain(domain string) (malicious bool, source string) {
 		return false, ""
 	}
 	domain = normaliseDomain(domain)
+	if domain == "" {
+		return false, ""
+	}
 
 	tf.mu.RLock()
 	defer tf.mu.RUnlock()
 
-	if domain == "" || tf.domainAllowlist[domain] {
+	e, ok := tf.domains[domain]
+	if !ok {
 		return false, ""
 	}
-	if e, ok := tf.domains[domain]; ok {
-		return true, e.Source
+	if tf.domainAllowlist[domain] {
+		// Suppressed by the allowlist — count the bypass (see CheckURL).
+		tf.maskedHits.Add(1)
+		return false, ""
 	}
-	return false, ""
+	return true, e.Source
+}
+
+// AllowlistMaskedTotal returns the cumulative count of domain-level threat
+// hits suppressed by the domain allowlist since process start. A rising
+// value means the allowlist is actively overriding live threat intel —
+// worth an operator's attention (the exemption may be too broad, or an
+// allowlisted platform is now hosting malware at the domain level).
+func (tf *Feed) AllowlistMaskedTotal() int64 {
+	return tf.maskedHits.Load()
 }
 
 // Enabled reports whether the feed is active.

@@ -315,6 +315,37 @@ func TestThreatFeed_SaveAndExportExcludeMaskedDomains(t *testing.T) {
 	}
 }
 
+func TestThreatFeed_AllowlistMaskedCounter(t *testing.T) {
+	tf := newEnabledFeed()
+	tf.domains["masked.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	tf.domains["evil.example"] = entry{Source: "urlhaus", AddedAt: time.Now()}
+	if err := tf.AddDomainAllowlist("masked.example"); err != nil {
+		t.Fatalf("AddDomainAllowlist: %v", err)
+	}
+	if got := tf.AllowlistMaskedTotal(); got != 0 {
+		t.Fatalf("masked counter should start at 0, got %d", got)
+	}
+
+	// A suppressed real hit increments; a clean allow and a real block do not.
+	if hit, _ := tf.CheckDomain("masked.example"); hit {
+		t.Fatal("allowlisted host must not block")
+	}
+	if hit, _ := tf.CheckURL("http://masked.example/x"); hit {
+		t.Fatal("allowlisted host must not block via URL fallback")
+	}
+	if hit, _ := tf.CheckDomain("evil.example"); !hit {
+		t.Fatal("non-allowlisted threat must still block")
+	}
+	if hit, _ := tf.CheckDomain("clean.example"); hit {
+		t.Fatal("clean host must not block")
+	}
+	// masked.example counted once via CheckDomain + once via CheckURL = 2;
+	// evil.example (real block) and clean.example (no entry) add nothing.
+	if got := tf.AllowlistMaskedTotal(); got != 2 {
+		t.Fatalf("masked counter = %d, want 2 (one per suppressed lookup)", got)
+	}
+}
+
 func TestThreatFeed_ImportFeedDataRecanonicalizesURLKeys(t *testing.T) {
 	tf := newEnabledFeed()
 	tf.ImportFeedData(
