@@ -167,15 +167,25 @@ func TestServedVerify_NoClobberExisting(t *testing.T) {
 	}
 }
 
-// TestServedVerify_BakedRootFailClosed proves the REAL baked-root Sigstore trust
-// store is CONSULTED on the served path and FAILS CLOSED — the locally-provable half
-// of must-prove #8. A present-but-invalid /index.json.sigstore is served against the
-// baked-root (sigstore-only, enforce) store so verifySigstoreScheme → sv.verifyIndexBundle
-// actually runs and REJECTS (artifact-owns-outcome: a present-but-unparseable bundle
-// never falls through). Serving a bundle-ABSENT catalog would reject via errSigMissing
-// WITHOUT invoking the baked-root verifier, which is why a garbage sidecar is served
-// here. The baked-root POSITIVE over real Fulcio-signed bytes needs CI signing and is
-// PR3 (TestServedVerify_BakedRootGate).
+// TestServedVerify_BakedRootFailClosed proves the REAL baked-root Sigstore verifier
+// is CONSULTED on the served path and FAILS CLOSED — the locally-provable half of
+// must-prove #8. A present-but-invalid /index.json.sigstore is served against the
+// baked-root (sigstore-only, enforce) store, and the rejection is pinned to
+// errSigstoreMalformed: that error identity is ONLY produced inside
+// sv.verifyIndexBundle (release_catalog_sigstore.go), so asserting it proves the
+// served bytes actually reached the baked-root verifier — not that they were refused
+// by some earlier/other gate. Serving a bundle-ABSENT catalog would instead reject
+// via errSigMissing WITHOUT invoking the verifier, which is why a present-but-invalid
+// sidecar is served here.
+//
+// SCOPE BOUNDARY (PR3): this pins verifier CONSULTATION + fail-closed on a
+// present-but-unparseable bundle. It does NOT exercise Fulcio-chain-to-baked-root
+// verification, because garbage bytes fail at protojson.Unmarshal before
+// verifyIndexEntity/verify.Verify. The stronger chain-level negative (a well-formed
+// bundle signed by a DIFFERENT root that fails chain building against the baked root)
+// and the baked-root POSITIVE both require serializing a signed entity to .sigstore
+// bytes (not exposed by sigstore-go's testing/ca), so they land in PR3 with real
+// CI-signed bytes (TestServedVerify_BakedRootGate).
 func TestServedVerify_BakedRootFailClosed(t *testing.T) {
 	sv, err := newSigstoreVerifier(bakedSigstoreTrustedRootJSON, officialSigstoreIdentity())
 	if err != nil {
@@ -194,7 +204,10 @@ func TestServedVerify_BakedRootFailClosed(t *testing.T) {
 	files := signedCatalogFiles(t, priv, freshValidSource("2099-01-01T00:00:00Z", 3))
 	files["/index.json.sigstore"] = []byte("garbage-not-a-sigstore-bundle") // present but invalid → baked-root verify runs and rejects
 	p, _ := servedHTTP(t, base, bakedTrust, files)
-	assertServedRejectedUntouched(t, p, cfg, catalogDir)
+	// errSigstoreMalformed originates only in sv.verifyIndexBundle → proves the
+	// baked-root verifier owned this rejection (via the %w chain through
+	// LoadVerifiedCatalog → autoSeedCatalog).
+	assertServedRejectedKind(t, p, cfg, catalogDir, errSigstoreMalformed)
 }
 
 // TestServedVerify_ArtifactOwnsOutcome proves the anti-downgrade property OVER HTTP:
