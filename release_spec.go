@@ -57,14 +57,27 @@ const (
 // is revisited when pre-release/ring semantics are added (deferred).
 const catalogVersionComponentMax = 1000
 
-// catalogVersionSchemeBase offsets every semver-encoded catalog_version so it always
-// exceeds any legacy count-based floor. The retired scheme was `(count of v* tags)+1`
-// — which counts ALL v* tags (incl. pre-release/rc), so a persisted count-based floor
-// could exceed a low semver patch number (e.g. floor 61 while v0.0.41 encodes 41),
-// making an appliance refuse a valid release as a rollback. With the base offset the
-// smallest semver encoding (base+1) dwarfs any realistic count floor (< ~1e5), so the
-// count→semver migration only ever moves the floor UP. int64 easily holds base + <1e9.
-const catalogVersionSchemeBase = 1_000_000_000
+// catalogVersionSchemeEpoch is the version-scheme EPOCH: a fixed additive offset that
+// separates the semver-encoded catalog_version space from the retired count-based
+// space, so a scheme change never looks like a rollback to the appliance floor.
+//
+//	WHY: the retired scheme was catalog_version = (count of all v* tags)+1. That count
+//	     includes pre-release/rc tags, so a persisted count-based floor could exceed a
+//	     low semver patch number (e.g. floor 61 while v0.0.41 encodes 41), which would
+//	     make an appliance refuse a valid release as errCatalogRollback.
+//
+//	GUARANTEE: every semver encoding is ≥ EPOCH+1 = 1_000_000_001. A count-based floor
+//	     is (number of v* tags ever created)+1. A repository would need > 999_999_999
+//	     v* tags for a legacy floor to reach the epoch — structurally impossible for a
+//	     real product (release cadence is dozens–thousands of tags over its lifetime).
+//	     So the count→semver migration provably moves the floor only UP; no on-disk
+//	     legacy floor can shadow a new release. This structural bound is the evidence;
+//	     enumerating each appliance's persisted floor is neither possible nor needed.
+//
+//	OPERATIONAL PREREQUISITE (documented, not enforced): do not manufacture ≥ ~10⁹
+//	     v* tags under the legacy scheme — the only way to breach the epoch. Not a real
+//	     constraint; recorded for completeness.
+const catalogVersionSchemeEpoch = 1_000_000_000
 
 // catalogVersionCoreRE captures the STRICT numeric major.minor.patch core — no
 // leading zeros — matching the numeric core of the generator's catalogSemverRE
@@ -202,10 +215,32 @@ func specTimestamps(in SpecInputs) (generatedAt, createdAt string, err error) {
 	}
 }
 
-// catalogVersionFromSemver encodes a GA semver into a monotonic, collision-free
-// catalog_version. major*1_000_000 + minor*1_000 + patch. Each component must be
-// < catalogVersionComponentMax; a pre-release/build suffix is rejected (fail
-// closed — stable ring is GA only).
+// catalogVersionFromSemver encodes a GA SemVer into a monotonic, collision-free
+// catalog_version.
+//
+//	FORMULA:  catalog_version = EPOCH + major*B² + minor*B + patch
+//	          EPOCH = catalogVersionSchemeEpoch (1_000_000_000)
+//	          B     = catalogVersionComponentMax (1000)  ⇒ B² = 1_000_000
+//
+//	BOUNDS:   0 ≤ major,minor,patch < B (each strictly < 1000; a component ≥ B is
+//	          rejected fail-closed). 0.0.0 is rejected (not a real release). Range of
+//	          the positional part is therefore [1, B³-1] = [1, 999_999_999], so
+//	          catalog_version ∈ [EPOCH+1, EPOCH+999_999_999] = [1_000_000_001, 1_999_999_999],
+//	          comfortably inside int64.
+//
+//	ORDERING: because each component is < B and packed at a distinct power of B, the
+//	          encoding is strictly increasing in SemVer precedence (major dominates
+//	          minor dominates patch) with no cross-component carry/overlap — proven in
+//	          TestCatalogVersionFromSemver (boundary cases across every component).
+//
+//	INJECTIVE: the (major,minor,patch) → integer map is a base-B positional encoding,
+//	          hence a bijection onto its range ⇒ two DISTINCT accepted versions can
+//	          never encode to the same catalog_version (proven by the collision case).
+//
+//	PRE-RELEASE: a pre-release/build suffix (e.g. -rc.1) and leading zeros are rejected
+//	          (catalogVersionCoreRE). The stable ring is GA-only; the canonical Master
+//	          Design defers pre-release/ring encoding, so rejecting them here is the
+//	          spec'd behavior, not an omission.
 func catalogVersionFromSemver(version string) (int, error) {
 	m := catalogVersionCoreRE.FindStringSubmatch(version)
 	if m == nil {
@@ -229,7 +264,7 @@ func catalogVersionFromSemver(version string) (int, error) {
 	if major == 0 && minor == 0 && patch == 0 {
 		return 0, fmt.Errorf("release spec: version %q (0.0.0) is not a real release", version)
 	}
-	return catalogVersionSchemeBase +
+	return catalogVersionSchemeEpoch +
 		major*catalogVersionComponentMax*catalogVersionComponentMax +
 		minor*catalogVersionComponentMax +
 		patch, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 )
 
@@ -34,18 +35,18 @@ func TestCatalogVersionFromSemver(t *testing.T) {
 	}
 
 	// Deterministic exact encodings (base offset + major*1e6 + minor*1e3 + patch).
-	if got := must("1.4.3"); got != catalogVersionSchemeBase+1_004_003 {
-		t.Errorf("v1.4.3 encoded %d, want %d", got, catalogVersionSchemeBase+1_004_003)
+	if got := must("1.4.3"); got != catalogVersionSchemeEpoch+1_004_003 {
+		t.Errorf("v1.4.3 encoded %d, want %d", got, catalogVersionSchemeEpoch+1_004_003)
 	}
-	if got := must("0.0.1"); got != catalogVersionSchemeBase+1 {
-		t.Errorf("v0.0.1 encoded %d, want %d", got, catalogVersionSchemeBase+1)
+	if got := must("0.0.1"); got != catalogVersionSchemeEpoch+1 {
+		t.Errorf("v0.0.1 encoded %d, want %d", got, catalogVersionSchemeEpoch+1)
 	}
-	if got := must("0.0.16"); got != catalogVersionSchemeBase+16 {
-		t.Errorf("v0.0.16 encoded %d, want %d", got, catalogVersionSchemeBase+16)
+	if got := must("0.0.16"); got != catalogVersionSchemeEpoch+16 {
+		t.Errorf("v0.0.16 encoded %d, want %d", got, catalogVersionSchemeEpoch+16)
 	}
 	// Component boundary: 999 passes (only ≥1000 is rejected).
-	if got := must("0.0.999"); got != catalogVersionSchemeBase+999 {
-		t.Errorf("v0.0.999 encoded %d, want %d", got, catalogVersionSchemeBase+999)
+	if got := must("0.0.999"); got != catalogVersionSchemeEpoch+999 {
+		t.Errorf("v0.0.999 encoded %d, want %d", got, catalogVersionSchemeEpoch+999)
 	}
 
 	// Migration-safety: every semver encoding dwarfs any legacy count-based floor
@@ -82,15 +83,51 @@ func TestCatalogVersionFromSemver(t *testing.T) {
 		seen[n] = v
 	}
 
-	// Fail-closed cases — incl. leading zeros (must match the generator's strict
-	// core, not accept 01.4.3) and 0.0.0 (not a real release).
+	// Fail-closed cases — leading zeros (must match the generator's strict core),
+	// 0.0.0 (not a real release), pre-release/build (GA-only stable ring), component
+	// ≥1000, and an overflowing component (strconv.Atoi ErrRange must be rejected,
+	// not silently mis-encoded).
 	for _, bad := range []string{
-		"1.4", "1.4.3.2", "1.4.3-rc.1", "v1.4.3", "1.4.1000", "1.1000.0", "1000.0.0",
+		"1.4", "1.4.3.2", "1.4.3-rc.1", "1.4.3+build.5", "v1.4.3", "1.4.1000", "1.1000.0", "1000.0.0",
 		"", "x.y.z", "01.4.3", "1.04.3", "1.4.03", "0.0.0",
+		"99999999999999999999.0.0", "1.99999999999999999999.0", "1.0.99999999999999999999",
 	} {
 		if _, err := catalogVersionFromSemver(bad); err == nil {
 			t.Errorf("catalogVersionFromSemver(%q): expected error, got nil", bad)
 		}
+	}
+}
+
+// TestCatalogVersionFromSemver_BoundaryOrdering proves the base-B positional encoding
+// has NO cross-component carry: a maxed lower component never reaches the next value
+// of the higher component. This is the precise ordering guarantee (major dominates
+// minor dominates patch) the appliance rollback floor relies on.
+func TestCatalogVersionFromSemver_BoundaryOrdering(t *testing.T) {
+	enc := func(v string) int {
+		t.Helper()
+		n, err := catalogVersionFromSemver(v)
+		if err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+		return n
+	}
+	// Each pair: max-out the lower component(s), then increment the next-higher one.
+	pairs := [][2]string{
+		{"0.0.999", "0.1.0"},    // patch maxed < next minor
+		{"0.999.999", "1.0.0"},  // minor+patch maxed < next major
+		{"1.0.999", "1.1.0"},    // patch maxed < next minor (nonzero major)
+		{"1.999.999", "2.0.0"},  // minor+patch maxed < next major
+		{"9.999.999", "10.0.0"}, // two-digit major boundary
+	}
+	for _, p := range pairs {
+		lo, hi := enc(p[0]), enc(p[1])
+		if lo >= hi {
+			t.Errorf("cross-component carry: %s (%d) must be < %s (%d)", p[0], lo, p[1], hi)
+		}
+	}
+	// Exact packed value pins the formula EPOCH + major*1e6 + minor*1e3 + patch.
+	if enc("2.3.4") != catalogVersionSchemeEpoch+2_003_004 {
+		t.Errorf("v2.3.4 = %d, want %d", enc("2.3.4"), catalogVersionSchemeEpoch+2_003_004)
 	}
 }
 
@@ -101,7 +138,7 @@ func TestCatalogVersionFromSemver(t *testing.T) {
 func TestReleaseSpec_Idempotent(t *testing.T) {
 	in := releaseInputs("1.4.3", "2026-07-08T12:00:00+02:00")
 
-	build := func() []byte {
+	build := func() (releaseCatalogSpec, []byte) {
 		t.Helper()
 		spec, err := buildReleaseSpec(in)
 		if err != nil {
@@ -111,12 +148,18 @@ func TestReleaseSpec_Idempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("generateReleaseCatalog: %v", err)
 		}
-		return b.Index
+		return spec, b.Index
 	}
 
-	a, bts := build(), build()
-	if !bytes.Equal(a, bts) {
-		t.Fatalf("non-idempotent: two identical-input builds differ\n a=%s\n b=%s", a, bts)
+	spec1, idx1 := build()
+	spec2, idx2 := build()
+	// Byte-identical specification INPUTS (the assembled spec, incl. derived
+	// timestamps + catalog_version), not just the generated output.
+	if !reflect.DeepEqual(spec1, spec2) {
+		t.Fatalf("non-idempotent spec inputs:\n %+v\n %+v", spec1, spec2)
+	}
+	if !bytes.Equal(idx1, idx2) {
+		t.Fatalf("non-idempotent output bytes:\n a=%s\n b=%s", idx1, idx2)
 	}
 }
 
