@@ -1,0 +1,269 @@
+name: Publish Release Catalog (R2)
+
+# DORMANT Cloudflare-R2 catalog publisher (M0-PR3).
+#
+# Publishes the SAME signed release-catalog bundle that ci.yml's `catalog-pipeline`
+# attaches to the GitHub Release, to Cloudflare R2, as a fail-closed
+# stage -> verify-staged-bytes-through-the-real-baked-root -> promote-by-server-side-copy
+# pipeline. GitHub Pages remains the authoritative host for all of M0 (Pages
+# retirement is M3); this workflow is inert until an owner sets
+# `vars.R2_PUBLISH_ENABLED=true` AND provisions the R2/Cloudflare secrets.
+#
+# SECURITY MODEL (identical to Pages): R2 (staging and live) is UNTRUSTED transport.
+# Integrity comes from the catalog's keyless Sigstore signature, verified IN-BINARY
+# against the baked trusted root + pinned ci.yml identity (offline Rekor timestamp).
+# The trust boundary is step "verify": the STAGED bytes are fetched over HTTPS and
+# run through the real autoSeedCatalog path; promotion to the live pointer happens
+# ONLY on a proven-PASS verification, by server-side-copying the exact staged object
+# that was verified (ETag-pinned). A tampered/MITM'd/edge-poisoned catalog cannot
+# pass verification, so it can never be promoted.
+#
+# INVARIANTS (pinned by TestWorkflowInvariants, release_workflow_invariants_test.go):
+#   - NO `id-token: write` at any level (verify-only; this job never signs).
+#   - `contents: read` only; the dormant gate keys on `vars.R2_PUBLISH_ENABLED`,
+#     never `secrets.*` (unavailable in `if:` anyway).
+#   - verify precedes promote; the verify step proves a non-skip PASS and has no
+#     `continue-on-error`; the promote step has no `if: always()` bypass.
+#
+# Triggers (mirrors publish-catalog-pages.yml): workflow_run after "CI" completes on
+# a tag push (the run that ATTACHES the signed bundle), or manual workflow_dispatch.
+#
+# OWNER ACTIVATION (full runbook: docs/operator/catalog-hosting-r2-activation.md, M0-PR5):
+#   vars: R2_PUBLISH_ENABLED=true, R2_PUBLIC_BASE=https://catalog.<domain>
+#   secrets: R2_S3_ENDPOINT, R2_S3_ACCESS_KEY_ID, R2_S3_SECRET_ACCESS_KEY,
+#            R2_BUCKET, CF_ZONE_ID, CF_CACHE_PURGE_TOKEN
+#   The custom domain must publicly serve BOTH history/stable/** (staging, for verify)
+#   and release-catalog/** (live). Add the R2 endpoint host + public-base host to the
+#   harden-runner allow-list below at activation.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0). Default: latest release."
+        required: false
+        type: string
+
+# Verify-only publisher: read the release bundle, verify, copy within R2. NO id-token.
+permissions:
+  contents: read
+
+# Serialize R2 publishes; never cancel an in-flight promote.
+concurrency:
+  group: r2-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish signed catalog to R2 (dormant)
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    # Dormant gate: keyed on a repository VARIABLE (secrets.* is unavailable in `if:`).
+    # Absent/!= 'true' => the job is skipped => the workflow is green + neutral, no
+    # secret is ever read. When active, only a SUCCESSFUL CI run on a tag push (or a
+    # manual dispatch) proceeds; branch/PR CI completions are filtered by the
+    # head_branch `v`-prefix guard, and the tag is re-confirmed to be a real tag ref
+    # in the "Resolve release tag" step (closes the "branch named v-evil" gap).
+    if: >-
+      ${{ vars.R2_PUBLISH_ENABLED == 'true' && (
+            github.event_name == 'workflow_dispatch' ||
+            (github.event.workflow_run.conclusion == 'success' &&
+             github.event.workflow_run.event == 'push' &&
+             startsWith(github.event.workflow_run.head_branch, 'v'))) }}
+    # contents: read only — download release assets via gh + copy within R2. NO id-token.
+    permissions:
+      contents: read
+    steps:
+      # Egress lock-down: this job holds R2 write + a CF cache-purge token, so a
+      # compromised transitive dependency must not be able to exfiltrate them.
+      # egress-policy: block with an allow-list of the static hosts; at activation the
+      # owner appends their R2 S3 endpoint host and public-base host (see header).
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            proxy.golang.org:443
+            sum.golang.org:443
+            storage.googleapis.com:443
+            api.cloudflare.com:443
+            "*.r2.cloudflarestorage.com:443"
+
+      # Check out the DEFAULT BRANCH (the checkout action's default) — NEVER the
+      # workflow_run head_sha of an arbitrary push. The verify step compiles and runs
+      # package main; checking out an attacker-controlled ref here would be code
+      # execution with R2/CF secrets in scope (pwn-request). workflow_run already runs
+      # the default-branch copy of this file; we keep the checked-out code in lock-step.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cache
+
+      # Resolve + STRICTLY validate the target tag. Unlike the Pages publisher (where
+      # TAG only feeds `gh release download` and a bad value 404s harmlessly), here TAG
+      # is interpolated into an R2 object key and a URL segment, so a loose `v[0-9]*`
+      # glob would allow `v1/../../live` path traversal. Anchor to an exact vX.Y.Z
+      # shape (no slashes, no `..`), then CONFIRM it is a real tag ref (not a branch
+      # named `v…`) before any secret-bearing step runs.
+      - name: Resolve release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_TAG: ${{ github.event.inputs.tag }}
+          WR_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          TAG="${IN_TAG:-$WR_TAG}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
+          fi
+          # Confirm TAG is an actual tag ref (fails for a branch named 'v…').
+          gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null \
+            || { echo "FATAL: '$TAG' is not a tag ref"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing catalog from release $TAG"
+
+      # Pull the signed bundle attached to the Release and unpack it. Refuse an
+      # unsigned bundle (structural precheck only — the TRUST decision is the verify
+      # step against the STAGED URL, not this local check).
+      - name: Download + precheck the signed catalog bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl stage
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'culvert-release-catalog-*.tar.gz' --dir dl
+          BUNDLE="$(ls dl/culvert-release-catalog-*.tar.gz | head -n1 || true)"
+          [ -n "$BUNDLE" ] || { echo "FATAL: no catalog bundle attached to release $TAG"; exit 1; }
+          tar xzf "$BUNDLE" -C stage
+          test -s stage/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
+          test -s stage/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore — refusing unsigned"; exit 1; }
+          test -d stage/manifests           || { echo "FATAL: bundle missing manifests/"; exit 1; }
+          sha256sum stage/index.json | awk '{print $1}' > stage/.index.sha256
+          echo "Staged bundle contents:"; ls -R stage
+
+      # Stage to R2 create-only under an immutable per-release prefix. `--if-none-match
+      # '*'` makes a re-publish of an existing tag a no-clobber no-op: a same-tag 412
+      # (PreconditionFailed) is treated as "already staged, immutable" and we CONTINUE
+      # to re-verify + (idempotently) re-promote — so a flaked run can be driven green
+      # by a re-run, while a genuinely different upload can never overwrite history.
+      - name: Stage bundle to R2 (create-only)
+        id: stage
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          aws --version
+          PREFIX="history/stable/$TAG"
+          put_create_only() { # <local> <key>
+            local src="$1" key="$2"
+            if aws s3api put-object --bucket "$R2_BUCKET" --key "$key" --body "$src" \
+                 --if-none-match '*' --endpoint-url "$R2_S3_ENDPOINT" >/dev/null 2>put_err.txt; then
+              return 0
+            fi
+            if grep -Eqi 'PreconditionFailed|status code: 412' put_err.txt; then
+              echo "note: $key already staged (immutable) — continuing"; return 0
+            fi
+            echo "FATAL: staging $key failed:"; cat put_err.txt; return 1
+          }
+          put_create_only stage/index.json          "$PREFIX/index.json"
+          put_create_only stage/index.json.sigstore "$PREFIX/index.json.sigstore"
+          while IFS= read -r m; do
+            put_create_only "$m" "$PREFIX/manifests/$(basename "$m")"
+          done < <(find stage/manifests -type f)
+          # Bind promote to the exact staged object: capture the origin ETag now
+          # (works whether we just created it or it pre-existed via 412).
+          ETAG="$(aws s3api head-object --bucket "$R2_BUCKET" --key "$PREFIX/index.json" \
+                    --endpoint-url "$R2_S3_ENDPOINT" --query ETag --output text)"
+          test -n "$ETAG" || { echo "FATAL: could not read staged index ETag"; exit 1; }
+          echo "etag=$ETAG" >> "$GITHUB_OUTPUT"
+          echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
+
+      # THE TRUST BOUNDARY. Fetch the STAGED bytes over HTTPS and drive the real
+      # baked-root verifier via TestServedVerify_BakedRootGate. That test t.Skips when
+      # the URL is empty and `go test` exits 0 on a skip — a fail-OPEN hazard — so we
+      # (1) hard-require the URL in THIS step, and (2) assert the exact test emitted an
+      # "Action":"pass" record (fail on skip/no-run). No `continue-on-error`: a verify
+      # failure here HARD-STOPS the job before the promote step.
+      - name: Verify STAGED catalog through the real baked-root path (must PASS, not skip)
+        env:
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+          PREFIX: ${{ steps.stage.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          test -n "$R2_PUBLIC_BASE" || { echo "FATAL: R2_PUBLIC_BASE unset"; exit 1; }
+          export CULVERT_RELEASE_SERVED_URL="$R2_PUBLIC_BASE/$PREFIX"
+          test -n "$CULVERT_RELEASE_SERVED_URL" || { echo "FATAL: served URL unset"; exit 1; }
+          echo "Verifying staged catalog at $CULVERT_RELEASE_SERVED_URL"
+          go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify.jsonl
+          jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify.jsonl >/dev/null \
+            || { echo "FATAL: baked-root served verify did not PASS (skipped or failed) — refusing to promote"; exit 1; }
+
+      # Promote ONLY on a proven-PASS verify, by server-side-copying the exact staged
+      # object that was verified. `--copy-source-if-match <staged ETag>` aborts the
+      # copy if the origin diverged from what verify saw (CDN/origin TOCTOU guard); we
+      # never re-upload the local artifact. copy-object is per-object (not recursive),
+      # and overwriting the live pointer is idempotent across re-runs.
+      - name: Promote verified staged bytes to the live pointer (server-side copy)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          PREFIX: ${{ steps.stage.outputs.prefix }}
+          INDEX_ETAG: ${{ steps.stage.outputs.etag }}
+        run: |
+          set -euo pipefail
+          copy_obj() { # <src-key> <dst-key> [extra-args...]
+            local src="$1" dst="$2"; shift 2
+            aws s3api copy-object --bucket "$R2_BUCKET" \
+              --copy-source "$R2_BUCKET/$src" --key "$dst" \
+              --endpoint-url "$R2_S3_ENDPOINT" "$@" >/dev/null
+          }
+          # Index is ETag-pinned to the verified staged object.
+          copy_obj "$PREFIX/index.json" "release-catalog/index.json" --copy-source-if-match "$INDEX_ETAG"
+          copy_obj "$PREFIX/index.json.sigstore" "release-catalog/index.json.sigstore"
+          while IFS= read -r key; do
+            copy_obj "$key" "release-catalog/manifests/$(basename "$key")"
+          done < <(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$PREFIX/manifests/" \
+                     --endpoint-url "$R2_S3_ENDPOINT" --query 'Contents[].Key' --output text | tr '\t' '\n')
+
+      # Cache-bust the live pointer and confirm the promoted digest is served. Cloudflare
+      # purge + re-fetch is eventually consistent and query-string busts are ignored by
+      # default, so confirm with an explicit no-cache request + bounded retry.
+      - name: Purge CDN cache + confirm live digest
+        env:
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_CACHE_PURGE_TOKEN: ${{ secrets.CF_CACHE_PURGE_TOKEN }}
+          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+        run: |
+          set -euo pipefail
+          WANT="$(cat stage/.index.sha256)"
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CF_CACHE_PURGE_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[\"$R2_PUBLIC_BASE/release-catalog/index.json\",\"$R2_PUBLIC_BASE/release-catalog/index.json.sigstore\"]}" >/dev/null
+          for i in 1 2 3 4 5; do
+            GOT="$(curl -fsS -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            if [ "$GOT" = "$WANT" ]; then echo "live index confirmed ($WANT)"; exit 0; fi
+            echo "confirm attempt $i: got '$GOT' want '$WANT' — retrying"; sleep $((i*i))
+          done
+          echo "FATAL: live index digest did not converge to the promoted digest"; exit 1

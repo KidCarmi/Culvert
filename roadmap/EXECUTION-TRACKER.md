@@ -98,7 +98,7 @@ pending; **implementation does not start until PR1 merges.** No stacked branch i
 needed (no overlap); if PR1's merge is delayed and PR2 must start, PR2 branches
 from current `main` and is rebased onto `main` after PR1 merges (dependency marked
 here + in the PR body). PR1 follow-up fixes are **never** placed in PR2.
-| M0-PR3 | Dormant R2 stage→verify→promote workflow | Planned | — | — | — | — | — |
+| M0-PR3 | Dormant R2 stage→verify→promote workflow | Implemented; post-impl review | `…-m0-r2-publish` (from merged main) | 3 reviews (security/ops/test): 1 BLOCKING + 6 HIGH resolved in design v2 §12 (verify-fail-open→json-pass-proof, tag-glob-traversal→strict-regex+tag-ref-confirm, CDN/origin-TOCTOU→ETag-pinned-copy, pwn-request→default-branch-checkout, 412-idempotency→catch-and-continue, write-all-bypass→type-switch, absent-step-vacuous→existence-before-order) | — | TestWorkflowInvariants (no id-token incl. write-all; explicit restrictive perms; no secrets.* in any if:; stage<verify<promote existence+order; verify pass-proof + no continue-on-error; promote no always()) — proven non-vacuous vs 4 unsafe mutations; vet + race+shuffle x2 clean | .github/workflows/publish-catalog-r2.yml + release_workflow_invariants_test.go |
 | M0-PR4 | Legacy update-path retirement | Planned | — | — | — | — | — |
 | M0-PR5 | IaC guardrails + activation docs | Planned | — | — | — | — | — |
 

@@ -1,4 +1,4 @@
-# M0-PR3 — Dormant R2 stage→verify→promote publisher — Detailed Design (v1)
+# M0-PR3 — Dormant R2 stage→verify→promote publisher — Detailed Design (v2, post planning-review)
 
 **Milestone:** M0 (Foundation & Safety) — PR 3 of 5.
 **Single objective:** add a **dormant** `publish-catalog-r2` workflow that, when an
@@ -259,3 +259,36 @@ the job never ran). `TestWorkflowInvariants` is a pure addition. Fully additive.
    the live pointer is already correct?
 5. **actionlint** — is there an existing workflow-lint lane this file must satisfy, and
    should `TestWorkflowInvariants` overlap or stay strictly security-invariant-only?
+
+## 12. Planning-review findings & resolutions (traceability)
+
+Three independent planning reviews (adversarial security, release-ops/CI-mechanics,
+correctness/test-quality). All verdicts **approve-with-fixes**; every BLOCKING/HIGH
+is resolved in the implementation below.
+
+| Finding | Sev | Resolution (in `publish-catalog-r2.yml` / `release_workflow_invariants_test.go`) |
+|---|---|---|
+| SEC — verify gate fails OPEN (`TestServedVerify_BakedRootGate` `t.Skip`s when URL unset; `go test` exits 0 on skip ⇒ promote unverified) | **BLOCKING** | Verify step hard-requires `CULVERT_RELEASE_SERVED_URL` in the SAME step, runs `go test -json`, and `jq -e` asserts an `Action==pass` record for the exact test (fail on skip/no-run). `TestWorkflowInvariants` pins the pass-proof triad (`-json`+`Action`+`pass`) + no `continue-on-error`. |
+| SEC — tag glob `v[0-9]*` path traversal (TAG is an R2 key + URL segment; `v1/../../live` passes) | **HIGH** | Strict `^v[0-9]+\.[0-9]+\.[0-9]+$` regex; then `gh api …/git/refs/tags/$TAG` confirms a real tag ref. |
+| SEC — CDN-verify vs origin-promote TOCTOU (verified bytes ≠ copied bytes) | **HIGH** | Capture the staged origin ETag; promote `index.json` with `--copy-source-if-match <etag>`; “promoted digest” in confirm = the staged index sha. |
+| SEC — pwn-request via `head_sha` checkout + gate ambiguity (branch `v-evil` + attacker code with secrets) | **HIGH** | Checkout the DEFAULT branch (never `head_sha`), `persist-credentials: false`; gate + tag-ref confirmation reject a branch masquerading as a tag. |
+| OPS — create-only 412 makes a re-run non-idempotent (dies before verify/promote/purge) | **HIGH** | `put-object --if-none-match '*'` catches a same-tag `PreconditionFailed/412` as “already staged, immutable” and CONTINUES; promote (copy) + purge are idempotent. |
+| TEST — `write-all`/`read-all` scalar bypasses the id-token key check | **HIGH** | `permsGrantIDToken` type-switches the node; scalar `write-all` counts as an id-token grant. Proven by a mutation test (write-all ⇒ FAIL). |
+| TEST — vacuous pass when verify/create-only step is ABSENT | **HIGH** | Assert step EXISTENCE (`stageIdx/verifyIdx/promoteIdx != -1`) before asserting order; missing step ⇒ FAIL. Proven by a mutation test (drop verify ⇒ FAIL). |
+| OPS — verify step needs `checkout` + Go toolchain | MED | Added `actions/checkout` + `./.github/actions/setup-go-cache`. |
+| SEC/OPS — AWS CLI unpinned / R2 conditional-write unproven | MED | `aws --version` asserted; the 412 path is handled explicitly; exact R2 behavior documented; activation runbook (PR5) treats it as a precondition. |
+| SEC — no egress hardening on a secret-bearing job | MED | `harden-runner` `egress-policy: block` + static allow-list (owner appends R2/CF hosts at activation); all actions SHA-pinned. |
+| TEST — `secrets.` substring scan evadable (`secrets['X']`); step-level `if:` unscanned | MED | Reject `secrets.` AND `secrets[` in EVERY `if:` (job- and step-level). |
+| TEST — absent/partial `permissions` inherits broad default; contents checked top-level-only | MED | Require an explicit restrictive top-level `permissions`; assert `contents` not `write` at top level AND per-job. |
+| SEC/TEST — verify-before-promote order-only, bypassable (`continue-on-error`/`if: always()`) | MED | Assert verify has no `continue-on-error`; promote has no `if: always()`. Proven by a mutation test. |
+| OPS — cache confirm flakes on edge propagation; query-bust ignored | MED | Purge then confirm with `Cache-Control: no-cache` + bounded retry/backoff against the promoted sha. |
+| SEC — `workflow_dispatch` promotes an arbitrary owner-chosen tag | LOW | Bytes still baked-root verified before promote; documented. Optional protected-environment gate deferred to PR5. |
+| SEC — a MERGED malicious edit inherits R2 secrets | LOW | Recommend CODEOWNERS on this file (PR5/owner); `workflow_run` already runs only the default-branch copy, so unmerged PR edits are inert. |
+| OPS — `manifests/**` promote is per-object; stale live manifests not pruned | LOW | Per-object copy loop; the verified index only references its own refs (stale manifests harmless — noted). |
+| OPS — activation presupposes a non-expired latest release (M0→M1 window) | LOW | Documented; freshness gate fails closed (no promote) — activation needs a fresh release or the M1 re-sign cron (PR5 runbook). |
+| OPS/SEC — staging prefix (`history/stable/**`) must be publicly served for verify | MED (activation) | Documented as a PR5 activation precondition (public custom domain must cover BOTH staging and live). |
+
+**Non-vacuousness evidence:** `TestWorkflowInvariants` was run against four unsafe
+mutations of the workflow — a job `id-token: write`, a top-level `write-all`, a
+deleted verify step, and a `continue-on-error` verify — and FAILED on each, then
+passed on the restored file.
