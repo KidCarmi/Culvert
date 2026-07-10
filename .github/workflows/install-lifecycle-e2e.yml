@@ -10,7 +10,7 @@ name: Install Lifecycle E2E
 #   stack-lifecycle  — install.sh brings up the proxy stack, then a second run
 #                      migrates idempotently (state preserved), then a pinned
 #                      image bump upgrades it (v1 -> v2) preserving /data.
-#   agent-installer  — install.sh installs the host-side maintenance agent
+#   agent-installer  — install.sh installs the Maintenance Agent
 #                      (packaging/culvert-maint/install.sh); assert the systemd
 #                      unit, sudoers grammar, config seeding/migration, and that
 #                      the installed unit actually runs and answers /v1/health.
