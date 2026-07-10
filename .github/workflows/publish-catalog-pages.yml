@@ -102,8 +102,15 @@ jobs:
           mkdir -p dl site/release-catalog
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern 'culvert-release-catalog-*.tar.gz' --dir dl
-          BUNDLE="$(ls dl/culvert-release-catalog-*.tar.gz | head -n1 || true)"
-          [ -n "$BUNDLE" ] || { echo "FATAL: no catalog bundle attached to release $TAG"; exit 1; }
+          # M1-4: prefer the NEWEST re-sign bundle when one exists (the resign
+          # job prunes to at most one; `sort | tail -n1` still picks the newest
+          # -rYYYYMMDD if several survive), else the original release bundle.
+          # NOTE the old `ls | head -n1` was ordering-broken once resigns exist:
+          # `-` sorts before `.`, so it silently picked the OLDEST resign.
+          BUNDLE="$(ls dl/culvert-release-catalog-"$TAG"-r*.tar.gz 2>/dev/null | sort | tail -n1 || true)"
+          [ -n "$BUNDLE" ] || BUNDLE="dl/culvert-release-catalog-${TAG}.tar.gz"
+          [ -s "$BUNDLE" ] || { echo "FATAL: no catalog bundle attached to release $TAG"; exit 1; }
+          echo "publishing bundle: $(basename "$BUNDLE")"
           tar xzf "$BUNDLE" -C site/release-catalog
           test -s site/release-catalog/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
           test -s site/release-catalog/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore — refusing to publish an unsigned catalog"; exit 1; }

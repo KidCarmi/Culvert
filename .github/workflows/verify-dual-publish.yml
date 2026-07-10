@@ -26,6 +26,13 @@ on:
   workflow_run:
     workflows: ["Publish Release Catalog (R2)"]
     types: [completed]
+  # M1-4 / SEC-F5: weekly freshness canary — runs after the Monday 03:00 UTC
+  # re-sign flow and asserts the LIVE catalog's generated_at is no older than
+  # 2x the re-sign cadence (14d). A silently-failing re-sign pipeline goes RED
+  # here months before the appliance-side 30d stale alert (which fires with
+  # only ~4 weekly retries left).
+  schedule:
+    - cron: "0 9 * * 1"
   workflow_dispatch:
     inputs:
       tag:
@@ -53,6 +60,7 @@ jobs:
     # branch-CI and dormant completions.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'schedule' ||
           github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
@@ -98,9 +106,20 @@ jobs:
               echo "FATAL: refusing tag '$TAG' — not a strict vX.Y.Z release tag"; exit 1
             fi
             rm -rf bundle && mkdir -p bundle
+            # M1-4: the EXPECTED content is the NEWEST re-sign bundle when one
+            # exists (the resign job prunes to at most one; sort -r + head -n1
+            # over the asset LIST still picks the newest -rYYYYMMDD if several
+            # survive), else the original release bundle. Selection is by exact
+            # name from the release's asset list — never a filesystem glob
+            # (OPS-F2) — and the chosen name is passed to gh as an exact pattern.
+            ASSET="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+                       --jq '.assets[].name' \
+                     | grep -E "^culvert-release-catalog-${TAG}-r[0-9]{8}\.tar\.gz$" \
+                     | sort -r | head -n1 || true)"
+            [ -n "$ASSET" ] || ASSET="culvert-release-catalog-${TAG}.tar.gz"
             gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --pattern "culvert-release-catalog-${TAG}.tar.gz" --dir bundle
-            tar xzf "bundle/culvert-release-catalog-${TAG}.tar.gz" -C bundle
+              --pattern "$ASSET" --dir bundle
+            tar xzf "bundle/$ASSET" -C bundle
             test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
             test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
             WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
@@ -131,3 +150,23 @@ jobs:
           go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify-pages.jsonl
           jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify-pages.jsonl >/dev/null \
             || { echo "FATAL: Pages served verify did not PASS"; exit 1; }
+
+      # SEC-F5 (M1-4): the publish-side freshness canary. The weekly re-sign
+      # slides generated_at every Monday; if the LIVE catalog's generated_at is
+      # older than 2x that cadence the re-sign pipeline has been silently
+      # failing — go RED now, not ~150 days later when the catalog lapses.
+      # Schedule runs only: on the push/dispatch paths a just-published catalog
+      # makes the assertion trivially true (and a legit old catalog must not
+      # fail an unrelated release verify).
+      - name: Assert live catalog freshness age ≤ 2× re-sign cadence (weekly canary)
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          GEN="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | jq -r '.generated_at // empty')"
+          test -n "$GEN" || { echo "FATAL: live index has no generated_at"; exit 1; }
+          AGE=$(( $(date -u +%s) - $(date -u -d "$GEN" +%s) ))
+          MAX=$(( 14 * 24 * 3600 ))
+          echo "live generated_at=$GEN age=${AGE}s max=${MAX}s"
+          [ "$AGE" -le "$MAX" ] || {
+            echo "FATAL: live catalog generated_at is older than 14d — the weekly re-sign has been failing silently (SEC-F5)"; exit 1
+          }

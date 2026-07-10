@@ -156,6 +156,48 @@ Revisit only if M1-4's cadence gate (SEC-F5) proves insufficient.
   serving the previous (still-valid) catalog; the Slice-C stale alert is the
   backstop (fires at 30d remaining, giving ~5 weekly retries before lapse).
 
+### 4.1 Implementation decisions (M1-4, 2026-07-10)
+
+- **`CULVERT_RELEASE_SPEC_RESIGN_CREATED_AT` env DROPPED** (delta from the §4
+  provisional env list): SEC-F1 requires every entry fact to come ONLY from the
+  signature-verified bundle — an env-provided created_at would be a spoofable
+  side-channel around verify-before-read. The gate takes `_RESIGN_SRC` (bundle
+  dir), `_VERSION` (from the dispatch ref), `_RESIGN_NOW`, `GEN_OUT` only.
+- **The resign gate core is `buildResignSpecFromVerified`**
+  (release_resign_gate_test.go): verify-first (LoadVerifiedCatalog — signature +
+  structure, expiry-TOLERANT by design: re-signing a lapsed catalog is the
+  recovery case), single-entry assert, version binding, spec rebuilt from
+  verified bytes. Always-on unit tests (`TestResignGate_*`) mutation-prove
+  SEC-F1 without the CI-only path; `TestReleaseResignGate` is the CI entrypoint
+  wiring the REAL baked root + pinned identity.
+- **Resign invariants pinned in the gate**: same `catalog_version`, same
+  `created_at`, byte-identical manifests, index differs ONLY in
+  `generated_at`/`expires_at` (+180d), deterministic re-runs.
+- **OPS-F1 implemented as guard + structural skip**: `resign-dispatch-guard`
+  fails loudly on a bare tag dispatch, AND `docker` skips all tag-ref
+  dispatches — its needs-chain (catalog-pipeline, release, provenance) then
+  skips, so a dispatched tag run can never overwrite release assets even if the
+  guard were deleted (the invariant test pins both halves).
+- **Pages ordering fix adopted** (the §4 "decision for review", recommended
+  option): the weekly flow re-dispatches Pages for dual-publish parity, and the
+  Pages bundle pick now prefers the newest `-rYYYYMMDD` asset with an
+  exact-original fallback — verification showed the old `ls | head -n1` picked
+  the OLDEST resign (`-` sorts before `.`), the exact OPS-F2 hazard.
+- **SEC-F5 canary**: `verify-dual-publish.yml` gains a weekly cron (Mon 09:00
+  UTC, after the 03:00 re-sign) asserting live `generated_at` age ≤ 14d;
+  schedule-runs only (push-path verifies must not fail on a legitimately old
+  catalog).
+- **Scheduler alerting = RED run** (OPS-F4 "alert on timeout"): the scheduler
+  holds no webhook credentials by design; a bounded-poll timeout or failed
+  downstream run fails the scheduler run itself — GitHub's workflow-failure
+  notification is the M1 alert channel, with the appliance-side stale alert as
+  the runtime backstop.
+- **SEC-F7 (owner precondition, activation gate)**: before enabling the weekly
+  cron in production, the `v-tag-protection` ruleset MUST gain `creation=true`
+  with `bypass_actors` = the Actions bot — tag CREATION becomes load-bearing
+  once a tag dispatch is a signing event. Listed in the M1-4 PR body and the
+  operator runbook; not enforceable in code from this repo.
+
 ## 5. M0-activation regression guards
 
 - **Quoted allow-list token:** SHIPPED (PR #634, `assertEgressAllowListWellFormed`,
