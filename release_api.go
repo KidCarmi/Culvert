@@ -61,6 +61,61 @@ type releaseManager struct {
 	// On a fetch/verify failure it returns an error and leaves the current catalog
 	// untouched (fail-closed, mirroring startup auto-seed).
 	refresh func(context.Context) error
+	// refreshInterval is the periodic refresh cadence this manager was wired with
+	// (M1-2), surfaced read-only on GET /api/releases. 0 ⇒ loop disabled.
+	refreshInterval time.Duration
+	// refreshStatus is the SHARED outcome record for BOTH refresh callers — the
+	// periodic loop and the manual admin endpoint (M1-2 / RT-H1: loop-local state
+	// diverges the moment an admin fixes the origin and refreshes by hand). Guarded
+	// by its own mutex, NOT refreshMu, so a status read never blocks ~30s behind an
+	// in-flight fetch. lastErr holds the already-REDACTED error string (rm.refresh
+	// redacts before returning; viewers read this via /api/releases).
+	statusMu      sync.Mutex
+	refreshStatus refreshStatus
+	// refreshRunMu serializes the WHOLE runRefresh (refresh call + status fold) so
+	// two overlapping callers cannot record outcomes out of order (a stale success
+	// must not overwrite a newer failure — M1-2 impl review MED). statusMu alone
+	// still guards reads, so /api/releases never blocks behind an in-flight fetch.
+	refreshRunMu sync.Mutex
+}
+
+// refreshStatus records the most recent catalog-refresh outcome (M1-2).
+type refreshStatus struct {
+	LastAt              time.Time `json:"last_at"`
+	LastOK              bool      `json:"last_ok"`
+	LastErr             string    `json:"last_error,omitempty"`
+	LastTrigger         string    `json:"last_trigger,omitempty"` // "loop" | "manual"
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+}
+
+// runRefresh is the ONE entry point both refresh callers use: it runs rm.refresh
+// and folds the outcome into the shared status under statusMu. Alert-transition
+// logic hangs off this record in M1-3.
+func (rm *releaseManager) runRefresh(ctx context.Context, trigger string) error {
+	rm.refreshRunMu.Lock()
+	defer rm.refreshRunMu.Unlock()
+	err := rm.refresh(ctx)
+	rm.statusMu.Lock()
+	defer rm.statusMu.Unlock()
+	rm.refreshStatus.LastAt = time.Now()
+	rm.refreshStatus.LastTrigger = trigger
+	if err != nil {
+		rm.refreshStatus.LastOK = false
+		rm.refreshStatus.LastErr = err.Error() // already redacted by rm.refresh
+		rm.refreshStatus.ConsecutiveFailures++
+		return err
+	}
+	rm.refreshStatus.LastOK = true
+	rm.refreshStatus.LastErr = ""
+	rm.refreshStatus.ConsecutiveFailures = 0
+	return nil
+}
+
+// refreshStatusSnapshot returns a copy of the shared status for read paths.
+func (rm *releaseManager) refreshStatusSnapshot() refreshStatus {
+	rm.statusMu.Lock()
+	defer rm.statusMu.Unlock()
+	return rm.refreshStatus
 }
 
 func newReleaseManager(svc *DispatchService, resolve agentResolver) *releaseManager {
@@ -225,6 +280,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		if rm.trustSchemes != "" {
 			unavail["trust_schemes"] = rm.trustSchemes
 		}
+		rm.addRefreshFields(unavail)
 		jsonOK(w, unavail)
 		return
 	}
@@ -244,7 +300,20 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 	if exp := cat.ExpiresAt(); !exp.IsZero() {
 		out["expires_at"] = exp.UTC().Format(time.RFC3339)
 	}
+	rm.addRefreshFields(out)
 	jsonOK(w, out)
+}
+
+// addRefreshFields folds the M1-2 refresh surface into an /api/releases response:
+// the wired cadence (read-only; env-configured) and the shared last-refresh
+// outcome, present once any refresh has run.
+func (rm *releaseManager) addRefreshFields(out map[string]any) {
+	if rm.refreshInterval > 0 {
+		out["refresh_interval"] = rm.refreshInterval.String()
+	}
+	if st := rm.refreshStatusSnapshot(); !st.LastAt.IsZero() {
+		out["last_refresh"] = st
+	}
 }
 
 func channelPointers(cat *Catalog) map[string]any {
@@ -282,7 +351,7 @@ func apiReleaseCatalogRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, releaseMethodNotAllowed, http.StatusMethodNotAllowed)
 		return
 	}
-	if err := rm.refresh(r.Context()); err != nil {
+	if err := rm.runRefresh(r.Context(), "manual"); err != nil {
 		auditEvent(r, "release.catalog.refresh", "catalog", "result=error: "+sanitizeLog(err.Error()))
 		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"refreshed": false, "error": err.Error()})
 		return
