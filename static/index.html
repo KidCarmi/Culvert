@@ -3131,7 +3131,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-lease-val">—</div><div class="stat-label">Fencing Lease</div></div>
             </div>
             <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
-              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease. The <strong>Term</strong> tile above and the fencing lease's epoch are the same counter (ADR-0005: term = epoch) — they will always match.
+              Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease. The <strong>Term</strong> tile above equals the epoch of the currently-held fencing lease (ADR-0005: term = a held lease's epoch). In a failure state where no lease is held — e.g. a leader that restarted and cannot reacquire the etcd lease, running read-only — the lease card shows <code>epoch 0</code> while <strong>Term</strong> retains the last synced value, so the two can differ precisely when you are diagnosing a fencing problem.
             </p>
             <!-- Manual failover: shown only when this node is a standby -->
             <div id="ha-promote-row" style="display:none;margin-bottom:16px">
