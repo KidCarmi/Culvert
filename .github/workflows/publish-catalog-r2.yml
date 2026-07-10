@@ -95,6 +95,7 @@ jobs:
             storage.googleapis.com:443
             api.cloudflare.com:443
             "*.r2.cloudflarestorage.com:443"
+            catalog.culvertlabs.com:443
 
       # Check out the DEFAULT BRANCH (the checkout action's default) — NEVER the
       # workflow_run head_sha of an arbitrary push. The verify step compiles and runs
