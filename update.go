@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
@@ -63,6 +64,10 @@ func (u *updateInfo) snapshot() map[string]any {
 		"update_available": u.updateAvailable,
 		"last_checked":     u.lastChecked.Format(time.RFC3339),
 		"updater_status":   u.updaterStatus,
+		// Surface the legacy-fallback gate so the UI can show "legacy GitHub-tags
+		// fallback disabled" — the discoverable answer for an operator who stops
+		// seeing updates (GUI-parity for the env-only break-glass switch).
+		"legacy_gh_tag_check": legacyGhTagCheck.Load(),
 	}
 }
 
@@ -198,6 +203,12 @@ func startUpdateChecker(ctx context.Context) {
 	globalUpdateInfo.updaterStatus = "checking"
 	globalUpdateInfo.mu.Unlock()
 
+	// Resolve the legacy GitHub-tags fallback gate once (default OFF) and log the mode.
+	applyLegacyGhTagCheckEnv(os.Getenv)
+	if logger != nil && legacyGhTagCheckNote != "" {
+		logger.Printf("%s", legacyGhTagCheckNote)
+	}
+
 	// Initial check after 30s (let everything start up).
 	timer := time.NewTimer(30 * time.Second)
 	select {
@@ -304,6 +315,77 @@ func semverGreater(a, b string) bool {
 	return a3 > b3
 }
 
+// envLegacyGhTagCheck gates the LEGACY unauthenticated GitHub-tags update fallback.
+const envLegacyGhTagCheck = "CULVERT_LEGACY_GH_TAG_CHECK"
+
+// legacyGhTagCheck is the resolved gate for the legacy GitHub-tags update fallback.
+// DEFAULT false (OFF): the update path makes NO unauthenticated GitHub API call, so a
+// private-repo build cannot 404-brick here. It is write-once at startup
+// (applyLegacyGhTagCheckEnv, called from startUpdateChecker) and read-only thereafter,
+// so the background update-checker goroutine reads it race-free. atomic.Bool because
+// snapshot() (an HTTP-handler goroutine) reads it without the updateInfo mutex.
+var (
+	legacyGhTagCheck     atomic.Bool
+	legacyGhTagCheckNote string
+)
+
+// checkGitHubLatestTagFn is the dial seam for the legacy fallback (default = the real
+// call). Tests replace it with a counting spy to PROVE the default build never dials
+// GitHub. Swap it only in tests that do NOT start the update-checker loop.
+var checkGitHubLatestTagFn = checkGitHubLatestTag
+
+// legacyFallbackHintOnce logs the "disabled-and-it-would-have-mattered" hint at most
+// once per process — at the exact moment the disabled fallback could have surfaced an
+// update the registry did not — so a puzzled operator has a discoverable signal.
+var legacyFallbackHintOnce sync.Once
+
+// resolveLegacyGhTagCheck decides whether the legacy fallback runs, from an env value,
+// and returns a loud one-line note to log once at startup. Pure (mirrors
+// resolveCatalogVerifyMode). Enabled ONLY by an explicit truthy value; a typo or unset
+// stays OFF (fail-safe toward no-dial).
+func resolveLegacyGhTagCheck(v string) (enabled bool, note string) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, "Update: legacy GitHub-tags fallback ENABLED via " + envLegacyGhTagCheck +
+			" (compat window; makes an unauthenticated GitHub API call on the update path)"
+	default:
+		return false, "Update: legacy GitHub-tags fallback DISABLED (default) — no unauthenticated " +
+			"GitHub API call on the update path; set " + envLegacyGhTagCheck + "=true to re-enable during the compat window"
+	}
+}
+
+// applyLegacyGhTagCheckEnv resolves the gate from the environment into the package
+// vars. Called once at startup (startUpdateChecker); getenv is a seam for tests.
+func applyLegacyGhTagCheckEnv(getenv func(string) string) {
+	enabled, note := resolveLegacyGhTagCheck(getenv(envLegacyGhTagCheck))
+	legacyGhTagCheck.Store(enabled)
+	legacyGhTagCheckNote = note
+}
+
+// maybeGitHubTagFallback consults the legacy gate and only THEN dials GitHub. It
+// returns the (possibly updated) latest/available and whether the fallback fired.
+// When the gate is OFF it never dials (via checkGitHubLatestTagFn) — the property that
+// proves the default build makes no unauthenticated GitHub call on the update path.
+// The caller maps `used` to pullTag="latest" (the fallback's whole point).
+func maybeGitHubTagFallback(curLatest string, curAvailable bool, cleanVer string) (latest string, available, used bool) {
+	latest, available = curLatest, curAvailable
+	if curAvailable || cleanVer == "dev" {
+		return latest, available, false // registry already has an update, or unversioned build
+	}
+	if !legacyGhTagCheck.Load() {
+		legacyFallbackHintOnce.Do(func() {
+			if logger != nil {
+				logger.Printf("Update: registry reports no newer version and the legacy GitHub-tags fallback is DISABLED; set %s=true if updates are expected but not shown", envLegacyGhTagCheck)
+			}
+		})
+		return latest, available, false // default OFF ⇒ no dial
+	}
+	if gh := checkGitHubLatestTagFn(); gh != "" && semverGreater(gh, cleanVer) {
+		return gh, true, true
+	}
+	return latest, available, false
+}
+
 // checkGitHubLatestTag queries the GitHub API for the latest semver tag.
 // Returns the tag name (e.g. "v0.0.19") or "" on any error.
 func checkGitHubLatestTag() string {
@@ -401,21 +483,22 @@ func checkUpdateNow() {
 		return
 	}
 
-	// GitHub tag fallback: if the Docker registry reports no newer version,
-	// check GitHub git tags. This handles the case where Docker images lack
-	// semver tags but git tags exist (a known CI issue for v0.0.16-v0.0.19).
-	// When this fallback activates, we tell the updater to pull ":latest"
-	// (which IS always updated on ghcr.io) instead of the specific semver tag.
+	// GitHub tag fallback (LEGACY, default OFF via CULVERT_LEGACY_GH_TAG_CHECK): when
+	// the Docker registry reports no newer semver tag, optionally consult GitHub git
+	// tags — a historical CI gap where images lacked semver tags (v0.0.16-v0.0.19).
+	// Default-off means NO unauthenticated GitHub API call on the update path (no
+	// private-repo 404 brick); the Docker-registry check above remains the live
+	// visibility path, and ci.yml now publishes semver image tags, so this covers only
+	// a CI-regression edge case. When it fires we pull ":latest" (always current on
+	// ghcr.io) instead of a maybe-absent semver tag. Gating + dial live in
+	// maybeGitHubTagFallback so the "no dial by default" property is unit-testable.
 	cleanVer := cleanSemver(version)
-	ghFallback := false
-	if !result.UpdateAvailable && cleanVer != "dev" {
-		if ghLatest := checkGitHubLatestTag(); ghLatest != "" && semverGreater(ghLatest, cleanVer) {
-			result.Latest = ghLatest
-			result.UpdateAvailable = true
-			ghFallback = true
-			logger.Printf("Update: Docker registry had no newer semver tag, but GitHub has %s (current: %s)",
-				ghLatest, cleanVer)
-		}
+	var ghFallback bool
+	result.Latest, result.UpdateAvailable, ghFallback =
+		maybeGitHubTagFallback(result.Latest, result.UpdateAvailable, cleanVer)
+	if ghFallback {
+		logger.Printf("Update: Docker registry had no newer semver tag, but GitHub has %s (current: %s)",
+			result.Latest, cleanVer)
 	}
 
 	// Correct stale registry display: if the Docker registry's highest semver
