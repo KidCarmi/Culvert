@@ -151,7 +151,7 @@ Run these once when bringing up a new node, in order:
    policy meta, audit log, request log, blocklist, cluster state, and
    config snapshots.
 2. **CA passphrase.** If you are using SSL inspection, set
-   `CULVERT_CA_PASSPHRASE` and pass `-ca-bundle /data/ca.bundle`. The
+   `CULVERT_CA_PASSPHRASE` and pass `-ca-path /data/ca.bundle`. The
    first start will generate the root CA; back up `ca.bundle` immediately.
 3. **Session HMAC.** For multi-node deployments set
    `CULVERT_SESSION_SECRET` (64 hex characters, ≥32 bytes) on every node
