@@ -18,7 +18,7 @@ func withTopHostsCap(t *testing.T, maxEntries int) {
 }
 
 func freshHostCounter() *hostCounter {
-	return &hostCounter{hosts: map[string]int64{}}
+	return &hostCounter{hosts: map[string]*int64{}}
 }
 
 func TestTopHosts_MemoryBounded(t *testing.T) {
@@ -82,8 +82,12 @@ func TestTopHosts_TrackedHostAlwaysCounts(t *testing.T) {
 		hc.Record("h-0.example")
 	}
 	hc.mu.Lock()
-	c := hc.hosts["h-0.example"]
+	p := hc.hosts["h-0.example"]
 	hc.mu.Unlock()
+	if p == nil {
+		t.Fatal("tracked host evicted — already-tracked hosts must never be gated")
+	}
+	c := *p
 	if c < 6 {
 		t.Fatalf("tracked host count = %d, want >= 6 (already-tracked hosts must never be gated)", c)
 	}
