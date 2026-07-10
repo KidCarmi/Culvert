@@ -79,7 +79,13 @@ jobs:
               go test -run TestE2ESeedSignedCatalog -count=1 . >/dev/null
           }
           start_cp() { # proxyport uiport
+            # CULVERT_RELEASE_CATALOG_URL=off disables the outbound catalog fetch so
+            # this test exercises ONLY the locally seeded catalog lifecycle
+            # (serve/upgrade/anti-rollback/tamper). Without it the M1-2 baked default
+            # origin would auto-seed the live upstream catalog over the seeded fixture
+            # in enforce mode — a non-deterministic false result.
             CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+            CULVERT_RELEASE_CATALOG_URL=off \
               ./culvert -port "$1" -ui-port "$2" -ui-no-tls > "$RUNNER_TEMP/cp.log" 2>&1 &
             echo $! > "$RUNNER_TEMP/cp.pid"
             for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$1/health" >/dev/null 2>&1 && return 0; sleep 1; done
@@ -161,9 +167,14 @@ jobs:
             # (rollback floor, config_versions, updater_token). This avoids the
             # cross-UID bind-mount permission problem entirely — a re-seed between
             # phases just overwrites host-owned files, no chmod needed.
+            # CULVERT_RELEASE_CATALOG_URL=off disables the outbound catalog fetch so
+            # this test exercises ONLY the locally seeded catalog lifecycle. Without
+            # it the M1-2 baked default origin would auto-seed the live upstream
+            # catalog over the seeded fixture in enforce mode (non-deterministic).
             docker run -d --name "$1" --user "$(id -u):$(id -g)" \
               -e CULVERT_RELEASE_CATALOG_TRUST_KEYS="$(cat "$KEYS")" \
               -e CULVERT_RELEASE_CATALOG_VERIFY=enforce \
+              -e CULVERT_RELEASE_CATALOG_URL=off \
               -v "$SEED:/data" -p "$2:8080" -p "$3:9090" \
               culvert:e2e -port 8080 -ui-port 9090 -ui-no-tls >/dev/null
             for i in $(seq 1 40); do curl -fsS "http://127.0.0.1:$2/health" >/dev/null 2>&1 && return 0; sleep 1; done
