@@ -100,3 +100,30 @@ func TestConcurrent_NoLeak(t *testing.T) {
 		t.Fatalf("all conns released but ActiveConns = %d", got)
 	}
 }
+
+// TestConnLimiter_ReleaseWhileDisabled pins the disable-during-connection
+// contract: a connection acquired while enabled must decrement the per-IP
+// counter even if Release runs after the limiter was disabled. Otherwise the
+// counter leaks and, after re-enable, that IP is permanently over-limit —
+// a self-inflicted DoS reachable via the admin API / config import. Against
+// the pre-fix Release (which early-returned when disabled), the Release below
+// is a no-op, the counter stays at 1, and the final Acquire fails (limit=1).
+func TestConnLimiter_ReleaseWhileDisabled(t *testing.T) {
+	cl := New()
+
+	cl.Enable(1)
+	if !cl.Acquire("ip") {
+		t.Fatal("acquire while enabled (limit 1) should succeed")
+	}
+
+	// Disable, then release the connection that was counted while enabled.
+	cl.Disable()
+	cl.Release("ip")
+
+	// Re-enable at limit 1. If Release decremented the counter, the IP is back
+	// to zero and this acquire must succeed; if it leaked, this fails.
+	cl.Enable(1)
+	if !cl.Acquire("ip") {
+		t.Fatal("acquire after disable/release/re-enable should succeed; counter leaked")
+	}
+}

@@ -93,10 +93,16 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 }
 
 // Release decrements the connection count for ip.
+//
+// Release intentionally does NOT gate on enabled: a connection counted by
+// Acquire while the limiter was enabled must be released even if the limiter
+// was since disabled (runtime disable is reachable via the admin API and
+// config import, and Acquire/Release are paired on the proxy hot path).
+// Gating here would leak the per-IP counter across a disable/re-enable, wedging
+// that IP permanently over-limit. The decrement is guarded by map-entry
+// presence, and the ≤0 delete below prevents underflow, so releasing an
+// untracked (never-acquired) IP is a safe no-op.
 func (cl *ConnLimiter) Release(ip string) {
-	if !cl.enabled.Load() {
-		return
-	}
 	cl.mu.Lock()
 	ctr, ok := cl.conns[ip]
 	cl.mu.Unlock()
