@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,11 +197,10 @@ func TestGenerateReleaseCatalog_DigestPinnedNeverTag(t *testing.T) {
 // shipped artifact), and asserts every release's list_digest equals the pushed
 // digest. Outside CI (env unset) it is skipped.
 func TestReleaseCatalogGate(t *testing.T) {
-	specPath := os.Getenv("CULVERT_RELEASE_GEN_SPEC")
-	if specPath == "" {
-		t.Skip("release gate: set CULVERT_RELEASE_GEN_SPEC to run (CI only)")
+	spec, ok := resolveGateSpec(t)
+	if !ok {
+		t.Skip("release gate: set CULVERT_RELEASE_SPEC_VERSION (+COMMIT_ISO/DIGEST/REPO) or CULVERT_RELEASE_GEN_SPEC to run (CI only)")
 	}
-	spec := readGenSpec(t, specPath)
 	bundle, err := generateReleaseCatalog(spec)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -225,6 +225,75 @@ func TestReleaseCatalogGate(t *testing.T) {
 
 	assertGatePushedDigest(t, spec)
 	emitGateBundle(t, bundle)
+}
+
+// resolveGateSpec builds the gate's release spec from deterministic env inputs via
+// buildReleaseSpec (the preferred path — timestamp/version derivation lives in tested
+// Go, not CI shell), falling back to a pre-built JSON file for backward compatibility.
+// Returns ok=false when neither is configured (local runs skip the gate).
+func resolveGateSpec(t *testing.T) (releaseCatalogSpec, bool) {
+	t.Helper()
+	if v := os.Getenv("CULVERT_RELEASE_SPEC_VERSION"); v != "" {
+		platforms := []string{"linux/amd64", "linux/arm64"}
+		if p := os.Getenv("CULVERT_RELEASE_SPEC_PLATFORMS"); p != "" {
+			platforms = strings.Split(p, ",")
+		}
+		spec, err := buildReleaseSpec(SpecInputs{
+			Version:    v,
+			Repo:       os.Getenv("CULVERT_RELEASE_SPEC_REPO"),
+			ListDigest: os.Getenv("CULVERT_RELEASE_SPEC_DIGEST"),
+			Platforms:  platforms,
+			Mode:       specModeRelease,
+			CommitISO:  os.Getenv("CULVERT_RELEASE_SPEC_COMMIT_ISO"),
+			Now:        os.Getenv("CULVERT_RELEASE_SPEC_NOW"), // optional dead-on-arrival guard
+		})
+		if err != nil {
+			t.Fatalf("buildReleaseSpec from env: %v", err)
+		}
+		return spec, true
+	}
+	if path := os.Getenv("CULVERT_RELEASE_GEN_SPEC"); path != "" {
+		return readGenSpec(t, path), true
+	}
+	return releaseCatalogSpec{}, false
+}
+
+// TestResolveGateSpec_MatchesBuild proves the CI entrypoint (env → SpecInputs via
+// resolveGateSpec) produces exactly the same catalog bytes as a direct
+// buildReleaseSpec call — closing the CI-shell→Go handoff.
+func TestResolveGateSpec_MatchesBuild(t *testing.T) {
+	t.Setenv("CULVERT_RELEASE_SPEC_VERSION", "1.4.3")
+	t.Setenv("CULVERT_RELEASE_SPEC_REPO", "ghcr.io/kidcarmi/culvert")
+	t.Setenv("CULVERT_RELEASE_SPEC_DIGEST", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	t.Setenv("CULVERT_RELEASE_SPEC_COMMIT_ISO", "2026-07-08T12:00:00+02:00")
+	// CULVERT_RELEASE_SPEC_NOW deliberately unset (guard off) for a deterministic compare.
+
+	got, ok := resolveGateSpec(t)
+	if !ok {
+		t.Fatal("resolveGateSpec returned ok=false with env set")
+	}
+	want, err := buildReleaseSpec(SpecInputs{
+		Version:    "1.4.3",
+		Repo:       "ghcr.io/kidcarmi/culvert",
+		ListDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Platforms:  []string{"linux/amd64", "linux/arm64"},
+		Mode:       specModeRelease,
+		CommitISO:  "2026-07-08T12:00:00+02:00",
+	})
+	if err != nil {
+		t.Fatalf("direct build: %v", err)
+	}
+	gb, err := generateReleaseCatalog(got)
+	if err != nil {
+		t.Fatalf("generate(resolveGateSpec): %v", err)
+	}
+	wb, err := generateReleaseCatalog(want)
+	if err != nil {
+		t.Fatalf("generate(direct): %v", err)
+	}
+	if !bytes.Equal(gb.Index, wb.Index) {
+		t.Fatalf("gate entrypoint bytes differ from direct build:\n gate=%s\n direct=%s", gb.Index, wb.Index)
+	}
 }
 
 // readGenSpec reads + parses the CI-provided generator spec.

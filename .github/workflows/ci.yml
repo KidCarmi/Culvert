@@ -413,7 +413,7 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0   # tag history for catalog_version
+          fetch-depth: 0   # full history for the tagged commit's committer date (deterministic generated_at)
       # Tag-path guard: this job keyless-signs the release catalog on a v*
       # tag. Refuse unless the tagged commit was green on its main push.
       - name: Require gate approval on the tagged commit
@@ -424,7 +424,12 @@ jobs:
           .github/scripts/require-gate.sh security-release-gate.yml "$GITHUB_SHA" assert
           .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" assert
       - uses: ./.github/actions/setup-go-cache
-      - name: Build catalog spec from the pushed digest
+      # Gather ONLY deterministic facts here (no wall-clock, no tag-count). The
+      # catalog spec — timestamps (from the tagged commit's committer date),
+      # expires_at (+180d), and the semver-derived catalog_version — is built and
+      # validated in tested Go (buildReleaseSpec), invoked by the gate below. This
+      # makes re-running a tag byte-idempotent (M0 / release_spec.go).
+      - name: Resolve deterministic catalog spec facts
         id: spec
         env:
           DIGEST: ${{ needs.docker.outputs.proxy_digest }}
@@ -437,23 +442,26 @@ jobs:
           test -n "$DIGEST" || { echo "missing pushed digest"; exit 1; }
           if [ -z "$VERSION" ]; then VERSION="${REF_NAME#v}"; fi
           test -n "$VERSION" || { echo "missing version"; exit 1; }
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EXP=$(date -u -d '+90 days' +%Y-%m-%dT%H:%M:%SZ)
-          # Monotonic catalog_version = (count of v* tags) + 1.
-          CATVER=$(( $(git tag --list 'v*' | wc -l | tr -d ' ') + 1 ))
+          # Committer date of the tagged commit — fixed per tag, so re-runs are identical.
+          COMMIT_ISO=$(git log -1 --format=%cI HEAD)
           OUT="$RUNNER_TEMP/catalog-out"
           mkdir -p "$OUT"
-          cat > "$RUNNER_TEMP/spec.json" <<EOF
-          {"generated_at":"$NOW","expires_at":"$EXP","catalog_version":$CATVER,
-           "entries":[{"release_id":"culvert-$VERSION","version_id":"$VERSION","severity":"normal",
-             "repo":"ghcr.io/kidcarmi/culvert","list_digest":"$DIGEST",
-             "platforms":["linux/amd64","linux/arm64"],"created_at":"$NOW",
-             "channels":["recommended"]}]}
-          EOF
-          echo "out=$OUT" >> "$GITHUB_OUTPUT"
-      - name: Run release catalog gate (generate + verify + digest-match)
+          {
+            echo "version=$VERSION"
+            echo "digest=$DIGEST"
+            echo "commit_iso=$COMMIT_ISO"
+            echo "out=$OUT"
+            # NOW is a guard input only (rejects an old-tag re-run whose 180d window
+            # is already past); it is NOT written into any catalog byte.
+            echo "now=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Run release catalog gate (build spec + generate + verify + digest-match)
         env:
-          CULVERT_RELEASE_GEN_SPEC: ${{ runner.temp }}/spec.json
+          CULVERT_RELEASE_SPEC_VERSION: ${{ steps.spec.outputs.version }}
+          CULVERT_RELEASE_SPEC_DIGEST: ${{ steps.spec.outputs.digest }}
+          CULVERT_RELEASE_SPEC_REPO: ghcr.io/kidcarmi/culvert
+          CULVERT_RELEASE_SPEC_COMMIT_ISO: ${{ steps.spec.outputs.commit_iso }}
+          CULVERT_RELEASE_SPEC_NOW: ${{ steps.spec.outputs.now }}
           CULVERT_RELEASE_GEN_OUT: ${{ steps.spec.outputs.out }}
           CULVERT_RELEASE_EXPECT_DIGEST: ${{ needs.docker.outputs.proxy_digest }}
         run: go test -run TestReleaseCatalogGate -count=1 -v .
