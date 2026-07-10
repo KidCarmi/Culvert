@@ -354,6 +354,18 @@ type Config struct {
 	// uiUsersFile is the path to persist UI users across restarts.
 	// Empty = in-memory only (auth resets on every restart).
 	uiUsersFile string
+
+	// saveUIUsersMu serializes SaveUIUsersFile's snapshot+write sequence
+	// end-to-end. mu alone is not enough: SaveUIUsersFile only holds mu
+	// (RLock) while snapshotting the roster, then releases it before the
+	// disk write. Two concurrent saves each take a valid, independent
+	// snapshot, but their disk writes are otherwise unordered — whichever
+	// write's rename() lands LAST wins, even if its snapshot was taken
+	// FIRST, silently reverting a concurrently-added user on disk. Holding
+	// saveUIUsersMu across the whole call forces saves to complete one at a
+	// time, so each save's snapshot is taken only after any earlier save's
+	// write has landed, guaranteeing disk order matches snapshot recency.
+	saveUIUsersMu sync.Mutex
 }
 
 var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -723,7 +735,15 @@ func (c *Config) LoadUIUsersFile() error {
 
 // SaveUIUsersFile writes the current UI user roster to disk atomically.
 // No-op when no file path is configured.
+//
+// saveUIUsersMu serializes the whole snapshot+write sequence against other
+// concurrent SaveUIUsersFile calls, so two saves triggered by concurrent
+// admin-API requests can't race their disk writes and silently lose
+// whichever one's rename() happens to land first (see the field comment).
 func (c *Config) SaveUIUsersFile() error {
+	c.saveUIUsersMu.Lock()
+	defer c.saveUIUsersMu.Unlock()
+
 	c.mu.RLock()
 	path := c.uiUsersFile
 	// Canonicalize for serialization: an unset in-memory value persists as the
