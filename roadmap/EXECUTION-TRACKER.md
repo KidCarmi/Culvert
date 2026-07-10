@@ -82,7 +82,7 @@ activation** (kept dormant) and **M2** (repo-private, protected env/ruleset).
 ### M0 PR plan
 | PR | Scope | Status | Branch | Findings (design) | Findings (impl) | Tests | Evidence |
 |---|---|---|---|---|---|---|---|
-| M0-PR1 | Deterministic spec + version authority | Planning | `…-m0-foundation` | pending reviewers | — | — | — |
+| M0-PR1 | Deterministic spec + version authority | Implementing | `…-m0-foundation` | 4 reviews consolidated; 1 BLOCKING + 4 HIGH resolved in M0 design v2 (§14) — version→semver-encoding, vars-gate, baked-root served gate, two spec modes, UTC-Z | — | — | — |
 | M0-PR2 | Served-catalog verifier + local origin harness | Planned | — | — | — | — | — |
 | M0-PR3 | Dormant R2 stage→verify→promote workflow | Planned | — | — | — | — | — |
 | M0-PR4 | Legacy update-path retirement | Planned | — | — | — | — | — |
