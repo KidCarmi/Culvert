@@ -261,12 +261,15 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 // the tier-1 IP+username pair lock and the tier-2 account-wide lock). Before
 // this endpoint, an admin's only way to discover or clear a stuck lockout was
 // waiting out lockoutDuration, restarting the process, or reading logs.
+// Admin-only (like GET /api/auth/users): the listing includes usernames and
+// pair-lock source IPs, which is authentication telemetry a viewer should
+// not be able to enumerate.
 // POST /api/auth/lockouts — clear every lock for {"username":"..."} (both
 // tiers, every IP), the GUI equivalent of the existing ResetUser primitive.
 func apiAuthLockouts(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, RoleViewer) {
+		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		jsonOK(w, map[string]any{"lockouts": loginLimiter.Snapshot()})

@@ -451,6 +451,17 @@ func TestAPIAuthLockouts_List_Empty(t *testing.T) {
 	}
 }
 
+func TestAPIAuthLockouts_List_RejectsViewer(t *testing.T) {
+	// The listing includes usernames and pair-lock source IPs — the same
+	// authentication-telemetry sensitivity as GET /api/auth/users, which
+	// is also admin-only. A viewer must not be able to enumerate it.
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/lockouts", http.NoBody)
+	r.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, withRoleCtx(r, RoleViewer))
+	assertStatus(t, w, http.StatusForbidden)
+}
+
 func TestAPIAuthLockouts_List_ReportsActiveLockout(t *testing.T) {
 	defer loginLimiter.ResetUser("lockoutlisttest")
 	for range lockoutMaxAttempts {
