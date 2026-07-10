@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +252,30 @@ func TestRedactSeedError(t *testing.T) {
 	// A malformed URL must not panic; returns the message as-is.
 	if redactSeedError(errors.New("boom"), "://bad") != "boom" {
 		t.Error("malformed URL handling changed the message unexpectedly")
+	}
+}
+
+// M1-2 review MED: an override mirror may embed a secret in the URL PATH (e.g. a
+// per-tenant token segment), not just userinfo/query. A real transport error
+// wraps net/http's *url.Error whose embedded request URL carries that path — it
+// must be collapsed to host-only before it reaches refreshStatus.LastErr (which
+// viewers read via /api/releases) and the audit ring.
+func TestRedactSeedError_StripsOverridePath(t *testing.T) {
+	secret := "tenant-" + "t0k3nSECRET" // fake; must not survive redaction
+	raw := "https://mirror.example.com/" + secret + "/index.json"
+	// net/http surfaces transport failures as *url.Error{Op, URL, Err}; URL is the
+	// full request URL (password stripped, but path/query intact).
+	ue := &url.Error{Op: "Get", URL: raw, Err: errors.New("dial tcp 203.0.113.7:443: connect: connection refused")}
+	got := redactSeedError(ue, raw)
+	if strings.Contains(got, secret) {
+		t.Errorf("redacted error still leaks the path secret %q: %s", secret, got)
+	}
+	if !strings.Contains(got, "mirror.example.com") {
+		t.Errorf("redaction over-stripped the host: %s", got)
+	}
+	// The actionable transport tail is preserved (host already logged separately).
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("redaction dropped the actionable transport detail: %s", got)
 	}
 }
 

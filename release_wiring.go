@@ -55,9 +55,11 @@ const (
 	// Unset + roots present ⇒ enforce. Unset + no roots ⇒ Release Management is
 	// disabled (an unsigned catalog is NEVER auto-trusted).
 	envReleaseCatalogVerify = "CULVERT_RELEASE_CATALOG_VERIFY"
-	// envReleaseCatalogURL is the OPTIONAL http(s) origin to auto-seed the signed
-	// catalog from at startup (P1.7). Auto-seed runs ONLY in enforce mode; the
-	// installer never bakes a default. Unset ⇒ no fetch (behavior unchanged).
+	// envReleaseCatalogURL is the operator OVERRIDE for the catalog origin (M1-2
+	// product revision). Unset ⇒ the baked default (defaultReleaseCatalogURL); a
+	// http(s) URL ⇒ that mirror/staging origin; an off/none/disabled sentinel ⇒ NO
+	// outbound fetch with the trust posture unchanged. Auto-seed runs ONLY in
+	// enforce mode. The origin NEVER affects trust (see resolveCatalogURL).
 	envReleaseCatalogURL = "CULVERT_RELEASE_CATALOG_URL"
 	// envReleaseSigstoreIdentity is the OPTIONAL operator override for the pinned
 	// keyless identity policy, JSON {"issuer","san_regex"} (P2b). Unset ⇒ the baked
@@ -85,20 +87,21 @@ const (
 var bakedReleaseTrustKeysJSON = ""
 
 type releaseStartupConfig struct {
-	proxyRepo       string
-	catalogDir      string
-	statePath       string     // persisted rollback version floor (sibling of catalogDir)
-	maintURL        string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
-	catalogURL      string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
-	trustKeys       []TrustKey // baked roots ∪ operator-configured roots
-	trustKeysErr    error
-	sigstore        *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
-	sigstoreActive  bool              // true ⇒ a Sigstore trusted root is present
-	sigstoreWarn    string            // loud one-line note (identity set without a root) ("" ⇒ none)
-	sigstoreErr     error             // fatal Sigstore config error ⇒ Release Management disabled
-	verifyMode      VerifyMode
-	verifyModeWarn  string        // loud break-glass message to log once at startup ("" ⇒ none)
-	refreshInterval time.Duration // periodic catalog refresh cadence (M1-2); 0 ⇒ loop disabled
+	proxyRepo        string
+	catalogDir       string
+	statePath        string     // persisted rollback version floor (sibling of catalogDir)
+	maintURL         string     // CP-local maint agent endpoint (unix socket path or http[s] URL)
+	catalogURL       string     // optional http(s) origin to auto-seed the signed catalog (P1.7); "" ⇒ no fetch
+	trustKeys        []TrustKey // baked roots ∪ operator-configured roots
+	trustKeysErr     error
+	sigstore         *sigstoreVerifier // optional keyless (Sigstore-identity) verifier; nil ⇒ scheme inactive
+	sigstoreActive   bool              // true ⇒ a Sigstore trusted root is present
+	sigstoreWarn     string            // loud one-line note (identity set without a root) ("" ⇒ none)
+	sigstoreErr      error             // fatal Sigstore config error ⇒ Release Management disabled
+	verifyMode       VerifyMode
+	verifyModeWarn   string        // loud break-glass message to log once at startup ("" ⇒ none)
+	refreshInterval  time.Duration // periodic catalog refresh cadence (M1-2); 0 ⇒ loop disabled
+	catalogURLSource string        // catalogURLSource{Default,Override,Disabled} (M1-2 product revision)
 }
 
 // resolveReleaseStartupConfig reads the static inputs (env + dataDir). No mutable
@@ -130,23 +133,80 @@ func resolveReleaseStartupConfigFrom(getenv func(string) string) releaseStartupC
 	}
 	mode, warn := resolveCatalogVerifyMode(getenv(envReleaseCatalogVerify), nSchemes)
 	interval := resolveRefreshInterval(getenv(envReleaseRefreshInterval))
+	catalogURL, catalogURLSource := resolveCatalogURL(getenv(envReleaseCatalogURL))
 	return releaseStartupConfig{
-		proxyRepo:       proxyRepo,
-		catalogDir:      catalogDir,
-		statePath:       filepath.Join(dataDir, "release_catalog_state.json"),
-		maintURL:        maintURL,
-		catalogURL:      strings.TrimSpace(getenv(envReleaseCatalogURL)),
-		trustKeys:       keys,
-		trustKeysErr:    keysErr,
-		sigstore:        sig.verifier,
-		sigstoreActive:  sig.active,
-		sigstoreWarn:    sig.warn,
-		sigstoreErr:     sig.err,
-		verifyMode:      mode,
-		verifyModeWarn:  warn,
-		refreshInterval: interval,
+		proxyRepo:        proxyRepo,
+		catalogDir:       catalogDir,
+		statePath:        filepath.Join(dataDir, "release_catalog_state.json"),
+		maintURL:         maintURL,
+		catalogURL:       catalogURL,
+		trustKeys:        keys,
+		trustKeysErr:     keysErr,
+		sigstore:         sig.verifier,
+		sigstoreActive:   sig.active,
+		sigstoreWarn:     sig.warn,
+		sigstoreErr:      sig.err,
+		verifyMode:       mode,
+		verifyModeWarn:   warn,
+		refreshInterval:  interval,
+		catalogURLSource: catalogURLSource,
 	}
 }
+
+// Catalog origin sources, surfaced read-only on /api/releases as
+// catalog_url_source so an operator can see WHERE releases come from (and whether
+// fetching is off) without SSH/log access.
+const (
+	catalogURLSourceDefault  = "default"  // baked canonical origin (customer configured nothing)
+	catalogURLSourceOverride = "override" // operator pointed CULVERT_RELEASE_CATALOG_URL at a mirror/staging origin
+	catalogURLSourceDisabled = "disabled" // operator explicitly turned outbound catalog fetch OFF
+)
+
+// resolveCatalogURL returns the effective catalog origin and its source. Pure.
+//   - empty/whitespace         ⇒ the canonical built-in default (a customer never
+//     needs to configure this; the override exists for air-gap/mirror/staging).
+//   - an explicit off sentinel ⇒ NO outbound fetch, trust posture UNCHANGED. This
+//     is the trust-SAFE opt-out: silencing the fetch must never require relaxing
+//     CULVERT_RELEASE_CATALOG_VERIFY (which would weaken the trust channel to
+//     solve a network/privacy concern).
+//   - anything else            ⇒ used verbatim as the operator override origin.
+func resolveCatalogURL(v string) (url, source string) {
+	v = strings.TrimSpace(v)
+	switch {
+	case v == "":
+		return defaultReleaseCatalogURL, catalogURLSourceDefault
+	case isCatalogFetchDisabled(v):
+		return "", catalogURLSourceDisabled
+	default:
+		return v, catalogURLSourceOverride
+	}
+}
+
+// isCatalogFetchDisabled recognizes the explicit "turn outbound catalog fetch
+// off" sentinels (case-insensitive). These are the ONLY values that stop the
+// fetch while leaving verification fully enforced on any on-disk catalog.
+func isCatalogFetchDisabled(v string) bool {
+	switch strings.ToLower(v) {
+	case "off", "none", "disabled":
+		return true
+	}
+	return false
+}
+
+// defaultReleaseCatalogURL is the CANONICAL built-in catalog origin (M1-2 product
+// revision): a normal customer needs NO configuration — the appliance fetches the
+// official signed catalog by default. CULVERT_RELEASE_CATALOG_URL remains an
+// explicit operator OVERRIDE (air-gapped deployments, internal mirrors,
+// staging/regional distribution), or one of the disable sentinels
+// (off/none/disabled) to turn outbound fetch off entirely. The origin NEVER
+// affects trust: verification is always the baked roots + pinned identity
+// regardless of where bytes come from, and overriding the URL cannot change
+// trusted signing identities or roots.
+// NOTE (recorded constraint): the SSRF guard rejects private-IP origins by design;
+// an internal mirror must be served on a publicly-resolving, non-private host, or
+// a future explicit allowlist knob (deferred) is required — the guard is not
+// relaxed here.
+const defaultReleaseCatalogURL = "https://catalog.culvertlabs.com/release-catalog"
 
 // defaultRefreshInterval is the periodic catalog refresh cadence when
 // CULVERT_RELEASE_REFRESH_INTERVAL is unset. Six hours keeps appliances within
@@ -264,15 +324,27 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	// Runs BEFORE the holder load so a freshly-seeded catalog is what gets
 	// published (and the holder, not auto-seed, raises the rollback floor). Any
 	// failure is logged host-only and leaves the on-disk catalog untouched.
+	//
+	// The outcome is captured and folded into refreshStatus below (as trigger
+	// "startup") so an operator sees a boot-time seed failure on /api/releases
+	// IMMEDIATELY — not only after the first periodic tick one full interval later
+	// (M1-2 review HIGH: an air-gapped default appliance was otherwise "tried and
+	// failed" vs "hasn't tried" indistinguishable for ~6h without log access).
+	var startupSeedAttempted bool
+	var startupSeedErr error // already REDACTED (viewer-safe) when non-nil
 	if cfg.catalogURL != "" {
 		if cfg.verifyMode == VerifyEnforce {
+			startupSeedAttempted = true
 			if err := runStartupAutoSeed(cfg, trust); err != nil {
-				// Redact the URL's credentials/query before logging: a transport
-				// error wraps net/http's *url.Error, whose string includes the full
-				// request URL (path + query, and any userinfo) — a presigned URL's
-				// signature would otherwise leak into startup logs.
+				// Redact the URL's credentials/path/query before logging OR storing:
+				// a transport error wraps net/http's *url.Error, whose string includes
+				// the full request URL (path + query, and any userinfo) — a presigned
+				// URL's signature would otherwise leak into startup logs AND into
+				// refreshStatus.LastErr (viewer-readable via /api/releases).
+				redacted := redactSeedError(err, cfg.catalogURL)
 				logger.Printf("release catalog: auto-seed from %q did not update the catalog: %s",
-					sanitizeLog(seedHost(cfg.catalogURL)), sanitizeLog(redactSeedError(err, cfg.catalogURL)))
+					sanitizeLog(seedHost(cfg.catalogURL)), sanitizeLog(redacted))
+				startupSeedErr = errors.New(redacted)
 			}
 		} else {
 			logger.Printf("release catalog: auto-seed skipped — it only runs in enforce mode (verify=%s); an unsigned catalog is never auto-downloaded", cfg.verifyMode)
@@ -299,6 +371,16 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 	rm := newReleaseManager(svc, resolve)
 	rm.verifyMode = cfg.verifyMode
 	rm.trustSchemes = trustSchemes(cfg)
+	rm.catalogURLSource = cfg.catalogURLSource
+	if cfg.catalogURL != "" {
+		// Host only (never the full override URL — it may carry presigned creds).
+		rm.catalogOrigin = seedHost(cfg.catalogURL)
+	}
+	// Surface the boot-time seed outcome right away (M1-2 review HIGH). Folded via
+	// the SAME shared status the loop/manual refresh use, tagged "startup".
+	if startupSeedAttempted {
+		rm.recordRefreshOutcome("startup", startupSeedErr)
+	}
 	// Runtime catalog refresh (admin POST /api/releases/catalog-refresh): re-run
 	// the verified auto-seed (only when a URL is configured AND in enforce mode)
 	// then reload from disk — the SAME sequence as startup, so a release published
@@ -471,12 +553,23 @@ func seedHost(raw string) string {
 }
 
 // redactSeedError returns err's message with the seed URL's sensitive components
-// (userinfo and raw query — e.g. a presigned-URL signature) stripped, since a
-// transport error wraps net/http's *url.Error whose string embeds the full
-// request URL. The host is preserved (it is already logged separately and is not
-// secret). The result is still passed through sanitizeLog at the call site.
+// (userinfo, PATH, and raw query — any of which may carry a presigned/tokenized
+// secret on an operator override origin) stripped, since a transport error wraps
+// net/http's *url.Error whose string embeds the full request URL. The host is
+// preserved (already logged separately, not secret). The result is stored in
+// refreshStatus.LastErr (viewer-readable via /api/releases) and passed through
+// sanitizeLog at the call site.
 func redactSeedError(err error, rawURL string) string {
 	msg := err.Error()
+	// A transport error wraps *url.Error, whose embedded request URL carries the
+	// full path (+ query/userinfo). Replace that whole embedded URL token with the
+	// host only — the surest way to strip a secret path segment (M1-2 review MED:
+	// tokenized mirrors embed secrets in the path, which the component strips below
+	// would miss if the error path differs from cfg.catalogURL's path).
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		msg = strings.ReplaceAll(msg, ue.URL, seedHost(rawURL))
+	}
 	u, perr := url.Parse(rawURL)
 	if perr != nil {
 		return msg
@@ -492,6 +585,11 @@ func redactSeedError(err error, rawURL string) string {
 	}
 	if u.RawQuery != "" {
 		msg = strings.ReplaceAll(msg, u.RawQuery, "REDACTED")
+	}
+	// Defense-in-depth for non-url.Error chains that still embedded the URL: strip
+	// the configured origin's path (a bare "/" is not sensitive and would over-match).
+	if p := u.EscapedPath(); p != "" && p != "/" {
+		msg = strings.ReplaceAll(msg, p, "/REDACTED")
 	}
 	return msg
 }

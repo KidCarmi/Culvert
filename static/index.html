@@ -3663,7 +3663,7 @@ Firefox (all platforms):
               <input id="rel-agent" value="local" data-change="releaseAgentChange"
                 style="margin-left:6px;width:120px;padding:4px 6px;font-size:.8rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text)">
             </label>
-            <button class="btn ghost sm" data-click="releaseCatalogRefresh" data-min-role="admin" title="Re-fetch the signed catalog from its configured origin (CULVERT_RELEASE_CATALOG_URL) and reload — no restart needed">⟳ Refresh catalog</button>
+            <button class="btn ghost sm" data-click="releaseCatalogRefresh" data-min-role="admin" title="Re-fetch the signed catalog from its effective origin (built-in default, or a CULVERT_RELEASE_CATALOG_URL override) and reload — verification unchanged, no restart needed">⟳ Refresh catalog</button>
             <button class="btn ghost sm" data-click="loadReleases">↺ Refresh</button>
           </div>
         </div>
@@ -3677,6 +3677,7 @@ Firefox (all platforms):
               <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
             </div>
             <div id="rel-trust-warning" style="display:none;font-size:.78rem;color:var(--warn,#f59e0b);background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:6px;padding:6px 10px;margin-bottom:8px"></div>
+            <div id="rel-origin" style="display:none;font-size:.76rem;color:var(--muted);margin-bottom:8px;line-height:1.6"></div>
             <div id="rel-catalog" style="font-size:.85rem"><div style="color:var(--muted)">Loading…</div></div>
           </div>
 
@@ -9815,11 +9816,51 @@ function renderReleaseTrustBadge(d) {
   warn.style.display = '';
 }
 
+// renderReleaseOrigin surfaces the M1-2 origin + refresh status the server
+// computes but otherwise only exposes via the API: the effective catalog origin
+// (built-in default vs operator override vs fetch-disabled), the auto-refresh
+// cadence, and the last-refresh outcome. This is what lets an operator tell
+// "hasn't tried" from "tried and failed" without SSH/log access — especially the
+// air-gap case where the catalog is available:false but a startup seed failed.
+function renderReleaseOrigin(d) {
+  const el = document.getElementById('rel-origin');
+  if (!el) return;
+  const src = d && d.catalog_url_source;
+  if (!src) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const rows = [];
+  if (src === 'disabled') {
+    rows.push('<div><strong>Origin:</strong> outbound catalog fetch <span style="color:var(--muted)">disabled</span> (verification still enforced on any on-disk catalog)</div>');
+  } else {
+    const where = src === 'default'
+      ? escHtml(d.catalog_url || d.catalog_origin || '') + ' <span style="color:var(--muted)">(built-in default)</span>'
+      : escHtml(d.catalog_origin || '') + ' <span style="color:var(--muted)">(operator override)</span>';
+    rows.push('<div><strong>Origin:</strong> ' + where + '</div>');
+  }
+  if (d.refresh_interval) {
+    rows.push('<div><strong>Auto-refresh:</strong> every ' + escHtml(d.refresh_interval) + ' <span style="color:var(--muted)">(±10% jitter)</span></div>');
+  }
+  const lr = d.last_refresh;
+  if (lr && lr.last_at) {
+    const ok = lr.last_ok === true;
+    const trig = lr.last_trigger ? (' · ' + escHtml(lr.last_trigger)) : '';
+    const icon = ok ? '<span style="color:var(--green)">✓ ok</span>' : '<span style="color:var(--red)">✗ failed</span>';
+    let line = '<div><strong>Last refresh:</strong> ' + icon + trig + ' · ' + escHtml(lr.last_at) + '</div>';
+    if (!ok && lr.last_error) {
+      const fails = lr.consecutive_failures ? (' (' + lr.consecutive_failures + ' consecutive)') : '';
+      line += '<div style="color:var(--red)">' + escHtml(lr.last_error) + escHtml(fails) + '</div>';
+    }
+    rows.push(line);
+  }
+  el.innerHTML = rows.join('');
+  el.style.display = '';
+}
+
 function renderReleaseCatalog(d, box, meta) {
   box = box || document.getElementById('rel-catalog');
   meta = meta || document.getElementById('rel-catalog-meta');
   if (!box) return;
   renderReleaseTrustBadge(d);
+  renderReleaseOrigin(d);
   if (!d || d.available !== true) {
     box.innerHTML = '<div style="color:var(--muted)">No catalog loaded (available: false). A seeded or refreshed catalog will appear here.</div>';
     if (meta) meta.textContent = '';

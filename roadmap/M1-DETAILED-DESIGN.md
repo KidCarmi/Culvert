@@ -220,3 +220,48 @@ override §1–§4 where they differ.
 | SEC-F5 — silent re-sign failure (~150d blind) | MED | **CI gate**: weekly verify asserts live `generated_at` age ≤ 2× resign cadence (RED on breach). | M1-4 |
 | SEC-F7 — `v*` tag creation restriction (backstop once tag-dispatch signs) | LOW | **Documented owner prerequisite** (allowed category): ruleset gains `creation=true` + `bypass_actors`(actions bot) BEFORE M1-4 activation; listed in the M1-4 PR body + runbook as a hard precondition. | M1-4 (owner) |
 | M1-1 baseline invariants | — | **Invariants** (mutation-proven): secret-name contract set-equality on `publish-catalog-r2.yml` (6 secrets + 2 vars, drift either direction fails); `verify-dual-publish.yml` is credential-free (zero `secrets.*` refs anywhere, no id-token at any level, `contents: read`). | M1-1 |
+
+
+## 11. M1-2 product revision (owner, 2026-07-10): built-in default catalog origin
+
+A normal customer must not configure `CULVERT_RELEASE_CATALOG_URL`. The appliance
+bakes `defaultReleaseCatalogURL = https://catalog.culvertlabs.com/release-catalog`;
+the env is an explicit override for air-gap / internal mirrors / staging /
+regional distribution. Binding behaviors (all implemented + tested in M1-2):
+unset⇒default; override wins; empty/whitespace⇒default; mirror URLs verbatim;
+**trust is origin-independent** (verify mode + roots identical either way —
+`TestCatalogURLSource_DoesNotAffectTrust`, plus the `TestServedVerify_*` suite as
+the byte-level proof); effective origin surfaced read-only on `/api/releases`
+(`catalog_origin` host + `catalog_url_source`; full URL only for the public
+default — overrides may carry presigned credentials). Override stays read-only
+(env) for M1. The refresh loop arms whenever release management is enabled in
+enforce mode (the default origin makes `wantSeed` ≡ enforce). **Recorded
+constraint:** the SSRF guard still rejects private-IP origins — an internal
+mirror needs a publicly-resolving host, or a future explicit allowlist knob
+(deferred, security-owner decision).
+
+### 11.1 Security + admin-UX review (2026-07-10) — fixes folded in
+
+An independent two-lens review (security + admin UX) graded the change
+**yes-with-fixes**: trust is provably origin-independent (traced + pinned by
+`TestCatalogURLSource_DoesNotAffectTrust` and the `TestServedVerify_*` byte-level
+suite), but four items shipped before calling the experience done. Each accepted
+finding maps to an enforcement mechanism per the §10 rule (no finding lives only
+as prose):
+
+| Finding | Severity | Fix | Enforcement |
+| --- | --- | --- | --- |
+| No trust-safe opt-out of the default fetch (the only silencing paths were firewalling or relaxing `CULVERT_RELEASE_CATALOG_VERIFY`, which weakens trust) | HIGH (sec) | `CULVERT_RELEASE_CATALOG_URL=off/none/disabled` ⇒ no fetch, trust posture unchanged, surfaced as `catalog_url_source:"disabled"` | **Test** `TestResolveCatalogURL_DisableSentinel` (sentinel ⇒ empty URL + disabled source + trust identical to default) |
+| Startup seed failure invisible on the API/GUI for up to one refresh interval (~6h) — "hasn't tried" vs "tried and failed" indistinguishable without log access | HIGH (ux) | Fold the startup auto-seed outcome into the shared `refreshStatus` as trigger `"startup"`, immediately after wiring | **Test** `TestLoadReleaseManagement_StartupSeedFailureRecorded` (enforce + SSRF-rejected origin ⇒ `last_refresh` shows startup failure on `/api/releases`) |
+| Override URL **path** segment (tokenized mirror secret) leaks to viewers via `last_error` and the audit ring — old redaction stripped only userinfo + query | MED (sec) | `redactSeedError` now collapses the embedded `*url.Error` URL to host-only and strips the configured path | **Test** `TestRedactSeedError_StripsOverridePath` |
+| GUI Release panel rendered none of the new fields; refresh-button tooltip still said "configured origin (CULVERT_RELEASE_CATALOG_URL)" (misleading for the default case) | MED (ux) | `renderReleaseOrigin` shows origin + source + cadence + last-refresh outcome; tooltip corrected | GUI-parity convention (`static/index.html`) |
+| New on-by-default egress ("phone-home") posture undocumented for operators | MED (sec) | Operator doc section: named host, cadence, override table, disable sentinel | `docs/operator/enterprise-release-catalog-plan.md` §Phase 5 |
+
+**Deferred (recorded, not silently dropped):** (a) `next_refresh_at` and a
+structured `last_refresh.error_kind` (transport/verify/reload) — LOW; the loop
+timer is decoupled from `LastAt` so a derived next-tick would mislead, and error
+classification belongs with M1-3's alerting where it drives latched transitions;
+(b) running the startup seed **asynchronously** to remove the blocked-egress boot
+delay (up to ~30s on a firewalled default appliance) — MED, deferred because it
+reorders the M0 seed-before-publish contract and warrants its own scoped change;
+the sync seed is preserved and its outcome is now recorded regardless.

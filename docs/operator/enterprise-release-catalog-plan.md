@@ -221,6 +221,43 @@ Acceptance:
 - An air-gapped test can import a signed catalog bundle, dispatch through a
   local mirror, and verify the running digest.
 
+### Catalog origin: built-in default, override, and egress posture (M1-2)
+
+As of M1-2 the appliance ships a **canonical built-in catalog origin**
+(`https://catalog.culvertlabs.com/release-catalog`). A normal customer configures
+nothing — in enforce mode the Control Plane fetches and verifies the signed
+catalog from that origin at startup and then on the periodic refresh cadence.
+
+**Egress posture (read this before deploying behind a strict firewall).** Because
+the default origin is always set, an enforce-mode appliance makes an outbound
+HTTPS request to `catalog.culvertlabs.com` at boot and every refresh interval
+(default 6h, ±10% jitter). Each request is a conditional `GET` (ETag/Last-Modified)
+carrying no payload beyond the appliance's source IP and the standard HTTP
+validators — it is a catalog-freshness poll, not telemetry — but it is on-by-default
+outbound traffic a proxy-appliance operator should know about.
+
+`CULVERT_RELEASE_CATALOG_URL` is the operator **override**:
+
+| Value | Effect | Trust |
+| --- | --- | --- |
+| _unset_ | Fetch the built-in default origin | Enforced (baked roots + pinned identity) |
+| `https://mirror.example.com/…` | Fetch that mirror/staging/regional origin | Enforced — **identical**; the origin never changes trusted roots/identities |
+| `off` / `none` / `disabled` | **No outbound fetch**; the appliance only uses an already-present on-disk catalog | Enforced — the disable sentinel is the trust-**safe** opt-out |
+
+The disable sentinel exists specifically so silencing the fetch never requires
+`CULVERT_RELEASE_CATALOG_VERIFY=permissive/disabled` (which would *weaken* the
+trust channel). Verification is byte-identical regardless of origin: a malicious
+default or mirror serving tampered bytes is rejected before promotion.
+
+The effective origin, its source (`default` / `override` / `disabled`), the
+refresh cadence, and the last-refresh outcome are surfaced read-only on
+`GET /api/releases` (`catalog_origin` host-only for overrides — never the full URL,
+which may carry presigned credentials — `catalog_url_source`, `refresh_interval`,
+`last_refresh`) and in the admin **Release Management** panel. An internal mirror
+must be served on a publicly-resolving, non-private host: the SSRF guard rejects
+private-IP origins by design (a future explicit allowlist knob is a separate,
+security-owner decision).
+
 ## Phase 6: Production Cutover
 
 Only after real production verification:
