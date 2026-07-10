@@ -2975,11 +2975,16 @@ Firefox (all platforms):
       </div>
       <div class="panel" style="margin-top:16px">
         <div class="panel-header"><span class="panel-title">OCSP / CRL Revocation</span></div>
-        <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem">
+        <div style="padding:16px;display:flex;align-items:center;gap:16px;font-size:.85rem;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="ocsp-toggle" data-change="toggleOCSP"> Enable OCSP checking
           </label>
           <span>Cache entries: <strong id="ocsp-cache-len">—</strong></span>
+          <span>Confirmed revoked: <strong id="ocsp-revoked-total">—</strong></span>
+          <span id="ocsp-failclosed-wrap">Fail-closed (responder unreachable): <strong id="ocsp-failclosed-total">—</strong></span>
+        </div>
+        <div id="ocsp-failclosed-banner" style="display:none;margin:0 16px 16px;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;font-size:.78rem;color:var(--yellow)">
+          OCSP responders were unreachable and Culvert treated affected certificates as revoked (fail-closed), blocking those connections. Last occurrence: <strong id="ocsp-failclosed-last">—</strong>.
         </div>
       </div>
       <!-- Dual-CA Overlap -->
@@ -10082,6 +10087,15 @@ async function loadCAMgmt() {
   if (ocsp) {
     document.getElementById('ocsp-toggle').checked = !!ocsp.enabled;
     document.getElementById('ocsp-cache-len').textContent = ocsp.cacheLen ?? 0;
+    document.getElementById('ocsp-revoked-total').textContent = ocsp.revokedTotal ?? 0;
+    document.getElementById('ocsp-failclosed-total').textContent = ocsp.failClosedTotal ?? 0;
+    const fcBanner = document.getElementById('ocsp-failclosed-banner');
+    if (ocsp.failClosedTotal > 0) {
+      fcBanner.style.display = '';
+      document.getElementById('ocsp-failclosed-last').textContent = ocsp.lastFailClosedAt || '—';
+    } else {
+      fcBanner.style.display = 'none';
+    }
   }
   // Dual-CA overlap status.
   const dcaStatus = document.getElementById('dca-status');
