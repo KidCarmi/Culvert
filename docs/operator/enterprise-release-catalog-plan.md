@@ -258,14 +258,42 @@ must be served on a publicly-resolving, non-private host: the SSRF guard rejects
 private-IP origins by design (a future explicit allowlist knob is a separate,
 security-owner decision).
 
+## Detection, metrics, and alerting (M1-3 — shipped)
+
+The refresh loop (Phase 5) and startup auto-seed both feed a detection layer
+that turns silent catalog failures into operator-visible signals. Three
+alert events fire through the existing webhook/alerts pipeline (selectable
+in the admin **Alerts → Webhooks** modal, or via `"*"`):
+
+| Event | Fires when | What it means | Operator action |
+|---|---|---|---|
+| `release_catalog_stale` | The **installed** catalog's `expires_at` is within 30 days of now (incl. already expired) | The weekly re-sign pipeline (M1-4) has likely stopped updating the catalog — this is the 180-day freshness watchdog's early-warning backstop | Check CI re-sign job health; if it cannot be fixed before expiry, catalog dispatch will stop serving and the legacy Docker updater remains available as fallback |
+| `release_catalog_refresh_failing` | 3 **consecutive** refresh failures (loop tick or manual `POST /api/releases/catalog-refresh`) | The configured catalog origin is unreachable, or a fetched catalog is failing verification/freshness/rollback checks | Check network egress to the catalog origin (`/api/releases` → `catalog_origin`), check `last_refresh` for the failure reason; the existing (unexpired) catalog stays installed and serving throughout |
+| `release_catalog_recovered` | The first refresh success after a `release_catalog_refresh_failing` alert | The refresh loop is healthy again | No action; informational |
+
+Each event fires **once per threshold crossing**, not on every evaluation
+(e.g. `release_catalog_stale` does not re-fire every 6h tick while still
+within the 30-day window) — an appliance restart re-arms an already-active
+condition and re-fires it once. Thresholds (30 days, 3 failures) are fixed
+constants, not configurable.
+
+Prometheus exposition (`/metrics`):
+- `culvert_release_catalog_refresh_total{result="success"|"failure"}` —
+  cumulative refresh outcomes (startup, loop, and manual).
+- `culvert_release_catalog_expires_in_seconds` — seconds until the installed
+  catalog expires (negative once expired); omitted when no catalog is
+  installed.
+
+`/api/releases` also surfaces `expires_in_days`, and the admin **Release
+Management** panel shows it with a warn color inside the same 30-day
+threshold.
+
 ## Phase 6: Production Cutover
 
 Only after real production verification:
 
 - Mark release catalog dispatch as the preferred update path.
 - Keep the legacy Docker updater installed but compatibility-only.
-- Add metrics and alerts for catalog trust failures, dispatch failures, digest
-  mismatch, and stale catalogs.
 - Add runbook steps for reverting to legacy updater if catalog dispatch fails in
   production.
 - Deprecate legacy updater UI paths only after at least one stable release cycle
