@@ -82,7 +82,7 @@ func assertServedRejectedKind(t *testing.T, p *HTTPCatalogProvider, cfg autoSeed
 func TestServedVerify_Contract(t *testing.T) {
 	t.Run("valid served catalog installs", func(t *testing.T) {
 		priv, trust, base := seedFixture(t)
-		cfg, catalogDir := autoSeedCfg(t, base, trust) // injected now = 2026-05-01
+		cfg, catalogDir := autoSeedCfg(t, base, trust) // injected clock: 2026-05-01
 		p, _ := servedHTTP(t, base, trust, signedCatalogFiles(t, priv, freshValidSource("2099-01-01T00:00:00Z", 3)))
 		if err := autoSeedCatalog(context.Background(), p, cfg); err != nil {
 			t.Fatalf("valid served catalog should install: %v", err)
@@ -106,8 +106,8 @@ func TestServedVerify_Contract(t *testing.T) {
 
 	t.Run("expired catalog rejected (freshness over transport)", func(t *testing.T) {
 		priv, trust, base := seedFixture(t)
-		cfg, catalogDir := autoSeedCfg(t, base, trust) // now = 2026-05-01
-		// expires_at (2026-04-20) is after generated_at (2026-04-18) but before now
+		cfg, catalogDir := autoSeedCfg(t, base, trust) // injected clock: 2026-05-01
+		// expires_at (2026-04-20) is after generated_at (2026-04-18) but before the clock
 		// → validly signed, structurally fine, rejected by the freshness gate.
 		p, _ := servedHTTP(t, base, trust, signedCatalogFiles(t, priv, freshValidSource("2026-04-20T00:00:00Z", 3)))
 		assertServedRejectedKind(t, p, cfg, catalogDir, errCatalogExpired)
