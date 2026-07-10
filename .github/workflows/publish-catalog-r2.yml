@@ -286,24 +286,40 @@ jobs:
       # SEC-F2b (M1-4, BLOCKING): a RESIGN promote must be monotonically bound to
       # the LIVE catalog — a fresh history prefix self-satisfies the create-only
       # digest guard, so without this an old (validly-signed) resign bundle could
-      # roll the live pointer BACKWARD (appliance floors would refuse it, but the
-      # public origin would be pinned stale for new installs). Require: staged
-      # catalog_version ≥ live; on equality, identical release entries AND a
-      # strictly newer generated_at. A missing live index (first publish) passes.
-      # Runs AFTER the staged-bytes verify and BEFORE promote; resign runs only.
+      # roll the live pointer BACKWARD (the SEC-F4 appliance ratchet refuses the
+      # same-version/older-generated_at replay per appliance, but the public
+      # origin would still be pinned stale for NEW installs, whose floor starts
+      # empty). Require: staged catalog_version ≥ live; on equality, identical
+      # release entries AND a strictly newer generated_at. A missing live index
+      # (first publish) passes. Runs AFTER the staged-bytes verify and BEFORE
+      # promote; resign runs only.
+      #
+      # The live index is read from the R2 ORIGIN via authenticated s3api — NOT
+      # through the public CDN: Cloudflare ignores a request Cache-Control for
+      # edge bypass (this file's own purge step exists because of that), and a
+      # BLOCKING control's freshness must not rest on cache semantics (impl
+      # review MED). Only a genuine NoSuchKey/404 counts as "first publish";
+      # any other read failure fails CLOSED.
       - name: Bind resign promote monotonically to the live catalog (SEC-F2b)
         if: github.event.inputs.resign_asset != ''
         env:
-          R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           set -euo pipefail
-          LIVE="$(curl -fsS -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" || true)"
-          if [ -z "$LIVE" ]; then
-            echo "no live catalog (first publish) — monotonic binding trivially satisfied"; exit 0
+          if ! aws s3api get-object --bucket "$R2_BUCKET" --key "release-catalog/index.json" \
+                 --endpoint-url "$R2_S3_ENDPOINT" live_index.json >/dev/null 2>get_err.txt; then
+            if grep -Eqi 'NoSuchKey|status code: 404|Not Found' get_err.txt; then
+              echo "no live catalog at the origin (first publish) — monotonic binding trivially satisfied"; exit 0
+            fi
+            echo "FATAL: could not read the live origin index (fail-closed):"; cat get_err.txt; exit 1
           fi
-          LIVE_V="$(printf '%s' "$LIVE" | jq -r '.catalog_version // 0')"
-          LIVE_G="$(printf '%s' "$LIVE" | jq -r '.generated_at // ""')"
-          LIVE_R="$(printf '%s' "$LIVE" | jq -cS '.releases')"
+          LIVE_V="$(jq -r '.catalog_version // 0' live_index.json)"
+          LIVE_G="$(jq -r '.generated_at // ""' live_index.json)"
+          LIVE_R="$(jq -cS '.releases' live_index.json)"
           ST_V="$(jq -r '.catalog_version // 0' stage/index.json)"
           ST_G="$(jq -r '.generated_at // ""' stage/index.json)"
           ST_R="$(jq -cS '.releases' stage/index.json)"

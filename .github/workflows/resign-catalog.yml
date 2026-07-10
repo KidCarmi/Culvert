@@ -73,7 +73,9 @@ jobs:
       # dispatch_and_wait: gh workflow run is async and returns no run id —
       # find the first run of that workflow+event+ref created after T0, then
       # poll it to completion. Bounded; any non-success conclusion fails.
-      - name: Re-sign — dispatch ci.yml at the tag ref and wait
+      # One step end-to-end so the helper is defined exactly once (drift
+      # hazard otherwise — impl review LOW).
+      - name: Re-sign at the tag, then publish R2 → Pages → verify (fail-closed)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
@@ -109,63 +111,22 @@ jobs:
               sleep 20
             done
           }
+
+          # 1) Re-sign under the tag's pinned signing identity.
           dispatch_and_wait ci.yml "$TAG" 1800 -f resign=true
 
-      - name: Resolve the freshly-attached resign asset (exact name)
-        id: asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
+          # 2) Resolve the freshly-attached resign asset by EXACT name (OPS-F2).
           ASSET="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
                      --jq '.assets[].name' \
                    | grep -E "^culvert-release-catalog-${TAG}-r[0-9]{8}\.tar\.gz$" \
                    | sort -r | head -n1)"
           test -n "$ASSET" || { echo "FATAL: re-sign run succeeded but no resign asset found on $TAG"; exit 1; }
-          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
           echo "resign asset: $ASSET"
 
-      - name: Publish — R2 (resign path), then Pages, then verify both origins
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          ASSET: ${{ steps.asset.outputs.asset }}
-        run: |
-          set -euo pipefail
-          dispatch_and_wait() { # <workflow-file> <ref> <max-wait-seconds> [extra gh args...]
-            local wf="$1" ref="$2" max="$3"; shift 3
-            local t0 run_id status conclusion waited=0
-            t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref "$ref" "$@"
-            run_id=""
-            for i in $(seq 1 24); do
-              run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
-                          --event workflow_dispatch --branch "$ref" \
-                          --json databaseId,createdAt \
-                          --jq "[.[] | select(.createdAt >= \"$t0\")] | sort_by(.createdAt) | first | .databaseId // empty" \
-                          --limit 10)"
-              [ -n "$run_id" ] && break
-              sleep 5
-            done
-            test -n "$run_id" || { echo "FATAL: dispatched $wf@$ref but no run appeared (fail-closed)"; return 1; }
-            echo "watching $wf run $run_id (max ${max}s)"
-            while :; do
-              status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"
-              if [ "$status" = "completed" ]; then
-                conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)"
-                [ "$conclusion" = "success" ] || { echo "FATAL: $wf run $run_id concluded '$conclusion'"; return 1; }
-                echo "$wf run $run_id succeeded"; return 0
-              fi
-              waited=$((waited + 20))
-              [ "$waited" -le "$max" ] || { echo "FATAL: $wf run $run_id still '$status' after ${max}s (fail-closed timeout)"; return 1; }
-              sleep 20
-            done
-          }
-          DEFAULT_BRANCH="${GITHUB_REF_NAME:-main}"
-          # R2 first (the origin appliances read), with the SEC-F2b-guarded
+          # 3) R2 first (the origin appliances read), with the SEC-F2b-guarded
           # resign input; then Pages (dual-publish parity); then the Slice A
           # verify proves both origins serve the re-signed bytes end-to-end.
+          DEFAULT_BRANCH="${GITHUB_REF_NAME:-main}"
           dispatch_and_wait publish-catalog-r2.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG" -f "resign_asset=$ASSET"
           dispatch_and_wait publish-catalog-pages.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG"
           dispatch_and_wait verify-dual-publish.yml "$DEFAULT_BRANCH" 1800 -f "tag=$TAG"

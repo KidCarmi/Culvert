@@ -44,8 +44,11 @@ jobs:
     timeout-minutes: 15
     # Skip on PRs (CI review): duplicates the Fast PR Gate's hygiene job
     # (fmt/vet/build) exactly; this job remains the main/tag-path build that
-    # feeds smoke/docker/auto-tag/release.
-    if: github.event_name != 'pull_request'
+    # feeds smoke/docker/auto-tag/release. Tag-ref dispatches (M1-4 resigns)
+    # skip too: the reduced resign path needs no build.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -109,7 +112,9 @@ jobs:
     # Skip on PRs (CI review): a full compose image build per PR; the Deep PR
     # Gate's build-image + compose-validate covers container-surface PRs.
     needs: test
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

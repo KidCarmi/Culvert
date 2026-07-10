@@ -58,8 +58,17 @@ type freshnessPolicy struct {
 
 // catalogStateFile is the on-disk rollback floor. It lives OUTSIDE the catalog
 // directory so replacing the catalog (a refresh) never clears the floor.
+//
+// SEC-F4 (M1-4): the floor is a (catalog_version, generated_at) PAIR. Weekly
+// re-signs never bump catalog_version, so a version-only floor is blind to a
+// same-version replay — an OLDER validly-signed re-sign re-served (or re-staged
+// by an attacker with origin write) would pass `>= floor` and roll freshness
+// backward. HighestGeneratedAt is absent in legacy state files (omitempty ⇒
+// zero time ⇒ no generated_at check until the first post-upgrade install
+// writes it — fail-safe migration, never bricks an existing appliance).
 type catalogStateFile struct {
-	HighestVersion int `json:"highest_accepted_version"`
+	HighestVersion     int    `json:"highest_accepted_version"`
+	HighestGeneratedAt string `json:"highest_accepted_generated_at,omitempty"` // RFC3339 UTC
 }
 
 // checkCatalogFreshness applies the freshness (expires_at) check against now.
@@ -113,10 +122,28 @@ func checkCatalogRollback(cat *Catalog, floor int) error {
 	return nil
 }
 
-// applyFreshnessAndRollback runs both enforce-mode gates and, on success, raises
-// the persisted version floor. It is a no-op when the policy is disabled. The
-// floor is raised only AFTER both checks pass, so a rejected catalog never moves
-// the floor (and a freshness failure never blocks a later in-window catalog).
+// checkCatalogReplay is the SEC-F4 half of the ratchet: at the SAME
+// catalog_version as the floor, a generated_at STRICTLY OLDER than the
+// floor's is a re-sign replay and is refused. Equality is deliberately
+// accepted — reloading the very catalog that set the floor (every restart)
+// carries the identical (version, generated_at) pair and must stay
+// idempotent. A zero floorGen (legacy state file, pre-ratchet) checks nothing.
+func checkCatalogReplay(cat *Catalog, floorVersion int, floorGen time.Time) error {
+	if floorGen.IsZero() || cat.Version() != floorVersion {
+		return nil
+	}
+	if cat.GeneratedAt().Before(floorGen) {
+		return fmt.Errorf("%w: generated_at=%s is older than the accepted floor %s at the same catalog_version=%d (re-sign replay refused)",
+			errCatalogRollback, cat.GeneratedAt().UTC().Format(time.RFC3339), floorGen.UTC().Format(time.RFC3339), floorVersion)
+	}
+	return nil
+}
+
+// applyFreshnessAndRollback runs the enforce-mode gates and, on success, raises
+// the persisted (version, generated_at) floor. It is a no-op when the policy is
+// disabled. The floor is raised only AFTER every check passes, so a rejected
+// catalog never moves the floor (and a freshness failure never blocks a later
+// in-window catalog).
 func (p freshnessPolicy) applyFreshnessAndRollback(cat *Catalog) error {
 	if !p.enabled {
 		return nil
@@ -128,52 +155,87 @@ func (p freshnessPolicy) applyFreshnessAndRollback(cat *Catalog) error {
 	if err := checkCatalogFreshness(cat, now(), p.skew); err != nil {
 		return err
 	}
-	floor, err := p.readVersionFloor()
+	st, err := p.readFloorState()
 	if err != nil {
 		return err
 	}
-	if err := checkCatalogRollback(cat, floor); err != nil {
+	if err := checkCatalogRollback(cat, st.HighestVersion); err != nil {
 		return err
 	}
-	if cat.Version() > floor {
-		if err := p.writeVersionFloor(cat.Version()); err != nil {
+	floorGen, err := parseFloorGen(st.HighestGeneratedAt)
+	if err != nil {
+		return err // corrupt floor fails closed, same as the version half
+	}
+	if err := checkCatalogReplay(cat, st.HighestVersion, floorGen); err != nil {
+		return err
+	}
+	// Ratchet forward on a higher version OR a newer re-sign of the same version.
+	if cat.Version() > st.HighestVersion ||
+		(cat.Version() == st.HighestVersion && cat.GeneratedAt().After(floorGen)) {
+		if err := p.writeFloorState(cat.Version(), cat.GeneratedAt()); err != nil {
 			return fmt.Errorf("release catalog: persist version floor: %w", err)
 		}
 	}
 	return nil
 }
 
-// readVersionFloor reads the persisted highest-accepted version. A missing file
-// is the genuine "first catalog ever" state and yields floor 0 (no rollback
-// possible yet). A present-but-unreadable/corrupt file FAILS CLOSED rather than
-// silently resetting the floor to 0, which would re-open the rollback window.
-func (p freshnessPolicy) readVersionFloor() (int, error) {
+// parseFloorGen parses the persisted generated_at floor ("" ⇒ zero time —
+// legacy pre-ratchet state files).
+func parseFloorGen(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("release catalog: parse generated_at floor: %w", err)
+	}
+	return t, nil
+}
+
+// readFloorState reads the persisted (version, generated_at) floor. A missing
+// file is the genuine "first catalog ever" state and yields the zero floor (no
+// rollback possible yet). A present-but-unreadable/corrupt file FAILS CLOSED
+// rather than silently resetting the floor, which would re-open the rollback
+// window.
+func (p freshnessPolicy) readFloorState() (catalogStateFile, error) {
 	if p.statePath == "" {
-		return 0, nil
+		return catalogStateFile{}, nil
 	}
 	b, err := os.ReadFile(p.statePath) // #nosec G304 -- fixed operator-configured state path, not attacker-controlled
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return catalogStateFile{}, nil
 		}
-		return 0, fmt.Errorf("release catalog: read version floor: %w", err)
+		return catalogStateFile{}, fmt.Errorf("release catalog: read version floor: %w", err)
 	}
 	var st catalogStateFile
 	if err := json.Unmarshal(b, &st); err != nil {
-		return 0, fmt.Errorf("release catalog: parse version floor: %w", err)
+		return catalogStateFile{}, fmt.Errorf("release catalog: parse version floor: %w", err)
 	}
 	if st.HighestVersion < 0 {
-		return 0, fmt.Errorf("release catalog: persisted version floor %d is negative", st.HighestVersion)
+		return catalogStateFile{}, fmt.Errorf("release catalog: persisted version floor %d is negative", st.HighestVersion)
 	}
-	return st.HighestVersion, nil
+	return st, nil
 }
 
-// writeVersionFloor atomically persists the new highest-accepted version.
+// writeVersionFloor persists a version-only floor (no generated_at half).
+// Kept for tests that seed a bare version floor; production installs go
+// through writeFloorState.
 func (p freshnessPolicy) writeVersionFloor(v int) error {
+	return p.writeFloorState(v, time.Time{})
+}
+
+// writeFloorState atomically persists the new highest-accepted
+// (version, generated_at) pair (SEC-F4 ratchet).
+func (p freshnessPolicy) writeFloorState(v int, gen time.Time) error {
 	if p.statePath == "" {
 		return nil
 	}
-	b, err := json.Marshal(catalogStateFile{HighestVersion: v})
+	st := catalogStateFile{HighestVersion: v}
+	if !gen.IsZero() {
+		st.HighestGeneratedAt = gen.UTC().Format(time.RFC3339)
+	}
+	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}

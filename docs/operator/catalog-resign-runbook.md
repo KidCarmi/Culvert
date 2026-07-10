@@ -15,6 +15,18 @@ create a `v*` tag can mint a signing context; the ruleset is the backstop.
 This cannot be enforced from inside the repository — confirm it in
 Settings → Rules before the first production re-sign.
 
+**First production run — one-time verification:** the scheduler locates each
+dispatched run via `gh run list --branch <ref>`; for the ci.yml dispatch the
+ref is the TAG. Confirm on the first run that the scheduler finds and watches
+the ci.yml run (its log prints `watching ci.yml run <id>`). A mismatch is
+fail-closed (FATAL after the bounded wait), not silent — but fix it before
+relying on the unattended weekly cron.
+
+The appliance-side backstop for same-version replays is the SEC-F4
+`(catalog_version, generated_at)` ratchet in `release_catalog_state.json` —
+shipped with this milestone; no operator action needed (legacy state files
+migrate on the first post-upgrade install).
+
 ## The weekly flow (all automatic)
 
 | When (UTC, Mon) | What | Where |

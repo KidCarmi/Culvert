@@ -77,11 +77,21 @@ func autoSeedCatalog(ctx context.Context, stager catalogStager, cfg autoSeedConf
 	if err := checkCatalogFreshness(cat, now(), cfg.skew); err != nil {
 		return fmt.Errorf("release catalog: auto-seed freshness: %w", err)
 	}
-	floor, err := (freshnessPolicy{enabled: true, statePath: cfg.statePath}).readVersionFloor()
+	st, err := (freshnessPolicy{enabled: true, statePath: cfg.statePath}).readFloorState()
 	if err != nil {
 		return fmt.Errorf("release catalog: auto-seed read floor: %w", err)
 	}
-	if err := checkCatalogRollback(cat, floor); err != nil {
+	if err := checkCatalogRollback(cat, st.HighestVersion); err != nil {
+		return fmt.Errorf("release catalog: auto-seed rollback: %w", err)
+	}
+	// SEC-F4: an origin serving an OLDER re-sign of the already-accepted version
+	// (same catalog_version, older generated_at) is a freshness rollback and is
+	// refused here, before the swap — the holder's post-swap gate rechecks too.
+	floorGen, err := parseFloorGen(st.HighestGeneratedAt)
+	if err != nil {
+		return fmt.Errorf("release catalog: auto-seed read floor: %w", err)
+	}
+	if err := checkCatalogReplay(cat, st.HighestVersion, floorGen); err != nil {
 		return fmt.Errorf("release catalog: auto-seed rollback: %w", err)
 	}
 

@@ -198,6 +198,23 @@ Revisit only if M1-4's cadence gate (SEC-F5) proves insufficient.
   once a tag dispatch is a signing event. Listed in the M1-4 PR body and the
   operator runbook; not enforceable in code from this repo.
 
+### 4.2 M1-4 implementation review (2026-07-10) — fixes folded in
+
+Adversarial review verdict: **ship-with-fixes** — the three BLOCKING controls
+(SEC-F1/F2a/F2b) verified correctly built and test-pinned (incl. the
+same-version/different-created_at substitution being impossible: deterministic
+generator ⇒ byte-identical manifests per version; `fetch-depth:0` fetches all
+tags so the latest-tag assert holds for tag-ref checkouts). Accepted findings:
+
+| Finding | Sev | Fix | Enforcement |
+| --- | --- | --- | --- |
+| SEC-F2b live read went through the CDN, which ignores request `Cache-Control` (the repo's own purge step exists because of that) — a days-stale edge copy could under-report `generated_at` and let an older signed re-sign roll the live pointer back | MED | Binding reads the live index from the R2 ORIGIN via authenticated `s3api get-object`; only a genuine NoSuchKey counts as first-publish, any other read failure fails closed | `TestResignR2PublisherInvariants` (step signature now matches the s3api read) |
+| The §10 M1-4 plan row's `(version, generated_at)` appliance ratchet (SEC-F4) was missing — re-signs never bump the version, so the version-only floor was blind to a same-version replay, leaving the SEC-F2b rollback with no appliance backstop | MED (scope) | SHIPPED: `catalogStateFile` gains `highest_accepted_generated_at`; `checkCatalogReplay` refuses equal-version/strictly-older `generated_at` at both the holder gate and the auto-seed read-only gate; equality accepted (restart-reload idempotency — recorded delta from the §10 row's "strictly newer to install" wording); legacy version-only state files check nothing until the first post-upgrade install writes the pair (fail-safe migration) | `TestApply_SameVersionResignReplayRefused` |
+| "Reduced path: no build" inaccurate — `test`+`smoke` still ran on resign dispatches | LOW | Both skip tag-ref dispatches now | doc/CI-cost only |
+| `dispatch_and_wait` duplicated verbatim in two scheduler steps | LOW | Merged into one step, helper defined once | cosmetic |
+| Scheduler run-discovery relies on `gh run list --branch <tag>` matching tag-dispatched runs | LOW (recorded) | Fail-closed either way (no run found ⇒ FATAL timeout); CONFIRM on the first production run — a mismatch breaks the flow loudly, not silently | runbook first-run checklist |
+| Inline trailing comments could in principle fake step-locating signatures in the invariant tests | LOW/INFO (accepted residual) | full-line stripping covers the realistic misorder; malicious edits are caught in review | known limitation, recorded |
+
 ## 5. M0-activation regression guards
 
 - **Quoted allow-list token:** SHIPPED (PR #634, `assertEgressAllowListWellFormed`,
