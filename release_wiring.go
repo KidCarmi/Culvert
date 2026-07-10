@@ -170,7 +170,7 @@ const (
 //     CULVERT_RELEASE_CATALOG_VERIFY (which would weaken the trust channel to
 //     solve a network/privacy concern).
 //   - anything else            ⇒ used verbatim as the operator override origin.
-func resolveCatalogURL(v string) (url, source string) {
+func resolveCatalogURL(v string) (origin, source string) {
 	v = strings.TrimSpace(v)
 	switch {
 	case v == "":

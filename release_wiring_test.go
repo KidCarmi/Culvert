@@ -241,6 +241,13 @@ func TestLoadReleaseManagement_UnsignedNotAutoTrusted(t *testing.T) {
 	cfg := resolveReleaseStartupConfigFrom(func(string) string { return "" })
 	cfg.catalogDir = dir
 	cfg.statePath = filepath.Join(t.TempDir(), "state.json")
+	// Hermetic (M1-2): the baked default origin would otherwise make
+	// loadReleaseManagement auto-seed from catalog.culvertlabs.com in enforce mode,
+	// fetching the REAL signed catalog and overwriting the unsigned dir under test
+	// (an available:true false-pass that flakes on runner egress). This test is
+	// about on-disk trust, not auto-seed, so disable the fetch.
+	cfg.catalogURL = ""
+	cfg.catalogURLSource = catalogURLSourceDisabled
 	loadReleaseManagement(cfg)
 	if currentReleaseManager() == nil {
 		t.Fatal("manager should be enabled (baked Sigstore root ⇒ enforce mode)")
