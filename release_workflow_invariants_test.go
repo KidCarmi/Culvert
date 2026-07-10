@@ -729,7 +729,8 @@ func TestResignSchedulerInvariants(t *testing.T) {
 	if ci == -1 || r2 == -1 || pg == -1 || vf == -1 {
 		t.Fatalf("scheduler must dispatch ci(%d), r2(%d), pages(%d), verify(%d) — one is missing", ci, r2, pg, vf)
 	}
-	if !(ci < r2 && r2 < pg && pg < vf) {
+	dispatchOrdered := ci < r2 && r2 < pg && pg < vf
+	if !dispatchOrdered {
 		t.Fatal("scheduler dispatch order must be ci → R2 → Pages → verify (OPS-F4)")
 	}
 	if !runContainsAll(seq, "resign=true", "resign_asset=", `"$conclusion" = "success"`, "fail-closed") {
