@@ -76,7 +76,7 @@ func TestOCSPChecker_CacheHitNotRevoked(t *testing.T) {
 		revoked:   false,
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	revoked, found := oc.checkCached("abc")
+	revoked, _, found := oc.checkCached("abc")
 	if !found {
 		t.Fatal("should find cached entry")
 	}
@@ -91,7 +91,7 @@ func TestOCSPChecker_CacheHitRevoked(t *testing.T) {
 		revoked:   true,
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	revoked, found := oc.checkCached("revoked-serial")
+	revoked, _, found := oc.checkCached("revoked-serial")
 	if !found {
 		t.Fatal("should find cached entry")
 	}
@@ -106,7 +106,7 @@ func TestOCSPChecker_CacheExpired(t *testing.T) {
 		revoked:   false,
 		expiresAt: time.Now().Add(-time.Hour),
 	}
-	_, found := oc.checkCached("expired")
+	_, _, found := oc.checkCached("expired")
 	if found {
 		t.Fatal("expired entry should not be found")
 	}
@@ -114,7 +114,7 @@ func TestOCSPChecker_CacheExpired(t *testing.T) {
 
 func TestOCSPChecker_CacheResult(t *testing.T) {
 	oc := New()
-	oc.cacheResult("serial-123", true)
+	oc.cacheResult("serial-123", true, false)
 	if len(oc.cache) != 1 {
 		t.Fatal("cache should have 1 entry")
 	}
@@ -133,7 +133,7 @@ func TestOCSPChecker_CacheEviction(t *testing.T) {
 		}
 	}
 	// Adding one more should trigger eviction.
-	oc.cacheResult("new-serial", false)
+	oc.cacheResult("new-serial", false, false)
 	if len(oc.cache) > cacheMaxSize {
 		t.Fatalf("cache size = %d, should be <= %d", len(oc.cache), cacheMaxSize)
 	}
@@ -280,7 +280,7 @@ func TestOCSPChecker_CheckRespondersFailClosedIncrementsCounters(t *testing.T) {
 
 	oc := New()
 	before := time.Now()
-	if revoked := oc.checkResponders(leaf, issuer); !revoked {
+	if revoked, _ := oc.checkResponders(leaf, issuer); !revoked {
 		t.Fatal("checkResponders should fail-closed (return true) when every responder is unreachable")
 	}
 	if got := oc.FailClosedTotal(); got != 1 {
@@ -291,6 +291,49 @@ func TestOCSPChecker_CheckRespondersFailClosedIncrementsCounters(t *testing.T) {
 	}
 	if last := oc.LastFailClosedAt(); last.Before(before.Add(-time.Second)) {
 		t.Errorf("LastFailClosedAt() = %v, want a time around %v", last, before)
+	}
+}
+
+func TestOCSPChecker_CachedFailClosedKeepsCounterCurrent(t *testing.T) {
+	// A sustained outage: the first handshake fails closed and caches the
+	// verdict; every later handshake for the same serial hits the cache and
+	// short-circuits checkResponders. The fail-closed counter and
+	// last-occurrence must still advance, or the OCSP panel would show only
+	// the first cache miss and under-report the ongoing outage (Codex P2 on
+	// PR #581).
+	leaf, issuer, _ := buildLeafWithResponder(t, "http://127.0.0.1:1")
+	oc := New()
+	oc.Enable()
+
+	rawCerts := [][]byte{leaf.Raw, issuer.Raw}
+
+	// First handshake: cache miss → fail-closed, counter = 1.
+	if err := oc.VerifyPeerCertificate(rawCerts, nil); err == nil {
+		t.Fatal("first handshake should fail closed (return an error)")
+	}
+	if got := oc.FailClosedTotal(); got != 1 {
+		t.Fatalf("after first handshake FailClosedTotal() = %d, want 1", got)
+	}
+	firstTS := oc.LastFailClosedAt()
+
+	// Second handshake: cache HIT (fail-closed) → counter must advance to 2,
+	// and checkResponders must NOT have been consulted again (cache present).
+	if got := oc.CacheLen(); got != 1 {
+		t.Fatalf("expected the fail-closed verdict to be cached, CacheLen() = %d", got)
+	}
+	if err := oc.VerifyPeerCertificate(rawCerts, nil); err == nil {
+		t.Fatal("cached fail-closed handshake should still fail closed")
+	}
+	if got := oc.FailClosedTotal(); got != 2 {
+		t.Fatalf("cached fail-closed hit must advance the counter; FailClosedTotal() = %d, want 2", got)
+	}
+	if oc.LastFailClosedAt().Before(firstTS) {
+		t.Fatal("cached fail-closed hit must not move last-occurrence backwards")
+	}
+	// A cached CONFIRMED revocation (failClosed=false) must return early
+	// WITHOUT touching the fail-closed counter — only the outage path does.
+	if _, failClosed, found := oc.checkCached(leaf.SerialNumber.Text(16)); !found || !failClosed {
+		t.Fatal("the cached verdict for this serial must be marked fail-closed")
 	}
 }
 
