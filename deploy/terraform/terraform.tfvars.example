@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (gitignored) and fill in. NO secrets belong here —
+# CLOUDFLARE_API_TOKEN / GITHUB_TOKEN are supplied via the environment at apply time.
+cloudflare_account_id = "REPLACE_WITH_CLOUDFLARE_ACCOUNT_ID"
+r2_bucket_name        = "culvert-release-catalog"
+github_owner          = "KidCarmi"
+github_repository     = "Culvert"
+
+# GitHub numeric IDs (NOT logins). Leave empty to configure reviewers by hand.
+release_reviewer_user_ids = [] # e.g. [1234567]
+release_reviewer_team_ids = []

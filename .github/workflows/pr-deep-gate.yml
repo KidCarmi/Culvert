@@ -52,6 +52,7 @@ jobs:
       packaging: ${{ steps.classify.outputs.packaging }}
       release: ${{ steps.classify.outputs.release }}
       maint: ${{ steps.classify.outputs.maint }}
+      terraform: ${{ steps.classify.outputs.terraform }}
       image_needed: ${{ steps.classify.outputs.image_needed }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -63,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            for k in proxy_core security docker deps tests packaging release maint image_needed; do
+            for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
               echo "$k=true" >> "$GITHUB_OUTPUT"
             done
             echo "Manual run — all deep jobs enabled."
@@ -74,6 +75,7 @@ jobs:
 
           proxy_core=false; security=false; docker=false; deps=false
           tests=false; packaging=false; release=false; maint=false
+          terraform=false
           self=false
           while IFS= read -r f; do
             case "$f" in
@@ -126,6 +128,12 @@ jobs:
               packaging/*|scripts/*) packaging=true ;;
             esac
             case "$f" in
+              # Declarations-only IaC skeleton (M0-PR5). Gates the terraform
+              # fmt/validate lane; must be a REQUIRED (aggregate-listed) job so a
+              # broken skeleton can't merge (TEST-M6 anti-rot).
+              deploy/terraform/*) terraform=true ;;
+            esac
+            case "$f" in
               # Release-catalog trust chain — Go code AND the non-Go trust
               # material (baked Sigstore root, CI↔binary identity SSOT).
               # NOTE: catalog-e2e.yml's paths: filter must stay in sync with
@@ -147,16 +155,17 @@ jobs:
             echo "Gate self-change detected — enabling all deep jobs."
             proxy_core=true; security=true; docker=true; deps=true
             tests=true; packaging=true; release=true; maint=true
+            terraform=true
           fi
 
           image_needed=false
           if $proxy_core || $security || $docker || $deps || $release; then
             image_needed=true
           fi
-          for k in proxy_core security docker deps tests packaging release maint image_needed; do
+          for k in proxy_core security docker deps tests packaging release maint terraform image_needed; do
             eval "echo \"$k=\$$k\"" >> "$GITHUB_OUTPUT"
           done
-          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint image_needed=$image_needed"
+          echo "proxy_core=$proxy_core security=$security docker=$docker deps=$deps tests=$tests packaging=$packaging release=$release maint=$maint terraform=$terraform image_needed=$image_needed"
 
   # ─── 1. Build the proxy image ONCE (amd64) — consumed by the jobs below ───
   build-image:
@@ -422,6 +431,40 @@ jobs:
           sudo install -m 0755 /tmp/culvert-maint /usr/local/bin/culvert-maint
           systemd-analyze verify packaging/systemd/culvert-maint.service
 
+  # ─── Terraform guardrails skeleton — fmt + validate (declarations-only) ──────
+  terraform:
+    name: "Deep · terraform (fmt/validate)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    permissions:
+      contents: read
+    steps:
+      # New lane: `init` pulls providers from registry.terraform.io (+ redirect to
+      # releases.hashicorp.com / GitHub release assets). Audit-first per the repo's
+      # egress baseline for new lanes; no cloud credentials, no id-token — validate
+      # constructs no API client.
+      - name: Harden runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.9.8"
+          # The default wrapper rewrites stdout/exit codes and can mask a
+          # fmt -check / validate failure — disable it so red stays red.
+          terraform_wrapper: false
+      - name: terraform fmt (check, recursive)
+        run: terraform fmt -check -recursive
+        working-directory: deploy/terraform
+      - name: terraform init (no backend) + validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+        working-directory: deploy/terraform
+
   # ─── ✅ Aggregate — required check, passes when all-skipped ─────────────────
   deep-gate-approved:
     name: "✅ Deep PR Gate — APPROVED"
@@ -437,6 +480,7 @@ jobs:
       - determinism
       - licenses
       - packaging
+      - terraform
     if: always()
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
