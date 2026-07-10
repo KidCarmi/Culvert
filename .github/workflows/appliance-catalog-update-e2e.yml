@@ -256,7 +256,7 @@ jobs:
           echo "installed-$(cat "$DATA_DIR/release_catalog/index.json" | head -c 16)" > "$DATA_DIR/e2e_sentinel.txt"
           echo "P1 OK: fresh appliance up on v1, catalog subsystem wired."
 
-      - name: "P1b — start the host maintenance agent"
+      - name: "P1b — start the Maintenance Agent"
         run: |
           set -euxo pipefail
           nohup "$AGENT_BIN" -config "$CONFIG" >"$AGENT_LOG" 2>&1 &
@@ -290,7 +290,7 @@ jobs:
 
       # ── P3: DISPATCH the update from the catalog. The CP is inside the container
       # that gets recreated, so we capture op_id from the 202, then verify the flip
-      # OUT-OF-BAND (docker inspect + the host agent's own op record). (MUST #1)
+      # OUT-OF-BAND (docker inspect + the Maintenance Agent's own op record). (MUST #1)
       - name: "P3 — dispatch catalog update, verify flip out-of-band"
         run: |
           set -euxo pipefail
@@ -314,7 +314,7 @@ jobs:
           echo "OP_ID=$OP_ID" >> "$GITHUB_ENV"
           echo "captured op_id=$OP_ID"
 
-          # Ground truth #1 — the host agent (survives the recreate) drives the op
+          # Ground truth #1 — the Maintenance Agent (survives the recreate) drives the op
           # to terminal succeeded.
           STATE=""; for i in $(seq 1 150); do
             STATE="$(curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("state",""))' 2>/dev/null || true)"

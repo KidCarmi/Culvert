@@ -35,7 +35,7 @@ Enterprise proxy cluster comparison (vs. Zscaler, Palo Alto Prisma, McAfee/Skyhi
 
 | # | Feature | Description | Effort | Status |
 |---|---|---|---|---|
-| 2 | **Rolling upgrade orchestration** | CP tracks DP versions, staged rollouts (canary → 10% → 100%), block incompatible versions | Medium | ✅ Done |
+| 2 | **Rolling update orchestration** | CP tracks DP versions, staged rollouts (canary → 10% → 100%), block incompatible versions | Medium | ✅ Done |
 | 3 | **Config versioning / rollback** | History of config snapshots, one-click rollback to previous known-good | Medium | ✅ Done |
 
 ### Tier 3: Advanced / Nice-to-Have

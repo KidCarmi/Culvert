@@ -30,11 +30,20 @@ type Checker struct {
 	enabled atomic.Bool
 	mu      sync.RWMutex
 	cache   map[string]*cacheEntry // serial hex → result
+
+	// Fail-closed / revocation counters (P-blindspot: surfaced via
+	// /api/ocsp so an admin can see mass HTTPS breakage caused by
+	// unreachable OCSP responders without grepping logs for
+	// "fail-closed").
+	failClosedTotal   atomic.Int64
+	revokedTotal      atomic.Int64
+	lastFailClosedUTC atomic.Int64 // unix seconds; 0 = never
 }
 
 type cacheEntry struct {
-	revoked   bool
-	expiresAt time.Time
+	revoked    bool
+	failClosed bool // revoked BECAUSE responders were unreachable (not a confirmed revocation)
+	expiresAt  time.Time
 }
 
 const (
@@ -77,6 +86,28 @@ func (oc *Checker) CacheLen() int {
 	return len(oc.cache)
 }
 
+// FailClosedTotal returns the number of times a peer certificate was treated
+// as revoked because every OCSP responder listed on it was unreachable.
+func (oc *Checker) FailClosedTotal() int64 {
+	return oc.failClosedTotal.Load()
+}
+
+// RevokedTotal returns the number of times an OCSP responder confirmed a
+// peer certificate as actually revoked.
+func (oc *Checker) RevokedTotal() int64 {
+	return oc.revokedTotal.Load()
+}
+
+// LastFailClosedAt returns the time of the most recent fail-closed event, or
+// the zero time if none has occurred.
+func (oc *Checker) LastFailClosedAt() time.Time {
+	ts := oc.lastFailClosedUTC.Load()
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0).UTC()
+}
+
 // resolveIssuer extracts the issuer certificate from verified chains or raw certs.
 func resolveIssuer(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) *x509.Certificate {
 	if len(verifiedChains) > 0 && len(verifiedChains[0]) > 1 {
@@ -92,19 +123,27 @@ func resolveIssuer(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) *x50
 	return nil
 }
 
-// checkCached returns (revoked, found). If found, the caller can return early.
-func (oc *Checker) checkCached(serialHex string) (revoked, found bool) {
+// checkCached returns (revoked, failClosed, found). If found, the caller can
+// return early. failClosed distinguishes a cached fail-closed verdict (all
+// responders were unreachable) from a cached confirmed revocation, so the
+// caller can keep the fail-closed counter/timestamp current across the whole
+// outage rather than only at the first cache miss.
+func (oc *Checker) checkCached(serialHex string) (revoked, failClosed, found bool) {
 	oc.mu.RLock()
 	entry, ok := oc.cache[serialHex]
 	oc.mu.RUnlock()
 	if ok && time.Now().Before(entry.expiresAt) {
-		return entry.revoked, true
+		return entry.revoked, entry.failClosed, true
 	}
-	return false, false
+	return false, false, false
 }
 
-// cacheResult stores an OCSP result with the given TTL and evicts if needed.
-func (oc *Checker) cacheResult(serialHex string, revoked bool, ttl time.Duration) {
+// cacheResult stores an OCSP result and evicts if needed. The TTL is chosen
+// from failClosed: a fail-closed verdict (all responders unreachable) is cached
+// on the short indeterminateTTL so outage recovery tracks the responder rather
+// than being pinned for the full cacheTTL; confirmed verdicts (revoked or good)
+// keep the full cacheTTL.
+func (oc *Checker) cacheResult(serialHex string, revoked, failClosed bool) {
 	oc.mu.Lock()
 	if len(oc.cache) >= cacheMaxSize {
 		// Evict expired entries first, then oldest 10% if still over capacity.
@@ -125,9 +164,14 @@ func (oc *Checker) cacheResult(serialHex string, revoked bool, ttl time.Duration
 			}
 		}
 	}
+	ttl := cacheTTL
+	if failClosed {
+		ttl = indeterminateTTL
+	}
 	oc.cache[serialHex] = &cacheEntry{
-		revoked:   revoked,
-		expiresAt: time.Now().Add(ttl),
+		revoked:    revoked,
+		failClosed: failClosed,
+		expiresAt:  time.Now().Add(ttl),
 	}
 	oc.mu.Unlock()
 }
@@ -150,25 +194,32 @@ func (oc *Checker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*
 
 	serialHex := leaf.SerialNumber.Text(16)
 
-	if revoked, found := oc.checkCached(serialHex); found {
+	if revoked, failClosed, found := oc.checkCached(serialHex); found {
 		if revoked {
+			if failClosed {
+				// Sustained outage: the cache short-circuits checkResponders,
+				// so without this the fail-closed counter/timestamp would
+				// reflect only the FIRST cache miss and the panel would
+				// under-report a still-ongoing outage. Count every cached
+				// fail-closed block and keep last-occurrence current.
+				oc.failClosedTotal.Add(1)
+				oc.lastFailClosedUTC.Store(time.Now().Unix())
+				return fmt.Errorf("ocsp: certificate %s is revoked (fail-closed, cached)", serialHex)
+			}
 			return fmt.Errorf("ocsp: certificate %s is revoked (cached)", serialHex)
 		}
 		return nil
 	}
 
-	revoked, indeterminate := oc.checkResponders(leaf, issuer)
-	// An indeterminate (all-responders-unreachable) verdict stays fail-closed
-	// but is cached on the short TTL so recovery follows the responder, not
-	// the cache; confirmed verdicts keep the full TTL.
-	ttl := cacheTTL
-	if indeterminate {
-		ttl = indeterminateTTL
-	}
-	oc.cacheResult(serialHex, revoked, ttl)
+	// checkResponders increments the fail-closed / revoked counters on this
+	// first-miss path; cacheResult picks the short indeterminateTTL when the
+	// verdict is fail-closed so outage recovery follows the responder, not the
+	// full cacheTTL, while still rejecting the connection (revoked=true).
+	revoked, failClosed := oc.checkResponders(leaf, issuer)
+	oc.cacheResult(serialHex, revoked, failClosed)
 
 	if revoked {
-		if indeterminate {
+		if failClosed {
 			return fmt.Errorf("ocsp: certificate %s revocation status unavailable (all responders unreachable) — failing closed", serialHex)
 		}
 		return fmt.Errorf("ocsp: certificate %s is revoked", serialHex)
@@ -179,9 +230,12 @@ func (oc *Checker) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*
 // checkResponders queries each OCSP responder listed in the leaf certificate.
 // Fail-closed: returns revoked=true if ALL responders fail, preventing
 // acceptance of certificates when revocation status cannot be determined.
-// indeterminate distinguishes that fail-closed outcome from a responder's
-// confirmed revocation so the caller can bound how long it is cached.
-func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) (revoked, indeterminate bool) {
+// failClosed reports whether that revoked verdict came from the outage path
+// (all responders unreachable) rather than a confirmed revocation, so the
+// caller can both cache the reason on the short indeterminateTTL and keep the
+// fail-closed observability current. This first-miss path increments the
+// counters; the caller re-increments on subsequent cached fail-closed hits.
+func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) (revoked, failClosed bool) {
 	anyResponded := false
 	for _, responderURL := range leaf.OCSPServer {
 		rev, err := oc.queryOCSP(leaf, issuer, responderURL)
@@ -190,12 +244,15 @@ func (oc *Checker) checkResponders(leaf, issuer *x509.Certificate) (revoked, ind
 		}
 		anyResponded = true
 		if rev {
+			oc.revokedTotal.Add(1)
 			return true, false // confirmed revoked
 		}
 	}
 	if !anyResponded && len(leaf.OCSPServer) > 0 {
 		obs.Printf("OCSP: all %d responder(s) unreachable for cert %s — fail-closed (treating as revoked)",
 			len(leaf.OCSPServer), leaf.SerialNumber.Text(16))
+		oc.failClosedTotal.Add(1)
+		oc.lastFailClosedUTC.Store(time.Now().Unix())
 		return true, true // fail-closed: treat as revoked when no responder reachable
 	}
 	return false, false

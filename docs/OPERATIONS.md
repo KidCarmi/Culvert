@@ -157,8 +157,9 @@ Run these once when bringing up a new node, in order:
    `CULVERT_SESSION_SECRET` (64 hex characters, ≥32 bytes) on every node
    so admin sessions are valid cluster-wide.
 4. **Cluster TLS.** When enabling Control Plane mode, supply
-   `--cluster-grpc-cert/--cluster-grpc-key/--cluster-grpc-ca`. Do **not**
-   keep `--cluster-insecure` past development.
+   `-cp-grpc-cert/-cp-grpc-key/-cp-grpc-ca` (Data Plane nodes use
+   `-dp-cert/-dp-key/-dp-ca`). Do **not** keep `--cluster-insecure` past
+   development.
 5. **Updater allowlist.** If you point the updater at anything other
    than the in-cluster sidecar, list the URL in
    `--updater-url-allowlist` (or `update.url_allowlist` in YAML). The
@@ -414,8 +415,9 @@ To harden:
 1. Provision a cluster CA (Cluster → Cluster CA → Import, or let
    Culvert auto-generate).
 2. Issue or supply server cert + key for the CP and each DP.
-3. Restart with `--cluster-grpc-cert / --cluster-grpc-key /
-   --cluster-grpc-ca` and **without** `--cluster-insecure`.
+3. Restart with `-cp-grpc-cert / -cp-grpc-key / -cp-grpc-ca` on the
+   Control Plane and `-dp-cert / -dp-key / -dp-ca` on each Data Plane,
+   **without** `--cluster-insecure`.
 4. Diagnostics should switch the `cluster_posture` row to `ok` with the
    message "cluster running with mTLS".
 

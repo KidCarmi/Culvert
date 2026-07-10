@@ -45,9 +45,17 @@ const MaxPersistentReturn = 20000
 // readCacheTTL bounds staleness; the dashboard polls every 3 s.
 const readCacheTTL = 2 * time.Second
 
+// The in-memory ring is a fixed-capacity circular buffer. Add overwrites the
+// oldest slot in place, so the steady state allocates nothing: the previous
+// append-then-retrim slice pattern re-allocated a ~2 MB backing array and
+// copied all MaxRing entries (328 B each) under ringMu every ~MaxRing/4 adds
+// — ~1.5 KB of amortized garbage per logged request plus a periodic 1.6 MB
+// copy while every request goroutine contends on the lock.
 var (
-	ringMu sync.Mutex
-	ring   []Entry
+	ringMu   sync.Mutex
+	ringBuf  []Entry // allocated to MaxRing on first Add; nil until then
+	ringHead int     // next write slot
+	ringLen  int     // valid entries (≤ MaxRing)
 )
 
 // Persistent JSONL layer. Assigned once at startup (Init) and read lock-free
@@ -144,9 +152,13 @@ func Close() error {
 // persistent JSONL file and the queryable-history hook.
 func Add(e Entry) {
 	ringMu.Lock()
-	ring = append(ring, e)
-	if len(ring) > MaxRing {
-		ring = ring[len(ring)-MaxRing:]
+	if ringBuf == nil {
+		ringBuf = make([]Entry, MaxRing)
+	}
+	ringBuf[ringHead] = e
+	ringHead = (ringHead + 1) % MaxRing
+	if ringLen < MaxRing {
+		ringLen++
 	}
 	ringMu.Unlock()
 
@@ -175,8 +187,12 @@ func Add(e Entry) {
 // Get returns a newest-first snapshot of the in-memory ring.
 func Get() []Entry {
 	ringMu.Lock()
-	cp := make([]Entry, len(ring))
-	copy(cp, ring)
+	// Copy oldest→newest with at most two bulk copies (the buffer wraps at
+	// ringHead), keeping the lock hold to plain memmoves.
+	cp := make([]Entry, ringLen)
+	tail := (ringHead - ringLen + MaxRing) % MaxRing
+	n := copy(cp, ringBuf[tail:min(tail+ringLen, MaxRing)])
+	copy(cp[n:], ringBuf[:ringLen-n])
 	ringMu.Unlock()
 	for i, j := 0, len(cp)-1; i < j; i, j = i+1, j-1 {
 		cp[i], cp[j] = cp[j], cp[i]
@@ -273,12 +289,12 @@ func ReadPersistent() ([]Entry, error) {
 // restore func, so Add side-effects don't leak across tests.
 func SwapRingForTest() (restore func()) {
 	ringMu.Lock()
-	old := ring
-	ring = nil
+	oldBuf, oldHead, oldLen := ringBuf, ringHead, ringLen
+	ringBuf, ringHead, ringLen = nil, 0, 0
 	ringMu.Unlock()
 	return func() {
 		ringMu.Lock()
-		ring = old
+		ringBuf, ringHead, ringLen = oldBuf, oldHead, oldLen
 		ringMu.Unlock()
 	}
 }

@@ -8,6 +8,7 @@ package main
 // now Acquires/Releases the same per-IP budget as handleRequest.
 
 import (
+	"context"
 	"io"
 	"net"
 	"testing"
@@ -18,12 +19,13 @@ import (
 // the connection and whether the server answered the greeting ([05 00]).
 func socks5Greet(t *testing.T, addr string) (net.Conn, bool) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.Write([]byte{0x05, 0x01, 0x00})                  //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	conn.Write([]byte{0x05, 0x01, 0x00})                  //nolint:errcheck // test: greeting write, error surfaced by the ReadFull below
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck // test: deadline on a fresh conn cannot fail
 	resp := make([]byte, 2)
 	if _, err := io.ReadFull(conn, resp); err != nil {
 		return conn, false
