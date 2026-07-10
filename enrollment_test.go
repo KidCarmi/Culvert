@@ -219,6 +219,32 @@ func TestTokenValidate_InvalidToken(t *testing.T) {
 	}
 }
 
+// TestTokenValidate_CorruptedCIDR_FailsClosed guards the fail-closed handling of
+// a malformed AllowCIDR that reached the persisted token map (e.g. via on-disk
+// state corruption or a hand-edited cluster.json). GenerateToken validates the
+// CIDR at creation, so we inject the bad value directly into the token map to
+// simulate corruption. Before the fix, net.ParseCIDR's discarded error left a
+// nil *net.IPNet and cidr.Contains(ip) panicked inside the enrollment path.
+func TestTokenValidate_CorruptedCIDR_FailsClosed(t *testing.T) {
+	cs := newTestClusterStore(t)
+
+	plaintext, err := cs.GenerateToken("", "", "admin", 1*time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	// Corrupt the persisted token's AllowCIDR out-of-band.
+	cs.mu.Lock()
+	cs.st.Tokens[hashToken(plaintext)].AllowCIDR = "not-a-valid-cidr"
+	cs.mu.Unlock()
+
+	// Must return an error, not panic.
+	_, err = cs.ValidateAndConsumeToken(plaintext, "node-1", "10.1.2.3")
+	if err == nil {
+		t.Fatal("expected fail-closed error for corrupted AllowCIDR, got nil")
+	}
+}
+
 func TestTokenGenerate_InvalidCIDR(t *testing.T) {
 	cs := newTestClusterStore(t)
 

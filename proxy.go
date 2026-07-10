@@ -145,13 +145,27 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	// authRequired uses (credCapable || ssoCapable) — byte-identical to today's
 	// backend term under Default — plus the Exempt-default term. Arm 2 (Basic
 	// validation) gates on credCapable ONLY.
+	//
+	// Gate ENTRY keys on originalEffective (the PRE-kill-switch global default),
+	// NOT on the kill-switched effectiveDefault. Otherwise a no-backend,
+	// originally-Exempt deployment (credCapable==ssoCapable==false) would, once the
+	// kill switch forces effectiveDefault→Default, drop the Exempt term, SKIP the
+	// whole gate, and silently stop challenging scoped CredentialRequired rules —
+	// the kill switch, which must be strictly MORE restrictive, would fail OPEN.
+	// Entering on originalEffective keeps the gate armed so CR/SSO rules still
+	// challenge; the kill-switched effectiveDefault below still governs the
+	// no-credential DEFAULT outcome INSIDE the gate (scoped Exempt is suppressed and
+	// falls to forced-Default). Backend-present behavior is byte-identical: with
+	// credCapable or ssoCapable true, authRequired is already true regardless of
+	// which default term is used.
 	effectiveDefault := cfg.DefaultAuthOutcome()
+	originalEffective := effectiveDefault
 	if authExemptKillSwitchEngaged() {
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
 	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
-	authRequired := credCapable || ssoCapable || effectiveDefault == OutcomeExempt
+	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
 		// ── 1. Session cookie (browser SSO) ──────────────────────────────────
@@ -306,6 +320,24 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					return authOutcome{}, false
 				default:
 					// ── 3. No credentials ────────────────────────────────────────
+					// No-backend inert guard. With neither a credential-capable
+					// validator (credCapable) nor an interactive IdP (ssoCapable), a
+					// 407 challenge or captive-portal redirect is UNFULFILLABLE — no
+					// presented credential could ever be validated and no SSO flow
+					// could complete. Emitting one would be a dangling affordance and,
+					// worse, the kill switch (which reaches this arm only by forcing a
+					// no-backend originally-Exempt deployment from Exempt→Default) would
+					// then surface a 407 the operator can never satisfy. Per the frozen
+					// spec's "no rule matches, Default, no auth backend → inert" row,
+					// fall through to Stage-2 instead: no identity is created,
+					// authenticatedSource stays "unauth", and the default-deny backstop
+					// still applies (open ≠ allow). Backend-present behavior is
+					// unchanged — this guard is skipped whenever a backend exists.
+					if !credCapable && !ssoCapable {
+						logger.Printf("AUTH_NO_BACKEND_INERT (no credential/SSO backend) %s -> %q {req_id=%s action=fallthrough}",
+							clientIP, sanitizeLog(r.Host), reqID)
+						break
+					}
 					// browserRedirectEligibleLegacy is the verbatim pre-Slice-1
 					// predicate (Mozilla User-Agent && non-CONNECT) — the Default
 					// compatibility path. It is intentionally NOT classifyClient:

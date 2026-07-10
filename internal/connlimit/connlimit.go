@@ -61,12 +61,21 @@ func (cl *ConnLimiter) ActiveIPs() int {
 	return len(cl.conns)
 }
 
-// Acquire increments the connection count for ip. Returns false if the limit
-// is exceeded (caller should reject the request).
+// Acquire records a connection from ip and reports whether it is admitted
+// (false ⇒ the per-IP limit is exceeded and the caller should reject).
+//
+// The per-IP counter is ALWAYS maintained, even while the limiter is disabled;
+// the enabled flag gates only the rejection decision, not the accounting. This
+// keeps Acquire and Release symmetric across a runtime disable/re-enable: every
+// admitted connection is counted exactly once and released exactly once. If
+// Acquire skipped counting while disabled (the historical behavior), a
+// connection admitted during the disabled window would later be Released
+// unconditionally and decrement a DIFFERENT, still-counted connection's slot —
+// letting a subsequent re-enable admit past the cap (fail-open). Conversely,
+// gating Release on enabled leaks the slot of a connection counted while
+// enabled and released after disable, wedging that IP over-limit forever
+// (the #503 fail-closed bug). Counting unconditionally closes both.
 func (cl *ConnLimiter) Acquire(ip string) bool {
-	if !cl.enabled.Load() {
-		return true // disabled, always allow
-	}
 	cl.mu.Lock()
 	ctr, ok := cl.conns[ip]
 	if !ok {
@@ -76,15 +85,20 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 	}
 	// Hold lock through the increment to prevent TOCTOU race with Release().
 	n := atomic.AddInt64(ctr, 1)
-	// Snapshot the limit under the lock — Enable() may rewrite it at runtime.
+	// Snapshot enabled + the limit under the lock — Enable()/Disable() may
+	// rewrite them at runtime.
+	enabled := cl.enabled.Load()
 	limit := int64(cl.maxPerIP)
 	cl.mu.Unlock()
 
-	if n > limit {
+	if enabled && n > limit {
+		// Over the cap: this connection is NOT admitted, so it will never be
+		// Released — undo its count now (and drop the entry if it was the last).
 		cl.mu.Lock()
-		// Re-check that the counter still exists in the map before decrementing.
 		if cur, exists := cl.conns[ip]; exists && cur == ctr {
-			atomic.AddInt64(ctr, -1)
+			if atomic.AddInt64(ctr, -1) <= 0 {
+				delete(cl.conns, ip)
+			}
 		}
 		cl.mu.Unlock()
 		return false
@@ -92,11 +106,12 @@ func (cl *ConnLimiter) Acquire(ip string) bool {
 	return true
 }
 
-// Release decrements the connection count for ip.
+// Release decrements the connection count for ip. It does NOT gate on enabled:
+// Acquire counts every admitted connection unconditionally (see its doc), so
+// Release must mirror that exactly. The decrement is guarded by map-entry
+// presence, and the ≤0 delete prevents underflow, so releasing an IP with no
+// live count is a safe no-op.
 func (cl *ConnLimiter) Release(ip string) {
-	if !cl.enabled.Load() {
-		return
-	}
 	cl.mu.Lock()
 	ctr, ok := cl.conns[ip]
 	cl.mu.Unlock()

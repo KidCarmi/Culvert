@@ -386,7 +386,7 @@ func applyConfigBackup(b *configBackup) {
 	// RateLimitExempt: rollback-surface extension (Finding 10.3 PR-2). Mirrors
 	// the CategoryGroups/URLCategories nil-skip contract exactly:
 	//   nil       → old/pre-extension snapshot; leave live exemptions untouched.
-	//   []        → snapshot recorded zero exemptions; wipe the live whitelist.
+	//   []        → snapshot recorded zero exemptions; wipe the live exempt list.
 	//   populated → wholesale replace.
 	// rl.ReplaceExemptions builds the new IP/CIDR sets outside the lock and
 	// swaps under a single Lock, so there is never a partial/stale-exemption
