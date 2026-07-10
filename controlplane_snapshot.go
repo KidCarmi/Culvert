@@ -192,14 +192,45 @@ type cpConfigVersionState struct {
 	Version int64 `json:"version"`
 }
 
+// replicatedLeaderConfigVersion is the highest config-snapshot Version an HA
+// standby has replicated from its leader (CHAOS-01 — HA-promotion follow-up).
+// applyHABundle ratchets it forward; armVersionPersistence folds it into the
+// version-floor seed so a freshly promoted standby publishes strictly above
+// every version the old leader ever issued.
+//
+// Why the wall-clock seed alone is not enough on promotion: the promoted node
+// was a standby, so its own cp_config_version.json floor is absent/stale and
+// its ConfigStore.version never advanced (applyConfigSnapshot does not touch
+// it). If the standby's clock lags the old leader, OR the leader's counter
+// outran elapsed seconds (many rapid config updates), the reseed would land at
+// or below the DPs' lastVersion and each DP's fetchAndApply would silently
+// short-circuit (snap.Version <= lastVersion), applying NO post-failover config.
+var replicatedLeaderConfigVersion atomic.Int64
+
+// noteReplicatedLeaderVersion raises the replicated-leader-version watermark
+// (monotonic; never lowers). Called by applyHABundle with the leader's bundle
+// Version so a later promotion can seed the version floor above it.
+func noteReplicatedLeaderVersion(v int64) {
+	for {
+		cur := replicatedLeaderConfigVersion.Load()
+		if v <= cur {
+			return
+		}
+		if replicatedLeaderConfigVersion.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
 // armVersionPersistence seeds the version counter with
-// max(current, persisted floor, wall clock) and enables floor persistence
-// on every subsequent Update. The two seeds are complementary fail-safes:
-// the persisted floor survives clock rollback (VM snapshot restore, NTP
-// step-back), while the wall-clock seed survives a deleted or corrupt
-// floor file AND makes a freshly promoted HA standby publish versions
-// above anything the old leader's independent counter ever reached. A
-// corrupt/unreadable floor is therefore recoverable, not fatal.
+// max(current, persisted floor, wall clock, replicated leader version) and
+// enables floor persistence on every subsequent Update. The seeds are
+// complementary fail-safes: the persisted floor survives clock rollback (VM
+// snapshot restore, NTP step-back); the wall-clock seed survives a deleted or
+// corrupt floor file; and the replicated-leader-version seed makes a freshly
+// promoted HA standby publish above the old leader's independent counter even
+// when the standby's own floor is absent/stale and its clock lags the leader.
+// A corrupt/unreadable floor is therefore recoverable, not fatal.
 func (s *ConfigStore) armVersionPersistence(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,6 +247,12 @@ func (s *ConfigStore) armVersionPersistence(path string) {
 		}
 	case !os.IsNotExist(err):
 		logger.Printf("ControlPlane: config-version floor read failed (%v) — reseeding from clock", err)
+	}
+	// Fold in the leader version this node replicated as a standby (0 when it
+	// never was one) so a promotion's first publish clears everything the old
+	// leader issued — the DP short-circuit guard depends on it.
+	if rv := replicatedLeaderConfigVersion.Load(); rv > seed {
+		seed = rv
 	}
 	if seed > s.version {
 		s.version = seed

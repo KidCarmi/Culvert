@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,5 +158,68 @@ func TestHandleHealth_SurfacesSSLInspectionState(t *testing.T) {
 	sslInspectionLoadError.Store("Root CA load/init failed: boom")
 	if got := health(); got != "load_failed" {
 		t.Fatalf("ssl_inspection = %q, want load_failed", got)
+	}
+}
+
+// TestCALoadFailure_SurfacedEvenWhenReady is the follow-up regression: the
+// recorded load failure must win over Ready() on BOTH /healthz and /readyz.
+// LoadOrInitCA calls InitCA() (Ready()→true) BEFORE SaveCA(), so a SaveCA
+// failure (missing parent dir) leaves initInspectionCA having recorded a
+// failure while certMgr.Ready() stays true. Reporting "ready"/"ok" there would
+// hide a configured CA bundle that never persisted — the reporting must reflect
+// the recorded failure first, without touching the CA manager's Ready()
+// semantics or the proxy's degrade-to-tunnel behavior.
+func TestCALoadFailure_SurfacedEvenWhenReady(t *testing.T) {
+	captureStartupAlerts(t)
+	prevMgr := certMgr
+	certMgr = ca.New()
+	t.Cleanup(func() { certMgr = prevMgr })
+
+	// Drive the real load path: a bundle whose PARENT directory does not exist.
+	// LoadOrInitCA sees no file → InitCA() (Ready()→true) → SaveCA() fails.
+	sslInspectionLoadError.Store("")
+	badPath := filepath.Join(t.TempDir(), "no-such-dir", "ca.bundle")
+	initInspectionCA(rootCAStartupConfig{Path: badPath})
+
+	// Preconditions that make this the exact bug window: Ready() true AND a
+	// failure recorded.
+	if !certMgr.Ready() {
+		t.Fatal("precondition: InitCA should leave certMgr Ready() true (the bug only bites when Ready() is true)")
+	}
+	if sslInspectionLoadFailure() == "" {
+		t.Fatal("precondition: a SaveCA failure must record a load failure")
+	}
+
+	// /healthz ssl_inspection must be load_failed, not "ready".
+	hr := httptest.NewRecorder()
+	handleHealth(hr, nil)
+	var h struct {
+		SSLInspection string `json:"ssl_inspection"`
+	}
+	if err := json.NewDecoder(hr.Body).Decode(&h); err != nil {
+		t.Fatal(err)
+	}
+	if h.SSLInspection != "load_failed" {
+		t.Fatalf("/healthz ssl_inspection = %q, want load_failed (Ready() true but SaveCA failed)", h.SSLInspection)
+	}
+
+	// /readyz ca row must be a failing (report-only) row, not "ok".
+	rr := httptest.NewRecorder()
+	handleReady(rr, nil)
+	var r struct {
+		Checks map[string]struct {
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&r); err != nil {
+		t.Fatal(err)
+	}
+	caRow, ok := r.Checks["ca"]
+	if !ok {
+		t.Fatal("/readyz ca row missing after a configured CA failed to persist despite Ready() true")
+	}
+	if caRow.Status != "fail" {
+		t.Fatalf("/readyz ca row = %+v, want status=fail (recorded failure must win over Ready())", caRow)
 	}
 }

@@ -34,12 +34,18 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	// SSL inspection state (CHAOS-06): a CA that was configured but failed
 	// to load leaves the gateway serving TLS as tunnel-only bypass — that
 	// degradation must be visible to monitoring, not just a startup log line.
+	//
+	// The recorded load failure is consulted BEFORE Ready(): LoadOrInitCA calls
+	// InitCA() (which flips Ready() true) before SaveCA(), so a SaveCA failure
+	// (missing/unwritable parent dir) leaves initInspectionCA having recorded a
+	// failure while Ready() stays true. Reporting "ready" there would hide a CA
+	// bundle that never persisted — the configured inspection material is not
+	// actually usable across a restart.
 	sslInspection := "ready"
-	if !certMgr.Ready() {
+	if sslInspectionLoadFailure() != "" {
+		sslInspection = "load_failed"
+	} else if !certMgr.Ready() {
 		sslInspection = "unavailable"
-		if sslInspectionLoadFailure() != "" {
-			sslInspection = "load_failed"
-		}
 	}
 
 	type healthResponse struct {
@@ -92,10 +98,15 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	// failed load is surfaced as a failing (non-gating) check so the
 	// degradation is visible to probes instead of the row silently
 	// disappearing (CHAOS-06); posture (report-only) mirrors policy_loaded.
-	if certMgr.Ready() {
-		checks["ca"] = &checkResult{Status: "ok"}
-	} else if detail := sslInspectionLoadFailure(); detail != "" {
+	//
+	// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
+	// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
+	// recorded failure while Ready() stays true. Reporting "ok" there would
+	// hide a configured CA bundle that never persisted.
+	if detail := sslInspectionLoadFailure(); detail != "" {
 		checks["ca"] = &checkResult{Status: "fail", Detail: detail}
+	} else if certMgr.Ready() {
+		checks["ca"] = &checkResult{Status: "ok"}
 	}
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.

@@ -123,3 +123,59 @@ func TestConfigStoreVersion_UnarmedStoreDoesNotPersist(t *testing.T) {
 		t.Fatalf("unarmed store version = %d, want 1", got)
 	}
 }
+
+// resetReplicatedLeaderVersion isolates the process-global replicated-leader
+// watermark for one test and restores it afterwards.
+func resetReplicatedLeaderVersion(t *testing.T) {
+	t.Helper()
+	prev := replicatedLeaderConfigVersion.Load()
+	replicatedLeaderConfigVersion.Store(0)
+	t.Cleanup(func() { replicatedLeaderConfigVersion.Store(prev) })
+}
+
+// TestConfigStoreVersion_HAPromotionSeedsFromReplicatedLeader is the
+// HA-promotion regression: a freshly promoted standby whose own floor file is
+// ABSENT (it was never a CP) and whose wall-clock-derived seed is BELOW the old
+// leader's replicated Version must still publish a version strictly greater
+// than that leader Version — otherwise every DP holding the old leader's
+// lastVersion would silently short-circuit fetchAndApply and apply NO
+// post-failover config.
+func TestConfigStoreVersion_HAPromotionSeedsFromReplicatedLeader(t *testing.T) {
+	resetReplicatedLeaderVersion(t)
+
+	// The old leader's counter ran far ahead of wall-clock seconds (many rapid
+	// config updates), so the standby's clock-derived seed is well below it.
+	// This is exactly the value a running DP has already applied.
+	leaderVersion := time.Now().Unix() + 5_000_000
+	noteReplicatedLeaderVersion(leaderVersion)
+
+	// Promotion arms the floor over the (absent) file + clock + replicated
+	// version, then publishes its first snapshot.
+	floor := filepath.Join(t.TempDir(), cpConfigVersionFile) // never written: fresh promotee
+	cp := &ConfigStore{}
+	cp.armVersionPersistence(floor)
+	cp.Update(ConfigSnapshot{})
+
+	if got := cp.Get().Version; got <= leaderVersion {
+		t.Fatalf("post-promotion version %d <= replicated leader version %d — DPs would silently ignore all post-failover config (CHAOS-01 HA promotion)", got, leaderVersion)
+	}
+}
+
+// TestApplyHABundle_RecordsReplicatedLeaderVersion pins the wiring: applyHABundle
+// must capture the leader's bundle Version even when a downstream apply step
+// fails (here the empty cluster-state import), because the leader already
+// published that Version to the DPs.
+func TestApplyHABundle_RecordsReplicatedLeaderVersion(t *testing.T) {
+	resetReplicatedLeaderVersion(t)
+
+	const leaderVersion int64 = 987654
+	// Empty bundle: no CA (skipped) and a nil ClusterState that fails to import,
+	// so applyHABundle returns false BEFORE applyConfigSnapshot — proving the
+	// version is recorded up front, independent of apply success.
+	if applyHABundle(&HAStateBundle{Version: leaderVersion}, "tok") {
+		t.Fatal("applyHABundle should return false when cluster state is absent")
+	}
+	if got := replicatedLeaderConfigVersion.Load(); got != leaderVersion {
+		t.Fatalf("applyHABundle did not record the leader version: got %d, want %d", got, leaderVersion)
+	}
+}

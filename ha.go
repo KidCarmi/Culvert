@@ -532,6 +532,17 @@ func (h *HAState) seedTermFromLeader(leaderTerm uint64) {
 // cluster state and config snapshot only after the CA succeeds guarantees a CA
 // failure does not leave unrelated replicated state partially applied.
 func applyHABundle(bundle *HAStateBundle, token string) bool {
+	// CHAOS-01 (HA-promotion follow-up): remember the leader's published config
+	// version so a later promotion seeds this node's version floor above it.
+	// applyConfigSnapshot below applies bundle.Config but does NOT advance the
+	// local ConfigStore.version (that counter moves only when THIS node
+	// publishes as CP), so without this the promoted CP would reseed only from
+	// its own stale/absent floor + wall clock and could re-issue versions the
+	// DPs already applied from the old leader. Recorded up front (the epoch
+	// fence in syncFromLeader already ran) so a raised floor is guaranteed even
+	// if a downstream apply step below fails — a higher floor never harms DPs.
+	noteReplicatedLeaderVersion(bundle.Version)
+
 	if bundle.CACertPEM != "" {
 		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
 			logger.Printf("HA: apply replicated CA failed (no state imported): %v", err)
