@@ -136,3 +136,19 @@ Revert the commit → the inline fallback returns (default-on). Fully additive/l
    registry reports no update AND the gate is off (vs. the single startup note only)?
 3. Truthy-set — is `1/true/yes/on` the right accept-set (matches `CULVERT_C2_ENFORCE`
    negation semantics inverted)? Anything else must stay OFF.
+
+## 8. Planning-review findings & resolutions
+
+Two independent planning reviews (correctness/testability; behavior/scope). Both
+**approve-with-fixes**; all resolved in the implementation:
+
+| Finding | Sev | Resolution |
+|---|---|---|
+| Package-var `= resolve(os.Getenv())` freezes at package-LOAD, before any test runs ⇒ env→gate wiring untestable | **HIGH** | Resolver stays pure; the env is read at STARTUP via `applyLegacyGhTagCheckEnv(getenv)` (called from `startUpdateChecker`), with `getenv` injected as a test seam. `TestApplyLegacyGhTagCheckEnv` drives it. |
+| Test mutation of `legacyGhTagCheck`/`checkGitHubLatestTagFn` leaks across `-count=2 -shuffle=on` | **HIGH** | Every mutating test save/restores via `t.Cleanup` (`withFallbackSpy` helper) and none call `t.Parallel`. |
+| Spy-at-helper proves "no dial" only if extraction is total | MED | Added `TestCheckUpdateNow_NoDirectGitHubCall` source-scan: `checkUpdateNow` body has no `checkGitHubLatestTag(` / `api.github.com`, only `maybeGitHubTagFallback`. |
+| Must preserve `used → pullTag="latest"` wiring (not just the log line) | MED | `checkUpdateNow` sets `ghFallback = used` and keeps `if ghFallback { pullTag = "latest" }`; the ON path is byte-identical. |
+| Discoverability: an operator who stops seeing updates has only a boot log | MED | Gate state surfaced in `/api/update/status` (`legacy_gh_tag_check`); env added to CLAUDE.md; a one-shot runtime hint fires when the disabled fallback could have mattered. |
+| "Reduced visibility" overstated — registry path untouched + ci.yml now publishes semver image tags | LOW | Code comment + PR body now state the Docker-registry check remains the live path; default-off covers only a CI-regression edge case. |
+| Objective is the runtime update path, not install scripts (`internal/bootstrap` still curls api.github.com) | LOW | Scoped explicitly in CLAUDE.md + the PR body; install-script fetches are M2. |
+| Truthy accept-set / concurrency / retain-posture / rollback | LOW/confirm | `1/true/yes/on` (fail-safe OFF otherwise); write-once-at-startup read is race-free; retain+break-glass and rollback confirmed sound. |
