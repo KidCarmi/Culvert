@@ -52,7 +52,7 @@ upstream.
                                        ▼ (Inspect only)
                         ┌─────────────────────────────┐
                         │  Content scanning            │  DPI regex · ClamAV · YARA ·
-                        │  scanner.go, clam.go, yara   │  file-type · threat-feed
+                        │  scanner.go, clamav, yara    │  file-type · threat-feed
                         └──────────────┬───────────────┘
                                        ▼
                         ┌─────────────────────────────┐
