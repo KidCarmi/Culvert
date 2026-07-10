@@ -11678,6 +11678,12 @@ function showCPUpdatingOverlay() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cert_expiry"> Cert expiry</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ca_load_failed"> CA load failed</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="update_available"> Update available</label>
+        <!-- M1-3 release-catalog detection events: the store filters on exact
+             event names (or "*"), so events missing here would be silently
+             filtered for GUI-managed webhooks (Codex review on PR #639). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_stale"> Release catalog stale</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_refresh_failing"> Release refresh failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_recovered"> Release refresh recovered</label>
       </div>
     </div>
     <div class="form-group">
