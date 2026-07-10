@@ -135,6 +135,7 @@ var d0KnownRoutes = func() []string {
 //   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote (manual failover).
 //   - 145 — Terminology governance: added canonical /api/settings/default-auth-outcome
 //     alongside the retained legacy /api/settings/unauth-mode alias.
+//   - 146 — Added /api/auth/lockouts (list + admin-unlock active login lockouts).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -151,7 +152,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 145
+	const want = 146
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

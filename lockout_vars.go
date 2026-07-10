@@ -9,6 +9,7 @@ import "github.com/KidCarmi/Culvert/internal/lockout"
 type (
 	LoginLimiter   = lockout.LoginLimiter
 	APIRateLimiter = lockout.APIRateLimiter
+	LockedEntry    = lockout.LockedEntry
 )
 
 var (

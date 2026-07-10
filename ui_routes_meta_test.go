@@ -41,8 +41,9 @@ import (
 //   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote.
 //   - 145 — Terminology governance: added canonical /api/settings/default-auth-outcome
 //     alongside the retained legacy /api/settings/unauth-mode alias.
+//   - 146 — Added /api/auth/lockouts (list + admin-unlock active login lockouts).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 145
+	const want = 146
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

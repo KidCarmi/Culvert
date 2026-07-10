@@ -257,6 +257,45 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /api/auth/lockouts — list every currently-active login lockout (both
+// the tier-1 IP+username pair lock and the tier-2 account-wide lock). Before
+// this endpoint, an admin's only way to discover or clear a stuck lockout was
+// waiting out lockoutDuration, restarting the process, or reading logs.
+// POST /api/auth/lockouts — clear every lock for {"username":"..."} (both
+// tiers, every IP), the GUI equivalent of the existing ResetUser primitive.
+func apiAuthLockouts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{"lockouts": loginLimiter.Snapshot()})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			Username string `json:"username"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		body.Username = strings.TrimSpace(body.Username)
+		if body.Username == "" {
+			http.Error(w, "missing username", http.StatusBadRequest)
+			return
+		}
+		loginLimiter.ResetUser(body.Username)
+		auditEvent(r, "auth.lockout.clear", body.Username, "")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // POST /api/auth/change-password — self-service password change for any authenticated user.
 // Body: {"current_password": "...", "new_password": "..."}
 // Verifies the current password before accepting the change.
@@ -902,6 +941,7 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
 	mux.HandleFunc("/api/auth/users", apiAuthUsers)                    // RBAC user management (admin only)
 	mux.HandleFunc("/api/auth/change-password", apiAuthChangePassword) // self-service password change (any role)
+	mux.HandleFunc("/api/auth/lockouts", apiAuthLockouts)              // list/clear active login lockouts (admin unlock)
 
 	// ── Generic IdP Framework ─────────────────────────────────────────────
 	mux.HandleFunc("/api/idp", apiIdPList)              // GET list / POST create
