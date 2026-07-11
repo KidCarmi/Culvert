@@ -2,7 +2,8 @@
 .golangci.yml
 .dockerignore
 deploy
-docker-compose*.yml
+# docker-compose*.yml stays IN the build context: the Dockerfile copies the
+# compose files into the /app/deploy bundle for source-free installs.
 *.md
 *.out
 coverage.*

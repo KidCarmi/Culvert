@@ -31,7 +31,15 @@ Admin UI / API ──► Release Management API ──► culvert-maint agent /v
 ## Automatic local wiring
 
 The quick-start installer attempts local Release Management wiring by default.
-It succeeds only when all safety checks pass:
+It deploys the stack to `/srv/culvert` (all users; `CULVERT_DIR` overrides) and
+installs the agent binary from the proxy image's `/app/deploy` bundle — no
+source checkout or GitHub release download needed. The system path matters:
+the unprivileged `culvert-maint` user must be able to traverse into the stack
+directory, which a `0700`/`0750` home directory (EC2 `ec2-user`, modern
+Ubuntu) forbids — a stack placed there makes the installer skip the agent
+fail-closed and leaves the panel at **"Agent unreachable"**.
+
+Wiring succeeds only when all safety checks pass:
 
 - Docker is rootful and `userns-remap` is not enabled.
 - The proxy container is running and has a non-root numeric UID.

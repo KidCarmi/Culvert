@@ -31,6 +31,31 @@ RUN if [ -z "$VERSION" ] && [ -d .git ]; then \
 # still stamped explicitly via the -X ldflag above (independent of buildvcs), so
 # the git-describe/--build-arg version path is unaffected.
 
+# ── Maintenance-agent stage ───────────────────────────────────────────────────
+# Builds the host-side culvert-maint agent (a SEPARATE Go module, Linux-only by
+# design) so the runtime image can carry it in the /app/deploy bundle below.
+# CGO_ENABLED=0 → static binary that runs on any distro the operator installs
+# it on (pure-Go os/user: allow_peers must be numeric UIDs or /etc/passwd
+# names — NSS/LDAP usernames won't resolve; scripts/install.sh already
+# authorizes the proxy by NUMERIC UID). Version is stamped through the agent's
+# OWN symbol path (culvert-maint/internal/server.Version) and normalized to the
+# release-asset convention (vX.Y.Z) so the quick-start installer's
+# upgrade/idempotence check (`culvert-maint --version` vs target) works for
+# image-bundled installs exactly like signed-release downloads.
+FROM golang:1.26-alpine AS maintbuilder
+
+WORKDIR /src
+COPY cmd/culvert-maint/go.mod cmd/culvert-maint/go.sum ./
+RUN go mod download
+
+COPY cmd/culvert-maint/ ./
+ARG VERSION=
+RUN VER="${VERSION:-}" && \
+    case "$VER" in "") VER=dev ;; v*) : ;; *) VER="v$VER" ;; esac && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
+      -ldflags="-s -w -X culvert-maint/internal/server.Version=${VER}" \
+      -o /culvert-maint .
+
 # ── GeoIP stage ───────────────────────────────────────────────────────────────
 # Downloads the DB-IP free country database (CC BY 4.0, ~6 MB) at image build
 # time so no runtime network access or manual download is required.
@@ -83,6 +108,19 @@ COPY --chown=proxy:proxy config.example.yaml ./config.example.yaml
 # Mount a volume over /app/yara to supply your own rule set, then call
 #   POST /api/security-scan/yara/reload  to load the new rules at runtime.
 COPY --chown=proxy:proxy yara/ ./yara/
+
+# ── Deploy bundle (/app/deploy) ──────────────────────────────────────────────
+# Everything a host needs to DEPLOY the stack, shipped inside the (public)
+# image itself so the quick-start installer never clones the source repo:
+# compose files, the maintenance-agent packaging (installer + config example +
+# systemd unit + sudoers template), and the agent binary for this image's
+# architecture. scripts/install.sh extracts this directory with
+# `docker create` + `docker cp` after seeding culvert/proxy:pinned — the image
+# registry (TLS pull of the same artifact that runs the proxy) is the trust
+# channel. Never read at container runtime; the proxy process ignores it.
+COPY --chown=proxy:proxy docker-compose.yml docker-compose.maint-agent.yml ./deploy/
+COPY --chown=proxy:proxy packaging/ ./deploy/packaging/
+COPY --from=maintbuilder --chown=proxy:proxy /culvert-maint ./deploy/bin/culvert-maint
 
 # /data is the persistent volume for the Root CA bundle, policy rules, and
 # other state that must survive container restarts.
