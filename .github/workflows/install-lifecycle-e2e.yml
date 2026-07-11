@@ -40,6 +40,7 @@ on:
     paths:
       - "scripts/**"
       - "packaging/**"
+      - "cmd/culvert-maint/**"
       - "docker-compose*.yml"
       - "Dockerfile*"
       - "test/e2e/**"
@@ -529,6 +530,94 @@ jobs:
             || { echo "FATAL: backup $FN not listed as non-empty by the agent"; exit 1; }
           echo "E2E PRIVILEGED OP OK: sudo docker compose backup succeeded through the sandboxed unit."
 
+      # Verify-stage sudoers grammar guard. The upgrade's capture/verify stage
+      # runs `docker inspect --format {{json .Image}} <cid>` via `sudo -n` AS the
+      # unprivileged culvert-maint user. `{{json .Image}}` is ONE argv token that
+      # contains a space; the sudoers rule MUST backslash-escape that space
+      # (`{{json\ .Image}}`). A double-quoted form silently misses, `sudo -n`
+      # demands a password, and EVERY upgrade dies at verify with "a password is
+      # required" — the exact field failure. The backup op above cannot catch it
+      # (different sudoers rule), so reproduce the verify call EXACTLY here,
+      # repo-independently (the inspect rule is a container-id wildcard, not
+      # repo-bound), and assert it escalates and returns the image config digest.
+      - name: "Assert the verify-stage docker-inspect escalates through sudoers"
+        run: |
+          set -euxo pipefail
+          # The proxy container `culvert` is up (install.sh ran `compose up`, with
+          # clamav stubbed by the override). Inspect the SAME identifier shape the
+          # agent uses: the full 64-hex container id (the sudoers rule covers 12–64).
+          CID="$(sudo docker inspect --format '{{.Id}}' culvert)"
+          echo "culvert container id: $CID"
+          case "$CID" in [0-9a-f]*) : ;; *) echo "FATAL: unexpected container id '$CID'"; exit 1 ;; esac
+          # EXACT verify-stage call, as culvert-maint, non-interactive sudo. On a
+          # correct sudoers grammar this escalates NOPASSWD and prints the image
+          # config digest as a JSON string ("sha256:<64hex>"). On the broken
+          # double-quote grammar, `sudo -n` fails with a non-zero exit.
+          if ! OUT="$(sudo -u culvert-maint sudo -n /usr/bin/docker inspect --format '{{json .Image}}' "$CID" 2>&1)"; then
+            echo "FATAL: 'sudo -n docker inspect --format {{json .Image}}' did NOT escalate for culvert-maint."
+            echo "sudo output: $OUT"
+            echo "The sudoers container-inspect rule is not matching — it must backslash-escape the"
+            echo "space in {{json\\ .Image}} (containerInspectSudoersLines). This is the verify-stage"
+            echo "failure that breaks every upgrade with 'a password is required'."
+            echo "----- rendered sudoers drop-in -----"; sudo cat /etc/sudoers.d/culvert-maint 2>/dev/null || true
+            exit 1
+          fi
+          echo "inspect output: $OUT"
+          printf '%s\n' "$OUT" | grep -qE '^"sha256:[0-9a-f]{64}"$' \
+            || { echo "FATAL: verify inspect escalated but did not return an image config digest: $OUT"; exit 1; }
+          echo "VERIFY SUDOERS OK: culvert-maint runs the verify-stage docker inspect NOPASSWD and gets the image digest."
+
+      # Passwd-less health-probe guard. The Release-Management wiring verifies the
+      # agent is reachable by impersonating the PROXY container's UID, which on
+      # the host usually has NO /etc/passwd entry (e.g. UID 100). The field bug:
+      # `sudo -u "#100"` failed with "unknown user" and was misread as the agent
+      # denying the UID, so wiring aborted ("Agent unreachable"). The fix probes
+      # with `true` first, then falls back to setpriv (util-linux), which switches
+      # to arbitrary numeric IDs with no passwd entry. Run the REAL install.sh
+      # probe function against the live socket as a UID that genuinely has no
+      # passwd entry, and assert it reaches /v1/health via the setpriv path.
+      - name: "Assert the health probe reaches a passwd-less proxy UID"
+        run: |
+          set -euxo pipefail
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          CFG=/etc/culvert-maint/config.toml
+          PLUID=61234   # high UID with no /etc/passwd entry — like an in-container proxy UID
+          if getent passwd "$PLUID" >/dev/null; then echo "FATAL: precondition — UID $PLUID unexpectedly has a passwd entry"; exit 1; fi
+          command -v setpriv >/dev/null || { echo "FATAL: setpriv (util-linux) missing — the passwd-less fallback cannot work"; exit 1; }
+          # The probe's 2nd arg is the GID used for socket access (the real caller
+          # passes the culvert-maint group GID, not a second UID). The agent socket
+          # is 0660 culvert-maint:culvert-maint, so the probe must run with THAT gid
+          # or connect() is denied by DAC before SO_PEERCRED is ever consulted.
+          MAINT_GID="$(getent group culvert-maint | awk -F: '{print $3}')"
+          [ -n "$MAINT_GID" ] || { echo "FATAL: culvert-maint group not found"; exit 1; }
+          # Authorize that UID so SO_PEERCRED admits the peer, then restart so the
+          # agent reloads allow_peers (config is read once at startup).
+          sudo sed -i "s|^allow_peers = .*|allow_peers = [\"$PLUID\"]|" "$CFG"
+          sudo systemctl restart culvert-maint
+          for i in $(seq 1 30); do if sudo test -S "$SOCK"; then break; fi; sleep 1; done
+          # Extract the REAL probe function and run it as root (exactly how
+          # install.sh calls it) against the live socket for the passwd-less UID.
+          # The function calls the install.sh `warn` helper in its failure path;
+          # stub it so the extracted function is self-contained.
+          printf 'warn() { echo "$*" >&2; }\n' > "$RUNNER_TEMP/probe_fn.sh"
+          awk '/^verify_maint_agent_health_as_proxy_uid\(\) \{/{f=1} f{print} f&&/^\}/{exit}' scripts/install.sh >> "$RUNNER_TEMP/probe_fn.sh"
+          echo 'verify_maint_agent_health_as_proxy_uid "$1" "$2" "$3" && echo PROBE_OK || echo PROBE_FAIL' >> "$RUNNER_TEMP/probe_fn.sh"
+          OUT="$(sudo bash "$RUNNER_TEMP/probe_fn.sh" "$PLUID" "$MAINT_GID" "$SOCK" || true)"
+          echo "probe result: $OUT"
+          case "$OUT" in
+            *PROBE_OK*) : ;;
+            *) echo "FATAL: verify_maint_agent_health_as_proxy_uid failed for the passwd-less UID $PLUID —"
+               echo "the setpriv fallback for a UID with no /etc/passwd entry regressed (the 'unknown user'"
+               echo "field bug that surfaced as 'Agent unreachable')."
+               sudo journalctl -u culvert-maint --no-pager -n 40 2>&1 || true
+               exit 1 ;;
+          esac
+          # Restore the root peer so the remaining steps (idempotency re-run) work.
+          sudo sed -i 's|^allow_peers = .*|allow_peers = ["0"]|' "$CFG"
+          sudo systemctl restart culvert-maint
+          for i in $(seq 1 30); do if sudo test -S "$SOCK" && sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then break; fi; sleep 1; done
+          echo "PASSWD-LESS PROBE OK: the health probe reached the socket as a UID with no passwd entry (setpriv path)."
+
       # Idempotent re-run: the installer must leave the already-installed agent
       # unchanged (no rebuild/reinstall churn).
       - name: "Re-run installer — assert agent idempotency"
@@ -570,4 +659,318 @@ jobs:
           sudo systemctl daemon-reload 2>/dev/null
           sudo userdel culvert-maint 2>/dev/null
           sudo groupdel culvert-maint 2>/dev/null
+          exit 0
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Day-2 agent upgrade through the REAL production privilege boundary.
+  # Installs the maintenance agent with the REAL scripts/install.sh (systemd
+  # unit + sandbox + unprivileged culvert-maint user + REAL rendered sudoers),
+  # then drives a REAL /v1/upgrades/apply v1->v2. Because the agent runs as the
+  # culvert-maint service user in privilege_mode=sudoers, EVERY docker op in the
+  # apply flow — including the VERIFY stage's
+  #   sudo -n docker inspect --format {{json .Image}} <cid>
+  # — actually traverses the on-disk /etc/sudoers.d/culvert-maint. This is the
+  # coverage gap the bare-as-root maint-agent-update-e2e.yml cannot exercise
+  # (sudoers quoting / NoNewPrivileges bugs shipped through it). The agent is
+  # bound to the local TLS registry so its sudoers pull/tag rules match, and the
+  # compose override is wired via compose_override_file so the agent's own
+  # `restart` recreate keeps the ClamAV stub (an explicit `-f` suppresses the
+  # docker-compose.override.yml auto-merge).
+  # ───────────────────────────────────────────────────────────────────────────
+  agent-day2-update:
+    name: Agent day-2 upgrade through real sudoers
+    runs-on: ubuntu-latest
+    # HARD GATE. Binding the agent to a LOCAL registry
+    # (proxy_repo=127.0.0.1:5000/culvert) originally exposed a bug in the
+    # packaging installer's sudoers render: the registry PORT colon was left
+    # unescaped, so `visudo -c` rejected the file and the systemd unit + sudoers
+    # never installed (the default ghcr.io repo has no port and did not hit it).
+    # sudoers_escape_colon() in packaging/culvert-maint/install.sh now escapes it
+    # (pinned by install_script_maint_sudoers_render_test.go), so a ported repo
+    # renders a valid file. This job proves that end-to-end through the real
+    # sudo boundary; keep it a required gate.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Preflight — guard Docker baseline + pre-pull base images
+        run: |
+          set -euxo pipefail
+          docker --version; docker compose version
+          if dpkg -l moby-engine 2>/dev/null | grep -q '^ii'; then
+            echo "FATAL: runner ships moby-engine; install.sh's cleanup would remove the running Docker. Pin the runner image."; exit 1
+          fi
+          pull_retry() {
+            for i in 1 2 3 4; do
+              if docker pull "$1" 1>&2; then return 0; fi
+              echo "pull $1 failed (attempt $i) — retrying" 1>&2; sleep $((i * 3))
+            done
+            echo "FATAL: could not pull $1 after retries"; return 1
+          }
+          pull_retry registry:2
+          pull_retry busybox:stable
+
+      # TLS registry trusted by BOTH the daemon (/etc/docker/certs.d) and the
+      # CLI/system CA store. The agent's resolve_target runs
+      # `docker manifest inspect --verbose` (a CLI TLS call, no --insecure), and
+      # the sudo'd docker runs AS ROOT, so root's CLI must trust the registry via
+      # the system CA store — hence update-ca-certificates, not just certs.d.
+      - name: Start TLS local registry (trusted by daemon + CLI)
+        run: |
+          set -euxo pipefail
+          CERT_DIR="$RUNNER_TEMP/registry-certs"
+          mkdir -p "$CERT_DIR"
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "$CERT_DIR/registry.key" \
+            -out "$CERT_DIR/registry.crt" \
+            -days 2 \
+            -subj "/CN=127.0.0.1" \
+            -addext "subjectAltName=IP:127.0.0.1"
+          chmod 0644 "$CERT_DIR/registry.crt" "$CERT_DIR/registry.key"
+          sudo mkdir -p "/etc/docker/certs.d/127.0.0.1:5000"
+          sudo cp "$CERT_DIR/registry.crt" "/etc/docker/certs.d/127.0.0.1:5000/ca.crt"
+          sudo cp "$CERT_DIR/registry.crt" /usr/local/share/ca-certificates/registry-e2e.crt
+          sudo update-ca-certificates
+          docker run -d --restart=always --name registry \
+            -p 127.0.0.1:5000:5000 \
+            -v "$CERT_DIR:/certs:ro" \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS https://127.0.0.1:5000/v2/ >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "FATAL: TLS registry did not come up"; docker logs registry 2>&1 | tail -n 50 || true; exit 1; }
+
+      # Two genuinely-distinct proxy images (distinct BUILD_VARIANT -> distinct
+      # binary -> distinct registry digest), so the upgrade is observable.
+      - name: Build, push, capture v1 + v2 proxy digests
+        id: images
+        run: |
+          set -euxo pipefail
+          build_push_digest() {
+            variant="$1"; tag="$REPO:$variant"
+            docker build -f "$PROXY_DOCKERFILE" --build-arg "BUILD_VARIANT=$variant" -t "$tag" . 1>&2
+            docker push "$tag" 1>&2
+            docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag" | grep "^${REPO}@sha256:" | head -n1
+          }
+          D1_REF="$(build_push_digest v1)"
+          D2_REF="$(build_push_digest v2)"
+          D1="${D1_REF#${REPO}@}"; D2="${D2_REF#${REPO}@}"
+          [ -n "$D1" ] && [ -n "$D2" ] || { echo "FATAL: empty digest (D1=$D1 D2=$D2)"; exit 1; }
+          [ "$D1" != "$D2" ] || { echo "FATAL: v1 and v2 share a digest ($D1); upgrade would be unobservable"; exit 1; }
+          { echo "d1_ref=$D1_REF"; echo "d2_ref=$D2_REF"; } >> "$GITHUB_OUTPUT"
+
+      # Seed the FIXED local tag to v1 so install.sh's `docker compose up` starts
+      # the proxy on v1. install.sh sees the tag present -> "not reseeding".
+      - name: Seed culvert/proxy:pinned = v1
+        run: |
+          set -euxo pipefail
+          docker tag "${{ steps.images.outputs.d1_ref }}" "$PINNED_TAG"
+          docker image inspect "$PINNED_TAG" --format 'seeded {{.Id}}'
+
+      - name: Stage stack at $STACK_DIR
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p "$STACK_DIR"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$STACK_DIR/"
+          sudo cp "$STACK_DIR/$OVERRIDE_SRC" "$STACK_DIR/docker-compose.override.yml"
+          sudo test -f "$STACK_DIR/docker-compose.yml"
+          sudo test -f "$STACK_DIR/scripts/install.sh"
+
+      # Bind the agent to the local registry BEFORE install: the packaging
+      # installer seeds /etc/culvert-maint/config.toml from this example and
+      # renders sudoers from proxy_repo, so the sudoers pull/tag rules match the
+      # registry the apply pulls from. Also:
+      #  - compose_override_file: the agent's `restart` recreates with an
+      #    EXPLICIT `-f`, which suppresses the docker-compose.override.yml
+      #    auto-merge; wiring it as the second `-f` keeps the ClamAV stub so the
+      #    recreate doesn't pull the real 250 MB clamav image.
+      #  - ready_path=/health: the ClamAV stub makes /ready 503 by design, and
+      #    the agent's health gate gates on /ready 2xx; point readiness at the
+      #    always-200 /health so the op reaches the verify stage (the coverage
+      #    target). The sudoers-gated verify inspect is unaffected by this knob.
+      - name: Bind agent config to the local registry + override
+        run: |
+          set -euxo pipefail
+          CFGX="$STACK_DIR/packaging/culvert-maint/config.example.toml"
+          sudo test -f "$CFGX"
+          # Remove the active keys we are about to redefine (avoid TOML dup keys).
+          sudo sed -i -e '/^proxy_repo = /d' -e '/^image_allowlist = /d' -e '/^ready_path = /d' "$CFGX"
+          # Append E2E-bound values. Quoted heredoc: no shell expansion, so the
+          # backslashes and the single-quoted TOML literal survive verbatim.
+          sudo tee -a "$CFGX" >/dev/null <<'EOF'
+
+          # install-lifecycle E2E: bind to the local TLS registry + keep the CI stubs
+          proxy_repo = "127.0.0.1:5000/culvert"
+          image_allowlist = '^127\.0\.0\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
+          compose_override_file = "docker-compose.override.yml"
+          ready_path = "/health"
+          EOF
+          echo "----- appended agent config -----"
+          sudo tail -n 8 "$CFGX"
+
+      # Run the REAL installer: agent INCLUDED (build from source, deterministic),
+      # only the Release-Management compose auto-wiring skipped (it re-ups with
+      # explicit -f flags that bypass our override and pull heavy sidecars).
+      - name: Install via scripts/install.sh (agent included)
+        run: |
+          set -euxo pipefail
+          cd "$STACK_DIR"
+          sudo env "PATH=$PATH" \
+            CULVERT_SKIP_RELEASE_AGENT_WIRING=1 \
+            CULVERT_MAINT_FORCE_BUILD=1 \
+            bash scripts/install.sh </dev/null
+
+      - name: Assert proxy on v1 + agent installed and bound
+        run: |
+          set -euxo pipefail
+          D1_REF="${{ steps.images.outputs.d1_ref }}"
+          running_digest() {
+            local img; img="$(sudo docker inspect --format '{{.Image}}' culvert 2>/dev/null)"
+            sudo docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep "^${REPO}@sha256:" | head -n1 || true
+          }
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "FATAL: proxy /health did not come up after install"; exit 1; }
+          RUN="$(running_digest)"; echo "running proxy (expect v1): $RUN"
+          [ "$RUN" = "$D1_REF" ] || { echo "FATAL: proxy not on v1 ($RUN != $D1_REF)"; exit 1; }
+
+          # Agent artifacts + registry binding rendered into the REAL sudoers.
+          command -v culvert-maint >/dev/null || { echo "FATAL: culvert-maint not on PATH"; exit 1; }
+          sudo test -f /etc/systemd/system/culvert-maint.service || { echo "FATAL: systemd unit missing"; exit 1; }
+          sudo test -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in missing"; exit 1; }
+          sudo visudo -c -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in fails visudo -c"; exit 1; }
+          sudo grep -Eq '^proxy_repo = "127\.0\.0\.1:5000/culvert"' /etc/culvert-maint/config.toml \
+            || { echo "FATAL: agent proxy_repo not bound to the local registry"; sudo grep -n proxy_repo /etc/culvert-maint/config.toml; exit 1; }
+          # The registry repo must be the sudoers pull/tag boundary literal. The
+          # port colon is backslash-escaped in the rendered sudoers (visudo treats
+          # a bare ':' as the Runas/Host separator), so match the escaped form.
+          sudo grep -Fq '127.0.0.1\:5000/culvert@sha256' /etc/sudoers.d/culvert-maint \
+            || { echo "FATAL: sudoers pull/tag rule not bound to the local registry repo (escaped-colon form)"; sudo grep -n 'docker pull' /etc/sudoers.d/culvert-maint; exit 1; }
+          echo "PRECONDITION OK: proxy on v1; agent installed; sudoers bound to the local registry."
+
+      # Start the INSTALLED unit (install.sh leaves it stopped when wiring is
+      # skipped). The socket is 0660 owned by the service user; connect as ROOT
+      # (DAC-bypass) and authorize UID 0 in allow_peers so SO_PEERCRED admits it.
+      # The agent still RUNS as culvert-maint, so its docker ops still go through
+      # `sudo -n` + the rendered sudoers — that is the boundary under test.
+      - name: Start the installed unit + assert /v1 health
+        run: |
+          set -euxo pipefail
+          CFG=/etc/culvert-maint/config.toml
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          sudo sed -i 's|^allow_peers = .*|allow_peers = ["0"]|' "$CFG"
+          sudo grep -n '^allow_peers' "$CFG"
+          sudo systemctl enable --now culvert-maint
+          ok=""
+          for i in $(seq 1 30); do
+            if sudo test -S "$SOCK" && sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "FATAL: installed unit did not answer /v1/health"
+            sudo systemctl status culvert-maint --no-pager -l 2>&1 | tail -n 40 || true
+            sudo journalctl -u culvert-maint --no-pager -n 60 2>&1 || true
+            exit 1
+          fi
+          echo "----- /v1/status -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/status; echo
+          sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: culvert-maint not active"; exit 1; }
+
+      # THE COVERAGE: drive a REAL upgrade v1->v2 through the sandboxed unit +
+      # real sudoers. capture_before / resolve_target / pull / restart /
+      # health_gate / verify each run `sudo -n docker …` as culvert-maint.
+      - name: Drive the update (apply v2) through sudoers + poll to terminal
+        id: apply
+        run: |
+          set -euxo pipefail
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          TARGET_REF="${{ steps.images.outputs.d2_ref }}"
+          APPLY_RESP="$(sudo curl -fsS --unix-socket "$SOCK" \
+            -H 'Content-Type: application/json' -X POST \
+            -d "{\"image_ref\":\"$TARGET_REF\"}" \
+            http://localhost/v1/upgrades/apply)"
+          echo "apply response: $APPLY_RESP"
+          OP_ID="$(printf '%s' "$APPLY_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"
+          [ -n "$OP_ID" ] || { echo "FATAL: no op_id in apply response"; exit 1; }
+          echo "op_id=$OP_ID"
+          STATE=""; OP_JSON=""
+          for i in $(seq 1 120); do
+            OP_JSON="$(sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" || true)"
+            STATE="$(printf '%s' "$OP_JSON" | python3 -c 'import sys,json; d=sys.stdin.read(); print((json.loads(d).get("state","") if d.strip() else ""))' 2>/dev/null || true)"
+            echo "poll $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break ;; esac
+            sleep 2
+          done
+          echo "----- final op record -----"
+          printf '%s\n' "$OP_JSON" | python3 -m json.tool || printf '%s\n' "$OP_JSON"
+          echo "----- op log -----"
+          sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" || true
+          if [ "$STATE" != "succeeded" ]; then
+            echo "FATAL: apply op did not succeed through the sandboxed+sudoers unit (state=$STATE)."
+            echo "A sudo/NoNewPrivileges error in the op log means the sandbox blocks escalation;"
+            echo "a compose/docker error means the sudoers grammar or registry binding is off."
+            sudo journalctl -u culvert-maint --no-pager -n 80 2>&1 || true
+            exit 1
+          fi
+          echo "op_id=$OP_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Assert the flip (v1 -> v2) + verify ran through sudoers
+        run: |
+          set -euxo pipefail
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          D1_REF="${{ steps.images.outputs.d1_ref }}"; D2_REF="${{ steps.images.outputs.d2_ref }}"
+          OP_ID="${{ steps.apply.outputs.op_id }}"
+          running_digest() {
+            local img; img="$(sudo docker inspect --format '{{.Image}}' culvert 2>/dev/null)"
+            sudo docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$img" 2>/dev/null | grep "^${REPO}@sha256:" | head -n1 || true
+          }
+          RUN="$(running_digest)"; echo "running after apply (expect v2): $RUN"
+          [ "$RUN" != "$D1_REF" ] || { echo "FATAL: still on v1 — the agent did not flip the image"; exit 1; }
+          [ "$RUN" = "$D2_REF" ] || { echo "FATAL: running digest is neither v2 nor v1 (got $RUN, want $D2_REF)"; exit 1; }
+          curl -fsS http://127.0.0.1:8080/health >/dev/null || { echo "FATAL: proxy /health failed after the flip"; exit 1; }
+
+          # PROOF the sudoers-gated VERIFY inspect actually ran: the verify stage
+          # emits `verify: running_image_id=sha256:<64hex> running_digests=…` ONLY
+          # on a successful, non-skipped re-capture. That line is written by
+          # verifyRunningImage (handlers_upgrade_apply.go), which calls
+          # CaptureRunningProxyImage -> ComposeContainerInspect, i.e.
+          #   sudo -n docker inspect --format {{json .Image}} <cid>
+          # through /etc/sudoers.d/culvert-maint. Its presence proves the sudoers
+          # quoting for that entry is correct AND the sandbox allowed escalation.
+          OP_LOG="$(sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs")"
+          printf '%s\n' "$OP_LOG" | grep -Eq 'verify: running_image_id=sha256:[0-9a-f]{64}' \
+            || { echo "FATAL: op log has no successful verify-stage inspect marker — the sudoers-gated verify did not run"; printf '%s\n' "$OP_LOG"; exit 1; }
+          echo "PROOF: agent flipped v1 -> v2 and the sudoers-gated verify inspect ran successfully."
+
+      - name: Diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          OP_ID="${{ steps.apply.outputs.op_id }}"
+          echo "===== systemctl status ====="; sudo systemctl status culvert-maint --no-pager -l 2>&1 | tail -n 40
+          echo "===== agent journal (tail) ====="; sudo journalctl -u culvert-maint --no-pager -n 120 2>&1
+          echo "===== agent /v1/status ====="; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/status 2>/dev/null; echo
+          echo "===== op log ====="; [ -n "$OP_ID" ] && sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" 2>/dev/null
+          echo "===== sudoers drop-in ====="; sudo cat /etc/sudoers.d/culvert-maint 2>/dev/null
+          echo "===== agent config.toml ====="; sudo cat /etc/culvert-maint/config.toml 2>/dev/null
+          echo "===== compose ps ====="; ( cd "$STACK_DIR" && sudo docker compose ps -a )
+          echo "===== culvert container logs (tail) ====="; sudo docker logs culvert 2>&1 | tail -n 150
+
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set +e
+          ( cd "$STACK_DIR" && sudo docker compose down -v )
+          sudo docker rm -f registry culvert 2>/dev/null
+          sudo systemctl disable --now culvert-maint 2>/dev/null
+          sudo rm -rf /etc/culvert-maint /etc/sudoers.d/culvert-maint
           exit 0

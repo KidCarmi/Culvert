@@ -88,6 +88,17 @@ sed_escape_replacement() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g'
 }
 
+# Escape sudoers-special colons in a value destined to be a LITERAL inside a
+# sudoers command (Cmnd) — sudo treats a bare ':' as the Runas/Host separator,
+# so a proxy_repo with a registry port (e.g. 127.0.0.1:5000/culvert) renders an
+# unescaped ':' that visudo -c rejects with a syntax error. The template already
+# hand-escapes its own literal colons (sha256\:, culvert/proxy\:pinned); the
+# substituted repo must get the same treatment. Run this BEFORE
+# sed_escape_replacement so the backslash it adds is then sed-escaped correctly.
+sudoers_escape_colon() {
+    printf '%s' "$1" | sed -e 's/:/\\:/g'
+}
+
 # Read a TOML basic-string value:  key = "value"  (any leading whitespace,
 # any spacing around =). Ignores commented lines. Prints empty if absent.
 # Strips everything from the FIRST "=" (not FS="="'s second field) so an "="
@@ -457,9 +468,11 @@ RENDERED_SUDOERS=$(mktemp)
 RENDERED_SUDOERS_TMP=$(mktemp)
 
 # Pass 1 — substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets
-# the path/registry slashes pass through unescaped.
+# the path/registry slashes pass through unescaped. proxy_repo is colon-escaped
+# for sudoers FIRST (a registry port like 127.0.0.1:5000 would otherwise render a
+# bare ':' that visudo rejects), THEN sed-escaped so the added backslash survives.
 sed -e "s|{compose_path}|$(sed_escape_replacement "$COMPOSE_PATH")|g" \
-    -e "s|{proxy_repo}|$(sed_escape_replacement "$PROXY_REPO")|g" \
+    -e "s|{proxy_repo}|$(sed_escape_replacement "$(sudoers_escape_colon "$PROXY_REPO")")|g" \
     "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS_TMP"
 
 # Pass 2 — the compose.up allowlist has a second, override-carrying form bound to
