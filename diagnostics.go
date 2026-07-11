@@ -151,7 +151,6 @@ func buildOperatorContract() OperatorContract {
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
-		checkUpdaterURL(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
@@ -567,26 +566,6 @@ func checkYARAEnginePosture() OperatorContractCheck {
 		Code:    "yara_engine_posture",
 		Status:  diagOK,
 		Message: "YARA engine posture: fail-closed on timeout and saturation",
-	}
-}
-
-// checkUpdaterURL re-runs the same pure validateUpdaterURL the startup path
-// uses. It does not contact the updater. The handler returns only a coarse
-// verdict — never the URL itself — so the field stays admin-safe at viewer
-// role.
-func checkUpdaterURL() OperatorContractCheck {
-	if err := validateUpdaterURL(updaterURL); err != nil {
-		return OperatorContractCheck{
-			Code:           "updater_url",
-			Status:         diagFail,
-			Message:        "configured updater URL is rejected by the SSRF/allowlist guard",
-			OperatorAction: "Set --updater-url-allowlist (or the YAML equivalent) to include the configured updater URL, or revert to the default sidecar.",
-		}
-	}
-	return OperatorContractCheck{
-		Code:    "updater_url",
-		Status:  diagOK,
-		Message: "updater URL passes SSRF / allowlist validation",
 	}
 }
 

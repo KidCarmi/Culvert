@@ -64,28 +64,6 @@ func haRoleCode() int {
 	}
 }
 
-// updateProgressGauges reads the active rolling-update state at scrape time.
-// in_progress is 1 when an update is active; completed/total are node counts.
-// When no update is active all three read 0 — the Nodes map is intentionally
-// retained after a rollout for status/reporting, so completed/total are gated
-// on Active to avoid exporting a finished rollout's counts as current progress.
-// No hot-path increments — pure read under clusterUpdateState.mu.
-func updateProgressGauges() (inProgress, completed, total int) {
-	clusterUpdateState.mu.Lock()
-	defer clusterUpdateState.mu.Unlock()
-	if !clusterUpdateState.Active {
-		return 0, 0, 0
-	}
-	inProgress = 1
-	total = len(clusterUpdateState.Nodes)
-	for _, n := range clusterUpdateState.Nodes {
-		if n.Status == "complete" {
-			completed++
-		}
-	}
-	return
-}
-
 // clusterWritePrometheus appends culvert_enrollment_* metric lines. Called from
 // handleMetrics alongside the per-rule, latency, urlcat, CA, and CDR writers.
 // Node counts are read live at scrape time via ClusterStore.NodeCounts().
@@ -126,20 +104,6 @@ func clusterWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_ha_failovers_total Standby→leader promotions (excludes the initial designated leader)\n")
 	w.WriteString("# TYPE culvert_ha_failovers_total counter\n")
 	fmt.Fprintf(w, "culvert_ha_failovers_total %d\n", statHAFailovers.Load())
-
-	inProgress, completed, total := updateProgressGauges()
-
-	w.WriteString("\n# HELP culvert_cluster_update_in_progress 1 while a rolling cluster update is active, else 0\n")
-	w.WriteString("# TYPE culvert_cluster_update_in_progress gauge\n")
-	fmt.Fprintf(w, "culvert_cluster_update_in_progress %d\n", inProgress)
-
-	w.WriteString("\n# HELP culvert_cluster_update_completed_nodes Nodes completed in the active rolling update\n")
-	w.WriteString("# TYPE culvert_cluster_update_completed_nodes gauge\n")
-	fmt.Fprintf(w, "culvert_cluster_update_completed_nodes %d\n", completed)
-
-	w.WriteString("\n# HELP culvert_cluster_update_total_nodes Nodes in scope for the active rolling update\n")
-	w.WriteString("# TYPE culvert_cluster_update_total_nodes gauge\n")
-	fmt.Fprintf(w, "culvert_cluster_update_total_nodes %d\n", total)
 
 	dpPollHist.WritePrometheus(w)
 }

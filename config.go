@@ -139,10 +139,14 @@ type FileConfig struct {
 	// at startup (single-node only). Also readable from CULVERT_SESSION_SECRET.
 	SessionSecret string `yaml:"session_secret"`
 
-	// Update configures the Docker self-update system.
+	// Update is retained as inert, parse-only surface. The legacy Docker
+	// self-update sidecar was removed; nothing reads these fields. They stay
+	// declared so an existing config file with an `update:` section still
+	// parses (the YAML decoder uses DisallowUnknownField and would otherwise
+	// fail closed at startup). Updates now flow through Release Management.
 	Update struct {
-		UpdaterURL   string   `yaml:"updater_url"`   // URL of the updater sidecar (default: http://culvert-updater:7123)
-		URLAllowlist []string `yaml:"url_allowlist"` // H4: operator-curated trusted updater URLs; empty ⇒ default + loopback only
+		UpdaterURL   string   `yaml:"updater_url"`   // deprecated: ignored
+		URLAllowlist []string `yaml:"url_allowlist"` // deprecated: ignored
 	} `yaml:"update"`
 
 	// Cluster configures Control Plane / Data Plane multi-node mode.

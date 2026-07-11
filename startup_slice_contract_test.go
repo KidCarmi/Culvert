@@ -42,7 +42,7 @@ func TestStartupSliceContract_PureAndDeterministic(t *testing.T) {
 		{"auth", func(_ *FileConfig) any { return resolveAuthStartupConfig(0, 0, "", "", "") }},
 		{"fileblock", func(fc *FileConfig) any { return resolveFileBlockStartupConfig(fc, "") }},
 		{"background_services", func(fc *FileConfig) any {
-			return resolveBackgroundServicesStartupConfig(fc, "", "", "")
+			return resolveBackgroundServicesStartupConfig(fc)
 		}},
 		{"blocklist", func(fc *FileConfig) any { return resolveBlocklistStartupConfig(fc, "") }},
 		{"cdr", func(fc *FileConfig) any { return resolveCDRStartupConfig(fc, cdrCLIFlags{}) }},

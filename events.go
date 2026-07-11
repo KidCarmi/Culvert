@@ -42,8 +42,6 @@ type DashboardPayload struct {
 	YARABlocked       int64          `json:"yaraBlocked"`
 	DPIBlocked        int64          `json:"dpiBlocked"`
 	ThreatFeedBlocked int64          `json:"threatFeedBlocked"`
-	UpdateAvailable   bool           `json:"updateAvailable,omitempty"`
-	LatestVersion     string         `json:"latestVersion,omitempty"`
 }
 
 // sseBroadcaster owns the live-dashboard ticker that pushes DashboardPayload
@@ -101,11 +99,6 @@ func (b *sseBroadcaster) tick() {
 	}
 	rps := float64(sum) / 60.0
 
-	globalUpdateInfo.mu.RLock()
-	updAvail := globalUpdateInfo.updateAvailable
-	updLatest := globalUpdateInfo.latestVersion
-	globalUpdateInfo.mu.RUnlock()
-
 	scanCounters := secscan.Counters()
 	payload := DashboardPayload{
 		ActiveConns:       getActiveConns(),
@@ -119,8 +112,6 @@ func (b *sseBroadcaster) tick() {
 		YARABlocked:       scanCounters.YARABlocked,
 		DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
 		ThreatFeedBlocked: scanCounters.ThreatFeedBlocked,
-		UpdateAvailable:   updAvail,
-		LatestVersion:     updLatest,
 	}
 	data, _ := json.Marshal(payload)
 	hub.Broadcast(data)

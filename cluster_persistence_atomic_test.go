@@ -1,13 +1,11 @@
 package main
 
 // cluster_persistence_atomic_test.go — CL-7 focused tests for the
-// three cluster-domain persistence paths that were hardened to use
+// cluster-domain persistence paths that were hardened to use
 // atomicWriteFile.
 //
-// Before CL-7 the three paths used non-durable primitives:
+// Before CL-7 the paths used non-durable primitives:
 //   (a) saveHAConfig         — plain os.WriteFile (no tmp+rename)
-//   (b) ClusterUpdateState.persist — tmp + os.Rename (atomic but
-//                                    not fsynced)
 //   (c) persistEnrollCerts   — plain os.WriteFile for the
 //                              dp_enrollment.json config file
 //
@@ -146,65 +144,6 @@ func TestCL7_SaveHAConfig_AtomicWriteFile(t *testing.T) {
 	}
 	if !loaded.Enabled {
 		t.Error("loaded.Enabled = false, want true")
-	}
-}
-
-// ─── (b) ClusterUpdateState.persist ──────────────────────────────────
-
-// TestCL7_ClusterUpdateState_Persist_AtomicWriteFile verifies that
-// ClusterUpdateState.persist() now routes through atomicWriteFile.
-// Pre-CL-7 it did a manual tmp + os.Rename — atomic-via-rename but
-// NOT fsynced.
-//
-// The clusterUpdateFile package global was const before CL-7;
-// changing it to var (single-keyword, no semantic change) lets the
-// test redirect to a tempdir. Production callers do not mutate the
-// global at runtime — see the package-level doc on the var.
-func TestCL7_ClusterUpdateState_Persist_AtomicWriteFile(t *testing.T) {
-	ensureClusterPersistTestLogger(t)
-
-	oldPath := clusterUpdateFile
-	t.Cleanup(func() { clusterUpdateFile = oldPath })
-
-	dir := t.TempDir()
-	clusterUpdateFile = filepath.Join(dir, "cluster_update.json")
-
-	state := &ClusterUpdateState{
-		Active:      true,
-		TargetTag:   "cl7-test-v1.0.0",
-		PreviousTag: "cl7-test-v0.9.0",
-		Initiator:   "cl7-test",
-		Phase:       "updating_dps",
-		Nodes: map[string]*NodeUpdateStatus{
-			"dp-a": {NodeID: "dp-a", Status: "pending"},
-		},
-		ErrorBudget: ErrorBudgetConfig{MaxConsecutive: 3, MaxPercent: 20},
-	}
-
-	state.persist()
-
-	assertFileMode0600(t, clusterUpdateFile)
-	assertNoTmpLeftovers(t, dir)
-
-	raw, err := os.ReadFile(clusterUpdateFile)
-	if err != nil {
-		t.Fatalf("read %q: %v", clusterUpdateFile, err)
-	}
-	var loaded ClusterUpdateState
-	if err := json.Unmarshal(raw, &loaded); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if loaded.TargetTag != state.TargetTag {
-		t.Errorf("loaded.TargetTag = %q, want %q", loaded.TargetTag, state.TargetTag)
-	}
-	if loaded.Phase != state.Phase {
-		t.Errorf("loaded.Phase = %q, want %q", loaded.Phase, state.Phase)
-	}
-	if !loaded.Active {
-		t.Error("loaded.Active = false, want true")
-	}
-	if len(loaded.Nodes) != 1 {
-		t.Errorf("len(loaded.Nodes) = %d, want 1", len(loaded.Nodes))
 	}
 }
 

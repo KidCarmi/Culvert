@@ -109,8 +109,8 @@ type startupState struct {
 	revocationsFile         *string
 	scanSvcListen           *string
 	scanSvcURL              *string
-	updaterURLFlag          *string
-	updaterURLAllowFlag     *string
+	updaterURLFlag          *string // deprecated: legacy updater removed; parsed-but-ignored
+	updaterURLAllowFlag     *string // deprecated: legacy updater removed; parsed-but-ignored
 	uiSANsFlag              *string
 	trustFwdHeaders         *bool
 	resetPwUser             *string
@@ -277,8 +277,8 @@ func parseFlags(s *startupState) {
 	s.revocationsFile = flag.String("revocations-file", "", "Path to persist session revocations across restarts (e.g. /data/revocations.json)")
 	s.scanSvcListen = flag.String("scan-svc-listen", "", "Run as scan microservice sidecar on this address (e.g. :8484)")
 	s.scanSvcURL = flag.String("scan-svc-url", "", "Remote scan service URL (e.g. http://scan-svc:8484) — disables local ClamAV/YARA")
-	s.updaterURLFlag = flag.String("updater-url", "", "Updater sidecar URL (default http://culvert-updater:7123)")
-	s.updaterURLAllowFlag = flag.String("updater-url-allowlist", "", "H4: comma-separated allowlist of permitted non-default updater URLs (empty ⇒ default + loopback only)")
+	s.updaterURLFlag = flag.String("updater-url", "", "deprecated: legacy updater sidecar removed; flag accepted but ignored")
+	s.updaterURLAllowFlag = flag.String("updater-url-allowlist", "", "deprecated: legacy updater sidecar removed; flag accepted but ignored")
 	s.uiSANsFlag = flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
@@ -807,12 +807,12 @@ func initMTLSAndOCSP(s *startupState) {
 	loadMTLSAndOCSP(resolveMTLSOCSPStartupConfig(s.fc))
 }
 
-// initBackgroundServices starts SSE, alert retry, updater, and cluster recovery.
-// initBackgroundServices resolves the background-services slice config and
-// hands it to the loader (background_services_startup*.go).
+// initBackgroundServices starts the SSE broadcaster and the alert-retry queue.
+// It resolves the (now config-free) background-services slice and hands it to
+// the loader (background_services_startup*.go).
 func initBackgroundServices(s *startupState) {
 	loadBackgroundServices(
-		resolveBackgroundServicesStartupConfig(s.fc, *s.updaterURLAllowFlag, *s.updaterURLFlag, version),
+		resolveBackgroundServicesStartupConfig(s.fc),
 		appLifecycleCtx,
 	)
 }

@@ -41,8 +41,9 @@ import (
 //   - 144 — ADR-0004 Slice 1e added /api/cluster/ha/promote.
 //   - 145 — Terminology governance: added canonical /api/settings/default-auth-outcome
 //     alongside the retained legacy /api/settings/unauth-mode alias.
+//   - 134 — Legacy updater removal: dropped the 11 /api/update/* routes.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 145
+	const want = 134
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -144,7 +145,6 @@ var helperSourceFiles = []string{
 	"pac.go",
 	"ui_security.go",
 	"ui_cluster.go",
-	"update.go",
 	"cdr_ui.go",
 	"diagnostics.go",
 	"ui_governance.go",

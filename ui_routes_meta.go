@@ -531,33 +531,6 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/cluster/bootstrap/", Handler: "apiBootstrapRouter", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "token-authed bootstrap dispatch; gating delegated to handler"}}},
 
-	// ── Updates ───────────────────────────────────────────────────────────
-	{Path: "/api/update/status", Handler: "apiUpdateStatus", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
-	{Path: "/api/update/check", Handler: "apiUpdateCheck", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal — confirmed direct gating"}}},
-	{Path: "/api/update/apply", Handler: "apiUpdateApply", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal; SSE stream"}}},
-	{Path: "/api/update/preview", Handler: "apiUpdatePreview", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal; config diff preview"}}},
-	{Path: "/api/update/reports", Handler: "apiUpdateReports", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "C1.5 audit: requireRole(\"viewer\") via string literal — confirmed direct gating"}}},
-	{Path: "/api/update/rollback", Handler: "apiUpdateRollback", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal"}}},
-	{Path: "/api/update/rollback/status", Handler: "apiUpdateRollbackStatus", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "C1.5 audit: requireRole(\"viewer\") via string literal"}}},
-	{Path: "/api/update/session", Handler: "apiUpdateSession", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "C1.5 audit: requireRole(\"viewer\") via string literal; SSE re-attach"}}},
-	{Path: "/api/update/cluster", Handler: "apiClusterUpdate", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal in update_cluster.go"}}},
-	{Path: "/api/update/cluster/status", Handler: "apiClusterUpdateStatus", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "C1.5 audit: requireRole(\"viewer\") via string literal in update_cluster.go"}}},
-	{Path: "/api/update/registry", Handler: "apiRegistrySettings", Domain: "update", Public: false,
-		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "C1.5 audit: requireRole(\"viewer\") via string literal — was metadata=admin (too strict)"},
-			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "C1.5 audit: requireRole(\"admin\") via string literal"},
-		}},
-
 	// ── CDR (Sluice) integration ──────────────────────────────────────────
 	{Path: "/api/cdr/config", Handler: "apiCDRConfig", Domain: "cdr", Public: false,
 		Methods: []uiRouteMethod{

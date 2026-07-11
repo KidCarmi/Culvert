@@ -407,9 +407,6 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="settings" data-min-role="admin">
       <span class="icon">⚙️</span> Settings
     </div>
-    <div class="nav-item" data-view="updates" data-min-role="admin">
-      <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
-    </div>
     <div class="nav-item" data-view="releases">
       <span class="icon">🚀</span> Releases
     </div>
@@ -3454,140 +3451,6 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-cluster -->
 
-    <!-- ═══ UPDATES ══════════════════════════════════════════════════════ -->
-    <div class="view" id="view-updates">
-      <!-- Version Status -->
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Version Status</span>
-          <button class="btn sm ghost" data-click="updateCheckNow">Check Now</button>
-        </div>
-        <div class="card-grid" id="update-status-cards">
-          <div class="card"><div class="card-label">Current Version</div><div class="card-value" id="upd-current">—</div></div>
-          <div class="card"><div class="card-label">Latest Available</div><div class="card-value" id="upd-latest">—</div></div>
-          <div class="card"><div class="card-label">Last Checked</div><div class="card-value" id="upd-last-checked">—</div></div>
-          <div class="card"><div class="card-label">Updater Status</div><div class="card-value" id="upd-updater-status">—</div></div>
-        </div>
-      </div>
-
-      <!-- Standalone Update -->
-      <div class="panel" id="upd-standalone-panel">
-        <div class="panel-header">
-          <span class="panel-title">Standalone Update</span>
-        </div>
-        <div style="padding:16px" id="upd-standalone-content">
-          <div id="upd-no-update" style="color:var(--muted);font-size:.85rem">No update available. You are running the latest version.</div>
-          <div id="upd-available" style="display:none">
-            <p style="margin:0 0 12px 0;font-size:.9rem">A new version is available. Review changes before applying.</p>
-            <div style="display:flex;gap:8px">
-              <button class="btn sm" data-click="updatePreview">Preview Changes</button>
-              <button class="btn sm" id="upd-apply-btn" style="display:none" data-click="updateApply">Apply Update</button>
-            </div>
-          </div>
-          <!-- Preview diff -->
-          <div id="upd-preview" style="display:none;margin-top:16px">
-            <div style="font-weight:600;margin-bottom:8px;font-size:.85rem">Container Config Changes</div>
-            <div id="upd-preview-content" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:.8rem;max-height:300px;overflow:auto;white-space:pre-wrap"></div>
-          </div>
-          <!-- Progress -->
-          <div id="upd-progress" style="display:none;margin-top:16px">
-            <div style="font-weight:600;margin-bottom:8px;font-size:.85rem">Update Progress</div>
-            <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px">
-              <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:8px">
-                <div id="upd-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s"></div>
-              </div>
-              <div id="upd-progress-step" style="font-size:.82rem;color:var(--muted)">Waiting...</div>
-              <div id="upd-progress-log" style="margin-top:8px;font-family:monospace;font-size:.78rem;max-height:200px;overflow:auto;white-space:pre-wrap"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Rollback -->
-      <div class="panel" id="upd-rollback-panel" style="display:none">
-        <div class="panel-header">
-          <span class="panel-title">Rollback</span>
-        </div>
-        <div style="padding:16px">
-          <p style="margin:0 0 8px 0;font-size:.85rem" id="upd-rollback-info">—</p>
-          <button class="btn sm danger" data-click="updateRollback">Rollback Now</button>
-        </div>
-      </div>
-
-      <!-- Cluster Rolling Update (CP only) -->
-      <div class="panel" id="upd-cluster-panel" style="display:none">
-        <div class="panel-header">
-          <span class="panel-title">Cluster Rolling Update</span>
-          <button class="btn sm ghost" data-click="loadClusterUpdateStatus">Refresh</button>
-        </div>
-        <div style="padding:16px">
-          <div id="upd-cluster-idle">
-            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-              <input type="text" class="input" id="upd-cluster-tag" placeholder="Target tag (e.g. v2.0.0)" style="width:200px">
-              <select class="input" id="upd-cluster-budget" style="width:160px">
-                <option value="conservative">Conservative (2/10%)</option>
-                <option value="normal" selected>Normal (3/20%)</option>
-                <option value="aggressive">Aggressive (5/50%)</option>
-              </select>
-              <button class="btn sm" data-click="clusterUpdateStart">Update Cluster</button>
-            </div>
-          </div>
-          <div id="upd-cluster-active" style="display:none">
-            <div style="margin-bottom:8px;font-size:.85rem">
-              Phase: <strong id="upd-cluster-phase">—</strong> &nbsp;|&nbsp;
-              Target: <code id="upd-cluster-target">—</code>
-            </div>
-            <div class="tbl-wrap">
-              <table>
-                <thead><tr><th>Node</th><th>Status</th><th>Detail</th><th>Duration</th></tr></thead>
-                <tbody id="upd-cluster-nodes"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Update Reports -->
-      <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">Update Reports</span>
-          <button class="btn sm ghost" data-click="loadUpdateReports">Refresh</button>
-        </div>
-        <div id="upd-reports-empty" style="padding:16px;color:var(--muted);font-size:.85rem">No update reports yet.</div>
-        <div class="tbl-wrap">
-          <table id="upd-reports-table" style="display:none">
-            <thead><tr><th>Report</th><th>Created</th><th>Actions</th></tr></thead>
-            <tbody id="upd-reports-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Registry Settings (admin only) -->
-      <div class="panel" id="upd-registry-panel">
-        <div class="panel-header">
-          <span class="panel-title">Registry Settings</span>
-        </div>
-        <div style="padding:16px">
-          <p style="font-size:.85rem;color:var(--muted);margin-bottom:14px">Configure a custom container registry for enterprise or air-gapped environments. Leave empty to use the default (ghcr.io).</p>
-          <div class="form-row" style="margin-bottom:10px">
-            <label for="upd-reg-url" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Registry URL</label>
-            <input id="upd-reg-url" type="text" placeholder="e.g. registry.corp.internal/culvert" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
-          </div>
-          <div style="display:flex;gap:12px;margin-bottom:12px">
-            <div style="flex:1">
-              <label for="upd-reg-user" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Username</label>
-              <input id="upd-reg-user" type="text" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
-            </div>
-            <div style="flex:1">
-              <label for="upd-reg-pass" style="display:block;font-size:.82rem;color:var(--muted);margin-bottom:4px">Password</label>
-              <input id="upd-reg-pass" type="password" placeholder="(optional)" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem">
-            </div>
-          </div>
-          <button class="btn accent" data-click="saveRegistrySettings">Save Registry Settings</button>
-        </div>
-      </div>
-    </div><!-- /view-updates -->
-
     <!-- ═══ DIAGNOSTICS ══════════════════════════════════════════════════ -->
     <div class="view" id="view-diagnostics">
       <div class="panel">
@@ -3710,21 +3573,6 @@ Firefox (all platforms):
   </div><!-- /content -->
 </div><!-- /main -->
 
-<!-- ── CP Updating Overlay ─────────────────────────────────────────────── -->
-<div id="cp-updating-overlay" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(11,15,26,.97);align-items:center;justify-content:center">
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:48px 44px;width:100%;max-width:440px;box-shadow:0 24px 64px rgba(0,0,0,.6);text-align:center">
-    <div style="font-size:2.4rem;margin-bottom:12px">&#8635;</div>
-    <h2 style="font-size:1.35rem;font-weight:700;margin-bottom:8px">Control Plane Updating</h2>
-    <p style="color:var(--muted);font-size:.9rem;margin-bottom:20px;line-height:1.55">The proxy container is restarting with the new version. This page will reload automatically when the update is complete.</p>
-    <div id="cp-upd-status" style="font-size:.9rem;color:var(--accent);margin-bottom:16px">Waiting for container restart...</div>
-    <div style="width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:24px">
-      <div id="cp-upd-bar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
-    </div>
-    <button id="cp-upd-reload" class="btn primary" data-click="reloadPage" style="margin-bottom:12px">Reload Now</button>
-    <p style="font-size:.78rem;color:var(--muted)">If the update already completed, click "Reload Now". Otherwise check <code>docker logs culvert-updater</code>.</p>
-  </div>
-</div>
-
 <!-- Confirmation dialog (F22) -->
 <div id="confirm-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
@@ -3801,7 +3649,6 @@ document.addEventListener('click', e => {
     case 'doLogout':          doLogout(); break;
     case 'switchView':        e.preventDefault(); switchView(arg); break;
     case 'dismissParent':     el.parentElement.parentElement.style.display='none'; break;
-    case 'reloadPage':        location.reload(); break;
 
     // ── Confirm dialog ──
     case 'confirmDialogResolve': confirmDialogResolve(arg === 'true'); break;
@@ -4017,16 +3864,6 @@ document.addEventListener('click', e => {
     case 'hideAddBandwidthModal': hideAddBandwidthModal(); break;
     case 'createBandwidthPolicy': createBandwidthPolicy(); break;
     case 'deleteBandwidthPolicy': deleteBandwidthPolicy(arg); break;
-
-    // ── Update system ──
-    case 'updateCheckNow':    updateCheckNow(); break;
-    case 'updatePreview':     updatePreview(); break;
-    case 'updateApply':       updateApply(); break;
-    case 'updateRollback':    updateRollback(); break;
-    case 'loadClusterUpdateStatus': loadClusterUpdateStatus(); break;
-    case 'clusterUpdateStart': clusterUpdateStart(); break;
-    case 'loadUpdateReports': loadUpdateReports(); break;
-    case 'saveRegistrySettings': saveRegistrySettings(); break;
 
     // ── CDR (Sluice) ──
     case 'cdrSwitchTab':       cdrSwitchTab(arg); break;
@@ -4282,7 +4119,6 @@ function switchView(name) {
   if (name === 'ca-mgmt')        loadCAMgmt();
   if (name === 'upstream')       loadUpstream();
   if (name === 'cluster')        loadCluster();
-  if (name === 'updates')        loadUpdates();
   if (name === 'cdr')            loadCDRData();
   if (name === 'diagnostics')    loadDiagnostics();
   if (name === 'governance')     loadGovernance();
@@ -8178,12 +8014,6 @@ function connectSSE() {
       setText('d-yara', fmt(d.yaraBlocked || 0));
       setText('d-dpi',  fmt(d.dpiBlocked || 0));
       setText('d-feed', fmt(d.threatFeedBlocked || 0));
-      // Update nav badge from SSE
-      const badge = document.getElementById('nav-update-badge');
-      if (badge) {
-        if (d.updateAvailable) { badge.style.display = ''; badge.textContent = 'NEW'; }
-        else badge.style.display = 'none';
-      }
     } catch(_) {}
   };
   es.onerror = () => {
@@ -11270,317 +11100,6 @@ function resetBlockPage() {
   document.getElementById('blockpage-html').value = blockPageDefault;
   toast('Reset to default - click Save to apply','success');
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Updates Panel
-// ═══════════════════════════════════════════════════════════════════════════
-let updatesData = null;
-
-async function loadUpdates() {
-  const r = await api('/api/update/status');
-  if (!r) return;
-  updatesData = r;
-  renderUpdateStatus(r);
-  loadRollbackStatus();
-  loadUpdateReports();
-  loadRegistrySettings();
-  // Show cluster panel only for CP nodes
-  const cs = await api('/api/cluster/status');
-  if (cs && cs.role === 'control-plane') {
-    document.getElementById('upd-cluster-panel').style.display = '';
-    loadClusterUpdateStatus();
-  }
-}
-
-function renderUpdateStatus(d) {
-  document.getElementById('upd-current').textContent = d.current_version || 'dev';
-  document.getElementById('upd-latest').textContent = d.latest_version || '—';
-  document.getElementById('upd-last-checked').textContent = d.last_checked ? new Date(d.last_checked).toLocaleString() : '—';
-  const st = d.updater_status || 'unknown';
-  const stEl = document.getElementById('upd-updater-status');
-  stEl.textContent = st;
-  stEl.className = 'card-value';
-  if (st === 'connected') stEl.style.color = 'var(--ok)';
-  else if (st === 'unavailable') stEl.style.color = 'var(--blocked)';
-  else stEl.style.color = 'var(--muted)';
-
-  if (d.update_available) {
-    document.getElementById('upd-no-update').style.display = 'none';
-    document.getElementById('upd-available').style.display = '';
-  } else {
-    document.getElementById('upd-no-update').style.display = '';
-    document.getElementById('upd-available').style.display = 'none';
-  }
-
-  // Nav badge
-  const badge = document.getElementById('nav-update-badge');
-  if (d.update_available) { badge.style.display = ''; badge.textContent = 'NEW'; }
-  else badge.style.display = 'none';
-}
-
-async function updateCheckNow() {
-  const r = await api('/api/update/check', { method: 'POST' });
-  if (r) toast('Version check started', 'success');
-  setTimeout(loadUpdates, 3000);
-}
-
-async function updatePreview() {
-  const tag = updatesData?.pull_tag || updatesData?.latest_version;
-  if (!tag) { toast('No target version', 'error'); return; }
-  const r = await api('/api/update/preview', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ container: 'culvert', target_tag: tag })
-  });
-  if (!r) return;
-  document.getElementById('upd-preview').style.display = '';
-  const pre = document.getElementById('upd-preview-content');
-  if (r.changes && r.changes.length) {
-    pre.textContent = r.changes.map(c => `${c.field}: ${c.old || '(none)'} → ${c.new || '(none)'}`).join('\n');
-  } else {
-    pre.textContent = 'No configuration changes detected (image update only).';
-  }
-  document.getElementById('upd-apply-btn').style.display = '';
-}
-
-async function updateApply() {
-  const tag = updatesData?.pull_tag || updatesData?.latest_version;
-  if (!tag) return;
-  if (!await confirmAction('Apply Update', 'Apply update to ' + tag + '? The container will be restarted.', 'Apply')) return;
-  document.getElementById('upd-progress').style.display = '';
-  document.getElementById('upd-apply-btn').style.display = 'none';
-  const progressBar = document.getElementById('upd-progress-bar');
-  const progressStep = document.getElementById('upd-progress-step');
-  const progressLog = document.getElementById('upd-progress-log');
-  progressLog.textContent = '';
-  try {
-    const resp = await fetch(BASE + '/api/update/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ target_tag: tag, container: 'culvert' })
-    });
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          progressStep.textContent = evt.step + (evt.detail ? ': ' + evt.detail : '');
-          if (evt.percent) progressBar.style.width = evt.percent + '%';
-          progressLog.textContent += evt.step + ': ' + (evt.detail||'') + '\n';
-          progressLog.scrollTop = progressLog.scrollHeight;
-          if (evt.step === 'complete') { toast('Update complete!', 'success'); loadUpdates(); }
-          if (evt.step === 'rolled_back') { toast('Update failed — rolled back', 'error'); }
-          if (evt.step === 'error') { toast('Update error: ' + evt.detail, 'error'); }
-        } catch(e) { console.error(e); }
-      }
-    }
-  } catch(e) {
-    // U26: Connection lost — attempt SSE reconnection before showing overlay.
-    let reconnected = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-      try {
-        const sessionResp = await fetch(BASE + '/api/update/session', { credentials: 'include' });
-        if (sessionResp.ok) {
-          const session = await sessionResp.json();
-          if (session.status === 'complete') {
-            toast('Update complete!', 'success');
-            loadUpdates();
-            reconnected = true;
-            break;
-          } else if (session.status === 'rolled_back' || session.status === 'error') {
-            toast('Update failed: ' + (session.detail || 'unknown'), 'error');
-            reconnected = true;
-            break;
-          }
-          // Still in progress — continue retry loop.
-          progressStep.textContent = 'Reconnecting... (' + session.status + ')';
-        }
-      } catch(_) { /* server still down */ }
-    }
-    if (!reconnected) {
-      showCPUpdatingOverlay();
-    }
-  }
-}
-
-async function loadRollbackStatus() {
-  const r = await api('/api/update/rollback/status');
-  if (!r) return;
-  const panel = document.getElementById('upd-rollback-panel');
-  if (r.available) {
-    panel.style.display = '';
-    document.getElementById('upd-rollback-info').textContent =
-      'Rollback to ' + (r.rollback_tag||'previous version') + ' available' +
-      (r.expires_at ? ' (expires ' + new Date(r.expires_at).toLocaleTimeString() + ')' : '');
-  } else {
-    panel.style.display = 'none';
-  }
-}
-
-async function updateRollback() {
-  if (!await confirmAction('Rollback', 'Rollback to the previous version? The container will be restarted.', 'Rollback')) return;
-  const r = await api('/api/update/rollback', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ container: 'culvert' })
-  });
-  if (r) {
-    toast(r.status === 'rolled_back' ? 'Rollback complete' : 'Rollback: ' + (r.status||'done'), 'success');
-    loadUpdates();
-  }
-}
-
-async function loadClusterUpdateStatus() {
-  const r = await api('/api/update/cluster/status');
-  if (!r) return;
-  const idle = document.getElementById('upd-cluster-idle');
-  const active = document.getElementById('upd-cluster-active');
-  if (r.active) {
-    idle.style.display = 'none';
-    active.style.display = '';
-    document.getElementById('upd-cluster-phase').textContent = r.phase || '—';
-    document.getElementById('upd-cluster-target').textContent = r.target_tag || '—';
-    const tbody = document.getElementById('upd-cluster-nodes');
-    const nodes = r.nodes ? Object.values(r.nodes) : [];
-    tbody.innerHTML = nodes.map(n => {
-      const cls = n.status === 'complete' ? 'ok' : n.status === 'failed' ? 'blocked' : 'auth';
-      return `<tr><td>${escHtml(n.node_id)}</td><td><span class="badge ${cls}">${escHtml(n.status)}</span></td><td style="font-size:.82rem">${escHtml(n.detail||'')}</td><td>${n.duration_s ? n.duration_s + 's' : '—'}</td></tr>`;
-    }).join('');
-  } else {
-    idle.style.display = '';
-    active.style.display = 'none';
-  }
-}
-
-async function clusterUpdateStart() {
-  const tag = document.getElementById('upd-cluster-tag').value.trim();
-  if (!tag) { toast('Enter a target tag', 'error'); return; }
-  const budgetSel = document.getElementById('upd-cluster-budget').value;
-  let mc = 3, mp = 20;
-  if (budgetSel === 'conservative') { mc = 2; mp = 10; }
-  else if (budgetSel === 'aggressive') { mc = 5; mp = 50; }
-  if (!await confirmAction('Cluster Update', 'Start cluster rolling update to ' + tag + '? Nodes will be updated one by one.', 'Start Update')) return;
-  const r = await api('/api/update/cluster', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target_tag: tag, max_consecutive: mc, max_percent: mp })
-  });
-  if (r) { toast('Cluster update started', 'success'); loadClusterUpdateStatus(); }
-}
-
-async function loadUpdateReports() {
-  const r = await api('/api/update/reports');
-  if (!r) return;
-  const reports = Array.isArray(r) ? r : [];
-  const empty = document.getElementById('upd-reports-empty');
-  const table = document.getElementById('upd-reports-table');
-  const tbody = document.getElementById('upd-reports-tbody');
-  if (!reports.length) { empty.style.display = ''; table.style.display = 'none'; return; }
-  empty.style.display = 'none';
-  table.style.display = '';
-  tbody.innerHTML = reports.map(rp =>
-    `<tr><td style="font-family:monospace;font-size:.82rem">${escHtml(rp.id)}</td><td>${rp.created_at ? new Date(rp.created_at).toLocaleString() : '—'}</td><td><a href="${BASE}/api/update/reports?id=${encodeURIComponent(rp.id)}" target="_blank" class="btn sm ghost">Download</a></td></tr>`
-  ).join('');
-}
-
-// ── Registry Settings ────────────────────────────────────────────────────
-async function loadRegistrySettings() {
-  const r = await api('/api/update/registry');
-  if (!r) return;
-  document.getElementById('upd-reg-url').value = r.registry_url || '';
-  document.getElementById('upd-reg-user').value = r.username || '';
-  document.getElementById('upd-reg-pass').value = r.credential || '';
-}
-
-async function saveRegistrySettings() {
-  const body = {
-    registry_url: document.getElementById('upd-reg-url').value.trim(),
-    username: document.getElementById('upd-reg-user').value.trim(),
-    credential: document.getElementById('upd-reg-pass').value
-  };
-  const r = await api('/api/update/registry', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (r) toast('Registry settings saved', 'success');
-}
-
-// ── CP Updating Overlay ─────────────────────────────────────────────────
-// Polls multiple endpoints to detect when the new container is back:
-//   1. /healthz           — 200 from admin UI (standalone / HA leader)
-//   2. /api/update/session — status=complete from updater (definitive)
-//   3. /healthz 503        — HA standby node; container is up, reload anyway
-//
-// Any successful reach reloads the page. The 2-minute cap is a soft hint;
-// after that we keep polling in the background so the user isn't stuck on
-// a "timeout" screen if the new container just took a little longer.
-let cpUpdOverlayActive = false;
-function showCPUpdatingOverlay() {
-  if (cpUpdOverlayActive) return;
-  cpUpdOverlayActive = true;
-  const ov = document.getElementById('cp-updating-overlay');
-  ov.style.display = 'flex';
-  const status = document.getElementById('cp-upd-status');
-  const bar = document.getElementById('cp-upd-bar');
-  let attempts = 0;
-  const softCap = 60; // 2 minutes — after this we still keep polling
-  let done = false;
-  const finish = (msg) => {
-    if (done) return;
-    done = true;
-    clearInterval(poll);
-    status.textContent = msg;
-    status.style.color = 'var(--ok)';
-    bar.style.width = '100%';
-    setTimeout(() => location.reload(), 1200);
-  };
-  const tryReach = async () => {
-    // 1. Any HTTP response from /healthz means the admin UI is up. 200
-    //    (standalone or leader) and 503 (HA standby) both count.
-    try {
-      const resp = await fetch(BASE + '/healthz', { signal: AbortSignal.timeout(3000) });
-      if (resp.status === 200 || resp.status === 503) {
-        finish('Container back online - reloading...');
-        return true;
-      }
-    } catch(_) { /* still down */ }
-    // 2. /api/update/session — definitive "update complete" signal even if
-    //    /healthz is briefly unavailable.
-    try {
-      const r = await fetch(BASE + '/api/update/session', { credentials: 'include', signal: AbortSignal.timeout(3000) });
-      if (r.ok) {
-        const s = await r.json();
-        if (s && (s.status === 'complete' || s.status === 'rolled_back' || s.status === 'error')) {
-          finish(s.status === 'complete' ? 'Update complete - reloading...' : 'Update finished (' + s.status + ') - reloading...');
-          return true;
-        }
-      }
-    } catch(_) { /* still down */ }
-    return false;
-  };
-  const poll = setInterval(async () => {
-    attempts++;
-    bar.style.width = Math.min(90, (attempts / softCap) * 100) + '%';
-    if (await tryReach()) return;
-    if (attempts <= 5) status.textContent = 'Container stopping...';
-    else if (attempts <= 15) status.textContent = 'Starting new container...';
-    else if (attempts <= 40) status.textContent = 'Verifying health...';
-    else if (attempts <= softCap) status.textContent = 'Still waiting on the container...';
-    else status.textContent = 'Taking longer than expected — click "Reload Now" if the update finished. Attempt ' + attempts + '.';
-  }, 2000);
-}
-
 
 </script>
 
