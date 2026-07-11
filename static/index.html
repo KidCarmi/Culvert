@@ -4432,16 +4432,12 @@ const _kbShortcuts = {
   '9': 'updates'
 };
 document.addEventListener('keydown', e => {
-  // Escape = close confirm dialog, then any open shared-managed modal.
-  // Handled BEFORE the input guard so Esc works from a focused field
-  // (e.g. the typed-confirmation input).
+  // Escape = close the TOP-most stack-managed modal (its registered close
+  // function runs, so the confirm dialog resolves false rather than leaking
+  // its promise). Handled BEFORE the input guard so Esc works from a focused
+  // field (e.g. the typed-confirmation input).
   if (e.key === 'Escape') {
-    if (_confirmResolver) { confirmDialogResolve(false); return; }
-    if (document.getElementById('user-modal')?.classList.contains('open')) { closeUserModal(); return; }
-    const wh = document.getElementById('webhook-modal');
-    if (wh && wh.style.display === 'flex') { closeWebhookModal(); return; }
-    const rd = document.getElementById('release-dispatch-modal');
-    if (rd && rd.style.display === 'flex') { releaseDispatchCancel(); return; }
+    modalCloseTop();
     return;
   }
 
@@ -4641,6 +4637,13 @@ function refreshChartTheme() {
   }
   if (breakdownChart) {
     breakdownChart.data.datasets[0].borderColor = [t.ok, t.crit, t.orange];
+    // Re-derive the .7-alpha segment fills from the themed border colors so
+    // light mode gets its own palette (hex → rgba).
+    breakdownChart.data.datasets[0].backgroundColor =
+      [t.ok, t.crit, t.orange].map(hex => {
+        const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+        return m ? `rgba(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)},.7)` : hex;
+      });
     breakdownChart.options.plugins.legend.labels.color = t.tick;
     breakdownChart.update('none');
   }
@@ -4781,7 +4784,7 @@ function openUserModal(username, role) {
   document.getElementById('um-err').textContent   = '';
   const modal = document.getElementById('user-modal');
   modal.classList.add('open');
-  modalActivate(modal, isEdit ? '#um-role' : '#um-username');
+  modalActivate(modal, isEdit ? '#um-role' : '#um-username', closeUserModal);
 }
 
 function closeUserModal() {
@@ -8493,13 +8496,29 @@ function toast(msg, type='success') {
 // Dialogs · modals · tables · badges · empty/loading states
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Shared modal mechanics: focus trap, Esc, focus restore ───────────────
+// ── Shared modal mechanics: stack, focus trap, Esc, focus restore ────────
 // modalActivate/Deactivate carry the focus behavior and work with either
 // visibility mechanism (style.display or a CSS .open class); modalOpen/Close
 // bundle the display:flex pattern used by most overlays.
-let _modalPrevFocus = null;
-function modalActivate(el, initialFocusSel) {
-  _modalPrevFocus = document.activeElement;
+//
+// A STACK (not a single slot) tracks open modals, so a dialog opened on top
+// of another modal restores focus into the modal underneath, and Esc always
+// closes the TOP-most layer via its registered close function — no
+// hardcoded modal list (self-review finding H1). While any stack-managed
+// modal is open the background (#sidebar/#main) is aria-hidden + inert so
+// screen-reader virtual cursors cannot wander behind the dialog (M1).
+const _modalStack = [];
+function _modalSetBackgroundHidden(hidden) {
+  for (const id of ['sidebar', 'main']) {
+    const bg = document.getElementById(id);
+    if (!bg) continue;
+    if (hidden) { bg.setAttribute('aria-hidden', 'true'); bg.inert = true; }
+    else { bg.removeAttribute('aria-hidden'); bg.inert = false; }
+  }
+}
+function modalActivate(el, initialFocusSel, closeFn) {
+  _modalStack.push({el, prevFocus: document.activeElement, close: closeFn || null});
+  if (_modalStack.length === 1) _modalSetBackgroundHidden(true);
   const target = initialFocusSel ? el.querySelector(initialFocusSel)
     : el.querySelector('input:not([type=hidden]):not([disabled]), select, textarea, button');
   if (target) target.focus();
@@ -8507,12 +8526,22 @@ function modalActivate(el, initialFocusSel) {
 }
 function modalDeactivate(el) {
   el.removeEventListener('keydown', _modalTrapFocus);
-  if (_modalPrevFocus && document.contains(_modalPrevFocus)) _modalPrevFocus.focus();
-  _modalPrevFocus = null;
+  const idx = _modalStack.map(m => m.el).lastIndexOf(el);
+  if (idx < 0) return;
+  const entry = _modalStack.splice(idx, 1)[0];
+  if (!_modalStack.length) _modalSetBackgroundHidden(false);
+  if (entry.prevFocus && document.contains(entry.prevFocus)) entry.prevFocus.focus();
 }
-function modalOpen(el, initialFocusSel) {
+// Close the top-most open modal (Esc). Returns false when the stack is empty.
+function modalCloseTop() {
+  const top = _modalStack[_modalStack.length - 1];
+  if (!top) return false;
+  if (top.close) top.close(); else modalClose(top.el);
+  return true;
+}
+function modalOpen(el, initialFocusSel, closeFn) {
   el.style.display = 'flex';
-  modalActivate(el, initialFocusSel);
+  modalActivate(el, initialFocusSel, closeFn || (() => modalClose(el)));
 }
 function modalClose(el) {
   modalDeactivate(el);
@@ -8575,8 +8604,11 @@ function _confirmDialogShow(opts) {
   input.value = opts.inputValue || '';
   input.placeholder = opts.inputPlaceholder || '';
   if (opts.inputLabel) document.getElementById('confirm-dialog-input-label').textContent = opts.inputLabel;
+  // Register the cancel path as the stack close function so Esc (via
+  // modalCloseTop) resolves the pending promise instead of leaking it.
   modalOpen(d, opts.confirmWord ? '#confirm-dialog-typed'
-              : opts.inputLabel ? '#confirm-dialog-input' : '#confirm-dialog-cancel');
+              : opts.inputLabel ? '#confirm-dialog-input' : '#confirm-dialog-cancel',
+            () => confirmDialogResolve(false));
 }
 // Legacy signature kept — 38 existing call sites (tier 1/2).
 function confirmAction(title, msg, okLabel='Delete', opts={}) {
@@ -8812,15 +8844,15 @@ function renderCountryChart(countries) {
   const max = countries[0].count || 1;
   wrap.innerHTML = countries.slice(0, 10).map(c => {
     const pct = Math.max(2, Math.round((c.count / max) * 100));
-    const name = c.name || c.code;
+    const name = escHtml(c.name || c.code);
     return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:.8rem">
-      <div style="width:28px;text-align:right;font-family:monospace;font-size:.72rem;color:var(--muted)">${countryFlag(c.code)}${c.code}</div>
-      <div style="flex:1;background:rgba(20,184,166,.1);border-radius:4px;overflow:hidden">
+      <div style="width:28px;text-align:right;font-family:monospace;font-size:.72rem;color:var(--muted)">${countryFlag(c.code)}${escHtml(c.code)}</div>
+      <div style="flex:1;background:var(--accent-tint);border-radius:4px;overflow:hidden">
         <div style="height:20px;background:rgba(20,184,166,.55);width:${pct}%;border-radius:4px;transition:width .3s;display:flex;align-items:center;padding:0 6px;min-width:24px">
         </div>
       </div>
       <div style="width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)" title="${name}">${name}</div>
-      <div style="width:36px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${c.count}</div>
+      <div style="width:36px;text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${fmt(c.count || 0)}</div>
     </div>`;
   }).join('');
 }

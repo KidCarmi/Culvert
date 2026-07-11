@@ -73,6 +73,15 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('go.mod') }}
 
       - name: Install playwright driver + chromium
+        # PLAYWRIGHT_DOWNLOAD_HOST: the default driver mirrors baked into
+        # playwright-go v0.6000.0 (*.azureedge.net) were decommissioned with
+        # the Edgio CDN shutdown and now 404 — this is Playwright's official
+        # replacement host. The pinned playwright-go honors the override
+        # (run.go getDriverURLs). Upstream v0.6100.0 would remove the need,
+        # but its release tag declares the old mxschmitt module path and is
+        # unusable; re-evaluate on the next upstream release.
+        env:
+          PLAYWRIGHT_DOWNLOAD_HOST: https://playwright.download.prss.microsoft.com
         run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
 
       - name: UI RBAC E2E
