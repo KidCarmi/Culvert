@@ -41,7 +41,7 @@ State: ☐ Pass · ☐ Fail · ☐ Accepted-risk. Blocker severity references th
 
 ## Authorization / Policy
 
-| `default_action: deny` set (Zero Trust) | `/api/policy/default-action` = deny | config | P1 | Security | rollback |
+| `default_action: deny` set (Zero Trust) | `/api/default-action` = deny | config | P1 | Security | rollback |
 | Policy validated via Policy Tester | tester output for key cases | screenshots | P2 | Security | — |
 | Pilot scoped by IP/IdP-group; monitored before enforce | pilot rules reviewed | pilot plan | P1 (GAP-POL-01/02) | Security | rollback |
 | Config snapshot taken before cutover | Config Versions list | version id | P2 | Ops | rollback |

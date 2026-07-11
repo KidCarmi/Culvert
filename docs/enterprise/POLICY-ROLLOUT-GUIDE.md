@@ -11,7 +11,7 @@ Deploying egress policy safely: the model, staged rollout, validation, rollback,
 - **Structure:** priority-ordered rules; each rule ANDs any of 8 match dimensions — Source IP/CIDR, authenticated identity, IdP group, auth source, destination FQDN (exact/wildcard), URL category / category group, destination country (GeoIP), time schedule (day/time/IANA tz).
 - **Actions:** `Allow`, `Drop`, `Block_Page`, `Redirect`; each rule also carries `SSLAction` (`Inspect`/`Bypass`).
 - **Evaluation:** priority-sorted, **first match wins**, empty field = "any" (`policy.go:638-689`).
-- **Default-deny (Zero Trust):** no-match ⇒ deny once any rule exists or `default_action: deny` is set. A fresh install with zero rules and no explicit default starts in passthrough so you can't lock yourself out — **set `default_action: deny` (or `POST /api/policy/default-action`) for production.**
+- **Default-deny (Zero Trust):** no-match ⇒ deny once any rule exists or `default_action: deny` is set. A fresh install with zero rules and no explicit default starts in passthrough so you can't lock yourself out — **set `default_action: deny` (or `POST /api/default-action`) for production.**
 - **GeoIP fails closed:** unknown country does not match.
 - **Conflict detection:** same-priority, different-action overlaps are surfaced as warnings (advisory, non-blocking).
 
@@ -56,7 +56,7 @@ Deploying egress policy safely: the model, staged rollout, validation, rollback,
 ## 7. Approval, ownership, emergency access
 
 - **Approval workflow:** not built in. Use the export JSON as the change-control artifact (attach to the ticket); the config-version + audit trail is the after-the-fact record. Operator role can reorder/move; admin role gates default-action/import/rollback — use the role split to separate authoring from promotion.
-- **Emergency access (open the gate fast):** `POST /api/policy/default-action {allow}` opens *unmatched* traffic; or a top-priority broad `Allow` rule. Revert via config-version rollback.
+- **Emergency access (open the gate fast):** `POST /api/default-action {allow}` opens *unmatched* traffic; or a top-priority broad `Allow` rule. Revert via config-version rollback.
 
 ## 8. Audit evidence
 
