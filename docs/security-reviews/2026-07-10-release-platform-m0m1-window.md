@@ -24,6 +24,28 @@
 
 ---
 
+## Addendum (2026-07-11) — post-window status
+
+This ledger is a point-in-time review of the window ending `8e88a40`. Between review
+and merge, `main` advanced to `76584f1` (#640, release-platform M1-4 weekly re-sign).
+Status deltas, so no fixed issue reads as open:
+
+- **F7 — FIXED on `main` by #640 (OPS-F2):** the publisher now downloads the release
+  bundle by exact tag-derived name (`--pattern "$ASSET"`,
+  `publish-catalog-r2.yml:182-197` at `76584f1`) and the exact-name invariant is
+  extended to it. F7 was accurate at `8e88a40`; no action remains.
+- **F1 / F8 — still valid; line numbers cited are at `8e88a40`.** At `76584f1` the F1
+  R2 wildcard sits at `publish-catalog-r2.yml:107` and the F8 get/head TOCTOU at
+  `:249`/`:260-263` with the promote pin at `:379`.
+- **F4 — cross-tracked as CHAOS-23** in
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-07-10.md` (PR #647), which registers
+  the same finding with the same remediation (always-on freshness ticker). Treat
+  CHAOS-23 as the canonical open item to avoid double-tracking.
+- The catalog **refresh-tick panic containment** (CHAOS-22, not claimed as a finding
+  here) is in flight in PR #647 for the same refresh loop this review analyzed.
+
+---
+
 ## Executive Summary
 
 **No CRITICAL or HIGH security regressions were found.** The window is a large net security
@@ -178,6 +200,8 @@ wiring).
   independent of `wantSeed` (`evaluateCatalogFreshness` is lock-cheap, no I/O) — or document
   that disabled/permissive deployments must monitor the gauge.
 - **CWE:** CWE-778 (insufficient logging/alerting). **Regression risk of fix:** low.
+- **Cross-reference:** registered independently as **CHAOS-23** in
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-07-10.md` (PR #647) — track there.
 
 ### F5 — LOW (pre-existing pattern, extended this window) · Lock-free policy `Evaluate` scan races with in-place mutators
 
@@ -230,6 +254,7 @@ earlier-sorting asset. Staged bytes must still carry a valid pinned-identity sig
 survive the verify step (worst case: publishing a stale-but-valid variant, further bounded by
 appliance rollback floors). **Fix:** `--pattern "culvert-release-catalog-${TAG}.tar.gz"` in
 the publisher too; extend the exact-name invariant to it. **CWE:** CWE-706.
+**Post-window status: FIXED on `main` by #640 (OPS-F2 exact-name selection) — see Addendum.**
 
 ### F8 — LOW · Stage-substitution guard has a get/head TOCTOU: the promote ETag pin can bind to an object that was never digest-checked
 
