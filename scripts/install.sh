@@ -468,6 +468,39 @@ ensure_git() {
 ###############################################################################
 # 5. Provision the install dir (no source checkout required)
 ###############################################################################
+
+# carry_forward_prior_secrets — a re-run that lands in a NEW stack dir must not
+# strand the encryption passphrases in the OLD .env. Every Culvert stack dir
+# basename resolves to the SAME compose project ('culvert'), so all stack dirs
+# SHARE the named volumes (proxy-data etc.); the new dir's `docker compose up`
+# reuses the existing, still-ENCRYPTED /data/ca.bundle. If the new .env lacks
+# CULVERT_CA_PASSPHRASE the proxy recreates with an empty passphrase and — since
+# CA load is non-fatal by design — SILENTLY disables SSL inspection (TLS becomes
+# tunnel-only: no scanning/DLP/CDR). Copy the prior .env forward so the existing
+# CA/log passphrases survive the move. Best-effort; never fatal.
+carry_forward_prior_secrets() {
+  [[ -f "$INSTALL_DIR/.env" ]] && return 0   # a .env already here — never overwrite
+  local prior=""
+  # 1. The dir the currently/most-recently deployed proxy container ran from.
+  prior="$(sudo docker inspect culvert \
+    --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)"
+  # 2. The legacy home-dir default of the INVOKING user (sudo resets $HOME to
+  #    root's, so resolve the real user's home explicitly).
+  if [[ -z "$prior" || ! -f "$prior/.env" ]]; then
+    local real_user real_home
+    real_user="${SUDO_USER:-$(id -un)}"
+    real_home="$(getent passwd "$real_user" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "$real_home" && -f "$real_home/Culvert/.env" ]]; then
+      prior="$real_home/Culvert"
+    fi
+  fi
+  if [[ -n "$prior" && "$prior" != "$INSTALL_DIR" && -f "$prior/.env" ]]; then
+    info "Carrying encryption secrets forward from the existing deployment at $prior"
+    info "(shared compose project + volumes — preserves the SSL-inspection CA passphrase)."
+    sudo install -m 600 -o "$(id -un)" "$prior/.env" "$INSTALL_DIR/.env"
+  fi
+}
+
 step "Setting up Culvert"
 
 # Deployment needs only the compose files + the maintenance-agent packaging.
@@ -488,6 +521,7 @@ else
   # (ensure_agent_traversal), and ancestors of /srv/culvert are already
   # world-searchable.
   sudo chown "$(id -un)" "$INSTALL_DIR"
+  carry_forward_prior_secrets
 fi
 
 cd "$INSTALL_DIR"
@@ -764,6 +798,17 @@ secret_already_set() {
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
 env_put() {
   local var="$1" val="$2" file="$3"
+  # The shared /srv/culvert .env can be owned by a different user across runs
+  # (a prior `sudo` install → root-owned 0600, then an unprivileged re-run, or
+  # vice versa). Without this, the `touch`/writes below hit EACCES and abort the
+  # whole install under `set -euo pipefail`. Take ownership via sudo when we
+  # can't write it (no-op — and no sudo call — when we already can, so the
+  # extracted-function tests on a user-owned temp file are unaffected).
+  if [[ -e "$file" && ! -w "$file" ]]; then
+    sudo chown "$(id -un)" "$file" 2>/dev/null || true
+  elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
+    sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
+  fi
   touch "$file"; chmod 600 "$file"
   sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
   # grep -v exits 1 (not just erroring) whenever EVERY line matched the
@@ -928,6 +973,34 @@ if [[ "$COMPOSE_UP_OK" != "1" ]]; then
     cd $INSTALL_DIR
     sudo docker compose ps -a
     sudo docker compose logs"
+fi
+
+# Backstop for the silent-SSL-inspection-loss class: a CA that fails to load is
+# non-fatal (the proxy serves TLS tunnel-only), so `docker compose up --wait`
+# reports HEALTHY even when SSL inspection is OFF — e.g. after a stack move that
+# stranded the CA passphrase. Surface it here instead of printing a clean
+# success banner over a degraded security posture. Best-effort; never fatal.
+SSL_INSPECTION_BROKEN=0
+warn_if_ssl_inspection_broken() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local body
+  body="$(curl -fsS --max-time 5 http://localhost:8080/health 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 0
+  # handleHealth reports "ssl_inspection":"load_failed" when a CONFIGURED CA
+  # bundle could not be loaded/decrypted (distinct from "unavailable" = no CA
+  # configured, which is a normal choice and NOT flagged here).
+  if grep -q '"ssl_inspection":"load_failed"' <<<"$body"; then
+    SSL_INSPECTION_BROKEN=1
+    warn "SSL inspection is DISABLED — the Root CA could not be loaded/decrypted."
+    warn "Most common cause: the CA passphrase (CULVERT_CA_PASSPHRASE) does not match the"
+    warn "existing encrypted /data/ca.bundle — e.g. the stack was moved without carrying"
+    warn "the original .env forward. TLS is being tunneled with NO scanning / DLP / CDR."
+    warn "Fix: put the ORIGINAL CULVERT_CA_PASSPHRASE in $INSTALL_DIR/.env, then run"
+    warn "     'cd $INSTALL_DIR && sudo docker compose up -d'  (or rotate the CA in the admin UI)."
+  fi
+}
+if [[ "$COMPOSE_UP_OK" == "1" ]]; then
+  warn_if_ssl_inspection_broken
 fi
 
 ###############################################################################
@@ -1552,6 +1625,12 @@ echo -e "${GREEN}============================================================${N
 echo -e "${GREEN}  Culvert is running!${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
+if [[ "${SSL_INSPECTION_BROKEN:-0}" == "1" ]]; then
+  echo -e "${YELLOW}  ⚠ SSL inspection is DISABLED — the Root CA failed to load (see the${NC}"
+  echo -e "${YELLOW}    warning above). HTTPS is tunneled without scanning/DLP/CDR until the${NC}"
+  echo -e "${YELLOW}    CA passphrase in $INSTALL_DIR/.env matches the encrypted ca.bundle.${NC}"
+  echo ""
+fi
 echo "  Proxy:    http://<your-ip>:8080  (configure browsers to use this)"
 echo "  Admin UI: https://<your-ip>:9090 (accept the self-signed cert)"
 echo ""
