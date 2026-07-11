@@ -1159,6 +1159,14 @@ step "Maintenance agent (optional)"
 #
 # Optional + best-effort: a failure NEVER fails the Culvert install — we warn
 # and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
+#
+# TRUST: the agent is host-root, and its installer + templates come from the
+# proxy image's /app/deploy bundle in a source-free deploy. We root-exec that
+# bundle installer ONLY when the image cosign-verifies against the pinned
+# release identity, or a source checkout is present, or the operator sets the
+# break-glass CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 (dev/private image, at their
+# own risk). An unverified image with no source and no override skips the agent
+# (the proxy is unaffected). See the trust gate in install_maint_agent.
 MAINT_AGENT_INSTALLED=0
 MAINT_AGENT_WIRED=0
 
@@ -1577,6 +1585,56 @@ install_maint_agent() {
     return 0
   fi
 
+  # ── Installer-script trust gate (Codex P1) ──────────────────────────────────
+  # EVERY install/wiring path below root-execs "$maint_installer"
+  # (packaging/culvert-maint/install.sh) — which also renders the sudoers and
+  # systemd-unit templates. In a source-free deploy that script was extracted
+  # from the proxy image's /app/deploy bundle by extract_deploy_bundle, BEFORE
+  # any signature check. Running an UNVERIFIED image's installer as root would
+  # hand a tampered/typosquatted image host-root — worse than fix #1, which only
+  # gated the bundled BINARY. So establish trust for the SCRIPT itself, ONCE,
+  # here (it gates the fast-path re-wire too):
+  #   1. A real source checkout — cmd/culvert-maint/go.mod is NEVER shipped in
+  #      the image bundle (only the compiled binary + packaging/), so its
+  #      presence positively identifies the operator's own tree (git checkout or
+  #      the clone_source_into_install_dir compat fallback). Trusted; cheap.
+  #   2. Otherwise the installer is image-derived: trust it (and the bundled
+  #      binary, via trust_image_bundle) ONLY when the pinned proxy image
+  #      cosign-verifies against the pinned release identity.
+  #   3. Break-glass: CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 for a dev/private
+  #      image the operator knowingly trusts.
+  # No trust ⇒ skip the agent entirely (the proxy is unaffected). The go.mod
+  # check runs first so source deploys keep the fast-path's no-network property;
+  # only a pure-bundle deploy pays the one cosign verify.
+  #
+  # trust_image_bundle is the SEPARATE decision of whether to install the image's
+  # BUNDLED BINARY (fix #1): true only when we are trusting the IMAGE (cosign OK
+  # or break-glass). A source checkout trusts the SCRIPT but not the image binary
+  # (it builds from source / downloads the signed release instead).
+  local installer_trusted=0 trust_image_bundle=0
+  if [[ -f cmd/culvert-maint/go.mod ]]; then
+    installer_trusted=1
+  elif [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]] && verify_pinned_image_signature; then
+    installer_trusted=1
+    trust_image_bundle=1
+  elif [[ -n "${CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE:-}" ]]; then
+    warn "CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE set — root-executing the image-bundle agent"
+    warn "installer AND its bundled binary despite an unverified proxy image (break-glass;"
+    warn "you accept the risk of a tampered image gaining host-root)."
+    installer_trusted=1
+    trust_image_bundle=1
+  fi
+  if [[ "$installer_trusted" -ne 1 ]]; then
+    warn "Maintenance agent skipped: the proxy image did not cosign-verify against the pinned"
+    warn "release identity (unsigned/main :latest, private image without credentials, locally"
+    warn "built, or cosign/registry unreachable) and no source checkout is present — so the"
+    warn "bundled packaging/culvert-maint/install.sh cannot be trusted to run as ROOT."
+    warn "Culvert's proxy is unaffected; Release Management / day-2 upgrades stay unwired."
+    warn "Wire it by installing from a signed release tag or a source checkout, or re-run with"
+    warn "  CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1   # dev/private image, at your own risk"
+    return 0
+  fi
+
   # ── Fast path: already installed AND at a KNOWN target version → just ensure
   #    traversal + wiring, skipping the (network) cosign verify + bundle extract
   #    entirely. The guards above already ran, so wiring here cannot create a
@@ -1603,17 +1661,18 @@ install_maint_agent() {
   # readable. It also tracks the EXACT image the stack runs.
   #
   # TRUST (fix — finding #1): the agent is a HOST-ROOT systemd service (sudoers
-  # docker allowlist), so we must NOT install its binary from an unverified
-  # image. Before trusting the bundle we cosign-verify the proxy image's
-  # registry digest against the pinned tag identity (fail-closed). Only on a
-  # verified image do we extract + trust the bundled binary — SKIP_VERIFY at
-  # install time is then legitimate because the SOURCE image is verified. When
-  # the image cannot be verified (unsigned/main :latest, locally built, or
-  # cosign/registry unavailable) we DO NOT touch the bundle and fall through to
-  # the signed-release download (which self-verifies) or the source build.
+  # docker allowlist), so we must NOT install its BINARY from an unverified
+  # image. trust_image_bundle (computed once in the trust gate above) is set only
+  # when we are trusting the IMAGE — either it cosign-verified against the pinned
+  # tag identity, or the operator set the CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE
+  # break-glass. Only then do we extract + trust the bundled binary — SKIP_VERIFY
+  # at install time is then legitimate because the SOURCE image is (or was
+  # explicitly) trusted. Otherwise (a source checkout where we build instead, or
+  # an image we don't trust) trust_image_bundle is 0 and we fall through to the
+  # signed-release download (which self-verifies) or the source build.
   local bundled_bin=""
   if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
-    if verify_pinned_image_signature; then
+    if [[ "$trust_image_bundle" -eq 1 ]]; then
       if extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
         local cand="$scratch/culvert-maint-bundled" bundled_version=""
         # Probe the extracted binary before trusting it. A FAILED exec means it
@@ -1646,10 +1705,11 @@ install_maint_agent() {
         fi
       fi
     else
-      info "Proxy image could not be verified against the pinned release identity"
-      info "(unsigned/non-tag image, locally built, private image without credentials,"
-      info "or cosign/registry unreachable) — not trusting the image bundle for the host"
-      info "agent; falling back to the cosign-verified signed-release download."
+      # Reached only for a source checkout (an untrusted image already returned
+      # at the trust gate). We trust the SCRIPT (from source) but not the image's
+      # bundled binary — build it from source / download the signed release.
+      info "Not using the image's bundled agent binary (source checkout present) —"
+      info "installing from the signed-release download or a local source build."
     fi
   fi
 
