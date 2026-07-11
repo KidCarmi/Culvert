@@ -1,7 +1,7 @@
 # CI smoke stack — overlay for docker-compose.yml.
 #
 # Builds the proxy image from the current branch source instead of pulling
-# from the registry. Starts only the proxy (--no-deps skips ClamAV/updater).
+# from the registry. Starts only the proxy (--no-deps skips ClamAV).
 # Tightens the healthcheck for faster CI feedback.
 #
 # Usage (CI):
