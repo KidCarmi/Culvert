@@ -67,6 +67,7 @@ type HAState struct {
 	pc           promoteContext // params captured at StartAsStandby so a manual/planned promote can reuse them
 	stopCh       chan struct{}
 	wg           sync.WaitGroup // tracks the standby sync + lease keepalive goroutines (Stop joins them)
+	stopping     bool           // latched by Stop before signaling: refuses new loop spawns so the join cannot chase freshly-created channels
 
 	// plannedPromotion (leader side) signals the standby, via the next HASync
 	// bundle, to perform a COORDINATED promotion — a planned handoff (e.g. a CP
@@ -309,6 +310,13 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	grpcAddr, certFile, keyFile, caFile string, autoFailover bool,
 	onPromote func() error) {
 	h.mu.Lock()
+	if h.stopping {
+		// Stop() is joining our goroutines — spawning a new sync loop here
+		// would hand it a channel the in-flight stopLoops already missed.
+		h.mu.Unlock()
+		logger.Printf("HA: stop in progress — not (re-)entering standby against %s", sanitizeLog(leaderAddr))
+		return
+	}
 	h.role = "standby"
 	h.peerAddr = leaderAddr
 	h.token = token
@@ -318,6 +326,11 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	h.promoted.Store(false)
 	stopCh := make(chan struct{})
 	h.stopCh = stopCh
+	// wg.Add INSIDE the lock: atomic with the stopping check above. An Add
+	// after Stop()'s Wait began (counter possibly 0) is documented WaitGroup
+	// misuse — the latch is set under this same mutex before Wait starts, so
+	// passing the check guarantees this Add happens-before it.
+	h.wg.Add(1)
 	h.mu.Unlock()
 
 	// Persist HA config so standby restarts know HA is enabled.
@@ -331,9 +344,8 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 
 	logger.Printf("HA: starting as standby (leader=%q, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
 
-	h.wg.Add(1)
 	go func() {
-		defer h.wg.Done()
+		defer h.wg.Done() // Add is in the locked section above
 		h.standbyLoop(ctx, stopCh, leaderAddr, token, certFile, keyFile, caFile)
 	}()
 }
@@ -464,6 +476,13 @@ func (s *standbyLoopState) tick() bool {
 		s.failCount = 0
 		s.manualWarned = false // leader recovered — re-arm the warning
 		return false
+	}
+	if s.ctx.Err() != nil {
+		// The loop is being stopped (stopCh watcher cancelled the context) —
+		// the aborted RPC is shutdown, NOT evidence of a dead leader. Counting
+		// it could manufacture the third failure and trip onMaxFail into a
+		// promotion (role flip + lease grab) on a node that is going away.
+		return true
 	}
 	s.failCount++
 	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
@@ -735,9 +754,23 @@ func (h *HAState) stopLoops() {
 // the HA config on its own goroutine — returning before it finishes lets
 // callers (shutdown, tests restoring globals) pull state out from under a
 // write that is still in flight.
+//
+// The stopping latch is set BEFORE the signal: a keepalive goroutine already
+// inside selfFence would otherwise re-enter standby AFTER stopLoops ran,
+// creating a fresh stop channel nobody closes — turning the join into a
+// shutdown deadlock. With the latch, StartAsStandby/startLeaseKeepalive
+// refuse to spawn while Stop is in flight (the node is going away; a resync
+// loop it would immediately have to kill is pure waste). Cleared after the
+// join — Stop is not terminal, restart afterwards is legitimate.
 func (h *HAState) Stop() {
+	h.mu.Lock()
+	h.stopping = true
+	h.mu.Unlock()
 	h.stopLoops()
 	h.wg.Wait()
+	h.mu.Lock()
+	h.stopping = false
+	h.mu.Unlock()
 }
 
 // ── HA Config Persistence ───────────────────────────────────────────────────

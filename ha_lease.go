@@ -105,13 +105,19 @@ func (h *HAState) acquireLeaseForLeadership(reason string) bool {
 // already running). Call after taking leadership with a granted lease.
 func (h *HAState) startLeaseKeepalive() {
 	h.mu.Lock()
-	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil {
+	// h.stopping: Stop() is joining — a fresh keepalive spawned now (e.g. a
+	// tracked standby loop promoting mid-shutdown) would hold a channel the
+	// in-flight stopLoops already missed, deadlocking the join.
+	if h.lease == nil || h.leaseEpoch == 0 || h.leaseStopCh != nil || h.stopping {
 		h.mu.Unlock()
 		return
 	}
 	stop := make(chan struct{})
 	h.leaseStopCh = stop
 	validFor := h.leaseValidFor
+	// wg.Add INSIDE the lock: atomic with the stopping check above (an Add
+	// racing Stop()'s Wait at counter 0 is WaitGroup misuse — see Stop).
+	h.wg.Add(1)
 	h.mu.Unlock()
 
 	tick := validFor / 3
@@ -121,9 +127,8 @@ func (h *HAState) startLeaseKeepalive() {
 	if tick > haLeaseMaxTick {
 		tick = haLeaseMaxTick
 	}
-	h.wg.Add(1)
 	go func() {
-		defer h.wg.Done()
+		defer h.wg.Done() // Add is in the locked section above
 		h.leaseKeepaliveLoop(stop, tick)
 	}()
 }
