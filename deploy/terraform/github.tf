@@ -31,14 +31,25 @@ resource "github_repository_ruleset" "v_tag_protection" {
     }
   }
 
-  # Protect existing release tags WITHOUT blocking creation: ci.yml's auto-tag job
-  # (github-actions[bot] pushing the next vX.Y.Z via GITHUB_TOKEN) must be able to
-  # create v* tags, and this ruleset declares no bypass_actors — so `creation`/`update`
-  # are intentionally left disabled. Block deletion + non-fast-forward (force-move)
-  # only. (An owner who wants to restrict WHO may create release tags adds a
-  # `bypass_actors` block for the release automation instead of enabling `creation`.)
+  # SEC-F7 (M1-4): a v* tag is a SIGNING CONTEXT — dispatching ci.yml at a v* tag
+  # with resign=true re-signs the release catalog under the pinned
+  # ci.yml@refs/tags/v* identity. So tag CREATION (not just deletion) must be
+  # restricted to bypass actors. Release automation (ci.yml `auto-tag`) pushes the
+  # next vX.Y.Z authenticated as RELEASE_TAG_PAT — a fine-grained PAT owned by a
+  # Repository admin — so the Repository-admin role is the sole bypass actor.
+  # (github-actions[bot] itself CANNOT be a repository-ruleset bypass actor, which
+  # is exactly why auto-tag pushes as the PAT; see docs/operator/catalog-resign-runbook.md.)
+  # Keep this in lock-step with the live ruleset: without `creation` + this bypass,
+  # a `terraform apply` would silently revert SEC-F7 and re-open unrestricted tag creation.
   rules {
+    creation         = true
     deletion         = true
     non_fast_forward = true
+  }
+
+  bypass_actors {
+    actor_id    = 5 # built-in RepositoryRole: Admin
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
   }
 }
