@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+// u8 / be16 / be24 emit fixed-width big-endian lengths with explicit masking so
+// gosec (G115) sees the int->byte truncation is bounded and intentional. Test
+// inputs are short, so the masks never actually truncate meaningful bits.
+func u8(n int) byte     { return byte(n & 0xff) }
+func be16(n int) []byte { return []byte{byte((n >> 8) & 0xff), byte(n & 0xff)} }
+func be24(n int) []byte { return []byte{byte((n >> 16) & 0xff), byte((n >> 8) & 0xff), byte(n & 0xff)} }
+
 // buildClientHello assembles a minimal but structurally-valid TLS ClientHello
 // record for exercising parseClientHelloALPN. includeALPN=false omits the ALPN
 // extension entirely (an older/ALPN-less client).
@@ -13,25 +20,26 @@ func buildClientHello(alpn []string, includeALPN bool) []byte {
 	if includeALPN {
 		var list []byte
 		for _, p := range alpn {
-			list = append(list, byte(len(p)))
+			list = append(list, u8(len(p)))
 			list = append(list, p...)
 		}
-		alpnData := []byte{byte(len(list) >> 8), byte(len(list))}
-		alpnData = append(alpnData, list...)
+		alpnData := append(be16(len(list)), list...)
 		// extension type = ALPN(16) | length | data
-		ext = append(ext, 0x00, 0x10, byte(len(alpnData)>>8), byte(len(alpnData)))
+		ext = append(ext, 0x00, 0x10)
+		ext = append(ext, be16(len(alpnData))...)
 		ext = append(ext, alpnData...)
 	}
 	body := []byte{0x03, 0x03} // legacy_version
 	body = append(body, make([]byte, 32)...)
 	// session_id(0) | cipher_suites(len2, TLS_AES_128_GCM_SHA256) | compression(len1, null)
-	body = append(body, 0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00, byte(len(ext)>>8), byte(len(ext)))
+	body = append(body, 0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00)
+	body = append(body, be16(len(ext))...)
 	body = append(body, ext...)
 
-	hs := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	hs := append([]byte{0x01}, be24(len(body))...)
 	hs = append(hs, body...)
 
-	rec := []byte{0x16, 0x03, 0x01, byte(len(hs) >> 8), byte(len(hs))}
+	rec := append([]byte{0x16, 0x03, 0x01}, be16(len(hs))...)
 	rec = append(rec, hs...)
 	return rec
 }
