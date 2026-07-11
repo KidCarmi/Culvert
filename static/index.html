@@ -15,22 +15,61 @@
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
 * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+/* ── Design tokens (docs/design/DESIGN-SYSTEM.md) ──
+   Semantic layer + legacy aliases. Raw color values may appear ONLY here;
+   the dark and light blocks must stay field-for-field parallel. */
 :root {
+  /* surfaces & text */
   --bg:        #0b0f1a;
   --surface:   #111827;
+  --surface1:  #151d2e;
   --surface2:  #1a2235;
+  --card:      #111827;
   --border:    #1e2d42;
   --border-hi: #2d3f5a;
-  --accent:    #14b8a6;
-  --accent2:   #2dd4bf;
-  --green:     #22c55e;
-  --red:       #ef4444;
-  --orange:    #f97316;
-  --yellow:    #eab308;
   --text:      #e2e8f0;
   --muted:     #8892a8;
   --text-muted:#8892a8;
-  --sidebar-w: 230px;
+  /* brand */
+  --accent:        #14b8a6;
+  --accent2:       #2dd4bf;
+  --accent-hover:  #0ea395;
+  --accent-active: #0d9488;
+  /* status */
+  --ok:     #22c55e;
+  --warn:   #eab308;
+  --crit:   #ef4444;
+  --info:   #60a5fa;
+  --orange: #f97316;
+  --green:  #22c55e;
+  --red:    #ef4444;
+  --yellow: #eab308;
+  --danger: #ef4444;
+  /* tints (badge / pill / banner backgrounds) */
+  --accent-tint: rgba(20,184,166,.12);
+  --ok-tint:     rgba(34,197,94,.12);
+  --warn-tint:   rgba(234,179,8,.12);
+  --crit-tint:   rgba(239,68,68,.12);
+  --orange-tint: rgba(249,115,22,.12);
+  --info-tint:   rgba(96,165,250,.12);
+  /* typography */
+  --font-ui:   system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+  --fs-xs:  .72rem;
+  --fs-sm:  .8rem;
+  --fs-md:  .875rem;
+  --fs-lg:  1rem;
+  --fs-xl:  1.25rem;
+  --fs-2xl: 1.75rem;
+  /* spacing (4px grid) */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
+  /* radius & elevation */
+  --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --r-full: 999px;
+  --shadow-1: 0 4px 16px rgba(0,0,0,.3);
+  --shadow-2: 0 8px 32px rgba(0,0,0,.45);
+  /* layout & legacy aliases */
+  --sidebar-w: 232px;
   --radius:    10px;
   --shadow:    0 4px 24px rgba(0,0,0,.4);
   --focus-ring: 0 0 0 3px rgba(20,184,166,.25);
@@ -39,23 +78,39 @@
 html[data-theme="light"] {
   --bg:        #f3f4f6;
   --surface:   #ffffff;
+  --surface1:  #f9fafb;
   --surface2:  #f9fafb;
+  --card:      #ffffff;
   --border:    #e5e7eb;
   --border-hi: #d1d5db;
-  --accent:    #0d9488;
-  --accent2:   #0f766e;
-  --green:     #16a34a;
-  --red:       #dc2626;
-  --orange:    #ea580c;
-  --yellow:    #ca8a04;
   --text:      #1f2937;
   --muted:     #6b7280;
   --text-muted:#6b7280;
-  --shadow:    0 4px 24px rgba(0,0,0,.08);
-  --card:      #ffffff;
-  --danger:    #dc2626;
+  --accent:        #0d9488;
+  --accent2:       #0f766e;
+  --accent-hover:  #0f766e;
+  --accent-active: #115e59;
+  --ok:     #16a34a;
+  --warn:   #ca8a04;
+  --crit:   #dc2626;
+  --info:   #2563eb;
+  --green:  #16a34a;
+  --red:    #dc2626;
+  --yellow: #ca8a04;
+  --orange: #ea580c;
+  --danger: #dc2626;
+  --accent-tint: rgba(13,148,136,.10);
+  --ok-tint:     rgba(22,163,74,.10);
+  --warn-tint:   rgba(202,138,4,.12);
+  --crit-tint:   rgba(220,38,38,.10);
+  --orange-tint: rgba(234,88,12,.10);
+  --info-tint:   rgba(37,99,235,.10);
+  --shadow-1: 0 4px 16px rgba(0,0,0,.06);
+  --shadow-2: 0 8px 32px rgba(0,0,0,.12);
+  --shadow:   0 4px 24px rgba(0,0,0,.08);
+  --focus-ring: 0 0 0 3px rgba(13,148,136,.25);
 }
-body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+body { font-family: var(--font-ui);
        background: var(--bg); color: var(--text); height: 100vh;
        display: flex; overflow: hidden; }
 /* ─── Sidebar ───────────────────────────────────────────────────────────── */
@@ -223,15 +278,22 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   font-size: .82rem; font-weight: 600; transition: background .15s, opacity .15s;
   white-space: nowrap;
 }
-.btn:hover   { background: #0ea395; }
-.btn:active  { background: #0d9488; }
+.btn:hover   { background: var(--accent-hover); }
+.btn:active  { background: var(--accent-active); }
 .btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
 .btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
-.btn.danger  { background: var(--red); }
+.btn.danger  { background: var(--crit); }
 .btn.danger:hover { background: #dc2626; }
 .btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .btn.ghost:hover { color: var(--text); border-color: var(--border-hi); background: var(--surface2); }
 .btn.sm      { padding: 5px 10px; font-size: .75rem; }
+/* variants referenced by markup — previously undefined (see CURRENT-UI-AUDIT.md §4) */
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.accent  { background: transparent; border: 1px solid var(--accent); color: var(--accent2); }
+.btn.accent:hover { background: var(--accent-tint); }
+.btn.warn    { background: var(--warn); color: #1f2937; }
+.btn.warn:hover { filter: brightness(.92); }
 /* host chips in blocklist table */
 .host-td { font-family: monospace; font-size: .82rem; }
 .wild-tag { color: var(--yellow); font-size: .7rem; font-weight: 700;
@@ -327,9 +389,88 @@ tr.dragging  { opacity: .4; }
   border-radius: 7px; font-size: .82rem;
 }
 .country-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+/* ─── M1 redesign components (docs/design/DESIGN-SYSTEM.md §3) ───────────── */
+/* inline SVG icons — stroke inherits text color, themes automatically */
+.ico { width: 16px; height: 16px; stroke: currentColor; stroke-width: 2;
+       fill: none; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.nav-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* alert banners */
+.banner { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+          border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5;
+          border: 1px solid var(--border); margin-bottom: 14px; }
+.banner.info { background: var(--info-tint); border-color: rgba(96,165,250,.35); }
+.banner.warn { background: var(--warn-tint); border-color: rgba(234,179,8,.35); }
+.banner.crit { background: var(--crit-tint); border-color: rgba(239,68,68,.35); }
+/* skeleton loading placeholder (replaces dead .spinner usage gap) */
+.skeleton { background: var(--surface2); border-radius: var(--r-sm);
+            animation: skel-pulse 1.2s ease-in-out infinite; color: transparent !important; }
+@keyframes skel-pulse { 50% { opacity: .55; } }
+/* dashboard posture strip */
+.posture-strip { display: grid; grid-template-columns: repeat(6,1fr); gap: 10px;
+                 margin-bottom: 18px; }
+@media(max-width:1200px){ .posture-strip { grid-template-columns: repeat(3,1fr); } }
+@media(max-width:640px) { .posture-strip { grid-template-columns: repeat(2,1fr); } }
+.posture-item { display: flex; align-items: center; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 10px 14px; cursor: pointer;
+  transition: border-color .15s; min-width: 0; }
+.posture-item:hover { border-color: var(--border-hi); }
+.posture-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.posture-dot { width: 8px; height: 8px; border-radius: 50%;
+               background: var(--muted); flex-shrink: 0; }
+.posture-item[data-state="ok"]   .posture-dot { background: var(--ok); }
+.posture-item[data-state="warn"] .posture-dot { background: var(--warn); }
+.posture-item[data-state="crit"] .posture-dot { background: var(--crit); }
+.posture-label { font-size: .62rem; color: var(--muted); font-weight: 700;
+                 text-transform: uppercase; letter-spacing: .06em; }
+.posture-state { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+.posture-item[data-state="warn"] .posture-state { color: var(--warn); }
+.posture-item[data-state="crit"] .posture-state { color: var(--crit); }
+/* dashboard panel grids — previously inline styles that never stacked on mobile */
+.dash-grid { display: grid; gap: 14px; margin-bottom: 18px; }
+.dash-grid.cols-21 { grid-template-columns: 2fr 1fr; }
+.dash-grid.cols-2  { grid-template-columns: 1fr 1fr; }
+@media(max-width:900px){ .dash-grid.cols-21, .dash-grid.cols-2 { grid-template-columns: 1fr; } }
+.dash-grid > .panel { margin-bottom: 0; }
+.card.clickable { cursor: pointer; }
+.card.clickable:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* motion floor */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
 </style>
 </head>
 <body>
+
+<!-- ═══ ICON SPRITE (stroke icons, 24×24, inherit currentColor) ═══════════ -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24"><path d="M10 2v7.5L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></symbol>
+  <symbol id="i-file-x" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9.5" y1="12.5" x2="14.5" y2="17.5"/><line x1="14.5" y1="12.5" x2="9.5" y2="17.5"/></symbol>
+  <symbol id="i-package" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></symbol>
+  <symbol id="i-id" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></symbol>
+  <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></symbol>
+  <symbol id="i-landmark" viewBox="0 0 24 24"><line x1="3" y1="22" x2="21" y2="22"/><line x1="6" y1="18" x2="6" y2="11"/><line x1="10" y1="18" x2="10" y2="11"/><line x1="14" y1="18" x2="14" y2="11"/><line x1="18" y1="18" x2="18" y2="11"/><polygon points="12 2 20 7 4 7"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-arrow-up-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="16 12 12 8 8 12"/><line x1="12" y1="16" x2="12" y2="8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-check-square" viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+</svg>
 
 <!-- ═══ SIDEBAR ════════════════════════════════════════════════════════════ -->
 <aside id="sidebar">
@@ -341,96 +482,93 @@ tr.dragging  { opacity: .4; }
     </div>
   </div>
 
-  <nav>
-    <div class="nav-section">Monitor</div>
-    <div class="nav-item active" data-view="dashboard">
-      <span class="icon">📊</span> Dashboard
+  <nav aria-label="Primary">
+    <div class="nav-section">Overview</div>
+    <div class="nav-item active" data-view="dashboard" role="button" tabindex="0" aria-current="page">
+      <svg class="ico" aria-hidden="true"><use href="#i-dashboard"/></svg> Dashboard
     </div>
-    <div class="nav-item" data-view="livefeed">
-      <span class="icon">⚡</span> Live Feed
+
+    <div class="nav-section">Monitor</div>
+    <div class="nav-item" data-view="livefeed" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-activity"/></svg> Traffic
       <span class="nav-badge" id="nav-blocked-count" style="display:none">0</span>
     </div>
-
-    <div class="nav-section" data-min-role="operator">Control</div>
-    <div class="nav-item" data-view="blocklist" data-min-role="operator">
-      <span class="icon">🚫</span> Blocklist
+    <div class="nav-item" data-view="audit" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> Audit Log
     </div>
-    <div class="nav-item" data-view="security" data-min-role="operator">
-      <span class="icon">🔒</span> Security
-    </div>
-    <div class="nav-item" data-view="policy" data-min-role="operator">
-      <span class="icon">📋</span> Policy
-    </div>
-    <div class="nav-item" data-view="authpolicy">
-      <span class="icon">🪪</span> Auth Policy
-    </div>
-    <div class="nav-item" data-view="urlcat" data-min-role="operator">
-      <span class="icon">🏷️</span> URL Categories
-    </div>
-    <div class="nav-item" data-view="catgroups" data-min-role="operator">
-      <span class="icon">📦</span> Category Groups
-    </div>
-    <div class="nav-item" data-view="fileblock" data-min-role="operator">
-      <span class="icon">🛡️</span> File Block
-    </div>
-    <div class="nav-item" data-view="cdr" data-min-role="operator">
-      <span class="icon">🧬</span> CDR
-    </div>
-    <div class="nav-section" data-min-role="operator">Network</div>
-    <div class="nav-item" data-view="rewrite" data-min-role="operator">
-      <span class="icon">✏️</span> Rewrite
-    </div>
-    <div class="nav-item" data-view="upstream" data-min-role="operator">
-      <span class="icon">🔗</span> Upstream Proxies
-    </div>
-    <div class="nav-item" data-view="pac" data-min-role="operator">
-      <span class="icon">📡</span> PAC File
+    <div class="nav-item" data-view="policy-tester" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> Policy Tester
     </div>
 
-    <div class="nav-section" data-min-role="admin">Identity</div>
-    <div class="nav-item" data-view="idproviders" data-min-role="admin">
-      <span class="icon">🪪</span> Identity Providers
+    <div class="nav-section">Policies</div>
+    <div class="nav-item" data-view="policy" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Access Rules
+    </div>
+    <div class="nav-item" data-view="authpolicy" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-key"/></svg> Authentication Rules
+    </div>
+    <div class="nav-item" data-view="blocklist" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-ban"/></svg> Blocklist
+    </div>
+    <div class="nav-item" data-view="security" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg> Content &amp; Scanning
+    </div>
+    <div class="nav-item" data-view="fileblock" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-file-x"/></svg> File Control
+    </div>
+    <div class="nav-item" data-view="cdr" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-package"/></svg> CDR
     </div>
 
-    <div class="nav-section" data-min-role="admin">Certificates</div>
-    <div class="nav-item" data-view="certificates" data-min-role="admin">
-      <span class="icon">🔑</span> SSL / TLS
+    <div class="nav-section" data-min-role="operator">Objects</div>
+    <div class="nav-item" data-view="urlcat" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-tag"/></svg> URL Categories
     </div>
-    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin">
-      <span class="icon">🏛️</span> CA Management
+    <div class="nav-item" data-view="catgroups" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg> Category Groups
     </div>
-
-    <div class="nav-section" data-min-role="admin">Infrastructure</div>
-    <div class="nav-item" data-view="cluster" data-min-role="admin">
-      <span class="icon">🖥️</span> Cluster Nodes
+    <div class="nav-item" data-view="rewrite" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg> Header Rewrite
     </div>
-    <div class="nav-item" data-view="settings" data-min-role="admin">
-      <span class="icon">⚙️</span> Settings
-    </div>
-    <div class="nav-item" data-view="updates" data-min-role="admin">
-      <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
-    </div>
-    <div class="nav-item" data-view="releases">
-      <span class="icon">🚀</span> Releases
-    </div>
-    <div class="nav-item" data-view="diagnostics" data-min-role="admin">
-      <span class="icon">🩺</span> Diagnostics
-    </div>
-    <div class="nav-item" data-view="governance" data-min-role="admin">
-      <span class="icon">🛡️</span> Governance
+    <div class="nav-item" data-view="idproviders" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-id"/></svg> Identity Providers
     </div>
 
-    <div class="nav-section">Tools</div>
-    <div class="nav-item" data-view="policy-tester">
-      <span class="icon">🧪</span> Policy Tester
+    <div class="nav-section">Platform</div>
+    <div class="nav-item" data-view="certificates" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-award"/></svg> Certificates
     </div>
-    <div class="nav-item" data-view="audit">
-      <span class="icon">📋</span> Audit Log
+    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-landmark"/></svg> CA Management
+    </div>
+    <div class="nav-item" data-view="cluster" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-server"/></svg> Cluster
+    </div>
+    <div class="nav-item" data-view="upstream" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-share"/></svg> Upstream Proxies
+    </div>
+    <div class="nav-item" data-view="pac" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-globe"/></svg> PAC File
+    </div>
+    <div class="nav-item" data-view="updates" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-arrow-up-circle"/></svg> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
+    </div>
+    <div class="nav-item" data-view="releases" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-send"/></svg> Releases
+    </div>
+    <div class="nav-item" data-view="diagnostics" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Diagnostics
+    </div>
+    <div class="nav-item" data-view="settings" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg> Settings
     </div>
 
-    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Admin</div>
-    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users">
-      <span class="icon">👥</span> Users &amp; Roles
+    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Administration</div>
+    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-users"/></svg> Administrators
+    </div>
+    <div class="nav-item" data-view="governance" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-check-square"/></svg> Governance
     </div>
   </nav>
 
@@ -458,7 +596,7 @@ tr.dragging  { opacity: .4; }
       <button id="sidebar-toggle" data-click="toggleSidebar" aria-label="Toggle menu">&#9776;</button>
       <div>
         <div class="topbar-title" id="topbar-title">Dashboard</div>
-        <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
+        <div class="topbar-meta" id="topbar-meta">Security posture and real-time proxy overview</div>
       </div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
@@ -472,10 +610,51 @@ tr.dragging  { opacity: .4; }
     </div>
   </div>
 
+  <!-- Connection-lost banner — shown when the poll loop gives up (tick pause) -->
+  <div id="conn-lost-banner" class="banner crit" role="alert" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg>
+    <span>Connection to Culvert lost — automatic retries stopped. Data on screen is stale. Reload the page to resume.</span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
     <div class="view active" id="view-dashboard">
+      <!-- Posture strip — is Culvert operational? (docs/design/SCREEN-SPECS.md §2)
+           Every item is computed from existing endpoints only; unknown ≠ healthy. -->
+      <div class="posture-strip" id="posture-strip" aria-label="System posture">
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="settings" role="button" tabindex="0"
+             title="Admin API reachability and proxy listener port — from /api/stats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Proxy</div><div class="posture-state" id="po-proxy">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Live request rate over the event stream — from /api/events">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Traffic</div><div class="posture-state" id="po-traffic">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="security" role="button" tabindex="0"
+             title="Scan-engine counters reporting (ClamAV / YARA / DPI / feeds) — from /api/dashboard/threats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Engines</div><div class="posture-state" id="po-engines">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="ca-mgmt" role="button" tabindex="0"
+             title="Root CA certificate validity — from /api/ca-cert">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Root CA</div><div class="posture-state" id="po-ca">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Persistent request-log write health — logWriteErrors from /api/stats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Logging</div><div class="posture-state" id="po-logging">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="updates" role="button" tabindex="0"
+             title="Software update availability — from the update checker via /api/events">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Updates</div><div class="posture-state" id="po-updates">Checking…</div></div>
+        </div>
+      </div>
+
       <!-- CA cert expiry warning — hidden until JS populates it -->
       <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
 
@@ -498,34 +677,38 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <div class="cards">
-        <div class="card c-blue">
+        <div class="card c-blue clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="All proxied requests since process start (counters reset on restart). Click to open Traffic.">
           <div class="card-label">Total Requests</div>
           <div class="card-value" id="d-total">0</div>
-          <div class="card-sub">all time</div>
+          <div class="card-sub">since start</div>
         </div>
-        <div class="card c-green">
+        <div class="card c-green clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Requests permitted by policy since start. Click to open Traffic.">
           <div class="card-label">Allowed</div>
           <div class="card-value" id="d-allowed">0</div>
           <div class="card-sub">passed through</div>
         </div>
-        <div class="card c-red">
+        <div class="card c-red clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Requests denied by policy, blocklist, or scan engines since start. Click to open Traffic.">
           <div class="card-label">Blocked</div>
           <div class="card-value" id="d-blocked">0</div>
           <div class="card-sub">by policy &amp; blocklist</div>
         </div>
-        <div class="card c-orange">
+        <div class="card c-orange clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Proxy authentication failures since start. Click to open Traffic.">
           <div class="card-label">Auth Failures</div>
           <div class="card-value" id="d-auth">0</div>
           <div class="card-sub">bad credentials</div>
         </div>
-        <div class="card c-blue">
+        <div class="card c-blue" title="Currently open client connections and requests per second (live via event stream).">
           <div class="card-label">Active Connections</div>
           <div class="card-value" id="d-active">0</div>
           <div class="card-sub" id="d-rps">0.0 req/s</div>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-21">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Request Rate</span>
@@ -548,7 +731,7 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <!-- ── New: Threat Breakdown + System Health ─────────────────────────── -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Threat Engine Breakdown</span>
@@ -612,7 +795,7 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <!-- ── Top Policy Rules + Top Hosts ──────────────────────────────────── -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Top Policy Rules</span>
@@ -630,7 +813,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Top Hosts</span>
-            <span style="font-size:.72rem;color:var(--muted)">by allowed requests</span>
+            <span style="font-size:.72rem;color:var(--muted)" title="Counts are approximate lower bounds beyond 10,000 distinct hosts (decay-based cap)">by allowed requests · approx past 10k hosts</span>
           </div>
           <div class="tbl-wrap">
             <table>
@@ -641,7 +824,7 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Destination Countries</span>
@@ -3748,7 +3931,8 @@ Firefox (all platforms):
 </div>
 
 <!-- Confirmation dialog (F22) -->
-<div id="confirm-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+<div id="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-msg"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
     <h3 id="confirm-dialog-title" style="margin:0 0 8px;font-size:1.05rem;font-weight:700;color:var(--danger)">Confirm</h3>
     <p id="confirm-dialog-msg" style="margin:0 0 20px;font-size:.88rem;color:var(--muted);line-height:1.6"></p>
@@ -3792,7 +3976,7 @@ Firefox (all platforms):
   </div>
 </div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
 
 <script nonce="__CSP_NONCE__">
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4077,6 +4261,16 @@ document.addEventListener('click', e => {
   }
 });
 
+// ── keyboard activation for data-click elements exposed as buttons ───────
+// (nav items bind their own keydown; this covers cards, posture items, etc.)
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const el = e.target.closest('[data-click][role="button"]');
+  if (!el || el.classList.contains('nav-item')) return;
+  e.preventDefault();
+  el.click();
+});
+
 // ── data-change: replaces onchange="fn()" ───────────────────────────────
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-change]');
@@ -4202,6 +4396,7 @@ function toggleTheme() {
     localStorage.setItem('culvert-theme', 'light');
     document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
+  if (typeof refreshChartTheme === 'function') refreshChartTheme();
 }
 initTheme();
 
@@ -4251,40 +4446,49 @@ let rwRules = [];
 // Navigation
 // ═══════════════════════════════════════════════════════════════════════════
 const viewMeta = {
-  dashboard:    { title: 'Dashboard',     meta: 'Real-time proxy overview' },
-  livefeed:     { title: 'Live Feed',     meta: 'All requests in real-time' },
+  dashboard:    { title: 'Dashboard',     meta: 'Security posture and real-time proxy overview' },
+  livefeed:     { title: 'Traffic',       meta: 'All requests in real time (formerly Live Feed)' },
   blocklist:    { title: 'Blocklist',     meta: 'Manage blocked hosts & wildcards' },
-  security:     { title: 'Security',      meta: 'IP filter, rate limiting & log export' },
-  policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
+  security:     { title: 'Content & Scanning', meta: 'Scan engines, IP filter, rate limiting & log export' },
+  policy:       { title: 'Access Rules',  meta: 'Policy-Based Access Control (PBAC) rules' },
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
-  fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
+  fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
-  rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
+  rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   'ca-mgmt':    { title: 'CA Management', meta: 'Root CA lifecycle, rotation, OCSP, and HSM/KMS key provider' },
   upstream:     { title: 'Upstream Proxies', meta: 'Parent proxy chaining with failover and circuit breaker' },
-  cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
+  cluster:      { title: 'Cluster',       meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
   updates:      { title: 'Updates',       meta: 'Docker-based self-update system' },
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
-  users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
+  users:          { title: 'Administrators',  meta: 'Manage console accounts and RBAC roles' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
-  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge; SSORequired forces interactive browser SSO (302) or fails closed (403). None allow traffic; Stage-2 policy still applies' },
+  authpolicy:     { title: 'Authentication Rules', meta: 'Stage-1 Auth Policy — Exempt skips authentication; CredentialRequired forces a 407 challenge; SSORequired forces interactive browser SSO (302) or fails closed (403). None allow traffic; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
+  governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => switchView(el.dataset.view));
+  // Keyboard activation — nav items are divs, so Enter/Space must be wired.
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchView(el.dataset.view); }
+  });
 });
 
 function switchView(name) {
   currentView = name;
-  document.querySelectorAll('.nav-item').forEach(el =>
-    el.classList.toggle('active', el.dataset.view === name));
+  document.querySelectorAll('.nav-item').forEach(el => {
+    const active = el.dataset.view === name;
+    el.classList.toggle('active', active);
+    if (active) el.setAttribute('aria-current', 'page');
+    else el.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.view').forEach(el =>
     el.classList.toggle('active', el.id === 'view-' + name));
   const m = viewMeta[name] || {};
@@ -4316,8 +4520,26 @@ function switchView(name) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Chart
 // ═══════════════════════════════════════════════════════════════════════════
+// Chart colors come from the design tokens so charts follow the active theme
+// (previously hardcoded hex values that ignored light mode).
+function themeColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function chartTheme() {
+  return {
+    accent: themeColor('--accent'), ok: themeColor('--ok'),
+    crit: themeColor('--crit'), orange: themeColor('--orange'),
+    grid: themeColor('--border'), tick: themeColor('--muted'),
+  };
+}
+
 function initChart() {
+  // Chart.js is CDN-loaded; in air-gapped deployments it may be absent.
+  // Degrade to chartless dashboards instead of killing the whole init chain
+  // (SSE, polling and view wiring run after this in the same script block).
+  if (typeof Chart === 'undefined') return;
   const ctx = document.getElementById('rateChart').getContext('2d');
+  const t = chartTheme();
   chart = new Chart(ctx, {
     type: 'line',
     data: {
@@ -4326,7 +4548,7 @@ function initChart() {
         {
           label: 'Total',
           data: new Array(60).fill(0),
-          borderColor: '#14b8a6',
+          borderColor: t.accent,
           backgroundColor: 'rgba(20,184,166,.06)',
           fill: true,
           tension: .4,
@@ -4336,7 +4558,7 @@ function initChart() {
         {
           label: 'Allowed',
           data: new Array(60).fill(0),
-          borderColor: '#22c55e',
+          borderColor: t.ok,
           backgroundColor: 'rgba(34,197,94,.06)',
           fill: false,
           tension: .4,
@@ -4347,7 +4569,7 @@ function initChart() {
         {
           label: 'Blocked',
           data: new Array(60).fill(0),
-          borderColor: '#ef4444',
+          borderColor: t.crit,
           backgroundColor: 'rgba(239,68,68,.06)',
           fill: false,
           tension: .4,
@@ -4360,16 +4582,37 @@ function initChart() {
       responsive: true, maintainAspectRatio: false,
       animation: false,
       plugins: {
-        legend: { display: true, position: 'top', labels: { color: '#64748b', font:{size:10}, boxWidth: 10 } },
+        legend: { display: true, position: 'top', labels: { color: t.tick, font:{size:10}, boxWidth: 10 } },
         tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' req/min' } }
       },
       scales: {
-        x: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', maxTicksLimit: 10, font:{size:10} } },
-        y: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', font:{size:10} },
+        x: { grid: { color: t.grid }, ticks: { color: t.tick, maxTicksLimit: 10, font:{size:10} } },
+        y: { grid: { color: t.grid }, ticks: { color: t.tick, font:{size:10} },
              beginAtZero: true, min: 0 },
       }
     }
   });
+}
+
+// Re-read token colors into both charts after a theme toggle.
+function refreshChartTheme() {
+  const t = chartTheme();
+  if (chart) {
+    chart.data.datasets[0].borderColor = t.accent;
+    chart.data.datasets[1].borderColor = t.ok;
+    chart.data.datasets[2].borderColor = t.crit;
+    chart.options.plugins.legend.labels.color = t.tick;
+    chart.options.scales.x.grid.color = t.grid;
+    chart.options.scales.x.ticks.color = t.tick;
+    chart.options.scales.y.grid.color = t.grid;
+    chart.options.scales.y.ticks.color = t.tick;
+    chart.update('none');
+  }
+  if (breakdownChart) {
+    breakdownChart.data.datasets[0].borderColor = [t.ok, t.crit, t.orange];
+    breakdownChart.options.plugins.legend.labels.color = t.tick;
+    breakdownChart.update('none');
+  }
 }
 
 function updateChart(payload) {
@@ -4384,6 +4627,7 @@ function updateChart(payload) {
 }
 
 function initBreakdownChart() {
+  if (typeof Chart === 'undefined') return; // CDN absent (air-gapped) — degrade gracefully
   const ctx = document.getElementById('breakdownChart').getContext('2d');
   breakdownChart = new Chart(ctx, {
     type: 'doughnut',
@@ -4392,7 +4636,7 @@ function initBreakdownChart() {
       datasets: [{
         data: [0, 0, 0],
         backgroundColor: ['rgba(34,197,94,.7)', 'rgba(239,68,68,.7)', 'rgba(249,115,22,.7)'],
-        borderColor: ['#22c55e', '#ef4444', '#f97316'],
+        borderColor: [chartTheme().ok, chartTheme().crit, chartTheme().orange],
         borderWidth: 1,
       }]
     },
@@ -4400,7 +4644,7 @@ function initBreakdownChart() {
       responsive: true, maintainAspectRatio: false,
       animation: false,
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#64748b', font: {size: 11}, boxWidth: 12 } },
+        legend: { position: 'bottom', labels: { color: chartTheme().tick, font: {size: 11}, boxWidth: 12 } },
       },
       cutout: '60%',
     }
@@ -5216,7 +5460,19 @@ async function fetchStats() {
     // Show/hide Getting Started banner
     const gsb = document.getElementById('getting-started-banner');
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
-  } catch(e) { console.error(e); }
+    // Posture: API reachable + request-log write health (real fields only)
+    setPosture('proxy', 'ok', 'Operational · :' + s.proxyPort);
+    if ((s.logWriteErrors || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else {
+      setPosture('logging', 'ok', 'Persisting');
+    }
+    const clb = document.getElementById('conn-lost-banner');
+    if (clb) clb.style.display = 'none';
+  } catch(e) {
+    console.error(e);
+    setPosture('proxy', 'crit', 'Unreachable');
+  }
   // CA cert expiry check
   checkCACertExpiry();
 }
@@ -5226,9 +5482,17 @@ async function checkCACertExpiry() {
     const info = await fetch('/api/ca-cert', { headers: { 'Accept': 'application/json' } })
       .then(r => r.json());
     const banner = document.getElementById('ca-expiry-banner');
-    if (!info || !info.notAfter) { banner.style.display = 'none'; return; }
+    if (!info || !info.notAfter) {
+      banner.style.display = 'none';
+      setPosture('ca', 'unknown', 'Not configured');
+      return;
+    }
     const expiry = new Date(info.notAfter);
     const days   = Math.floor((expiry - Date.now()) / 86400000);
+    if (days < 0)        setPosture('ca', 'crit', 'Expired');
+    else if (days <= 7)  setPosture('ca', 'crit', 'Expires in ' + days + 'd');
+    else if (days <= 30) setPosture('ca', 'warn', 'Expires in ' + days + 'd');
+    else                 setPosture('ca', 'ok', 'Valid · ' + days + 'd left');
     if (days > 30) { banner.style.display = 'none'; return; }
     const isCritical = days <= 7;
     banner.style.background = isCritical ? 'rgba(220,53,69,.15)' : 'rgba(255,193,7,.15)';
@@ -5236,7 +5500,7 @@ async function checkCACertExpiry() {
     banner.style.color       = isCritical ? '#e74c3c' : '#b8860b';
     banner.textContent       = `⚠ CA certificate expires in ${days} day${days===1?'':'s'} (${info.notAfter}) — renew via the Certificates page`;
     banner.style.display     = 'block';
-  } catch(e) { console.error(e); }
+  } catch(e) { console.error(e); setPosture('ca', 'unknown', 'Unavailable'); }
 }
 
 async function fetchTopHosts() {
@@ -8124,7 +8388,8 @@ async function loadFileProfileDropdown() {
 function toast(msg, type='success') {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
-  el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + msg;
+  // msg often carries server-provided error text — always escape (CWE-79).
+  el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + escHtml(msg);
   document.getElementById('toasts').appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
@@ -8152,6 +8417,18 @@ function confirmAction(title, msg, okLabel='Delete') {
 // ═══════════════════════════════════════════════════════════════════════════
 function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
 
+// ── Posture strip (docs/design/SCREEN-SPECS.md §2) ───────────────────────
+// state: 'ok' | 'warn' | 'crit' | 'unknown'. State is carried by BOTH the
+// dot color and the state text — never color alone (UX-PRINCIPLES §9).
+function setPosture(id, state, text) {
+  const el = document.getElementById('po-' + id);
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('skeleton');
+  const item = el.closest('.posture-item');
+  if (item) item.dataset.state = state;
+}
+
 async function fetchDashboardHealth() {
   try {
     const h = await api('/api/dashboard/health');
@@ -8171,7 +8448,8 @@ async function fetchDashboardThreats() {
     setText('d-yara', fmt(t.yara || 0));
     setText('d-dpi',  fmt(t.dpi || 0));
     setText('d-feed', fmt(t.threatFeed || 0));
-  } catch(_) {}
+    setPosture('engines', 'ok', 'Reporting');
+  } catch(_) { setPosture('engines', 'unknown', 'Unavailable'); }
 }
 
 async function fetchTopRules() {
@@ -8231,7 +8509,11 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   _sseInstance = es;
 
-  es.addEventListener('connected', () => { sseConnected = true; _sseRetries = 0; setLivePill(true); startTick(); });
+  es.addEventListener('connected', () => {
+    sseConnected = true; _sseRetries = 0; setLivePill(true); startTick();
+    const clb = document.getElementById('conn-lost-banner');
+    if (clb) clb.style.display = 'none';
+  });
   es.onmessage = e => {
     try {
       _sseRetries = 0; // successful message resets retry counter
@@ -8241,6 +8523,17 @@ function connectSSE() {
       document.getElementById('d-blocked').textContent = fmt(d.blocked || 0);
       document.getElementById('d-auth').textContent = fmt(d.authFail || 0);
       document.getElementById('d-rps').textContent = (d.rps || 0).toFixed(1) + ' req/s';
+      // Posture: live traffic + update availability (from the same payload)
+      if ((d.rps || 0) > 0 || (d.activeConns || 0) > 0) {
+        setPosture('traffic', 'ok', (d.rps || 0).toFixed(1) + ' req/s');
+      } else {
+        setPosture('traffic', 'ok', 'Idle');
+      }
+      if (d.updateAvailable) {
+        setPosture('updates', 'warn', (d.latestVersion ? d.latestVersion + ' ' : '') + 'available');
+      } else {
+        setPosture('updates', 'ok', 'Up to date');
+      }
       renderCountryChart(d.topCountries || []);
       // Threat engine breakdown (live from SSE)
       setText('d-clam', fmt(d.clamBlocked || 0));
@@ -8258,6 +8551,7 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill(false);
+    setPosture('traffic', 'unknown', 'Stale');
     es.close();          // explicitly close the failed connection
     _sseInstance = null;
     _sseRetries++;
@@ -8646,6 +8940,10 @@ async function tick() {
       clearInterval(_tickInterval);
       _tickInterval = null;
       setLivePill(false);
+      // Surface the stall — a silently paused poll looks like a healthy idle UI.
+      const clb = document.getElementById('conn-lost-banner');
+      if (clb) clb.style.display = '';
+      setPosture('proxy', 'crit', 'Unreachable');
       console.warn('Tick: server unreachable, pausing poll. Will resume when SSE reconnects.');
     }
     return; // skip view-specific fetches when server is down
@@ -9761,7 +10059,9 @@ async function apSave() {
 }
 
 async function apDeleteRule(priority) {
-  if (!await confirmDialog('Delete this auth rule? Clients it covered will fall back to the default authentication gate.')) return;
+  // was confirmDialog(...) — an undefined helper that threw before the DELETE
+  if (!await confirmAction('Delete auth rule',
+    'Clients this rule covered will fall back to the default authentication gate.', 'Delete')) return;
   try {
     await api(`/api/authpolicy?priority=${priority}`, { method: 'DELETE' });
     toast('Auth rule deleted', 'success');
