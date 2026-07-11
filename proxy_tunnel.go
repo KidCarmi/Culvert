@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -161,15 +162,86 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	recordTunnelCloseGated(match, id, "WS", r.Host, toDest, toClient, start, "")
 }
 
+// tunnelIdleTimeout bounds how long a raw tunnel relay may sit with zero bytes
+// flowing in EITHER direction before it is torn down (CHAOS-03). Half-open
+// peers that keep ACKing TCP keepalives but never send data previously pinned
+// 2 goroutines + 2 FDs + a pooled buffer indefinitely; a flood of such
+// connections exhausts the process. One hour is deliberately conservative:
+// legitimate idle-but-alive tunnels (SSH, IMAP IDLE, WebSocket ping/pong) all
+// generate application bytes well inside that window, so only truly dead or
+// abusive tunnels are reaped. Var (not const) so tests can shorten it;
+// production never mutates it (configurability is a recorded deferral).
+var tunnelIdleTimeout = 1 * time.Hour
+
+// newTunnelActivityStamp returns the shared last-activity stamp (unix nanos)
+// for one tunnel's two relay directions, seeded to now so a tunnel that never
+// moves a byte is reaped one idle window after establishment.
+func newTunnelActivityStamp() *atomic.Int64 {
+	s := new(atomic.Int64)
+	s.Store(time.Now().UnixNano())
+	return s
+}
+
+// idleCopyCounted copies src→dst through a pooled relay buffer, arming a read
+// deadline on srcConn (the conn src ultimately reads — src itself may be a
+// bufio wrapper over it) so the copy wakes at least twice per idle window. A
+// deadline pop while the tunnel saw bytes in either direction (shared stamp
+// fresh) re-arms and resumes — safe because only read deadlines are used and
+// read-deadline timeouts are resumable on both *net.TCPConn and *tls.Conn
+// (only write timeouts corrupt TLS state). A pop with the stamp stale for a
+// full window means BOTH directions were silent: the tunnel is torn down by
+// closing BOTH conns — a hard close, not CloseWrite, because the peer relay
+// may be blocked in a deadline-less Write (receiver ACKs but never reads)
+// that only a close can unblock.
+//
+// Two deliberate mechanics:
+//   - Deadlines are armed AROUND io.CopyBuffer, not via a reader wrapper, so
+//     the ReaderFrom/WriterTo kernel-splice fast path on TCP↔TCP relays is
+//     preserved on the CONNECT-bypass hot path.
+//   - The arm interval is HALF the idle window. The stamp is only refreshed
+//     when a copy call returns (a busy copy runs without returning), so an
+//     active direction refreshes the stamp every half-window at latest; the
+//     silent direction's staleness check therefore carries a half-window
+//     scheduling margin and can never reap a tunnel whose other direction is
+//     alive, even when both deadlines pop near-simultaneously.
+//
+// Returns the bytes copied into dst.
+func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atomic.Int64) int64 {
+	timeout := tunnelIdleTimeout
+	armInterval := timeout / 2
+	bp := getRelayBuf()
+	defer relayBufPool.Put(bp)
+	var total int64
+	for {
+		srcConn.SetReadDeadline(time.Now().Add(armInterval)) //nolint:errcheck // a set failure on a closing conn surfaces as the next read error
+		n, err := io.CopyBuffer(dst, src, *bp)
+		total += n
+		if n > 0 {
+			shared.Store(time.Now().UnixNano())
+		}
+		var ne net.Error
+		if err != nil && errors.As(err, &ne) && ne.Timeout() {
+			if time.Since(time.Unix(0, shared.Load())) >= timeout {
+				logger.Printf("tunnel idle timeout: no bytes in either direction for %v, closing relay", timeout)
+				dst.Close()     //nolint:errcheck // teardown; peer relay unblocks on the close
+				srcConn.Close() //nolint:errcheck // teardown; peer relay unblocks on the close
+				return total
+			}
+			continue // the tunnel was active inside the window — re-arm and keep waiting
+		}
+		// nil (src EOF) or a terminal error — relay copy errors are expected
+		// on peer close; the byte count is still valid.
+		return total
+	}
+}
+
 // relayCounted copies src→dst through a pooled relay buffer, adds the bytes
 // copied to *count, closes dst's write half so the peer sees EOF (B2 — without
 // interfering with the other direction's in-flight writes), and signals done.
+// srcConn is the conn src reads (idle-deadline anchor — see idleCopyCounted).
 // Shared by the WebSocket and CONNECT-bypass raw relays.
-func relayCounted(dst net.Conn, src io.Reader, count *int64, done chan<- struct{}) {
-	bp := getRelayBuf()
-	n, _ := io.CopyBuffer(dst, src, *bp) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
-	relayBufPool.Put(bp)
-	*count += n
+func relayCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atomic.Int64, count *int64, done chan<- struct{}) {
+	*count += idleCopyCounted(dst, src, srcConn, shared)
 	if tc, ok := dst.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck // best-effort EOF signal; peer may already be gone
 	}
@@ -181,10 +253,15 @@ func relayCounted(dst net.Conn, src io.Reader, count *int64, done chan<- struct{
 // respectively. Each direction's count is written by exactly one goroutine
 // before its done-send and read only after both receives (channel
 // happens-before), so no atomics are needed.
+//
+// Idle-deadline anchoring relies on the bridge invariant that holds for both
+// callers by construction: aSrc reads the conn that is bDst, and bSrc reads
+// the conn that is aDst (each direction reads one peer and writes the other).
 func bidiRelayCounted(aDst net.Conn, aSrc io.Reader, bDst net.Conn, bSrc io.Reader) (aBytes, bBytes int64) {
+	shared := newTunnelActivityStamp()
 	done := make(chan struct{}, 2)
-	go relayCounted(aDst, aSrc, &aBytes, done)
-	go relayCounted(bDst, bSrc, &bBytes, done)
+	go relayCounted(aDst, aSrc, bDst, shared, &aBytes, done)
+	go relayCounted(bDst, bSrc, aDst, shared, &bBytes, done)
 	<-done
 	<-done
 	return aBytes, bBytes
@@ -537,19 +614,20 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// Teardown is unchanged: wait for one side to EOF, then Close both to
 		// unblock the other. Each direction's count is written by exactly one
 		// goroutine before its done-send and read only after both done-receives
-		// (channel happens-before), so no atomics are needed.
+		// (channel happens-before), so no atomics are needed. Both directions
+		// share an idle stamp (idleCopyCounted) so a half-open peer cannot pin
+		// the tunnel forever; the client direction reads through peekBuf, so
+		// its deadline anchors on the underlying rawClient conn.
 		start := time.Now()
 		var toUpstream, toClient int64
+		shared := newTunnelActivityStamp()
 		done := make(chan struct{}, 2)
-		relay := func(dst io.Writer, src io.Reader, count *int64) {
-			bp := getRelayBuf()
-			n, _ := io.CopyBuffer(dst, src, *bp) //nolint:errcheck // relay copy error is expected on peer close; byte count still valid
-			relayBufPool.Put(bp)
-			*count = n
+		relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
+			*count = idleCopyCounted(dst, src, srcConn, shared)
 			done <- struct{}{}
 		}
-		go relay(upstreamTLS, peekBuf, &toUpstream) // client → upstream
-		go relay(rawClient, upstreamTLS, &toClient) // upstream → client
+		go relay(upstreamTLS, peekBuf, rawClient, &toUpstream)   // client → upstream
+		go relay(rawClient, upstreamTLS, upstreamTLS, &toClient) // upstream → client
 		<-done
 		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
 		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
@@ -659,11 +737,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		if resp.StatusCode == http.StatusSwitchingProtocols {
 			resp.Write(clientTLS) //nolint:errcheck // best-effort write of buffered response to client
 			resp.Body.Close()
+			// Idle-bounded (idleCopyCounted) like every other raw relay: a
+			// half-open WebSocket peer inside an inspected tunnel cannot pin
+			// the two TLS conns forever. Read deadlines re-arm per window and
+			// are resumable on tls.Conn (only write timeouts corrupt TLS).
+			shared := newTunnelActivityStamp()
 			done := make(chan struct{}, 2)
 			rawRelay := func(dst, src net.Conn) {
-				bp := getRelayBuf()
-				io.CopyBuffer(dst, src, *bp) //nolint:errcheck // best-effort relay copy; peer close ends the stream
-				relayBufPool.Put(bp)
+				idleCopyCounted(dst, src, src, shared)
 				done <- struct{}{}
 			}
 			go rawRelay(upstreamTLS, clientTLS)

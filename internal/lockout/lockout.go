@@ -5,6 +5,8 @@ package lockout
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -56,6 +58,15 @@ const (
 // separator is injection-safe (a crafted username cannot alias another
 // client's pair).
 func pairKey(ip, username string) string { return ip + "\x00" + username }
+
+// splitPairKey reverses pairKey for display purposes (Snapshot).
+func splitPairKey(key string) (ip, username string) {
+	idx := strings.IndexByte(key, 0)
+	if idx < 0 {
+		return "", key
+	}
+	return key[:idx], key[idx+1:]
+}
 
 type lockoutEntry struct {
 	attempts    int
@@ -342,6 +353,47 @@ func (l *LoginLimiter) ResetUser(username string) {
 			delete(l.pairs, key)
 		}
 	}
+}
+
+// LockedEntry describes one currently-active lockout, for admin visibility.
+// Tier is "account" (tier-2, blocks every IP for Username) or "pair"
+// (tier-1, blocks only IP against Username). IP is empty for account-tier
+// entries.
+type LockedEntry struct {
+	Tier             string `json:"tier"`
+	Username         string `json:"username"`
+	IP               string `json:"ip,omitempty"`
+	SecondsRemaining int    `json:"seconds_remaining"`
+}
+
+// Snapshot returns every currently-active lockout across both tiers, sorted
+// by username then IP for stable display. It is the read side of the
+// explicit unlock primitive (ResetUser) — without it, an operator has no way
+// to see who is locked out short of reading logs or waiting/restarting. It
+// does not mutate limiter state; expired entries are simply omitted.
+func (l *LoginLimiter) Snapshot() []LockedEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	out := []LockedEntry{}
+	for username, e := range l.accounts {
+		if secs := e.lockRemaining(now); secs > 0 {
+			out = append(out, LockedEntry{Tier: "account", Username: username, SecondsRemaining: secs})
+		}
+	}
+	for key, e := range l.pairs {
+		if secs := e.lockRemaining(now); secs > 0 {
+			ip, username := splitPairKey(key)
+			out = append(out, LockedEntry{Tier: "pair", Username: username, IP: ip, SecondsRemaining: secs})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Username != out[j].Username {
+			return out[i].Username < out[j].Username
+		}
+		return out[i].IP < out[j].IP
+	})
+	return out
 }
 
 // SnapshotAndClear captures the current limiter state, replaces it with an

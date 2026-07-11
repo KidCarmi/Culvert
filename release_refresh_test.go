@@ -186,3 +186,46 @@ func TestRefresh_ValidatorsPendingUntilCommit(t *testing.T) {
 		t.Fatalf("post-commit Stage: want errCatalogUnchanged, got %v", err)
 	}
 }
+
+// CHAOS-R1 (2026-07-10 review): the refresh loop is the sole runtime driver of
+// both catalog refresh and the freshness watchdog, so a panic anywhere in the
+// refresh path must cost exactly one tick — the loop keeps ticking and later
+// ticks still run and record outcomes.
+func TestRunCatalogRefreshLoop_SurvivesTickPanic(t *testing.T) {
+	var calls atomic.Int32
+	rm := &releaseManager{refresh: func(context.Context) error {
+		if calls.Add(1) == 1 {
+			panic("injected refresh panic")
+		}
+		return nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runCatalogRefreshLoop(ctx, 20*time.Millisecond, func() *releaseManager { return rm })
+	}()
+
+	// Tick 1 panics; the loop must survive it and keep ticking.
+	deadline := time.Now().Add(3 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls.Load(); got < 3 {
+		t.Fatalf("loop died after the panicking tick (calls = %d, want >= 3)", got)
+	}
+	// The post-panic tick still folds into the shared status, and the panic
+	// did not strand refreshRunMu/statusMu (deferred unlocks release during
+	// unwinding — a stuck lock would deadlock the later ticks above).
+	if st := rm.refreshStatusSnapshot(); st.LastTrigger != "loop" || !st.LastOK {
+		t.Fatalf("post-panic tick did not record shared status: %+v", st)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not stop on context cancellation after a recovered panic")
+	}
+}

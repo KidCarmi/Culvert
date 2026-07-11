@@ -1,6 +1,10 @@
 package main
 
-// Release-catalog detection / canary / alerting (M1-3, design §3 Slice C).
+// Release-catalog detection / freshness alerting (M1-3, design §3 Slice C).
+//
+// "Canary" is deliberately not used here: update_cluster.go already owns that
+// word for its staged-rollout mechanism (CanaryCount/CanarySoak), and this
+// file implements no staged rollout — only staleness/failure alerts.
 //
 // Operators learn about catalog problems from alerts, not outages. Three alert
 // events ride the existing fireAlert seam:
@@ -163,9 +167,12 @@ func (rm *releaseManager) evaluateCatalogFreshness() {
 		// Permissive/legacy catalogs may carry no expiry — nothing to watch.
 		return
 	}
-	rm.statusMu.Lock()
-	events := rm.evalStale(exp, time.Now())
-	rm.statusMu.Unlock()
+	// defer-released (closure) so a recovered panic cannot strand statusMu.
+	events := func() []AlertPayload {
+		rm.statusMu.Lock()
+		defer rm.statusMu.Unlock()
+		return rm.evalStale(exp, time.Now())
+	}()
 	for _, p := range events {
 		releaseAlertFire(p.Event, p)
 	}

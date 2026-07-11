@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -485,7 +484,7 @@ func catalogReadBounded(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("release catalog: %s is not a regular file", base)
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- path joined under a fixed dir; ref shape-validated; symlinks refused
+	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0) // #nosec G304 -- path joined under a fixed dir; ref shape-validated; symlinks refused
 	if err != nil {
 		return nil, err
 	}

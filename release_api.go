@@ -135,20 +135,25 @@ func (rm *releaseManager) recordRefreshOutcome(trigger string, err error) {
 	} else {
 		atomic.AddInt64(&statReleaseRefreshSuccess, 1)
 	}
-	rm.statusMu.Lock()
-	rm.refreshStatus.LastAt = time.Now()
-	rm.refreshStatus.LastTrigger = trigger
-	if err != nil {
-		rm.refreshStatus.LastOK = false
-		rm.refreshStatus.LastErr = err.Error()
-		rm.refreshStatus.ConsecutiveFailures++
-	} else {
-		rm.refreshStatus.LastOK = true
-		rm.refreshStatus.LastErr = ""
-		rm.refreshStatus.ConsecutiveFailures = 0
-	}
-	events := rm.evaluateRefreshTransitions(err)
-	rm.statusMu.Unlock()
+	// The locked section releases via defer (closure) so a panic inside it —
+	// recovered by refreshLoopTick's guard — cannot strand statusMu; events
+	// are still emitted after unlock (no network I/O under the lock).
+	events := func() []AlertPayload {
+		rm.statusMu.Lock()
+		defer rm.statusMu.Unlock()
+		rm.refreshStatus.LastAt = time.Now()
+		rm.refreshStatus.LastTrigger = trigger
+		if err != nil {
+			rm.refreshStatus.LastOK = false
+			rm.refreshStatus.LastErr = err.Error()
+			rm.refreshStatus.ConsecutiveFailures++
+		} else {
+			rm.refreshStatus.LastOK = true
+			rm.refreshStatus.LastErr = ""
+			rm.refreshStatus.ConsecutiveFailures = 0
+		}
+		return rm.evaluateRefreshTransitions(err)
+	}()
 	for _, p := range events {
 		releaseAlertFire(p.Event, p)
 	}
