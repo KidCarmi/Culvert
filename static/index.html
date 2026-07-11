@@ -4027,7 +4027,7 @@ document.addEventListener('click', e => {
     case 'polTestRule':       polTestRule(+arg); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
     case 'polGotoRuleByName': polGotoRuleByName(arg); break;
-    case 'apGotoRule':        apGotoRule(+arg); break;
+    case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
     case 'setPolActionFilter': setPolActionFilter(arg); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
     case 'runPolicyTest':     runPolicyTest(); break;
@@ -9024,7 +9024,10 @@ async function polHistory(priority) {
 // it. Works for ANY tbody whose rows carry data-priority (access rules, auth
 // rules, future consumers) — deliberately not rule-shaped.
 function gotoAnchoredRow(view, tbodyId, priority) {
-  switchView(view);
+  // Don't re-enter switchView when already there: re-triggering the view's
+  // async loader would rebuild the tbody and discard the flash mid-animation
+  // (views without a render-skip signature repaint unconditionally).
+  if (currentView !== view) switchView(view);
   const deadline = Date.now() + 3000;
   (function seek() {
     const row = document.querySelector('#' + tbodyId + ' tr[data-priority="' + priority + '"]');
@@ -9042,20 +9045,23 @@ function gotoAnchoredRow(view, tbodyId, priority) {
 }
 
 function polGotoRule(priority) { gotoAnchoredRow('policy', 'pol-table', priority); }
-function apGotoRule(priority)  { gotoAnchoredRow('authpolicy', 'ap-rules', priority); }
 
-// polGotoRuleByName — Traffic rows record the matched rule by NAME; resolve
-// it against polRules once the policy view's async load lands.
-function polGotoRuleByName(name) {
-  switchView('policy');
+// gotoAnchoredRowByName — as gotoAnchoredRow, but resolves the row's
+// priority from a lazily-loaded rule list by NAME (Traffic rows and the
+// Stage-1 simulator identify rules by name, not priority). `list` is a
+// thunk because the backing array loads asynchronously on view entry.
+function gotoAnchoredRowByName(view, tbodyId, list, name) {
+  if (currentView !== view) switchView(view);
   const deadline = Date.now() + 3000;
   (function seek() {
-    const r = (polRules || []).find(x => x.name === name);
-    if (r) return polGotoRule(r.priority);
+    const r = (list() || []).find(x => x.name === name);
+    if (r) return gotoAnchoredRow(view, tbodyId, r.priority);
     if (Date.now() < deadline) setTimeout(seek, 150);
     else toast(`Rule "${name}" not found — it may have been renamed or deleted`, 'error');
   })();
 }
+function polGotoRuleByName(name) { gotoAnchoredRowByName('policy', 'pol-table', () => polRules, name); }
+function apGotoRuleByName(name)  { gotoAnchoredRowByName('authpolicy', 'ap-rules', () => apRules, name); }
 
 // renderPolicyTrace — the shared decision-trace rows (.trace contract): one
 // row per rule walked, consuming the walkPolicyTestRules payload verbatim
@@ -10262,7 +10268,7 @@ async function runPolicyTest() {
     }
     authHtml = `<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
       <div class="pt-sub" style="font-weight:600;margin-bottom:4px">Stage-1 Authentication: ${badge}</div>
-      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong> <a href="#" class="trace-link" data-click="apGotoRule" data-arg="${a.rule.priority}">View rule →</a>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''} <span style="color:var(--muted)">(scoped rules evaluate first)</span></div>` : `<div class="pt-sub" style="color:var(--muted)">No scoped auth rule matched — the global default applies (Default authentication: <strong>${escHtml(a.defaultAuthOutcome || 'Default')}</strong>).</div>`}
+      ${a.rule ? `<div class="pt-sub">Matched auth rule: <strong>${escHtml(a.rule.name)}</strong> <a href="#" class="trace-link" data-click="apGotoRuleByName" data-arg="${escHtml(a.rule.name)}">View rule →</a>${a.rule.owner ? ` (owner: ${escHtml(a.rule.owner)})` : ''} <span style="color:var(--muted)">(scoped rules evaluate first)</span></div>` : `<div class="pt-sub" style="color:var(--muted)">No scoped auth rule matched — the global default applies (Default authentication: <strong>${escHtml(a.defaultAuthOutcome || 'Default')}</strong>).</div>`}
       ${runtimeLine}
       ${scopedExempt ? `<div class="pt-sub" style="color:#fbbf24;margin-top:4px">Scoped Exempt rule — skips authentication only; it does NOT allow traffic. Stage-2 still applies and sees authSource="${escHtml(a.stage2AuthSource)}".</div>` : ''}
       ${defaultExempt ? `<div class="pt-sub" style="color:#34d399;margin-top:4px">Open unmatched traffic (defaultAuthOutcome=Exempt) — admitted without authentication because no rule matched. This is NOT Allow: Stage-2 policy and default-deny still apply, and Stage-2 sees authSource="${escHtml(a.stage2AuthSource)}" (no identity).</div>` : ''}
