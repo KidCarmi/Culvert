@@ -481,8 +481,8 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalCategoryGroups.Save()
-		auditEvent(r, "category-group.add", g.Name, fmt.Sprintf("%d categories", len(g.Categories)))
-		saveConfigVersion(sessionAdmin(r), "category-group.add")
+		auditEvent(r, "category-group.create", g.Name, fmt.Sprintf("%d categories", len(g.Categories)))
+		saveConfigVersion(sessionAdmin(r), "category-group.create")
 		jsonOK(w, map[string]any{"ok": true, "group": g})
 
 	case http.MethodPut:
@@ -527,8 +527,8 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		globalCategoryGroups.Save()
-		auditEvent(r, "category-group.remove", name, "")
-		saveConfigVersion(sessionAdmin(r), "category-group.remove")
+		auditEvent(r, "category-group.delete", name, "")
+		saveConfigVersion(sessionAdmin(r), "category-group.delete")
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
