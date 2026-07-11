@@ -628,11 +628,12 @@ func resolveStripALPN(match *PolicyMatch) bool {
 	return *match.Rule.StripALPN
 }
 
-// geoTrackSem bounds concurrent destination-country trackers. Each tracker
-// can block in uncached DNS resolution (resolveHost → net.LookupHost) for the
-// full resolver timeout, and handleRequest fires one per proxied request —
-// without a bound, a resolver brownout piles up one DNS-blocked goroutine per
-// request with no backpressure, exactly when the proxy is already stressed.
+// geoTrackSem bounds concurrent destination-country trackers. A tracker can
+// block in DNS resolution (resolveHost — memoised per host with a TTL, so
+// only cache misses resolve) for the full resolver timeout, and handleRequest
+// fires one per proxied request — without a bound, a resolver brownout piles
+// up one DNS-blocked goroutine per request with no backpressure, exactly when
+// the proxy is already stressed.
 var geoTrackSem = make(chan struct{}, 256)
 
 // trackDestinationCountry records the destination country for the live
