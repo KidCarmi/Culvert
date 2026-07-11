@@ -29,6 +29,32 @@
 | RISK-019 | MEDIUM | ✅ CLOSED | Admin-UI per-IP logic keys on direct peer IP; no trusted-proxy XFF extraction (lockout collapses behind an L7 proxy) | trusted-proxy `realClientIP` (2026-07-05); adversarially reviewed |
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
 | RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
+| RISK-020 | LOW | OPEN | Native HTTP/2 inspection: deferred hardening on the opt-in path | `proxy_tunnel_h2.go` — see below |
+
+---
+
+## RISK-020 — Native HTTP/2 inspection deferred hardening · LOW · OPEN
+- **Context:** native H2 inspection (`proxy_tunnel_h2.go`) is **opt-in per rule** (`stripAlpn: false`);
+  the default and every pre-feature rule keep the HTTP/1.1-downgrade path, so production behavior is
+  unchanged until an operator opts in. Reviewed by three independent implementation reviewers per
+  milestone (SWG architect, HTTP/2+TLS security, Go runtime) — all APPROVE-WITH-CHANGES, every verified
+  finding fixed, no opt-in merge blocker. Security posture: per-stream inactivity watchdog,
+  `MaxConcurrentStreams=32` (also the Rapid-Reset cap), 1 MiB frame/header caps, pinned upstream conn
+  (no `:authority` SSRF), truncation → RST. Rapid Reset (CVE-2023-44487) + CONTINUATION flood
+  (CVE-2023-45288) mitigated by the vendored `golang.org/x/net`.
+- **Residual (deferred, documented in `docs/operator/http2-inspection.md`):**
+  1. **`:authority` pinning / 421** not enforced — **not a new exposure** (the HTTP/1.1 path forwards the
+     inner `Host` to the pinned upstream identically today; single-SAN forged leaf prevents coalescing).
+     Tracked as a **shared H1+H2** hardening item, not H2-only.
+  2. **Graceful GOAWAY on shutdown** — inspected H2 tunnels are counted + drained, but `ServeConn`
+     hard-closes rather than sending a client GOAWAY (bounded by the x/net API). Availability, not
+     security.
+  3. **Configurability** — stall timeout + `MaxConcurrentStreams` are compile-time constants; exposing
+     them as admin-tunable decryption-profile settings (PAN-OS-style) is a planned follow-up.
+  4. **Per-connection scan memory** — worst case `maxScanBufferBytes × MaxConcurrentStreams` per
+     malicious connection; documented as a capacity-planning note.
+- **Why LOW:** opt-in, off by default, bounded, reviewed; each residual is either not-a-new-exposure,
+  availability-only, or a usability follow-up.
 
 ---
 
