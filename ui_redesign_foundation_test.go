@@ -96,6 +96,13 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="confirm-dialog-rollback"`, // rollback statement region
 		`aria-live="polite"`,           // toast announcement region
 		`aria-current`,                 // nav current-page marker
+		// M3 S3 — policy editor assist layer
+		`function polReadForm`,       // single form reader shared by submit/summary/validation
+		`function polValidateClient`, // pre-submit checks mirroring validatePolicyRule
+		`function polRenderSummary`,  // live human-readable rule summary (G10)
+		`function polHistory`,        // per-rule History → filtered audit view (G7)
+		`id="pol-summary"`,           // summary region
+		`id="pol-form-err"`,          // inline validation errors
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)

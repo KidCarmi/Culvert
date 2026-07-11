@@ -445,6 +445,11 @@ tr.dragging  { opacity: .4; }
 /* shared table empty cell (M2) */
 .tbl-empty { text-align: center; color: var(--muted); padding: 24px 14px !important;
              font-size: var(--fs-sm); }
+/* policy editor live summary (M3 S3) */
+.pol-summary { font-size: var(--fs-sm); color: var(--muted); line-height: 1.55;
+  padding: 10px 12px; margin-bottom: 12px; background: var(--surface1);
+  border: 1px solid var(--border); border-radius: var(--r-md); }
+.pol-summary strong { color: var(--text); }
 /* motion floor */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
@@ -2537,6 +2542,9 @@ Firefox (all platforms):
             </div>
           </details>
 
+          <!-- S3: live human-readable rule summary + client validation errors -->
+          <div id="pol-form-err" class="banner crit" role="alert" style="display:none"></div>
+          <div id="pol-summary" class="pol-summary" aria-live="polite"></div>
           <button class="btn" id="policy-submit-btn" data-click="submitPolicyRule">+ Add Rule</button>
         </div>
       </div>
@@ -4012,6 +4020,7 @@ document.addEventListener('click', e => {
     case 'movePolicy':        movePolicy(+arg, arg2); break;
     case 'showMoveTarget':    showMoveTarget(+arg, arg2); break;
     case 'clonePolicy':       clonePolicy(+arg); break;
+    case 'polHistory':        polHistory(+arg); break;
     case 'setPolActionFilter': setPolActionFilter(arg); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
     case 'runPolicyTest':     runPolicyTest(); break;
@@ -4341,6 +4350,19 @@ document.querySelectorAll('.nav-item').forEach(el => {
 });
 
 function switchView(name) {
+  // Unsaved-changes guard (M3 S3): leaving the policy view with a dirty rule
+  // form asks first; Discard clears the form and completes the navigation.
+  if (currentView === 'policy' && name !== 'policy' && _polFormDirty) {
+    confirmAction('Discard unsaved rule changes?',
+      'The rule editor has edits that have not been saved.', 'Discard').then(ok => {
+      if (!ok) return;
+      _polFormDirty = false;
+      clearPolicyForm();
+      cancelPolicyEdit();
+      switchView(name);
+    });
+    return;
+  }
   currentView = name;
   document.querySelectorAll('.nav-item').forEach(el => {
     const active = el.dataset.view === name;
@@ -8750,6 +8772,8 @@ function editPolicy(priority) {
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
   document.getElementById('policy-cancel-btn').style.display = '';
+  polShowFormErrors([]);
+  polRenderSummary(); // programmatic population fires no events — refresh manually
   document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
 }
 
@@ -8779,28 +8803,19 @@ function clearPolicyForm() {
   if (ci) ci.value = '';
   setScheduleToForm(null);
   document.getElementById('pol-schedule-details').open = false;
+  _polFormDirty = false;
+  polShowFormErrors([]);
+  polRenderSummary();
 }
 
-const _origSubmitPolicyRule = window.submitPolicyRule;
-async function submitPolicyRule() {
-  const name   = document.getElementById('pol-name').value.trim();
-  const action = document.getElementById('pol-action').value;
-  if (!name || !action) {
-    toast('Name and Action are required', 'error'); return;
-  }
-  // Auto-assign priority: when adding new rule use max+10; when editing keep existing.
-  let priority;
-  if (polEditPriority !== null) {
-    priority = polEditPriority;
-  } else {
-    priority = nextAutoPriority();
-  }
+// polReadForm — single reader for the access-rule editor fields, shared by
+// submit, the live summary, and client validation (M3 S3).
+function polReadForm() {
   const countryStr = document.getElementById('pol-dest-country').value.trim();
-  const destCountry = countryStr ? countryStr.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [];
-  const rule = {
-    priority,
-    name,
-    action,
+  return {
+    priority: polEditPriority !== null ? polEditPriority : nextAutoPriority(),
+    name:   document.getElementById('pol-name').value.trim(),
+    action: document.getElementById('pol-action').value,
     sourceIP:       document.getElementById('pol-src-ip').value.trim(),
     sourceIdentity: document.getElementById('pol-src-id').value.trim(),
     sourceGroup:    document.getElementById('pol-src-group').value.trim(),
@@ -8809,7 +8824,7 @@ async function submitPolicyRule() {
     destFQDN:       document.getElementById('pol-dest-fqdn').value.trim(),
     destCategory:      document.getElementById('pol-dest-cat').value || '',
     destCategoryGroup: document.getElementById('pol-dest-catgroup').value || '',
-    destCountry,
+    destCountry: countryStr ? countryStr.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [],
     sslAction:      document.getElementById('pol-ssl').value,
     enabled:        document.getElementById('pol-enabled').checked,
     fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
@@ -8819,6 +8834,97 @@ async function submitPolicyRule() {
     logTraffic:     document.getElementById('pol-log-traffic').checked,
     schedule:       getScheduleFromForm(),
   };
+}
+
+// polValidateClient — pre-submit checks mirroring the server's
+// validatePolicyRule/validateAccessRule (ui_helpers.go). The server remains
+// the authority; this only turns a round-trip rejection into inline feedback.
+function polValidateClient(rule) {
+  const errs = [];
+  if (!rule.name) errs.push('Name is required.');
+  else if (polRules.some(r => r.ruleType !== 'auth' && r.priority !== rule.priority &&
+      r.name.toLowerCase() === rule.name.toLowerCase())) {
+    errs.push(`A rule named "${rule.name}" already exists.`);
+  }
+  if (rule.action === 'Redirect') {
+    if (!rule.redirectURL) errs.push('Redirect action requires a redirect URL.');
+    else if (!/^https?:\/\//.test(rule.redirectURL)) errs.push('Redirect URL must start with http:// or https://.');
+  }
+  if (rule.sourceIP && !/^[0-9]{1,3}(\.[0-9]{1,3}){3}(\/[0-9]{1,2})?$/.test(rule.sourceIP) && !rule.sourceIP.includes(':')) {
+    errs.push('Source IP must be an IPv4/IPv6 address or CIDR (e.g. 10.0.0.0/8).');
+  }
+  if (rule.destFQDN && (/\s/.test(rule.destFQDN) || rule.destFQDN.includes('://'))) {
+    errs.push('Destination FQDN is a hostname pattern (e.g. *.example.com) — no scheme, no spaces.');
+  }
+  return errs;
+}
+
+function polShowFormErrors(errs) {
+  const box = document.getElementById('pol-form-err');
+  if (!box) return;
+  if (!errs.length) { box.style.display = 'none'; box.textContent = ''; return; }
+  box.textContent = errs.join(' ');
+  box.style.display = '';
+  box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+// polRenderSummary — live human-readable sentence for the rule being edited
+// (G10). Reads the same fields the submit path sends; never marks dirty.
+function polRenderSummary() {
+  const el = document.getElementById('pol-summary');
+  if (!el) return;
+  const r = polReadForm();
+  const verb = {Allow: 'Allow', Drop: 'Silently block', Block_Page: 'Block (with page)', Redirect: 'Redirect'}[r.action] || r.action;
+  const src = [r.sourceIP, r.sourceIdentity && `identity ${r.sourceIdentity}`,
+    r.sourceGroup && `group [${r.sourceGroup}]`, r.authSource && `via ${r.authSource}`]
+    .filter(Boolean).join(', ') || 'any source';
+  const dst = [r.destFQDN, r.destCategory && `category ${r.destCategory}`,
+    r.destCategoryGroup && `group «${r.destCategoryGroup}»`,
+    r.destCountry.length && `countries ${r.destCountry.join('/')}`]
+    .filter(Boolean).join(', ') || 'any destination';
+  const extras = [];
+  if (r.action === 'Redirect' && r.redirectURL) extras.push(`to ${r.redirectURL}`);
+  if (r.sslAction === 'Inspect') extras.push('TLS inspected');
+  if (r.fileProfile) extras.push(`file profile ${r.fileProfile}`);
+  if (r.schedule) extras.push('on a schedule');
+  if (!r.enabled) extras.push('rule DISABLED');
+  el.innerHTML = `<strong>${escHtml(verb)}</strong> traffic from <strong>${escHtml(src)}</strong>` +
+    ` to <strong>${escHtml(dst)}</strong>` +
+    (extras.length ? ` — ${escHtml(extras.join(' · '))}` : '') +
+    `. First matching rule wins, top to bottom.`;
+}
+
+// Unsaved-changes tracking: only USER edits mark the form dirty
+// (programmatic population via editPolicy does not fire input/change).
+let _polFormDirty = false;
+(() => {
+  const panel = document.getElementById('policy-form-panel');
+  if (!panel) return;
+  const onEdit = () => { _polFormDirty = true; polRenderSummary(); polShowFormErrors([]); };
+  panel.addEventListener('input', onEdit);
+  panel.addEventListener('change', onEdit);
+})();
+
+// polHistory — per-rule change trail: opens the Audit Log filtered to the
+// rule's name (the audit ring keys entries on the rule name today; the
+// ULID-keyed trail is the policy-identity backend record).
+function polHistory(priority) {
+  const r = polRules.find(x => x.priority === Number(priority));
+  if (!r) return;
+  const f = document.getElementById('audit-filter');
+  if (f) f.value = r.name;
+  switchView('audit');
+}
+
+const _origSubmitPolicyRule = window.submitPolicyRule;
+async function submitPolicyRule() {
+  const rule = polReadForm();
+  if (!rule.name || !rule.action) {
+    toast('Name and Action are required', 'error'); return;
+  }
+  const errs = polValidateClient(rule);
+  if (errs.length) { polShowFormErrors(errs); return; }
+  polShowFormErrors([]);
   try {
     if (polEditPriority !== null) {
       await api('/api/policy?priority=' + polEditPriority, {
@@ -8827,6 +8933,7 @@ async function submitPolicyRule() {
         body: JSON.stringify(rule),
       });
       toast('Rule updated', 'success');
+      _polFormDirty = false;
       cancelPolicyEdit();
     } else {
       await api('/api/policy', {
@@ -8835,6 +8942,7 @@ async function submitPolicyRule() {
         body: JSON.stringify(rule),
       });
       toast('Rule added', 'success');
+      _polFormDirty = false;
       clearPolicyForm();
     }
     fetchPolicy();
@@ -8966,6 +9074,7 @@ function renderPolicy() {
           <div class="pol-act-item" data-click="showMoveTarget" data-arg="${r.priority}" data-arg2="after">Move after…</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="pol-act-item" data-click="clonePolicy" data-arg="${r.priority}">Clone rule</div>
+          <div class="pol-act-item" data-click="polHistory" data-arg="${r.priority}">History</div>
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           <div class="pol-act-item" style="color:var(--danger)" data-click="deletePolicy" data-arg="${r.priority}">Delete</div>
         </div>
