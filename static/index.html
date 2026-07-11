@@ -4327,6 +4327,7 @@ document.addEventListener('input', e => {
   if (!el) return;
   switch (el.dataset.input) {
     case 'applyLogFilter':       applyLogFilter(); break;
+    case 'renderPolicy':         renderPolicy(); break;
     case 'renderBlocklist':      renderBlocklist(); break;
     case 'onGroupSearchInput':   onGroupSearchInput(el.value); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
@@ -9046,7 +9047,7 @@ function _polPatchHitCounts(rules) {
   for (const r of rules) {
     const cell = document.querySelector(`#pol-table tr[data-priority="${r.priority}"] td[data-hits]`);
     if (!cell) continue;
-    const v = fmt(r.hitCount || 0);
+    const v = String(fmt(r.hitCount || 0)); // fmt returns a Number below 1e3
     if (cell.textContent !== v) cell.textContent = v;
   }
 }
