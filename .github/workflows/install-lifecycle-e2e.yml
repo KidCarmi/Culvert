@@ -680,15 +680,15 @@ jobs:
   agent-day2-update:
     name: Agent day-2 upgrade through real sudoers
     runs-on: ubuntu-latest
-    # ADVISORY while this brand-new job is stabilized: binding the agent to a
-    # LOCAL registry (proxy_repo=127.0.0.1:5000/culvert) exposed a wrinkle in the
-    # packaging installer's sudoers render/validate that the default ghcr.io repo
-    # does not hit (first run left the systemd unit + sudoers uninstalled). The
-    # deterministic real-boundary guards that carry the coverage weight live in
-    # the agent-installer job (verify-stage inspect + passwd-less probe) and the
-    # Go traversability tests, which stay hard gates. Flip this off once the
-    # local-registry install path is fixed.
-    continue-on-error: true
+    # HARD GATE. Binding the agent to a LOCAL registry
+    # (proxy_repo=127.0.0.1:5000/culvert) originally exposed a bug in the
+    # packaging installer's sudoers render: the registry PORT colon was left
+    # unescaped, so `visudo -c` rejected the file and the systemd unit + sudoers
+    # never installed (the default ghcr.io repo has no port and did not hit it).
+    # sudoers_escape_colon() in packaging/culvert-maint/install.sh now escapes it
+    # (pinned by install_script_maint_sudoers_render_test.go), so a ported repo
+    # renders a valid file. This job proves that end-to-end through the real
+    # sudo boundary; keep it a required gate.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -850,9 +850,11 @@ jobs:
           sudo visudo -c -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in fails visudo -c"; exit 1; }
           sudo grep -Eq '^proxy_repo = "127\.0\.0\.1:5000/culvert"' /etc/culvert-maint/config.toml \
             || { echo "FATAL: agent proxy_repo not bound to the local registry"; sudo grep -n proxy_repo /etc/culvert-maint/config.toml; exit 1; }
-          # The registry repo must be the sudoers pull/tag boundary literal.
-          sudo grep -q '127.0.0.1:5000/culvert@sha256' /etc/sudoers.d/culvert-maint \
-            || { echo "FATAL: sudoers pull/tag rule not bound to the local registry repo"; exit 1; }
+          # The registry repo must be the sudoers pull/tag boundary literal. The
+          # port colon is backslash-escaped in the rendered sudoers (visudo treats
+          # a bare ':' as the Runas/Host separator), so match the escaped form.
+          sudo grep -Fq '127.0.0.1\:5000/culvert@sha256' /etc/sudoers.d/culvert-maint \
+            || { echo "FATAL: sudoers pull/tag rule not bound to the local registry repo (escaped-colon form)"; sudo grep -n 'docker pull' /etc/sudoers.d/culvert-maint; exit 1; }
           echo "PRECONDITION OK: proxy on v1; agent installed; sudoers bound to the local registry."
 
       # Start the INSTALLED unit (install.sh leaves it stopped when wiring is
