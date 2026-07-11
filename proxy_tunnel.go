@@ -556,6 +556,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 
+	// Native-ALPN dispatch (opt-in per rule; StripALPN==false). The default and
+	// every pre-feature rule resolve to strip=true and fall through to the
+	// byte-for-byte-unchanged HTTP/1.1 path below. The native path needs the
+	// client's ALPN offer — which only arrives after the 200 — so it reorders
+	// (200 → peek client ALPN → upstream handshake → constrained client handshake
+	// → dispatch), which is why it is a separate function rather than a flag in
+	// this flow: reordering here would change the strip path's 502-before-200
+	// semantics. It takes ownership of the freshly-dialled rawUpstream.
+	if !resolveStripALPN(match) {
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, tlsSkipVerify, match, id)
+		return
+	}
+
 	// 2. Perform TLS handshake with the upstream.
 	// upstreamInspectTLSConfig verifies against the shared system root pool by
 	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
@@ -652,27 +665,26 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
-	// 5. Proxy HTTP/1.x with optional DPI scanning on response bodies.
-	//
-	// Parsing the decrypted HTTP stream request-by-request lets us:
-	//   a) Apply DPI signatures to text response bodies before forwarding.
-	//   b) Block on match (true prevention, not just detection).
-	//
-	// WebSocket upgrades (101 Switching Protocols) fall back to raw relay
-	// because the protocol is no longer HTTP after the handshake.
-	//
-	// Limitation: HTTP/2 inside the tunnel is not parsed; the fallback raw
-	// relay is used.  H2 DPI support requires a full HPACK parser.
+	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
+	// file-block via the shared inspection pipeline). Extracted so the native-ALPN
+	// path reuses the exact same loop when a tunnel negotiates HTTP/1.1.
+	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id)
+}
+
+// runH1InspectLoop drives the HTTP/1.1 keep-alive inspection loop over a decrypted
+// tunnel: it parses each client request, runs the protocol-neutral inspection
+// pipeline (runInspectExchange) with H1 transport hooks, and tears the tunnel down
+// on block/error/close-after. WebSocket 101 upgrades fall back to idle-bounded raw
+// relay (H1-only; HTTP/2 does not advertise Extended CONNECT). This is the exact
+// body that was inline in handleTunnelInspect; the native-ALPN dispatcher reuses it
+// for tunnels that negotiate HTTP/1.1 on either leg, so there is ONE enforcement
+// path for both protocols. Closes both conns on return.
+func runH1InspectLoop(r *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
 	clientBR := bufio.NewReaderSize(clientTLS, 32*1024)
 	upstreamBR := bufio.NewReaderSize(upstreamTLS, 32*1024)
 
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
-	// H1 driver loop. The protocol-neutral inspection (scrub → round-trip →
-	// file-block → scan → deliver) is factored into runInspectExchange, which the
-	// HTTP/2 per-stream handler reuses verbatim (invariant C5); only the transport
-	// edges — request parse, the upstream round-trip, client delivery, the stall
-	// deadline, and the 101 raw-relay fallback — stay here, H1-specific.
 relayLoop:
 	for {
 		// Slowloris protection: enforce a read deadline so a slow client cannot
