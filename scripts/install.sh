@@ -747,19 +747,37 @@ extract_deploy_bundle() {
     sudo rm -rf "$tmp"
     return 1
   fi
-  copy_bundle_file "$tmp/docker-compose.yml"             "$INSTALL_DIR/docker-compose.yml"            0644 &&
-  copy_bundle_file "$tmp/docker-compose.maint-agent.yml" "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || {
-    sudo rm -rf "$tmp"; return 1; }
-  local f rel
+  # Install order matters for crash-safety: the packaging/ tree and the override
+  # compose file go in FIRST, and docker-compose.yml — the re-extraction sentinel
+  # that §6b and §5's reuse check key on — goes in LAST. So a copy that fails
+  # partway leaves NO sentinel (or we remove it below), and the next run
+  # re-extracts instead of treating an incomplete tree as a finished deployment.
+  # Every copy is checked; the previous version ignored the loop's failures and
+  # unconditionally returned 0, which permanently stranded a partial extract.
+  local ok=1 f rel
   while IFS= read -r -d '' f; do
     rel="${f#"$tmp"/}"
-    sudo mkdir -p "$INSTALL_DIR/$(dirname "$rel")"
+    sudo mkdir -p "$INSTALL_DIR/$(dirname "$rel")" || { ok=0; break; }
     case "$rel" in
-      */install.sh) copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0755 ;;
-      *)            copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0644 ;;
+      */install.sh) copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0755 || { ok=0; break; } ;;
+      *)            copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0644 || { ok=0; break; } ;;
     esac
   done < <(sudo find "$tmp/packaging" -type f -print0)
+  if [[ "$ok" -eq 1 ]]; then
+    copy_bundle_file "$tmp/docker-compose.maint-agent.yml" \
+      "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || ok=0
+  fi
+  if [[ "$ok" -eq 1 ]]; then
+    # LAST — the sentinel. Only now is the deployment considered complete.
+    copy_bundle_file "$tmp/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml" 0644 || ok=0
+  fi
   sudo rm -rf "$tmp"
+  if [[ "$ok" -ne 1 ]]; then
+    # Remove the sentinel so a partial extract can't be mistaken for a complete
+    # one on the next run (it may not have been written, but be certain).
+    sudo rm -f "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
+    return 1
+  fi
   return 0
 }
 
@@ -781,7 +799,13 @@ extract_bundled_maint_bin() {
   [[ -x "$dest" ]]
 }
 
-if [[ ! -f "$INSTALL_DIR/docker-compose.yml" ]]; then
+# Re-extract when the deployment is missing OR incomplete. Keying on
+# docker-compose.yml alone would treat a partial extract (compose present, the
+# maint-agent installer missing) as finished and never self-heal; also require
+# the packaging installer that install_maint_agent depends on. A complete source
+# checkout / clone has both, so this never spuriously re-extracts over one.
+if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
+   || ! -f "$INSTALL_DIR/packaging/culvert-maint/install.sh" ]]; then
   step "Extracting deployment files"
   info "Extracting compose files + agent packaging from $PINNED_TAG (/app/deploy)..."
   if extract_deploy_bundle; then
