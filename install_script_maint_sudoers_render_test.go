@@ -105,6 +105,7 @@ func TestCulvertMaintInstall_SudoersRender_PortedRepoEscapesColon(t *testing.T) 
 		}
 	}
 
+	// #nosec G204 -- fixed argv; `rendered` is a temp path this test wrote
 	if out, err := exec.CommandContext(t.Context(), "visudo", "-c", "-f", rendered).CombinedOutput(); err != nil {
 		t.Fatalf("visudo -c rejected the rendered sudoers for a ported proxy_repo (Gap B regression): %v\n%s", err, out)
 	}
@@ -127,6 +128,7 @@ func TestCulvertMaintInstall_SudoersRender_DefaultRepoStillValid(t *testing.T) {
 		}
 	}
 
+	// #nosec G204 -- fixed argv; `rendered` is a temp path this test wrote
 	if out, err := exec.CommandContext(t.Context(), "visudo", "-c", "-f", rendered).CombinedOutput(); err != nil {
 		t.Fatalf("visudo -c rejected the rendered sudoers for the default proxy_repo: %v\n%s", err, out)
 	}
