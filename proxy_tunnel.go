@@ -556,6 +556,19 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		return
 	}
 
+	// Native-ALPN dispatch (opt-in per rule; StripALPN==false). The default and
+	// every pre-feature rule resolve to strip=true and fall through to the
+	// byte-for-byte-unchanged HTTP/1.1 path below. The native path needs the
+	// client's ALPN offer — which only arrives after the 200 — so it reorders
+	// (200 → peek client ALPN → upstream handshake → constrained client handshake
+	// → dispatch), which is why it is a separate function rather than a flag in
+	// this flow: reordering here would change the strip path's 502-before-200
+	// semantics. It takes ownership of the freshly-dialled rawUpstream.
+	if !resolveStripALPN(match) {
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, tlsSkipVerify, match, id)
+		return
+	}
+
 	// 2. Perform TLS handshake with the upstream.
 	// upstreamInspectTLSConfig verifies against the shared system root pool by
 	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
