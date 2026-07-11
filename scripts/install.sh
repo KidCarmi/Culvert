@@ -1145,9 +1145,21 @@ agent_ancestors_traversable() {
 # version stamp, and past that installs without a version pin (bundled binary
 # as-is, or a source build).
 resolve_maint_version() {
+  # Explicit env pin wins — but normalize + semver-gate it exactly like the
+  # image-label path below. Without this, a bare `CULVERT_MAINT_VERSION=1.4.0`
+  # would be compared verbatim against the ALWAYS v-prefixed bundled stamp
+  # ("v1.4.0"), spuriously refusing the matching verified bundle, and the
+  # downstream agent installer (which requires vX.Y.Z) would reject it too. A
+  # non-semver env value is ignored (warn to STDERR so it can't pollute the
+  # command-substitution capture) and resolution falls through to the label.
   if [[ -n "${CULVERT_MAINT_VERSION:-}" ]]; then
-    echo "${CULVERT_MAINT_VERSION}"
-    return 0
+    local ev="${CULVERT_MAINT_VERSION}"
+    [[ "$ev" != v* ]] && ev="v$ev"
+    if [[ "$ev" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+      echo "$ev"
+      return 0
+    fi
+    warn "CULVERT_MAINT_VERSION='${CULVERT_MAINT_VERSION}' is not a release version (vX.Y.Z) — ignoring it." >&2
   fi
   local v
   v="$(sudo docker inspect culvert --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
