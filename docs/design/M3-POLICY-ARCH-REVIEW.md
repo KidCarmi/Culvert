@@ -108,6 +108,16 @@ commits (single-admin-console scale does not justify the state machine).
   commit bar over `/api/policy/reorder`; client-side subsumption hints with
   explicit heuristic labeling.
 
+### Deferred from the S2 code review (UI follow-up, not backend)
+
+- **Shared tick-render seam**: renderPolicy now carries view-local guards
+  (menu-open, active-drag, version signature) while `tick()` drives four
+  other renderers (upstream, cluster, fileblock, rewrite) that still rebuild
+  their tbodies unconditionally every 3 s — same bug class, unguarded. When
+  a second view needs these guards, generalize into a shared render-skip/
+  interaction-lock helper at the tick seam instead of copying the flags
+  (altitude finding, 2026-07-11 review of PR #664).
+
 ### Backend design records to open (blocking nothing in S1–S5)
 
 1. `policy-draft` — candidate/commit/validate/revert model (G2, G9); must

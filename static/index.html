@@ -4637,13 +4637,7 @@ function refreshChartTheme() {
   }
   if (breakdownChart) {
     breakdownChart.data.datasets[0].borderColor = [t.ok, t.crit, t.orange];
-    // Re-derive the .7-alpha segment fills from the themed border colors so
-    // light mode gets its own palette (hex → rgba).
-    breakdownChart.data.datasets[0].backgroundColor =
-      [t.ok, t.crit, t.orange].map(hex => {
-        const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-        return m ? `rgba(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)},.7)` : hex;
-      });
+    breakdownChart.data.datasets[0].backgroundColor = chartFills();
     breakdownChart.options.plugins.legend.labels.color = t.tick;
     breakdownChart.update('none');
   }
@@ -4660,6 +4654,16 @@ function updateChart(payload) {
   chart.update('none');
 }
 
+// .7-alpha segment fills derived from the themed status colors — shared by
+// initBreakdownChart and refreshChartTheme so both states use one palette.
+function chartFills() {
+  const t = chartTheme();
+  return [t.ok, t.crit, t.orange].map(hex => {
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    return m ? `rgba(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)},.7)` : hex;
+  });
+}
+
 function initBreakdownChart() {
   if (typeof Chart === 'undefined') return; // CDN absent (air-gapped) — degrade gracefully
   const ctx = document.getElementById('breakdownChart').getContext('2d');
@@ -4669,7 +4673,7 @@ function initBreakdownChart() {
       labels: ['Allowed', 'Blocked', 'Auth Fail'],
       datasets: [{
         data: [0, 0, 0],
-        backgroundColor: ['rgba(34,197,94,.7)', 'rgba(239,68,68,.7)', 'rgba(249,115,22,.7)'],
+        backgroundColor: chartFills(),
         borderColor: [chartTheme().ok, chartTheme().crit, chartTheme().orange],
         borderWidth: 1,
       }]
@@ -6868,6 +6872,9 @@ async function fetchPolicy() {
   try {
     const d = await api('/api/policy');
     polRules = d.rules || [];
+    // Structural version for renderPolicy's skip signature. Fallback: if the
+    // payload ever lacks a version, force re-render (old behavior, fail-safe).
+    _polVersion = (typeof d.version === 'number') ? d.version : _polVersion + 1;
     // Show version badge
     const vBadge = document.getElementById('pol-version-badge');
     const uBadge = document.getElementById('pol-updated-badge');
@@ -6931,12 +6938,11 @@ function initPolicyDragDrop() {
   tbody.addEventListener('dragstart', e => {
     const row = e.target.closest('tr[data-priority]');
     if (!row) return;
-    _polDragging = true; // suppress tick re-renders — a rebuild kills the drag
+    _polDragStartVersion = _polVersion; // drop aborts if the rulebase moves
     e.dataTransfer.setData('text/plain', row.dataset.priority);
-    row.classList.add('dragging');
+    row.classList.add('dragging'); // .dragging also suppresses tick re-renders
   });
   tbody.addEventListener('dragend', e => {
-    _polDragging = false;
     const row = e.target.closest('tr[data-priority]');
     if (row) row.classList.remove('dragging');
   });
@@ -6958,6 +6964,18 @@ function initPolicyDragDrop() {
     const fromPri = parseInt(e.dataTransfer.getData('text/plain'));
     const toPri   = parseInt(row.dataset.priority);
     if (fromPri === toPri) return;
+    // Renders are suppressed while dragging, but the 3s tick still refreshes
+    // polRules underneath. If the rulebase version moved since dragstart, the
+    // on-screen priorities may describe DIFFERENT rules now — abort rather
+    // than permute the wrong ones (the server's permutation check is the
+    // backstop; this gives the operator an honest, immediate answer).
+    if (_polVersion !== _polDragStartVersion) {
+      toast('Rulebase changed while dragging — reorder cancelled, showing latest rules', 'error');
+      tbody.querySelectorAll('tr.dragging').forEach(tr => tr.classList.remove('dragging'));
+      _polRenderSig = ''; // force an immediate rebuild with the fresh rules
+      renderPolicy();
+      return;
+    }
 
     // /api/policy/reorder is access-only: it expects every Stage-2 access-rule
     // priority exactly once and permutes them among their own slots (auth rules
@@ -8510,17 +8528,30 @@ function toast(msg, type='success') {
 // modal is open the background (#sidebar/#main) is aria-hidden + inert so
 // screen-reader virtual cursors cannot wander behind the dialog (M1).
 const _modalStack = [];
-function _modalSetBackgroundHidden(hidden) {
+// Hide the app background from assistive tech while modals are open — but
+// never a container that holds an open modal itself (several legacy modals
+// live INSIDE #main; inert-ing their ancestor would make them unclickable
+// the moment they migrate to the stack). Recomputed on every stack change.
+function _modalSyncBackgroundHidden() {
   for (const id of ['sidebar', 'main']) {
     const bg = document.getElementById(id);
     if (!bg) continue;
-    if (hidden) { bg.setAttribute('aria-hidden', 'true'); bg.inert = true; }
+    const hide = _modalStack.length > 0 && !_modalStack.some(m => bg.contains(m.el));
+    if (hide) { bg.setAttribute('aria-hidden', 'true'); bg.inert = true; }
     else { bg.removeAttribute('aria-hidden'); bg.inert = false; }
   }
 }
 function modalActivate(el, initialFocusSel, closeFn) {
-  _modalStack.push({el, prevFocus: document.activeElement, close: closeFn || null});
-  if (_modalStack.length === 1) _modalSetBackgroundHidden(true);
+  // Re-activating an element already on the stack (e.g. overlapping
+  // confirmAction calls reusing the singleton dialog) must not push a ghost
+  // entry — an unmatched entry would keep the background inert forever.
+  if (_modalStack.some(m => m.el === el)) {
+    const entry = _modalStack[_modalStack.map(m => m.el).lastIndexOf(el)];
+    entry.close = closeFn || entry.close;
+  } else {
+    _modalStack.push({el, prevFocus: document.activeElement, close: closeFn || null});
+  }
+  _modalSyncBackgroundHidden();
   const target = initialFocusSel ? el.querySelector(initialFocusSel)
     : el.querySelector('input:not([type=hidden]):not([disabled]), select, textarea, button');
   if (target) target.focus();
@@ -8531,7 +8562,7 @@ function modalDeactivate(el) {
   const idx = _modalStack.map(m => m.el).lastIndexOf(el);
   if (idx < 0) return;
   const entry = _modalStack.splice(idx, 1)[0];
-  if (!_modalStack.length) _modalSetBackgroundHidden(false);
+  _modalSyncBackgroundHidden();
   if (entry.prevFocus && document.contains(entry.prevFocus)) entry.prevFocus.focus();
 }
 // Close the top-most open modal (Esc). Returns false when the stack is empty.
@@ -9005,7 +9036,20 @@ function setPolActionFilter(f) {
 // UI's scalability ceiling (POLICY-ARCHITECTURE-FUTURE.md §5) and destroys
 // in-progress interactions. Skip when nothing observable changed.
 let _polRenderSig = '';
-let _polDragging = false; // set by initPolicyDragDrop; render must not destroy a drag
+let _polVersion = 0; // policy-store version from /api/policy (bumps on mutation)
+let _polDragStartVersion = 0; // rulebase version when the current drag began
+
+// In-place hit-counter patch for skipped renders: counters churn under live
+// traffic, so they are deliberately NOT in the render signature — otherwise
+// the skip would never fire on a busy proxy (the exact case it exists for).
+function _polPatchHitCounts(rules) {
+  for (const r of rules) {
+    const cell = document.querySelector(`#pol-table tr[data-priority="${r.priority}"] td[data-hits]`);
+    if (!cell) continue;
+    const v = fmt(r.hitCount || 0);
+    if (cell.textContent !== v) cell.textContent = v;
+  }
+}
 
 function renderPolicy() {
   // Skip re-render while a policy actions dropdown is open — the tick
@@ -9014,8 +9058,10 @@ function renderPolicy() {
       document.querySelector('.pol-actions-menu[style*="display:block"]')) {
     return;
   }
-  if (_polDragging) return; // never rebuild rows under an active drag
   const tbody = document.getElementById('pol-table');
+  // Never rebuild rows under an active drag (the .dragging class is the
+  // single source of truth — same idiom as the menu check above).
+  if (tbody && tbody.querySelector('tr.dragging')) return;
   // Stage-1 auth rules (ruleType:"auth") are managed in the Auth Policy panel
   // via /api/authpolicy. They share the unified policy store (and its priority
   // namespace) with Stage-2 access rules, but must never appear in this
@@ -9024,8 +9070,19 @@ function renderPolicy() {
   const total = accessRules.length;
   updateDefaultActionBadge();
 
-  // F20: client-side search + action filter
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
+
+  // Structural render-skip: rebuild only when the rulebase VERSION (bumped
+  // server-side on every mutation) or the filter state changes. Deliberately
+  // excludes hitCount — counters churn under live traffic, and including
+  // them (or stringifying rules) would defeat the skip exactly when the
+  // proxy is busy; counters are patched in place instead. JSON-array form so
+  // filter text containing separators cannot collide with the other fields.
+  const sig = JSON.stringify([_polVersion, total, q, polActionFilter]);
+  if (sig === _polRenderSig) { _polPatchHitCounts(accessRules); return; }
+  _polRenderSig = sig;
+
+  // F20: client-side search + action filter (computed only when rebuilding)
   const filtered = accessRules.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
     if (!q) return true;
@@ -9034,11 +9091,6 @@ function renderPolicy() {
       ...(r.destCountry || [])].filter(Boolean).join(' ').toLowerCase();
     return haystack.includes(q);
   });
-
-  // Content-hash skip: identical data + filter state ⇒ no DOM rebuild.
-  const sig = q + ' ' + polActionFilter + ' ' + JSON.stringify(filtered);
-  if (sig === _polRenderSig) return;
-  _polRenderSig = sig;
 
   if (!total) {
     document.getElementById('pol-count').textContent = '0 rules';
@@ -9052,7 +9104,8 @@ function renderPolicy() {
   document.getElementById('pol-count').textContent = showing;
 
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">No rules match the current filter<div class="empty-hint">Clear the search box or the action filter to see all rules</div></div></td></tr>';
+    tbody.innerHTML = emptyRow(11, 'No rules match the current filter',
+      'Clear the search box or the action filter to see all rules');
     return;
   }
   tbody.innerHTML = filtered.map((r, idx) => {
@@ -9082,7 +9135,7 @@ function renderPolicy() {
       <td style="font-size:.78rem">${fileProfileCell}</td>
       <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
       <td>${actionBadge(r.action)}</td>
-      <td style="text-align:right;font-family:var(--font-mono);font-weight:700;color:var(--accent2)" title="Matches since process start — counters reset on restart">${fmt(r.hitCount || 0)}</td>
+      <td data-hits style="text-align:right;font-family:var(--font-mono);font-weight:700;color:var(--accent2)">${fmt(r.hitCount || 0)}</td>
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
