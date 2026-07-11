@@ -407,4 +407,30 @@ HUMAN DECISION REQUIRED
 
 ---
 
-*Validation evidence in this document comes from actual command runs in isolated worktrees (per-PR and combined), recorded verbatim in the per-agent review transcripts. No PR was merged, closed, or commented on during this review.*
+## 10. Actions taken (2026-07-11, post-review)
+
+The required actions from §7 were applied directly to the PR branches (no merges, no closures):
+
+- **#647** (`0e19490`): fixed the `noctx` lint blocker (`proxy_tunnel_idle_test.go:32` →
+  `(&net.ListenConfig{}).Listen`); converted the `statusMu` sections in
+  `recordRefreshOutcome`/`evaluateCatalogFreshness` to defer-released closures so the
+  CHAOS-22 no-stranded-lock claim is actually true; corrected the review doc's
+  deferred-locks claim; split the write-block recovery row (one-sided fixed vs double
+  write-block NOT covered) and registered the double-write-block escape as **CHAOS-27**;
+  fixed the deadline-pop cadence description. Validated: gofmt clean, `go vet`/`go build`
+  OK, targeted `-race` suite ok 35.7s, `golangci-lint run --new-from-rev origin/main` →
+  0 issues.
+- **#641** (`102cda1`): reinstated a narrowed Phase-6 bullet for the unshipped
+  dispatch-failure/digest-mismatch alerting (per the open Codex P2, verified against code);
+  linked the M1-4 catalog-resign runbook from the stale-alert row. Replied on the thread.
+- **#646** (`3370f21`): added the post-window addendum (F7 fixed on main by #640; F1/F8
+  citations pinned to `8e88a40`; F4 cross-referenced to CHAOS-23/PR #647 as the canonical
+  open item; CHAOS-22 fix noted as in flight).
+- **#644** (`8599d14`): precomputed benchmark hostnames outside the timed loops (open
+  Codex P2); both parallel benchmarks now report 0 B/op / 0 allocs/op. Replied on the thread.
+- **#643**: PR description corrected to match the code (GET `/api/auth/lockouts` is
+  admin-only since `5f32f3b`); no code change needed.
+
+All seven open PRs are now in a mergeable-pending-CI state; the merge sequence in §8 stands.
+
+*Validation evidence in this document comes from actual command runs in isolated worktrees (per-PR and combined), recorded verbatim in the per-agent review transcripts. No PR was merged or closed during this review.*
