@@ -1484,17 +1484,34 @@ install_maint_agent() {
   if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
     if verify_pinned_image_signature; then
       if extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
-        bundled_bin="$scratch/culvert-maint-bundled"
-        info "Proxy image signature verified against the pinned release identity — trusting its bundled agent binary."
-        if [[ -z "$target_version" ]]; then
-          # Derive the target from the bundled binary's own version stamp so the
-          # idempotence/upgrade check below works for image-bundled installs.
-          # Accept only a real release semver — dev/main builds stamp "dev".
-          local bundled_version
-          bundled_version="$("$bundled_bin" --version 2>/dev/null || true)"
-          if [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+        local cand="$scratch/culvert-maint-bundled" bundled_version=""
+        # Probe the extracted binary before trusting it. A FAILED exec means it
+        # cannot run on THIS host — e.g. a foreign-arch image seeded via
+        # CULVERT_PROXY_SEED_REF with no matching binfmt/qemu — so discard it
+        # rather than install a crash-looping systemd unit (#10). (If binfmt IS
+        # registered the foreign binary runs emulated and --version succeeds,
+        # which is degraded-but-functional and acceptable.)
+        if bundled_version="$("$cand" --version 2>/dev/null)" \
+           && [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          if [[ -z "$target_version" ]]; then
+            # No explicit target — adopt the verified image's bundled version.
             target_version="$bundled_version"
+            bundled_bin="$cand"
+            info "Proxy image verified — using its bundled agent $bundled_version."
+          elif [[ "$bundled_version" == "$target_version" ]]; then
+            bundled_bin="$cand"
+            info "Proxy image verified — using its bundled agent $bundled_version (matches target)."
+          else
+            # The image bundles a DIFFERENT version than requested. Installing
+            # the bundle would install the WRONG version and loop forever on
+            # every re-run (installed != target); use the signed-release
+            # download of the requested target instead (#4).
+            info "Proxy image bundles agent $bundled_version but the target is $target_version —"
+            info "using the signed-release download for $target_version instead of the image bundle."
           fi
+        else
+          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
+          info "corrupt) — falling back to the signed-release download / source build."
         fi
       fi
     else
