@@ -139,6 +139,8 @@ var d0KnownRoutes = func() []string {
 //     (status/check/apply/preview/reports/rollback/rollback-status/session/
 //     cluster/cluster-status/registry) from the 146 baseline. Updates flow
 //     through Release Management.
+//   - 136 — policy-refs P0 added /api/objects/references (generic Where-Used
+//     dependency walk backing the fail-open delete guards).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -155,7 +157,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 135
+	const want = 136
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

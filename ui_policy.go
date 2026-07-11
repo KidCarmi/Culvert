@@ -515,12 +515,13 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		// Referential integrity: block deletion if referenced by a policy rule.
-		for _, rule := range policyStore.List() {
-			if strings.EqualFold(rule.DestCategoryGroup, name) {
-				http.Error(w, fmt.Sprintf("cannot delete: group is referenced by policy rule %q", rule.Name), http.StatusConflict)
-				return
-			}
+		// Referential integrity (policy-refs P0): block via the shared
+		// objectReferences walk so this 409 and GET /api/objects/references
+		// stay a single source of truth.
+		if _, refs := objectReferences("category-group", name); len(refs) > 0 {
+			auditEvent(r, "category-group.remove.blocked", name, referenceBlockMessage("category-group", name, refs))
+			writeReferenceBlock(w, "category-group", name, refs)
+			return
 		}
 		if err := globalCategoryGroups.Delete(name); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -636,9 +637,15 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 			http.Error(w, "name query param required", http.StatusBadRequest)
 			return
 		}
-		// Referential integrity: block deletion if the category is in a group.
-		if groupName, inGroup := globalCategoryGroups.ContainsCategory(name); inGroup {
-			http.Error(w, fmt.Sprintf("cannot delete: category is used by group %q", groupName), http.StatusConflict)
+		// Referential integrity (policy-refs P0): block deletion if ANY
+		// consumer references the category — policy rules (DestCategory) OR
+		// category-group membership. Both come from the single objectReferences
+		// walk, so the 409 and GET /api/objects/references can never disagree.
+		// Deleting a referenced category was fail-open: a Deny rule scoped to
+		// it silently stopped blocking.
+		if _, refs := objectReferences("category", name); len(refs) > 0 {
+			auditEvent(r, "urlcat.delete.blocked", name, referenceBlockMessage("category", name, refs))
+			writeReferenceBlock(w, "category", name, refs)
 			return
 		}
 		if err := catStore.Delete(name); err != nil {
@@ -1513,6 +1520,7 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
+	mux.HandleFunc("/api/objects/references", apiObjectReferences)
 
 	// Stage-1 authentication-policy (auth/exempt) rules — admin-only writes.
 	mux.HandleFunc("/api/authpolicy", apiAuthPolicy)                // GET list / POST add / PUT update / DELETE remove

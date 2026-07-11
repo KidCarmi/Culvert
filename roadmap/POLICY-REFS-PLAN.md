@@ -56,6 +56,19 @@ GET /api/objects/references?type=<category|category-group|file-profile|idp>&name
   `file-profile` → `FileProfile` (matched case-insensitively by name, the
   reference form rules use today); `idp` → `Auth.ProviderRefs` for auth
   rules. Case-insensitive to match the engine's matching.
+- **A category has TWO consumer kinds, not one** (architect review): policy
+  rules (`DestCategory`) AND category-group *membership*. The walk emits
+  both — group membership as a generic `consumerType:"category-group"`
+  entry (`view:"catgroups"`). Without this the endpoint would under-report
+  ("used by group X" invisible) and the URLCat delete would need a second,
+  separate `ContainsCategory` check that could disagree with the endpoint —
+  defeating the single-source guarantee. The URLCat delete now blocks off
+  the walk ALONE.
+- `objectReferences` returns `(found, refs)`: `found==false` means *unknown
+  type* and is deliberately distinct from `found==true, len==0` (known,
+  unreferenced). A delete caller MUST treat `!found` as "do not proceed" —
+  an unknown type silently reported as empty would read as safe-to-delete
+  and re-open the fail-open hole.
 
 ## Uniform delete policy (slice 1)
 
@@ -73,10 +86,43 @@ choose **block** (preferred for fail-open per the review):
 Both reuse the shared `objectReferences` walk that backs the endpoint, so
 the block reason and the endpoint can never disagree (single source of
 truth — the class of drift the config-surface registry exists to prevent).
+The 409 body is **structured JSON** (`{error, object, referencedBy}`, the
+same `objectRef` shape the endpoint returns) so the P1 delete-impact dialog
+needs no second round-trip, and a blocked delete is **audited**
+(`*.delete.blocked` / `*.remove.blocked`) — a denied removal of an in-use
+enforcement object is a security-relevant event.
 
 The category-group delete keeps its inline 409 (already safe) but is
 migrated onto `objectReferences("category-group", name)` for the same
 single-source guarantee.
+
+### What this slice does NOT close (recorded, not silent)
+
+- **File-profile RENAME stays fail-open.** Profiles are id-keyed with a
+  *mutable* name (`apiFileblockProfiles` PUT), so renaming one instantly
+  dangles every rule holding the old name — no delete required. The delete
+  guard keys on the *current* name and cannot see those stale refs. This is
+  the rename-silent-unlink problem the object-ID work (P3) closes; slice 1
+  closes DELETE only. Categories/category-groups are accidentally
+  rename-safe (name-keyed, their PUT cannot rename).
+- **TOCTOU.** The reference check and the store delete are not atomic — a
+  rule added between them re-opens the hole for that instant. Same
+  last-write-wins gap the parent doc §5 flags (no generation counter); the
+  existing category-group guard has it too. Closed by the P2 rule-set
+  generation counter, not slice 1.
+
+### Enforcement SITE migrates when candidate/commit lands (architect note)
+
+Block-at-delete is correct **because Culvert is live-write today** — there
+is no candidate config, so every mutation is immediately the running config
+and delete-time is the only place to enforce integrity. When candidate/
+commit (`policy-draft`, P3) lands, block-at-delete becomes **wrong**: in a
+candidate model, deleting an object and its referencing rule in the same
+draft is a legal intermediate state, and integrity must be validated once
+at COMMIT over the whole proposed end-state (as PAN-OS does), not refused
+mid-edit. The `objectReferences` walk is the reused validation primitive;
+only the CALLER changes — from the delete handler (today) to the commit
+validator (then). Do not cement block-at-delete as load-bearing.
 
 ## Non-goals (later slices)
 

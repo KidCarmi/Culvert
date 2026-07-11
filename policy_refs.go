@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -45,16 +46,22 @@ func consumerTypeForRule(r *PolicyRule) (consumerType, view string) {
 	return "access-rule", "policy"
 }
 
-// objectReferences walks every policy rule and returns the consumers that
-// reference the named object of the given type. Case-insensitive to match
-// the engine's matching (categories/profiles are referenced by name).
-// Returns nil for an unknown type — callers that need to distinguish
-// "unknown type" from "no referents" check objectRefTypes first.
-func objectReferences(objType, name string) []objectRef {
-	if name == "" || !objectRefTypes[objType] {
-		return nil
+// objectReferences returns every consumer that references the named object,
+// via (found, refs). `found` is FALSE only for an unknown object type — it is
+// deliberately distinct from `found==true, len(refs)==0` ("known type, not
+// referenced, safe to delete"). Delete callers MUST treat !found as "do not
+// proceed": an unknown type silently reported as empty would read as
+// safe-to-delete and re-open the fail-open hole the walk exists to close.
+//
+// Case-insensitive throughout to match the engine's matching (objects are
+// referenced by name today; the ULID promotion slice makes id load-bearing).
+func objectReferences(objType, name string) (found bool, refs []objectRef) {
+	if !objectRefTypes[objType] {
+		return false, nil
 	}
-	var refs []objectRef
+	if name == "" {
+		return true, nil
+	}
 	rules := policyStore.List()
 	for i := range rules {
 		r := &rules[i]
@@ -89,33 +96,77 @@ func objectReferences(objType, name string) []objectRef {
 			}
 		}
 	}
-	// Stable order: by rule name then id, so the block reason and the
-	// endpoint list are deterministic across calls.
+	// A category is referenced by TWO kinds of consumer: policy rules
+	// (DestCategory, above) AND category groups (membership). The Where-Used
+	// endpoint and the delete guard must see both, or the endpoint
+	// under-reports and the URLCat delete needs a second, separate check
+	// that could disagree with it. Emit group membership as a generic
+	// consumer entry (consumerType "category-group") so the walk stays the
+	// single source of truth.
+	if objType == "category" {
+		for _, g := range globalCategoryGroups.List() {
+			for _, c := range g.Categories {
+				if strings.EqualFold(c, name) {
+					refs = append(refs, objectRef{
+						ConsumerType: "category-group", ID: g.ID, Name: g.Name,
+						Detail: "categories", View: "catgroups",
+					})
+					break
+				}
+			}
+		}
+	}
+	// Stable order: by consumerType, then name, then id — deterministic
+	// across calls so the block reason and the endpoint list never reorder.
 	sort.Slice(refs, func(a, b int) bool {
+		if refs[a].ConsumerType != refs[b].ConsumerType {
+			return refs[a].ConsumerType < refs[b].ConsumerType
+		}
 		if refs[a].Name != refs[b].Name {
 			return refs[a].Name < refs[b].Name
 		}
 		return refs[a].ID < refs[b].ID
 	})
-	return refs
+	return true, refs
 }
 
-// referenceBlockReason renders the 409 body for a block-on-referenced delete:
-// names the first referent and, when there is more than one, the remaining
-// count. Empty string means "not referenced — safe to delete".
-func referenceBlockReason(objType, objName string, refs []objectRef) string {
-	if len(refs) == 0 {
-		return ""
+// referenceBlockMessage renders the human-readable 409 summary: names the
+// first referent and, when there is more than one, the remaining count. The
+// referent is described by its consumerType so "used by group X" reads
+// correctly alongside "used by policy rule Y".
+func referenceBlockMessage(objType, objName string, refs []objectRef) string {
+	first := refs[0]
+	label := first.Name
+	if label == "" {
+		label = "(unnamed)"
 	}
-	first := refs[0].Name
-	if first == "" {
-		first = "(unnamed rule)"
+	kind := map[string]string{
+		"access-rule":    "policy rule",
+		"auth-rule":      "authentication rule",
+		"category-group": "category group",
+	}[first.ConsumerType]
+	if kind == "" {
+		kind = first.ConsumerType
 	}
 	if len(refs) == 1 {
-		return fmt.Sprintf("cannot delete %s %q: referenced by policy rule %q", objType, objName, first)
+		return fmt.Sprintf("cannot delete %s %q: referenced by %s %q", objType, objName, kind, label)
 	}
-	return fmt.Sprintf("cannot delete %s %q: referenced by policy rule %q and %d other rule(s)",
-		objType, objName, first, len(refs)-1)
+	return fmt.Sprintf("cannot delete %s %q: referenced by %s %q and %d other object(s)",
+		objType, objName, kind, label, len(refs)-1)
+}
+
+// writeReferenceBlock writes the structured 409 for a block-on-referenced
+// delete: the same referencedBy shape the endpoint returns, so the P1
+// delete-impact dialog (and any future force-delete flow) needs no second
+// round-trip. The plain "error" string keeps non-JSON clients informative.
+func writeReferenceBlock(w http.ResponseWriter, objType, objName string, refs []objectRef) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+		"error":        referenceBlockMessage(objType, objName, refs),
+		"object":       map[string]string{"type": objType, "name": objName},
+		"referencedBy": refs,
+	})
 }
 
 // GET /api/objects/references?type=<>&name=<> — read-only dependency walk.
@@ -138,7 +189,7 @@ func apiObjectReferences(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name query param required", http.StatusBadRequest)
 		return
 	}
-	refs := objectReferences(objType, name)
+	_, refs := objectReferences(objType, name)
 	if refs == nil {
 		refs = []objectRef{} // never null in the JSON — the UI iterates it
 	}
