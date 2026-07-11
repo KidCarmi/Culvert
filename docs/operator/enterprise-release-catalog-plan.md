@@ -267,7 +267,7 @@ in the admin **Alerts → Webhooks** modal, or via `"*"`):
 
 | Event | Fires when | What it means | Operator action |
 |---|---|---|---|
-| `release_catalog_stale` | The **installed** catalog's `expires_at` is within 30 days of now (incl. already expired) | The weekly re-sign pipeline (M1-4) has likely stopped updating the catalog — this is the 180-day freshness watchdog's early-warning backstop | Check CI re-sign job health; if it cannot be fixed before expiry, catalog dispatch will stop serving and the legacy Docker updater remains available as fallback |
+| `release_catalog_stale` | The **installed** catalog's `expires_at` is within 30 days of now (incl. already expired) | The weekly re-sign pipeline (M1-4) has likely stopped updating the catalog — this is the 180-day freshness watchdog's early-warning backstop | Check CI re-sign job health (see `docs/operator/catalog-resign-runbook.md`); if it cannot be fixed before expiry, catalog dispatch will stop serving and the legacy Docker updater remains available as fallback |
 | `release_catalog_refresh_failing` | 3 **consecutive** refresh failures (loop tick or manual `POST /api/releases/catalog-refresh`) | The configured catalog origin is unreachable, or a fetched catalog is failing verification/freshness/rollback checks | Check network egress to the catalog origin (`/api/releases` → `catalog_origin`), check `last_refresh` for the failure reason; the existing (unexpired) catalog stays installed and serving throughout |
 | `release_catalog_recovered` | The first refresh success after a `release_catalog_refresh_failing` alert | The refresh loop is healthy again | No action; informational |
 
@@ -294,6 +294,10 @@ Only after real production verification:
 
 - Mark release catalog dispatch as the preferred update path.
 - Keep the legacy Docker updater installed but compatibility-only.
+- Add metrics and a selectable alert event for **dispatch failures and digest
+  mismatch** (`release_dispatch_attention` exists in code but has no Prometheus
+  series and no webhook-modal checkbox yet; trust-failure and stale-catalog
+  alerting shipped in M1-3 — see the section above).
 - Add runbook steps for reverting to legacy updater if catalog dispatch fails in
   production.
 - Deprecate legacy updater UI paths only after at least one stable release cycle
