@@ -250,6 +250,21 @@ func TestApiObjectReferences_IdpRejected(t *testing.T) {
 	}
 }
 
+// A rule with destCategory "Any" is the wildcard, not a consumer of a
+// category object named "Any" — it must not appear in the walk, so a
+// category literally named "Any" stays deletable.
+func TestObjectReferences_CategoryAnyIsWildcardNotAReference(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	r := refTestRule("w1", "allow-any")
+	r.DestCategory = CategoryAny
+	policyStore.ReplaceAll([]PolicyRule{r})
+
+	if _, refs := objectReferences("category", string(CategoryAny)); len(refs) != 0 {
+		t.Fatalf("wildcard rule reported as a category reference: %+v", refs)
+	}
+}
+
 func TestObjectReferences_StableWhenRuleIDEmpty(t *testing.T) {
 	// A rule with an empty ID (freshly created in-memory before a reload)
 	// still produces a usable ref keyed on name/view — id is best-effort

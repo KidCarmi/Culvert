@@ -95,7 +95,12 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 func ruleReferencesObject(r *PolicyRule, objType, name string) string {
 	switch objType {
 	case "category":
-		if strings.EqualFold(string(r.DestCategory), name) {
+		// CategoryAny ("Any") is the wildcard "any destination", NOT a
+		// reference to a concrete category object — the engine only
+		// category-matches when DestCategory != CategoryAny (policy.go). A
+		// rule set to Any must not appear as a consumer of a category, and an
+		// admin-created category literally named "Any" must stay deletable.
+		if r.DestCategory != CategoryAny && strings.EqualFold(string(r.DestCategory), name) {
 			return "destCategory"
 		}
 	case "category-group":
