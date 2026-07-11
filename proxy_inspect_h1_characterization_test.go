@@ -200,7 +200,8 @@ func TestCharacterize_BlockReasonCannotInjectResponse(t *testing.T) {
 	}
 	// The crux: no SECOND response may be parseable — the injected status line is
 	// body, not a new message.
-	if _, err := http.ReadResponse(br, nil); err == nil {
+	if resp2, err := http.ReadResponse(br, nil); err == nil {
+		resp2.Body.Close()
 		t.Fatal("SECURITY: a second HTTP response was injectable via the scan reason")
 	}
 }
