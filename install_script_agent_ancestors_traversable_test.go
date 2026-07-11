@@ -93,7 +93,9 @@ func runAgentAncestorsTraversable(t *testing.T, path string) string {
 func TestInstallScript_AgentAncestorsTraversable_AllSearchable(t *testing.T) {
 	root := searchableTempRoot(t)
 	stack := filepath.Join(root, "srv", "culvert")
-	if err := os.MkdirAll(stack, 0o755); err != nil {
+	// 0o750 keeps gosec G301 happy; the world-search (0755) bits that actually
+	// matter are set explicitly below (chmod0755Chain / the per-test chmod).
+	if err := os.MkdirAll(stack, 0o750); err != nil {
 		t.Fatalf("mkdir stack: %v", err)
 	}
 	// MkdirAll applies the process umask, so under umask 027 the intermediate
@@ -114,7 +116,9 @@ func TestInstallScript_AgentAncestorsTraversable_Blocked0700Home(t *testing.T) {
 	root := searchableTempRoot(t)
 	home := filepath.Join(root, "home0700")
 	stack := filepath.Join(home, "Culvert")
-	if err := os.MkdirAll(stack, 0o755); err != nil {
+	// 0o750 keeps gosec G301 happy; the world-search (0755) bits that actually
+	// matter are set explicitly below (chmod0755Chain / the per-test chmod).
+	if err := os.MkdirAll(stack, 0o750); err != nil {
 		t.Fatalf("mkdir stack: %v", err)
 	}
 	// The private home: 0700 = owner rwx, no group/other search bit — exactly the
@@ -137,7 +141,9 @@ func TestInstallScript_AgentAncestorsTraversable_Blocked0750Home(t *testing.T) {
 	root := searchableTempRoot(t)
 	home := filepath.Join(root, "home0750")
 	stack := filepath.Join(home, "Culvert")
-	if err := os.MkdirAll(stack, 0o755); err != nil {
+	// 0o750 keeps gosec G301 happy; the world-search (0755) bits that actually
+	// matter are set explicitly below (chmod0755Chain / the per-test chmod).
+	if err := os.MkdirAll(stack, 0o750); err != nil {
 		t.Fatalf("mkdir stack: %v", err)
 	}
 	if err := os.Chmod(home, 0o750); err != nil {
