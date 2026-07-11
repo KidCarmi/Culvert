@@ -608,7 +608,23 @@ component, acceptance criteria, dependencies, estimated PR size, priority. -->
 
 ## Verification log (independent review of P0/P1)
 
-_Pending — independent specialist re-review of every P1 (and the no-SSH P0 case of GAP-IAM-01) is recorded here once complete._
+Each P1 (and the no-SSH-P0 case of GAP-IAM-01) was re-reviewed against primary evidence.
+The two P1s that rested on inference (absence of code) were sent to a dedicated adversarial
+verifier instructed to refute them.
+
+| Gap | Basis | Verification result |
+|---|---|---|
+| GAP-IAM-01 | Direct read | **Confirmed.** `main.go:381-404` read directly by lead auditor; `--reset-password` is the only recovery, host-shell-bound; no API/GUI route exists. |
+| GAP-PKI-01 | Inference (no `SaveCA`) | **Confirmed (high).** Adversarial verifier found the mitm upload branch (`ui_security.go:284-292`) calls only `LoadCustomCA`+`auditEvent`; `LoadCustomCA` (`ca.go:458-484`) sets in-memory state + fires `CAChangedObserver` (rotates ticket keys, no disk I/O); the only `SaveCA` callers are `LoadOrInitCA`/`RotateIfNeeded`/`apiCARotate`. Non-persistence is intentional per the `ui_security.go:256-259` comment; operator-facing loss-on-restart is real and unsurfaced. |
+| GAP-PKI-02 | Direct test | **Confirmed.** `TestCertManager_LoadCustomCA_RejectsRSA`; `ca.go:470-473`. |
+| GAP-PKI-03 | Verified mechanics + inference | **Confirmed (mechanics).** `RotateIfNeeded`→`InitCA` generates a new CA; imported-CA interaction is a strong inference. |
+| GAP-POL-01 | Direct read | **Confirmed.** `LogTraffic` gates logging only (`proxy.go:505-508`); no monitor action exists. |
+| GAP-BAK-01 | Route/flag absence | **Confirmed.** No backup/restore routes in `ui_routes_meta.go`; agent primitives are UDS-only. |
+| GAP-UPD-01 | Inference (`RepoRewrite` unwired) | **Confirmed (high).** Adversarial verifier: `RepoRewrite` appears only in `release_dispatch.go` (type + nil-guarded logic); the sole production `DispatchConfig` construction (`release_wiring.go:369`) leaves it `nil`; no env/API sets it; `RefusedRepoMismatch` (`release_dispatch.go:277-284`) forces catalog-repo==`ProxyRepo`, so the official ghcr catalog cannot target an internal registry. `CULVERT_RELEASE_PROXY_REPO` cannot substitute (proven by the verifier). |
+| GAP-UPD-02 | Route absence | **Confirmed.** `/v1/rollbacks` exists on the agent; no `/api/releases/rollback` CP route. |
+| GAP-APP-01 / APP-03 | Negative search + direct read | **Confirmed.** No ISO/OVA artifacts; `install.sh:203-208` internet preflight. |
+
+No refutations were found. Severities stand as recorded.
 
 ## Evidence provenance
 
