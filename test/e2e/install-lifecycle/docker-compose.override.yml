@@ -8,11 +8,9 @@
 #
 #   - clamav  — the real image downloads ~250 MB of virus signatures on first
 #               boot (slow, memory-hungry, 300s start_period).
-#   - updater — the real image is pulled from ghcr.io (an external dependency
-#               we do not want the hermetic lifecycle gate to rely on).
 #
-# We replace BOTH with a tiny always-up busybox so the proxy's start-order
-# `depends_on` is satisfied, and disable their healthchecks so
+# We replace it with a tiny always-up busybox so the proxy's start-order
+# `depends_on` is satisfied, and disable its healthcheck so
 # `docker compose up --wait` only gates on the proxy becoming healthy. The proxy
 # itself is the REAL `culvert/proxy:pinned` image, started by the REAL compose
 # definition via the REAL installer — only the orthogonal sidecars are stubbed.
@@ -22,12 +20,6 @@
 # still answer 200. This file is TEST-ONLY and never ships to operators.
 services:
   clamav:
-    image: busybox:stable
-    command: ["sleep", "infinity"]
-    healthcheck:
-      disable: true
-
-  updater:
     image: busybox:stable
     command: ["sleep", "infinity"]
     healthcheck:

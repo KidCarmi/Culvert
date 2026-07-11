@@ -123,7 +123,7 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml build proxy
 
-      - name: Start proxy (no deps — skips ClamAV and updater)
+      - name: Start proxy (no deps — skips ClamAV)
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-deps proxy
 
@@ -274,7 +274,7 @@ jobs:
       # Container registries require lowercase image names, but
       # ${{ github.repository }} preserves the original case (e.g.
       # "KidCarmi/Culvert"). docker/metadata-action lowercases automatically;
-      # the updater build step uses raw `tags:` so we have to do it ourselves.
+      # the image build step below uses raw `tags:` so we lowercase ourselves.
       - name: Compute lowercase image base
         id: img-lc
         run: |
@@ -344,26 +344,6 @@ jobs:
           provenance: true
           sbom: true
 
-      # ── Build & push updater sidecar image ────────────────────────────────
-      - name: Build and push updater image
-        id: build-updater
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: Dockerfile.updater
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ghcr.io/${{ steps.img-lc.outputs.repo }}-updater:latest
-            ghcr.io/${{ steps.img-lc.outputs.repo }}-updater:${{ steps.next-ver.outputs.version || 'dev' }}
-          labels: |
-            org.opencontainers.image.title=Culvert Updater
-            org.opencontainers.image.description=Update sidecar for Culvert proxy
-            org.opencontainers.image.vendor=KidCarmi
-            org.opencontainers.image.licenses=MIT
-          cache-from: type=gha,scope=updater
-          cache-to: type=gha,mode=max,scope=updater
-
       # ── Apply semver tags explicitly ──────────────────────────────────────
       # The metadata-action raw tags with enable= can silently fail to apply.
       # This step guarantees the computed semver tag (e.g. v0.0.18) is applied
@@ -379,18 +359,6 @@ jobs:
             --tag "${IMAGE}:${VER}" \
             --tag "${IMAGE}:${VER_BARE}" \
             "${IMAGE}@${{ steps.build.outputs.digest }}"
-
-      - name: Apply version tag (updater)
-        if: steps.next-ver.outputs.version != '' && github.event_name != 'pull_request'
-        run: |
-          VER="${{ steps.next-ver.outputs.version }}"
-          VER_BARE="${{ steps.next-ver.outputs.version_bare }}"
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-updater"
-          echo "Tagging updater image with ${VER} and ${VER_BARE}"
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${VER}" \
-            --tag "${IMAGE}:${VER_BARE}" \
-            "${IMAGE}@${{ steps.build-updater.outputs.digest }}"
 
       # ── Sign the published image with cosign (keyless) ────────────────────
       # Only runs when the image was actually pushed (not PRs).
@@ -414,18 +382,6 @@ jobs:
             cosign sign --yes \
               --rekor-url=https://rekor.sigstore.dev \
               "${tag}@${{ steps.build.outputs.digest }}"
-          done
-
-      - name: Sign updater image (keyless via Sigstore)
-        if: ${{ github.event_name != 'pull_request' }}
-        env:
-          COSIGN_EXPERIMENTAL: "1"
-        run: |
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')-updater"
-          for tag in "latest" "${{ steps.next-ver.outputs.version || 'dev' }}"; do
-            cosign sign --yes \
-              --rekor-url=https://rekor.sigstore.dev \
-              "${IMAGE}:${tag}@${{ steps.build-updater.outputs.digest }}"
           done
 
   # ─── Release catalog gate (P2a) ─────────────────────────────────────────────

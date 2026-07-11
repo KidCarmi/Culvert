@@ -12,12 +12,17 @@
 #   2. Removes conflicting Docker packages (snap, old docker-compose v1, distro packages)
 #   3. Installs Docker Engine + Compose v2 from Docker's official repo
 #   4. Adds the current user to the docker group
-#   5. Clones Culvert (if not already in the repo)
-#   6. Starts all services with docker compose up -d --build
-#   7. (Optional, best-effort) Builds + installs the host-side maintenance
-#      agent (culvert-maint systemd service). Builds with the host Go
-#      toolchain if present, else in a throwaway golang container (no host
-#      Go required). Skip entirely with CULVERT_SKIP_MAINT_AGENT=1.
+#   5. Provisions /srv/culvert (no source checkout needed): pulls the public
+#      proxy image from ghcr.io and extracts the deployment files (compose
+#      files + maintenance-agent packaging) from its /app/deploy bundle.
+#      Running from inside a source checkout uses the checkout instead;
+#      images without the bundle fall back to a git clone.
+#   6. Starts all services with docker compose up -d
+#   7. (Optional, best-effort) Installs the host-side maintenance agent
+#      (culvert-maint systemd service) from the image deploy bundle — falling
+#      back to the cosign-verified signed-release download, then to a local
+#      source build (host Go toolchain or a throwaway golang container).
+#      Skip entirely with CULVERT_SKIP_MAINT_AGENT=1.
 #
 # Supported distros:
 #   Ubuntu 20.04+, Debian 11+, RHEL/CentOS/Rocky/Alma 8+, Fedora 38+,
@@ -111,19 +116,19 @@ dump_docker_diagnostics() {
   echo "" >&2
 }
 
+# Source repo — used ONLY by the legacy clone fallback in §6b (images built
+# before the /app/deploy bundle). Everything a normal install needs comes from
+# the public proxy image on ghcr.io.
 REPO_URL="https://github.com/KidCarmi/Culvert.git"
-# Where to clone/run the stack. Honor CULVERT_DIR if set. Otherwise: root (the
-# appliance / first-boot / OVA case) gets the system path /srv/culvert — it
-# matches the agent config's compose_project_dir default, and the maintenance
-# agent reaches it via the culvert-maint group (0750 root:culvert-maint, granted
-# post-install) rather than world bits. Non-root keeps the familiar ~/Culvert.
-if [[ -n "${CULVERT_DIR:-}" ]]; then
-  INSTALL_DIR="$CULVERT_DIR"
-elif [[ "$(id -u)" -eq 0 ]]; then
-  INSTALL_DIR="/srv/culvert"
-else
-  INSTALL_DIR="$HOME/Culvert"
-fi
+# Where to run the stack. Honor CULVERT_DIR if set; default /srv/culvert for
+# EVERY user — it matches the maintenance-agent config's compose_project_dir
+# default, and its ancestors (/, /srv) are world-searchable, so the
+# unprivileged culvert-maint service user can chdir into the stack and Release
+# Management wires up out of the box. A home-dir stack (the old non-root
+# default ~/Culvert) sits under a 0700/0750 home on most cloud images
+# (ec2-user, modern Ubuntu), which forces the installer to skip the agent
+# fail-closed and leaves the Release panel at "Agent unreachable".
+INSTALL_DIR="${CULVERT_DIR:-/srv/culvert}"
 
 ###############################################################################
 # Detect distro family
@@ -446,10 +451,11 @@ else
 fi
 
 ###############################################################################
-# 4. Install git if missing
+# 4. git (helper) — only the legacy clone fallback in §6b needs it
 ###############################################################################
-if ! command -v git &>/dev/null; then
-  step "Installing git"
+ensure_git() {
+  command -v git &>/dev/null && return 0
+  info "Installing git..."
   case "$DISTRO_FAMILY" in
     debian) apt_install_with_repair git ;;
     rhel|fedora) sudo dnf install -y git 2>/dev/null || sudo yum install -y git ;;
@@ -457,22 +463,65 @@ if ! command -v git &>/dev/null; then
     arch) sudo pacman -Sy --noconfirm git ;;
   esac
   info "git installed"
-fi
+}
 
 ###############################################################################
-# 5. Clone Culvert (if not already in the repo)
+# 5. Provision the install dir (no source checkout required)
 ###############################################################################
+
+# carry_forward_prior_secrets — a re-run that lands in a NEW stack dir must not
+# strand the encryption passphrases in the OLD .env. Every Culvert stack dir
+# basename resolves to the SAME compose project ('culvert'), so all stack dirs
+# SHARE the named volumes (proxy-data etc.); the new dir's `docker compose up`
+# reuses the existing, still-ENCRYPTED /data/ca.bundle. If the new .env lacks
+# CULVERT_CA_PASSPHRASE the proxy recreates with an empty passphrase and — since
+# CA load is non-fatal by design — SILENTLY disables SSL inspection (TLS becomes
+# tunnel-only: no scanning/DLP/CDR). Copy the prior .env forward so the existing
+# CA/log passphrases survive the move. Best-effort; never fatal.
+carry_forward_prior_secrets() {
+  [[ -f "$INSTALL_DIR/.env" ]] && return 0   # a .env already here — never overwrite
+  local prior=""
+  # 1. The dir the currently/most-recently deployed proxy container ran from.
+  prior="$(sudo docker inspect culvert \
+    --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)"
+  # 2. The legacy home-dir default of the INVOKING user (sudo resets $HOME to
+  #    root's, so resolve the real user's home explicitly).
+  if [[ -z "$prior" || ! -f "$prior/.env" ]]; then
+    local real_user real_home
+    real_user="${SUDO_USER:-$(id -un)}"
+    real_home="$(getent passwd "$real_user" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "$real_home" && -f "$real_home/Culvert/.env" ]]; then
+      prior="$real_home/Culvert"
+    fi
+  fi
+  if [[ -n "$prior" && "$prior" != "$INSTALL_DIR" && -f "$prior/.env" ]]; then
+    info "Carrying encryption secrets forward from the existing deployment at $prior"
+    info "(shared compose project + volumes — preserves the SSL-inspection CA passphrase)."
+    sudo install -m 600 -o "$(id -un)" "$prior/.env" "$INSTALL_DIR/.env"
+  fi
+}
+
 step "Setting up Culvert"
 
+# Deployment needs only the compose files + the maintenance-agent packaging.
+# Those ship INSIDE the public proxy image at /app/deploy and are extracted in
+# §6b after the image is pulled — a fresh install never clones the source
+# repo (which may not be publicly readable). Running from inside an existing
+# checkout / deployment dir uses its files directly.
 if [[ -f "./docker-compose.yml" ]] && grep -q "culvert" ./docker-compose.yml 2>/dev/null; then
-  info "Already inside Culvert repo: $(pwd)"
+  info "Already inside a Culvert checkout/deployment dir: $(pwd)"
   INSTALL_DIR="$(pwd)"
-elif [[ -d "$INSTALL_DIR" ]] && [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
-  info "Culvert repo already exists at $INSTALL_DIR"
+elif [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
+  info "Culvert deployment already exists at $INSTALL_DIR"
 else
-  info "Cloning Culvert..."
-  git clone "$REPO_URL" "$INSTALL_DIR"
-  info "Cloned to $INSTALL_DIR"
+  info "Provisioning $INSTALL_DIR..."
+  sudo mkdir -p "$INSTALL_DIR"
+  # Owned by the invoking user so later non-sudo writes (.env via env_put)
+  # work; the maintenance agent gets group traversal separately
+  # (ensure_agent_traversal), and ancestors of /srv/culvert are already
+  # world-searchable.
+  sudo chown "$(id -un)" "$INSTALL_DIR"
+  carry_forward_prior_secrets
 fi
 
 cd "$INSTALL_DIR"
@@ -491,10 +540,126 @@ step "Seeding proxy image"
 PINNED_TAG="culvert/proxy:pinned"
 PROXY_REPO="${CULVERT_PROXY_REPO:-ghcr.io/kidcarmi/culvert}"
 
+# Pinned release-signing identity (PUBLIC — mirrors release_identity.env, kept
+# byte-equal by TestReleaseIdentitySSOT). Used to cosign-verify the proxy image
+# BEFORE we trust the host-root maintenance-agent binary extracted from its
+# /app/deploy bundle. Hardcoded here — NOT read from the image — on purpose:
+# the trust identity must come from a source the image cannot forge (this
+# script arrives over TLS from a trusted origin; the image does not).
+# NOTE: the SAN is pinned to TAGGED releases (…@refs/tags/v.*$) — only a
+# version-tagged signed image verifies; a main-tracking :latest or a locally
+# built image does not, and the agent then falls back to the signed-release
+# download (fail-closed) rather than trusting an unverified binary.
+MAINT_SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
+MAINT_SIGSTORE_SAN_REGEX='^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$'
+# Pinned cosign verifier image (the root of trust for the check). A bare tag is
+# mutable; high-assurance operators should override with a digest-pinned ref.
+# MUST be cosign v3.x (new-format Sigstore bundles). Mirrors the agent
+# installer's COSIGN_IMAGE default.
+MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}"
+
+# verify_pinned_image_signature — cosign-verify (keyless) the registry image
+# behind $PINNED_TAG against the pinned tag identity. No host cosign needed;
+# runs the pinned cosign container (docker is already up). Return codes:
+#   0 = VERIFIED (a keyless signature present AND the pinned tag identity matched)
+#   1 = NOT VERIFIED, for ANY reason (image has no registry digest — e.g.
+#       locally built; unsigned/main-only image; private image the cosign
+#       container has no credentials for; identity mismatch; or cosign/registry/
+#       Rekor unreachable). The reasons are deliberately NOT distinguished:
+#       cosign's "no matching signatures" text cannot reliably tell an absent
+#       signature from a present-but-mismatched one, so claiming "tampering"
+#       would cry wolf on a normal :latest. Fail-closed callers trust the
+#       bundle ONLY on return 0; every 1 falls through to the self-verifying
+#       signed-release download.
+verify_pinned_image_signature() {
+  local digest_ref
+  # RepoDigests carries the source-registry digest of the pulled image; a
+  # locally built (never-pushed) image has none → unverifiable.
+  digest_ref="$(sudo docker image inspect "$PINNED_TAG" \
+    --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
+  if [[ "$digest_ref" != *@sha256:* ]]; then
+    return 1
+  fi
+  # Best-effort registry auth for the cosign container: it fetches the signature
+  # artifact from the SAME repo as the image, so a PRIVATE image needs the same
+  # credentials the earlier `sudo docker pull` used (root's docker config under
+  # sudo). Public images (the default posture) need none. Plaintext-auth entries
+  # transfer; external credential helpers do not (documented limitation).
+  local -a cred_args=()
+  if sudo test -f /root/.docker/config.json 2>/dev/null; then
+    cred_args=(-v /root/.docker:/root/.docker:ro)
+  fi
+  # --timeout bounds the Sigstore/Rekor network call so an egress-filtered
+  # appliance (sigstore.dev blackholed) fails closed instead of hanging.
+  local rc=0
+  sudo docker run --rm "${cred_args[@]}" "$MAINT_COSIGN_IMAGE" verify \
+    --timeout=60s \
+    --certificate-oidc-issuer="$MAINT_SIGSTORE_ISSUER" \
+    --certificate-identity-regexp="$MAINT_SIGSTORE_SAN_REGEX" \
+    "$digest_ref" >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -eq 0 ]]
+}
+
+# clone_source_into_install_dir — LAST-RESORT population of $INSTALL_DIR from
+# the source repo, used when the registry image is unreachable (nothing to seed
+# or extract from) or the pulled image predates the /app/deploy bundle. Requires
+# the repo to be publicly readable. GIT_TERMINAL_PROMPT=0 makes a PRIVATE or
+# unreachable repo fail FAST with a clear message instead of blocking forever on
+# a credential prompt on /dev/tty (a `curl | bash` run has no way to answer it).
+# `cp -a` of the clone CONTENTS merges into $INSTALL_DIR WITHOUT overwriting a
+# carried-forward .env (the repo ships none). Returns non-zero on any failure;
+# never hangs, never aborts the caller.
+clone_source_into_install_dir() {
+  ensure_git
+  local tmp="$INSTALL_DIR/.culvert-src.tmp"
+  sudo rm -rf "$tmp" 2>/dev/null || true
+  # Airtight no-hang: GIT_TERMINAL_PROMPT=0 stops git's own /dev/tty prompt,
+  # `-c credential.helper=` empties the helper list so a configured (possibly
+  # GUI) credential helper can't block, and GIT_ASKPASS=/bin/true neutralizes
+  # any askpass path. A private/unreachable repo then fails fast, never prompts.
+  if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
+       git -c credential.helper= clone "$REPO_URL" "$tmp"; then
+    warn "Could not clone $REPO_URL — the source repo may be private or unreachable."
+    sudo rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! sudo cp -a "$tmp/." "$INSTALL_DIR/" 2>/dev/null; then
+    warn "Could not populate $INSTALL_DIR from the clone."
+    sudo rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  sudo rm -rf "$tmp" 2>/dev/null || true
+  return 0
+}
+
 seed_pinned_tag() {
+  local had_stale=0
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
-    info "$PINNED_TAG already present; not reseeding"
-    return 0
+    # Keep the existing tag when it tracks a LIVE/current deployment: a proxy
+    # container (culvert, or culvert-dp on an HA data-plane node — running OR
+    # stopped, the P1.4 §8.2 stability rule that the pinned tag matches the live
+    # daemon), or a populated stack dir at $INSTALL_DIR (a source checkout with a
+    # locally-built tag, or an existing install). When NONE is present the tag is
+    # a stale leftover from a previously-removed install (dir + volumes gone,
+    # image kept); reusing it would silently deploy a year-old image + compose +
+    # agent (#7). Fall through to refresh it.
+    #
+    # KNOWN NARROWING: `docker compose down -v` that leaves the dir on disk still
+    # keeps the tag (compose file present) even though the data volume is gone —
+    # closing that fully would refresh a dev's locally-built pinned tag on a
+    # never-deployed checkout, so the tradeoff favours the checkout case. The
+    # operator escape hatch (CULVERT_PROXY_SEED_REF, named in the warning below)
+    # covers the rare stale-after-down-v reinstall.
+    if sudo docker inspect culvert >/dev/null 2>&1 \
+       || sudo docker inspect culvert-dp >/dev/null 2>&1 \
+       || [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
+      info "$PINNED_TAG already present; not reseeding (tracking the current deployment)"
+      return 0
+    fi
+    warn "$PINNED_TAG is present but no running or existing deployment was found — treating it"
+    warn "as a stale leftover and refreshing it (a removed-then-reinstalled host must not deploy"
+    warn "an old image). The registry-down path below keeps the leftover rather than failing."
+    had_stale=1
   fi
 
   # Seed source precedence (mirrors packaging/culvert-maint/install.sh):
@@ -529,9 +694,24 @@ seed_pinned_tag() {
     return 0
   fi
 
-  warn "Registry pull failed. Building $PINNED_TAG locally from this checkout (slower)..."
-  if sudo docker build -t "$PINNED_TAG" .; then
-    info "Built and seeded $PINNED_TAG locally"
+  if [[ -f Dockerfile ]]; then
+    warn "Registry pull failed. Building $PINNED_TAG locally from this checkout (slower)..."
+    if sudo docker build -t "$PINNED_TAG" .; then
+      info "Built and seeded $PINNED_TAG locally"
+      return 0
+    fi
+  else
+    warn "Registry pull failed and no source checkout is present to build from."
+  fi
+
+  # Every refresh source failed. If we were only trying to REFRESH a stale
+  # leftover (the tag still exists), keep it rather than failing — a possibly-old
+  # image is better than no install when the registry is unreachable. A genuine
+  # fresh seed with no leftover still returns 1 so the caller can clone+build.
+  if [[ "$had_stale" -eq 1 ]] && sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
+    warn "Could not refresh $PINNED_TAG — keeping the existing (possibly STALE) leftover image."
+    warn "If this host previously ran a different Culvert version, seed a current image explicitly:"
+    warn "  CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh"
     return 0
   fi
 
@@ -539,12 +719,155 @@ seed_pinned_tag() {
 }
 
 if ! seed_pinned_tag; then
-  error "Could not seed $PINNED_TAG from any source (seed ref, running container, $PROXY_REPO:latest, local build).
+  # The registry was unreachable and there was no local source to build from
+  # (source-free install). Last resort: clone the (public) source repo and build
+  # the image locally — this restores the "github reachable but ghcr blocked"
+  # completion path that a plain seed-then-error ordering removes.
+  #
+  # If a Dockerfile was ALREADY present (running from a source checkout),
+  # seed_pinned_tag already attempted the local build and it failed — don't
+  # repeat the identical doomed build; go straight to the actionable error.
+  had_dockerfile_before=0
+  [[ -f "$INSTALL_DIR/Dockerfile" ]] && had_dockerfile_before=1
+  if [[ "$had_dockerfile_before" -eq 0 ]]; then
+    warn "Could not seed $PINNED_TAG from the registry — cloning the source repo to build locally..."
+    clone_source_into_install_dir || true
+    cd "$INSTALL_DIR"
+  fi
+  if [[ "$had_dockerfile_before" -eq 0 && -f "$INSTALL_DIR/Dockerfile" ]]; then
+    info "Building $PINNED_TAG from source (slower than a registry pull)..."
+    sudo docker build -t "$PINNED_TAG" "$INSTALL_DIR" \
+      || error "Building $PINNED_TAG from the cloned source failed — see the build output above."
+    info "Built $PINNED_TAG from source."
+  else
+    error "Could not obtain $PINNED_TAG: the registry is unreachable AND the source repo
+  could not be cloned (private or offline).
 
-  Seed it manually, then re-run this script:
-    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG
-  or build from source:
-    docker build -t $PINNED_TAG ."
+  Provide a reachable image instead — e.g. a signed release tag on a host that can reach it:
+    CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh
+  or seed the tag by hand and re-run:
+    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG"
+  fi
+fi
+
+###############################################################################
+# 6b. Deployment files — extracted from the image (no git clone)
+###############################################################################
+
+# copy_bundle_file SRC DST MODE — install one extracted (root-owned, from
+# `sudo docker cp`) bundle file into the stack dir, owned by the invoking user.
+copy_bundle_file() {
+  sudo install -m "$3" -o "$(id -un)" "$1" "$2"
+}
+
+# extract_deploy_bundle — pull the deployment files out of the pinned proxy
+# image's /app/deploy bundle into $INSTALL_DIR: the compose files and the
+# maintenance-agent packaging/ tree (installer, config example, systemd unit,
+# sudoers template). The agent BINARY in the bundle is deliberately NOT left
+# in the stack dir — install_maint_agent extracts it into a throwaway temp dir
+# when it needs it (extract_bundled_maint_bin). Fails cleanly (nothing written)
+# when the image predates the bundle, so the caller can fall back to git.
+extract_deploy_bundle() {
+  local tmp cid
+  tmp="$(mktemp -d)" || return 1
+  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || { rm -rf "$tmp"; return 1; }
+  if ! sudo docker cp "$cid:/app/deploy/." "$tmp/" >/dev/null 2>&1; then
+    sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+  if [[ ! -f "$tmp/docker-compose.yml" || ! -f "$tmp/docker-compose.maint-agent.yml" \
+     || ! -f "$tmp/packaging/culvert-maint/install.sh" ]]; then
+    sudo rm -rf "$tmp"
+    return 1
+  fi
+  # Install order matters for crash-safety: the packaging/ tree and the override
+  # compose file go in FIRST, and docker-compose.yml — the re-extraction sentinel
+  # that §6b and §5's reuse check key on — goes in LAST. So a copy that fails
+  # partway leaves NO sentinel (or we remove it below), and the next run
+  # re-extracts instead of treating an incomplete tree as a finished deployment.
+  # Every copy is checked; the previous version ignored the loop's failures and
+  # unconditionally returned 0, which permanently stranded a partial extract.
+  local ok=1 f rel
+  while IFS= read -r -d '' f; do
+    rel="${f#"$tmp"/}"
+    sudo mkdir -p "$INSTALL_DIR/$(dirname "$rel")" || { ok=0; break; }
+    case "$rel" in
+      */install.sh) copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0755 || { ok=0; break; } ;;
+      *)            copy_bundle_file "$f" "$INSTALL_DIR/$rel" 0644 || { ok=0; break; } ;;
+    esac
+  done < <(sudo find "$tmp/packaging" -type f -print0)
+  if [[ "$ok" -eq 1 ]]; then
+    copy_bundle_file "$tmp/docker-compose.maint-agent.yml" \
+      "$INSTALL_DIR/docker-compose.maint-agent.yml" 0644 || ok=0
+  fi
+  if [[ "$ok" -eq 1 ]]; then
+    # LAST — the sentinel. Only now is the deployment considered complete.
+    copy_bundle_file "$tmp/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml" 0644 || ok=0
+  fi
+  sudo rm -rf "$tmp"
+  if [[ "$ok" -ne 1 ]]; then
+    # Remove the sentinel so a partial extract can't be mistaken for a complete
+    # one on the next run (it may not have been written, but be certain).
+    sudo rm -f "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
+    # Return 2 = the bundle WAS present but writing it into $INSTALL_DIR failed
+    # (disk full / permissions), distinct from return 1 = no bundle in the image
+    # (older release). The caller errors directly on 2 instead of attempting a
+    # git clone that would fail the same way.
+    return 2
+  fi
+  return 0
+}
+
+# extract_bundled_maint_bin DEST — copy the agent binary shipped in the pinned
+# proxy image (/app/deploy/bin/culvert-maint) to DEST. The TLS image pull from
+# the pinned repo is the trust channel — the same channel that delivers the
+# proxy binary that handles all the traffic — so this grants nothing the stack
+# does not already trust. Primary agent source: unlike the GitHub release
+# assets and the source repo, the image stays publicly pullable.
+extract_bundled_maint_bin() {
+  local dest="$1" cid
+  cid="$(sudo docker create "$PINNED_TAG" 2>/dev/null)" || return 1
+  if ! sudo docker cp "$cid:/app/deploy/bin/culvert-maint" "$dest" >/dev/null 2>&1; then
+    sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+    return 1
+  fi
+  sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+  sudo chmod 0755 "$dest" 2>/dev/null || true
+  [[ -x "$dest" ]]
+}
+
+# Re-extract when the deployment is missing OR incomplete. Keying on
+# docker-compose.yml alone would treat a partial extract (compose present, the
+# maint-agent installer missing) as finished and never self-heal; also require
+# the packaging installer that install_maint_agent depends on. A complete source
+# checkout / clone has both, so this never spuriously re-extracts over one.
+if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
+   || ! -f "$INSTALL_DIR/packaging/culvert-maint/install.sh" ]]; then
+  step "Extracting deployment files"
+  info "Extracting compose files + agent packaging from $PINNED_TAG (/app/deploy)..."
+  if extract_deploy_bundle; then
+    info "Deployment files installed to $INSTALL_DIR (no source checkout needed)."
+  else
+    extract_rc=$?
+    if [[ "$extract_rc" -eq 2 ]]; then
+      # The bundle was present but writing it failed (disk full / permissions).
+      # A git clone would fail the same way — error directly with the real cause.
+      error "Failed to write the deployment files to $INSTALL_DIR — likely out of disk space
+  or a permissions problem (not a missing image bundle). Free space / fix permissions and
+  re-run; the installer re-extracts automatically."
+    fi
+    # Compat window: images built before the /app/deploy bundle. Requires the
+    # source repo to be publicly readable; clone_source_into_install_dir fails
+    # fast (never hangs) on a private/unreachable repo.
+    warn "The image has no /app/deploy bundle (older release) — falling back to a git clone."
+    clone_source_into_install_dir \
+      || error "The pulled image has no /app/deploy bundle and the source repo could not be
+  cloned (private or offline). Use an image that includes the deploy bundle (a current
+  release), or run this script from a source checkout."
+    info "Populated $INSTALL_DIR from the source repo."
+  fi
 fi
 
 ###############################################################################
@@ -599,6 +922,26 @@ secret_already_set() {
 # env_put VAR VALUE FILE — set/replace VAR=VALUE in FILE (mode 600).
 env_put() {
   local var="$1" val="$2" file="$3"
+  # The shared /srv/culvert .env can be owned by a different user across runs
+  # (a prior `sudo` install → root-owned 0600, then an unprivileged re-run, or
+  # vice versa). Without this, the `touch`/writes below hit EACCES and abort the
+  # whole install under `set -euo pipefail`. Take ownership via sudo when we
+  # can't write it (no-op — and no sudo call — when we already can, so the
+  # extracted-function tests on a user-owned temp file are unaffected).
+  if [[ -e "$file" && ! -w "$file" ]]; then
+    sudo chown "$(id -un)" "$file" 2>/dev/null || true
+  elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
+    sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
+  fi
+  # If ownership still can't be taken (sudo genuinely denied), DEGRADE — warn
+  # and skip rather than let the unguarded touch/append below abort the whole
+  # install under `set -euo pipefail`. The normal path (writable, or sudo chown
+  # succeeded) falls straight through with no behavior change.
+  if [[ -e "$file" && ! -w "$file" ]]; then
+    warn "Cannot write $file (owned by another user and sudo could not take it) — leaving it unchanged."
+    warn "Set $var manually in $file if you need it, then restart the stack."
+    return 0
+  fi
   touch "$file"; chmod 600 "$file"
   sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
   # grep -v exits 1 (not just erroring) whenever EVERY line matched the
@@ -765,6 +1108,34 @@ if [[ "$COMPOSE_UP_OK" != "1" ]]; then
     sudo docker compose logs"
 fi
 
+# Backstop for the silent-SSL-inspection-loss class: a CA that fails to load is
+# non-fatal (the proxy serves TLS tunnel-only), so `docker compose up --wait`
+# reports HEALTHY even when SSL inspection is OFF — e.g. after a stack move that
+# stranded the CA passphrase. Surface it here instead of printing a clean
+# success banner over a degraded security posture. Best-effort; never fatal.
+SSL_INSPECTION_BROKEN=0
+warn_if_ssl_inspection_broken() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local body
+  body="$(curl -fsS --max-time 5 http://localhost:8080/health 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 0
+  # handleHealth reports "ssl_inspection":"load_failed" when a CONFIGURED CA
+  # bundle could not be loaded/decrypted (distinct from "unavailable" = no CA
+  # configured, which is a normal choice and NOT flagged here).
+  if grep -q '"ssl_inspection":"load_failed"' <<<"$body"; then
+    SSL_INSPECTION_BROKEN=1
+    warn "SSL inspection is DISABLED — the Root CA could not be loaded/decrypted."
+    warn "Most common cause: the CA passphrase (CULVERT_CA_PASSPHRASE) does not match the"
+    warn "existing encrypted /data/ca.bundle — e.g. the stack was moved without carrying"
+    warn "the original .env forward. TLS is being tunneled with NO scanning / DLP / CDR."
+    warn "Fix: put the ORIGINAL CULVERT_CA_PASSPHRASE in $INSTALL_DIR/.env, then run"
+    warn "     'cd $INSTALL_DIR && sudo docker compose up -d'  (or rotate the CA in the admin UI)."
+  fi
+}
+if [[ "$COMPOSE_UP_OK" == "1" ]]; then
+  warn_if_ssl_inspection_broken
+fi
+
 ###############################################################################
 # 8. Maintenance agent (optional, best-effort)
 ###############################################################################
@@ -776,16 +1147,26 @@ step "Maintenance agent (optional)"
 # automation for unattended (e.g. OVA / first-boot) deployments.
 #
 # It is reached on the host via its UDS by a local operator or the control
-# plane. By default we do NOT wire that socket into the proxy container, so the
-# in-container Release Management UI reports the agent as "unreachable" until you
-# opt in. Mounting the AGENT's UDS (NOT /var/run/docker.sock) is the supported,
-# isolation-preserving opt-in — the agent's SO_PEERCRED + allow_peers + sudoers
-# allowlist remain the privilege boundary, so a compromised proxy still cannot
-# exceed the agent's narrow allowlisted surface. See docker-compose.maint-agent.yml
+# plane. The installer attempts to wire that socket into the proxy container
+# automatically (wire_release_agent_for_compose) — fail-closed: any safety
+# check that does not pass leaves Release Management unwired ("Agent
+# unreachable" in the UI) with a warning. Mounting the AGENT's UDS (NOT
+# /var/run/docker.sock) is the supported, isolation-preserving mechanism — the
+# agent's SO_PEERCRED + allow_peers + sudoers allowlist remain the privilege
+# boundary, so a compromised proxy still cannot exceed the agent's narrow
+# allowlisted surface. See docker-compose.maint-agent.yml
 # and docs/operator/release-management-agent.md.
 #
 # Optional + best-effort: a failure NEVER fails the Culvert install — we warn
 # and move on. Opt out entirely with CULVERT_SKIP_MAINT_AGENT=1.
+#
+# TRUST: the agent is host-root, and its installer + templates come from the
+# proxy image's /app/deploy bundle in a source-free deploy. We root-exec that
+# bundle installer ONLY when the image cosign-verifies against the pinned
+# release identity, or a source checkout is present, or the operator sets the
+# break-glass CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 (dev/private image, at their
+# own risk). An unverified image with no source and no override skips the agent
+# (the proxy is unaffected). See the trust gate in install_maint_agent.
 MAINT_AGENT_INSTALLED=0
 MAINT_AGENT_WIRED=0
 
@@ -815,11 +1196,25 @@ agent_ancestors_traversable() {
 # running proxy so the agent matches the stack it operates: CULVERT_MAINT_VERSION
 # wins, else the proxy image's org.opencontainers.image.version label (bare
 # semver from docker/metadata-action, normalized to vX.Y.Z). Empty output means
-# "unknown" — the caller then BUILDS from source instead of downloading.
+# "unknown" — the caller then falls back to the image-bundled binary's own
+# version stamp, and past that installs without a version pin (bundled binary
+# as-is, or a source build).
 resolve_maint_version() {
+  # Explicit env pin wins — but normalize + semver-gate it exactly like the
+  # image-label path below. Without this, a bare `CULVERT_MAINT_VERSION=1.4.0`
+  # would be compared verbatim against the ALWAYS v-prefixed bundled stamp
+  # ("v1.4.0"), spuriously refusing the matching verified bundle, and the
+  # downstream agent installer (which requires vX.Y.Z) would reject it too. A
+  # non-semver env value is ignored (warn to STDERR so it can't pollute the
+  # command-substitution capture) and resolution falls through to the label.
   if [[ -n "${CULVERT_MAINT_VERSION:-}" ]]; then
-    echo "${CULVERT_MAINT_VERSION}"
-    return 0
+    local ev="${CULVERT_MAINT_VERSION}"
+    [[ "$ev" != v* ]] && ev="v$ev"
+    if [[ "$ev" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+      echo "$ev"
+      return 0
+    fi
+    warn "CULVERT_MAINT_VERSION='${CULVERT_MAINT_VERSION}' is not a release version (vX.Y.Z) — ignoring it." >&2
   fi
   local v
   v="$(sudo docker inspect culvert --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
@@ -943,7 +1338,25 @@ patch_allow_peers_numeric_uid() {
 verify_maint_agent_health_as_proxy_uid() {
   local uid="$1" gid="$2" sock="$3"
   command -v curl >/dev/null 2>&1 || return 1
-  sudo -n -u "#$uid" -g "#$gid" curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+  # Preferred: impersonate the proxy UID via sudo. But the container UID
+  # usually has NO passwd entry on the host (e.g. UID 100 on Amazon Linux),
+  # and sudo rejects unknown numeric run-as users unless the sudoers option
+  # allow_unknown_runas_id is enabled — probe with `true` first so a sudo
+  # limitation is never misread as the agent denying the UID. Fall back to
+  # setpriv (util-linux), which switches to arbitrary numeric IDs without a
+  # passwd entry; the agent itself only ever sees the numeric SO_PEERCRED
+  # UID, exactly like the real in-container caller.
+  if sudo -n -u "#$uid" -g "#$gid" true 2>/dev/null; then
+    sudo -n -u "#$uid" -g "#$gid" curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+    return
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    sudo -n setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+      curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+    return
+  fi
+  warn "Cannot impersonate UID $uid for the health probe (no passwd entry for sudo, and setpriv is unavailable)."
+  return 1
 }
 
 wire_release_agent_for_compose() {
@@ -1117,10 +1530,10 @@ install_maint_agent() {
   fi
 
   # The installer script is required for every path (it installs binary,
-  # sudoers, and unit). The Go sources are only needed for the BUILD fallback —
-  # the signed-release download path does not need them.
+  # sudoers, and unit). It arrives via the image deploy bundle (§6b) or a
+  # source checkout; the Go sources are only needed for the BUILD fallback.
   if [[ ! -f "$maint_installer" ]]; then
-    warn "Maintenance agent installer not found in this checkout — skipping"
+    warn "Maintenance agent installer not found in $INSTALL_DIR — skipping"
     return 0
   fi
 
@@ -1130,9 +1543,175 @@ install_maint_agent() {
     return 0
   fi
 
-  # Version we WANT installed (env → running proxy). Empty = build from source.
+  # One scratch dir + one RETURN trap for every temp artifact this function
+  # creates (bash keeps a single RETURN trap per function; the bundled-binary
+  # extract and the build fallback below both live under it). sudo rm: files
+  # written via `sudo docker cp` / container builds come out root-owned.
+  local scratch
+  scratch="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
+  # shellcheck disable=SC2064 -- expand $scratch now; it is function-local
+  trap "sudo rm -rf '$scratch'" RETURN
+
+  # Version we WANT installed (env → running proxy image label). Empty = take
+  # the bundled binary as-is / build from source.
   local target_version
   target_version="$(resolve_maint_version)"
+
+  # ── Guards (apply to EVERY path below, INCLUDING the already-installed wiring
+  #    fast-path — a wired agent that can't chdir into the stack is worse than
+  #    an unwired one, so these must gate the wiring, not just fresh installs
+  #    (#6)). Cheap + dependency-free, so run them BEFORE the network cosign
+  #    verify + bundle extract. ─────────────────────────────────────────────────
+  #
+  # (1) The agent's sudoers allowlist is path-bound to this stack's directory. A
+  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
+  # safely into the sudoers grammar, so skip cleanly rather than half-bind it.
+  case "$INSTALL_DIR" in
+    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
+      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
+      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
+      return 0 ;;
+  esac
+  # (2) The unprivileged culvert-maint service must be able to chdir into the
+  # stack (the runner sets cmd.Dir before sudo). We grant the LEAF group
+  # traversal post-install, but an ANCESTOR we won't modify that is unsearchable
+  # (a 0700 home, /root) means the agent could never reach the stack.
+  if ! agent_ancestors_traversable "$INSTALL_DIR"; then
+    warn "An ancestor of '$INSTALL_DIR' is not searchable by an unprivileged service user."
+    warn "The maintenance agent runs as 'culvert-maint' and could not chdir into the stack; skipping."
+    warn "This happens for stacks under a 0700/0750 home directory (CULVERT_DIR override or a"
+    warn "home-dir checkout). Use the default system path instead — re-run from a neutral cwd:"
+    warn "  cd / && sudo bash /path/to/install.sh          # deploys to /srv/culvert"
+    return 0
+  fi
+
+  # ── Installer-script trust gate (Codex P1) ──────────────────────────────────
+  # EVERY install/wiring path below root-execs "$maint_installer"
+  # (packaging/culvert-maint/install.sh) — which also renders the sudoers and
+  # systemd-unit templates. In a source-free deploy that script was extracted
+  # from the proxy image's /app/deploy bundle by extract_deploy_bundle, BEFORE
+  # any signature check. Running an UNVERIFIED image's installer as root would
+  # hand a tampered/typosquatted image host-root — worse than fix #1, which only
+  # gated the bundled BINARY. So establish trust for the SCRIPT itself, ONCE,
+  # here (it gates the fast-path re-wire too):
+  #   1. A real source checkout — cmd/culvert-maint/go.mod is NEVER shipped in
+  #      the image bundle (only the compiled binary + packaging/), so its
+  #      presence positively identifies the operator's own tree (git checkout or
+  #      the clone_source_into_install_dir compat fallback). Trusted; cheap.
+  #   2. Otherwise the installer is image-derived: trust it (and the bundled
+  #      binary, via trust_image_bundle) ONLY when the pinned proxy image
+  #      cosign-verifies against the pinned release identity.
+  #   3. Break-glass: CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 for a dev/private
+  #      image the operator knowingly trusts.
+  # No trust ⇒ skip the agent entirely (the proxy is unaffected). The go.mod
+  # check runs first so source deploys keep the fast-path's no-network property;
+  # only a pure-bundle deploy pays the one cosign verify.
+  #
+  # trust_image_bundle is the SEPARATE decision of whether to install the image's
+  # BUNDLED BINARY (fix #1): true only when we are trusting the IMAGE (cosign OK
+  # or break-glass). A source checkout trusts the SCRIPT but not the image binary
+  # (it builds from source / downloads the signed release instead).
+  local installer_trusted=0 trust_image_bundle=0
+  if [[ -f cmd/culvert-maint/go.mod ]]; then
+    installer_trusted=1
+  elif [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]] && verify_pinned_image_signature; then
+    installer_trusted=1
+    trust_image_bundle=1
+  elif [[ -n "${CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE:-}" ]]; then
+    warn "CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE set — root-executing the image-bundle agent"
+    warn "installer AND its bundled binary despite an unverified proxy image (break-glass;"
+    warn "you accept the risk of a tampered image gaining host-root)."
+    installer_trusted=1
+    trust_image_bundle=1
+  fi
+  if [[ "$installer_trusted" -ne 1 ]]; then
+    warn "Maintenance agent skipped: the proxy image did not cosign-verify against the pinned"
+    warn "release identity (unsigned/main :latest, private image without credentials, locally"
+    warn "built, or cosign/registry unreachable) and no source checkout is present — so the"
+    warn "bundled packaging/culvert-maint/install.sh cannot be trusted to run as ROOT."
+    warn "Culvert's proxy is unaffected; Release Management / day-2 upgrades stay unwired."
+    warn "Wire it by installing from a signed release tag or a source checkout, or re-run with"
+    warn "  CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1   # dev/private image, at your own risk"
+    return 0
+  fi
+
+  # ── Fast path: already installed AND at a KNOWN target version → just ensure
+  #    traversal + wiring, skipping the (network) cosign verify + bundle extract
+  #    entirely. The guards above already ran, so wiring here cannot create a
+  #    broken-chdir state. Only when the target is known pre-extract (env/label);
+  #    an unknown target still needs the bundle to derive its version (the
+  #    idempotence block after the bundle handles that). ─────────────────────────
+  if [[ -f /etc/systemd/system/culvert-maint.service && -n "$target_version" ]]; then
+    local installed_now=""
+    if command -v culvert-maint &>/dev/null; then
+      installed_now="$(culvert-maint --version 2>/dev/null || true)"
+    fi
+    if [[ "$installed_now" == "$target_version" ]]; then
+      info "Maintenance agent already at $target_version — leaving it unchanged."
+      ensure_agent_traversal || true
+      MAINT_AGENT_INSTALLED=1
+      wire_release_agent_for_compose "$maint_installer"
+      return 0
+    fi
+  fi
+
+  # Bundled agent binary: shipped inside the pinned proxy image at
+  # /app/deploy/bin/culvert-maint, so it exists wherever the image can be
+  # pulled — GitHub release assets and the source repo may not be publicly
+  # readable. It also tracks the EXACT image the stack runs.
+  #
+  # TRUST (fix — finding #1): the agent is a HOST-ROOT systemd service (sudoers
+  # docker allowlist), so we must NOT install its BINARY from an unverified
+  # image. trust_image_bundle (computed once in the trust gate above) is set only
+  # when we are trusting the IMAGE — either it cosign-verified against the pinned
+  # tag identity, or the operator set the CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE
+  # break-glass. Only then do we extract + trust the bundled binary — SKIP_VERIFY
+  # at install time is then legitimate because the SOURCE image is (or was
+  # explicitly) trusted. Otherwise (a source checkout where we build instead, or
+  # an image we don't trust) trust_image_bundle is 0 and we fall through to the
+  # signed-release download (which self-verifies) or the source build.
+  local bundled_bin=""
+  if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
+    if [[ "$trust_image_bundle" -eq 1 ]]; then
+      if extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
+        local cand="$scratch/culvert-maint-bundled" bundled_version=""
+        # Probe the extracted binary before trusting it. A FAILED exec means it
+        # cannot run on THIS host — e.g. a foreign-arch image seeded via
+        # CULVERT_PROXY_SEED_REF with no matching binfmt/qemu — so discard it
+        # rather than install a crash-looping systemd unit (#10). (If binfmt IS
+        # registered the foreign binary runs emulated and --version succeeds,
+        # which is degraded-but-functional and acceptable.)
+        if bundled_version="$("$cand" --version 2>/dev/null)" \
+           && [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+          if [[ -z "$target_version" ]]; then
+            # No explicit target — adopt the verified image's bundled version.
+            target_version="$bundled_version"
+            bundled_bin="$cand"
+            info "Proxy image verified — using its bundled agent $bundled_version."
+          elif [[ "$bundled_version" == "$target_version" ]]; then
+            bundled_bin="$cand"
+            info "Proxy image verified — using its bundled agent $bundled_version (matches target)."
+          else
+            # The image bundles a DIFFERENT version than requested. Installing
+            # the bundle would install the WRONG version and loop forever on
+            # every re-run (installed != target); use the signed-release
+            # download of the requested target instead (#4).
+            info "Proxy image bundles agent $bundled_version but the target is $target_version —"
+            info "using the signed-release download for $target_version instead of the image bundle."
+          fi
+        else
+          info "Bundled agent binary is not runnable on this host (architecture mismatch or"
+          info "corrupt) — falling back to the signed-release download / source build."
+        fi
+      fi
+    else
+      # Reached only for a source checkout (an untrusted image already returned
+      # at the trust gate). We trust the SCRIPT (from source) but not the image's
+      # bundled binary — build it from source / download the signed release.
+      info "Not using the image's bundled agent binary (source checkout present) —"
+      info "installing from the signed-release download or a local source build."
+    fi
+  fi
 
   # Upgrade-aware: the systemd unit is the "fully installed" marker (written
   # last). If it exists AND the installed agent already reports the target
@@ -1144,45 +1723,46 @@ install_maint_agent() {
     if command -v culvert-maint &>/dev/null; then
       installed_version="$(culvert-maint --version 2>/dev/null || true)"
     fi
-    if [[ -n "$target_version" && "$installed_version" == "$target_version" ]]; then
-      info "Maintenance agent already at $target_version — leaving it unchanged"
-      return 0
-    fi
+    # When the installed agent is already the target (or no target can be
+    # resolved), skip the reinstall but STILL run the wiring below — it is
+    # idempotent, and a previous run may have installed the agent yet failed
+    # (or been skipped) at the Release Management wiring step.
+    # (Guards already ran before the bundle block above, so wiring on these
+    # already-installed early-returns cannot create a broken-chdir state.)
     if [[ -z "$target_version" ]]; then
       info "Maintenance agent installed ($installed_version); cannot resolve a target version — leaving it unchanged"
+      ensure_agent_traversal || true
+      MAINT_AGENT_INSTALLED=1
+      wire_release_agent_for_compose "$maint_installer"
+      return 0
+    fi
+    if [[ "$installed_version" == "$target_version" ]]; then
+      info "Maintenance agent already at $target_version — leaving it unchanged"
+      ensure_agent_traversal || true
+      MAINT_AGENT_INSTALLED=1
+      wire_release_agent_for_compose "$maint_installer"
       return 0
     fi
     info "Upgrading maintenance agent ($installed_version → $target_version)..."
   fi
 
-  # The agent's sudoers allowlist is path-bound to this stack's directory. A
-  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
-  # safely into the sudoers grammar (the agent installer rejects it), so skip
-  # the whole step cleanly rather than leave a half-bound install behind.
-  case "$INSTALL_DIR" in
-    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
-      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
-      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
-      return 0 ;;
-  esac
-
-  # The unprivileged culvert-maint service must be able to chdir into the stack
-  # (the runner sets cmd.Dir = compose_project_dir before sudo). We grant the
-  # LEAF group traversal post-install (0750 root:culvert-maint), so it has no
-  # world requirement — but an ANCESTOR we will not modify that is unsearchable
-  # (e.g. a 0700 home, or /root) means the agent could never reach the stack.
-  # Skip cleanly instead of binding a guaranteed-broken path.
-  if ! agent_ancestors_traversable "$INSTALL_DIR"; then
-    warn "An ancestor of '$INSTALL_DIR' is not searchable by an unprivileged service user."
-    warn "The maintenance agent runs as 'culvert-maint' and could not chdir into the stack; skipping."
-    warn "For unattended/appliance installs, place the stack under a system path, e.g.:"
-    warn "  sudo CULVERT_DIR=/srv/culvert bash scripts/install.sh"
-    return 0
-  fi
-
-  # ── Install: prefer the signed release, fall back to a local build. ─────────
+  # ── Install: verified bundled binary → signed release → local build. ────────
+  # $bundled_bin is set ONLY when verify_pinned_image_signature passed above, so
+  # CULVERT_MAINT_SKIP_VERIFY=1 here is trusting an ALREADY-VERIFIED source (the
+  # cosign-verified proxy image), not an unverified download. The image carries
+  # no sidecar cosign bundle for the binary itself; the image signature is the
+  # anchor. If the image was not verified, $bundled_bin is empty and this branch
+  # is skipped in favour of the self-verifying signed-release download below.
   local installed_ok=0
-  if [[ -n "$target_version" && -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
+  if [[ -n "$bundled_bin" ]]; then
+    info "Installing maintenance agent from the (verified) image deploy bundle..."
+    if sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" "$bundled_bin"; then
+      installed_ok=1
+    else
+      warn "Bundled-agent install failed — trying the signed-release download..."
+    fi
+  fi
+  if [[ "$installed_ok" -ne 1 && -n "$target_version" && -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
     info "Installing maintenance agent from the signed release ($target_version)..."
     # No positional binary → the agent installer downloads + cosign-verifies the
     # release asset itself (fail-closed). Pass the resolved version through.
@@ -1206,13 +1786,13 @@ install_maint_agent() {
     #    falls back to pure-Go /etc/passwd parsing, so on a host whose
     #    allow_peers come from NSS the operator must use numeric UIDs (warned).
     if [[ ! -f cmd/culvert-maint/go.mod ]]; then
-      warn "No release installed and agent sources not present for a build fallback — skipping (Culvert is unaffected)."
+      warn "No bundled/release agent installed and sources not present for a build fallback — skipping (Culvert is unaffected)."
       return 0
     fi
     local build_dir maint_bin go_image
     go_image="${CULVERT_GO_IMAGE:-golang:1.25}"
-    build_dir="$(mktemp -d)" || { warn "mktemp failed — skipping maintenance agent"; return 0; }
-    trap "rm -rf '$build_dir'" RETURN
+    build_dir="$scratch/build"
+    mkdir -p "$build_dir" || { warn "mkdir failed — skipping maintenance agent"; return 0; }
     maint_bin="$build_dir/culvert-maint"
 
     if command -v go &>/dev/null; then
@@ -1293,6 +1873,12 @@ echo -e "${GREEN}============================================================${N
 echo -e "${GREEN}  Culvert is running!${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
+if [[ "${SSL_INSPECTION_BROKEN:-0}" == "1" ]]; then
+  echo -e "${YELLOW}  ⚠ SSL inspection is DISABLED — the Root CA failed to load (see the${NC}"
+  echo -e "${YELLOW}    warning above). HTTPS is tunneled without scanning/DLP/CDR until the${NC}"
+  echo -e "${YELLOW}    CA passphrase in $INSTALL_DIR/.env matches the encrypted ca.bundle.${NC}"
+  echo ""
+fi
 echo "  Proxy:    http://<your-ip>:8080  (configure browsers to use this)"
 echo "  Admin UI: https://<your-ip>:9090 (accept the self-signed cert)"
 echo ""
@@ -1310,7 +1896,7 @@ echo "    docker compose logs -f          # watch all logs"
 echo "    docker compose logs -f proxy    # watch proxy logs"
 echo "    docker compose ps               # check service status"
 echo "    docker compose down             # stop everything"
-echo "    docker compose up -d --build    # rebuild and restart"
+echo "    docker compose up -d            # (re)start everything"
 echo ""
 if [[ "$CURRENT_USER" != "root" ]] && ! groups "$CURRENT_USER" | grep -qw docker; then
   echo -e "${YELLOW}  NOTE: Log out and back in to use 'docker' without sudo.${NC}"

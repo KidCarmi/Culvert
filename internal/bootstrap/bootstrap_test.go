@@ -110,12 +110,6 @@ func TestImage_Defaults(t *testing.T) {
 	if got := Image(missing, "1.2.3"); got != DefaultImage+":1.2.3" {
 		t.Errorf("Image(1.2.3) = %q, want %s:1.2.3", got, DefaultImage)
 	}
-	if got := UpdaterImage(missing, "dev"); got != DefaultImage+"-updater:latest" {
-		t.Errorf("UpdaterImage(dev) = %q, want %s-updater:latest", got, DefaultImage)
-	}
-	if got := UpdaterImage(missing, "1.2.3"); got != DefaultImage+"-updater:1.2.3" {
-		t.Errorf("UpdaterImage(1.2.3) = %q, want %s-updater:1.2.3", got, DefaultImage)
-	}
 }
 
 func TestImage_RegistryOverride(t *testing.T) {
@@ -126,9 +120,6 @@ func TestImage_RegistryOverride(t *testing.T) {
 	}
 	if got := Image(path, "2.0.0"); got != "registry.corp/culvert:2.0.0" {
 		t.Errorf("Image override = %q, want registry.corp/culvert:2.0.0", got)
-	}
-	if got := UpdaterImage(path, "dev"); got != "registry.corp/culvert-updater:latest" {
-		t.Errorf("UpdaterImage override = %q, want registry.corp/culvert-updater:latest", got)
 	}
 
 	// Corrupt settings fall back to the default.
@@ -158,13 +149,12 @@ func TestRenderScript_And_Compose(t *testing.T) {
 	}
 
 	sb.Reset()
-	if err := RenderCompose(&sb, "img:1", "img-updater:1", "culvert://enroll/x"); err != nil {
+	if err := RenderCompose(&sb, "img:1", "culvert://enroll/x"); err != nil {
 		t.Fatalf("RenderCompose: %v", err)
 	}
 	out = sb.String()
 	for _, want := range []string{
 		"image: img:1",
-		"image: img-updater:1",
 		"ENROLL_URL=culvert://enroll/x",
 	} {
 		if !strings.Contains(out, want) {

@@ -28,9 +28,9 @@ updates:
       day: monday
     open-pull-requests-limit: 5
 
-  # Docker base images (Dockerfile, Dockerfile.updater) — trivy image scans
-  # gate on their CVEs; this makes the fix PRs arrive automatically instead
-  # of only the failures (CI review finding).
+  # Docker base images (Dockerfile) — trivy image scans gate on their CVEs;
+  # this makes the fix PRs arrive automatically instead of only the failures
+  # (CI review finding).
   - package-ecosystem: docker
     directory: "/"
     schedule:

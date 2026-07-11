@@ -19,7 +19,7 @@
 | RISK-014 | MEDIUM | ✅ CLOSED | Reachability gate (govulncheck) scans root module only; nested modules unanalyzed | per-module govulncheck in both lanes (2026-07-04) |
 | RISK-015 | LOW | OPEN | Single-scanner gate; detection-source divergence (Dependabot 5 vs Trivy DB 3) | trivy run vs Dependabot count, 2026-06-28 |
 | RISK-016 | LOW ↓ | MITIGATING | ~~Scanners `@latest`~~ all pinned (tree-verified 2026-07-04); residual: CodeQL non-blocking | gosec v2.27.1 / govulncheck v1.5.0 / go-licenses v1.6.0 / trivy v0.69.3 / Obituary SHA-pinned |
-| RISK-ACC-1 | HIGH | ACCEPTED | 5 `docker/docker` CVEs in `updater/` (no upstream fix) | `updater/go.mod`; resolution = DEBT-008 |
+| RISK-ACC-1 | HIGH | ✅ CLOSED | 5 `docker/docker` CVEs in `updater/` | legacy updater removed 2026-07-11 (DEBT-008); dependency tree deleted |
 | RISK-005 | MEDIUM | ✅ CLOSED | Interrupted restore can leave `/data` absent | boot guard `checkInterruptedRestore` (`restore.go`) + runbook §8b |
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
 | RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
@@ -121,9 +121,12 @@
   caught by Codex review on PR #557) posts everything Trivy knows to the job summary — "green
   gate" can no longer silently coexist with masked vulns. (2) `.trivyignore` entries now carry **trivy-native
   `exp:` dates** (better than the recommended CI check — trivy itself stops honoring the ignore
-  when the date passes, flipping the blocking gate red and forcing re-triage). Dates set to
-  2026-10-01, aligned to the updater-removal target (DEBT-008/RISK-ACC-1); the file documents
+  when the date passes, flipping the blocking gate red and forcing re-triage). Dates were set to
+  2026-10-01, aligned to the updater-removal target (DEBT-008/RISK-ACC-1); the file documented
   that extending requires re-validating the reachability rationale, not reflex.
+- **Update 2026-07-11:** the updater module was removed (DEBT-008/RISK-ACC-1 CLOSED), so those two
+  `docker/docker` masks were retired and `.trivyignore` is now empty. The `exp:`-date mechanism and
+  the full-severity non-blocking pass remain the pattern for any future suppression.
 - Original finding preserved below for context.
 
 ### (was) RISK-006 — Trivy gate config blind spots · MEDIUM · OPEN
@@ -150,11 +153,9 @@
 - **Fix (as recommended, with one deliberate nuance):** explicit per-module govulncheck steps in
   BOTH lanes (`pr-fast-gate.yml` security-fast job — the merge-blocking one — and
   `security-release-gate.yml` vuln-govulncheck). `cmd/culvert-maint` is **blocking** like the
-  root. `updater/` is **advisory** (`continue-on-error`): it carries the RISK-ACC-1 accepted
-  unfixed CVEs, so a reachable finding has no fix short of removal — but the run converts the
-  `.trivyignore` prose unreachability claim into actual reachability analysis, and any finding
-  there invalidates the acceptance and must be triaged (comment in both workflows says exactly
-  that). Flips to moot when DEBT-008 deletes the module.
+  root. The former `updater/` advisory step (`continue-on-error`, carrying the RISK-ACC-1 unfixed
+  CVEs) was **removed on 2026-07-11** together with the module (DEBT-008 CLOSED), so the per-module
+  govulncheck matrix is now just root (blocking) + `cmd/culvert-maint` (blocking).
 - Local verification unavailable (org egress still 403s `vuln.go.dev`); the CI runs on this
   branch's PR are the proof. Original finding preserved below.
 
@@ -215,23 +216,18 @@
   (internal/alerts) — restart round-trip incl. decrypted secret, mode 0600, no tmp leftovers —
   and the slice-resolver path test.
 
-## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ACCEPTED
-- **Current state (trivy-verified 2026-06-28):** 5 CVEs in `github.com/docker/docker v28.5.2`,
-  all in `updater/go.mod` only: `CVE-2026-41567` (HIGH), `CVE-2026-42306` (HIGH),
-  `CVE-2026-41568` (MEDIUM) — confirmed by local trivy — plus `CVE-2026-34040`, `CVE-2026-33997`
-  (in `.trivyignore`). **None have an upstream fix.** The root proxy binary and `cmd/culvert-maint`
-  are unaffected (0 vulns).
-- **Why accepted, not fixed:** (1) no upstream patch exists, so there is nothing to bump to;
-  (2) the entire legacy Docker updater is being **removed** (maintainer in progress; DEBT-008),
-  which closes all 5 at once; (3) bumping dependencies in code slated for deletion is wasted work.
-- **Acceptance conditions / expiry:** this acceptance is valid **only until the updater module is
-  removed**. If updater removal stalls, re-evaluate: confirm the `.trivyignore` reachability
-  rationale still holds and that the updater is not exposed to untrusted Docker registry/plugin input.
-- **Resolution:** DEBT-008 (remove legacy updater). **Owner:** maintainer · **Target:** with DEBT-008.
-- **Re-verified 2026-07-03:** `go list -m -u github.com/docker/docker` in `updater/` reports no
-  newer version — still no upstream fix, acceptance conditions still hold. The GitHub Dependabot
-  banner shown on every push ("5 vulnerabilities, 3 high") maps to THIS entry (the updater-only
-  CVE set); it is not an unhandled finding.
+## RISK-ACC-1 — `docker/docker` CVEs in the updater · HIGH · ✅ CLOSED 2026-07-11
+- **Was:** 5 CVEs in `github.com/docker/docker v28.5.2`, all in `updater/go.mod` only:
+  `CVE-2026-41567` (HIGH), `CVE-2026-42306` (HIGH), `CVE-2026-41568` (MEDIUM), plus
+  `CVE-2026-34040`, `CVE-2026-33997` (in `.trivyignore`). None had an upstream fix, so the risk
+  was ACCEPTED until the updater module could be removed (resolution path = DEBT-008).
+- **Resolution:** the legacy Docker updater was removed on 2026-07-11 (DEBT-008 CLOSED). Deleting
+  `updater/go.mod` deleted the entire `docker/docker` dependency tree — `go list -m` across the root
+  module and `cmd/culvert-maint` no longer references `github.com/docker/docker`, so all 5 alerts
+  are structurally closed (nothing to bump, nothing reachable). The two `.trivyignore` masks were
+  retired with the module; the file is kept present-but-empty for the workflows' `--ignorefile`.
+- The maintenance agent (`cmd/culvert-maint`) drives Docker via the `docker` CLI over sudo, not the
+  Go SDK, so no `docker/docker` dependency was reintroduced.
 
 ## RISK-005 — Interrupted restore leaves `/data` absent · MEDIUM · ✅ CLOSED 2026-06-30
 - **Was:** `runRestoreCommit` (`restore.go`) does move-aside (`rename /data → /data.bak.<ts>-<pid>`)

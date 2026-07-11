@@ -1,8 +1,20 @@
-version: "2.4"
-
 # Culvert HA Cluster — Control Plane + Standby + Data Plane workers
 #
+# DEPLOYMENT MODEL — read first:
+#   HA/DP nodes BUILD the proxy image from source (`build: .`), so this file
+#   must be deployed ALONGSIDE the source tree (git clone / release tarball),
+#   NOT copied on its own. This differs from the single-node quick-start
+#   (`scripts/install.sh` + `docker-compose.yml`), which is source-free and
+#   runs a pinned `culvert/proxy:pinned` image.
+#
+#   DAY-2 UPDATES are OUT-OF-BAND for HA: pull the new source and run
+#   `docker compose -f docker-compose.ha.yml build && … up -d` on each node.
+#   Release Management (the signed catalog + maintenance-agent dispatch) drives
+#   upgrades for the SINGLE-NODE installer path only — it retags/recreates
+#   `culvert/proxy:pinned`, which HA nodes do not run, so it does not reach them.
+#
 # Deploy:
+#   0. Check out the Culvert source on each node (this file lives at its root).
 #   1. Copy this file to BOTH CP servers (Server A + Server B)
 #   2. On Server A:  docker compose -f docker-compose.ha.yml up -d
 #   3. Open GUI at https://server-a:9090
@@ -41,31 +53,6 @@ services:
       retries: 5
       start_period: 300s
 
-  # ── Culvert updater sidecar ──────────────────────────────────────────────
-  updater:
-    build:
-      context: .
-      dockerfile: Dockerfile.updater
-    container_name: culvert-updater
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - proxy-data:/data:ro
-    ports:
-      - "127.0.0.1:7123:7123"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    mem_limit: 512m
-    cpus: 0.5
-    pids_limit: 64
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   # ── Culvert proxy (CP, Standby, or DP — configured at runtime via GUI) ─────
   proxy:
     build: .
@@ -73,7 +60,6 @@ services:
     restart: unless-stopped
     depends_on:
       - clamav
-      - updater
     ports:
       - "8080:8080"   # HTTP/HTTPS proxy
       - "1080:1080"   # SOCKS5 proxy (optional)
@@ -128,32 +114,6 @@ services:
       '
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  # ── DP updater sidecar (activate with --profile dp) ────────────────────────
-  dp-updater:
-    build:
-      context: .
-      dockerfile: Dockerfile.updater
-    container_name: culvert-dp-updater
-    restart: unless-stopped
-    profiles: ["dp"]
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - dp-data:/data:ro
-    ports:
-      - "127.0.0.1:7123:7123"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    mem_limit: 512m
-    cpus: 0.5
-    pids_limit: 64
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -51,6 +51,36 @@ func TestReleaseIdentitySSOT(t *testing.T) {
 	}
 }
 
+// TestInstallScriptPinsSameReleaseIdentity extends the SSOT wall to the
+// quick-start installer: scripts/install.sh hardcodes the issuer + SAN regex
+// (verify_pinned_image_signature) to cosign-verify the proxy image before it
+// trusts the host-root maintenance-agent binary in the /app/deploy bundle. That
+// copy MUST equal release_identity.env / the Go constants, or the installer
+// could trust an image the in-binary verifier would reject (or vice versa). The
+// identity is hardcoded (not read from the image) on purpose — the image must
+// not be able to forge the identity it is verified against.
+func TestInstallScriptPinsSameReleaseIdentity(t *testing.T) {
+	env := parseReleaseIdentityEnv(t)
+	b, err := os.ReadFile("scripts/install.sh")
+	if err != nil {
+		t.Fatalf("read scripts/install.sh: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "verify_pinned_image_signature") {
+		t.Skip("scripts/install.sh no longer verifies the pinned image signature; contract not applicable")
+	}
+	// The installer assigns the issuer as a plain double-quoted string and the
+	// SAN regex as a single-quoted literal (backslashes must survive verbatim).
+	wantIssuer := `MAINT_SIGSTORE_ISSUER="` + env["CULVERT_RELEASE_SIGSTORE_ISSUER"] + `"`
+	if !strings.Contains(s, wantIssuer) {
+		t.Errorf("scripts/install.sh missing/!= pinned issuer; want line containing %q", wantIssuer)
+	}
+	wantSAN := `MAINT_SIGSTORE_SAN_REGEX='` + env["CULVERT_RELEASE_SIGSTORE_SAN_REGEX"] + `'`
+	if !strings.Contains(s, wantSAN) {
+		t.Errorf("scripts/install.sh missing/!= pinned SAN regex; want line containing %q", wantSAN)
+	}
+}
+
 // TestReleaseCatalogKeylessVerify is the CI end-to-end gate (tag path): after
 // `cosign sign-blob --bundle` writes index.json.sigstore into CULVERT_RELEASE_GEN_OUT,
 // this loads that dir through the REAL in-binary path — the BAKED Sigstore root +

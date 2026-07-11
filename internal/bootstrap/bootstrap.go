@@ -55,15 +55,6 @@ func Image(settingsPath, version string) string {
 	return DefaultImage + ":" + tagFor(version)
 }
 
-// UpdaterImage returns the updater sidecar image reference (base image name
-// + "-updater").
-func UpdaterImage(settingsPath, version string) string {
-	if base := registryURL(settingsPath); base != "" {
-		return base + "-updater:" + tagFor(version)
-	}
-	return DefaultImage + "-updater:" + tagFor(version)
-}
-
 // ── Bootstrap shell script ─────────────────────────────────────────────────
 
 var scriptTmpl = template.Must(template.New("bootstrap").Parse(`#!/bin/bash
@@ -190,9 +181,6 @@ services:
     image: {{.Image}}
     container_name: culvert-dp
     restart: unless-stopped
-    depends_on:
-      dp-updater:
-        condition: service_healthy
     ports:
       - "8080:8080"
       - "1080:1080"
@@ -214,8 +202,7 @@ services:
           -threat-feed-db /data/threatfeeds.json
           -cat-feed-db /data/catfeeddb
           -fileprofiles-file /data/fileprofiles.json
-          -idp-profiles-file /data/idp_profiles.json
-          -updater-url http://dp-updater:7123"
+          -idp-profiles-file /data/idp_profiles.json"
 
         if [ -n "$$ENROLL_URL" ]; then
           ARGS="$$ARGS --enroll $$ENROLL_URL"
@@ -225,21 +212,6 @@ services:
       '
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  dp-updater:
-    image: {{.UpdaterImage}}
-    container_name: culvert-dp-updater
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - dp-data:/data:ro
-    ports:
-      - "7123:7123"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -258,13 +230,12 @@ func RenderScript(w io.Writer, cpHost, cpBase, token string) error {
 	})
 }
 
-// RenderCompose writes the docker-compose.yml for the given image refs and
+// RenderCompose writes the docker-compose.yml for the given image ref and
 // enrollment URL.
-func RenderCompose(w io.Writer, image, updaterImage, enrollURL string) error {
+func RenderCompose(w io.Writer, image, enrollURL string) error {
 	return composeTmpl.Execute(w, map[string]string{
-		"Image":        image,
-		"UpdaterImage": updaterImage,
-		"EnrollURL":    enrollURL,
+		"Image":     image,
+		"EnrollURL": enrollURL,
 	})
 }
 

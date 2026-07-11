@@ -164,7 +164,7 @@ jobs:
           run_proxy() { # name proxyport uiport
             # Run the container as the HOST runner UID so it shares ownership with
             # the host-seeded catalog files (read) AND the /data state it writes
-            # (rollback floor, config_versions, updater_token). This avoids the
+            # (rollback floor, config_versions). This avoids the
             # cross-UID bind-mount permission problem entirely — a re-seed between
             # phases just overwrites host-owned files, no chmod needed.
             # CULVERT_RELEASE_CATALOG_URL=off disables the outbound catalog fetch so

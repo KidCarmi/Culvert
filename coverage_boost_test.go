@@ -174,35 +174,6 @@ func TestNodeGroupStore_Get(t *testing.T) {
 // internal/alerts/retry_test.go with the delivery-engine extraction
 // (ADR-0002).
 
-// ── update.go coverage ──────────────────────────────────────────────────────
-
-func TestValidateUpdaterURL(t *testing.T) {
-	// H4: ensure the package-global allowlist is empty during this test
-	// (so we exercise the default-only contract), restored on exit.
-	origAllow := append([]string(nil), updaterURLAllowlist...)
-	updaterURLAllowlist = nil
-	defer func() { updaterURLAllowlist = origAllow }()
-
-	tests := []struct {
-		url     string
-		wantErr bool
-	}{
-		{"http://culvert-updater:7123", false},  // default URL — always accepted
-		{"https://updater.internal:7123", true}, // H4: non-default, not in allowlist → rejected
-		{"http://127.0.0.1:7123", false},        // loopback allowed
-		{"ftp://updater:21", true},              // bad scheme
-		{"://bad", true},                        // unparseable
-		{"http://169.254.169.254/latest", true}, // metadata endpoint
-		{"http://", true},                       // empty host
-	}
-	for _, tc := range tests {
-		err := validateUpdaterURL(tc.url)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("validateUpdaterURL(%q) = %v, wantErr=%v", tc.url, err, tc.wantErr)
-		}
-	}
-}
-
 // ── configversion.go load/save coverage ─────────────────────────────────────
 
 func TestLoadConfigVersion_NotFound(t *testing.T) {
@@ -238,15 +209,6 @@ func TestDiffConfigs_ListChanges(t *testing.T) {
 }
 
 // ── blockpage.go coverage ────────────────────────────────────────────────────
-
-// ── update_cluster.go coverage ──────────────────────────────────────────────
-
-func TestClusterUpdateState_Snapshot(t *testing.T) {
-	snap := clusterUpdateState.snapshot()
-	if snap.Phase == "" && snap.Active {
-		t.Error("active state should have a phase")
-	}
-}
 
 func TestNodeGroupStore_Save(t *testing.T) {
 	dir := t.TempDir()

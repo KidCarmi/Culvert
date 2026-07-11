@@ -84,45 +84,7 @@ func TestClusterMetrics_HAFailover_EnableAsLeaderDoesNotIncrement(t *testing.T) 
 	}
 }
 
-// TestClusterMetrics_UpdateGauges verifies the rolling-update gauges reflect
-// active/completed/total, and that an inactive update renders in_progress=0.
-func TestClusterMetrics_UpdateGauges(t *testing.T) {
-	clusterUpdateState.mu.Lock()
-	origActive := clusterUpdateState.Active
-	origNodes := clusterUpdateState.Nodes
-	clusterUpdateState.mu.Unlock()
-	t.Cleanup(func() {
-		clusterUpdateState.mu.Lock()
-		clusterUpdateState.Active = origActive
-		clusterUpdateState.Nodes = origNodes
-		clusterUpdateState.mu.Unlock()
-	})
-
-	clusterUpdateState.mu.Lock()
-	clusterUpdateState.Active = true
-	clusterUpdateState.Nodes = map[string]*NodeUpdateStatus{
-		"a": {NodeID: "a", Status: "complete"},
-		"b": {NodeID: "b", Status: "complete"},
-		"c": {NodeID: "c", Status: "updating"},
-	}
-	clusterUpdateState.mu.Unlock()
-
-	inProgress, completed, total := updateProgressGauges()
-	if inProgress != 1 || completed != 2 || total != 3 {
-		t.Errorf("updateProgressGauges() = (%d,%d,%d), want (1,2,3)", inProgress, completed, total)
-	}
-
-	// Inactive but Nodes intentionally retained for reporting: all three gauges
-	// must read 0, not the finished rollout's stale counts.
-	clusterUpdateState.mu.Lock()
-	clusterUpdateState.Active = false
-	clusterUpdateState.mu.Unlock()
-	if inProgress, completed, total := updateProgressGauges(); inProgress != 0 || completed != 0 || total != 0 {
-		t.Errorf("idle gauges = (%d,%d,%d), want (0,0,0) when inactive (Nodes retained)", inProgress, completed, total)
-	}
-}
-
-// TestClusterMetrics_PR3Rendered verifies /metrics renders all five families.
+// TestClusterMetrics_PR3Rendered verifies /metrics renders the HA families.
 func TestClusterMetrics_PR3Rendered(t *testing.T) {
 	oldTok := metricsToken
 	t.Cleanup(func() { metricsToken = oldTok })
@@ -140,12 +102,6 @@ func TestClusterMetrics_PR3Rendered(t *testing.T) {
 		"culvert_ha_role ",
 		"# TYPE culvert_ha_failovers_total counter",
 		"culvert_ha_failovers_total ",
-		"# TYPE culvert_cluster_update_in_progress gauge",
-		"culvert_cluster_update_in_progress ",
-		"# TYPE culvert_cluster_update_completed_nodes gauge",
-		"culvert_cluster_update_completed_nodes ",
-		"# TYPE culvert_cluster_update_total_nodes gauge",
-		"culvert_cluster_update_total_nodes ",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics missing %q\n--- body ---\n%s", want, body)

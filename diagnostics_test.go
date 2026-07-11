@@ -133,7 +133,6 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"saml_base_url":              false,
 		"default_auth_open":          false,
 		"yara_engine_posture":        false,
-		"updater_url":                false,
 		"config_snapshot_validator":  false,
 		"config_versions_present":    false,
 		"config_versions_readable":   false,
@@ -420,21 +419,10 @@ func TestApiDiagnostics_DegradedCDRNoPanic(t *testing.T) {
 }
 
 // TestApiDiagnostics_NoSensitiveValues is a guardrail: the report must
-// never include the session secret, full updater URL, IdP tokens, file
-// paths, or other operator secrets. New checks that need to display
-// sensitive data must redact at the API boundary, not in the SPA.
+// never include the session secret, IdP tokens, file paths, or other
+// operator secrets. New checks that need to display sensitive data must
+// redact at the API boundary, not in the SPA.
 func TestApiDiagnostics_NoSensitiveValues(t *testing.T) {
-	// Plant a recognisable sentinel into globals the report inspects so
-	// that, if a future change leaks them, this test fails loudly.
-	prevURL := updaterURL
-	prevAllow := append([]string(nil), updaterURLAllowlist...)
-	updaterURL = "https://leaky.example.invalid/secret-path"
-	updaterURLAllowlist = []string{updaterURL}
-	t.Cleanup(func() {
-		updaterURL = prevURL
-		updaterURLAllowlist = prevAllow
-	})
-
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
@@ -444,9 +432,7 @@ func TestApiDiagnostics_NoSensitiveValues(t *testing.T) {
 
 	body := w.Body.String()
 	forbidden := []string{
-		"leaky.example.invalid", // raw updater URL
-		"secret-path",           // raw updater URL path
-		"sessionSecret",         // Go symbol leak
+		"sessionSecret", // Go symbol leak
 		"CULVERT_SESSION_SECRET",
 		"-----BEGIN", // PEM material
 		"/data/",     // raw filesystem paths

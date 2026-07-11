@@ -17,11 +17,10 @@ name: Install Lifecycle E2E
 #
 # Hermetic w.r.t. Culvert artifacts: a local TLS registry (trusted by the daemon
 # via /etc/docker/certs.d) serves two genuinely-distinct proxy image digests;
-# clamav + the ghcr updater sidecar are stubbed via an auto-merged
-# docker-compose.override.yml so the run needs NO ghcr pulls and NO 250 MB
-# ClamAV signature download. The proxy is the REAL culvert/proxy:pinned image,
-# started by the REAL compose file via the REAL installer — only the orthogonal
-# sidecars are stubbed. (It does still pull stock Docker Hub base images —
+# clamav is stubbed via an auto-merged docker-compose.override.yml so the run
+# needs NO ghcr pulls and NO 250 MB ClamAV signature download. The proxy is the
+# REAL culvert/proxy:pinned image, started by the REAL compose file via the REAL
+# installer — only the orthogonal sidecar is stubbed. (It does still pull stock Docker Hub base images —
 # registry:2, busybox, alpine, golang — which are pre-pulled with retry below.)
 
 on:
@@ -456,6 +455,79 @@ jobs:
           echo "----- /v1/status -----"; sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/status; echo
           sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: culvert-maint not active"; exit 1; }
           echo "AGENT RUNTIME OK: installed unit is active and serves /v1 over the UDS."
+
+      # Sandbox-vs-sudo regression guard. privilege_mode=sudoers runs every
+      # Docker op via `sudo -n`, which FAILS under NoNewPrivileges. A hardening
+      # option that implies NoNewPrivileges for a User= service (any seccomp-
+      # backed option) — or an empty CapabilityBoundingSet inherited across exec
+      # — silently breaks EVERY privileged op while /v1/health + unit-active keep
+      # passing (the exact blind spot that shipped the original field failure).
+      # Assert the RUNNING unit's process has neither condition, so a future
+      # sandbox tightening that re-breaks sudo fails HERE instead of in the field.
+      - name: "Assert the sandboxed unit can still escalate via sudo"
+        run: |
+          set -euxo pipefail
+          PID="$(sudo systemctl show -p MainPID --value culvert-maint)"
+          [ -n "$PID" ] && [ "$PID" != "0" ] || { echo "FATAL: no MainPID for culvert-maint"; exit 1; }
+          NNP="$(sudo awk '/^NoNewPrivs:/{print $2}' "/proc/$PID/status")"
+          CAPBND="$(sudo awk '/^CapBnd:/{print $2}' "/proc/$PID/status")"
+          echo "culvert-maint pid=$PID NoNewPrivs=$NNP CapBnd=$CAPBND"
+          if [ "$NNP" != "0" ]; then
+            echo "FATAL: culvert-maint runs with NoNewPrivs=$NNP — 'sudo -n docker' cannot escalate,"
+            echo "so every privileged agent op (apply/rollback/backup/ps) would fail. A sandbox option"
+            echo "in packaging/systemd/culvert-maint.service is implying NoNewPrivileges; remove it."
+            exit 1
+          fi
+          if [ "$CAPBND" = "0000000000000000" ]; then
+            echo "FATAL: culvert-maint has an EMPTY capability bounding set — inherited across exec,"
+            echo "this leaves setuid sudo with no capabilities and breaks privileged ops. Do not clamp"
+            echo "CapabilityBoundingSet in packaging/systemd/culvert-maint.service."
+            exit 1
+          fi
+          echo "SANDBOX OK: NoNewPrivs=0 and CapBnd is non-empty — sudo-based privileged ops can escalate."
+
+      # END-TO-END privileged op through the SANDBOXED unit. The NoNewPrivs guard
+      # above proves sudo *can* escalate; this proves a real `sudo -n docker
+      # compose --profile cli run` op driven through the agent's /v1 API actually
+      # SUCCEEDS under the full sandbox (ProtectSystem=strict, ProtectHome,
+      # PrivateTmp, ReadWritePaths). An unencrypted backup is the lightest
+      # privileged op: read-only w.r.t. the stack, no image pull, no passphrase,
+      # and it's the NOPASSWD-allowlisted `--backup /backup/*` sudoers entry.
+      # This is the coverage the original NoNewPrivileges failure slipped through
+      # (unit-active + /v1/health both passed while every privileged op broke).
+      - name: "E2E: real privileged backup op through the sandboxed agent"
+        run: |
+          set -euxo pipefail
+          SOCK=/run/culvert-maint/culvert-maint.sock
+          FN="e2e-sandbox-${{ github.run_id }}.tar.gz"
+          RESP="$(sudo curl -fsS --unix-socket "$SOCK" -H 'Content-Type: application/json' -X POST \
+            -d "{\"filename\":\"$FN\",\"encrypt\":false}" \
+            http://localhost/v1/backups)"
+          echo "backup response: $RESP"
+          OP_ID="$(printf '%s' "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["op_id"])')"
+          [ -n "$OP_ID" ] || { echo "FATAL: no op_id from /v1/backups"; exit 1; }
+          STATE=""
+          for i in $(seq 1 90); do
+            OP_JSON="$(sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID" || true)"
+            STATE="$(printf '%s' "$OP_JSON" | python3 -c 'import sys,json;d=sys.stdin.read();print(json.loads(d).get("state","") if d.strip() else "")' 2>/dev/null || true)"
+            echo "poll $i: state=$STATE"
+            case "$STATE" in succeeded|failed|cancelled) break;; esac
+            sleep 2
+          done
+          echo "----- op log -----"; sudo curl -fsS --unix-socket "$SOCK" "http://localhost/v1/operations/$OP_ID/logs" || true
+          if [ "$STATE" != "succeeded" ]; then
+            echo "FATAL: privileged backup op did not succeed under the sandboxed unit (state=$STATE)."
+            echo "If the op log shows a sudo/NoNewPrivileges error, the systemd sandbox is blocking"
+            echo "sudo escalation; if it shows a compose/cli error, the stack/profile setup is off."
+            sudo journalctl -u culvert-maint --no-pager -n 60 2>&1 || true
+            exit 1
+          fi
+          BACKUPS="$(sudo curl -fsS --unix-socket "$SOCK" http://localhost/v1/backups)"
+          echo "backups: $BACKUPS"
+          echo "$BACKUPS" | jq -e --arg fn "$FN" \
+            '[.[] | select(.filename==$fn and (.size_bytes//0)>0)] | length>0' >/dev/null \
+            || { echo "FATAL: backup $FN not listed as non-empty by the agent"; exit 1; }
+          echo "E2E PRIVILEGED OP OK: sudo docker compose backup succeeded through the sandboxed unit."
 
       # Idempotent re-run: the installer must leave the already-installed agent
       # unchanged (no rebuild/reinstall churn).

@@ -94,7 +94,6 @@ func apiBootstrapCompose(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "inline; filename=docker-compose.yml")
 	err := bootstrap.RenderCompose(w,
 		bootstrap.Image(registrySettingsFile, version),
-		bootstrap.UpdaterImage(registrySettingsFile, version),
 		enrollURL)
 	if err != nil {
 		logger.Printf("Bootstrap: compose template error: %v", err)

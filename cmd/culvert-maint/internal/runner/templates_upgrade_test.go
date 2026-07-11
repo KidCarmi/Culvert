@@ -237,7 +237,9 @@ func TestValidateContainerID_ExportedWrapper(t *testing.T) {
 // The container-inspect template must be read-only and enumerate one
 // fixed-length hex pattern per legal id length (12–64) — never a single
 // trailing `*` (which sudo would let match whitespace + extra args). It
-// must also keep the format token double-quoted.
+// must backslash-escape the space in the format token: sudo does not treat
+// double quotes as argument grouping, so a double-quoted `"{{json .Image}}"`
+// silently fails to match the agent's single-token argv (verified on AL2023).
 func TestContainerInspectTemplate_EnumeratedNoTrailingWildcard(t *testing.T) {
 	tmpl := templateByID(TemplateComposeContainerInspect)
 	if tmpl == nil {
@@ -255,8 +257,11 @@ func TestContainerInspectTemplate_EnumeratedNoTrailingWildcard(t *testing.T) {
 		if strings.Contains(line, "*") {
 			t.Errorf("sudoers line must NOT contain a trailing wildcard (sudo `*` matches whitespace): %q", line)
 		}
-		if !strings.Contains(line, `"{{json .Image}}"`) {
-			t.Errorf("sudoers line must double-quote the format token: %q", line)
+		if !strings.Contains(line, `--format {{json\ .Image}} `) {
+			t.Errorf("sudoers line must backslash-escape the space in the format token (double quotes do not match under sudo): %q", line)
+		}
+		if strings.Contains(line, `"{{json .Image}}"`) {
+			t.Errorf("sudoers line must NOT double-quote the format token (sudo splits it on the space and never matches): %q", line)
 		}
 	}
 	// Shortest and longest patterns must carry exactly min/max hex classes.

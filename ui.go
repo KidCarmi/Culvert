@@ -84,7 +84,6 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerSecurityRoutes(mux)      // ui_security.go    — 27 routes
 	registerSettingsRoutes(mux)      // ui_config.go      — 18 routes (panel-grouped)
 	registerClusterRoutes(mux)       // ui_cluster.go     — 21 routes
-	registerUpdateRoutes(mux)        // update.go         — 11 routes
 	registerCDRRoutes(mux)           // cdr_ui.go         —  7 routes
 	registerObservabilityRoutes(mux) // diagnostics.go    —  2 routes (incl. /healthz)
 	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
