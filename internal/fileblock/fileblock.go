@@ -284,18 +284,33 @@ func (fb *FileBlocker) CheckContentDisposition(cd string) string {
 	return ""
 }
 
-// BlockConn writes a synthetic HTTP/1.1 403 response to a raw connection
-// (typically the client side of an SSL-inspected tunnel) when a file-blocking
-// check fires inside handleTunnelInspect. After writing the response, the
-// connection is explicitly closed to prevent HTTP/1.1 connection reuse — a
-// browser with a pipelined second request in the same TLS session could
-// otherwise bypass the block on retry.
+// BlockMessage returns the plain-text body of a file-block 403 for the given
+// extension and source label. Exposed so the SSL-inspect path can emit the block
+// through its protocol-neutral responder (HTTP/1.1 or HTTP/2) without this
+// package owning HTTP framing; the legacy raw-conn BlockConn uses it too.
+func BlockMessage(ext, source string) string {
+	return fmt.Sprintf("Blocked: file type %s is not allowed (%s)\r\n", ext, source)
+}
+
+// LogBlock emits the FILE_BLOCKED tunnel observability line. Split out of
+// BlockConn so the SSL-inspect path can log identically while emitting the wire
+// block through its own responder (keeping this package framing-free).
+func LogBlock(host, urlPath, ext, source string) {
+	obs.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, obs.Sanitize(host), obs.Sanitize(urlPath), obs.Sanitize(ext))
+}
+
+// BlockConn writes a synthetic HTTP/1.1 403 response to a raw connection and
+// closes it. Retained for the raw-conn callers and its own test; the SSL-inspect
+// path no longer uses it (it emits via the protocol-neutral blockResponder so the
+// same detector serves HTTP/2, where closing the shared conn on a per-stream
+// block would kill sibling streams and Connection: close is illegal per RFC 9113
+// §8.2.2). The force-close here prevents HTTP/1.1 pipelined-request bypass.
 func BlockConn(dst interface {
 	Write([]byte) (int, error)
 	Close() error
 }, host, urlPath, ext, source string) {
-	obs.Printf("FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)", source, obs.Sanitize(host), obs.Sanitize(urlPath), obs.Sanitize(ext))
-	body := fmt.Sprintf("Blocked: file type %s is not allowed (%s)\r\n", ext, source)
+	LogBlock(host, urlPath, ext, source)
+	body := BlockMessage(ext, source)
 	fmt.Fprintf(dst, //nolint:errcheck // best-effort write of the 403 block response
 		"HTTP/1.1 403 Forbidden\r\n"+
 			"Content-Type: text/plain; charset=utf-8\r\n"+

@@ -140,7 +140,7 @@ func TestScanBlock(t *testing.T) {
 
 func TestScanBlockConn(t *testing.T) {
 	var buf bytes.Buffer
-	scanBlockConn(&buf, "evil.com", "EICAR", "clamav")
+	scanBlockConn(h1BlockResponder{w: &buf}, "evil.com", "EICAR", "clamav")
 	if !strings.Contains(buf.String(), "403") {
 		t.Errorf("scanBlockConn should write 403, got: %q", buf.String())
 	}

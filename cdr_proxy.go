@@ -28,7 +28,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -390,7 +389,7 @@ type cdrStageDecision struct {
 //
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
-	clientTLS net.Conn, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
+	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
 	if cdrActiveClient() == nil {
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}
@@ -411,7 +410,7 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 			clientIP, sanitizeLog(hostOnly),
 			sanitizeLog(res.BlockReason), sanitizeLog(res.ProfileName),
 			sanitizeLog(res.Mode), sanitizeLog(cdrSummariseThreats(res.Threats)))
-		scanBlockConn(clientTLS, hostOnly, res.BlockReason, "cdr")
+		scanBlockConn(br, hostOnly, res.BlockReason, "cdr")
 		return cdrStageDecision{blocked: true}
 	case cdrSwap:
 		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))

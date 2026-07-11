@@ -106,6 +106,7 @@ type PolicyRule struct {
 	LogFullURI        bool            `json:"logFullUri"`           // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
 	LogTraffic        *bool           `json:"logTraffic,omitempty"` // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
 	TLSSkipVerify     bool            `json:"tlsSkipVerify"`        // skip upstream cert verification (use with caution)
+	StripALPN         *bool           `json:"stripAlpn,omitempty"`  // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN).
 	Action            PolicyAction    `json:"action"`
 	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect
 	Enabled           *bool           `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation

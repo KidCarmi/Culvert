@@ -8,7 +8,6 @@ package main
 // statDPIBlocked is read by events/metrics/otlp/ui directly).
 
 import (
-	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -56,16 +55,9 @@ func isTextContentType(ct string) bool {
 // dpiBlock sends an HTTP 403 Forbidden response to dst and increments the
 // DPI blocked counter.  It is called inside inspected tunnels after a
 // signature match is detected in a buffered response body.
-func dpiBlock(dst interface{ Write([]byte) (int, error) }, host, pattern string) {
+func dpiBlock(br blockResponder, host, pattern string) {
 	atomic.AddInt64(&statDPIBlocked, 1)
 	logger.Printf("DPI_BLOCKED host=%s pattern=%q", host, pattern)
 	const body = "Blocked by content inspection policy\r\n"
-	fmt.Fprintf(dst,
-		"HTTP/1.1 403 Forbidden\r\n"+
-			"Content-Type: text/plain; charset=utf-8\r\n"+
-			"Content-Length: %d\r\n"+
-			"Connection: close\r\n"+
-			"\r\n%s",
-		len(body), body,
-	)
+	br.blockBeforeResponse("text/plain; charset=utf-8", body)
 }
