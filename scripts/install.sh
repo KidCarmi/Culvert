@@ -651,15 +651,18 @@ resolve_latest_signed_release_ref() {
   # The anonymous tag-list flow is GHCR-specific and needs a host/path split; a
   # custom/private registry (CULVERT_PROXY_REPO override) falls back to :latest.
   [[ "$reg" == "ghcr.io" && "$repo_path" != "$PROXY_REPO" ]] || return 0
+  # Each command-substitution assignment is explicitly `|| return 0` guarded so
+  # the fallback does not depend on bash's non-POSIX `set -e`-in-$() suppression
+  # (RHEL-family / Amazon Linux 2 ship bash 4.x where that quirk differs).
   token="$(curl -fsS --max-time 15 "https://ghcr.io/token?scope=repository:${repo_path}:pull" 2>/dev/null \
-    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')" || return 0
   [[ -n "$token" ]] || return 0
   tags="$(curl -fsS --max-time 15 -H "Authorization: Bearer $token" \
     "https://ghcr.io/v2/${repo_path}/tags/list?n=1000" 2>/dev/null)" || return 0
   # Newest final vMAJOR.MINOR.PATCH by version sort. Pre-releases (v1.2.3-rc1)
   # are excluded — the require-closing-quote pattern only matches bare vX.Y.Z
   # tags, and the pinned identity/pipeline sign final release tags.
-  latest="$(printf '%s' "$tags" | grep -oE '"v[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' | sort -V -u | tail -n1)"
+  latest="$(printf '%s' "$tags" | grep -oE '"v[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' | sort -V -u | tail -n1)" || return 0
   [[ -n "$latest" ]] || return 0
   printf '%s:%s\n' "$PROXY_REPO" "$latest"
 }
