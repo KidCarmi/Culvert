@@ -69,16 +69,17 @@ NoNewPrivileges=no
 # read-only /var, /etc and /run that ProtectSystem=full did not cover:
 #   • ProtectSystem is mount-namespace based — it NEVER implies NoNewPrivileges,
 #     so it does not affect setuid sudo (unlike the seccomp options above).
-#   • NOPASSWD `sudo -n` (how the runner invokes docker) performs NO credential
-#     caching, so it writes no timestamp under /run/sudo — the one concern that
-#     motivated the earlier downgrade to =full. The ReadWritePaths below keep the
-#     sudo timestamp dirs writable anyway (tolerant `-` prefix) for any sudo build
-#     that touches them, belt-and-suspenders.
+#   • NOPASSWD `sudo -n` (how the runner invokes docker — every entry in
+#     packaging/sudoers/culvert-maint is NOPASSWD) performs NO credential caching,
+#     so it writes no timestamp under /run/sudo — the one concern that motivated
+#     the earlier downgrade to =full. sudo only READS /etc/sudoers[.d] (fine, RO).
 #   • The agent's `sudo docker compose …` children inherit this mount namespace,
 #     but the docker CLI only connects to the daemon socket (a connect(), allowed
 #     on a read-only mount) and writes only to $HOME=/var/lib/culvert-maint (in
 #     ReadWritePaths); the actual container/volume writes happen in the UNsandboxed
-#     dockerd, outside this unit. So `up`/`down`/`ps`/pull all work under strict.
+#     dockerd, outside this unit. Backups likewise write inside the `cli`
+#     container's /backup volume, not the agent's host fs. So up/down/ps/pull and
+#     backup/restore all work under strict.
 # NOTE: this interacts with the sudo↔systemd path that caused the original field
 # failure; keep the install-lifecycle e2e exercising a real privileged agent op.
 ProtectSystem=strict
