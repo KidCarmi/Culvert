@@ -31,10 +31,21 @@ import (
 // production traffic hits (the distinct-host working set repeats heavily).
 func benchHostCounter(n int) *hostCounter {
 	hc := freshHostCounter()
-	for i := 0; i < n; i++ {
-		hc.Record(fmt.Sprintf("host-%d.example.com", i))
+	for _, h := range benchHostNames(n) {
+		hc.Record(h)
 	}
 	return hc
+}
+
+// benchHostNames precomputes the working-set hostnames so the timed loops
+// index a slice instead of calling fmt.Sprintf per iteration (which would
+// fold formatting + allocator contention into the measurement).
+func benchHostNames(n int) []string {
+	names := make([]string, n)
+	for i := range names {
+		names[i] = fmt.Sprintf("host-%d.example.com", i)
+	}
+	return names
 }
 
 // BenchmarkTopHostsRecord_Hit measures the serial cost of counting one
@@ -53,12 +64,13 @@ func BenchmarkTopHostsRecord_Hit(b *testing.B) {
 // requests, a hot working set of repeated hosts.
 func BenchmarkTopHostsRecord_HitParallel(b *testing.B) {
 	hc := benchHostCounter(512)
+	hosts := benchHostNames(512)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			hc.Record(fmt.Sprintf("host-%d.example.com", i%512))
+			hc.Record(hosts[i%512])
 			i++
 		}
 	})
@@ -93,11 +105,13 @@ func BenchmarkTSRecordResultParallel(b *testing.B) {
 // the time-series bucket, and the top-hosts counter, under concurrency.
 // Uses the package globals — exactly what handleRequest exercises.
 func BenchmarkRecordStatsAllowedParallel(b *testing.B) {
+	hosts := benchHostNames(512)
 	b.ReportAllocs()
+	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			recordStats("203.0.113.7", fmt.Sprintf("host-%d.example.com", i%512), "OK", "allow-rule", "Allow")
+			recordStats("203.0.113.7", hosts[i%512], "OK", "allow-rule", "Allow")
 			i++
 		}
 	})
