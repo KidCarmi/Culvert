@@ -27,9 +27,22 @@ import (
 )
 
 // h2MaxConcurrentStreams bounds concurrent streams per inspected H2 connection.
-// Browser-parity (100) keeps the per-connection scan-buffer memory ceiling
-// bounded (maxScanBufferBytes × this) while covering real client fan-out.
-const h2MaxConcurrentStreams uint32 = 100
+// This is the primary per-connection resource cap: the scan pipeline buffers up
+// to maxScanBufferBytes per in-flight response, so the per-connection scan-buffer
+// memory ceiling is maxScanBufferBytes × this. Kept intentionally low (not the
+// 100 browsers advertise) because native H2 multiplies H1's single-in-flight
+// memory by this factor; 32 keeps a malicious connection's buffered footprint an
+// order of magnitude below the naive 100 while covering real client fan-out. It
+// also tightens the vendored x/net Rapid-Reset backstop (CVE-2023-44487), whose
+// effective cap equals MaxConcurrentStreams. Per-stream stall/inactivity bounds
+// are PR3c.
+const h2MaxConcurrentStreams uint32 = 32
+
+// h2ConnWriteByteTimeout bounds a stuck client write on the H2 leg so a stalled
+// reader cannot pin a handler goroutine + its scan buffer indefinitely. A
+// per-stream body-read inactivity watchdog (the H2 analogue of the H1
+// stallDetectReadCloser) is PR3c; this is the cheap conn-level backstop.
+const h2ConnWriteByteTimeout = 30 * time.Second
 
 // handleInspectNativeALPN runs the native-ALPN inspection flow for a rule with
 // StripALPN==false. It has already received the freshly-dialled (not yet
@@ -39,7 +52,11 @@ const h2MaxConcurrentStreams uint32 = 100
 // the upstream negotiated → client handshake → dispatch (h2↔h2 to handleInspectH2,
 // otherwise the shared HTTP/1.1 loop). The intersection guarantees the two legs
 // can only both be h2 or both be h1 — the mixed quadrants are impossible by
-// construction, so an HTTP/1.1-only client is never stranded.
+// construction, so an HTTP/1.1-only client is never stranded. (Residual edge: a
+// client offering ONLY "h2" against an h1-only origin is forced to http/1.1
+// downstream and its handshake fails with no_application_protocol — but this is
+// identical to the strip path, which pins http/1.1 for all clients, and browsers
+// always include http/1.1 in their offer.)
 func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream net.Conn, targetHost, hostOnly string, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -208,6 +225,11 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 		logger.Printf("SSL_INSPECT(h2) upstream client-conn %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
+	// Explicitly close the upstream client conn on teardown so the origin gets a
+	// GOAWAY rather than a bare mid-stream FIN, and the ClientConn's reader
+	// goroutine is reaped deterministically (closing upstreamTLS alone also reaps
+	// it, but this documents the teardown).
+	defer upstreamCC.Close() //nolint:errcheck // best-effort GOAWAY + reader-goroutine reap
 
 	clientIP, _, _ := net.SplitHostPort(outer.RemoteAddr)
 
@@ -215,7 +237,15 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 		h2InspectStream(outer, w, req, upstreamCC, hostOnly, clientIP, match, id)
 	})
 
-	srv := &http2.Server{MaxConcurrentStreams: h2MaxConcurrentStreams}
+	// MaxConcurrentStreams is the primary per-connection resource bound (and the
+	// effective Rapid-Reset cap). IdleTimeout GOAWAYs a fully-idle tunnel;
+	// WriteByteTimeout bounds a stuck client write. A per-STREAM body-read
+	// inactivity watchdog (the H2 analogue of the H1 stallDetectReadCloser) is PR3c.
+	srv := &http2.Server{
+		MaxConcurrentStreams: h2MaxConcurrentStreams,
+		IdleTimeout:          tunnelIdleTimeout,
+		WriteByteTimeout:     h2ConnWriteByteTimeout,
+	}
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
 	// the client connection is no longer readable.
 	srv.ServeConn(clientTLS, &http2.ServeConnOpts{
@@ -229,11 +259,23 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 // is protocol-agnostic; only the roundTrip (upstream http2 RoundTrip) and deliver
 // (h2 ResponseWriter) hooks and the block responder are H2-specific.
 func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Request, upstreamCC *http2.ClientConn, hostOnly, clientIP string, match *PolicyMatch, id ProxyIdentity) {
+	// Per-request debug log, parity with the H1 loop's SSL_INNER line so admins can
+	// trace file-block/scan decisions on H2 tunnels too. Logged before the reshape
+	// (req.URL.Path is unchanged by it).
+	filterStr := "off"
+	profileStr := ""
+	if match != nil && match.Rule != nil && match.Rule.FileFiltering {
+		filterStr = "on"
+		profileStr = sanitizeLog(string(match.Rule.FileProfile))
+	}
+	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
+
 	// Reshape the h2 server request for an h2 client RoundTrip: RoundTrip requires
 	// an absolute URL (scheme+host) and an empty RequestURI. The request travels
 	// over upstreamCC, which is pinned to the CONNECT target, so the :authority
 	// cannot redirect it off that connection (no SSRF). Strict :authority pinning
 	// / 421 handling is a security-PR refinement.
+	reqPath := req.URL.Path
 	req.URL.Scheme = "https"
 	if req.URL.Host == "" {
 		req.URL.Host = req.Host
@@ -252,18 +294,34 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		deliver:   func(resp *http.Response) error { return h2DeliverResponse(w, resp) },
 	}
 
-	switch runInspectExchange(ex).kind {
+	out := runInspectExchange(ex)
+	switch out.kind {
 	case exRoundTripError:
 		// Upstream failed before any byte was delivered — emit a clean 502.
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	case exUpgrade:
 		// HTTP/2 has no 101 Switching Protocols; an upstream that returns one is
-		// malformed for h2. Fail the stream rather than raw-relaying a shared conn.
+		// malformed for h2. Close the surfaced body and fail the stream rather than
+		// raw-relaying a shared conn.
+		if out.resp != nil {
+			out.resp.Body.Close() //nolint:errcheck // best-effort; avoid an fd leak on this near-impossible path
+		}
 		logger.Printf("SSL_INSPECT(h2) unexpected 101 upgrade for %q — failing stream", sanitizeLog(hostOnly))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-	default:
-		// exDelivered / exBlocked / exDeliverError: the responder or deliver hook
-		// has already written the stream response (or the client is gone).
+	case exDeliverError:
+		// Delivery failed AFTER the response headers were committed (upstream body
+		// truncation, or the client went away). Reset the stream with RST_STREAM so
+		// the client observes an error rather than a clean-but-truncated 200 —
+		// http2.Server recovers ErrAbortHandler into a stream reset.
+		panic(http.ErrAbortHandler)
+	case exDelivered:
+		// Per-rule "log full URL" parity with the H1 path (log-only; the enclosing
+		// CONNECT was already counted at allow time).
+		if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
+			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, reqPath), AuthLogFields{})
+		}
+	case exBlocked:
+		// The h2 block responder already wrote the 403 to the stream.
 	}
 }
 
@@ -294,7 +352,10 @@ func (h *h2BlockResponder) blockBeforeResponse(contentType, body string) {
 func h2DeliverResponse(w http.ResponseWriter, resp *http.Response) error {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	// Flush per chunk so a trickle-streaming origin (SSE, gRPC server-streaming,
+	// long-poll) reaches the client promptly instead of stalling in the h2 server's
+	// ~4 KB write buffer until it fills or the stream ends.
+	if _, err := io.Copy(h2FlushWriter{w: w}, resp.Body); err != nil {
 		return err
 	}
 	for k, vs := range resp.Trailer {
@@ -303,4 +364,18 @@ func h2DeliverResponse(w http.ResponseWriter, resp *http.Response) error {
 		}
 	}
 	return nil
+}
+
+// h2FlushWriter flushes the HTTP/2 ResponseWriter after every write so streaming
+// responses are delivered chunk-by-chunk rather than buffered.
+type h2FlushWriter struct {
+	w http.ResponseWriter
+}
+
+func (fw h2FlushWriter) Write(p []byte) (int, error) {
+	n, err := fw.w.Write(p)
+	if f, ok := fw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
 }

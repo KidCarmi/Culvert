@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,7 +77,8 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawIdentity = r.Header.Get("X-User-Identity")
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = io.WriteString(w, "h2-origin-ok proto="+r.Proto)
+		w.Header().Set("X-Origin-Proto", r.Proto) // proves the proxy→origin leg protocol
+		_, _ = io.WriteString(w, "h2-origin-ok")
 	}))
 	origin.EnableHTTP2 = true
 	origin.StartTLS()
@@ -103,8 +108,11 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if got := string(body); got != "h2-origin-ok proto=HTTP/2.0" {
-		t.Fatalf("body = %q, want the origin's h2 response", got)
+	if got := string(body); got != "h2-origin-ok" {
+		t.Fatalf("body = %q, want the origin's response", got)
+	}
+	if p := resp.Header.Get("X-Origin-Proto"); p != "HTTP/2.0" {
+		t.Fatalf("upstream leg proto = %q, want HTTP/2.0 (proxy→origin must be h2)", p)
 	}
 	if sawIdentity != "" {
 		t.Fatalf("origin saw X-User-Identity=%q — pipeline scrub did not run on the H2 path", sawIdentity)
@@ -159,6 +167,140 @@ func TestMITM_NativeH2_BlocksFileDownload(t *testing.T) {
 	}
 }
 
+// nativeH2ClientConn wires the common native-h2 fixture: proxy CA, an h2 origin
+// running `handler`, a native-inspect rule, and an h2 client conn through the
+// proxy CONNECT tunnel. It asserts h2 was negotiated downstream.
+func nativeH2ClientConn(t *testing.T, handler http.Handler) *http2.ClientConn {
+	t.Helper()
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+	origin := httptest.NewUnstartedServer(handler)
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	t.Cleanup(origin.Close)
+	proxyURL := startTestProxy(t)
+	inspectRuleNative()
+	tc, proto := connectTLSWithProto(t, proxyURL.Host, origin.Listener.Addr().String(), "origin.test", proxyRoots, []string{"h2", "http/1.1"})
+	if proto != "h2" {
+		t.Fatalf("downstream ALPN = %q, want h2", proto)
+	}
+	cc, err := (&http2.Transport{}).NewClientConn(tc)
+	if err != nil {
+		t.Fatalf("h2 client conn: %v", err)
+	}
+	return cc
+}
+
+// TestMITM_NativeH2_TrailerForwarding proves gRPC-style un-announced trailers
+// (e.g. grpc-status) round-trip through the H2 deliver path to the client.
+func TestMITM_NativeH2_TrailerForwarding(t *testing.T) {
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "grpc-frame")
+		// Un-announced trailer set after the body — the gRPC pattern.
+		w.Header().Set(http.TrailerPrefix+"Grpc-Status", "0")
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/svc.Method", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck // test cleanup
+	if string(body) != "grpc-frame" {
+		t.Fatalf("body = %q", body)
+	}
+	if got := resp.Trailer.Get("Grpc-Status"); got != "0" {
+		t.Fatalf("trailer Grpc-Status = %q, want 0 (trailer must forward through the H2 deliver path)", got)
+	}
+}
+
+// TestMITM_NativeH2_TruncatedBodyResetsStream proves the correctness fix: when the
+// origin aborts mid-body, the proxy RESETS the client stream (RST_STREAM) rather
+// than delivering a clean-but-truncated 200. The client must observe a read error.
+func TestMITM_NativeH2_TruncatedBodyResetsStream(t *testing.T) {
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		// Flush a chunk large enough to force it out to the proxy so the proxy
+		// COMMITS response headers+body to the client, THEN abort mid-body — this
+		// exercises the deliver-truncation path (not the RST-at-headers path, which
+		// correctly yields a 502).
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 32*1024))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // origin RSTs its stream mid-body
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/blob", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		return // an error before/at headers is also an acceptable failure signal
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (headers committed before truncation)", resp.StatusCode)
+	}
+	_, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck // test cleanup
+	if readErr == nil {
+		t.Fatal("truncated upstream body was delivered as a clean success — the stream must be reset")
+	}
+}
+
+// TestMITM_NativeH2_ConcurrentStreams exercises many multiplexed streams over one
+// inspected tunnel (one upstream ClientConn) concurrently; under -race this
+// validates the shared-state safety of the H2 path.
+func TestMITM_NativeH2_ConcurrentStreams(t *testing.T) {
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok:"+r.URL.Path)
+	}))
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := "/s/" + strconv.Itoa(i)
+			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test"+path, http.NoBody)
+			resp, err := cc.RoundTrip(req)
+			if err != nil {
+				errs <- err
+				return
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close() //nolint:errcheck // test cleanup
+			if string(body) != "ok:"+path {
+				errs <- fmt.Errorf("stream %d body = %q", i, body)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// TestMITM_NativeH2_PostBodyEcho proves request-body streaming on the H2 path: a
+// POST body is forwarded upstream and echoed back through the pipeline.
+func TestMITM_NativeH2_PostBodyEcho(t *testing.T) {
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(b)
+	}))
+	payload := bytes.Repeat([]byte("A"), 64*1024)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://origin.test/upload", bytes.NewReader(payload))
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck // test cleanup
+	if len(body) != len(payload) {
+		t.Fatalf("echo len = %d, want %d (POST body must stream upstream on H2)", len(body), len(payload))
+	}
+}
+
 // TestMITM_NativeH2_FallsBackToH1WhenOriginNoH2 proves the ALPN intersection: an
 // h2-offering client through a native rule to an HTTP/1.1-only origin negotiates
 // http/1.1 on BOTH legs (the origin declined h2, so the forged leaf is
@@ -169,7 +311,8 @@ func TestMITM_NativeH2_FallsBackToH1WhenOriginNoH2(t *testing.T) {
 	_, proxyRoots := setupInspectCA(t)
 
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "h1-origin-ok proto="+r.Proto)
+		w.Header().Set("X-Origin-Proto", r.Proto) // proves the proxy→origin leg protocol
+		_, _ = io.WriteString(w, "h1-origin-ok")
 	}))
 	defer origin.Close()
 
@@ -192,7 +335,10 @@ func TestMITM_NativeH2_FallsBackToH1WhenOriginNoH2(t *testing.T) {
 	}
 	defer resp.Body.Close() //nolint:errcheck // test cleanup
 	body, _ := io.ReadAll(resp.Body)
-	if got := string(body); got != "h1-origin-ok proto=HTTP/1.1" {
-		t.Fatalf("body = %q, want the origin's h1 response", got)
+	if got := string(body); got != "h1-origin-ok" {
+		t.Fatalf("body = %q, want the origin's response", got)
+	}
+	if p := resp.Header.Get("X-Origin-Proto"); p != "HTTP/1.1" {
+		t.Fatalf("upstream leg proto = %q, want HTTP/1.1", p)
 	}
 }
