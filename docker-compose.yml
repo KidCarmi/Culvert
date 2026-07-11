@@ -49,35 +49,6 @@ services:
       retries: 5
       start_period: 300s  # first run downloads ~250 MB of signatures
 
-  # ── Culvert updater sidecar ──────────────────────────────────────────────
-  # Lightweight Go service (~5 MB idle) with Docker socket access.
-  # Handles container pull/recreate/rollback when triggered from the GUI.
-  # Idle 99.99% of the time — only wakes for update operations.
-  updater:
-    image: ghcr.io/kidcarmi/culvert-updater:latest
-    # Uncomment to build locally instead of pulling from registry:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile.updater
-    container_name: culvert-updater
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - proxy-data:/data:ro       # read shared updater token (read-only)
-      - updater-state:/state      # writable rollback metadata; survives self-update
-    ports:
-      - "127.0.0.1:7123:7123" # localhost only; exposed for GUI resilience during CP update (auth required)
-    cap_drop:
-      - ALL
-    mem_limit: 512m
-    cpus: 0.5
-    pids_limit: 64
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:7123/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   # ── Culvert proxy + admin UI ────────────────────────────────────────────
   proxy:
     # FIXED local image tag (P1.4 / roadmap/D1.6c-pin-value-binding-plan.md).
@@ -100,7 +71,6 @@ services:
     # (per-request retry), so this just avoids "unreachable" log noise on startup.
     depends_on:
       - clamav
-      - updater
     ports:
       - "8080:8080"   # Proxy (configure browsers / PAC file to point here)
       - "9090:9090"   # Admin Web UI (HTTPS — accept the self-signed cert on first visit)
@@ -258,6 +228,5 @@ services:
 volumes:
   proxy-data:
   clamav-db:        # ClamAV signature database — persisted to skip re-download on restart
-  updater-state:   # writable rollback state for the updater sidecar (survives self-update)
   culvert-backups: # backup archives produced by the cli service (D1.5; mounted at /backup, only in cli)
   etcd-data:       # fencing-lease witness state (ADR-0005; only with --profile ha)
