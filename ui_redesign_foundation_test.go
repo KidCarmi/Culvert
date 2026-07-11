@@ -96,9 +96,39 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="confirm-dialog-rollback"`, // rollback statement region
 		`aria-live="polite"`,           // toast announcement region
 		`aria-current`,                 // nav current-page marker
+		// M3 S3 — policy editor assist layer
+		`function polReadForm`,       // single form reader shared by submit/summary/validation
+		`function polValidateClient`, // pre-submit checks mirroring validatePolicyRule
+		`function polRenderSummary`,  // live human-readable rule summary (G10)
+		`function polHistory`,        // per-rule History → filtered audit view (G7)
+		`function polMarkEdited`,     // dirty-tracking entry point for chip/picker gestures
+		`function polValidSourceIP`,  // strict IPv4/IPv6 CIDR pre-validation
+		`id="pol-summary"`,           // summary region
+		`id="pol-form-err"`,          // inline validation errors
+		`data-mousedown=`,            // CSP-safe replacement for picker onmousedown
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
+		}
+	}
+}
+
+func TestFoundation_NoInlineEventHandlers(t *testing.T) {
+	data, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	// The CSP is script-src 'self' 'nonce-…' — inline on*="" handlers are
+	// BLOCKED by the browser, so any such attribute (in static markup or in
+	// JS-generated template strings) is silently dead UI. Everything must go
+	// through the data-* delegation layer.
+	re := regexp.MustCompile(`\bon(?:click|dblclick|mousedown|mouseup|mouseover|mouseout|change|input|blur|focus|keydown|keyup|keypress|submit|load|error)="`)
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue // delegation-layer comments name the attributes they replace
+		}
+		if m := re.FindString(line); m != "" {
+			t.Errorf("static/index.html:%d inline event handler %q is blocked by the CSP — use the data-* delegation layer", i+1, m)
 		}
 	}
 }
