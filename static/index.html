@@ -3308,7 +3308,7 @@ Firefox (all platforms):
               <input id="cp-ca-file" class="input" placeholder="/path/to/ca.pem" style="margin-top:4px">
             </label>
             <div style="margin-top:4px">
-              <button class="btn" data-click="enableControlPlane">Enable Control Plane</button>
+              <button class="btn" id="cp-enable-btn" data-click="enableControlPlane">Enable Control Plane</button>
             </div>
           </div>
         </div>
@@ -5514,7 +5514,10 @@ async function fetchStats() {
     if (clb) clb.style.display = 'none';
   } catch(e) {
     console.error(e);
-    setPosture('proxy', 'crit', 'Unreachable');
+    // 401 means the session expired — the proxy itself is fine. Only report
+    // Unreachable for real transport/server failures (honest-state rule).
+    if (e && e.message === 'Unauthorized') setPosture('proxy', 'unknown', 'Sign-in required');
+    else setPosture('proxy', 'crit', 'Unreachable');
   }
   // CA cert expiry check
   checkCACertExpiry();
@@ -8592,7 +8595,7 @@ function confirmDanger({title, msg, impact, rollback, confirmWord, okLabel='Appl
     _confirmDialogShow({title, msg, impact, rollback, confirmWord, okLabel, tier: 3});
   });
 }
-// Free-text input dialog — replaces native prompt() (CSP/a11y-safe).
+// Free-text input dialog — replaces the native browser prompt (CSP/a11y-safe).
 // Resolves the string on OK, or null on cancel.
 function promptAction({title, msg, label, placeholder='', value='', okLabel='OK', okStyle='primary'}) {
   return new Promise(resolve => {
@@ -11566,7 +11569,9 @@ async function enableControlPlane() {
   });
   if (!okc) return;
 
-  const btn = event.target; btn.disabled = true; btn.textContent = 'Enabling…';
+  // NOTE: must not use `event.target` here — after the awaited confirmation
+  // above, the ambient window.event of the click dispatch no longer exists.
+  const btn = document.getElementById('cp-enable-btn'); btn.disabled = true; btn.textContent = 'Enabling…';
   try {
     const r = await api('/api/cluster/mode', {
       method: 'POST',
@@ -11617,8 +11622,8 @@ async function enableHA() {
 }
 
 async function promoteHA() {
-  // Tier 3 (replaces the last native confirm()): manual promote bypasses the
-  // fencing-lease freshness/hysteresis checks — split-brain risk.
+  // Tier 3, replacing the last native browser confirm: manual promote bypasses
+  // the fencing-lease freshness/hysteresis checks — split-brain risk.
   const ok = await confirmDanger({
     title: 'Promote this standby to leader',
     msg: 'Only do this if the current leader is truly down. Manual promotion is break-glass: it bypasses automatic failover safeguards and is recorded in the audit log.',
