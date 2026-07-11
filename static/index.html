@@ -4023,8 +4023,7 @@ initTheme();
 // Alt+1..9 = navigate to panel, Alt+/ = show help, Esc = close modals
 const _kbShortcuts = {
   '1': 'dashboard', '2': 'blocklist', '3': 'policy', '4': 'log',
-  '5': 'settings',  '6': 'rewrite',   '7': 'fileblock', '8': 'cluster',
-  '9': 'updates'
+  '5': 'settings',  '6': 'rewrite',   '7': 'fileblock', '8': 'cluster'
 };
 document.addEventListener('keydown', e => {
   // Skip if user is typing in an input/textarea/select
@@ -4047,7 +4046,7 @@ document.addEventListener('keydown', e => {
   // Alt+/ = show shortcut help
   if (e.altKey && e.key === '/') {
     e.preventDefault();
-    toast('Shortcuts: Alt+1 Dashboard, Alt+2 Blocklist, Alt+3 Policy, Alt+4 Log, Alt+5 Settings, Alt+6 Rewrite, Alt+7 FileBlock, Alt+8 Cluster, Alt+9 Updates, Esc Close', 'success');
+    toast('Shortcuts: Alt+1 Dashboard, Alt+2 Blocklist, Alt+3 Policy, Alt+4 Log, Alt+5 Settings, Alt+6 Rewrite, Alt+7 FileBlock, Alt+8 Cluster, Esc Close', 'success');
   }
 });
 let currentView = 'dashboard';
@@ -4082,7 +4081,6 @@ const viewMeta = {
   upstream:     { title: 'Upstream Proxies', meta: 'Parent proxy chaining with failover and circuit breaker' },
   cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
-  updates:      { title: 'Updates',       meta: 'Docker-based self-update system' },
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
   users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
