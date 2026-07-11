@@ -9083,10 +9083,15 @@ function renderPolicyTrace(trace) {
 // it (G6). Derivations are heuristic but stay VISIBLE in the tester inputs
 // so nothing is hidden: a CIDR source contributes its base address, a
 // wildcard FQDN gets a www. sample host.
-function polTestRule(priority) {
+async function polTestRule(priority) {
   const r = polRules.find(x => x.priority === priority);
   if (!r) return;
   document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  // Resolve the unsaved-changes guard BEFORE touching tester state, so a
+  // cancelled navigation leaves no half-prefilled test behind (same pattern
+  // as polHistory).
+  const ok = viewLeaveGuards.policy();
+  if (ok !== true && !await ok) return;
   document.getElementById('pt-ip').value       = (r.sourceIP || '').split('/')[0];
   document.getElementById('pt-identity').value = r.sourceIdentity || '';
   document.getElementById('pt-groups').value   = r.sourceGroup || '';
@@ -9100,7 +9105,7 @@ function polTestRule(priority) {
     runPolicyTest();
   } else {
     document.getElementById('pt-host').focus();
-    toast('Enter a destination host to run the test — this rule matches by category/country, not FQDN', 'success');
+    toast('Enter a destination host to run the test — this rule does not pin a concrete FQDN', 'success');
   }
 }
 
