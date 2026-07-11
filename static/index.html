@@ -4026,7 +4026,7 @@ document.addEventListener('click', e => {
     case 'polHistory':        polHistory(+arg); break;
     case 'polTestRule':       polTestRule(+arg); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
-    case 'polGotoRuleByName': polGotoRuleByName(arg); break;
+    case 'trafficGotoRule':   trafficGotoRule(arg); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
     case 'setPolActionFilter': setPolActionFilter(arg); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
@@ -4266,7 +4266,7 @@ document.addEventListener('mouseout', e => {
 // Close policy actions menu on outside click.
 document.addEventListener('click', e => {
   if (!e.target.closest('.pol-actions-menu') && !e.target.closest('[data-click="togglePolActions"]')) {
-    document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+    closePolActionMenus();
   }
 });
 
@@ -5538,7 +5538,7 @@ function rowHTML(e) {
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
     <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}${(e.bytesSent || e.bytesRecv || e.durationMs) ? `<div style="font-size:.7rem;color:var(--muted)">&#8593;${fmtBytes(e.bytesSent)} &#8595;${fmtBytes(e.bytesRecv)}${e.durationMs ? ' &middot; ' + (e.durationMs >= 1000 ? (e.durationMs/1000).toFixed(1)+'s' : e.durationMs+'ms') : ''}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
-    <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${e.ruleMatched ? `<a href="#" data-click="polGotoRuleByName" data-arg="${escHtml(e.ruleMatched)}" style="color:var(--accent2);text-decoration:none" title="Open in Access Rules">${escHtml(e.ruleMatched)}</a>` : ''}</td>
+    <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${e.ruleMatched ? `<a href="#" data-click="trafficGotoRule" data-arg="${escHtml(e.ruleMatched)}" style="color:var(--accent2);text-decoration:none" title="${escHtml(e.ruleMatched)}">${escHtml(e.ruleMatched)}</a>` : ''}</td>
     <td>${levelBadge(e.level)}</td>
   </tr>`;
 }
@@ -6944,7 +6944,7 @@ async function movePolicy(pri, position, targetName) {
 
 function showMoveTarget(pri, direction) {
   // Close the actions menu.
-  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  closePolActionMenus();
   // Build a list of other rule names.
   const currentRule = polRules.find(r => r.priority === pri);
   // Only Stage-2 access rules are valid move targets here; auth rules are
@@ -6976,7 +6976,7 @@ function showMoveTarget(pri, direction) {
 
 async function clonePolicy(pri) {
   // Close the actions menu.
-  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  closePolActionMenus();
   const r = polRules.find(x => x.priority === pri);
   if (!r) return;
   // Populating the clone overwrites the whole form — ask before clobbering.
@@ -8907,8 +8907,9 @@ function polReadForm() {
 function polValidateClient(rule) {
   const errs = [];
   if (!rule.name) errs.push('Name is required.');
-  // /api/policy never lists Stage-1 auth rules, so this check cannot see
-  // them; a name colliding with an auth rule still fails server-side.
+  // polRules carries BOTH stages (/api/policy returns the unified store), so
+  // this also flags collisions with Stage-1 auth-rule names — matching the
+  // server, which EqualFold-checks all rules.
   else if (polRules.some(r => r.priority !== rule.priority &&
       r.name.toLowerCase() === rule.name.toLowerCase())) {
     errs.push(`A rule named "${rule.name}" already exists.`);
@@ -9007,11 +9008,10 @@ function polMarkEdited() {
 async function polHistory(priority) {
   const r = polRules.find(x => x.priority === Number(priority));
   if (!r) return;
-  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  closePolActionMenus();
   // Resolve the unsaved-changes guard BEFORE touching the audit filter, so a
   // cancelled navigation leaves no stale pre-filter behind on the Audit view.
-  const ok = viewLeaveGuards.policy();
-  if (ok !== true && !await ok) return;
+  if (!await viewLeaveGuards.policy()) return;
   const f = document.getElementById('audit-filter');
   if (f) f.value = r.name;
   switchView('audit');
@@ -9019,49 +9019,113 @@ async function polHistory(priority) {
 
 // ── M3 S4: decision-trace integration ──────────────────────────────────────
 
+// closePolActionMenus — shared close for the rulebase row ⋮ menus.
+function closePolActionMenus() {
+  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+}
+
+// _waitFor — poll a getter every 150ms until it returns truthy or the
+// deadline passes (resolves null). Shared by the anchored-navigation seeks.
+async function _waitFor(get, ms = 3000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = get();
+    if (v) return v;
+    if (Date.now() >= deadline) return null;
+    await new Promise(res => setTimeout(res, 150));
+  }
+}
+
 // gotoAnchoredRow — generic anchored navigation: switch to a view, then
-// flash-highlight the row carrying data-priority once the async load renders
-// it. Works for ANY tbody whose rows carry data-priority (access rules, auth
-// rules, future consumers) — deliberately not rule-shaped.
-function gotoAnchoredRow(view, tbodyId, priority) {
+// flash-highlight the row matching attr="value" once the async load renders
+// it. Works for ANY tbody whose rows carry the attribute — deliberately not
+// rule-shaped. Callers prefer the stable data-rule-id ULID when they have
+// one (it survives reorders and the S5 staged-order client mutations);
+// data-priority is the fallback for rules predating IDs.
+async function gotoAnchoredRow(view, tbodyId, attr, value) {
   // Don't re-enter switchView when already there: re-triggering the view's
   // async loader would rebuild the tbody and discard the flash mid-animation
   // (views without a render-skip signature repaint unconditionally).
+  if (currentView !== view) {
+    const tb = document.getElementById(tbodyId);
+    const stale = tb ? tb.innerHTML : '';
+    switchView(view);
+    // A hidden view keeps its last-rendered rows, so the seek would flash a
+    // STALE row that the loader's imminent repaint then discards (or that a
+    // concurrent reorder has repurposed). Wait for the fresh render; the
+    // short fallback covers loaders that skip identical repaints.
+    await _waitFor(() => {
+      const t = document.getElementById(tbodyId);
+      return t && t.innerHTML !== stale;
+    }, 800);
+  }
+  const row = await _waitFor(() =>
+    document.querySelector(`#${tbodyId} tr[${attr}="${value}"]`));
+  if (!row) {
+    toast('The rule exists but its row is not visible — a search or action filter may be hiding it', 'error');
+    return;
+  }
+  row.scrollIntoView({behavior: 'smooth', block: 'center'});
+  row.classList.remove('row-flash');
+  void row.offsetWidth; // restart the animation if re-anchored
+  row.classList.add('row-flash');
+  clearTimeout(row._flashTimer); // a stale timer would strip a re-anchor's flash
+  row._flashTimer = setTimeout(() => row.classList.remove('row-flash'), 2500);
+}
+
+// polAnchorRule — anchor the Access Rules view at a rule. The operator asked
+// to SEE this rule, so the rulebase search/action filters that could hide
+// its row are cleared first.
+function polAnchorRule(r) {
+  const f = document.getElementById('pol-filter');
+  if (f && f.value) f.value = '';
+  if (polActionFilter) setPolActionFilter('');
+  gotoAnchoredRow('policy', 'pol-table', r.id ? 'data-rule-id' : 'data-priority', r.id || r.priority);
+}
+
+function polGotoRule(priority) {
+  polAnchorRule((polRules || []).find(x => x.priority === priority) || {priority});
+}
+
+// gotoAnchoredRowByName — as gotoAnchoredRow, but resolves the row from a
+// lazily-loaded rule list by NAME (the Stage-1 simulator identifies rules
+// by name, not priority). `list` is a thunk because the backing array loads
+// asynchronously on view entry.
+async function gotoAnchoredRowByName(view, tbodyId, list, name) {
   if (currentView !== view) switchView(view);
-  const deadline = Date.now() + 3000;
-  (function seek() {
-    const row = document.querySelector('#' + tbodyId + ' tr[data-priority="' + priority + '"]');
-    if (row) {
-      row.scrollIntoView({behavior: 'smooth', block: 'center'});
-      row.classList.remove('row-flash');
-      void row.offsetWidth; // restart the animation if re-anchored
-      row.classList.add('row-flash');
-      clearTimeout(row._flashTimer); // a stale timer would strip a re-anchor's flash
-      row._flashTimer = setTimeout(() => row.classList.remove('row-flash'), 2500);
+  const r = await _waitFor(() => (list() || []).find(x => x.name === name));
+  if (!r) {
+    toast(`Rule "${name}" not found — it may have been renamed or deleted`, 'error');
+    return;
+  }
+  gotoAnchoredRow(view, tbodyId, r.id ? 'data-rule-id' : 'data-priority', r.id || r.priority);
+}
+function apGotoRuleByName(name) { gotoAnchoredRowByName('authpolicy', 'ap-rules', () => apRules, name); }
+
+// trafficGotoRule — the Traffic feed's rule column also carries non-rule
+// attributions (blocklist, threat-feed sources, scanner names, file
+// extensions) and Stage-1 outcomes name AUTH rules. Resolve the name
+// against a FRESH rule list before navigating, so a non-rule click never
+// yanks the operator off the live feed into a dead seek, an auth rule
+// opens the right view, and a stale cached priority can't anchor the
+// wrong row. (/api/policy returns both stages; ruleType picks the view.)
+async function trafficGotoRule(name) {
+  try {
+    const pol = await api('/api/policy');
+    const r = (pol.rules || []).find(x => x.name === name);
+    if (!r) {
+      toast(`"${name}" is not a policy rule — blocklist, scanner, and feed attributions also appear in this column`, 'error');
       return;
     }
-    if (Date.now() < deadline) setTimeout(seek, 150);
-  })();
+    if (r.ruleType === 'auth') {
+      gotoAnchoredRow('authpolicy', 'ap-rules', r.id ? 'data-rule-id' : 'data-priority', r.id || r.priority);
+      return;
+    }
+    polAnchorRule(r);
+  } catch (e) {
+    toast('Rule lookup failed: ' + e.message, 'error');
+  }
 }
-
-function polGotoRule(priority) { gotoAnchoredRow('policy', 'pol-table', priority); }
-
-// gotoAnchoredRowByName — as gotoAnchoredRow, but resolves the row's
-// priority from a lazily-loaded rule list by NAME (Traffic rows and the
-// Stage-1 simulator identify rules by name, not priority). `list` is a
-// thunk because the backing array loads asynchronously on view entry.
-function gotoAnchoredRowByName(view, tbodyId, list, name) {
-  if (currentView !== view) switchView(view);
-  const deadline = Date.now() + 3000;
-  (function seek() {
-    const r = (list() || []).find(x => x.name === name);
-    if (r) return gotoAnchoredRow(view, tbodyId, r.priority);
-    if (Date.now() < deadline) setTimeout(seek, 150);
-    else toast(`Rule "${name}" not found — it may have been renamed or deleted`, 'error');
-  })();
-}
-function polGotoRuleByName(name) { gotoAnchoredRowByName('policy', 'pol-table', () => polRules, name); }
-function apGotoRuleByName(name)  { gotoAnchoredRowByName('authpolicy', 'ap-rules', () => apRules, name); }
 
 // renderPolicyTrace — the shared decision-trace rows (.trace contract): one
 // row per rule walked, consuming the walkPolicyTestRules payload verbatim
@@ -9092,12 +9156,11 @@ function renderPolicyTrace(trace) {
 async function polTestRule(priority) {
   const r = polRules.find(x => x.priority === priority);
   if (!r) return;
-  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  closePolActionMenus();
   // Resolve the unsaved-changes guard BEFORE touching tester state, so a
   // cancelled navigation leaves no half-prefilled test behind (same pattern
   // as polHistory).
-  const ok = viewLeaveGuards.policy();
-  if (ok !== true && !await ok) return;
+  if (!await viewLeaveGuards.policy()) return;
   document.getElementById('pt-ip').value       = (r.sourceIP || '').split('/')[0];
   document.getElementById('pt-identity').value = r.sourceIdentity || '';
   document.getElementById('pt-groups').value   = r.sourceGroup || '';
@@ -10371,7 +10434,7 @@ function renderAuthPolicy() {
     const warn = (r.warnings || []).length
       ? `<span title="${escHtml((r.warnings||[]).join('\n'))}" style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem">⚠ ${r.warnings.length}</span>`
       : '<span style="color:var(--muted)">—</span>';
-    return `<tr data-priority="${r.priority}" style="${enabled ? '' : 'opacity:.45'}">
+    return `<tr data-priority="${r.priority}" data-rule-id="${escHtml(r.id || '')}" style="${enabled ? '' : 'opacity:.45'}">
       <td>${r.priority}</td>
       <td>${escHtml(r.name)}</td>
       <td>${apOutcomeBadge(r)}</td>

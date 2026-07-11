@@ -108,10 +108,10 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="pol-form-err"`,          // inline validation errors
 		`data-mousedown=`,            // CSP-safe replacement for picker onmousedown
 		// M3 S4 — decision-trace integration
-		`function renderPolicyTrace`,     // shared trace rows consuming the walkPolicyTestRules payload
-		`function gotoAnchoredRow`,       // generic view+row anchor (any tbody with data-priority)
-		`function polTestRule`,           // tester prefill from a rule's conditions (G6)
-		`data-click="polGotoRuleByName"`, // Traffic rule chip → anchored rulebase row
+		`function renderPolicyTrace`,   // shared trace rows consuming the walkPolicyTestRules payload
+		`function gotoAnchoredRow`,     // generic view+row anchor (any tbody with data-priority)
+		`function polTestRule`,         // tester prefill from a rule's conditions (G6)
+		`data-click="trafficGotoRule"`, // Traffic rule chip → resolve + anchored rulebase row
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
