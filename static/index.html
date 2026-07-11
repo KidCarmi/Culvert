@@ -2581,6 +2581,12 @@ Firefox (all platforms):
             <button class="btn sm ghost" id="pol-act-block" data-click="setPolActionFilter" data-arg="block">Block</button>
           </div>
         </div>
+        <div id="pol-reorder-bar" class="banner warn reorder-bar" style="display:none" role="status">
+          <span>⚠ Rule order edited — <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
+          <span style="flex:1"></span>
+          <button class="btn sm primary" data-click="polApplyOrder">Apply order</button>
+          <button class="btn ghost sm" data-click="polRevertOrder">Revert</button>
+        </div>
         <div class="tbl-wrap">
           <table id="policy-table">
             <thead>
@@ -4025,6 +4031,8 @@ document.addEventListener('click', e => {
     case 'clonePolicy':       clonePolicy(+arg); break;
     case 'polHistory':        polHistory(+arg); break;
     case 'polTestRule':       polTestRule(+arg); break;
+    case 'polApplyOrder':     polApplyOrder(); break;
+    case 'polRevertOrder':    polRevertOrder(); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
     case 'trafficGotoRule':   trafficGotoRule(arg); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
@@ -4386,6 +4394,10 @@ document.querySelectorAll('.nav-item').forEach(el => {
 // the user. A confirmed leave must clean up its own view state before
 // resolving true. Keeps view-specific dirty state out of switchView itself.
 const viewLeaveGuards = {
+  // Form edits are guarded; a staged rule ORDER deliberately is not — it
+  // survives navigation (the commit bar reappears with it, and the version
+  // stamp still discards it honestly if the rulebase moves meanwhile), so
+  // read-only side trips (History, the tester) never force discarding it.
   policy: () => {
     if (!_polFormDirty) return true;
     return confirmAction('Discard unsaved rule changes?',
@@ -6812,6 +6824,7 @@ function cancelPolicyEdit() {
 }
 
 async function deletePolicy(priority) {
+  if (polBlockWhileStaged()) return;
   const rule = polRules.find(r => r.priority === priority);
   const name = rule ? rule.name || ('Rule #' + priority) : ('Rule #' + priority);
   if (!await confirmAction('Delete Policy Rule', 'Delete "' + name + '"? This cannot be undone.')) return;
@@ -6865,9 +6878,13 @@ function initPolicyDragDrop() {
     // Renders are suppressed while dragging, but the 3s tick still refreshes
     // polRules underneath. If the rulebase version moved since dragstart, the
     // on-screen priorities may describe DIFFERENT rules now — abort rather
-    // than permute the wrong ones (the server's permutation check is the
-    // backstop; this gives the operator an honest, immediate answer).
+    // than stage a permutation of the wrong ones (polApplyOrder's version
+    // re-check and the server's permutation validation remain the backstops;
+    // this gives the operator an honest, immediate answer).
     if (_polVersion !== _polDragStartVersion) {
+      // Drop any staged order silently here — renderPolicy's staleness pass
+      // would otherwise fire a second toast for the same event.
+      if (_polStagedOrder && _polVersion !== _polStagedVersion) _polSetStagedState(null);
       toast('Rulebase changed while dragging — reorder cancelled, showing latest rules', 'error');
       tbody.querySelectorAll('tr.dragging').forEach(tr => tr.classList.remove('dragging'));
       _polRenderSig = ''; // force an immediate rebuild with the fresh rules
@@ -6875,28 +6892,114 @@ function initPolicyDragDrop() {
       return;
     }
 
-    // /api/policy/reorder is access-only: it expects every Stage-2 access-rule
-    // priority exactly once and permutes them among their own slots (auth rules
-    // keep their priorities). Build the COMPLETE access order from the store —
-    // not the DOM — so an active search/action filter can't truncate the list,
-    // then apply the drag.
-    const priorities = polRules.filter(r => r.ruleType !== 'auth').map(r => r.priority);
+    // M3 S5 — staged reorder (G3): a drop edits a CLIENT-SIDE order only.
+    // Nothing reaches /api/policy/reorder until the operator clicks Apply in
+    // the commit bar, so an accidental drag can never change enforcement.
+    // Build the COMPLETE access order from the staged state (or the store) —
+    // not the DOM — so an active search/action filter can't truncate it.
+    const priorities = (_polStagedOrder || polRules.filter(r => r.ruleType !== 'auth').map(r => r.priority)).slice();
     const fromIdx = priorities.indexOf(fromPri);
     const toIdx   = priorities.indexOf(toPri);
     if (fromIdx < 0 || toIdx < 0) return;
     priorities.splice(fromIdx, 1);
     priorities.splice(toIdx, 0, fromPri);
-
-    try {
-      await api('/api/policy/reorder', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ priorities }),
-      });
-      fetchPolicy();
-    } catch(e) { toast('Reorder failed: ' + e.message, 'error'); }
+    // drop fires BEFORE dragend: strip .dragging first or the render-guard
+    // suppresses the rebuild and the rows don't visually move until the
+    // next tick (same idiom as the version-abort path above).
+    tbody.querySelectorAll('tr.dragging').forEach(tr => tr.classList.remove('dragging'));
+    polStageOrder(priorities);
   });
 }
+
+// ── M3 S5: staged reorder (G3) ──────────────────────────────────────────────
+// Drag edits _polStagedOrder (access-rule priorities in their PENDING
+// sequence); the sticky commit bar makes the unapplied state explicit and
+// the ONLY call to /api/policy/reorder lives in polApplyOrder (pinned by
+// TestFoundation_DragReorderIsStaged).
+let _polStagedOrder = null;   // null = no pending order
+let _polStagedVersion = 0;    // _polVersion the staged order was built against
+let _polApplyInFlight = false;
+
+// _polSetStagedState — single owner of the staged-order state + commit bar
+// (no render; polStageOrder renders, the renderPolicy staleness path is
+// already mid-render).
+function _polSetStagedState(order) {
+  _polStagedOrder = order;
+  if (order) _polStagedVersion = _polVersion;
+  const bar = document.getElementById('pol-reorder-bar');
+  if (bar) bar.style.display = order ? 'flex' : 'none';
+}
+
+function polStageOrder(order) {
+  _polSetStagedState(order);
+  renderPolicy(); // staged order is part of the render signature
+}
+
+async function polApplyOrder() {
+  // In-flight guard: the server permutes CURRENT slot occupants, so a
+  // double-click replaying the same permutation would re-permute — e.g. a
+  // staged swap applied twice lands back in the original order while the
+  // UI reports success.
+  if (!_polStagedOrder || _polApplyInFlight) return;
+  // Apply-time staleness re-check: renders (and their staleness pass) are
+  // suppressed while a ⋮ menu is open or a drag is active, so a version
+  // bump can land unprocessed right up to this click. A bump the tick has
+  // not FETCHED yet remains inherently invisible client-side (≤3s window,
+  // same exposure the old immediate-POST flow had).
+  if (_polVersion !== _polStagedVersion) {
+    _polSetStagedState(null);
+    toast('Rulebase changed — the staged rule order was discarded', 'error');
+    renderPolicy();
+    return;
+  }
+  _polApplyInFlight = true;
+  const btn = document.querySelector('#pol-reorder-bar [data-click="polApplyOrder"]');
+  if (btn) btn.disabled = true;
+  try {
+    await api('/api/policy/reorder', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ priorities: _polStagedOrder }),
+    });
+    // Clear the staged state WITHOUT re-rendering: polRules still holds the
+    // pre-apply order, so an immediate render would visibly snap the table
+    // back to the old sequence under the success toast. The rows already
+    // show the staged order — which now IS the server order — and
+    // fetchPolicy paints the re-stamped truth.
+    _polSetStagedState(null);
+    toast('Rule order applied', 'success');
+    await fetchPolicy();
+  } catch (e) {
+    // Fail honest: the staged order stays visible so nothing is lost.
+    toast('Apply failed: ' + e.message + ' — order left staged', 'error');
+  } finally {
+    _polApplyInFlight = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function polRevertOrder() {
+  polStageOrder(null);
+  toast('Staged order discarded — showing the applied order', 'success');
+}
+
+// polBlockWhileStaged — rule mutations under a pending staged order would
+// either silently diverge from the on-screen sequence (server-side moves)
+// or destroy the staged work via the staleness discard with a toast that
+// blames an external change. Block them consistently instead.
+function polBlockWhileStaged() {
+  if (!_polStagedOrder) return false;
+  closePolActionMenus();
+  toast('A staged rule order is pending — Apply or Revert it before changing rules', 'error');
+  return true;
+}
+
+// The SPA leave guard cannot see a browser refresh/close — without this,
+// F5 silently discards a staged order or unsaved form edits (G3 promises
+// loss is always explicit).
+window.addEventListener('beforeunload', e => {
+  if (_polStagedOrder || _polFormDirty) { e.preventDefault(); e.returnValue = ''; }
+});
 
 // ── Policy actions dropdown ─────────────────────────────────────────────
 
@@ -6929,6 +7032,7 @@ function togglePolActions(e, pri) {
 
 
 async function movePolicy(pri, position, targetName) {
+  if (polBlockWhileStaged()) return;
   const body = { priority: pri, position };
   if (targetName) body.targetName = targetName;
   try {
@@ -6945,6 +7049,7 @@ async function movePolicy(pri, position, targetName) {
 function showMoveTarget(pri, direction) {
   // Close the actions menu.
   closePolActionMenus();
+  if (polBlockWhileStaged()) return;
   // Build a list of other rule names.
   const currentRule = polRules.find(r => r.priority === pri);
   // Only Stage-2 access rules are valid move targets here; auth rules are
@@ -6977,6 +7082,9 @@ function showMoveTarget(pri, direction) {
 async function clonePolicy(pri) {
   // Close the actions menu.
   closePolActionMenus();
+  // Clone only STAGES a copy in the form (no server write), but its Save is
+  // a mutation — blocking up front beats losing the staged order at Save.
+  if (polBlockWhileStaged()) return;
   const r = polRules.find(x => x.priority === pri);
   if (!r) return;
   // Populating the clone overwrites the whole form — ask before clobbering.
@@ -9170,6 +9278,12 @@ async function polTestRule(priority) {
   else if (host.includes('*')) host = '';
   document.getElementById('pt-host').value = host;
   switchView('policy-tester');
+  // The tester dry-runs the APPLIED order server-side — an unapplied staged
+  // order (whose preview may have produced the shadow hint that led here)
+  // does not affect the result.
+  if (_polStagedOrder) {
+    toast('Note: the tester evaluates the APPLIED rule order — your staged order is not applied yet', 'success');
+  }
   if (host) {
     runPolicyTest();
   } else {
@@ -9179,6 +9293,7 @@ async function polTestRule(priority) {
 }
 
 async function submitPolicyRule() {
+  if (polBlockWhileStaged()) return;
   const rule = polReadForm();
   if (!rule.name || !rule.action) {
     toast('Name and Action are required', 'error'); return;
@@ -9227,6 +9342,8 @@ function setPolActionFilter(f) {
 let _polRenderSig = '';
 let _polVersion = 0; // policy-store version from /api/policy (bumps on mutation)
 let _polDragStartVersion = 0; // rulebase version when the current drag began
+let _polShadowKey = '';   // memo key for the O(n²) shadow-hint pass
+let _polShadowMap = new Map();
 
 // In-place hit-counter patch for skipped renders: counters churn under live
 // traffic, so they are deliberately NOT in the render signature — otherwise
@@ -9238,6 +9355,44 @@ function _polPatchHitCounts(rules) {
     const v = String(fmt(r.hitCount || 0)); // fmt returns a Number below 1e3
     if (cell.textContent !== v) cell.textContent = v;
   }
+}
+
+// polShadowHints — advisory shadow detection (G4). ONLY exactly-decidable
+// subsumption is flagged: an earlier ENABLED, always-active (no schedule)
+// rule A shadows rule B when every request B could match provably also
+// matches A — fields compare by identity or A-empty (matches everything),
+// FQDN globs only for the provable '*.suffix'-covers-'x.suffix' shapes,
+// countries by superset. CIDR containment, category-group expansion, and
+// schedule overlap are deliberately NOT attempted — authoritative analysis
+// is the policy-shadow backend design record. The hint never claims
+// completeness (info tier, "verify with the tester").
+function polShadowHints(rules) {
+  const shadowed = new Map(); // priority → the shadowing rule
+  const covers = (a, b) => !a || a === b;
+  const fqdnCovers = (a, b) =>
+    !a || a === b ||
+    (a.startsWith('*.') && !!b && b !== a.slice(2) && b.endsWith(a.slice(1)));
+  const countryCovers = (a, b) => !(a && a.length) ||
+    (!!(b && b.length) && b.every(c => a.includes(c)));
+  const act = rules.filter(r => r.enabled !== false);
+  for (let j = 1; j < act.length; j++) {
+    for (let i = 0; i < j; i++) {
+      const a = act[i], b = act[j];
+      if (a.schedule) continue; // A must be always-active to provably cover B
+      if (covers(a.sourceIP, b.sourceIP) &&
+          covers(a.sourceIdentity, b.sourceIdentity) &&
+          covers(a.sourceGroup, b.sourceGroup) &&
+          covers(a.authSource, b.authSource) &&
+          fqdnCovers(a.destFQDN, b.destFQDN) &&
+          covers(a.destCategory, b.destCategory) &&
+          covers(a.destCategoryGroup, b.destCategoryGroup) &&
+          countryCovers(a.destCountry, b.destCountry)) {
+        shadowed.set(b.priority, a);
+        break;
+      }
+    }
+  }
+  return shadowed;
 }
 
 function renderPolicy() {
@@ -9259,20 +9414,50 @@ function renderPolicy() {
   const total = accessRules.length;
   updateDefaultActionBadge();
 
+  // Staged-order staleness (M3 S5): the staged permutation is only
+  // meaningful against the rulebase VERSION it was built from. Any mutation
+  // bumps the version — including a concurrent reorder from another session,
+  // which keeps the same priority SET while changing which rule occupies
+  // each slot, so a set comparison would miss it and Apply would permute
+  // the wrong occupants. Drop the staged order honestly instead.
+  if (_polStagedOrder && _polVersion !== _polStagedVersion) {
+    _polSetStagedState(null);
+    toast('Rulebase changed — the staged rule order was discarded', 'error');
+  }
+  // Display order: the staged sequence when one is pending, else the applied
+  // priority order from the store.
+  let ordered = accessRules;
+  if (_polStagedOrder) {
+    const byPri = new Map(accessRules.map(r => [r.priority, r]));
+    ordered = _polStagedOrder.map(p => byPri.get(p)).filter(Boolean);
+  }
+
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
 
   // Structural render-skip: rebuild only when the rulebase VERSION (bumped
-  // server-side on every mutation) or the filter state changes. Deliberately
-  // excludes hitCount — counters churn under live traffic, and including
-  // them (or stringifying rules) would defeat the skip exactly when the
-  // proxy is busy; counters are patched in place instead. JSON-array form so
-  // filter text containing separators cannot collide with the other fields.
-  const sig = JSON.stringify([_polVersion, total, q, polActionFilter]);
+  // server-side on every mutation), the filter state, or the staged order
+  // changes. Deliberately excludes hitCount — counters churn under live
+  // traffic, and including them (or stringifying rules) would defeat the
+  // skip exactly when the proxy is busy; counters are patched in place
+  // instead. JSON-array form so filter text containing separators cannot
+  // collide with the other fields.
+  const sig = JSON.stringify([_polVersion, total, q, polActionFilter, _polStagedOrder]);
   if (sig === _polRenderSig) { _polPatchHitCounts(accessRules); return; }
   _polRenderSig = sig;
 
+  // Advisory shadow hints (M3 S4 review → S5, G4): computed on the DISPLAYED
+  // order so a staged reorder previews its effect before Apply. Memoized on
+  // the only inputs that can change the result — search-box keystrokes also
+  // rebuild (q is in the sig) but must not re-run the O(n²) pass.
+  const shadowKey = JSON.stringify([_polVersion, _polStagedOrder]);
+  if (shadowKey !== _polShadowKey) {
+    _polShadowMap = polShadowHints(ordered);
+    _polShadowKey = shadowKey;
+  }
+  const shadowMap = _polShadowMap;
+
   // F20: client-side search + action filter (computed only when rebuilding)
-  const filtered = accessRules.filter(r => {
+  const filtered = ordered.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
@@ -9310,6 +9495,10 @@ function renderPolicy() {
       : '<span style="color:var(--muted)">—</span>';
     const disabledStyle = r.enabled === false ? 'opacity:.45' : '';
     const disabledBadge = r.enabled === false ? ' ' + badge('neutral', 'Disabled') : '';
+    const sh = shadowMap.get(r.priority);
+    const shadowBadge = sh
+      ? ` <span class="badge info" style="cursor:pointer" data-click="polTestRule" data-arg="${r.priority}" title="Heuristic: “${escHtml(sh.name)}”, evaluated earlier in the order shown, appears to cover every request this rule targets — so this rule may never match. Click to verify in the Policy Tester.">possible shadow</span>`
+      : '';
     // data-rule-id: the stable ULID (POLICY-ARCHITECTURE-FUTURE.md guardrail).
     // Actions still address by priority because the current API does; the row
     // identity attribute is the seam later slices key on (shadow hints, deep
@@ -9317,7 +9506,7 @@ function renderPolicy() {
     return `<tr draggable="true" data-priority="${r.priority}" data-rule-id="${escHtml(r.id || '')}" style="${disabledStyle}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
-      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}${disabledBadge}</td>
+      <td style="font-weight:600">${escHtml(r.name)}${schedBadge}${disabledBadge}${shadowBadge}</td>
       <td style="font-size:.78rem;font-family:var(--font-mono)">${src}</td>
       <td style="font-size:.78rem;font-family:var(--font-mono)">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>
@@ -12428,6 +12617,13 @@ function resetBlockPage() {
 .trace-skip  { color:var(--muted);font-style:italic; }
 .trace-link  { color:var(--accent2);font-size:.75rem;text-decoration:none;margin-left:6px; }
 .trace-link:hover { text-decoration:underline; }
+/* Composes with .banner.warn (markup: class="banner warn reorder-bar") so the
+   warn tokens stay single-sourced; this only adds the sticky/flex deltas.
+   top offset ≈ the sticky .topbar's height (z-index 50, same #main scroller)
+   — top:0 would slide the bar underneath it exactly when the rulebase is
+   long enough to scroll. */
+.reorder-bar { position:sticky;top:52px;z-index:40;display:flex;gap:10px;align-items:center;
+  margin:8px 16px 0;font-size:.82rem; }
 @keyframes rowflash { 0%,55% { background:var(--accent-tint, rgba(20,184,166,.14)); } 100% { background:transparent; } }
 .row-flash td { animation: rowflash 2.4s ease-out; }
 .audit-diff-btn { background:none;border:none;cursor:pointer;color:var(--accent2);font-size:.75rem;padding:2px 6px;border-radius:4px; }

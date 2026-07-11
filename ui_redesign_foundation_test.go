@@ -112,6 +112,11 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`function gotoAnchoredRow`,     // generic view+row anchor (any tbody with data-priority)
 		`function polTestRule`,         // tester prefill from a rule's conditions (G6)
 		`data-click="trafficGotoRule"`, // Traffic rule chip → resolve + anchored rulebase row
+		// M3 S5 — staged reorder + advisory shadow hints
+		`function polApplyOrder`,  // the ONLY /api/policy/reorder call site (G3)
+		`function polRevertOrder`, // discard the staged order
+		`function polShadowHints`, // exactly-decidable advisory shadow detection (G4)
+		`id="pol-reorder-bar"`,    // sticky Apply/Revert commit bar
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
@@ -145,6 +150,33 @@ func TestFoundation_PolicyTraceContractFrozen(t *testing.T) {
 		if got := f.Tag.Get("json"); got != tag {
 			t.Errorf("policyTestTrace.%s json tag = %q; want %q (frozen trace contract)", name, got, tag)
 		}
+	}
+}
+
+// ── M3 S5: drag must never POST — the commit bar owns the reorder ───────────
+
+func TestFoundation_DragReorderIsStaged(t *testing.T) {
+	data, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	s := string(data)
+	// Exactly one CALL site may hit /api/policy/reorder (comments may name it)…
+	call := `api('/api/policy/reorder'`
+	if n := strings.Count(s, call); n != 1 {
+		t.Fatalf("%s appears %d times in static/index.html; want exactly 1 (inside polApplyOrder) — drag must stage, never POST", call, n)
+	}
+	// …and it must live inside polApplyOrder, not the drag handlers.
+	start := strings.Index(s, "async function polApplyOrder")
+	if start < 0 {
+		t.Fatal("polApplyOrder not found")
+	}
+	end := strings.Index(s[start:], "\nfunction ")
+	if end < 0 {
+		end = len(s) - start
+	}
+	if !strings.Contains(s[start:start+end], call) {
+		t.Error("the /api/policy/reorder call is not inside polApplyOrder — the staged-reorder contract (G3) is broken")
 	}
 }
 
