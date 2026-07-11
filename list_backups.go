@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 )
 
@@ -104,21 +103,19 @@ func runListBackups(dir string, out io.Writer) error {
 // caller's DirEntry.Type() / Lstat checks cannot trick us into
 // reading from an unintended target.
 //
-// PLATFORM: syscall.O_NOFOLLOW is defined on Linux (and most other
-// POSIX-y systems Go supports), but NOT on Windows. The Maintenance
-// Agent (which is the primary consumer of `--list-backups`) is
-// declared Linux-only by the D1.6 implementation plan
-// (`packaging/systemd/culvert-maint.service` is a systemd unit;
-// SO_PEERCRED auth is Linux-specific). The proxy CLI itself happens
-// to compile and run on other systems for D1.3a/b backup/restore
-// operations, so a future port to Windows would need to either
-// drop the NOFOLLOW guard for `--list-backups` (with a documented
-// caveat) or thread a build-tag through this file. For D1.6b we
-// keep the Linux-anchored constant; the build will fail loudly on
-// any platform that doesn't define syscall.O_NOFOLLOW, which is a
-// better failure mode than silently following symlinks.
+// PLATFORM: O_NOFOLLOW is defined on Linux (and most other POSIX-y
+// systems Go supports), but NOT on Windows. The Maintenance Agent
+// (the primary consumer of `--list-backups`) is declared Linux-only
+// by the D1.6 implementation plan (`packaging/systemd/culvert-maint.service`
+// is a systemd unit; SO_PEERCRED auth is Linux-specific). The proxy CLI
+// itself compiles and runs on other systems for D1.3a/b backup/restore
+// operations, so the flag is sourced from the build-tagged `oNoFollow`
+// constant (nofollow_unix.go / nofollow_windows.go): the real
+// syscall.O_NOFOLLOW on Unix, a no-op on Windows where it does not exist.
+// The caller's Lstat/DirEntry.Type() checks remain the primary symlink
+// guard; O_NOFOLLOW is defense-in-depth against a post-check swap race.
 func peekEncryptedMagic(path string) bool {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
+	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0) //nolint:gosec // intentional: classify the operator-supplied backup file
 	if err != nil {
 		return false
 	}
