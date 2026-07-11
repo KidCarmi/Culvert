@@ -221,7 +221,146 @@ identity-scrub on the H2 rebuilt request; SSRF on the H2 upstream dial; block-af
 shutdown-with-active-streams; high-concurrency `-race` over the daemon-backed scanners (ClamAV/YARA hold
 sockets — H1-serial never exercised concurrency). PR0 already locks the strip-ALPN downgrade oracle.
 
+## Phase 1 final corrections (v3) — supersede where they conflict with v2
+
+Five owner corrections. These are binding and override any looser v2 wording.
+
+### C1 — ALPN sequence: intersection of client-offer ∩ policy ∩ origin (v3.1)
+
+The effective protocol is the **intersection of three inputs**: the client's ClientHello ALPN offer, the
+decryption policy (`StripALPN`), and the origin's capability. A naive "offer h2 upstream, then offer only
+what the origin took downstream" can strand an **HTTP/1.1-only client** (origin picks h2 → downstream
+offers only h2 → no common protocol → client handshake fails). The client offer MUST bound the upstream
+offer. Full sequence, per inspected CONNECT:
+
+1. **Observe the client's offered ALPN** without consuming/stranding bytes the eventual H1/H2 handler
+   needs. **Go mechanism:** the forged-leaf `tls.Config.GetConfigForClient(chi *ClientHelloInfo)` exposes
+   `chi.SupportedProtos` (the client's ALPN list) at the START of the client handshake — but we need it
+   BEFORE the upstream handshake to shape the upstream offer, and the upstream handshake happens first in
+   the current code (`:566`). Resolution: **do the client handshake first is not an option** (we need
+   the origin protocol to constrain the client). Instead, peek the client's ALPN from the buffered
+   ClientHello without completing the handshake. Concretely: the inspect path already peeks the first
+   client byte (`clientBuf.Reader.Peek`, `:598`) to detect TLS; extend that to parse the ClientHello
+   ALPN extension read-only from the buffered bytes (a bounded, well-defined TLS record parse — the same
+   technique the PR0 characterization test uses to assert ALPN, and what the NetLog decode did). This
+   observes `clientOffer []string` **without consuming** the bytes `tls.Server` will re-read (we hand
+   `tls.Server` a `readerConn` wrapping the same buffered reader — `:643` — so no strand, and no pre-read
+   that could break a later `ServeConn` since `ServeConn` reads the H2 preface which arrives only AFTER
+   this TLS handshake completes). If ALPN parsing fails/absent, treat `clientOffer` as `["http/1.1"]`
+   (conservative).
+2. **Apply `StripALPN`** (see C2): `stripALPN := resolveStripALPN(match)`.
+3. **Build the upstream offer from the allowed intersection:**
+   - `stripALPN == true` → upstream `["http/1.1"]`.
+   - native H2 (`stripALPN == false`) AND client offered `h2` → upstream `["h2","http/1.1"]`.
+   - native H2 but client offered only `http/1.1` → upstream `["http/1.1"]`.
+4. **Negotiate upstream:** dial + `HandshakeContext`; `up := upstreamTLS.ConnectionState().NegotiatedProtocol`
+   (read post-resumption — never assume the cached session's protocol; the LRU cache is ServerName-keyed).
+5. **Select the same negotiated protocol downstream:** forge-leaf offer = `[up]` (a single protocol the
+   client is guaranteed to also support, because `up` came from an offer already intersected with the
+   client's list in step 3). `up` can only be `h2` when the client offered `h2`.
+6. **Dispatch on the downstream negotiated protocol:** `h2` → `handleInspectH2`; `http/1.1` → H1 loop.
+
+Because the upstream offer is bounded by the client offer (step 3), `up` is always in the client's
+support set, so step 5 never strands the client, and the mixed quadrants remain impossible. **Required
+test (C4 PR-merge blocker): an HTTP/1.1-only client through a native-H2 rule to an h2-capable origin must
+complete and be inspected over H1** — do not assume every inspected client offers h2. Validate the
+ClientHello-ALPN-peek mechanism against Go's TLS APIs in PR2; if read-only ClientHello ALPN extraction
+proves infeasible without a handshake, fall back to `GetConfigForClient` + accepting that the upstream
+offer for native-H2 rules is always `["h2","http/1.1"]` and the DOWNSTREAM constraint (step 5) is what
+prevents the strand — but then step 5 must offer `["h2","http/1.1"]` (not `[up]`) to an h1-only client
+whenever `up=="h2"` is impossible, i.e. re-derive from `chi.SupportedProtos ∩ [up]`. The intersection is
+the invariant; the peek-vs-GetConfigForClient plumbing is a PR2 implementation choice to be reviewer-validated.
+
+### C2 — Minimal product model with presence semantics: `StripALPN *bool` (v3.1)
+
+A plain persisted `bool` cannot distinguish an **old rule where the field is absent** from a **new rule
+explicitly setting `StripALPN=false`** — both deserialize to `false`, which would silently switch
+existing deployments to native H2 on upgrade. Use a presence-aware representation on the existing per-rule
+TLS-options surface (alongside `TLSSkipVerify`):
+
+```go
+StripALPN *bool `json:"stripAlpn,omitempty"` // nil = absent (pre-feature) => strip; else explicit
+```
+
+(or an equivalent config-versioning/migration mechanism with the same three-way semantics). **Resolver
+contract (binding):**
+
+```text
+field absent (nil) on a pre-feature rule → strip = true   (today's HTTP/1.1 downgrade)
+explicit *StripALPN == true              → strip = true
+explicit *StripALPN == false             → native H2 inspection
+```
+
+`resolveStripALPN(match) bool` implements exactly this. **No `default|enable|strip-alpn` tri-state** —
+Culvert's policy model has no rule inheritance/profile nesting a tri-state would express; a presence-aware
+bool is the minimal faithful model. Administrator UX stays a single checkbox (unchecked/absent = strip);
+presence tracking is an internal persistence concern, not surfaced as a third UI state.
+
+**Migration (binding):** an existing rule deserialized from current config has `StripALPN == nil` →
+`resolveStripALPN` returns `true` → byte-for-byte current downgrade behavior. Pinned by a test that loads
+a pre-feature rule JSON and asserts `strip==true`. The default flips to native H2 only through a
+documented operator rollout decision post-H2-qualification, never as an upgrade side effect. Config-surface
+registry (`config_surfaces.go`) + export/import + rollback parity updated when the field lands (PR5).
+
+### C3 — Post-commit enforcement: gRPC ≠ SSE, always with a reason code
+
+Once response HEADERS are committed on a stream-through response, enforcement differs by protocol and
+MUST be auditable:
+- **gRPC** (`content-type: application/grpc*`): prefer a **protocol-valid terminal trailer** —
+  `grpc-status` (non-OK, e.g. `PERMISSION_DENIED`) + `grpc-message` in the HEADERS trailer + `END_STREAM`
+  — whenever enforcement can still be expressed that way. A gRPC client surfaces this as a clean RPC
+  error, not a transport failure.
+- **SSE** (`text/event-stream`): a terminal trailer is not meaningful; terminate the stream after commit.
+- **`RST_STREAM` only as the last resort** — when no valid terminal response/trailer can still be emitted
+  safely (headers+some DATA already flushed, non-gRPC, or the trailer window is gone).
+- **Every post-commit enforcement emits an auditable reason code** (e.g. `blocked_post_commit_grpc_trailer`,
+  `blocked_post_commit_sse_terminate`, `blocked_post_commit_rst`) through the existing audit/request-log
+  path. The `blockResponder` H2 impl carries a reason argument on the post-commit entry point.
+
+**Binding behavioral invariants (not a frozen signature):** separate pre-commit and post-commit block
+operations; protocol-valid gRPC trailers where possible; SSE termination and RST_STREAM only when
+appropriate; an audit reason for every post-commit enforcement. **Do NOT lock the API to
+`PostCommit(contentType, reasonCode string)`** — the responder must act on **actual stream state and
+capabilities** (whether headers/DATA are already flushed, whether a trailer window remains, the stream
+handle for RST), not merely a content-type string. The concrete `blockResponder` post-commit signature is
+DERIVED from the real lifecycle extracted in PR2 (see C5), and the three reviewers validate the resulting
+API shape from the PR1/PR2 diff — not from this document. PR1 therefore ships only the pre-commit seam
+(the sole shape all three current writers actually exercise today) and leaves post-commit to PR2/PR3.
+
+### C4 — Validation gates split by delivery stage
+
+Tests are classified; do NOT weaken coverage, but do NOT make every adversarial case block the first
+functional H2 PR:
+- **PR-merge blockers** (every PR): fmt/vet/lint, `-race`, H1-path regression (PR0 oracle + existing
+  suite unchanged), and for a PR's own new surface: functional correctness + goroutine-leak + the
+  protocol-neutral-contract invariant (C5).
+- **Native-H2 default-enable blockers** (gate flipping the default OFF→ON, C2): full cross-protocol
+  quadrant proof, `:authority`/421 + coalescing isolation, request-smuggling rejection, CONTINUATION
+  flood + Rapid Reset (client AND malicious-origin legs), HPACK/decompression-bomb bounds under
+  concurrency, SSRF-on-H2-dial, trailers/GOAWAY, per-stream stall, global memory-budget backpressure,
+  high-concurrency `-race` over daemon-backed scanners.
+- **Post-delivery hardening** (tracked, not release-blocking): fuzz corpus for the framer boundary,
+  soak/load, additional malformed-frame matrices, 0-RTT re-verification if the toolchain gains early
+  data.
+
+The functional H2 PR (PR3) ships behind the default-OFF flag and needs only the PR-merge-blocker class
+green; the default-enable class gates PR5's rollout, not PR3's merge.
+
+### C5 — Invariant: ONE inspection pipeline, protocol-neutral exchange contract
+
+**No H2 implementation may create a second inspection pipeline.** H1 and H2 MUST invoke the *same*
+policy → scan → CDR → file-block orchestration through a **protocol-neutral exchange contract**, with no
+protocol branching inside the scan/CDR/file-block/scrub functions. The contract must naturally support the
+full lifecycle: **request inspection → upstream round-trip → buffered response inspection → stream-through
+response** (+ block via a `blockResponder`). PR2 extracts this seam by lifting the REAL lifecycle out of
+the current H1 inner loop (`proxy_tunnel.go:671-787`) — the exact function name/signature (e.g. some
+`inspectExchange(...)`) is **DERIVED from that extraction, not pre-frozen here**. PR3's H2 handler calls
+the SAME seam per stream. A test asserts both paths route through one instrumented choke point (an H1 and
+an H2 e2e both hit it), making "reused verbatim" a structural guarantee. The three reviewers validate the
+extracted contract's shape from the PR2 diff.
+
 ## Definition of done
 
-Reviewed plan (3 reviewers, no blocking findings — **DONE, v2**) → reviewed implementation (3 reviewers
-per PR) → green CI (fmt/vet/lint/race) → PRs ready for merge → updated docs → residual risks documented.
+Reviewed plan (3 reviewers, no blocking findings — **DONE, v2; v3 owner corrections applied**) →
+reviewed implementation (3 reviewers per PR) → green CI (fmt/vet/lint/race) → PRs ready for merge →
+updated docs → residual risks documented.
