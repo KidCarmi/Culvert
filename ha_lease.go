@@ -121,7 +121,11 @@ func (h *HAState) startLeaseKeepalive() {
 	if tick > haLeaseMaxTick {
 		tick = haLeaseMaxTick
 	}
-	go h.leaseKeepaliveLoop(stop, tick)
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.leaseKeepaliveLoop(stop, tick)
+	}()
 }
 
 // stopLeaseKeepalive halts the renew loop (idempotent).
@@ -199,7 +203,16 @@ func (h *HAState) selfFence(reason string) {
 	h.role = "standby"
 	h.since = time.Now()
 	h.leaseEpoch = 0
-	h.leaseStopCh = nil          // the keepalive loop exits by returning after selfFence
+	// CLOSE the keepalive stop channel rather than just nil it: when the
+	// loop's own renew round fenced, it exits by returning anyway — but a
+	// fence driven from OUTSIDE the loop (tests exercising leaseRenewOnce,
+	// any future caller) would otherwise leave the loop ticking forever with
+	// no channel left for stopLeaseKeepalive to close (Stop() then joins a
+	// goroutine that never exits).
+	if h.leaseStopCh != nil {
+		close(h.leaseStopCh)
+		h.leaseStopCh = nil
+	}
 	h.lastSelfFence = time.Now() // re-promotion hysteresis input (ADR-0005 S4)
 	// Persist INSIDE the lock: anyone observing the demotion (IsLeader/
 	// Status take h.mu) is then guaranteed the config write has completed —

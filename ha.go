@@ -66,6 +66,7 @@ type HAState struct {
 	term         uint64         // leadership epoch — bumped on each promotion (ADR-0004 Slice 1c)
 	pc           promoteContext // params captured at StartAsStandby so a manual/planned promote can reuse them
 	stopCh       chan struct{}
+	wg           sync.WaitGroup // tracks the standby sync + lease keepalive goroutines (Stop joins them)
 
 	// plannedPromotion (leader side) signals the standby, via the next HASync
 	// bundle, to perform a COORDINATED promotion — a planned handoff (e.g. a CP
@@ -315,7 +316,8 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	h.autoFailover = autoFailover
 	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile, onPromote: onPromote, set: true}
 	h.promoted.Store(false)
-	h.stopCh = make(chan struct{})
+	stopCh := make(chan struct{})
+	h.stopCh = stopCh
 	h.mu.Unlock()
 
 	// Persist HA config so standby restarts know HA is enabled.
@@ -329,7 +331,11 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 
 	logger.Printf("HA: starting as standby (leader=%q, auto_failover=%v)", sanitizeLog(leaderAddr), autoFailover)
 
-	go h.standbyLoop(ctx, leaderAddr, token, certFile, keyFile, caFile)
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.standbyLoop(ctx, stopCh, leaderAddr, token, certFile, keyFile, caFile)
+	}()
 }
 
 // haStandbyMaxFail is the number of consecutive HASync failures (≈ maxFail × 5s)
@@ -348,18 +354,31 @@ type standbyLoopState struct {
 	manualWarned              bool // warn-once latch for the auto-failover-disabled path
 }
 
-func (h *HAState) standbyLoop(ctx context.Context, leaderAddr, token string,
+// standbyLoop receives ITS OWN stop channel from StartAsStandby rather than
+// re-reading h.stopCh: promote() and Stop() close-then-nil the field, so a
+// loop goroutine scheduled after such a close would capture nil and select
+// on it forever — deadlocking the Stop() join. The passed channel is the one
+// created for this loop instance; if it was already closed before the
+// goroutine ran, the select fires immediately and the loop exits.
+func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderAddr, token string,
 	certFile, keyFile, caFile string) {
-	// Capture the stop channel once. promote() calls Stop() (which closes then
-	// nils h.stopCh), so reading the field per-iteration could select on a nil
-	// channel after a manual/planned promotion; the local keeps the closed
-	// channel reachable so the loop exits cleanly.
-	h.mu.RLock()
-	stopCh := h.stopCh
-	h.mu.RUnlock()
+	// The sync RPCs can block (gRPC wait-for-ready against an unreachable
+	// leader) far longer than a tick; the select below only observes stopCh
+	// BETWEEN ticks. Tie a derived context to stopCh so stopLoops interrupts
+	// in-flight work too — Stop() joins this goroutine and must not wait out
+	// a dial. The watcher exits via the deferred cancel when the loop returns.
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-stopCh:
+			cancel()
+		case <-loopCtx.Done():
+		}
+	}()
 
 	s := &standbyLoopState{
-		h: h, ctx: ctx, leaderAddr: leaderAddr, token: token,
+		h: h, ctx: loopCtx, leaderAddr: leaderAddr, token: token,
 		certFile: certFile, keyFile: keyFile, caFile: caFile,
 	}
 	// Connect to leader using the same gRPC client infrastructure as DPs.
@@ -664,9 +683,11 @@ func (h *HAState) promote(reason string) {
 	// Becoming leader makes the standby sync loop pointless — stop it so a
 	// manual/planned promotion (which runs outside the loop) doesn't leave it
 	// spinning against the old leader. Idempotent with the auto-failover path,
-	// which also exits the loop after promote returns.
-	h.Stop()
-	h.startLeaseKeepalive() // after Stop(): Stop halts the keepalive too
+	// which also exits the loop after promote returns. Signal-only (never
+	// Stop()): auto-failover reaches here FROM the standby loop goroutine, and
+	// joining would deadlock waiting on ourselves.
+	h.stopLoops()
+	h.startLeaseKeepalive() // after stopLoops(): it halts the keepalive too
 
 	logger.Printf("HA: now serving as leader (promoted from standby, term=%d)", newTerm)
 }
@@ -695,8 +716,10 @@ func (h *HAState) PromoteManually() error {
 	return nil
 }
 
-// Stop terminates the sync loop and the lease keepalive loop.
-func (h *HAState) Stop() {
+// stopLoops signals the sync loop and the lease keepalive loop to exit
+// WITHOUT waiting for them. Internal use only (promote runs on the standby
+// loop's own goroutine); external callers want Stop.
+func (h *HAState) stopLoops() {
 	h.mu.Lock()
 	if h.stopCh != nil {
 		close(h.stopCh)
@@ -704,6 +727,17 @@ func (h *HAState) Stop() {
 	}
 	h.mu.Unlock()
 	h.stopLeaseKeepalive()
+}
+
+// Stop terminates the sync loop and the lease keepalive loop and WAITS for
+// them to finish. The join matters: a fencing keepalive round that lost the
+// lease re-enters standby (enterStandbyResync → StartAsStandby) and persists
+// the HA config on its own goroutine — returning before it finishes lets
+// callers (shutdown, tests restoring globals) pull state out from under a
+// write that is still in flight.
+func (h *HAState) Stop() {
+	h.stopLoops()
+	h.wg.Wait()
 }
 
 // ── HA Config Persistence ───────────────────────────────────────────────────
