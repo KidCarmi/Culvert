@@ -222,7 +222,15 @@ func imageInspectTemplates() []Template {
 // a single trailing `*` is unsafe here. The set MUST stay in lock-step
 // with packaging/sudoers/culvert-maint (the parity test enforces it).
 func containerInspectSudoersLines() []string {
-	const prefix = `/usr/bin/docker inspect --format "{{json .Image}}" `
+	// The format value `{{json .Image}}` is ONE argv token that contains a
+	// space. sudo does NOT treat double quotes as argument grouping — a
+	// double-quoted `"{{json .Image}}"` is split on the space into two sudoers
+	// tokens, the arg count no longer matches, the rule silently misses, and
+	// `sudo -n` demands a password (verified on Amazon Linux 2023 sudo 1.9.x).
+	// Backslash-escape the space instead — the portable way to match a space in
+	// a sudoers command argument. fnmatch treats `{ } .` as literals, so the
+	// pattern matches exactly the argv token `{{json .Image}}` and nothing else.
+	const prefix = `/usr/bin/docker inspect --format {{json\ .Image}} `
 	lines := make([]string, 0, containerIDMaxLen-containerIDMinLen+1)
 	for n := containerIDMinLen; n <= containerIDMaxLen; n++ {
 		lines = append(lines, prefix+strings.Repeat("[0-9a-f]", n))
