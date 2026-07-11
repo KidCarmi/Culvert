@@ -510,7 +510,7 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		name := r.URL.Query().Get("name")
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
 		if name == "" {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
@@ -518,9 +518,7 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 		// Referential integrity (policy-refs P0): block via the shared
 		// objectReferences walk so this 409 and GET /api/objects/references
 		// stay a single source of truth.
-		if _, refs := objectReferences("category-group", name); len(refs) > 0 {
-			auditEvent(r, "category-group.remove.blocked", name, referenceBlockMessage("category-group", name, refs))
-			writeReferenceBlock(w, "category-group", name, refs)
+		if deleteBlockedByReferences(w, r, "category-group", name, "category-group.remove.blocked") {
 			return
 		}
 		if err := globalCategoryGroups.Delete(name); err != nil {
@@ -632,7 +630,7 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		if !requireRole(w, r, RoleOperator) {
 			return
 		}
-		name := r.URL.Query().Get("name")
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
 		if name == "" {
 			http.Error(w, "name query param required", http.StatusBadRequest)
 			return
@@ -640,12 +638,11 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen 
 		// Referential integrity (policy-refs P0): block deletion if ANY
 		// consumer references the category — policy rules (DestCategory) OR
 		// category-group membership. Both come from the single objectReferences
-		// walk, so the 409 and GET /api/objects/references can never disagree.
-		// Deleting a referenced category was fail-open: a Deny rule scoped to
-		// it silently stopped blocking.
-		if _, refs := objectReferences("category", name); len(refs) > 0 {
-			auditEvent(r, "urlcat.delete.blocked", name, referenceBlockMessage("category", name, refs))
-			writeReferenceBlock(w, "category", name, refs)
+		// walk (via deleteBlockedByReferences), so the 409 and
+		// GET /api/objects/references can never disagree. Deleting a referenced
+		// category was fail-open: a Deny rule scoped to it silently stopped
+		// blocking.
+		if deleteBlockedByReferences(w, r, "category", name, "urlcat.delete.blocked") {
 			return
 		}
 		if err := catStore.Delete(name); err != nil {

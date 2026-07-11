@@ -30,7 +30,7 @@ rule-shaped** — the envelope is the product-wide "Where Used" seam the M3
 `whereUsed` UI contract (`DESIGN-SYSTEM.md` §3) already anticipates.
 
 ```
-GET /api/objects/references?type=<category|category-group|file-profile|idp>&name=<objectName>
+GET /api/objects/references?type=<category|category-group|file-profile>&name=<objectName>
 → 200
 {
   "object": {"type": "file-profile", "name": "Executables"},
@@ -54,8 +54,19 @@ GET /api/objects/references?type=<category|category-group|file-profile|idp>&name
 - The walk covers every `PolicyRule` field that points at the object type:
   `category` → `DestCategory`; `category-group` → `DestCategoryGroup`;
   `file-profile` → `FileProfile` (matched case-insensitively by name, the
-  reference form rules use today); `idp` → `Auth.ProviderRefs` for auth
-  rules. Case-insensitive to match the engine's matching.
+  reference form rules use today). Case-insensitive to match the engine's
+  matching. **`idp` is NOT covered in slice 1**: auth rules reference IdPs
+  by ID (`Auth.ProviderRefs` hold IdP IDs, not names), so a name-keyed walk
+  cannot answer it; IdP deletion is fail-CLOSED already (a dangling
+  providerRef fails SSO 403). It joins the walk with the object-ID work.
+  The name query param is trimmed identically by the endpoint and the delete
+  guards, so they never disagree on whitespace-padded input.
+
+  The endpoint answers "what CONSUMES this object", not "does this object
+  exist" — an unknown object name returns 200 with an empty list, not 404.
+  Per-type existence validation (catStore/groups/profiles) is a caller
+  concern; the P1 UI only queries names it already has from a real object
+  list. Add existence-checking later if direct-API ergonomics need it.
 - **A category has TWO consumer kinds, not one** (architect review): policy
   rules (`DestCategory`) AND category-group *membership*. The walk emits
   both — group membership as a generic `consumerType:"category-group"`

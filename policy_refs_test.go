@@ -227,6 +227,29 @@ func TestApiFileblockProfiles_DeleteBadIDFallsThroughTo404(t *testing.T) {
 	}
 }
 
+// The shared delete guard fails CLOSED on an unknown object type: a typo'd
+// type must refuse the delete (409), never read as "unreferenced → safe".
+func TestDeleteBlockedByReferences_FailsClosedOnUnknownType(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := operatorReq(t, http.MethodDelete, "/x", "198.51.100.62")
+	if !deleteBlockedByReferences(rec, req, "file_profile" /* typo */, "P", "x.blocked") {
+		t.Fatal("unknown type did not block — fail-open by typo")
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unknown type: got %d; want 409 (fail-closed)", rec.Code)
+	}
+}
+
+// idp is no longer a walk type in slice 1 (auth rules reference IdPs by ID,
+// not name); the endpoint rejects it rather than silently returning empty.
+func TestApiObjectReferences_IdpRejected(t *testing.T) {
+	rec := httptest.NewRecorder()
+	apiObjectReferences(rec, viewerReq(t, "/api/objects/references?type=idp&name=okta"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("type=idp: got %d; want 400", rec.Code)
+	}
+}
+
 func TestObjectReferences_StableWhenRuleIDEmpty(t *testing.T) {
 	// A rule with an empty ID (freshly created in-memory before a reload)
 	// still produces a usable ref keyed on name/view — id is best-effort

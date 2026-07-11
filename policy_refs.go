@@ -31,11 +31,16 @@ type objectRef struct {
 
 // objectRefType enumerates the shared-object kinds the walk understands.
 // Unknown kinds are a caller error (400 at the endpoint).
+//
+// idp is deliberately NOT here: auth rules reference IdPs by ID
+// (Auth.ProviderRefs hold IdP IDs, not names), so a name-keyed walk cannot
+// answer it, and IdP deletion is fail-CLOSED already (a dangling providerRef
+// fails SSO 403, not open). It joins this walk with the object-ID work that
+// makes ID-vs-name references first-class (see roadmap/POLICY-REFS-PLAN.md).
 var objectRefTypes = map[string]bool{
 	"category":       true,
 	"category-group": true,
 	"file-profile":   true,
-	"idp":            true,
 }
 
 // consumerTypeForRule maps a rule's stage to its whereUsed consumerType/view.
@@ -65,59 +70,68 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 	rules := policyStore.List()
 	for i := range rules {
 		r := &rules[i]
-		consumerType, view := consumerTypeForRule(r)
-		add := func(detail string) {
+		if detail := ruleReferencesObject(r, objType, name); detail != "" {
+			consumerType, view := consumerTypeForRule(r)
 			refs = append(refs, objectRef{
 				ConsumerType: consumerType, ID: r.ID, Name: r.Name,
 				Detail: detail, View: view,
 			})
 		}
-		switch objType {
-		case "category":
-			if strings.EqualFold(string(r.DestCategory), name) {
-				add("destCategory")
-			}
-		case "category-group":
-			if strings.EqualFold(r.DestCategoryGroup, name) {
-				add("destCategoryGroup")
-			}
-		case "file-profile":
-			if strings.EqualFold(string(r.FileProfile), name) {
-				add("fileProfile")
-			}
-		case "idp":
-			if r.Auth != nil {
-				for _, ref := range r.Auth.ProviderRefs {
-					if strings.EqualFold(ref, name) {
-						add("providerRefs")
-						break
-					}
-				}
-			}
-		}
 	}
 	// A category is referenced by TWO kinds of consumer: policy rules
-	// (DestCategory, above) AND category groups (membership). The Where-Used
-	// endpoint and the delete guard must see both, or the endpoint
-	// under-reports and the URLCat delete needs a second, separate check
-	// that could disagree with it. Emit group membership as a generic
-	// consumer entry (consumerType "category-group") so the walk stays the
-	// single source of truth.
+	// (DestCategory, above) AND category groups (membership). Emitting both
+	// keeps the walk the single source of truth — the Where-Used endpoint
+	// and the URLCat delete block off the same list and can never disagree.
 	if objType == "category" {
-		for _, g := range globalCategoryGroups.List() {
-			for _, c := range g.Categories {
-				if strings.EqualFold(c, name) {
-					refs = append(refs, objectRef{
-						ConsumerType: "category-group", ID: g.ID, Name: g.Name,
-						Detail: "categories", View: "catgroups",
-					})
-					break
-				}
+		refs = append(refs, categoryGroupMembers(name)...)
+	}
+	sortObjectRefs(refs)
+	return true, refs
+}
+
+// ruleReferencesObject returns the referencing field name if the rule points
+// at the named object of the given type, else "". Case-insensitive to match
+// the engine.
+func ruleReferencesObject(r *PolicyRule, objType, name string) string {
+	switch objType {
+	case "category":
+		if strings.EqualFold(string(r.DestCategory), name) {
+			return "destCategory"
+		}
+	case "category-group":
+		if strings.EqualFold(r.DestCategoryGroup, name) {
+			return "destCategoryGroup"
+		}
+	case "file-profile":
+		if strings.EqualFold(string(r.FileProfile), name) {
+			return "fileProfile"
+		}
+	}
+	return ""
+}
+
+// categoryGroupMembers returns the category groups whose membership includes
+// the named category, as generic consumer entries.
+func categoryGroupMembers(name string) []objectRef {
+	var refs []objectRef
+	for _, g := range globalCategoryGroups.List() {
+		for _, c := range g.Categories {
+			if strings.EqualFold(c, name) {
+				refs = append(refs, objectRef{
+					ConsumerType: "category-group", ID: g.ID, Name: g.Name,
+					Detail: "categories", View: "catgroups",
+				})
+				break
 			}
 		}
 	}
-	// Stable order: by consumerType, then name, then id — deterministic
-	// across calls so the block reason and the endpoint list never reorder.
+	return refs
+}
+
+// sortObjectRefs orders by consumerType, then name, then id — deterministic
+// across calls so the 409 message, the audit detail, and the endpoint list
+// never reorder.
+func sortObjectRefs(refs []objectRef) {
 	sort.Slice(refs, func(a, b int) bool {
 		if refs[a].ConsumerType != refs[b].ConsumerType {
 			return refs[a].ConsumerType < refs[b].ConsumerType
@@ -127,7 +141,28 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 		}
 		return refs[a].ID < refs[b].ID
 	})
-	return true, refs
+}
+
+// deleteBlockedByReferences enforces referential integrity for a
+// shared-object delete: it writes a 409 (and audits the attempt) when the
+// object is referenced, AND fails CLOSED when the object type is unknown —
+// an unrecognized type means the walk cannot verify safety, so refusing
+// beats silently deleting (honoring objectReferences' found contract, which
+// a bare `len(refs) > 0` check would discard). Returns true when the caller
+// must stop because a response was written.
+func deleteBlockedByReferences(w http.ResponseWriter, r *http.Request, objType, name, auditAction string) bool {
+	found, refs := objectReferences(objType, name)
+	if !found {
+		auditEvent(r, auditAction, name, "reference check unavailable for object type "+objType)
+		http.Error(w, "cannot verify references for object type "+objType, http.StatusConflict)
+		return true
+	}
+	if len(refs) == 0 {
+		return false
+	}
+	auditEvent(r, auditAction, name, referenceBlockMessage(objType, name, refs))
+	writeReferenceBlock(w, objType, name, refs)
+	return true
 }
 
 // referenceBlockMessage renders the human-readable 409 summary: names the
