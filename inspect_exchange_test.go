@@ -210,6 +210,76 @@ func TestRunInspectExchange_BlockAndLifecycle(t *testing.T) {
 	})
 }
 
+// errAfterReadCloser yields some bytes and then fails with a non-EOF error,
+// simulating an origin that resets / truncates the response mid-body while the
+// scan buffer is reading it. It records Close() calls to prove no double-close.
+type errAfterReadCloser struct {
+	data   []byte
+	off    int
+	closes int
+}
+
+func (e *errAfterReadCloser) Read(p []byte) (int, error) {
+	if e.off < len(e.data) {
+		n := copy(p, e.data[e.off:])
+		e.off += n
+		return n, nil
+	}
+	return 0, io.ErrUnexpectedEOF // origin reset / truncation, NOT io.EOF
+}
+
+func (e *errAfterReadCloser) Close() error { e.closes++; return nil }
+
+// TestRunInspectExchange_ScanReadErrorFailsClosed is the regression guard for the
+// H2 silent-empty-200 defect: when the scan buffer cannot read the full response
+// body (origin RST/GOAWAY/truncation mid-buffer), runInspectExchange must return
+// exDeliverError — NOT exBlocked — so both transports fail closed (H1 tears the
+// tunnel down; H2 resets the stream). Conflating the read failure with a policy
+// block let the H2 handler write nothing and http2.Server emit a clean, empty,
+// cacheable 200 for what was actually a failed fetch. The scan responder must not
+// be invoked (no block page was written) and deliver must not run (no truncated
+// body reaches the client).
+func TestRunInspectExchange_ScanReadErrorFailsClosed(t *testing.T) {
+	// Enable the DPI scanner with a never-matching pattern and use a text
+	// content-type so bodyNeedsBuffering() is true and the scan buffer engages.
+	origScanner := dpiScanner
+	dpiScanner = &ContentScanner{}
+	if err := dpiScanner.Add("NEVERMATCHZZZ"); err != nil {
+		t.Fatalf("enable dpi: %v", err)
+	}
+	t.Cleanup(func() { dpiScanner = origScanner })
+
+	body := &errAfterReadCloser{data: []byte("partial-body-then-reset")}
+	blk := &spyResponder{}
+	delivered := false
+
+	ex := baseExchange()
+	ex.responder = blk
+	ex.roundTrip = func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/plain"}}, // → bodyNeedsBuffering true (DPI on)
+			Body:       body,
+		}, nil
+	}
+	ex.deliver = func(*http.Response) error { delivered = true; return nil }
+
+	out := runInspectExchange(ex)
+
+	if out.kind != exDeliverError {
+		t.Fatalf("scan read error: kind = %v, want exDeliverError (must fail closed, never exBlocked/exDelivered)", out.kind)
+	}
+	if delivered {
+		t.Fatal("deliver must NOT run on a scan read error (a truncated body must not reach the client)")
+	}
+	if blk.calls != 0 {
+		t.Fatalf("block responder invoked %d times on a read error, want 0 (no block page was written — this is a failure, not a block)", blk.calls)
+	}
+	if body.closes == 0 {
+		t.Fatal("the origin body must be closed on a scan read error (no fd leak)")
+	}
+}
+
 // TestRunInspectExchange_BodyClose verifies resp.Body is closed exactly once on
 // the delivered and deliverError paths and NOT closed by the seam on the upgrade
 // path (the transport driver owns the 101 teardown).
