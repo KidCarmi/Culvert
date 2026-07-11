@@ -1,0 +1,133 @@
+name: Re-sign Release Catalog (weekly freshness)
+
+# M1-4 (design §4 Slice D) — the weekly no-bump re-sign SCHEDULER. The served
+# catalog's expires_at must never lapse even with no releases (180d window,
+# re-signed weekly ⇒ ~25 retries of headroom; the SEC-F5 canary in
+# verify-dual-publish.yml goes RED after 2 missed weeks).
+#
+# This workflow SIGNS NOTHING and holds no publish credentials (OPS-F4 +
+# SEC-F6c posture): it only sequences, because the publishers' workflow_run
+# guards fire on push events and deliberately do NOT widen to resign runs:
+#
+#   1. dispatch ci.yml AT THE LATEST v* TAG REF with resign=true — the
+#      keyless signature's SAN is then ci.yml@refs/tags/v<latest>, matching
+#      the pinned identity; ci.yml's catalog-resign job owns every trust
+#      decision (verify-before-read, latest-tag assert, prune — SEC-F1/F2a).
+#   2. poll that run to SUCCESS (bounded, fail-closed).
+#   3. dispatch the R2 publisher with the EXACT resign asset name (OPS-F2) —
+#      its resign path adds the SEC-F2b monotonic live binding.
+#   4. dispatch the Pages publisher at the same tag (dual-publish parity for
+#      re-signs — design §4 recommended option).
+#   5. dispatch the dual-publish verify (Slice A) as the end-to-end proof.
+#
+# Every poll is bounded and fail-closed: a timeout or a failed downstream run
+# turns THIS run red — that is the operator alert for a broken re-sign flow
+# (the appliance-side 30d stale alert remains the last-line backstop).
+#
+# SECURITY INVARIANTS (pinned by TestWorkflowInvariants):
+#   - permissions: actions:write + contents:read ONLY; NO id-token, NO
+#     secrets.* reference anywhere. A scheduler must not be able to sign.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC; verify-dual-publish's canary runs 09:00
+  workflow_dispatch:
+
+permissions:
+  actions: write   # dispatch ci.yml + publishers + verify
+  contents: read   # resolve the latest tag + the resign asset name
+
+concurrency:
+  group: resign-catalog
+  cancel-in-progress: false
+
+jobs:
+  sequence:
+    name: Sequence re-sign → publish → verify
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner (egress block)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+
+      - name: Resolve the latest v* release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Highest semver tag (not "most recent release object") — the same
+          # authority the catalog-resign job re-asserts internally (SEC-F2a).
+          TAG="$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate \
+                   --jq '.[].ref | sub("^refs/tags/"; "")' \
+                 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          test -n "$TAG" || { echo "FATAL: no vX.Y.Z tags found"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Re-signing catalog for latest tag $TAG"
+
+      # dispatch_and_wait: gh workflow run is async and returns no run id —
+      # find the first run of that workflow+event+ref created after T0, then
+      # poll it to completion. Bounded; any non-success conclusion fails.
+      # One step end-to-end so the helper is defined exactly once (drift
+      # hazard otherwise — impl review LOW).
+      - name: Re-sign at the tag, then publish R2 → Pages → verify (fail-closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          dispatch_and_wait() { # <workflow-file> <ref> <max-wait-seconds> [extra gh args...]
+            local wf="$1" ref="$2" max="$3"; shift 3
+            local t0 run_id status conclusion waited=0
+            t0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref "$ref" "$@"
+            # Find the dispatched run (creation is eventually consistent).
+            run_id=""
+            for i in $(seq 1 24); do
+              run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$wf" \
+                          --event workflow_dispatch --branch "$ref" \
+                          --json databaseId,createdAt \
+                          --jq "[.[] | select(.createdAt >= \"$t0\")] | sort_by(.createdAt) | first | .databaseId // empty" \
+                          --limit 10)"
+              [ -n "$run_id" ] && break
+              sleep 5
+            done
+            test -n "$run_id" || { echo "FATAL: dispatched $wf@$ref but no run appeared (fail-closed)"; return 1; }
+            echo "watching $wf run $run_id (max ${max}s)"
+            while :; do
+              status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status --jq .status)"
+              if [ "$status" = "completed" ]; then
+                conclusion="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json conclusion --jq .conclusion)"
+                [ "$conclusion" = "success" ] || { echo "FATAL: $wf run $run_id concluded '$conclusion'"; return 1; }
+                echo "$wf run $run_id succeeded"; return 0
+              fi
+              waited=$((waited + 20))
+              [ "$waited" -le "$max" ] || { echo "FATAL: $wf run $run_id still '$status' after ${max}s (fail-closed timeout)"; return 1; }
+              sleep 20
+            done
+          }
+
+          # 1) Re-sign under the tag's pinned signing identity.
+          dispatch_and_wait ci.yml "$TAG" 1800 -f resign=true
+
+          # 2) Resolve the freshly-attached resign asset by EXACT name (OPS-F2).
+          ASSET="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+                     --jq '.assets[].name' \
+                   | grep -E "^culvert-release-catalog-${TAG}-r[0-9]{8}\.tar\.gz$" \
+                   | sort -r | head -n1)"
+          test -n "$ASSET" || { echo "FATAL: re-sign run succeeded but no resign asset found on $TAG"; exit 1; }
+          echo "resign asset: $ASSET"
+
+          # 3) R2 first (the origin appliances read), with the SEC-F2b-guarded
+          # resign input; then Pages (dual-publish parity); then the Slice A
+          # verify proves both origins serve the re-signed bytes end-to-end.
+          DEFAULT_BRANCH="${GITHUB_REF_NAME:-main}"
+          dispatch_and_wait publish-catalog-r2.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG" -f "resign_asset=$ASSET"
+          dispatch_and_wait publish-catalog-pages.yml "$DEFAULT_BRANCH" 1200 -f "tag=$TAG"
+          dispatch_and_wait verify-dual-publish.yml "$DEFAULT_BRANCH" 1800 -f "tag=$TAG"
+          echo "re-sign flow complete: $ASSET live on both origins and verified"

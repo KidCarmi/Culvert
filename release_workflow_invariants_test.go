@@ -441,27 +441,43 @@ func assertVerifyWorkflowCredentialFree(t *testing.T, doc wfDoc) {
 }
 
 // assertExactAssetSelection: every `--pattern` argument in run: bodies is
-// wildcard-free, and the exact tag-derived pattern is the one used — checked in
-// the REAL download context so a comment cannot satisfy it (OPS-F2).
+// wildcard-free, and the download uses an EXACT name — either the tag-derived
+// literal, or (M1-4 amendment, declared in the design §10 plan) a `$ASSET`
+// resolved from the release's ASSET LIST by the anchored resign-name regex
+// with the exact original name as the fallback. A filesystem glob can never
+// reappear (OPS-F2).
 func assertExactAssetSelection(t *testing.T, doc wfDoc) {
 	t.Helper()
 	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
 	exactSeen := false
 	for _, job := range doc.Jobs {
 		for i := range job.Steps {
-			for _, m := range patternRE.FindAllStringSubmatch(runScript(job.Steps[i].Run), -1) {
+			run := runScript(job.Steps[i].Run)
+			for _, m := range patternRE.FindAllStringSubmatch(run, -1) {
 				arg := strings.Trim(m[1], `"'`)
 				if strings.ContainsAny(arg, "*?[") {
 					t.Fatalf("verify workflow must download assets by EXACT name, never a glob (OPS-F2); got --pattern %q", arg)
 				}
-				if arg == "culvert-release-catalog-${TAG}.tar.gz" {
+				switch arg {
+				case "culvert-release-catalog-${TAG}.tar.gz":
 					exactSeen = true
+				case "$ASSET":
+					// The resolved form is exact ONLY if the same step derives
+					// $ASSET from the asset list via the anchored resign regex
+					// AND falls back to the exact original name.
+					if runContainsAll(run,
+						`-r[0-9]{8}\.tar\.gz$`,
+						`ASSET="culvert-release-catalog-${TAG}.tar.gz"`) {
+						exactSeen = true
+					} else {
+						t.Fatalf("--pattern \"$ASSET\" without the anchored resign-name resolution + exact fallback in the same step (OPS-F2)")
+					}
 				}
 			}
 		}
 	}
 	if !exactSeen {
-		t.Fatal("verify workflow must select the release bundle via --pattern \"culvert-release-catalog-${TAG}.tar.gz\" (exact tag-derived name)")
+		t.Fatal("verify workflow must select the release bundle by exact name (tag-derived literal or list-resolved $ASSET with exact fallback)")
 	}
 }
 
@@ -486,5 +502,277 @@ func assertServedVerifyPassProofs(t *testing.T, doc wfDoc, n int) {
 	}
 	if passProof != n {
 		t.Fatalf("expected exactly %d baked-root served-verify steps; found %d", n, passProof)
+	}
+}
+
+// ─── M1-4: re-sign invariants (SEC-F1/F2a/F2b, OPS-F1/F2/F4) ──────────────────
+//
+// Every §10 row for the re-sign slice that names an "invariant" is pinned here,
+// mutation-proven: each assertion locates its step by run-body SIGNATURE with a
+// -1 sentinel, so deleting or reordering a guard fails the test rather than
+// passing vacuously.
+
+const (
+	ciWorkflowPath      = ".github/workflows/ci.yml"
+	resignSchedulerPath = ".github/workflows/resign-catalog.yml"
+	pagesWorkflowPath   = ".github/workflows/publish-catalog-pages.yml"
+)
+
+func loadWorkflow(t *testing.T, path string) wfDoc {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var doc wfDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if len(doc.Jobs) == 0 {
+		t.Fatalf("%s has no jobs", path)
+	}
+	return doc
+}
+
+// TestResignCIInvariants pins ci.yml's re-sign surface.
+func TestResignCIInvariants(t *testing.T) {
+	doc := loadWorkflow(t, ciWorkflowPath)
+	assertResignDispatchGuards(t, doc)
+
+	// The dedicated resign job: dispatch+tag+resign-gated, NO docker dependency.
+	resign, ok := doc.Jobs["catalog-resign"]
+	if !ok {
+		t.Fatal("ci.yml must carry the catalog-resign job")
+	}
+	if !runContainsAll(resign.If, "workflow_dispatch", "refs/tags/v", "inputs.resign") {
+		t.Fatalf("catalog-resign must require a resign tag dispatch; got if: %q", resign.If)
+	}
+	assertResignStepOrder(t, resign)
+	assertNoGlobPatterns(t, "catalog-resign", resign)
+}
+
+// assertResignDispatchGuards pins BOTH halves of OPS-F1: the loud fail-fast
+// guard job AND docker's structural tag-dispatch skip (which skips the whole
+// needs-chain, so a dispatched tag run can never overwrite release assets).
+func assertResignDispatchGuards(t *testing.T, doc wfDoc) {
+	t.Helper()
+	guard, ok := doc.Jobs["resign-dispatch-guard"]
+	if !ok {
+		t.Fatal("OPS-F1: ci.yml must carry the resign-dispatch-guard job (bare tag dispatches must fail loudly)")
+	}
+	if !runContainsAll(guard.If, "workflow_dispatch", "refs/tags/") {
+		t.Fatalf("guard job must be scoped to tag-ref dispatches; got if: %q", guard.If)
+	}
+	guardEnforces := false
+	for i := range guard.Steps {
+		if runContainsAll(runScript(guard.Steps[i].Run), `"$RESIGN" != "true"`, "exit 1") {
+			guardEnforces = true
+		}
+	}
+	if !guardEnforces {
+		t.Fatal("OPS-F1: the guard step must exit 1 when resign != true")
+	}
+	docker, ok := doc.Jobs["docker"]
+	if !ok {
+		t.Fatal("ci.yml docker job missing")
+	}
+	if !runContainsAll(docker.If, "workflow_dispatch", "refs/tags/", "!(") {
+		t.Fatalf("docker must exclude tag-ref dispatches (needs-chain skip); got if: %q", docker.If)
+	}
+}
+
+// assertResignStepOrder pins the SEC-F1 + SEC-F2a + OPS-F2 step ordering inside
+// catalog-resign, located by run-body signature (-1 sentinel ⇒ missing step
+// FAILS, never vacuously passes). THE load-bearing order: the latest-tag assert
+// and the verifying gate both run BEFORE cosign signs anything; the
+// attach+prune step comes last.
+func assertResignStepOrder(t *testing.T, resign wfJob) {
+	t.Helper()
+	latest, download, gate, sign, keyless, prune := -1, -1, -1, -1, -1, -1
+	for i := range resign.Steps {
+		run := runScript(resign.Steps[i].Run)
+		switch {
+		case latest == -1 && runContainsAll(run, "sort -V", "tail -n1", `"$REF_NAME" = "$LATEST"`):
+			latest = i
+		case download == -1 && strings.Contains(run, `culvert-release-catalog-${REF_NAME}.tar.gz`):
+			download = i
+		case gate == -1 && strings.Contains(run, "TestReleaseResignGate"):
+			gate = i
+		case sign == -1 && strings.Contains(run, "cosign sign-blob"):
+			sign = i
+		case keyless == -1 && strings.Contains(run, "TestReleaseCatalogKeylessVerify"):
+			keyless = i
+		case prune == -1 && strings.Contains(run, "delete-asset"):
+			prune = i
+		}
+	}
+	if latest == -1 {
+		t.Fatal("SEC-F2a: the latest-tag assert step is missing from catalog-resign (old-tag re-sign = unbounded freshness extension)")
+	}
+	if download == -1 {
+		t.Fatal("OPS-F2: the exact-name original-bundle download step is missing")
+	}
+	if gate == -1 {
+		t.Fatal("SEC-F1: the TestReleaseResignGate step (verify-before-read) is missing")
+	}
+	if sign == -1 || keyless == -1 {
+		t.Fatal("catalog-resign must keyless-sign and then end-to-end verify the resigned index")
+	}
+	if prune == -1 {
+		t.Fatal("OPS-F2: the superseded-resign prune step is missing (multi-asset globs would mis-pick)")
+	}
+	ordered := latest < download && download < gate && gate < sign && sign < keyless && keyless < prune
+	if !ordered {
+		t.Fatalf("catalog-resign step order violated: latest(%d) < download(%d) < gate(%d) < sign(%d) < keyless(%d) < prune(%d) required (verify must precede sign — SEC-F1)",
+			latest, download, gate, sign, keyless, prune)
+	}
+}
+
+// assertNoGlobPatterns: no glob --pattern anywhere in the job (OPS-F2).
+func assertNoGlobPatterns(t *testing.T, name string, job wfJob) {
+	t.Helper()
+	patternRE := regexp.MustCompile(`--pattern\s+("[^"]*"|'[^']*'|\S+)`)
+	for i := range job.Steps {
+		for _, m := range patternRE.FindAllStringSubmatch(runScript(job.Steps[i].Run), -1) {
+			if arg := strings.Trim(m[1], `"'`); strings.ContainsAny(arg, "*?[") {
+				t.Fatalf("%s must download by exact name, never a glob; got --pattern %q", name, arg)
+			}
+		}
+	}
+}
+
+// TestResignR2PublisherInvariants pins the SEC-F2b monotonic live binding and
+// the M1-4 exact-name extension on the R2 publisher.
+func TestResignR2PublisherInvariants(t *testing.T) {
+	doc := loadR2Workflow(t)
+	job := requirePublishJob(t, doc)
+
+	// Locate verify / monotonic-binding / promote by signature.
+	verifyIdx, bindIdx, promoteIdx := -1, -1, -1
+	for i := range job.Steps {
+		run := runScript(job.Steps[i].Run)
+		switch {
+		case verifyIdx == -1 && strings.Contains(run, "TestServedVerify_BakedRootGate"):
+			verifyIdx = i
+		case bindIdx == -1 && runContainsAll(run, "catalog_version", "generated_at", "release-catalog/index.json"):
+			bindIdx = i
+		case promoteIdx == -1 && strings.Contains(run, "copy-object"):
+			promoteIdx = i
+		}
+	}
+	if bindIdx == -1 {
+		t.Fatal("SEC-F2b: the monotonic live-binding step is missing from the R2 publisher (a resign could roll the live pointer backward)")
+	}
+	bindOrdered := verifyIdx != -1 && promoteIdx != -1 && verifyIdx < bindIdx && bindIdx < promoteIdx
+	if !bindOrdered {
+		t.Fatalf("SEC-F2b binding must sit between verify(%d) and promote(%d); got bind(%d)", verifyIdx, promoteIdx, bindIdx)
+	}
+	bind := job.Steps[bindIdx]
+	if !strings.Contains(bind.If, "resign_asset") {
+		t.Fatalf("the monotonic binding step must be gated on the resign_asset input; got if: %q", bind.If)
+	}
+	if !runContainsAll(bind.Run, "-lt", "exit 1", "sort") {
+		t.Fatal("the monotonic binding must fail closed on version regression and non-newer generated_at")
+	}
+	// OPS-F2 (M1-4 extension): the publisher downloads by exact name — no glob
+	// --pattern, and the resign asset name is validated by the anchored regex.
+	assertNoGlobPatterns(t, "R2 publisher", job)
+	anchored := false
+	for i := range job.Steps {
+		if strings.Contains(runScript(job.Steps[i].Run), `-r[0-9]{8}\.tar\.gz$`) {
+			anchored = true
+		}
+	}
+	if !anchored {
+		t.Fatal("R2 publisher must validate resign_asset against the anchored resign-name regex before using it as an R2 key segment")
+	}
+}
+
+// TestResignSchedulerInvariants: the scheduler sequences but must not be able
+// to SIGN or PUBLISH — actions:write + contents:read only, no id-token, zero
+// secrets-context mentions — and its dispatch chain is ordered ci → R2 → Pages
+// → verify with fail-closed bounded polling.
+func TestResignSchedulerInvariants(t *testing.T) {
+	doc := loadWorkflow(t, resignSchedulerPath)
+	if permsGrantIDToken(doc.Permissions) || permsContentsWritable(doc.Permissions) {
+		t.Fatal("scheduler must have no id-token and contents at most read")
+	}
+	for name, job := range doc.Jobs {
+		if permsGrantIDToken(job.Permissions) || permsContentsWritable(job.Permissions) {
+			t.Fatalf("scheduler job %q must have no id-token and contents at most read", name)
+		}
+	}
+	raw, err := os.ReadFile(resignSchedulerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expr := range wfExprRE.FindAllString(string(raw), -1) {
+		if regexp.MustCompile(`\bsecrets\b`).MatchString(expr) {
+			t.Fatalf("scheduler expression mentions the secrets context: %q", expr)
+		}
+	}
+	// Sequencing: one job whose combined run bodies dispatch ci.yml with
+	// resign=true, then the R2 publisher with resign_asset, then Pages, then
+	// the dual verify — in that order — with a fail-closed conclusion check.
+	var all strings.Builder
+	for _, job := range doc.Jobs {
+		for i := range job.Steps {
+			all.WriteString(runScript(job.Steps[i].Run))
+			all.WriteByte('\n')
+		}
+	}
+	seq := all.String()
+	ci := strings.Index(seq, "dispatch_and_wait ci.yml")
+	r2 := strings.Index(seq, "dispatch_and_wait publish-catalog-r2.yml")
+	pg := strings.Index(seq, "dispatch_and_wait publish-catalog-pages.yml")
+	vf := strings.Index(seq, "dispatch_and_wait verify-dual-publish.yml")
+	if ci == -1 || r2 == -1 || pg == -1 || vf == -1 {
+		t.Fatalf("scheduler must dispatch ci(%d), r2(%d), pages(%d), verify(%d) — one is missing", ci, r2, pg, vf)
+	}
+	dispatchOrdered := ci < r2 && r2 < pg && pg < vf
+	if !dispatchOrdered {
+		t.Fatal("scheduler dispatch order must be ci → R2 → Pages → verify (OPS-F4)")
+	}
+	if !runContainsAll(seq, "resign=true", "resign_asset=", `"$conclusion" = "success"`, "fail-closed") {
+		t.Fatal("scheduler must pass resign=true / resign_asset and poll each run to a fail-closed success conclusion")
+	}
+}
+
+// TestResignPagesAndCanaryInvariants: the Pages newest-resign pick and the
+// SEC-F5 weekly freshness canary on the dual verify.
+func TestResignPagesAndCanaryInvariants(t *testing.T) {
+	pages := loadWorkflow(t, pagesWorkflowPath)
+	pick := false
+	for _, job := range pages.Jobs {
+		for i := range job.Steps {
+			run := runScript(job.Steps[i].Run)
+			if runContainsAll(run, `-r*.tar.gz`, "sort | tail -n1", `BUNDLE="dl/culvert-release-catalog-${TAG}.tar.gz"`) {
+				pick = true
+			}
+		}
+	}
+	if !pick {
+		t.Fatal("Pages publisher must prefer the newest resign bundle with an exact-original fallback (the old `ls | head -n1` picked the OLDEST resign)")
+	}
+
+	verify := loadWorkflow(t, dualVerifyWorkflowPath)
+	canary := false
+	for _, job := range verify.Jobs {
+		for i := range job.Steps {
+			st := job.Steps[i]
+			if !strings.Contains(st.Run, "generated_at") || !strings.Contains(st.Run, "AGE") {
+				continue
+			}
+			if !strings.Contains(st.If, "schedule") {
+				t.Fatalf("the freshness canary must run on schedule events only; got if: %q", st.If)
+			}
+			if !runContainsAll(st.Run, "14", "exit 1") {
+				t.Fatal("the freshness canary must fail when the live generated_at is older than 14 days (2× cadence)")
+			}
+			canary = true
+		}
+	}
+	if !canary {
+		t.Fatal("SEC-F5: verify-dual-publish must carry the weekly live-freshness canary step")
 	}
 }

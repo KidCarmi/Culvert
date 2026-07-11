@@ -100,23 +100,81 @@ func TestApply_PersistsAndRefusesDowngrade(t *testing.T) {
 	if err := p.applyFreshnessAndRollback(mk(5)); err != nil {
 		t.Fatalf("accept v5: %v", err)
 	}
-	if floor, _ := p.readVersionFloor(); floor != 5 {
-		t.Fatalf("floor = %d; want 5", floor)
+	if st, _ := p.readFloorState(); st.HighestVersion != 5 {
+		t.Fatalf("floor = %d; want 5", st.HighestVersion)
 	}
 	// A replay of v4 (a captured older signed catalog) is refused.
 	if err := p.applyFreshnessAndRollback(mk(4)); !errors.Is(err, errCatalogRollback) {
 		t.Fatalf("downgrade to v4: err = %v; want errCatalogRollback", err)
 	}
 	// Floor unchanged by the refused downgrade.
-	if floor, _ := p.readVersionFloor(); floor != 5 {
-		t.Fatalf("floor after refused downgrade = %d; want 5", floor)
+	if st, _ := p.readFloorState(); st.HighestVersion != 5 {
+		t.Fatalf("floor after refused downgrade = %d; want 5", st.HighestVersion)
 	}
 	// Forward to v6 accepted and floor raised.
 	if err := p.applyFreshnessAndRollback(mk(6)); err != nil {
 		t.Fatalf("accept v6: %v", err)
 	}
-	if floor, _ := p.readVersionFloor(); floor != 6 {
-		t.Fatalf("floor = %d; want 6", floor)
+	if st, _ := p.readFloorState(); st.HighestVersion != 6 {
+		t.Fatalf("floor = %d; want 6", st.HighestVersion)
+	}
+}
+
+// SEC-F4 (M1-4, §10): the ratchet is a (catalog_version, generated_at) PAIR —
+// weekly re-signs never bump the version, so an equal-version catalog with an
+// OLDER generated_at (a captured earlier re-sign) must be REFUSED, while the
+// identical pair (a restart reloading the very catalog that set the floor)
+// stays idempotent and a NEWER re-sign advances the floor.
+func TestApply_SameVersionResignReplayRefused(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	now := mustTime(t, "2026-07-10T00:00:00Z") // advanced below as the weeks pass
+	p := freshnessPolicy{enabled: true, now: func() time.Time { return now }, skew: catalogClockSkew, statePath: statePath}
+	exp := mustTime(t, "2099-01-01T00:00:00Z")
+	mk := func(gen string) *Catalog {
+		return &Catalog{generatedAt: mustTime(t, gen), expiresAt: exp, version: 7}
+	}
+
+	// Install the week-2 re-sign → floor (7, week2).
+	if err := p.applyFreshnessAndRollback(mk("2026-07-06T03:00:00Z")); err != nil {
+		t.Fatalf("accept week-2 re-sign: %v", err)
+	}
+	st, _ := p.readFloorState()
+	if st.HighestVersion != 7 || st.HighestGeneratedAt != "2026-07-06T03:00:00Z" {
+		t.Fatalf("floor pair not persisted: %+v", st)
+	}
+	// The captured week-1 re-sign (same version, older generated_at) is refused.
+	if err := p.applyFreshnessAndRollback(mk("2026-06-29T03:00:00Z")); !errors.Is(err, errCatalogRollback) {
+		t.Fatalf("SEC-F4 violated: equal-version/older-generated_at accepted (err=%v)", err)
+	}
+	// Floor untouched by the refusal.
+	if st, _ := p.readFloorState(); st.HighestGeneratedAt != "2026-07-06T03:00:00Z" {
+		t.Fatalf("floor moved on a refused replay: %+v", st)
+	}
+	// Restart idempotency: the identical pair reloads fine.
+	if err := p.applyFreshnessAndRollback(mk("2026-07-06T03:00:00Z")); err != nil {
+		t.Fatalf("reload of the floor catalog must stay idempotent: %v", err)
+	}
+	// The week-3 re-sign advances the generated_at half (clock moves with it,
+	// else the future-dating guard would trip — correct but not under test here).
+	now = mustTime(t, "2026-07-13T04:00:00Z")
+	if err := p.applyFreshnessAndRollback(mk("2026-07-13T03:00:00Z")); err != nil {
+		t.Fatalf("accept week-3 re-sign: %v", err)
+	}
+	if st, _ := p.readFloorState(); st.HighestGeneratedAt != "2026-07-13T03:00:00Z" {
+		t.Fatalf("generated_at floor not advanced: %+v", st)
+	}
+	// Legacy migration: a version-only state file (no generated_at half) checks
+	// nothing until the next install writes the pair — never bricks an upgrade.
+	legacy := freshnessPolicy{enabled: true, now: func() time.Time { return now }, skew: catalogClockSkew,
+		statePath: filepath.Join(t.TempDir(), "legacy.json")}
+	if err := legacy.writeVersionFloor(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.applyFreshnessAndRollback(mk("2026-06-29T03:00:00Z")); err != nil {
+		t.Fatalf("legacy version-only floor must not refuse a same-version catalog: %v", err)
+	}
+	if st, _ := legacy.readFloorState(); st.HighestGeneratedAt == "" {
+		t.Fatalf("first post-migration install must write the generated_at half: %+v", st)
 	}
 }
 
@@ -192,7 +250,7 @@ func TestReadVersionFloor_CorruptFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := freshnessPolicy{enabled: true, statePath: statePath}
-	if _, err := p.readVersionFloor(); err == nil {
+	if _, err := p.readFloorState(); err == nil {
 		t.Fatal("a corrupt version-floor file must fail closed, not reset the floor to 0")
 	}
 }

@@ -15,6 +15,17 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      # M1-4: dispatching ci.yml AT A TAG REF with resign=true runs ONLY the
+      # catalog-resign job (no-bump freshness re-sign under the pinned
+      # ci.yml@refs/tags/v* signing identity). A bare tag dispatch (resign
+      # unset) is REFUSED by the resign-dispatch-guard job (OPS-F1: it must
+      # never re-run the whole pipeline / overwrite release assets).
+      resign:
+        description: "Re-sign the tag's existing catalog bundle (freshness only; no rebuild)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -33,8 +44,11 @@ jobs:
     timeout-minutes: 15
     # Skip on PRs (CI review): duplicates the Fast PR Gate's hygiene job
     # (fmt/vet/build) exactly; this job remains the main/tag-path build that
-    # feeds smoke/docker/auto-tag/release.
-    if: github.event_name != 'pull_request'
+    # feeds smoke/docker/auto-tag/release. Tag-ref dispatches (M1-4 resigns)
+    # skip too: the reduced resign path needs no build.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -98,7 +112,9 @@ jobs:
     # Skip on PRs (CI review): a full compose image build per PR; the Deep PR
     # Gate's build-image + compose-validate covers container-surface PRs.
     needs: test
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -157,6 +173,31 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color proxy
           docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
 
+  # OPS-F1 fail-fast (M1-4): a workflow_dispatch AT A TAG REF exists ONLY for
+  # the catalog re-sign. A bare tag dispatch must fail LOUDLY instead of
+  # re-running the whole pipeline (docker rebuild ⇒ new digest ⇒ softprops
+  # would overwrite the release's immutable catalog bundle). The heavy jobs are
+  # additionally gated structurally: `docker` skips on tag dispatches, which
+  # skips its whole needs-chain (catalog-pipeline, release, provenance).
+  resign-dispatch-guard:
+    name: "Supply Chain · Tag-dispatch guard"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Refuse a bare tag dispatch (resign runs are the only tag dispatches)
+        env:
+          RESIGN: ${{ inputs.resign }}
+        run: |
+          set -euo pipefail
+          if [ "$RESIGN" != "true" ]; then
+            echo "FATAL: ci.yml was dispatched at a tag ref WITHOUT resign=true."
+            echo "       Tag dispatches exist only for the catalog re-sign; a bare"
+            echo "       dispatch would rebuild + overwrite release assets (OPS-F1)."
+            exit 1
+          fi
+          echo "resign dispatch confirmed"
+
   docker:
     name: Docker Build & Publish
     timeout-minutes: 45
@@ -168,7 +209,14 @@ jobs:
     # container surface, and the Fast PR Gate compile-checks linux/arm64.
     # Every downstream consumer of this job (catalog-pipeline, auto-tag,
     # release) already only runs on main pushes or v* tags.
-    if: github.event_name != 'pull_request'
+    # ALSO skip on tag-ref dispatches (M1-4 / OPS-F1): a resign dispatch must
+    # not rebuild the image; skipping docker skips its whole needs-chain
+    # (catalog-pipeline, release, provenance), so a dispatched tag run can
+    # never overwrite release assets. The resign-dispatch-guard job is the
+    # loud fail-fast for bare tag dispatches.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     # Expose the pushed manifest-list digest + computed version so the
     # catalog-pipeline job (P2a) can generate + gate the release catalog against
@@ -544,6 +592,156 @@ jobs:
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: ${{ steps.pkg.outputs.bundle }}
+
+  # ─── Catalog re-sign (M1-4, design §4 Slice D) ────────────────────────────
+  # Weekly no-bump freshness re-sign, dispatched BY resign-catalog.yml at the
+  # latest v* tag ref with resign=true (so the keyless SAN is
+  # ci.yml@refs/tags/v<latest> and matches the pinned identity). A REDUCED
+  # path: no build, no docker, no release job — download the tag's EXISTING
+  # release bundle, verify it through the baked root + pinned identity BEFORE
+  # reading anything (SEC-F1, enforced inside TestReleaseResignGate), rebuild
+  # the index with the SAME catalog_version/created_at and a fresh
+  # generated_at/expires_at (+180d), keyless-sign, verify end-to-end, attach as
+  # a VERSIONED resign asset. The original release asset is never replaced.
+  catalog-resign:
+    name: "Supply Chain · Catalog re-sign (freshness)"
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    needs: [resign-dispatch-guard]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      inputs.resign
+    permissions:
+      contents: write     # attach the resign bundle + prune superseded resign assets
+      id-token: write     # cosign keyless blob signing of the re-signed index.json
+    steps:
+      - name: Harden runner (egress audit — same baseline as catalog-pipeline)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0   # full tag list for the latest-tag assert (SEC-F2a)
+      - uses: ./.github/actions/setup-go-cache
+      # SEC-F2a (BLOCKING): only the LATEST v* tag may be re-signed — an old-tag
+      # dispatch would mint an unbounded freshness extension for a superseded
+      # release (a live downgrade pin). Enforced HERE, inside the signing job,
+      # so it holds even for a hand-crafted dispatch that bypasses the scheduler.
+      - name: Assert dispatch tag is the latest v* tag (SEC-F2a)
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          LATEST="$(git tag -l | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          test -n "$LATEST" || { echo "FATAL: no vX.Y.Z tags found"; exit 1; }
+          [ "$REF_NAME" = "$LATEST" ] || {
+            echo "FATAL: refusing to re-sign $REF_NAME — latest release tag is $LATEST"
+            echo "       (re-signing an old tag would extend a superseded release's freshness)"; exit 1
+          }
+      # Resolve the resign facts once (a single UTC date avoids a midnight
+      # rollover splitting the asset name across steps). RESIGN_NOW is derived
+      # from the DATE ONLY (midnight UTC), not the wall clock: the asset name
+      # and the R2 history prefix are date-keyed and the staged prefix is
+      # create-only immutable, so a same-day retry must reproduce byte-identical
+      # catalog content or the publisher's digest guard bricks the retry
+      # (Codex review P2 on PR #640). Same date ⇒ same generated_at/expires_at
+      # ⇒ same bytes (the generator is deterministic).
+      - name: Resolve re-sign facts
+        id: rfacts
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/resign-out"; mkdir -p "$OUT"
+          {
+            echo "now=$(date -u +%Y-%m-%d)T00:00:00Z"
+            echo "rdate=$(date -u +%Y%m%d)"
+            echo "out=$OUT"
+          } >> "$GITHUB_OUTPUT"
+      # OPS-F2: the ORIGINAL bundle by EXACT name — never a glob (a prior
+      # resign asset must not be picked up as the source).
+      - name: Download the tag's ORIGINAL release bundle (exact name)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/resign-src"; mkdir -p "$SRC" dl
+          gh release download "$REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern "culvert-release-catalog-${REF_NAME}.tar.gz" --dir dl
+          tar xzf "dl/culvert-release-catalog-${REF_NAME}.tar.gz" -C "$SRC"
+          test -s "$SRC/index.json"          || { echo "FATAL: bundle missing index.json"; exit 1; }
+          test -s "$SRC/index.json.sigstore" || { echo "FATAL: bundle missing index.json.sigstore — an unsigned source is never re-signed"; exit 1; }
+          test -d "$SRC/manifests"           || { echo "FATAL: bundle missing manifests/"; exit 1; }
+          echo "src=$SRC" >> "$GITHUB_ENV"
+      # SEC-F1 (BLOCKING): verify-before-read + version binding + rebuild —
+      # all inside the gate binary (release_resign_gate_test.go), not shell.
+      - name: Run re-sign gate (verify source through baked root, rebuild, assert invariants)
+        env:
+          CULVERT_RELEASE_SPEC_RESIGN: "1"
+          CULVERT_RELEASE_RESIGN_SRC: ${{ env.src }}
+          CULVERT_RELEASE_SPEC_VERSION: ${{ github.ref_name }}
+          CULVERT_RELEASE_SPEC_RESIGN_NOW: ${{ steps.rfacts.outputs.now }}
+          CULVERT_RELEASE_GEN_OUT: ${{ steps.rfacts.outputs.out }}
+        run: |
+          set -euo pipefail
+          export CULVERT_RELEASE_SPEC_VERSION="${CULVERT_RELEASE_SPEC_VERSION#v}"
+          go test -run '^TestReleaseResignGate$' -count=1 -v .
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+      - name: Sign re-signed index keyless (cosign sign-blob → index.json.sigstore)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.rfacts.outputs.out }}"
+          cosign sign-blob --yes \
+            --bundle "$OUT/index.json.sigstore" \
+            "$OUT/index.json"
+          test -s "$OUT/index.json.sigstore" || { echo "empty .sigstore bundle"; exit 1; }
+      - name: Keyless end-to-end verify (baked root + pinned identity)
+        env:
+          CULVERT_RELEASE_GEN_OUT: ${{ steps.rfacts.outputs.out }}
+          CULVERT_RELEASE_GEN_VERIFY_SIGSTORE: "1"
+        run: go test -run TestReleaseCatalogKeylessVerify -count=1 -v .
+      - name: Package versioned resign bundle
+        id: rpkg
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          RDATE: ${{ steps.rfacts.outputs.rdate }}
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.rfacts.outputs.out }}"
+          NAME="culvert-release-catalog-${REF_NAME}-r${RDATE}.tar.gz"
+          tar -C "$OUT" -czf "$RUNNER_TEMP/$NAME" index.json index.json.sigstore manifests
+          echo "bundle=$RUNNER_TEMP/$NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+      # OPS-F2: the release carries exactly ORIGINAL + LATEST resign. Upload the
+      # NEW bundle FIRST, prune superseded -r* assets only after the upload
+      # succeeded — pruning first would strand the live origins with no matching
+      # release asset if the upload then failed, turning the verify workflow RED
+      # against a healthy catalog (Codex review P2 on PR #640). A same-day
+      # re-run is idempotent: the deterministic bytes + --clobber replace the
+      # same-named asset in place.
+      - name: Attach the new resign bundle, then prune superseded ones
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          NEW_NAME: ${{ steps.rpkg.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$REF_NAME" "${{ steps.rpkg.outputs.bundle }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "attached $NEW_NAME"
+          gh release view "$REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' \
+            | grep -E "^culvert-release-catalog-.+-r[0-9]{8}\.tar\.gz$" > old_resigns.txt || true
+          while IFS= read -r a; do
+            [ -n "$a" ] && [ "$a" != "$NEW_NAME" ] || continue
+            echo "pruning superseded resign asset: $a"
+            gh release delete-asset "$REF_NAME" "$a" --repo "$GITHUB_REPOSITORY" --yes
+          done < old_resigns.txt
 
   # ─── Auto-tag ───────────────────────────────────────────────────────────
   # On every push to main, fetch the latest semver tag, bump the patch

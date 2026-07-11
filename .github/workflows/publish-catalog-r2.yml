@@ -46,6 +46,16 @@ on:
         description: "Release tag to publish (e.g. v1.0.0). Default: latest release."
         required: false
         type: string
+      # M1-4: EXACT filename of a versioned re-sign bundle attached by the
+      # catalog-resign job (culvert-release-catalog-<tag>-rYYYYMMDD.tar.gz).
+      # When set, the run stages to a NEW history prefix (<tag>-rYYYYMMDD — the
+      # create-only digest guard for real releases stays intact) and the
+      # promote is additionally bound monotonically to the LIVE catalog
+      # (SEC-F2b). Exact name by design (OPS-F2): globs must never pick assets.
+      resign_asset:
+        description: "Re-sign bundle asset name (resign publishes only; exact filename)"
+        required: false
+        type: string
 
 # Verify-only publisher: read the release bundle, verify, copy within R2. NO id-token.
 permissions:
@@ -118,6 +128,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
+          IN_RESIGN_ASSET: ${{ github.event.inputs.resign_asset }}
           WR_TAG: ${{ github.event.workflow_run.head_branch }}
           WR_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
@@ -150,22 +161,40 @@ jobs:
             }
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Publishing catalog from release $TAG (target $TAG_SHA)"
+          # M1-4 resign publish: validate the EXACT asset name (it becomes an R2
+          # key segment — same traversal rules as TAG) and bind it to THIS tag.
+          ASSET="culvert-release-catalog-${TAG}.tar.gz"
+          SUB="$TAG"
+          if [ -n "${IN_RESIGN_ASSET:-}" ]; then
+            printf '%s' "$IN_RESIGN_ASSET" | grep -Eq "^culvert-release-catalog-${TAG}-r[0-9]{8}\.tar\.gz$" || {
+              echo "FATAL: resign_asset '$IN_RESIGN_ASSET' is not a valid resign bundle name for $TAG"; exit 1
+            }
+            ASSET="$IN_RESIGN_ASSET"
+            SUB="${ASSET#culvert-release-catalog-}"; SUB="${SUB%.tar.gz}"
+          fi
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "sub=$SUB"     >> "$GITHUB_OUTPUT"
+          echo "Publishing catalog from release $TAG (target $TAG_SHA, asset $ASSET)"
 
       # Pull the signed bundle attached to the Release and unpack it. Refuse an
       # unsigned bundle (structural precheck only — the TRUST decision is the verify
       # step against the STAGED URL, not this local check).
+      # OPS-F2 (M1-4): EXACT-name selection — once resign assets exist, a glob
+      # + head -n1 picks the wrong bundle (lexically, `-rYYYYMMDD` sorts BEFORE
+      # `.tar.gz`, so a glob would silently publish a resign on the push path
+      # and the OLDEST resign on re-sign republish).
       - name: Download + precheck the signed catalog bundle
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          ASSET: ${{ steps.tag.outputs.asset }}
         run: |
           set -euo pipefail
           mkdir -p dl stage
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'culvert-release-catalog-*.tar.gz' --dir dl
-          BUNDLE="$(ls dl/culvert-release-catalog-*.tar.gz | head -n1 || true)"
-          [ -n "$BUNDLE" ] || { echo "FATAL: no catalog bundle attached to release $TAG"; exit 1; }
+            --pattern "$ASSET" --dir dl
+          BUNDLE="dl/$ASSET"
+          [ -s "$BUNDLE" ] || { echo "FATAL: asset $ASSET not attached to release $TAG"; exit 1; }
           tar xzf "$BUNDLE" -C stage
           test -s stage/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
           test -s stage/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore — refusing unsigned"; exit 1; }
@@ -186,11 +215,14 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          SUB: ${{ steps.tag.outputs.sub }}
         run: |
           set -euo pipefail
           aws --version
-          PREFIX="history/stable/$TAG"
+          # SUB is <tag> for a release publish, <tag>-rYYYYMMDD for a resign —
+          # a NEW immutable prefix per resign, so the create-only digest guard
+          # for real releases stays intact (M1-4, design §4).
+          PREFIX="history/stable/$SUB"
           put_create_only() { # <local> <key>
             local src="$1" key="$2"
             if aws s3api put-object --bucket "$R2_BUCKET" --key "$key" --body "$src" \
@@ -219,7 +251,7 @@ jobs:
           GOT="$(sha256sum origin_index.json | awk '{print $1}')"
           WANT="$(cat stage/.index.sha256)"
           [ "$GOT" = "$WANT" ] || {
-            echo "FATAL: staged origin index ($GOT) != release bundle ($WANT) for $TAG"
+            echo "FATAL: staged origin index ($GOT) != release bundle ($WANT) for $SUB"
             echo "       possible substitution or a divergent prior stage — refusing to promote"
             exit 1
           }
@@ -250,6 +282,66 @@ jobs:
           go test -json -run '^TestServedVerify_BakedRootGate$' -count=1 . | tee verify.jsonl
           jq -e 'select(.Test=="TestServedVerify_BakedRootGate" and .Action=="pass")' verify.jsonl >/dev/null \
             || { echo "FATAL: baked-root served verify did not PASS (skipped or failed) — refusing to promote"; exit 1; }
+
+      # SEC-F2b (M1-4, BLOCKING): a RESIGN promote must be monotonically bound to
+      # the LIVE catalog — a fresh history prefix self-satisfies the create-only
+      # digest guard, so without this an old (validly-signed) resign bundle could
+      # roll the live pointer BACKWARD (the SEC-F4 appliance ratchet refuses the
+      # same-version/older-generated_at replay per appliance, but the public
+      # origin would still be pinned stale for NEW installs, whose floor starts
+      # empty). Require: staged catalog_version ≥ live; on equality, identical
+      # release entries AND a strictly newer generated_at. A missing live index
+      # (first publish) passes. Runs AFTER the staged-bytes verify and BEFORE
+      # promote; resign runs only.
+      #
+      # The live index is read from the R2 ORIGIN via authenticated s3api — NOT
+      # through the public CDN: Cloudflare ignores a request Cache-Control for
+      # edge bypass (this file's own purge step exists because of that), and a
+      # BLOCKING control's freshness must not rest on cache semantics (impl
+      # review MED). Only a genuine NoSuchKey/404 counts as "first publish";
+      # any other read failure fails CLOSED.
+      - name: Bind resign promote monotonically to the live catalog (SEC-F2b)
+        if: github.event.inputs.resign_asset != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if ! aws s3api get-object --bucket "$R2_BUCKET" --key "release-catalog/index.json" \
+                 --endpoint-url "$R2_S3_ENDPOINT" live_index.json >/dev/null 2>get_err.txt; then
+            if grep -Eqi 'NoSuchKey|status code: 404|Not Found' get_err.txt; then
+              echo "no live catalog at the origin (first publish) — monotonic binding trivially satisfied"; exit 0
+            fi
+            echo "FATAL: could not read the live origin index (fail-closed):"; cat get_err.txt; exit 1
+          fi
+          # Idempotent no-op: re-publishing the EXACT live bytes (a same-day
+          # retry after a fully successful promote — resign bytes are
+          # date-deterministic) is harmless and must stay green; the
+          # strictly-newer rule below applies only to DIFFERING content.
+          if [ "$(sha256sum live_index.json | awk '{print $1}')" = "$(cat stage/.index.sha256)" ]; then
+            echo "staged index is byte-identical to the live index — idempotent re-publish, binding satisfied"; exit 0
+          fi
+          LIVE_V="$(jq -r '.catalog_version // 0' live_index.json)"
+          LIVE_G="$(jq -r '.generated_at // ""' live_index.json)"
+          LIVE_R="$(jq -cS '.releases' live_index.json)"
+          ST_V="$(jq -r '.catalog_version // 0' stage/index.json)"
+          ST_G="$(jq -r '.generated_at // ""' stage/index.json)"
+          ST_R="$(jq -cS '.releases' stage/index.json)"
+          if [ "$ST_V" -lt "$LIVE_V" ]; then
+            echo "FATAL: staged catalog_version $ST_V < live $LIVE_V — a resign must never roll the live catalog back"; exit 1
+          fi
+          if [ "$ST_V" -eq "$LIVE_V" ]; then
+            [ "$ST_R" = "$LIVE_R" ] || {
+              echo "FATAL: staged release entries differ from live at the same catalog_version — refusing (not a pure re-sign)"; exit 1
+            }
+            if ! [ "$(printf '%s\n%s\n' "$LIVE_G" "$ST_G" | sort | tail -n1)" = "$ST_G" ] || [ "$ST_G" = "$LIVE_G" ]; then
+              echo "FATAL: staged generated_at ($ST_G) is not strictly newer than live ($LIVE_G) — stale/replayed resign refused"; exit 1
+            fi
+          fi
+          echo "monotonic binding OK: staged v$ST_V/$ST_G vs live v$LIVE_V/$LIVE_G"
 
       # Promote ONLY on a proven-PASS verify, by server-side-copying the exact staged
       # object that was verified. `--copy-source-if-match <staged ETag>` aborts the

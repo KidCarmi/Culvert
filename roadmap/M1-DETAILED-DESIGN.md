@@ -156,6 +156,74 @@ Revisit only if M1-4's cadence gate (SEC-F5) proves insufficient.
   serving the previous (still-valid) catalog; the Slice-C stale alert is the
   backstop (fires at 30d remaining, giving ~5 weekly retries before lapse).
 
+### 4.1 Implementation decisions (M1-4, 2026-07-10)
+
+- **`CULVERT_RELEASE_SPEC_RESIGN_CREATED_AT` env DROPPED** (delta from the §4
+  provisional env list): SEC-F1 requires every entry fact to come ONLY from the
+  signature-verified bundle — an env-provided created_at would be a spoofable
+  side-channel around verify-before-read. The gate takes `_RESIGN_SRC` (bundle
+  dir), `_VERSION` (from the dispatch ref), `_RESIGN_NOW`, `GEN_OUT` only.
+- **The resign gate core is `buildResignSpecFromVerified`**
+  (release_resign_gate_test.go): verify-first (LoadVerifiedCatalog — signature +
+  structure, expiry-TOLERANT by design: re-signing a lapsed catalog is the
+  recovery case), single-entry assert, version binding, spec rebuilt from
+  verified bytes. Always-on unit tests (`TestResignGate_*`) mutation-prove
+  SEC-F1 without the CI-only path; `TestReleaseResignGate` is the CI entrypoint
+  wiring the REAL baked root + pinned identity.
+- **Resign invariants pinned in the gate**: same `catalog_version`, same
+  `created_at`, byte-identical manifests, index differs ONLY in
+  `generated_at`/`expires_at` (+180d), deterministic re-runs.
+- **OPS-F1 implemented as guard + structural skip**: `resign-dispatch-guard`
+  fails loudly on a bare tag dispatch, AND `docker` skips all tag-ref
+  dispatches — its needs-chain (catalog-pipeline, release, provenance) then
+  skips, so a dispatched tag run can never overwrite release assets even if the
+  guard were deleted (the invariant test pins both halves).
+- **Pages ordering fix adopted** (the §4 "decision for review", recommended
+  option): the weekly flow re-dispatches Pages for dual-publish parity, and the
+  Pages bundle pick now prefers the newest `-rYYYYMMDD` asset with an
+  exact-original fallback — verification showed the old `ls | head -n1` picked
+  the OLDEST resign (`-` sorts before `.`), the exact OPS-F2 hazard.
+- **SEC-F5 canary**: `verify-dual-publish.yml` gains a weekly cron (Mon 09:00
+  UTC, after the 03:00 re-sign) asserting live `generated_at` age ≤ 14d;
+  schedule-runs only (push-path verifies must not fail on a legitimately old
+  catalog).
+- **Scheduler alerting = RED run** (OPS-F4 "alert on timeout"): the scheduler
+  holds no webhook credentials by design; a bounded-poll timeout or failed
+  downstream run fails the scheduler run itself — GitHub's workflow-failure
+  notification is the M1 alert channel, with the appliance-side stale alert as
+  the runtime backstop.
+- **SEC-F7 (owner precondition, activation gate)**: before enabling the weekly
+  cron in production, the `v-tag-protection` ruleset MUST gain `creation=true`
+  with `bypass_actors` = the Actions bot — tag CREATION becomes load-bearing
+  once a tag dispatch is a signing event. Listed in the M1-4 PR body and the
+  operator runbook; not enforceable in code from this repo.
+
+### 4.2 M1-4 implementation review (2026-07-10) — fixes folded in
+
+Adversarial review verdict: **ship-with-fixes** — the three BLOCKING controls
+(SEC-F1/F2a/F2b) verified correctly built and test-pinned (incl. the
+same-version/different-created_at substitution being impossible: deterministic
+generator ⇒ byte-identical manifests per version; `fetch-depth:0` fetches all
+tags so the latest-tag assert holds for tag-ref checkouts). Accepted findings:
+
+| Finding | Sev | Fix | Enforcement |
+| --- | --- | --- | --- |
+| SEC-F2b live read went through the CDN, which ignores request `Cache-Control` (the repo's own purge step exists because of that) — a days-stale edge copy could under-report `generated_at` and let an older signed re-sign roll the live pointer back | MED | Binding reads the live index from the R2 ORIGIN via authenticated `s3api get-object`; only a genuine NoSuchKey counts as first-publish, any other read failure fails closed | `TestResignR2PublisherInvariants` (step signature now matches the s3api read) |
+| The §10 M1-4 plan row's `(version, generated_at)` appliance ratchet (SEC-F4) was missing — re-signs never bump the version, so the version-only floor was blind to a same-version replay, leaving the SEC-F2b rollback with no appliance backstop | MED (scope) | SHIPPED: `catalogStateFile` gains `highest_accepted_generated_at`; `checkCatalogReplay` refuses equal-version/strictly-older `generated_at` at both the holder gate and the auto-seed read-only gate; equality accepted (restart-reload idempotency — recorded delta from the §10 row's "strictly newer to install" wording); legacy version-only state files check nothing until the first post-upgrade install writes the pair (fail-safe migration) | `TestApply_SameVersionResignReplayRefused` |
+| "Reduced path: no build" inaccurate — `test`+`smoke` still ran on resign dispatches | LOW | Both skip tag-ref dispatches now | doc/CI-cost only |
+| `dispatch_and_wait` duplicated verbatim in two scheduler steps | LOW | Merged into one step, helper defined once | cosmetic |
+| Scheduler run-discovery relies on `gh run list --branch <tag>` matching tag-dispatched runs | LOW (recorded) | Fail-closed either way (no run found ⇒ FATAL timeout); CONFIRM on the first production run — a mismatch breaks the flow loudly, not silently | runbook first-run checklist |
+| Inline trailing comments could in principle fake step-locating signatures in the invariant tests | LOW/INFO (accepted residual) | full-line stripping covers the realistic misorder; malicious edits are caught in review | known limitation, recorded |
+
+Post-PR Codex review (P2, both accepted): (a) **same-day retry brick** — the
+date-keyed asset/prefix collided with second-granularity `generated_at`, so a
+retry after a partial R2 stage hit the immutable-prefix digest guard; fixed by
+deriving `RESIGN_NOW` from the DATE ONLY (midnight UTC ⇒ byte-identical
+same-day bytes) plus a byte-equal idempotent no-op in the SEC-F2b binding for
+full-success retries. (b) **prune-before-upload** stranded the live origins
+with no matching release asset on an upload failure; the attach step now
+uploads first and prunes after.
+
 ## 5. M0-activation regression guards
 
 - **Quoted allow-list token:** SHIPPED (PR #634, `assertEgressAllowListWellFormed`,
