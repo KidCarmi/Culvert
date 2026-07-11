@@ -17,11 +17,10 @@ name: Install Lifecycle E2E
 #
 # Hermetic w.r.t. Culvert artifacts: a local TLS registry (trusted by the daemon
 # via /etc/docker/certs.d) serves two genuinely-distinct proxy image digests;
-# clamav + the ghcr updater sidecar are stubbed via an auto-merged
-# docker-compose.override.yml so the run needs NO ghcr pulls and NO 250 MB
-# ClamAV signature download. The proxy is the REAL culvert/proxy:pinned image,
-# started by the REAL compose file via the REAL installer — only the orthogonal
-# sidecars are stubbed. (It does still pull stock Docker Hub base images —
+# clamav is stubbed via an auto-merged docker-compose.override.yml so the run
+# needs NO ghcr pulls and NO 250 MB ClamAV signature download. The proxy is the
+# REAL culvert/proxy:pinned image, started by the REAL compose file via the REAL
+# installer — only the orthogonal sidecar is stubbed. (It does still pull stock Docker Hub base images —
 # registry:2, busybox, alpine, golang — which are pre-pulled with retry below.)
 
 on:

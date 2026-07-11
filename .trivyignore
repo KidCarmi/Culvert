@@ -1,12 +1,8 @@
-# Moby Docker SDK CVEs -- both affect Docker plugin installation/AuthZ,
-# which the culvert-updater sidecar never uses (it only calls container
-# lifecycle APIs: inspect, pull, create, start, stop, remove, logs).
-# Accepted under RISK-ACC-1 (docs/engineering/TECHNICAL-RISK-REGISTER.md)
-# until the updater module is removed (DEBT-008).
+# Trivy suppression list — intentionally empty.
 #
-# exp: dates are enforced by trivy itself -- once the date passes, the CVE
-# stops being ignored and the blocking gate goes red, forcing re-triage
-# (RISK-006). If the updater removal slips past the date, re-validate the
-# reachability rationale and extend deliberately; do not extend by reflex.
-CVE-2026-34040 exp:2026-10-01
-CVE-2026-33997 exp:2026-10-01
+# The former entries masked docker/docker SDK CVEs reachable only through the
+# legacy culvert-updater sidecar module, accepted under RISK-ACC-1 / DEBT-008.
+# That module has been removed, so nothing in the tree imports docker/docker
+# and the masks are no longer needed. Keep this file present (workflows pass
+# `--ignorefile .trivyignore`); add new suppressions here with a dated `exp:`
+# and a rationale.

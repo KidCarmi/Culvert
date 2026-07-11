@@ -274,7 +274,7 @@ jobs:
       # Container registries require lowercase image names, but
       # ${{ github.repository }} preserves the original case (e.g.
       # "KidCarmi/Culvert"). docker/metadata-action lowercases automatically;
-      # the updater build step uses raw `tags:` so we have to do it ourselves.
+      # the image build step below uses raw `tags:` so we lowercase ourselves.
       - name: Compute lowercase image base
         id: img-lc
         run: |

@@ -423,19 +423,19 @@ To harden:
 
 ---
 
-## 8. Updater allowlist
+## 8. Day-2 updates
 
-The proxy's self-update flow refuses to talk to arbitrary URLs. The
-allowlist is *startup-only* by design — a config write through the
-admin API cannot redirect the updater to an attacker-controlled host.
+The legacy Docker self-update sidecar has been removed. Day-2 upgrades
+now flow through **Release Management** (the signed release catalog) and
+the **maintenance agent** on the host: the Control Plane dispatches an
+upgrade to the agent's `/v1/upgrades/apply`, which pulls a repo-bound
+pinned digest, retags it to `culvert/proxy:pinned`, and restarts via the
+compose file. See `docs/operator/release-management-agent.md` and
+`docs/operator/enterprise-release-catalog-plan.md`.
 
-* If `updater_url` matches the in-cluster default
-  (`http://culvert-updater:7123`) or is a loopback address, no
-  allowlist entry is needed.
-* For any other URL, add it to `--updater-url-allowlist` (CLI) **or**
-  `update.url_allowlist` (YAML), and restart.
-* The Diagnostics check `updater_url` will show `fail` with a pointer
-  to this knob if the configured URL is not in the allowlist.
+> The old `update.url_allowlist` / `-updater-url*` knobs are retained only
+> as inert, parse-only settings so a legacy config file or launch command
+> still starts; they no longer do anything.
 
 ---
 

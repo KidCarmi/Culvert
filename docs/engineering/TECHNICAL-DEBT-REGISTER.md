@@ -16,7 +16,7 @@
 | DEBT-005 | ✅ CLOSED | `main.go` was a 30-`init*` hand-wired DI container | startup-slice program complete (24 slices, contract-tested) |
 | DEBT-006 | ✅ CLOSED | `ConfigSnapshot` (34-field) CP→DP god-DTO | walled by capture/apply/redaction/wire-wipe parity (2026-07-05); `config_surfaces_test.go` |
 | DEBT-007 | ✅ CLOSED | No end-to-end SSL-inspection MITM data-path test | `mitm_inspect_e2e_test.go` — verified 2026-07-04 |
-| DEBT-008 | LOW | Two parallel update mechanisms coexist | `updater/` + `release_dispatch*.go` |
+| DEBT-008 | ✅ CLOSED | Two parallel update mechanisms coexisted | legacy `updater/` removed 2026-07-11; `release_dispatch*.go` + maintenance agent is the sole path |
 | DEBT-009 | LOW ↓ | Three durability layers for config can drift — ownership now registry-declared; effective-config visibility remains | `config.go`, `admin_settings.go`, `configversion.go` |
 | DEBT-010 | ✅ CLOSED | Coverage floor 55% (doc said 60%); delta gate non-blocking | resolved in tree by CI-REDESIGN step 7 — verified 2026-07-04 |
 
@@ -195,16 +195,16 @@
   large-body integrity, and leaf-cache hit/miss + rotation. Hermetic (in-process TLS upstream,
   in-memory CA, loopback-only). This is exactly the listener-level test this entry asked for.
 
-## DEBT-008 — Two update mechanisms · LOW → **active removal**
-- Legacy `updater/` sidecar and the new release-catalog dispatch both ship. Documented as a
-  deliberate transition (the updater is the fallback until catalog-driven update succeeds in prod).
-  **Track to actually remove the fallback** once superseded; don't let it become permanent.
-- **2026-06-28:** This is now also the resolution path for **RISK-ACC-1** — the `updater/` module's
-  `docker/docker v28.5.2` carries all 5 of the repo's open Dependabot alerts (2 HIGH + 1 MEDIUM
-  Trivy-confirmed, 2 more in `.trivyignore`; no upstream fix). The maintainer is actively removing
-  the updater. Removing `updater/go.mod` deletes the entire vulnerable dependency tree and closes
-  all 5 alerts at once — the correct fix, vs. bumping deps in soon-deleted code. **Priority raised
-  in practice** by the alert pressure, even though the structural debt itself is LOW.
+## DEBT-008 — Two update mechanisms · ✅ CLOSED 2026-07-11 (updater removed)
+- Legacy `updater/` sidecar and the new release-catalog dispatch both shipped. The transition is
+  complete: catalog-driven update via the maintenance agent (Release Management → agent
+  `/v1/upgrades/apply`) was proven E2E, and the legacy path was fully removed — `updater/` module,
+  `Dockerfile.updater`, the compose sidecars, `update.go`/`update_cluster.go`, the 11 `/api/update/*`
+  routes, the Updates admin-UI panel, and the `TriggerUpdate` RPC are all deleted. The maintenance
+  agent is now the sole day-2 update path.
+- **This also closes RISK-ACC-1.** Deleting `updater/go.mod` removed the entire `docker/docker`
+  dependency tree that carried all 5 open Dependabot alerts; nothing in the remaining tree imports
+  `docker/docker`, and the `.trivyignore` masks were retired with it.
 
 ## DEBT-009 — Three config durability layers · LOW ↓ (partially addressed)
 - CLI flags / YAML / `admin_settings.json` can hold different values for the same setting; which

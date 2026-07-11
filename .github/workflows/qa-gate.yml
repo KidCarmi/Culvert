@@ -218,9 +218,9 @@ jobs:
 
       - name: Bring up stack (proxy only — clamav disabled for determinism)
         # We override the compose file at runtime to bring up only the proxy
-        # service. The production compose wires in clamav + an updater sidecar;
-        # both are slow and their failure modes would mask application logic
-        # issues. The proxy service is exercised here IN ISOLATION.
+        # service. The production compose also wires in clamav, which is slow
+        # and whose failure modes would mask application logic issues. The
+        # proxy service is exercised here IN ISOLATION.
         #
         # The session secret is generated in the shell (OUTSIDE the heredoc)
         # so the value is a real 64-hex-char string, not the literal text
