@@ -633,9 +633,23 @@ clone_source_into_install_dir() {
 }
 
 seed_pinned_tag() {
+  local had_stale=0
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
-    info "$PINNED_TAG already present; not reseeding"
-    return 0
+    # Keep the existing tag when it tracks a LIVE/current deployment: a running
+    # culvert container (the P1.4 §8.2 stability rule — the pinned tag must match
+    # the live daemon) or an existing stack at $INSTALL_DIR. But when NEITHER is
+    # present the tag is a stale leftover from a previously-removed install
+    # (dir + volumes gone, image kept); reusing it would silently deploy a
+    # year-old image + compose + agent (#7). Fall through to refresh it.
+    if sudo docker inspect culvert >/dev/null 2>&1 \
+       || [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
+      info "$PINNED_TAG already present; not reseeding (tracking the current deployment)"
+      return 0
+    fi
+    warn "$PINNED_TAG is present but no running or existing deployment was found — treating it"
+    warn "as a stale leftover and refreshing it (a removed-then-reinstalled host must not deploy"
+    warn "an old image). The registry-down path below keeps the leftover rather than failing."
+    had_stale=1
   fi
 
   # Seed source precedence (mirrors packaging/culvert-maint/install.sh):
@@ -678,6 +692,17 @@ seed_pinned_tag() {
     fi
   else
     warn "Registry pull failed and no source checkout is present to build from."
+  fi
+
+  # Every refresh source failed. If we were only trying to REFRESH a stale
+  # leftover (the tag still exists), keep it rather than failing — a possibly-old
+  # image is better than no install when the registry is unreachable. A genuine
+  # fresh seed with no leftover still returns 1 so the caller can clone+build.
+  if [[ "$had_stale" -eq 1 ]] && sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
+    warn "Could not refresh $PINNED_TAG — keeping the existing (possibly STALE) leftover image."
+    warn "If this host previously ran a different Culvert version, seed a current image explicitly:"
+    warn "  CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh"
+    return 0
   fi
 
   return 1
