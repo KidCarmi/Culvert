@@ -809,6 +809,15 @@ env_put() {
   elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
     sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
   fi
+  # If ownership still can't be taken (sudo genuinely denied), DEGRADE — warn
+  # and skip rather than let the unguarded touch/append below abort the whole
+  # install under `set -euo pipefail`. The normal path (writable, or sudo chown
+  # succeeded) falls straight through with no behavior change.
+  if [[ -e "$file" && ! -w "$file" ]]; then
+    warn "Cannot write $file (owned by another user and sudo could not take it) — leaving it unchanged."
+    warn "Set $var manually in $file if you need it, then restart the stack."
+    return 0
+  fi
   touch "$file"; chmod 600 "$file"
   sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
   # grep -v exits 1 (not just erroring) whenever EVERY line matched the
