@@ -73,7 +73,30 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('go.mod') }}
 
       - name: Install playwright driver + chromium
-        run: go run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+        # playwright-go v0.6000.0's driver installer is dead end-to-end: its
+        # baked *.azureedge.net mirrors were decommissioned (Edgio shutdown)
+        # AND upstream stopped publishing driver zips around 1.60 entirely
+        # (playwright.download.prss.microsoft.com 404s too — verified) —
+        # driver distribution moved to npm, which is what playwright-go
+        # v0.6100.x does, but that release tag declares the old mxschmitt
+        # module path and cannot be imported. Until upstream ships a fixed
+        # tag, build the node+package driver layout playwright-go expects
+        # from the npm tarballs directly and point the tests at it via
+        # CULVERT_PW_DRIVER_DIR (uiE2EBrowser honors it and then skips its
+        # own download fallback). DRIVER_VERSION must match
+        # playwrightCliVersion in the pinned playwright-go (v0.6000.0 → 1.60.0).
+        run: |
+          set -euo pipefail
+          DRIVER_VERSION=1.60.0
+          DRV="$HOME/.cache/ms-playwright-go/driver"
+          mkdir -p "$DRV/package/node_modules/playwright-core"
+          npm pack "playwright@${DRIVER_VERSION}" --silent
+          tar xzf "playwright-${DRIVER_VERSION}.tgz" -C "$DRV/package" --strip-components=1
+          npm pack "playwright-core@${DRIVER_VERSION}" --silent
+          tar xzf "playwright-core-${DRIVER_VERSION}.tgz" -C "$DRV/package/node_modules/playwright-core" --strip-components=1
+          ln -sf "$(command -v node)" "$DRV/node"
+          "$DRV/node" "$DRV/package/cli.js" install --with-deps chromium
+          echo "CULVERT_PW_DRIVER_DIR=$DRV" >> "$GITHUB_ENV"
 
       - name: UI RBAC E2E
         id: uie2e
