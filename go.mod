@@ -1,6 +1,6 @@
 module github.com/KidCarmi/Culvert
 
-go 1.25.12
+go 1.26
 
 require (
 	github.com/KidCarmi/Sluice v0.2.0
@@ -18,7 +18,7 @@ require (
 	github.com/playwright-community/playwright-go v0.6000.0
 	github.com/sigstore/protobuf-specs v0.5.1
 	github.com/sigstore/sigstore-go v1.2.2
-	go.etcd.io/etcd/api/v3 v3.6.13
+	go.etcd.io/etcd/api/v3 v3.7.0
 	go.etcd.io/etcd/client/v3 v3.6.13
 	go.etcd.io/etcd/server/v3 v3.6.13
 	golang.org/x/crypto v0.54.0

@@ -424,8 +424,8 @@ github.com/zalando/go-keyring v0.2.3 h1:v9CUu9phlABObO4LPWycf+zwMG7nlbb3t/B5wa97
 github.com/zalando/go-keyring v0.2.3/go.mod h1:HL4k+OXQfJUWaMnqyuSOc0drfGPX2b51Du6K+MRgZMk=
 go.etcd.io/bbolt v1.4.3 h1:dEadXpI6G79deX5prL3QRNP6JB8UxVkqo4UPnHaNXJo=
 go.etcd.io/bbolt v1.4.3/go.mod h1:tKQlpPaYCVFctUIgFKFnAlvbmB3tpy1vkTnDWohtc0E=
-go.etcd.io/etcd/api/v3 v3.6.13 h1:AvHPZv15LYEe7tZDyFglv7xnbiuF6GMZpZqKpIzXTt0=
-go.etcd.io/etcd/api/v3 v3.6.13/go.mod h1:X9+3gaKwzjlOxzo6TZ2u3b7HcHBcAL+Ph7EBPjI/VWk=
+go.etcd.io/etcd/api/v3 v3.7.0 h1:WZlGK7pRtYGDB8ti8wkrQ5D2oWGMbtNL9VA5e+vF2Fg=
+go.etcd.io/etcd/api/v3 v3.7.0/go.mod h1:EcTihnwAQ0BQNh5dfAdaFVFdchuo7EP0HlX7TV3jz/A=
 go.etcd.io/etcd/client/pkg/v3 v3.6.13 h1:7QeMOisYByx8dBA7/CKcwCaPWfjb5C0xpmrIov/8WyY=
 go.etcd.io/etcd/client/pkg/v3 v3.6.13/go.mod h1:Dn2zUBOCu/6xYcd6iAjB7LgoY16OTQjDZfWHLwvuQj4=
 go.etcd.io/etcd/client/v3 v3.6.13 h1:0E+9ZYGpMsi9KlOJVoCdONh9PUDawKDTy5mSNY8wOEI=
