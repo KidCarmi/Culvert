@@ -1,6 +1,6 @@
 module github.com/KidCarmi/Culvert
 
-go 1.25.12
+go 1.26
 
 require (
 	github.com/KidCarmi/Sluice v0.2.0
@@ -18,8 +18,8 @@ require (
 	github.com/playwright-community/playwright-go v0.6000.0
 	github.com/sigstore/protobuf-specs v0.5.1
 	github.com/sigstore/sigstore-go v1.2.2
-	go.etcd.io/etcd/api/v3 v3.6.13
-	go.etcd.io/etcd/client/v3 v3.6.13
+	go.etcd.io/etcd/api/v3 v3.7.0
+	go.etcd.io/etcd/client/v3 v3.7.0
 	go.etcd.io/etcd/server/v3 v3.6.13
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.57.0
@@ -36,7 +36,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
-	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
+	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
@@ -120,7 +120,7 @@ require (
 	github.com/xiang90/probing v0.0.0-20221125231312-a49e3df8f510 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.6.13 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.7.0 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.6.13 // indirect
 	go.etcd.io/raft/v3 v3.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
