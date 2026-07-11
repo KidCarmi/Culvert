@@ -167,6 +167,52 @@ func TestMITM_NativeH2_BlocksFileDownload(t *testing.T) {
 	}
 }
 
+// recordingRW is a minimal http.ResponseWriter that records headers/status/body
+// for unit-testing h2DeliverResponse without a live h2 server.
+type recordingRW struct {
+	hdr    http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (r *recordingRW) Header() http.Header {
+	if r.hdr == nil {
+		r.hdr = http.Header{}
+	}
+	return r.hdr
+}
+func (r *recordingRW) Write(p []byte) (int, error) { return r.body.Write(p) }
+func (r *recordingRW) WriteHeader(s int)           { r.status = s }
+
+// TestH2DeliverResponse_StripsHopByHopTrailers verifies the deliver path forwards
+// application trailers (gRPC grpc-status) but drops hop-by-hop names — defense
+// against a non-conformant upstream (a conformant origin won't emit them, so this
+// is tested directly rather than end-to-end).
+func TestH2DeliverResponse_StripsHopByHopTrailers(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader([]byte("body"))),
+		Trailer: http.Header{
+			"Grpc-Status": {"0"},
+			"Connection":  {"close"},
+			"Te":          {"trailers"},
+		},
+	}
+	rw := &recordingRW{}
+	if err := h2DeliverResponse(rw, resp); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got := rw.Header().Get(http.TrailerPrefix + "Grpc-Status"); got != "0" {
+		t.Fatalf("application trailer Grpc-Status = %q, want 0", got)
+	}
+	for _, bad := range []string{"Connection", "Te"} {
+		if v := rw.Header().Get(http.TrailerPrefix + bad); v != "" {
+			t.Fatalf("hop-by-hop trailer %q was forwarded (=%q); it must be dropped", bad, v)
+		}
+	}
+}
+
 // nativeH2ClientConn wires the common native-h2 fixture: proxy CA, an h2 origin
 // running `handler`, a native-inspect rule, and an h2 client conn through the
 // proxy CONNECT tunnel. It asserts h2 was negotiated downstream.

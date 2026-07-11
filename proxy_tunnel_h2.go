@@ -4,11 +4,18 @@ package main
 // live here, in the transport layer; the inspection pipeline (runInspectExchange)
 // is reused verbatim per stream, so there is ONE enforcement path for H1 and H2.
 //
-// Scope of this file (PR3b — minimal working + functional): native-ALPN dispatch,
-// per-stream request/response proxying via runInspectExchange, pre-commit block
-// emission, and trailer forwarding. Deferred to later focused PRs (marked inline):
-//   - PR3c security: per-stream stall/inactivity cancel, adversarial frame limits
-//     (Rapid Reset / CONTINUATION flood / HPACK bounds), :authority pinning / 421.
+// Scope: native-ALPN dispatch, per-stream request/response proxying via
+// runInspectExchange, pre-commit block emission, trailer forwarding (PR3b), the
+// per-stream inactivity watchdog + frame/header caps (PR3c). Rapid Reset
+// (CVE-2023-44487) and CONTINUATION flood (CVE-2024-27316) are mitigated by
+// default in the vendored x/net v0.57.0 (the effective Rapid-Reset cap equals
+// MaxConcurrentStreams). Still deferred (marked inline):
+//   - :authority pinning / 421: NOT a security hole — upstreamCC is pinned to the
+//     CONNECT target so a client :authority cannot redirect the request off that
+//     connection (no SSRF). It is defense-in-depth against cross-origin coalescing
+//     confusion; deferred because a naive 421 risks breaking legitimate edge cases
+//     (IP-target CONNECT, single-SAN forged leaves already prevent coalescing) and
+//     warrants its own careful pass.
 //   - PR3d concurrency: GOAWAY-on-shutdown / drainActiveTunnels registration,
 //     upstream GOAWAY → per-stream failure mapping, graceful teardown.
 //   - perf: forged-leaf session resumption for native tunnels (ticket-key sharing).
@@ -41,6 +48,25 @@ const h2MaxConcurrentStreams uint32 = 32
 // h2ConnWriteByteTimeout bounds a stuck client write on the H2 leg so a stalled
 // reader cannot pin a handler goroutine + its scan buffer indefinitely.
 const h2ConnWriteByteTimeout = 30 * time.Second
+
+// h2MaxReadFrameSize caps a single HTTP/2 frame the server will read (1 MiB).
+// h2MaxHeaderBytes caps the decoded header-list size per request (1 MiB), a
+// defense against oversized / compression-amplified header blocks.
+const (
+	h2MaxReadFrameSize = 1 << 20
+	h2MaxHeaderBytes   = 1 << 20
+)
+
+// hopByHopTrailerNames are the RFC 7230 §6.1 hop-by-hop header names (canonicalized
+// http.Header keys) that must not be forwarded by an intermediary. removeHopHeaders
+// strips these from request/response header blocks; the H2 deliver path filters
+// them out of forwarded trailers too (removeHopHeaders operates on Header, not
+// Trailer). Keep in sync with removeHopHeaders' list.
+var hopByHopTrailerNames = map[string]bool{
+	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true,
+	"Proxy-Authorization": true, "Te": true, "Trailer": true,
+	"Transfer-Encoding": true, "Upgrade": true,
+}
 
 // h2StreamStallTimeout bounds per-stream body inactivity. It is the HTTP/2
 // analogue of the H1 stallDetectReadCloser: H2 cannot use a per-conn read deadline
@@ -265,18 +291,22 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 
 	// MaxConcurrentStreams is the primary per-connection resource bound (and the
 	// effective Rapid-Reset cap). IdleTimeout GOAWAYs a fully-idle tunnel;
-	// WriteByteTimeout bounds a stuck client write. A per-STREAM body-read
-	// inactivity watchdog (the H2 analogue of the H1 stallDetectReadCloser) is PR3c.
+	// WriteByteTimeout bounds a stuck client write. MaxReadFrameSize caps a single
+	// frame. A per-STREAM body-read inactivity watchdog is wired in h2InspectStream.
 	srv := &http2.Server{
 		MaxConcurrentStreams: h2MaxConcurrentStreams,
 		IdleTimeout:          tunnelIdleTimeout,
 		WriteByteTimeout:     h2ConnWriteByteTimeout,
+		MaxReadFrameSize:     h2MaxReadFrameSize,
 	}
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
-	// the client connection is no longer readable.
+	// the client connection is no longer readable. BaseConfig.MaxHeaderBytes bounds
+	// the decoded header-list size (SETTINGS_MAX_HEADER_LIST_SIZE) — a defense
+	// against oversized/compression-amplified header blocks.
 	srv.ServeConn(clientTLS, &http2.ServeConnOpts{
-		Context: outer.Context(),
-		Handler: handler,
+		Context:    outer.Context(),
+		Handler:    handler,
+		BaseConfig: &http.Server{MaxHeaderBytes: h2MaxHeaderBytes, ReadHeaderTimeout: h2ConnWriteByteTimeout},
 	})
 }
 
@@ -411,6 +441,9 @@ func h2DeliverResponse(w http.ResponseWriter, resp *http.Response) error {
 		return err
 	}
 	for k, vs := range resp.Trailer {
+		if hopByHopTrailerNames[k] {
+			continue // don't forward hop-by-hop names as trailers
+		}
 		for _, v := range vs {
 			w.Header().Add(http.TrailerPrefix+k, v)
 		}
