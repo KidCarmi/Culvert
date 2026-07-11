@@ -24,8 +24,8 @@ Cross-references are to the [Gap Register](ENTERPRISE-IMPLEMENTATION-GAP-REGISTE
 - **Complexity:** Medium.
 - **Architectural fit:** Strong — mirrors the existing Release Management → agent dispatch pattern; keeps restore-commit offline-gated.
 - **Timing:** **First enterprise customer.**
-- **Acceptance criteria:** An admin takes an encrypted backup and runs a restore dry-run from the GUI with no host shell; commit still enforces the offline gate; actions are audited.
-- **Review:** Real problem (GAP-BAK-01, verified); no existing GUI/API surface; scope is right (proxy existing primitives, don't reimplement); no new architecture. **Endorsed.**
+- **Acceptance criteria:** An admin takes an encrypted backup and runs a restore dry-run from the GUI with no host shell; commit still enforces the offline gate; actions are audited. **Scope note:** backup/restore rides the CP-local agent (`localAgentKey = "local"`), so in a CP/DP cluster this covers **CP node config/state**, not DP-local data — state this explicitly so it is not mistaken for a whole-cluster backup.
+- **Review:** Real problem (GAP-BAK-01, verified); routes `/v1/backups`, `/v1/restores/dryrun`, `/v1/restores/commit` confirmed present (`cmd/culvert-maint/internal/server/server.go:280-283`) so "wire existing primitives" is accurate; no new architecture. **Endorsed** (independent reviewer: by the project's own GUI-parity rule this arguably reads *before-MVP*, not just first-customer).
 
 ## FO-2 — Support bundle endpoint
 
@@ -41,7 +41,9 @@ Cross-references are to the [Gap Register](ENTERPRISE-IMPLEMENTATION-GAP-REGISTE
 - **Acceptance criteria:** `GET /api/support-bundle` (admin) streams a redacted tar.gz; a test asserts no secrets present.
 - **Review:** Real, no existing single artifact, correctly scoped to aggregation+redaction. **Endorsed.**
 
-## FO-3 — Monitor-only (shadow) policy enforcement mode
+## FO-3 — Monitor-only policy enforcement mode
+
+> **Naming caveat (independent review):** do **not** call this "shadow" mode — `shadow` already denotes the C2 metadata-RBAC log-only mode (`CULVERT_C2_ENFORCE=false`). Use `Monitor` / `monitor-only` to avoid a support/telemetry collision.
 
 - **Exposing step:** Policy rollout / pilot (steps 28, 47). GAP-POL-01.
 - **Customer problem:** No observe-only mode — a blocking rule always blocks, so there is no safe window to see what a new deny policy *would* block.
@@ -144,12 +146,12 @@ Cross-references are to the [Gap Register](ENTERPRISE-IMPLEMENTATION-GAP-REGISTE
 - **Customer problem:** No automated backup; RPO depends on operator cron.
 - **Current workaround:** External cron + off-host sync. **Quality: acceptable if owned.**
 - **Operational value:** High.
-- **Implementation leverage:** Medium — cadence/retention driven by the agent (builds on FO-1).
+- **Implementation leverage:** Medium — **not** merely "extends FO-1." The maintenance agent has **no scheduler primitive** (no timer/cron/retention loop under `cmd/culvert-maint`), so this adds a net-new timer + retention loop, not just wiring.
 - **Complexity:** Medium.
-- **Architectural fit:** Strong (extends FO-1).
-- **Timing:** **First enterprise customer** (bundled with FO-1).
+- **Architectural fit:** Moderate (new scheduling loop).
+- **Timing:** **Later** (downgraded on independent review). The workaround — external cron / host systemd timer invoking the FO-1 backup — fully covers RPO once FO-1 exists; ship FO-1 first, then reassess demand for in-product scheduling.
 - **Acceptance criteria:** An operator sets a nightly encrypted backup + retention from the GUI; backups appear on schedule.
-- **Review:** Real; depends on FO-1; correctly scoped. **Endorsed (after FO-1).**
+- **Review:** Real; workaround acceptable if owned; **downgraded to Later** — the "extends FO-1" framing overstated leverage (no scheduler primitive exists). Ship FO-1 first.
 
 ## FO-11 — Admin SSO (IdP-group → admin RBAC)
 
@@ -171,7 +173,7 @@ Cross-references are to the [Gap Register](ENTERPRISE-IMPLEMENTATION-GAP-REGISTE
 
 | Timing | Opportunities |
 |---|---|
-| **First enterprise customer** | FO-1 (backup/restore GUI), FO-2 (support bundle), FO-3 (monitor-only), FO-4 (setup token), FO-5 (recovery guard + runbook), FO-6 (repo-rewrite wiring, if air-gapped), FO-7 (CA import durability, if internal-PKI), FO-10 (scheduled backup) |
-| **Later** | FO-8 (expiry watchdog), FO-9 (appliance/OVA — conditional), FO-11 (admin SSO — conditional), FO-6/FO-5 full variants |
+| **First enterprise customer** | FO-1 (backup/restore GUI), FO-2 (support bundle), FO-3 (monitor-only), FO-4 (setup token), FO-5 (recovery guard + runbook), FO-6 (repo-rewrite wiring, if air-gapped), FO-7 (CA import durability, if internal-PKI) |
+| **Later** | FO-8 (expiry watchdog), FO-10 (scheduled backup — after FO-1, no scheduler primitive today), FO-9 (appliance/OVA — conditional; **document Compose-on-VM first, do not build the OVA speculatively**), FO-11 (admin SSO — conditional), FO-6/FO-5 full variants |
 
-The four highest-leverage, lowest-risk items — **FO-1, FO-2, FO-3, FO-4** — each reuse an existing engine or add a small, localized change, and each closes a verified gap that a first enterprise customer will hit in week one. None introduces new architecture. Recommend sequencing these first.
+The four highest-leverage, lowest-risk items — **FO-1, FO-2, FO-3, FO-4** — each reuse an existing engine or add a small, localized change, and each closes a verified gap that a first enterprise customer will hit in week one. None introduces new architecture. Recommend sequencing these first. (Independent review confirmed all four gaps are truly absent in code and endorsed this sequencing; it downgraded FO-10 to Later — the maintenance agent has no scheduler primitive, so external cron suffices — and cautioned that the FO-9 OVA is genuinely XL and should not be built before it is contractually required.)
