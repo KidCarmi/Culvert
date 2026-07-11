@@ -116,8 +116,12 @@ disabled-fetch/permissive deployments — boot-only evaluation), CHAOS-06 remain
 - **Fix:** each tick body is extracted into `refreshLoopTick` with a `recover()` guard: a
   panic is logged and costs exactly one tick — the existing catalog is untouched (the
   auto-seed path only swaps on full success) and the next tick runs normally.
-  `runRefresh`'s lock releases are deferred, so recovery cannot strand
-  `refreshRunMu`/`statusMu`.
+  Every lock on the `runRefresh` path releases via defer — `refreshRunMu` already
+  did; the `statusMu` sections in `recordRefreshOutcome` and
+  `evaluateCatalogFreshness` were Lock/Unlock without defer and are converted to
+  defer-released closures as part of this fix — so recovery cannot strand a mutex
+  (a stranded `statusMu` would have turned a visible crash into a silent hang of
+  the loop *and* `/api/releases`).
 - **Tests:** `TestRunCatalogRefreshLoop_SurvivesTickPanic` (`release_refresh_test.go`) —
   tick 1 panics; the loop must keep ticking (≥3 calls), the post-panic tick must still fold
   into the shared status (also proving no stranded lock — a stuck mutex would deadlock the
@@ -136,6 +140,7 @@ New findings are registered with fresh IDs (CHAOS-22 was fixed above).
 | CHAOS-24 | LOW | Runtime stale/expiry evaluation uses raw wall clock with no skew tolerance (`evalStale`, `isExpiredNow`); a backward clock jump can re-arm the stale latch and mask staleness. Serving stays fail-closed either way (`GetCatalog` hides an expired catalog) — detection-fidelity only. The load-time gate *does* apply `catalogClockSkew`; the runtime watchdog should too. | `release_alerts.go`, `release_catalog_holder.go` |
 | CHAOS-25 | LOW | Failing-latch fires once per crossing and never re-alerts during a prolonged origin outage; restart re-fires once. Both documented as accepted in `release_alerts.go` — recorded here as residual, optional escalating re-alert. | `release_alerts.go` |
 | CHAOS-26 | LOW | `stageVerified` bounds each fetched file but not the **number** of manifests / aggregate staged bytes. Mitigated: the index signature is verified before enumeration, so only a trusted signer can inflate the list. Optional belt-and-suspenders cap. | `release_catalog_http.go` |
+| CHAOS-27 | LOW-MED | **Double write-block escapes the idle reaper**: the CHAOS-03 fix arms *read* deadlines, so it needs at least one relay direction parked in a read. If BOTH directions are simultaneously blocked in a deadline-less `Write` (each peer fills its receive window and stops reading — a few hundred KB of kernel buffer per tunnel), no deadline ever pops and the tunnel still pins its goroutines/FDs/limiter slot forever. Write deadlines remain correctly ruled out (they corrupt `tls.Conn` state); remediation is an out-of-band sweeper (periodic scan of tunnels whose shared activity stamp is stale, hard-closing both conns from outside the copy loops). The one-sided write-block case IS fixed (the reading direction's pop hard-closes both conns). | `proxy_tunnel.go` (`idleCopyCounted`) |
 
 **Positive findings (the new code already fails safely — cite-worthy models):**
 
@@ -184,6 +189,7 @@ Statuses relative to the 2026-07-09 table. Findings not listed are unchanged (op
 | CHAOS-08 | MED | No semantic floor on snapshots | OPEN (policy decision required) |
 | CHAOS-13/14 | MED-LOW | No jitter on legacy feed tickers; no gRPC keepalives on CP/DP channel | OPEN (M1 refresh loop ships jitter — the model to copy) |
 | CHAOS-24/25/26 | LOW | Release-platform delta lows (skew tolerance, latch re-alert, staged-bytes cap) | OPEN (new) |
+| CHAOS-27 | LOW-MED | Double write-block escapes the idle reaper (both directions stuck in deadline-less Write) | OPEN (new — accepted residual of the CHAOS-03 fix) |
 | CHAOS-19/20/21 | LOW-MED | Audit-write counter; feed staleness metrics; CA-rotation window race | OPEN |
 
 ---
@@ -193,7 +199,8 @@ Statuses relative to the 2026-07-09 table. Findings not listed are unchanged (op
 | Scenario | Before this change | After |
 |---|---|---|
 | Half-open peer on any raw tunnel (CONNECT/WS/SOCKS5/inspect-fallback) | ❌ goroutines + FDs + buffer + limiter slot pinned forever; silent | ✅ reaped 1–2× `tunnelIdleTimeout` after last byte; logged; accounting entry emitted |
-| Peer that ACKs but never **reads** (write-side half-open) | ❌ relay blocked in deadline-less Write forever | ✅ idle teardown hard-closes both conns, unblocking the writer |
+| Peer that ACKs but never **reads** (one-sided write-block) | ❌ relay blocked in deadline-less Write forever | ✅ the *other* direction's read-deadline pop hard-closes both conns, unblocking the writer |
+| BOTH peers ACK but never read (double write-block) | ❌ both relays blocked in deadline-less Write forever | ❌ unchanged — no direction is parked in a read, so no deadline pops (registered as CHAOS-27) |
 | Mass idle-tunnel flood | ❌ unbounded resource growth until FD exhaustion | ✅ bounded at (arrival rate × idle window); per-IP limiter (CHAOS-02) bounds per-source concurrency |
 | Panic inside catalog refresh/verify/reload | ❌ refresh + 180-day stale watchdog silently dead until restart | ✅ one missed tick, logged; catalog untouched; loop continues |
 
@@ -228,9 +235,12 @@ Statuses relative to the 2026-07-09 table. Findings not listed are unchanged (op
 - The CHAOS-03 fix alters relay behavior ONLY on tunnels silent in both directions for a
   full hour; the keep-alive test proves one-way-active tunnels survive arbitrarily many
   idle windows, and the EOF test proves graceful teardown is byte-identical. The hot-path
-  cost is one `SetReadDeadline` (a runtime-timer update, no syscall) per copy resumption —
-  twice per hour on an idle-ish tunnel, once per ~128 KB-buffer-drain interruption
-  otherwise; the kernel-splice fast path is preserved by design.
+  cost is one `SetReadDeadline` (a runtime-timer update, no syscall) per copy resumption.
+  The deadline is absolute, so it pops and re-arms once per half-window (default 30 min)
+  per direction regardless of how much traffic is flowing — ~4 pops/hour/tunnel total; the
+  kernel-splice fast path is preserved by design. The double-write-block case (both
+  directions stuck in a deadline-less `Write`) is NOT covered by this mechanism and is
+  registered as CHAOS-27.
 - `tunnelIdleTimeout` configurability is deferred (GUI-parity obligation); 1 h is
   conservative. An operator-facing knob should arrive with the config surface done
   properly (registry row + snapshot/rollback classification per Finding 10.3).

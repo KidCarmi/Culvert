@@ -50,8 +50,10 @@ func runCatalogRefreshLoop(ctx context.Context, interval time.Duration, getRM fu
 	// watchdog (evaluateCatalogFreshness runs inside runRefresh), so a panic
 	// anywhere in the fetch/verify/reload path must cost one tick, not kill
 	// refresh + stale-alerting for the rest of the process lifetime
-	// (CHAOS-R1, 2026-07-10 review). runRefresh's lock releases are deferred,
-	// so recovery here cannot strand refreshRunMu/statusMu.
+	// (CHAOS-R1, 2026-07-10 review). Every lock on the runRefresh path
+	// (refreshRunMu, and the statusMu sections in recordRefreshOutcome /
+	// evaluateCatalogFreshness) releases via defer, so recovery here cannot
+	// strand a mutex.
 	for {
 		select {
 		case <-ctx.Done():

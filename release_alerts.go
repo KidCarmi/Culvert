@@ -163,9 +163,12 @@ func (rm *releaseManager) evaluateCatalogFreshness() {
 		// Permissive/legacy catalogs may carry no expiry — nothing to watch.
 		return
 	}
-	rm.statusMu.Lock()
-	events := rm.evalStale(exp, time.Now())
-	rm.statusMu.Unlock()
+	// defer-released (closure) so a recovered panic cannot strand statusMu.
+	events := func() []AlertPayload {
+		rm.statusMu.Lock()
+		defer rm.statusMu.Unlock()
+		return rm.evalStale(exp, time.Now())
+	}()
 	for _, p := range events {
 		releaseAlertFire(p.Event, p)
 	}

@@ -29,7 +29,7 @@ func setTunnelIdleTimeout(t *testing.T, d time.Duration) {
 // the splice-capable ReaderFrom path and CloseWrite semantics are exercised.
 func idleTestTCPPair(t *testing.T) (client, server net.Conn) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
