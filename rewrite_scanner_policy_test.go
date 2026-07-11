@@ -15,7 +15,7 @@ import (
 func TestDPIBlock_IncrementsStat(t *testing.T) {
 	before := statDPIBlocked
 	var buf bytes.Buffer
-	dpiBlock(&buf, "test.com", "pattern")
+	dpiBlock(h1BlockResponder{w: &buf}, "test.com", "pattern")
 	after := statDPIBlocked
 	if after <= before {
 		t.Error("dpiBlock should increment statDPIBlocked")

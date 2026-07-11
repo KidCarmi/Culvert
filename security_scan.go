@@ -124,10 +124,10 @@ func scanBlock(w http.ResponseWriter, host, reason, source string) {
 
 // scanBlockConn sends a 403 Forbidden HTTP/1.1 response to a raw connection
 // (used inside SSL-inspect tunnels where http.ResponseWriter is not available).
-func scanBlockConn(dst interface{ Write([]byte) (int, error) }, host, reason, source string) {
+func scanBlockConn(br blockResponder, host, reason, source string) {
 	logger.Printf("SecurityScan: blocked host=%s source=%s reason=%q", host, source, reason)
 	body := fmt.Sprintf("Blocked by %s scan: %s\r\n", strings.ToUpper(source), reason)
-	h1BlockResponder{w: dst}.blockBeforeResponse("text/plain; charset=utf-8", body)
+	br.blockBeforeResponse("text/plain; charset=utf-8", body)
 }
 
 // ── Buffer sizing helpers ─────────────────────────────────────────────────────

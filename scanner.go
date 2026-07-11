@@ -55,9 +55,9 @@ func isTextContentType(ct string) bool {
 // dpiBlock sends an HTTP 403 Forbidden response to dst and increments the
 // DPI blocked counter.  It is called inside inspected tunnels after a
 // signature match is detected in a buffered response body.
-func dpiBlock(dst interface{ Write([]byte) (int, error) }, host, pattern string) {
+func dpiBlock(br blockResponder, host, pattern string) {
 	atomic.AddInt64(&statDPIBlocked, 1)
 	logger.Printf("DPI_BLOCKED host=%s pattern=%q", host, pattern)
 	const body = "Blocked by content inspection policy\r\n"
-	h1BlockResponder{w: dst}.blockBeforeResponse("text/plain; charset=utf-8", body)
+	br.blockBeforeResponse("text/plain; charset=utf-8", body)
 }

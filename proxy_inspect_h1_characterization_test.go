@@ -101,7 +101,7 @@ func TestCharacterize_InspectClientALPNIsHTTP11(t *testing.T) {
 // wire output — the oracle the H1 blockResponder must reproduce.
 func TestCharacterize_ScanBlockConnBytes(t *testing.T) {
 	var buf bytes.Buffer
-	scanBlockConn(&buf, "evil.example", "eicar", "clamav")
+	scanBlockConn(h1BlockResponder{w: &buf}, "evil.example", "eicar", "clamav")
 	out := buf.String()
 	for _, want := range []string{
 		"HTTP/1.1 403 Forbidden\r\n",
@@ -121,7 +121,7 @@ func TestCharacterize_ScanBlockConnBytes(t *testing.T) {
 // TestCharacterize_DPIBlockBytes locks dpiBlock's exact HTTP/1.1 403 output.
 func TestCharacterize_DPIBlockBytes(t *testing.T) {
 	var buf bytes.Buffer
-	dpiBlock(&buf, "evil.example", "sig-42")
+	dpiBlock(h1BlockResponder{w: &buf}, "evil.example", "sig-42")
 	out := buf.String()
 	for _, want := range []string{
 		"HTTP/1.1 403 Forbidden\r\n",
@@ -183,7 +183,7 @@ func TestCharacterize_UpstreamInspectLegOffersNoALPN(t *testing.T) {
 // second response," not "string absent."
 func TestCharacterize_BlockReasonCannotInjectResponse(t *testing.T) {
 	var buf bytes.Buffer
-	scanBlockConn(&buf, "evil.example", "sig\r\n\r\nHTTP/1.1 200 OK\r\n\r\ninjected", "clamav")
+	scanBlockConn(h1BlockResponder{w: &buf}, "evil.example", "sig\r\n\r\nHTTP/1.1 200 OK\r\n\r\ninjected", "clamav")
 
 	br := bufio.NewReader(bytes.NewReader(buf.Bytes()))
 	resp, err := http.ReadResponse(br, nil)

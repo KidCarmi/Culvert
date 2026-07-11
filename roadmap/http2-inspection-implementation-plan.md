@@ -359,6 +359,48 @@ the SAME seam per stream. A test asserts both paths route through one instrument
 an H2 e2e both hit it), making "reused verbatim" a structural guarantee. The three reviewers validate the
 extracted contract's shape from the PR2 diff.
 
+## Implementation review consolidation — PR1/PR2a diff (3 reviewers)
+
+All three (SWG architect, HTTP/2+TLS security, Go runtime) returned **APPROVE-WITH-CHANGES** on the
+committed PR1+PR2a. Unanimous points, all actioned:
+
+- **Ship PR1+PR2a** — behavior-neutral, byte-exact, fail-safe resolver. ✓
+- **Test hardening (landed):** explicit-`false` JSON round-trip (the load-bearing C2 guarantee); `fileblock.BlockConn`
+  H1 golden byte-lock; upstream-leg no-ALPN oracle; CRLF-cannot-inject-a-second-response (verified via
+  `http.ReadResponse`, not string-count); `h1BlockResponder` does-not-close-conn contract.
+- **`fileblock` migration is PR2b's first act** (all three): make `internal/fileblock` a **pure detector** —
+  wire emission moves to the main-package responder; drop the H1 force-close on the H2 path (a per-stream
+  block must never close the shared conn; `Connection: close` is illegal on H2, RFC 9113 §8.2.2).
+- **Product design confirmed:** `StripALPN` on the rule TLS-options surface (alongside `TLSSkipVerify`) is
+  the faithful mapping of PAN-OS's "on the decryption surface" — Culvert has no separate profile object, so
+  this per-rule TLS-options block *is* the decryption-profile equivalent. Do not overload `SSLAction`.
+- **`resolveStripALPN` must be consulted only on `SSLAction==Inspect`** at the PR3 call site (gate + test).
+
+**Consolidated PR2b design (derived from the extraction, not pre-frozen):**
+- Widen `inspectFileBlocked`/`inspectCDBlocked`/`inspectMagicBlock`/`scanInspectBody`/`runCDRStage` from
+  `*tls.Conn`/`net.Conn` → the `blockResponder` seam. **No inspection function may name a conn or branch on
+  protocol** — the single mechanical invariant of C5. (PR2b-1: DONE — all block emitters route through one
+  responder; asserted by `TestC5_AllBlockEmittersRouteThroughResponder`.)
+- The seam must own **both** sinks — block-emit AND clean-**deliver** (`resp.Write`); leaving `resp.Write`
+  in the H1 loop moves only half the seam. Model the upstream round-trip and client delivery as
+  function-typed transport hooks on an exchange object (H1: `req.Write`+`ReadResponse` / `resp.Write`;
+  H2: `NewClientConn.RoundTrip` / stream write) so scanners stay conn-free. (PR2b-2.)
+- **Preserve `resp.Trailer`** through the `MultiReader` reassembly (`proxy_tunnel.go:971`) — it currently
+  drops trailers (RF8); the H2 deliver needs gRPC `grpc-status` trailers. (PR2b-2.)
+- Per-stream stall timer lives at the **transport edge**, not the seam; H1 keeps `stallDetectReadCloser`
+  verbatim (PR3/RF6).
+- **Post-commit responder is still NOT frozen** — it must take a stream-state object
+  (`headersFlushed`/`dataFlushed`/`trailerWindowOpen` + typed capability `isGRPC`/`isSSE` + stream handle +
+  structured reason), derived from the H2 lifecycle in PR3. Never `PostCommit(contentType, reason string)`.
+- **C1 ClientHello ALPN peek confirmed sound** (not `GetConfigForClient` for the upstream-offer input, due
+  to upstream-first handshake ordering): bounded read-only parse of the buffered plaintext ClientHello via
+  the existing `clientBuf.Reader`, non-stranding (the H2 preface is post-handshake ciphertext on another
+  layer), fail-closed to `["http/1.1"]` on parse failure; **must be fuzzed** (new attack surface).
+  `GetConfigForClient` is used only to inject the per-conn **downstream** `NextProtos`, sharing (not
+  cloning) the ticket-key state (RF2). Read `NegotiatedProtocol` post-resumption on both legs.
+- **GOAWAY/drain:** `ServeConn` on a hijacked conn has no per-conn `Shutdown`; PR3 must register active h2
+  conns for GOAWAY-on-shutdown and map origin GOAWAY → per-stream fail + tunnel teardown (RF3/RF10).
+
 ## Definition of done
 
 Reviewed plan (3 reviewers, no blocking findings — **DONE, v2; v3 owner corrections applied**) →

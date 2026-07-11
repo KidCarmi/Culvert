@@ -27,6 +27,49 @@ func TestBlockResponderInterface_H1Satisfies(t *testing.T) {
 	var _ blockResponder = h1BlockResponder{w: &strings.Builder{}}
 }
 
+// spyResponder records blockResponder calls for the C5 choke-point assertion.
+type spyResponder struct {
+	calls          int
+	lastCT, lastBd string
+}
+
+func (s *spyResponder) blockBeforeResponse(ct, body string) {
+	s.calls++
+	s.lastCT, s.lastBd = ct, body
+}
+
+// TestC5_AllBlockEmittersRouteThroughResponder is the invariant-C5 structural
+// guarantee: every tunnel block emitter (scan/DPI/CDR-via-scanBlockConn, and the
+// file-block path) routes through the single blockResponder choke point — no
+// emitter writes a conn directly. This is what makes "one inspection pipeline for
+// H1 and H2" a structural fact: the H2 responder plugs into the same choke point.
+func TestC5_AllBlockEmittersRouteThroughResponder(t *testing.T) {
+	t.Run("scanBlockConn", func(t *testing.T) {
+		s := &spyResponder{}
+		scanBlockConn(s, "h", "reason", "clamav")
+		if s.calls != 1 {
+			t.Fatalf("scanBlockConn routed through responder %d times, want 1", s.calls)
+		}
+	})
+	t.Run("dpiBlock", func(t *testing.T) {
+		s := &spyResponder{}
+		dpiBlock(s, "h", "pattern")
+		if s.calls != 1 {
+			t.Fatalf("dpiBlock routed through responder %d times, want 1", s.calls)
+		}
+	})
+	t.Run("emitFileBlock", func(t *testing.T) {
+		s := &spyResponder{}
+		emitFileBlock(s, "h", "/p/x.exe", "exe", "global ext")
+		if s.calls != 1 {
+			t.Fatalf("emitFileBlock routed through responder %d times, want 1", s.calls)
+		}
+		if s.lastBd != "Blocked: file type exe is not allowed (global ext)\r\n" {
+			t.Fatalf("emitFileBlock body = %q", s.lastBd)
+		}
+	})
+}
+
 // TestH1BlockResponder_DoesNotCloseConn locks the anti-bypass contract: the
 // pre-commit responder must NOT close the tunnel conn (the H1 loop owns teardown
 // via break + clientTLS.Close, and pipelined-retry bypass is prevented by
