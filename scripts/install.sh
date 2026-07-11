@@ -600,6 +600,33 @@ verify_pinned_image_signature() {
   [[ "$rc" -eq 0 ]]
 }
 
+# clone_source_into_install_dir — LAST-RESORT population of $INSTALL_DIR from
+# the source repo, used when the registry image is unreachable (nothing to seed
+# or extract from) or the pulled image predates the /app/deploy bundle. Requires
+# the repo to be publicly readable. GIT_TERMINAL_PROMPT=0 makes a PRIVATE or
+# unreachable repo fail FAST with a clear message instead of blocking forever on
+# a credential prompt on /dev/tty (a `curl | bash` run has no way to answer it).
+# `cp -a` of the clone CONTENTS merges into $INSTALL_DIR WITHOUT overwriting a
+# carried-forward .env (the repo ships none). Returns non-zero on any failure;
+# never hangs, never aborts the caller.
+clone_source_into_install_dir() {
+  ensure_git
+  local tmp="$INSTALL_DIR/.culvert-src.tmp"
+  sudo rm -rf "$tmp" 2>/dev/null || true
+  if ! GIT_TERMINAL_PROMPT=0 git clone "$REPO_URL" "$tmp"; then
+    warn "Could not clone $REPO_URL — the source repo may be private or unreachable."
+    sudo rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! sudo cp -a "$tmp/." "$INSTALL_DIR/" 2>/dev/null; then
+    warn "Could not populate $INSTALL_DIR from the clone."
+    sudo rm -rf "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  sudo rm -rf "$tmp" 2>/dev/null || true
+  return 0
+}
+
 seed_pinned_tag() {
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
     info "$PINNED_TAG already present; not reseeding"
@@ -652,12 +679,29 @@ seed_pinned_tag() {
 }
 
 if ! seed_pinned_tag; then
-  error "Could not seed $PINNED_TAG from any source (seed ref, running container, $PROXY_REPO:latest, local build).
+  # The registry was unreachable and there was no local source to build from
+  # (source-free install). Last resort: clone the (public) source repo and build
+  # the image locally — this restores the "github reachable but ghcr blocked"
+  # completion path that a plain seed-then-error ordering removes.
+  if [[ ! -f "$INSTALL_DIR/Dockerfile" ]]; then
+    warn "Could not seed $PINNED_TAG from the registry — cloning the source repo to build locally..."
+    clone_source_into_install_dir || true
+    cd "$INSTALL_DIR"
+  fi
+  if [[ -f "$INSTALL_DIR/Dockerfile" ]]; then
+    info "Building $PINNED_TAG from source (slower than a registry pull)..."
+    sudo docker build -t "$PINNED_TAG" "$INSTALL_DIR" \
+      || error "Building $PINNED_TAG from the cloned source failed — see the build output above."
+    info "Built $PINNED_TAG from source."
+  else
+    error "Could not obtain $PINNED_TAG: the registry is unreachable AND the source repo
+  could not be cloned (private or offline).
 
-  Seed it manually, then re-run this script:
-    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG
-  or build from source:
-    docker build -t $PINNED_TAG ."
+  Provide a reachable image instead — e.g. a signed release tag on a host that can reach it:
+    CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh
+  or seed the tag by hand and re-run:
+    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG"
+  fi
 fi
 
 ###############################################################################
@@ -733,16 +777,14 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" ]]; then
     info "Deployment files installed to $INSTALL_DIR (no source checkout needed)."
   else
     # Compat window: images built before the /app/deploy bundle. Requires the
-    # source repo to be publicly readable.
+    # source repo to be publicly readable; clone_source_into_install_dir fails
+    # fast (never hangs) on a private/unreachable repo.
     warn "The image has no /app/deploy bundle (older release) — falling back to a git clone."
-    ensure_git
-    git clone "$REPO_URL" "$INSTALL_DIR/.culvert-src.tmp"
-    # Move the checkout's contents into the (empty apart from the clone) stack
-    # dir so the layout matches the extract path and re-runs behave the same.
-    (shopt -s dotglob && mv "$INSTALL_DIR/.culvert-src.tmp"/* "$INSTALL_DIR/") \
-      || error "Could not populate $INSTALL_DIR from the fallback clone."
-    rmdir "$INSTALL_DIR/.culvert-src.tmp"
-    info "Cloned to $INSTALL_DIR"
+    clone_source_into_install_dir \
+      || error "The pulled image has no /app/deploy bundle and the source repo could not be
+  cloned (private or offline). Use an image that includes the deploy bundle (a current
+  release), or run this script from a source checkout."
+    info "Populated $INSTALL_DIR from the source repo."
   fi
 fi
 
