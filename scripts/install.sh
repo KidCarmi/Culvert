@@ -506,6 +506,61 @@ step "Seeding proxy image"
 PINNED_TAG="culvert/proxy:pinned"
 PROXY_REPO="${CULVERT_PROXY_REPO:-ghcr.io/kidcarmi/culvert}"
 
+# Pinned release-signing identity (PUBLIC — mirrors release_identity.env, kept
+# byte-equal by TestReleaseIdentitySSOT). Used to cosign-verify the proxy image
+# BEFORE we trust the host-root maintenance-agent binary extracted from its
+# /app/deploy bundle. Hardcoded here — NOT read from the image — on purpose:
+# the trust identity must come from a source the image cannot forge (this
+# script arrives over TLS from a trusted origin; the image does not).
+# NOTE: the SAN is pinned to TAGGED releases (…@refs/tags/v.*$) — only a
+# version-tagged signed image verifies; a main-tracking :latest or a locally
+# built image does not, and the agent then falls back to the signed-release
+# download (fail-closed) rather than trusting an unverified binary.
+MAINT_SIGSTORE_ISSUER="https://token.actions.githubusercontent.com"
+MAINT_SIGSTORE_SAN_REGEX='^https://github\.com/KidCarmi/Culvert/\.github/workflows/ci\.yml@refs/tags/v.*$'
+# Pinned cosign verifier image (the root of trust for the check). A bare tag is
+# mutable; high-assurance operators should override with a digest-pinned ref.
+# MUST be cosign v3.x (new-format Sigstore bundles). Mirrors the agent
+# installer's COSIGN_IMAGE default.
+MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign:v3.0.6}"
+
+# verify_pinned_image_signature — cosign-verify (keyless) the registry image
+# behind $PINNED_TAG against the pinned tag identity. No host cosign needed;
+# runs the pinned cosign container (docker is already up). Return codes:
+#   0 = verified (signature present AND pinned tag identity matched)
+#   1 = a signature was checked and REJECTED (identity mismatch / bad sig) —
+#       a possible-tampering signal worth surfacing loudly
+#   2 = could not verify (image has no registry digest — e.g. locally built —
+#       or cosign/registry/Rekor was unreachable)
+# Fail-closed callers trust the bundle ONLY on return 0.
+verify_pinned_image_signature() {
+  local digest_ref
+  # RepoDigests carries the source-registry digest of the pulled image; a
+  # locally built (never-pushed) image has none → unverifiable.
+  digest_ref="$(sudo docker image inspect "$PINNED_TAG" \
+    --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
+  if [[ "$digest_ref" != *@sha256:* ]]; then
+    return 2
+  fi
+  local out rc=0
+  out="$(sudo docker run --rm "$MAINT_COSIGN_IMAGE" verify \
+           --certificate-oidc-issuer="$MAINT_SIGSTORE_ISSUER" \
+           --certificate-identity-regexp="$MAINT_SIGSTORE_SAN_REGEX" \
+           "$digest_ref" 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+  # Distinguish "couldn't run" (no signature published, registry/Rekor/network
+  # unreachable, cosign image unpullable) from "ran and rejected". Both are
+  # fail-closed for the security decision; the distinction only picks the
+  # message. Default to the benign "couldn't verify" (2) unless the output is
+  # specifically an identity/signature rejection.
+  if grep -qiE 'none of the (given )?identities|no matching (signatures|certificates)|certificate identity|signature.*(mismatch|invalid|not verified)' <<<"$out"; then
+    return 1
+  fi
+  return 2
+}
+
 seed_pinned_tag() {
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
     info "$PINNED_TAG already present; not reseeding"
@@ -1271,23 +1326,46 @@ install_maint_agent() {
   local target_version
   target_version="$(resolve_maint_version)"
 
-  # Bundled agent binary (primary source): shipped inside the pinned proxy
-  # image at /app/deploy/bin/culvert-maint, so it exists wherever the image
-  # can be pulled — GitHub release assets and the source repo may not be
-  # publicly readable. It also tracks the EXACT image the stack runs.
+  # Bundled agent binary: shipped inside the pinned proxy image at
+  # /app/deploy/bin/culvert-maint, so it exists wherever the image can be
+  # pulled — GitHub release assets and the source repo may not be publicly
+  # readable. It also tracks the EXACT image the stack runs.
+  #
+  # TRUST (fix — finding #1): the agent is a HOST-ROOT systemd service (sudoers
+  # docker allowlist), so we must NOT install its binary from an unverified
+  # image. Before trusting the bundle we cosign-verify the proxy image's
+  # registry digest against the pinned tag identity (fail-closed). Only on a
+  # verified image do we extract + trust the bundled binary — SKIP_VERIFY at
+  # install time is then legitimate because the SOURCE image is verified. When
+  # the image cannot be verified (unsigned/main :latest, locally built, or
+  # cosign/registry unavailable) we DO NOT touch the bundle and fall through to
+  # the signed-release download (which self-verifies) or the source build.
   local bundled_bin=""
-  if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]] \
-     && extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
-    bundled_bin="$scratch/culvert-maint-bundled"
-    if [[ -z "$target_version" ]]; then
-      # Derive the target from the bundled binary's own version stamp so the
-      # idempotence/upgrade check below works for image-bundled installs.
-      # Accept only a real release semver — dev/main builds stamp "dev".
-      local bundled_version
-      bundled_version="$("$bundled_bin" --version 2>/dev/null || true)"
-      if [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-        target_version="$bundled_version"
+  if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
+    local vrc=0
+    verify_pinned_image_signature || vrc=$?
+    if [[ "$vrc" -eq 0 ]]; then
+      if extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
+        bundled_bin="$scratch/culvert-maint-bundled"
+        info "Proxy image signature verified against the pinned release identity — trusting its bundled agent binary."
+        if [[ -z "$target_version" ]]; then
+          # Derive the target from the bundled binary's own version stamp so the
+          # idempotence/upgrade check below works for image-bundled installs.
+          # Accept only a real release semver — dev/main builds stamp "dev".
+          local bundled_version
+          bundled_version="$("$bundled_bin" --version 2>/dev/null || true)"
+          if [[ "$bundled_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            target_version="$bundled_version"
+          fi
+        fi
       fi
+    elif [[ "$vrc" -eq 1 ]]; then
+      warn "Proxy image signature did NOT match the pinned release identity ($PINNED_TAG)."
+      warn "Refusing to install the host maintenance agent from the image bundle (possible tampering)."
+      warn "Falling back to the cosign-verified signed-release download."
+    else
+      info "Proxy image signature could not be verified (unsigned/main image, locally built, or cosign/registry unavailable)."
+      info "Using the signed-release download for the host agent instead of the image bundle (fail-closed)."
     fi
   fi
 
@@ -1346,14 +1424,16 @@ install_maint_agent() {
     return 0
   fi
 
-  # ── Install: bundled binary → signed release → local build. ─────────────────
-  # The bundled path installs with CULVERT_MAINT_SKIP_VERIFY=1: the binary was
-  # just extracted from the TLS-pulled pinned proxy image, which IS the trust
-  # channel (the same artifact runs the proxy) — there is no sidecar cosign
-  # bundle inside the image to verify against.
+  # ── Install: verified bundled binary → signed release → local build. ────────
+  # $bundled_bin is set ONLY when verify_pinned_image_signature passed above, so
+  # CULVERT_MAINT_SKIP_VERIFY=1 here is trusting an ALREADY-VERIFIED source (the
+  # cosign-verified proxy image), not an unverified download. The image carries
+  # no sidecar cosign bundle for the binary itself; the image signature is the
+  # anchor. If the image was not verified, $bundled_bin is empty and this branch
+  # is skipped in favour of the self-verifying signed-release download below.
   local installed_ok=0
   if [[ -n "$bundled_bin" ]]; then
-    info "Installing maintenance agent from the image deploy bundle..."
+    info "Installing maintenance agent from the (verified) image deploy bundle..."
     if sudo CULVERT_MAINT_SKIP_VERIFY=1 bash "$maint_installer" "$bundled_bin"; then
       installed_ok=1
     else
