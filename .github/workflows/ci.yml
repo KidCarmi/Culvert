@@ -759,9 +759,31 @@ jobs:
       actions: read   # list-workflow-runs endpoint (require-gate.sh)
 
     steps:
+      # SEC-F7: the v-tag-protection ruleset (Restrict creations) blocks
+      # github-actions[bot] from creating v* tags — and the repo-level ruleset
+      # cannot add the Actions bot as a bypass actor. So auto-tag pushes the tag
+      # authenticated as RELEASE_TAG_PAT (a fine-grained, contents:write,
+      # single-repo PAT owned by a Repository-admin bypass actor). Fail LOUDLY
+      # if the secret is absent rather than surfacing a confusing checkout auth
+      # error. See docs/operator/catalog-resign-runbook.md.
+      - name: Assert RELEASE_TAG_PAT is configured (SEC-F7)
+        env:
+          RELEASE_TAG_PAT: ${{ secrets.RELEASE_TAG_PAT }}
+        run: |
+          test -n "$RELEASE_TAG_PAT" || {
+            echo "FATAL: RELEASE_TAG_PAT secret is not set."
+            echo "       The v-tag-protection ruleset blocks github-actions[bot] from"
+            echo "       creating v* tags; auto-tag must push as a bypass actor."
+            echo "       Create the fine-grained PAT + secret per the SEC-F7 runbook."
+            exit 1
+          }
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0   # need full history for tags
+          # Persist the PAT (not the default token) so the tag push below is
+          # authenticated as the bypass actor. Also means the tag push reliably
+          # triggers the tag-ref release CI (a GITHUB_TOKEN push would not).
+          token: ${{ secrets.RELEASE_TAG_PAT }}
 
       - name: Compute next version
         id: next
@@ -795,6 +817,9 @@ jobs:
           .github/scripts/require-gate.sh qa-gate.yml "$GITHUB_SHA" wait
 
       - name: Create and push tag
+        # The push is authenticated as RELEASE_TAG_PAT (persisted by checkout
+        # above) — the ruleset evaluates the PUSHER (the PAT owner, a bypass
+        # actor), not this annotated-tag author identity.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

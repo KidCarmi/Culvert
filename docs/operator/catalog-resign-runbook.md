@@ -15,6 +15,30 @@ create a `v*` tag can mint a signing context; the ruleset is the backstop.
 This cannot be enforced from inside the repository — confirm it in
 Settings → Rules before the first production re-sign.
 
+### Enabling the tag-creation restriction without breaking releases (RELEASE_TAG_PAT)
+
+The `auto-tag` job (`ci.yml`) creates each `v*` release tag by pushing as
+`github-actions[bot]`, which **Restrict creations blocks** — and a
+repository-level ruleset cannot add the Actions bot as a bypass actor. So the
+job pushes the tag authenticated as **`RELEASE_TAG_PAT`** instead: a
+fine-grained PAT (single-repo, `Contents: read and write`) owned by a
+Repository-admin, stored as an Actions secret. Do this IN ORDER so releases
+never break:
+
+1. Create the fine-grained PAT (owner = the repo admin; repo = this repo only;
+   `Contents: read and write`) and add it as the repo secret `RELEASE_TAG_PAT`.
+2. Merge the `ci.yml` change that pushes the tag with that PAT (already wired;
+   `auto-tag` fails loudly if the secret is missing). Restrict creations is
+   still OFF here, so nothing is blocked yet.
+3. In the ruleset: **Bypass list → Add bypass → Repository admin** (Always
+   allow), then tick **Restrict creations**, Save.
+
+Validate: the next merge to `main` auto-tags fine (the PAT owner bypasses); a
+manual `git tag v9.9.9 && git push origin v9.9.9` from a normal clone is
+rejected. If the PAT expires it silently breaks releases — the `auto-tag`
+preflight then fails with a clear message; rotate the secret. (A GitHub App
+installation token is the no-expiry upgrade if you prefer.)
+
 **First production run — one-time verification:** the scheduler locates each
 dispatched run via `gh run list --branch <ref>`; for the ci.yml dispatch the
 ref is the TAG. Confirm on the first run that the scheduler finds and watches
