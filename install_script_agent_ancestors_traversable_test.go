@@ -51,6 +51,27 @@ func searchableTempRoot(t *testing.T) string {
 	return root
 }
 
+// chmod0755Chain makes leaf and every ancestor up to (and including) root
+// world-searchable (0755), so a test's outcome does not depend on the process
+// umask that os.MkdirAll applied to intermediate dirs.
+func chmod0755Chain(t *testing.T, root, leaf string) {
+	t.Helper()
+	p := leaf
+	for {
+		if err := os.Chmod(p, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+		if p == root {
+			return
+		}
+		parent := filepath.Dir(p)
+		if parent == p { // reached filesystem root without hitting `root` — stop
+			return
+		}
+		p = parent
+	}
+}
+
 // runAgentAncestorsTraversable extracts the REAL agent_ancestors_traversable()
 // function body and runs it against path, returning "TRAVERSABLE" or "BLOCKED".
 func runAgentAncestorsTraversable(t *testing.T, path string) string {
@@ -75,6 +96,10 @@ func TestInstallScript_AgentAncestorsTraversable_AllSearchable(t *testing.T) {
 	if err := os.MkdirAll(stack, 0o755); err != nil {
 		t.Fatalf("mkdir stack: %v", err)
 	}
+	// MkdirAll applies the process umask, so under umask 027 the intermediate
+	// dirs would be 0750 (no world-search bit) and blow up this test. chmod the
+	// whole created chain to 0755 so the outcome is umask-independent.
+	chmod0755Chain(t, root, stack)
 	if got := runAgentAncestorsTraversable(t, stack); got != "TRAVERSABLE" {
 		t.Fatalf("agent_ancestors_traversable(%s) = %q, want TRAVERSABLE when every ancestor is 0755", stack, got)
 	}

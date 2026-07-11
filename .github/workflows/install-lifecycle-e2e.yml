@@ -584,6 +584,12 @@ jobs:
           PLUID=61234   # high UID with no /etc/passwd entry — like an in-container proxy UID
           if getent passwd "$PLUID" >/dev/null; then echo "FATAL: precondition — UID $PLUID unexpectedly has a passwd entry"; exit 1; fi
           command -v setpriv >/dev/null || { echo "FATAL: setpriv (util-linux) missing — the passwd-less fallback cannot work"; exit 1; }
+          # The probe's 2nd arg is the GID used for socket access (the real caller
+          # passes the culvert-maint group GID, not a second UID). The agent socket
+          # is 0660 culvert-maint:culvert-maint, so the probe must run with THAT gid
+          # or connect() is denied by DAC before SO_PEERCRED is ever consulted.
+          MAINT_GID="$(getent group culvert-maint | awk -F: '{print $3}')"
+          [ -n "$MAINT_GID" ] || { echo "FATAL: culvert-maint group not found"; exit 1; }
           # Authorize that UID so SO_PEERCRED admits the peer, then restart so the
           # agent reloads allow_peers (config is read once at startup).
           sudo sed -i "s|^allow_peers = .*|allow_peers = [\"$PLUID\"]|" "$CFG"
@@ -596,7 +602,7 @@ jobs:
           printf 'warn() { echo "$*" >&2; }\n' > "$RUNNER_TEMP/probe_fn.sh"
           awk '/^verify_maint_agent_health_as_proxy_uid\(\) \{/{f=1} f{print} f&&/^\}/{exit}' scripts/install.sh >> "$RUNNER_TEMP/probe_fn.sh"
           echo 'verify_maint_agent_health_as_proxy_uid "$1" "$2" "$3" && echo PROBE_OK || echo PROBE_FAIL' >> "$RUNNER_TEMP/probe_fn.sh"
-          OUT="$(sudo bash "$RUNNER_TEMP/probe_fn.sh" "$PLUID" "$PLUID" "$SOCK" || true)"
+          OUT="$(sudo bash "$RUNNER_TEMP/probe_fn.sh" "$PLUID" "$MAINT_GID" "$SOCK" || true)"
           echo "probe result: $OUT"
           case "$OUT" in
             *PROBE_OK*) : ;;
