@@ -1307,13 +1307,13 @@ tr.dragging  { opacity: .4; }
                 <input id="yara-setting-maxinflight" type="number" min="1" max="500" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
               </label>
               <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">On Timeout
-                <select id="yara-setting-ontimeout" onchange="yaraSettingCheckWarn()" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                <select id="yara-setting-ontimeout" data-change="yaraSettingCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
                   <option value="fail_closed">fail_closed (secure default)</option>
                   <option value="fail_open_with_alert">fail_open_with_alert</option>
                 </select>
               </label>
               <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">On Saturation
-                <select id="yara-setting-onsaturation" onchange="yaraSettingCheckWarn()" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                <select id="yara-setting-onsaturation" data-change="yaraSettingCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
                   <option value="fail_closed">fail_closed (secure default)</option>
                   <option value="fail_open_with_alert">fail_open_with_alert</option>
                 </select>
@@ -4024,7 +4024,7 @@ document.addEventListener('click', e => {
     case 'setPolActionFilter': setPolActionFilter(arg); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
     case 'runPolicyTest':     runPolicyTest(); break;
-    case 'clearGroupSelection': clearGroupSelection(); break;
+    case 'clearGroupSelection': clearGroupSelection(); polMarkEdited(); break;
 
     // ── URL categories ──
     case 'openNewCategoryModal': openNewCategoryModal(); break;
@@ -4159,6 +4159,7 @@ document.addEventListener('change', e => {
     case 'releaseDispSelectChannel': if (el.value) document.getElementById('rel-disp-release').value = ''; break;
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
+    case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -4218,6 +4219,24 @@ document.addEventListener('focusout', e => {
   if (!el) return;
   if (el.dataset.blur === 'closeGroupDropdown') {
     setTimeout(() => closeGroupDropdown(), 200);
+  }
+});
+
+// ── data-mousedown: replaces onmousedown ─────────────────────────────────
+// (dropdown options must act on mousedown — it fires BEFORE the search
+// input's focusout starts the delayed dropdown close, so a slow click can
+// never race the picker away). These are user gestures on chip/picker
+// widgets that mutate hidden form fields programmatically, so they also
+// drive the unsaved-changes tracking (polMarkEdited) that input/change
+// delegation cannot see.
+document.addEventListener('mousedown', e => {
+  const el = e.target.closest('[data-mousedown]');
+  if (!el) return;
+  const arg = el.dataset.arg;
+  switch (el.dataset.mousedown) {
+    case 'selectGroup':   selectGroup(arg); polMarkEdited(); break;
+    case 'removeCountry': removeCountry(arg); break; // marks dirty itself
+    default: console.warn('CSP delegation: unknown mousedown action:', el.dataset.mousedown);
   }
 });
 
@@ -4287,6 +4306,11 @@ document.addEventListener('keydown', e => {
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+  // Skip while any stack-managed modal is open: shortcuts must not act
+  // behind a dialog — e.g. Alt+N navigation could re-enter confirmAction
+  // and clobber the confirm dialog's single pending resolver.
+  if (_modalStack.length) return;
+
   // Alt+number = panel navigation
   if (e.altKey && _kbShortcuts[e.key]) {
     e.preventDefault();
@@ -4349,19 +4373,33 @@ document.querySelectorAll('.nav-item').forEach(el => {
   });
 });
 
+// Per-view unsaved-changes guards (M3 S3): a view registers a beforeLeave
+// hook that returns `true` synchronously when there is nothing to protect
+// (clean navigation stays synchronous) or a Promise<boolean> after asking
+// the user. A confirmed leave must clean up its own view state before
+// resolving true. Keeps view-specific dirty state out of switchView itself.
+const viewLeaveGuards = {
+  policy: () => {
+    if (!_polFormDirty) return true;
+    return confirmAction('Discard unsaved rule changes?',
+      'The rule editor has edits that have not been saved.', 'Discard')
+      .then(ok => {
+        if (ok) cancelPolicyEdit(); // clears the form + resets the dirty flag
+        return ok;
+      });
+  },
+};
+
 function switchView(name) {
-  // Unsaved-changes guard (M3 S3): leaving the policy view with a dirty rule
-  // form asks first; Discard clears the form and completes the navigation.
-  if (currentView === 'policy' && name !== 'policy' && _polFormDirty) {
-    confirmAction('Discard unsaved rule changes?',
-      'The rule editor has edits that have not been saved.', 'Discard').then(ok => {
-      if (!ok) return;
-      _polFormDirty = false;
-      clearPolicyForm();
-      cancelPolicyEdit();
-      switchView(name);
-    });
-    return;
+  if (name !== currentView) {
+    const guard = viewLeaveGuards[currentView];
+    if (guard) {
+      const res = guard();
+      if (res !== true) {
+        res.then(ok => { if (ok) switchView(name); });
+        return;
+      }
+    }
   }
   currentView = name;
   document.querySelectorAll('.nav-item').forEach(el => {
@@ -6929,11 +6967,14 @@ function showMoveTarget(pri, direction) {
   };
 }
 
-function clonePolicy(pri) {
+async function clonePolicy(pri) {
   // Close the actions menu.
   document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
   const r = polRules.find(x => x.priority === pri);
   if (!r) return;
+  // Populating the clone overwrites the whole form — ask before clobbering.
+  if (_polFormDirty && !await confirmAction('Discard unsaved rule changes?',
+      'Cloning this rule will overwrite the edits in the rule form.', 'Discard')) return;
   // Switch to "Add" mode (not edit) — cloned rule is not live until Save.
   polEditPriority = null;
   document.getElementById('pol-priority').value  = '';
@@ -6943,7 +6984,6 @@ function clonePolicy(pri) {
   document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
-  loadPolicyCategoryOptions(r.destCategory || '');
   document.getElementById('pol-dest-catgroup').value = r.destCategoryGroup || '';
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
@@ -6954,9 +6994,6 @@ function clonePolicy(pri) {
   document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
-  loadPolicyProviderOptions().then(() => {
-    document.getElementById('pol-src-auth').value = r.authSource || '';
-  });
   _selectedCountries = [...(r.destCountry || [])];
   _syncCountryHidden();
   renderCountryChips();
@@ -6964,8 +7001,21 @@ function clonePolicy(pri) {
   document.getElementById('policy-form-title').textContent = 'Clone Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Create Clone';
   document.getElementById('policy-cancel-btn').style.display = '';
+  // The staged clone IS unsaved data: navigating away must prompt.
+  _polFormDirty = true;
+  polShowFormErrors([]);
+  polRenderSummary();
   document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
   toast('Edit the cloned rule and click Save to create it', 'success');
+  // Async selects (categories, auth providers) land late — re-render the
+  // summary once they do so it describes the clone, not the previous form.
+  await Promise.all([
+    loadPolicyCategoryOptions(r.destCategory || ''),
+    loadPolicyProviderOptions().then(() => {
+      document.getElementById('pol-src-auth').value = r.authSource || '';
+    }),
+  ]);
+  polRenderSummary();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8736,10 +8786,13 @@ function renderCountryChart(countries) {
 // Policy: Country & FileProfile support
 // ═══════════════════════════════════════════════════════════════════════════
 // Extend editPolicy to handle new fields
-const _origEditPolicy = window.editPolicy;
-function editPolicy(priority) {
+async function editPolicy(priority) {
   const r = polRules.find(x => x.priority === priority);
   if (!r) return;
+  // Loading a rule overwrites the whole form — same data loss the
+  // cross-view guard protects against, so ask before clobbering edits.
+  if (_polFormDirty && !await confirmAction('Discard unsaved rule changes?',
+      'Loading this rule will overwrite the edits in the rule form.', 'Discard')) return;
   polEditPriority = priority;
   document.getElementById('pol-priority').value  = r.priority;
   document.getElementById('pol-name').value       = r.name;
@@ -8748,7 +8801,6 @@ function editPolicy(priority) {
   document.getElementById('pol-src-id').value     = r.sourceIdentity || '';
   document.getElementById('pol-redirect').value   = r.redirectURL || '';
   document.getElementById('pol-dest-fqdn').value  = r.destFQDN || '';
-  loadPolicyCategoryOptions(r.destCategory || '');
   document.getElementById('pol-dest-catgroup').value = r.destCategoryGroup || '';
   document.getElementById('pol-ssl').value        = r.sslAction || 'Bypass';
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
@@ -8760,10 +8812,6 @@ function editPolicy(priority) {
   // Group chip picker
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
-  // Auth source dropdown — populate providers then set value
-  loadPolicyProviderOptions().then(() => {
-    document.getElementById('pol-src-auth').value = r.authSource || '';
-  });
   // Country chips
   _selectedCountries = [...(r.destCountry || [])];
   _syncCountryHidden();
@@ -8772,9 +8820,19 @@ function editPolicy(priority) {
   document.getElementById('policy-form-title').textContent = 'Edit Rule: ' + r.name;
   document.getElementById('policy-submit-btn').textContent = '💾 Save Changes';
   document.getElementById('policy-cancel-btn').style.display = '';
+  _polFormDirty = false; // freshly-loaded rule = nothing unsaved yet
   polShowFormErrors([]);
   polRenderSummary(); // programmatic population fires no events — refresh manually
   document.getElementById('policy-form-panel').scrollIntoView({behavior:'smooth'});
+  // Category options and the auth-source dropdown populate asynchronously;
+  // re-render the summary once they land or it misses/misstates them.
+  await Promise.all([
+    loadPolicyCategoryOptions(r.destCategory || ''),
+    loadPolicyProviderOptions().then(() => {
+      document.getElementById('pol-src-auth').value = r.authSource || '';
+    }),
+  ]);
+  polRenderSummary();
 }
 
 function clearPolicyForm() {
@@ -8842,7 +8900,9 @@ function polReadForm() {
 function polValidateClient(rule) {
   const errs = [];
   if (!rule.name) errs.push('Name is required.');
-  else if (polRules.some(r => r.ruleType !== 'auth' && r.priority !== rule.priority &&
+  // /api/policy never lists Stage-1 auth rules, so this check cannot see
+  // them; a name colliding with an auth rule still fails server-side.
+  else if (polRules.some(r => r.priority !== rule.priority &&
       r.name.toLowerCase() === rule.name.toLowerCase())) {
     errs.push(`A rule named "${rule.name}" already exists.`);
   }
@@ -8850,13 +8910,30 @@ function polValidateClient(rule) {
     if (!rule.redirectURL) errs.push('Redirect action requires a redirect URL.');
     else if (!/^https?:\/\//.test(rule.redirectURL)) errs.push('Redirect URL must start with http:// or https://.');
   }
-  if (rule.sourceIP && !/^[0-9]{1,3}(\.[0-9]{1,3}){3}(\/[0-9]{1,2})?$/.test(rule.sourceIP) && !rule.sourceIP.includes(':')) {
+  if (rule.sourceIP && !polValidSourceIP(rule.sourceIP)) {
     errs.push('Source IP must be an IPv4/IPv6 address or CIDR (e.g. 10.0.0.0/8).');
   }
   if (rule.destFQDN && (/\s/.test(rule.destFQDN) || rule.destFQDN.includes('://'))) {
     errs.push('Destination FQDN is a hostname pattern (e.g. *.example.com) — no scheme, no spaces.');
   }
   return errs;
+}
+
+// polValidSourceIP — IPv4 with 0-255 octets and optional /0-32 prefix, or
+// IPv6-ish (≥2 colons — rejects accidental host:port pastes — hex/colon/dot
+// charset, optional /0-128 prefix). The proxy treats an unparsable sourceIP
+// as never-matching, so a typo like 10.0.0.0/33 would silently disable the
+// rule — catching it here matters.
+function polValidSourceIP(v) {
+  const m4 = v.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/);
+  if (m4) {
+    if (m4.slice(1, 5).some(o => Number(o) > 255)) return false;
+    return m4[5] === undefined || Number(m4[5]) <= 32;
+  }
+  const parts = v.split('/');
+  if (parts.length > 2) return false;
+  if (parts[1] !== undefined && !(/^\d{1,3}$/.test(parts[1]) && Number(parts[1]) <= 128)) return false;
+  return (parts[0].match(/:/g) || []).length >= 2 && /^[0-9a-fA-F:.]+$/.test(parts[0]);
 }
 
 function polShowFormErrors(errs) {
@@ -8895,28 +8972,44 @@ function polRenderSummary() {
 }
 
 // Unsaved-changes tracking: only USER edits mark the form dirty
-// (programmatic population via editPolicy does not fire input/change).
+// (programmatic population via editPolicy/clonePolicy fires no input/change).
+// Chip/picker widgets that set hidden fields programmatically call
+// polMarkEdited() from their user-gesture handlers instead of relying on
+// events that never fire.
 let _polFormDirty = false;
+let _polSummaryTimer = null;
+function polMarkEdited() {
+  _polFormDirty = true;
+  polShowFormErrors([]);
+  // Debounce the summary: #pol-summary is aria-live, so rewriting it per
+  // keystroke makes screen readers re-announce the whole sentence on every
+  // character. The dirty flag above stays synchronous.
+  clearTimeout(_polSummaryTimer);
+  _polSummaryTimer = setTimeout(polRenderSummary, 300);
+}
 (() => {
   const panel = document.getElementById('policy-form-panel');
   if (!panel) return;
-  const onEdit = () => { _polFormDirty = true; polRenderSummary(); polShowFormErrors([]); };
-  panel.addEventListener('input', onEdit);
-  panel.addEventListener('change', onEdit);
+  panel.addEventListener('input', polMarkEdited);
+  panel.addEventListener('change', polMarkEdited);
 })();
 
 // polHistory — per-rule change trail: opens the Audit Log filtered to the
 // rule's name (the audit ring keys entries on the rule name today; the
 // ULID-keyed trail is the policy-identity backend record).
-function polHistory(priority) {
+async function polHistory(priority) {
   const r = polRules.find(x => x.priority === Number(priority));
   if (!r) return;
+  document.querySelectorAll('.pol-actions-menu').forEach(m => m.style.display = 'none');
+  // Resolve the unsaved-changes guard BEFORE touching the audit filter, so a
+  // cancelled navigation leaves no stale pre-filter behind on the Audit view.
+  const ok = viewLeaveGuards.policy();
+  if (ok !== true && !await ok) return;
   const f = document.getElementById('audit-filter');
   if (f) f.value = r.name;
   switchView('audit');
 }
 
-const _origSubmitPolicyRule = window.submitPolicyRule;
 async function submitPolicyRule() {
   const rule = polReadForm();
   if (!rule.name || !rule.action) {
@@ -9907,7 +10000,7 @@ function renderGroupDropdown(query) {
       '</div>';
   } else {
     dd.innerHTML = shown.map(g =>
-      `<div class="picker-option" onmousedown="selectGroup(${JSON.stringify(g)})">👥 ${escHtml(g)}</div>`
+      `<div class="picker-option" data-mousedown="selectGroup" data-arg="${escHtml(g)}">👥 ${escHtml(g)}</div>`
     ).join('') +
     (matches.length > 50
       ? `<div class="picker-empty">Showing 50 of ${matches.length} — type to filter</div>` : '');
@@ -9951,17 +10044,24 @@ function onCountryKeydown(e) {
   }
 }
 
+// addCountryTag/removeCountry are user-gesture-only entry points (Enter/
+// Backspace in the tag input, chip × button); programmatic population goes
+// through _selectedCountries + _syncCountryHidden directly. They mutate the
+// hidden field without input/change events, so they mark the form dirty
+// themselves.
 function addCountryTag(code) {
   if (!code || _selectedCountries.includes(code)) return;
   _selectedCountries.push(code);
   _syncCountryHidden();
   renderCountryChips();
+  polMarkEdited();
 }
 
 function removeCountry(code) {
   _selectedCountries = _selectedCountries.filter(c => c !== code);
   _syncCountryHidden();
   renderCountryChips();
+  polMarkEdited();
 }
 
 function _syncCountryHidden() {
@@ -9974,7 +10074,7 @@ function renderCountryChips() {
   if (!el) return;
   el.innerHTML = _selectedCountries.map(code =>
     `<span class="picker-chip">${countryFlag(code)} ${escHtml(code)}
-      <button type="button" onmousedown="removeCountry('${code}')">×</button>
+      <button type="button" data-mousedown="removeCountry" data-arg="${escHtml(code)}">×</button>
     </span>`
   ).join('');
 }
