@@ -16,17 +16,29 @@
 # (b) docker group membership (dev/lab opt-in; effectively root-equiv).
 # See /etc/culvert-maint/config.toml `privilege_mode` and `allow_peers`.
 #
-# IMPORTANT — NoNewPrivileges:
-#   This unit deliberately does NOT set `NoNewPrivileges=true`.
+# IMPORTANT — NoNewPrivileges (learned in the field, 2026-07):
 #   privilege_mode=sudoers (the production default) requires the agent
 #   to call `sudo -n docker compose ...`, and sudo's setuid escalation
-#   does not work under PR_SET_NO_NEW_PRIVS. The trade-off is bounded:
+#   does not work under PR_SET_NO_NEW_PRIVS. Merely omitting
+#   `NoNewPrivileges=true` is NOT enough: for a non-root (User=) service,
+#   systemd IMPLIES NoNewPrivileges whenever any seccomp-backed sandbox
+#   option is used (SystemCallFilter/SystemCallArchitectures,
+#   MemoryDenyWriteExecute, RestrictRealtime, RestrictSUIDSGID,
+#   LockPersonality, RestrictNamespaces, PrivateDevices,
+#   ProtectKernelTunables/Modules/Logs, ProtectClock, ProtectHostname),
+#   because installing a seccomp filter without CAP_SYS_ADMIN requires
+#   PR_SET_NO_NEW_PRIVS — sudo then fails with 'the "no new privileges"
+#   flag is set' and EVERY Docker operation breaks (the socket/API keep
+#   working, so the failure only surfaces on the first privileged op).
+#   Likewise, an empty CapabilityBoundingSet= is inherited across exec,
+#   so even setuid-root sudo would compute an EMPTY capability set.
+#   This unit therefore keeps only mount-namespace / fd-level hardening
+#   (no seccomp options, no capability clamp). The trade-off is bounded:
 #   the sudoers allowlist (/etc/sudoers.d/culvert-maint) is the
-#   privilege boundary, and the kernel-level hardening below still
-#   applies. If `privilege_mode=docker_group_lab` is in use, operators
-#   may add `NoNewPrivileges=true` via a drop-in
-#   (/etc/systemd/system/culvert-maint.service.d/*.conf) — but
-#   docker_group_lab is dev/lab only.
+#   privilege boundary. If `privilege_mode=docker_group_lab` is in use
+#   (dev/lab only — no sudo involved), operators may re-add
+#   `NoNewPrivileges=true` and the seccomp options via a drop-in
+#   (/etc/systemd/system/culvert-maint.service.d/*.conf).
 
 [Unit]
 Description=Culvert Maintenance Agent
@@ -46,24 +58,19 @@ ExecStart=/usr/local/bin/culvert-maint --config /etc/culvert-maint/config.toml
 Restart=on-failure
 RestartSec=5s
 
-# ── Hardening (kernel-level, applies regardless of privilege_mode) ─────────
-# NoNewPrivileges intentionally omitted — see header comment.
-ProtectSystem=strict
+# ── Hardening (mount-namespace / fd-level ONLY — see header comment) ───────
+# No seccomp-backed options here: for a User= service they would imply
+# NoNewPrivileges and break setuid sudo (privilege_mode=sudoers). Explicit
+# NoNewPrivileges=no documents the requirement; it cannot override an
+# implication, which is why the seccomp options must stay absent.
+NoNewPrivileges=no
+# "full" not "strict": strict makes /run read-only, and sudo wants to write
+# its timestamp records under /run/sudo. /usr, /boot, /efi and /etc remain
+# read-only under full.
+ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
-ProtectClock=true
-ProtectHostname=true
-ProtectKernelLogs=true
 ProtectProc=invisible
 ProcSubset=pid
 
@@ -85,10 +92,11 @@ RuntimeDirectoryPreserve=yes
 #  - /var/lib/culvert-maint for state (audit log, op logs)
 ReadWritePaths=/var/lib/culvert-maint
 
-# Capability set: empty by default. The agent does not need any
-# capabilities to do its own work; sudo / docker provides the
-# privilege when needed.
-CapabilityBoundingSet=
+# Capability bounding set: DELIBERATELY not clamped. The bounding set is
+# inherited across exec, so `CapabilityBoundingSet=` (empty) would leave a
+# setuid-root sudo with an empty capability set and break privilege_mode=
+# sudoers (see header). The agent process itself still runs as the
+# unprivileged culvert-maint user with no ambient capabilities.
 AmbientCapabilities=
 
 # Resource sanity.
