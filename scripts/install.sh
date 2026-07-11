@@ -613,7 +613,12 @@ clone_source_into_install_dir() {
   ensure_git
   local tmp="$INSTALL_DIR/.culvert-src.tmp"
   sudo rm -rf "$tmp" 2>/dev/null || true
-  if ! GIT_TERMINAL_PROMPT=0 git clone "$REPO_URL" "$tmp"; then
+  # Airtight no-hang: GIT_TERMINAL_PROMPT=0 stops git's own /dev/tty prompt,
+  # `-c credential.helper=` empties the helper list so a configured (possibly
+  # GUI) credential helper can't block, and GIT_ASKPASS=/bin/true neutralizes
+  # any askpass path. A private/unreachable repo then fails fast, never prompts.
+  if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
+       git -c credential.helper= clone "$REPO_URL" "$tmp"; then
     warn "Could not clone $REPO_URL — the source repo may be private or unreachable."
     sudo rm -rf "$tmp" 2>/dev/null || true
     return 1
@@ -683,12 +688,18 @@ if ! seed_pinned_tag; then
   # (source-free install). Last resort: clone the (public) source repo and build
   # the image locally — this restores the "github reachable but ghcr blocked"
   # completion path that a plain seed-then-error ordering removes.
-  if [[ ! -f "$INSTALL_DIR/Dockerfile" ]]; then
+  #
+  # If a Dockerfile was ALREADY present (running from a source checkout),
+  # seed_pinned_tag already attempted the local build and it failed — don't
+  # repeat the identical doomed build; go straight to the actionable error.
+  had_dockerfile_before=0
+  [[ -f "$INSTALL_DIR/Dockerfile" ]] && had_dockerfile_before=1
+  if [[ "$had_dockerfile_before" -eq 0 ]]; then
     warn "Could not seed $PINNED_TAG from the registry — cloning the source repo to build locally..."
     clone_source_into_install_dir || true
     cd "$INSTALL_DIR"
   fi
-  if [[ -f "$INSTALL_DIR/Dockerfile" ]]; then
+  if [[ "$had_dockerfile_before" -eq 0 && -f "$INSTALL_DIR/Dockerfile" ]]; then
     info "Building $PINNED_TAG from source (slower than a registry pull)..."
     sudo docker build -t "$PINNED_TAG" "$INSTALL_DIR" \
       || error "Building $PINNED_TAG from the cloned source failed — see the build output above."
