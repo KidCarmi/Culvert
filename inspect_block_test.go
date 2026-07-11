@@ -26,3 +26,17 @@ func TestH1BlockResponder_BlockBeforeResponse(t *testing.T) {
 func TestBlockResponderInterface_H1Satisfies(t *testing.T) {
 	var _ blockResponder = h1BlockResponder{w: &strings.Builder{}}
 }
+
+// TestH1BlockResponder_DoesNotCloseConn locks the anti-bypass contract: the
+// pre-commit responder must NOT close the tunnel conn (the H1 loop owns teardown
+// via break + clientTLS.Close, and pipelined-retry bypass is prevented by
+// Connection: close in the emitted response). This is the property the H2 path
+// depends on — an H2 per-stream block must never close the shared conn (which
+// would kill sibling streams). Reviewer R1 missing-test #3.
+func TestH1BlockResponder_DoesNotCloseConn(t *testing.T) {
+	w := &writeCloseBuf{}
+	h1BlockResponder{w: w}.blockBeforeResponse("text/plain; charset=utf-8", "blocked\r\n")
+	if w.closed {
+		t.Fatal("blockBeforeResponse must NOT close the conn (loop owns teardown; anti-bypass is the Connection: close header)")
+	}
+}

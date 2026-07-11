@@ -69,6 +69,36 @@ func TestStripALPN_JSONOmitempty(t *testing.T) {
 	}
 }
 
+// TestStripALPN_ExplicitFalseRoundTrips is the load-bearing presence guarantee
+// (review blocking #3): an operator who explicitly chose native H2 (*false) must
+// serialize WITH the key present and survive marshal→unmarshal as non-nil-false —
+// otherwise a config reload silently reverts native H2 back to strip, the exact
+// "silent switch" C2 exists to prevent, in the other direction.
+func TestStripALPN_ExplicitFalseRoundTrips(t *testing.T) {
+	fls := false
+	r := PolicyRule{Priority: 1, Name: "native-h2", SSLAction: SSLInspect, Action: ActionAllow, StripALPN: &fls}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !containsSubstr(string(b), `"stripAlpn":false`) {
+		t.Fatalf("explicit false must serialize the key present, got: %s", b)
+	}
+	var back PolicyRule
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.StripALPN == nil {
+		t.Fatal("explicit false must survive round-trip as non-nil (not reverted to absent/strip)")
+	}
+	if *back.StripALPN != false {
+		t.Fatalf("round-trip value = %v, want false", *back.StripALPN)
+	}
+	if resolveStripALPN(&PolicyMatch{Rule: &back}) {
+		t.Fatal("round-tripped explicit false must resolve to native H2 (strip=false)")
+	}
+}
+
 func containsSubstr(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
