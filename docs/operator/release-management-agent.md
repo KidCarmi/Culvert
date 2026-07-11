@@ -133,6 +133,13 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 > sudo -u "#${PROXY_UID}" -g "#${MAINT_GID}" \
 >   curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
 > ```
+> If sudo answers `unknown user #<uid>` (the container UID has no host passwd
+> entry — default sudo rejects unknown numeric run-as users), use setpriv,
+> which switches to raw numeric IDs: 
+> ```bash
+> sudo setpriv --reuid "${PROXY_UID}" --regid "${MAINT_GID}" --clear-groups \
+>   curl --unix-socket /run/culvert-maint/culvert-maint.sock http://unix/v1/health
+> ```
 
 ## Troubleshooting
 

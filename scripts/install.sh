@@ -1052,7 +1052,25 @@ patch_allow_peers_numeric_uid() {
 verify_maint_agent_health_as_proxy_uid() {
   local uid="$1" gid="$2" sock="$3"
   command -v curl >/dev/null 2>&1 || return 1
-  sudo -n -u "#$uid" -g "#$gid" curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+  # Preferred: impersonate the proxy UID via sudo. But the container UID
+  # usually has NO passwd entry on the host (e.g. UID 100 on Amazon Linux),
+  # and sudo rejects unknown numeric run-as users unless the sudoers option
+  # allow_unknown_runas_id is enabled — probe with `true` first so a sudo
+  # limitation is never misread as the agent denying the UID. Fall back to
+  # setpriv (util-linux), which switches to arbitrary numeric IDs without a
+  # passwd entry; the agent itself only ever sees the numeric SO_PEERCRED
+  # UID, exactly like the real in-container caller.
+  if sudo -n -u "#$uid" -g "#$gid" true 2>/dev/null; then
+    sudo -n -u "#$uid" -g "#$gid" curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+    return
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    sudo -n setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+      curl -fsS --unix-socket "$sock" http://unix/v1/health >/dev/null 2>&1
+    return
+  fi
+  warn "Cannot impersonate UID $uid for the health probe (no passwd entry for sudo, and setpriv is unavailable)."
+  return 1
 }
 
 wire_release_agent_for_compose() {
