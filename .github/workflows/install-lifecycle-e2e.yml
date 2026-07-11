@@ -457,6 +457,36 @@ jobs:
           sudo systemctl is-active --quiet culvert-maint || { echo "FATAL: culvert-maint not active"; exit 1; }
           echo "AGENT RUNTIME OK: installed unit is active and serves /v1 over the UDS."
 
+      # Sandbox-vs-sudo regression guard. privilege_mode=sudoers runs every
+      # Docker op via `sudo -n`, which FAILS under NoNewPrivileges. A hardening
+      # option that implies NoNewPrivileges for a User= service (any seccomp-
+      # backed option) — or an empty CapabilityBoundingSet inherited across exec
+      # — silently breaks EVERY privileged op while /v1/health + unit-active keep
+      # passing (the exact blind spot that shipped the original field failure).
+      # Assert the RUNNING unit's process has neither condition, so a future
+      # sandbox tightening that re-breaks sudo fails HERE instead of in the field.
+      - name: "Assert the sandboxed unit can still escalate via sudo"
+        run: |
+          set -euxo pipefail
+          PID="$(sudo systemctl show -p MainPID --value culvert-maint)"
+          [ -n "$PID" ] && [ "$PID" != "0" ] || { echo "FATAL: no MainPID for culvert-maint"; exit 1; }
+          NNP="$(sudo awk '/^NoNewPrivs:/{print $2}' "/proc/$PID/status")"
+          CAPBND="$(sudo awk '/^CapBnd:/{print $2}' "/proc/$PID/status")"
+          echo "culvert-maint pid=$PID NoNewPrivs=$NNP CapBnd=$CAPBND"
+          if [ "$NNP" != "0" ]; then
+            echo "FATAL: culvert-maint runs with NoNewPrivs=$NNP — 'sudo -n docker' cannot escalate,"
+            echo "so every privileged agent op (apply/rollback/backup/ps) would fail. A sandbox option"
+            echo "in packaging/systemd/culvert-maint.service is implying NoNewPrivileges; remove it."
+            exit 1
+          fi
+          if [ "$CAPBND" = "0000000000000000" ]; then
+            echo "FATAL: culvert-maint has an EMPTY capability bounding set — inherited across exec,"
+            echo "this leaves setuid sudo with no capabilities and breaks privileged ops. Do not clamp"
+            echo "CapabilityBoundingSet in packaging/systemd/culvert-maint.service."
+            exit 1
+          fi
+          echo "SANDBOX OK: NoNewPrivs=0 and CapBnd is non-empty — sudo-based privileged ops can escalate."
+
       # Idempotent re-run: the installer must leave the already-installed agent
       # unchanged (no rebuild/reinstall churn).
       - name: "Re-run installer — assert agent idempotency"
