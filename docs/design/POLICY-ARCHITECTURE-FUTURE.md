@@ -110,11 +110,28 @@ urgent finding in this review.
 
 ### Recommendation
 
-1. **One dependency-walk endpoint** (small, read-only, all in-memory):
-   `GET /api/objects/references?type=<category|category-group|file-profile|idp>&name=…`
-   → `{referencedBy: [{ruleId, ruleName, priority, ruleType}]}`. The server
-   already walks these references ad hoc in the two blocked-delete paths;
-   this generalizes that walk behind one viewer-readable endpoint.
+1. **One GENERIC dependency-walk endpoint** (small, read-only, in-memory) —
+   deliberately NOT rule-shaped, so it can grow into a product-wide
+   "Where Used" capability without a redesign:
+   `GET /api/objects/references?type=<category|category-group|file-profile|idp|…>&name=…`
+   →
+   ```json
+   {"object": {"type": "file-profile", "name": "Executables"},
+    "referencedBy": [
+      {"consumerType": "access-rule", "id": "<ulid>", "name": "block-exe",
+       "detail": "fileProfile", "view": "policy"}
+    ]}
+   ```
+   `consumerType` is an open enum: the first backend walk emits only
+   `access-rule`/`auth-rule`, but the envelope already accommodates future
+   consumers (PAC config, alert routes, reports, node-group selectors,
+   CDR policies, …) as `{consumerType, id, name, detail, view}` entries.
+   The server already walks rule references ad hoc in the two blocked-delete
+   paths; this generalizes that walk behind one viewer-readable contract.
+   **UI constraint (binding on M3+): every dependency surface renders the
+   generic entry shape — a consumer-type badge + name + navigation target —
+   never a rules-only table.** The `whereUsed` component contract lives in
+   `DESIGN-SYSTEM.md` §3.
 2. **Uniform delete policy on top of it**: every shared-object delete either
    (a) blocks with 409 listing referents (extend the existing catgroup
    pattern — preferred for the fail-open edges: direct categories, file
@@ -122,12 +139,14 @@ urgent finding in this review.
    affected rules (acceptable only for fail-closed edges like IdP). The
    danger-tier dialog already has the impact slot; it should show *real*
    referents from (1), not generic copy.
-3. **UI dependency surfacing** (needs only endpoint 1): "used by N rules"
-   chips on object rows, and the rule drawer lists its object dependencies
-   with liveness ("category `gambling` — missing ⚠"). A full visual
-   dependency *graph* is rejected — at Culvert's object counts a referent
-   list answers every real question a graph would, at a fraction of the
-   complexity.
+3. **UI dependency surfacing** (needs only endpoint 1): "used by N" chips on
+   object rows (count of consumers of ANY type), and the rule drawer lists
+   its own outbound dependencies with liveness ("category `gambling` —
+   missing ⚠") — the outbound direction is client-computable today and ships
+   with M3 S3; the inbound "Where Used" direction waits for the endpoint.
+   A full visual dependency *graph* is rejected — at Culvert's object counts
+   a referent list answers every real question a graph would, at a fraction
+   of the complexity.
 4. **Long-term**: when identity work lands, migrate object references from
    name to object IDs (categories/groups/profiles would need their own IDs)
    so rename stops being a silent unlink. That is a bigger migration

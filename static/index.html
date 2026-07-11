@@ -2594,7 +2594,7 @@ Firefox (all platforms):
                 <th>File Profile</th>
                 <th>SSL</th>
                 <th>Action</th>
-                <th class="text-right">Hits</th>
+                <th class="text-right" title="Matches since process start — counters reset on restart">Hits <span style="font-weight:400;text-transform:none;letter-spacing:0">· since start</span></th>
                 <th></th>
               </tr>
             </thead>
@@ -6894,7 +6894,7 @@ function sslBadge(ssl, skipVerify) {
   if (!ssl) return '<span style="color:var(--muted);font-size:.75rem">—</span>';
   const cls = ssl === 'Inspect' ? 'inspect' : 'bypass';
   let badge = `<span class="badge ${cls}">${ssl}</span>`;
-  if (skipVerify) badge += ' <span style="font-size:.72rem;color:#f59e0b;font-weight:700" title="TLS certificate verification disabled">⚠ NO-VERIFY</span>';
+  if (skipVerify) badge += ' <span style="font-size:.72rem;color:var(--warn);font-weight:700" title="TLS certificate verification disabled">⚠ NO-VERIFY</span>';
   return badge;
 }
 
@@ -6931,10 +6931,12 @@ function initPolicyDragDrop() {
   tbody.addEventListener('dragstart', e => {
     const row = e.target.closest('tr[data-priority]');
     if (!row) return;
+    _polDragging = true; // suppress tick re-renders — a rebuild kills the drag
     e.dataTransfer.setData('text/plain', row.dataset.priority);
     row.classList.add('dragging');
   });
   tbody.addEventListener('dragend', e => {
+    _polDragging = false;
     const row = e.target.closest('tr[data-priority]');
     if (row) row.classList.remove('dragging');
   });
@@ -8997,6 +8999,14 @@ function setPolActionFilter(f) {
   renderPolicy();
 }
 
+// Signature of the last rendered rulebase state. The 3s tick calls
+// renderPolicy on every cycle while the view is open; rebuilding the whole
+// <tbody> (and re-initializing drag handlers) for identical data is the
+// UI's scalability ceiling (POLICY-ARCHITECTURE-FUTURE.md §5) and destroys
+// in-progress interactions. Skip when nothing observable changed.
+let _polRenderSig = '';
+let _polDragging = false; // set by initPolicyDragDrop; render must not destroy a drag
+
 function renderPolicy() {
   // Skip re-render while a policy actions dropdown is open — the tick
   // interval destroys the DOM and the user can't click menu items.
@@ -9004,6 +9014,7 @@ function renderPolicy() {
       document.querySelector('.pol-actions-menu[style*="display:block"]')) {
     return;
   }
+  if (_polDragging) return; // never rebuild rows under an active drag
   const tbody = document.getElementById('pol-table');
   // Stage-1 auth rules (ruleType:"auth") are managed in the Auth Policy panel
   // via /api/authpolicy. They share the unified policy store (and its priority
@@ -9012,11 +9023,6 @@ function renderPolicy() {
   const accessRules = polRules.filter(r => r.ruleType !== 'auth');
   const total = accessRules.length;
   updateDefaultActionBadge();
-  if (!total) {
-    document.getElementById('pol-count').textContent = '0 rules';
-    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>No policy rules yet - default action applies to all traffic</div></td></tr>';
-    return;
-  }
 
   // F20: client-side search + action filter
   const q = (document.getElementById('pol-filter')?.value || '').toLowerCase().trim();
@@ -9029,37 +9035,54 @@ function renderPolicy() {
     return haystack.includes(q);
   });
 
+  // Content-hash skip: identical data + filter state ⇒ no DOM rebuild.
+  const sig = q + ' ' + polActionFilter + ' ' + JSON.stringify(filtered);
+  if (sig === _polRenderSig) return;
+  _polRenderSig = sig;
+
+  if (!total) {
+    document.getElementById('pol-count').textContent = '0 rules';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">📋</div>' +
+      'No policy rules yet — the default action applies to all traffic' +
+      '<div class="empty-hint">Add a rule with the form above; the first match wins, top to bottom. Unmatched traffic hits the Default row below.</div></div></td></tr>';
+    return;
+  }
+
   const showing = filtered.length < total ? `${filtered.length} of ${total} rules` : `${total} rule${total !== 1 ? 's' : ''}`;
   document.getElementById('pol-count').textContent = showing;
 
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">No rules match the current filter</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">No rules match the current filter<div class="empty-hint">Clear the search box or the action filter to see all rules</div></div></td></tr>';
     return;
   }
   tbody.innerHTML = filtered.map((r, idx) => {
     const schedBadge = r.schedule ? ` <span title="Schedule active" style="font-size:.8em">⏰</span>` : '';
     const src = [r.sourceIP, r.sourceIdentity, r.sourceGroup && `[${r.sourceGroup}]`, r.authSource && `via:${r.authSource}`].filter(Boolean).map(escHtml).join(' / ') || '<span style="color:var(--muted)">Any</span>';
-    const destParts = [r.destFQDN, r.destCategory].filter(Boolean).map(escHtml);
+    const destParts = [r.destFQDN, r.destCategory, r.destCategoryGroup && `«${r.destCategoryGroup}»`].filter(Boolean).map(escHtml);
     const dest = destParts.join(' / ') || '<span style="color:var(--muted)">Any</span>';
     const countryCell = r.destCountry && r.destCountry.length
-      ? r.destCountry.map(c => `<span style="font-family:monospace;font-size:.72rem;background:rgba(20,184,166,.15);padding:1px 5px;border-radius:4px">${countryFlag(c)}${escHtml(c)}</span>`).join(' ')
+      ? r.destCountry.map(c => `<span style="font-family:var(--font-mono);font-size:.72rem;background:var(--accent-tint);padding:1px 5px;border-radius:var(--r-sm)">${countryFlag(c)}${escHtml(c)}</span>`).join(' ')
       : '<span style="color:var(--muted)">Any</span>';
     const fileProfileCell = r.fileProfile
-      ? `<span style="font-size:.72rem;background:rgba(245,158,11,.15);color:#f59e0b;padding:1px 6px;border-radius:4px">${escHtml(r.fileProfile)}</span>`
+      ? badge('warn', r.fileProfile)
       : '<span style="color:var(--muted)">—</span>';
     const disabledStyle = r.enabled === false ? 'opacity:.45' : '';
-    const disabledBadge = r.enabled === false ? ' <span style="font-size:.68rem;color:var(--danger);font-weight:700">(disabled)</span>' : '';
-    return `<tr draggable="true" data-priority="${r.priority}" style="${disabledStyle}">
+    const disabledBadge = r.enabled === false ? ' ' + badge('neutral', 'Disabled') : '';
+    // data-rule-id: the stable ULID (POLICY-ARCHITECTURE-FUTURE.md guardrail).
+    // Actions still address by priority because the current API does; the row
+    // identity attribute is the seam later slices key on (shadow hints, deep
+    // links) so they survive reorder.
+    return `<tr draggable="true" data-priority="${r.priority}" data-rule-id="${escHtml(r.id || '')}" style="${disabledStyle}">
       <td><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td style="color:var(--muted);font-size:.7rem;text-align:center">${idx + 1}</td>
       <td style="font-weight:600">${escHtml(r.name)}${schedBadge}${disabledBadge}</td>
-      <td style="font-size:.78rem;font-family:monospace">${src}</td>
-      <td style="font-size:.78rem;font-family:monospace">${dest}</td>
+      <td style="font-size:.78rem;font-family:var(--font-mono)">${src}</td>
+      <td style="font-size:.78rem;font-family:var(--font-mono)">${dest}</td>
       <td style="font-size:.78rem">${countryCell}</td>
       <td style="font-size:.78rem">${fileProfileCell}</td>
       <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
       <td>${actionBadge(r.action)}</td>
-      <td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">${r.hitCount || 0}</td>
+      <td style="text-align:right;font-family:var(--font-mono);font-weight:700;color:var(--accent2)" title="Matches since process start — counters reset on restart">${fmt(r.hitCount || 0)}</td>
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>

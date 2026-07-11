@@ -141,9 +141,33 @@ New/normalized components (introduced with their first consuming slice):
 | Policy action badge | `.badge.action-{allow,deny,redirect,exempt,cr,sso}` | M2 |
 | Rule reorder control (commit/revert) | `.reorder-bar` | M3 |
 | Decision trace viewer | `.trace` | M3 |
+| Where-Used list (generic dependency entries) | `whereUsedList(entries)` → `.where-used` | M3 contract, renders when the references endpoint lands |
 | Timeline / audit metadata panel | `.timeline` | M3 |
 | Code/JSON viewer | `.codeview` | M3 |
 | Combobox / multi-select | upgrade of chip pickers | M3 |
+
+### The Where-Used contract (dependency presentation)
+
+Dependency surfaces are **generic by construction** — Culvert will
+eventually answer "what depends on this object?" for any shared resource,
+and the UI must not need a redesign when consumers beyond policy rules
+appear. Binding rules:
+
+- Input is always a list of generic consumer entries:
+  `{consumerType, id, name, detail, view}` (see
+  `POLICY-ARCHITECTURE-FUTURE.md` §3). `consumerType` is an open enum
+  rendered as a type badge (`access-rule`, `auth-rule`, and later
+  `pac`, `report`, `node-group`, …) — components switch on nothing.
+- `whereUsedList(entries)` renders: type badge + name (navigates to `view`,
+  anchored by `id` when deep links exist) + muted `detail` (which field
+  references the object). Empty state: "Not referenced by anything".
+- "Used by N" chips show a total across ALL consumer types, never a
+  rules-only count.
+- The same entry shape feeds delete-impact dialogs (the danger dialog's
+  impact slot lists referents) — one contract, three surfaces.
+- Outbound dependencies (what a rule/object itself references, with
+  liveness) use the same visual row but are client-computed; do not fork
+  the presentation.
 
 ## 4. Iconography
 

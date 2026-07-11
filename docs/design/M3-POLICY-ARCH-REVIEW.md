@@ -128,6 +128,11 @@ commits (single-admin-console scale does not justify the state machine).
   hints labeled; "since restart" on volatile counters.
 - Foundation wall tests (`ui_redesign_foundation_test.go`) extended per
   slice (e.g. S5 pins that drag no longer POSTs without Apply).
+- **Dependency presentation is generic, never rule-shaped** (owner
+  directive): any "used by"/impact surface renders the generic consumer-
+  entry contract (`DESIGN-SYSTEM.md` §3 "Where-Used contract") so the
+  future product-wide Where Used capability needs no UI redesign. Rules are
+  the first consumer type, not the model.
 
 ## 5. Risks
 
