@@ -1514,6 +1514,52 @@ install_maint_agent() {
   local target_version
   target_version="$(resolve_maint_version)"
 
+  # ── Guards (apply to EVERY path below, INCLUDING the already-installed wiring
+  #    fast-path — a wired agent that can't chdir into the stack is worse than
+  #    an unwired one, so these must gate the wiring, not just fresh installs
+  #    (#6)). Cheap + dependency-free, so run them BEFORE the network cosign
+  #    verify + bundle extract. ─────────────────────────────────────────────────
+  #
+  # (1) The agent's sudoers allowlist is path-bound to this stack's directory. A
+  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
+  # safely into the sudoers grammar, so skip cleanly rather than half-bind it.
+  case "$INSTALL_DIR" in
+    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
+      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
+      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
+      return 0 ;;
+  esac
+  # (2) The unprivileged culvert-maint service must be able to chdir into the
+  # stack (the runner sets cmd.Dir before sudo). We grant the LEAF group
+  # traversal post-install, but an ANCESTOR we won't modify that is unsearchable
+  # (a 0700 home, /root) means the agent could never reach the stack.
+  if ! agent_ancestors_traversable "$INSTALL_DIR"; then
+    warn "An ancestor of '$INSTALL_DIR' is not searchable by an unprivileged service user."
+    warn "The maintenance agent runs as 'culvert-maint' and could not chdir into the stack; skipping."
+    warn "This happens for stacks under a 0700/0750 home directory (CULVERT_DIR override or a"
+    warn "home-dir checkout). Use the default system path instead — re-run from a neutral cwd:"
+    warn "  cd / && sudo bash /path/to/install.sh          # deploys to /srv/culvert"
+    return 0
+  fi
+
+  # ── Fast path: already installed AND at a KNOWN target version → just ensure
+  #    traversal + wiring, skipping the (network) cosign verify + bundle extract
+  #    entirely. The guards above already ran, so wiring here cannot create a
+  #    broken-chdir state. Only when the target is known pre-extract (env/label);
+  #    an unknown target still needs the bundle to derive its version (the
+  #    idempotence block after the bundle handles that). ─────────────────────────
+  if [[ -f /etc/systemd/system/culvert-maint.service && -n "$target_version" ]]; then
+    local installed_now=""
+    command -v culvert-maint &>/dev/null && installed_now="$(culvert-maint --version 2>/dev/null || true)"
+    if [[ "$installed_now" == "$target_version" ]]; then
+      info "Maintenance agent already at $target_version — leaving it unchanged."
+      ensure_agent_traversal || true
+      MAINT_AGENT_INSTALLED=1
+      wire_release_agent_for_compose "$maint_installer"
+      return 0
+    fi
+  fi
+
   # Bundled agent binary: shipped inside the pinned proxy image at
   # /app/deploy/bin/culvert-maint, so it exists wherever the image can be
   # pulled — GitHub release assets and the source repo may not be publicly
@@ -1584,45 +1630,23 @@ install_maint_agent() {
     # resolved), skip the reinstall but STILL run the wiring below — it is
     # idempotent, and a previous run may have installed the agent yet failed
     # (or been skipped) at the Release Management wiring step.
+    # (Guards already ran before the bundle block above, so wiring on these
+    # already-installed early-returns cannot create a broken-chdir state.)
     if [[ -z "$target_version" ]]; then
       info "Maintenance agent installed ($installed_version); cannot resolve a target version — leaving it unchanged"
+      ensure_agent_traversal || true
       MAINT_AGENT_INSTALLED=1
       wire_release_agent_for_compose "$maint_installer"
       return 0
     fi
     if [[ "$installed_version" == "$target_version" ]]; then
       info "Maintenance agent already at $target_version — leaving it unchanged"
+      ensure_agent_traversal || true
       MAINT_AGENT_INSTALLED=1
       wire_release_agent_for_compose "$maint_installer"
       return 0
     fi
     info "Upgrading maintenance agent ($installed_version → $target_version)..."
-  fi
-
-  # The agent's sudoers allowlist is path-bound to this stack's directory. A
-  # path with whitespace/quotes/shell-or-sed metacharacters can't be rendered
-  # safely into the sudoers grammar (the agent installer rejects it), so skip
-  # the whole step cleanly rather than leave a half-bound install behind.
-  case "$INSTALL_DIR" in
-    *[[:space:]\"\'\\\&\|\$\`\(\)]*)
-      warn "Install path '$INSTALL_DIR' has characters that can't be bound in the agent's sudoers allowlist."
-      warn "Skipping the maintenance agent. Move the checkout to a plain path and re-run, or install it manually."
-      return 0 ;;
-  esac
-
-  # The unprivileged culvert-maint service must be able to chdir into the stack
-  # (the runner sets cmd.Dir = compose_project_dir before sudo). We grant the
-  # LEAF group traversal post-install (0750 root:culvert-maint), so it has no
-  # world requirement — but an ANCESTOR we will not modify that is unsearchable
-  # (e.g. a 0700 home, or /root) means the agent could never reach the stack.
-  # Skip cleanly instead of binding a guaranteed-broken path.
-  if ! agent_ancestors_traversable "$INSTALL_DIR"; then
-    warn "An ancestor of '$INSTALL_DIR' is not searchable by an unprivileged service user."
-    warn "The maintenance agent runs as 'culvert-maint' and could not chdir into the stack; skipping."
-    warn "This happens for stacks under a 0700/0750 home directory (CULVERT_DIR override or a"
-    warn "home-dir checkout). Use the default system path instead — re-run from a neutral cwd:"
-    warn "  cd / && sudo bash /path/to/install.sh          # deploys to /srv/culvert"
-    return 0
   fi
 
   # ── Install: verified bundled binary → signed release → local build. ────────
