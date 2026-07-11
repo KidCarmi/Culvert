@@ -389,6 +389,92 @@ func TestMITM_NativeH2_PerStreamStallResets(t *testing.T) {
 	}
 }
 
+// TestMITM_NativeH2_SteadyProgressSurvivesWatchdog proves the watchdog is an
+// INACTIVITY bound, not a total deadline: a stream that keeps emitting bytes at an
+// interval shorter than h2StreamStallTimeout survives even when its total duration
+// exceeds the timeout. Guards against false-positive cancellation of slow-but-alive
+// streaming (SSE / gRPC server-streaming / long download).
+func TestMITM_NativeH2_SteadyProgressSurvivesWatchdog(t *testing.T) {
+	orig := h2StreamStallTimeout
+	h2StreamStallTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { h2StreamStallTimeout = orig })
+
+	const chunks = 8
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < chunks; i++ {
+			_, _ = w.Write([]byte("chunk"))
+			w.(http.Flusher).Flush()
+			time.Sleep(60 * time.Millisecond) // < 200ms timeout; total 480ms > 200ms
+		}
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/stream", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("steadily-progressing stream was rejected: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatalf("steadily-progressing stream was falsely reset: %v", readErr)
+	}
+	if len(body) != chunks*len("chunk") {
+		t.Fatalf("got %d body bytes, want %d (full stream must be delivered)", len(body), chunks*len("chunk"))
+	}
+}
+
+// TestMITM_NativeH2_ScanPhaseStallResets proves the watchdog covers the
+// scanInspectBody buffering phase (not just delivery) AND that a cancel during
+// scanning resets the stream rather than emitting a clean empty 200. With DPI
+// enabled and a text content-type the response is buffered before delivery; an
+// origin that stalls mid-buffer must produce a stream reset, not a success.
+func TestMITM_NativeH2_ScanPhaseStallResets(t *testing.T) {
+	origScanner := dpiScanner
+	dpiScanner = &ContentScanner{}
+	if err := dpiScanner.Add("NEVERMATCHZZZ"); err != nil {
+		t.Fatalf("enable dpi: %v", err)
+	}
+	t.Cleanup(func() { dpiScanner = origScanner })
+
+	origTO := h2StreamStallTimeout
+	h2StreamStallTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { h2StreamStallTimeout = origTO })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain") // → bodyNeedsBuffering true (DPI on)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 1024))
+		w.(http.Flusher).Flush()
+		<-release // stall while the proxy is buffering for the scan
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/scanme", http.NoBody)
+
+	type rt struct {
+		resp *http.Response
+		err  error
+	}
+	ch := make(chan rt, 1)
+	go func() {
+		resp, err := cc.RoundTrip(req) //nolint:bodyclose // closed below when non-nil
+		ch <- rt{resp, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return // reset before headers — the scan-phase stall was handled
+		}
+		defer r.resp.Body.Close() //nolint:errcheck // test cleanup
+		if _, readErr := io.ReadAll(r.resp.Body); readErr == nil {
+			t.Fatal("scan-phase stall produced a clean success (empty 200) — it must reset the stream")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scan-phase stall was not handled within the window (hang)")
+	}
+}
+
 // TestMITM_NativeH2_FallsBackToH1WhenOriginNoH2 proves the ALPN intersection: an
 // h2-offering client through a native rule to an HTTP/1.1-only origin negotiates
 // http/1.1 on BOTH legs (the origin declined h2, so the forged leaf is

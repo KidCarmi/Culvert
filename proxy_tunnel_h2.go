@@ -7,8 +7,9 @@ package main
 // Scope: native-ALPN dispatch, per-stream request/response proxying via
 // runInspectExchange, pre-commit block emission, trailer forwarding (PR3b), the
 // per-stream inactivity watchdog + frame/header caps (PR3c). Rapid Reset
-// (CVE-2023-44487) and CONTINUATION flood (CVE-2024-27316) are mitigated by
-// default in the vendored x/net v0.57.0 (the effective Rapid-Reset cap equals
+// (CVE-2023-44487) and the HTTP/2 CONTINUATION flood (CVE-2023-45288 — the Go /
+// x-net identifier; not the Apache-httpd CVE-2024-27316) are mitigated by default
+// in the vendored x/net v0.57.0 (the effective Rapid-Reset cap equals
 // MaxConcurrentStreams). Still deferred (marked inline):
 //   - :authority pinning / 421: NOT a security hole — upstreamCC is pinned to the
 //     CONNECT target so a client :authority cannot redirect the request off that
@@ -49,9 +50,12 @@ const h2MaxConcurrentStreams uint32 = 32
 // reader cannot pin a handler goroutine + its scan buffer indefinitely.
 const h2ConnWriteByteTimeout = 30 * time.Second
 
-// h2MaxReadFrameSize caps a single HTTP/2 frame the server will read (1 MiB).
-// h2MaxHeaderBytes caps the decoded header-list size per request (1 MiB), a
-// defense against oversized / compression-amplified header blocks.
+// h2MaxReadFrameSize pins the largest HTTP/2 frame the server will read. 1 MiB
+// equals the x/net default, so this does not tighten below the library — it pins
+// the value explicitly so a future default change can't silently widen it.
+// h2MaxHeaderBytes caps the decoded header-list size per request (1 MiB), the
+// effective defense against oversized / compression-amplified header blocks
+// (SETTINGS_MAX_HEADER_LIST_SIZE).
 const (
 	h2MaxReadFrameSize = 1 << 20
 	h2MaxHeaderBytes   = 1 << 20
@@ -363,14 +367,30 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		host:      hostOnly,
 		clientIP:  clientIP,
 		responder: &h2BlockResponder{w: w},
-		roundTrip: func(rq *http.Request) (*http.Response, error) { return upstreamCC.RoundTrip(rq) },
-		deliver: func(resp *http.Response) error {
-			resp.Body = &h2StallReader{rc: resp.Body, reset: resetStall} // download progress re-arms
-			return h2DeliverResponse(w, resp)
+		roundTrip: func(rq *http.Request) (*http.Response, error) {
+			resp, err := upstreamCC.RoundTrip(rq)
+			if err != nil {
+				return nil, err
+			}
+			// Wrap here (not in deliver) so download progress re-arms the watchdog
+			// during BOTH the scanInspectBody buffering phase and delivery — a slow
+			// but steadily-progressing large download must not be falsely cancelled
+			// mid-scan.
+			resp.Body = &h2StallReader{rc: resp.Body, reset: resetStall}
+			return resp, nil
 		},
+		deliver: func(resp *http.Response) error { return h2DeliverResponse(w, resp) },
 	}
 
-	handleH2StreamOutcome(w, runInspectExchange(ex), req, hostOnly, reqPath, clientIP, match, id)
+	out := runInspectExchange(ex)
+	// If the per-stream watchdog (or the client) cancelled the context mid-exchange,
+	// reset the stream — including the mid-scan case, which otherwise surfaces as
+	// exBlocked with nothing written (a clean, empty 200). A genuinely delivered
+	// response (exDelivered) completed its copy, so it is never reset here.
+	if ctx.Err() != nil && out.kind != exDelivered {
+		panic(http.ErrAbortHandler)
+	}
+	handleH2StreamOutcome(w, out, req, hostOnly, reqPath, clientIP, match, id)
 }
 
 // handleH2StreamOutcome maps an inspection outcome to the H2 stream's terminal
