@@ -44,16 +44,18 @@ Three tiers, applied consistently (today coverage is inverted — see
 
 - **Tier 1 — routine destructive** (delete one host/rule/webhook): standard
   `confirmAction` modal naming the object.
-- **Tier 2 — service-impacting** (default action flip, blocklist mode flip,
-  upstream replacement, engine enable/disable, purge): `confirmAction` with an
+- **Tier 2 — service-impacting** (default action flip, upstream chain change,
+  SSL-bypass add, engine enable/disable, purge): `confirmAction` with an
   explicit **impact statement** ("All traffic not matching a rule will be
-  DENIED starting immediately") and the affected scope.
-- **Tier 3 — lockout/trust-breaking** (default auth outcome, session-secret
-  regen, admin IP allowlist, CA rotation, cluster CA, HA promote, cluster
-  enable): **typed confirmation** (the CA-rotation two-phase pattern at
+  DENIED starting immediately"), the affected scope, and the rollback path.
+- **Tier 3 — lockout/trust-breaking/outage-capable** (default auth outcome,
+  blocklist↔allowlist mode, session-secret regen, admin IP allowlist, CA
+  rotation, cluster CA import, HA enable/promote, control-plane enable):
+  **typed confirmation** (the CA-rotation two-phase pattern at
   `static/index.html:10290` generalized — dry-run/preview response where the
-  backend supports it, otherwise type-the-word confirm) + statement of the
-  recovery path ("You will be signed out. All admins must sign in again.").
+  backend supports it, otherwise type-the-word confirm via `confirmDanger`) +
+  statement of the recovery path ("You will be signed out. All admins must
+  sign in again.").
 
 Native `confirm()`/`prompt()` are banned; the 4 remaining sites migrate to the
 shared dialog.
