@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -106,9 +107,43 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="pol-summary"`,           // summary region
 		`id="pol-form-err"`,          // inline validation errors
 		`data-mousedown=`,            // CSP-safe replacement for picker onmousedown
+		// M3 S4 — decision-trace integration
+		`function renderPolicyTrace`,     // shared trace rows consuming the walkPolicyTestRules payload
+		`function gotoAnchoredRow`,       // generic view+row anchor (any tbody with data-priority)
+		`function polTestRule`,           // tester prefill from a rule's conditions (G6)
+		`data-click="polGotoRuleByName"`, // Traffic rule chip → anchored rulebase row
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
+		}
+	}
+}
+
+// ── M3 S4: the decision-trace payload is a frozen contract ──────────────────
+
+func TestFoundation_PolicyTraceContractFrozen(t *testing.T) {
+	// renderPolicyTrace (static/index.html) consumes the walkPolicyTestRules
+	// payload verbatim; renaming or adding fields silently breaks (or silently
+	// bypasses) the admin UI's trace viewer. Field changes must update the
+	// trace component in the same commit. Contract owner:
+	// docs/design/M3-POLICY-ARCH-REVIEW.md §4 (S4).
+	want := map[string]string{
+		"Priority":   "priority",
+		"Name":       "name",
+		"SkipReason": "skipReason,omitempty",
+	}
+	typ := reflect.TypeOf(policyTestTrace{})
+	if typ.NumField() != len(want) {
+		t.Fatalf("policyTestTrace has %d fields; want %d — update renderPolicyTrace and this contract together", typ.NumField(), len(want))
+	}
+	for name, tag := range want {
+		f, ok := typ.FieldByName(name)
+		if !ok {
+			t.Errorf("policyTestTrace lost field %s (frozen trace contract)", name)
+			continue
+		}
+		if got := f.Tag.Get("json"); got != tag {
+			t.Errorf("policyTestTrace.%s json tag = %q; want %q (frozen trace contract)", name, got, tag)
 		}
 	}
 }
