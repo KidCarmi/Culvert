@@ -632,6 +632,38 @@ clone_source_into_install_dir() {
   return 0
 }
 
+# resolve_latest_signed_release_ref — echo "<PROXY_REPO>:vX.Y.Z" for the newest
+# vMAJOR.MINOR.PATCH tag published to the (public) GHCR proxy repo. A default
+# install should seed a SIGNED RELEASE digest: only a release-tag image
+# cosign-verifies against the pinned identity (verify_pinned_image_signature),
+# which is what lets the host maintenance agent install from a trusted image.
+# `:latest` is a main build and can NEVER verify (the pinned SAN anchors to
+# refs/tags/v*), so seeding it left the agent SKIPPED on every default
+# source-free install. Uses the anonymous GHCR pull-token flow: works for a
+# PUBLIC image with no credentials (the stated distribution posture even after
+# the source repo goes private). Echoes nothing on ANY failure — the caller then
+# falls back to :latest, so this only ever IMPROVES the default, never worsens it.
+resolve_latest_signed_release_ref() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local reg repo_path token tags latest
+  reg="${PROXY_REPO%%/*}"        # ghcr.io
+  repo_path="${PROXY_REPO#*/}"   # kidcarmi/culvert
+  # The anonymous tag-list flow is GHCR-specific and needs a host/path split; a
+  # custom/private registry (CULVERT_PROXY_REPO override) falls back to :latest.
+  [[ "$reg" == "ghcr.io" && "$repo_path" != "$PROXY_REPO" ]] || return 0
+  token="$(curl -fsS --max-time 15 "https://ghcr.io/token?scope=repository:${repo_path}:pull" 2>/dev/null \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
+  [[ -n "$token" ]] || return 0
+  tags="$(curl -fsS --max-time 15 -H "Authorization: Bearer $token" \
+    "https://ghcr.io/v2/${repo_path}/tags/list?n=1000" 2>/dev/null)" || return 0
+  # Newest final vMAJOR.MINOR.PATCH by version sort. Pre-releases (v1.2.3-rc1)
+  # are excluded — the require-closing-quote pattern only matches bare vX.Y.Z
+  # tags, and the pinned identity/pipeline sign final release tags.
+  latest="$(printf '%s' "$tags" | grep -oE '"v[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' | sort -V -u | tail -n1)"
+  [[ -n "$latest" ]] || return 0
+  printf '%s:%s\n' "$PROXY_REPO" "$latest"
+}
+
 seed_pinned_tag() {
   local had_stale=0
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
@@ -667,8 +699,13 @@ seed_pinned_tag() {
   #      migration: the currently-running repo@sha256 digest).
   #   2. The image of an already-running `culvert` container (auto-captured,
   #      keeps the pinned tag identical to the live daemon — §8.2).
-  #   3. ${PROXY_REPO}:latest — fresh-install bootstrap.
-  #   4. Local build from this checkout — air-gapped / registry-down fallback.
+  #   3. The latest SIGNED release ${PROXY_REPO}:vX.Y.Z — fresh-install default.
+  #      A signed release digest cosign-verifies, so the host maintenance agent
+  #      installs from a trusted image (no override needed).
+  #   4. ${PROXY_REPO}:latest — fallback when no signed release resolves. It
+  #      cannot cosign-verify, so a source-free install seeded here leaves the
+  #      agent unwired unless CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 is set.
+  #   5. Local build from this checkout — air-gapped / registry-down fallback.
   if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
     info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
     if sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
@@ -688,7 +725,25 @@ seed_pinned_tag() {
     warn "Could not tag the running container's image — trying the next source..."
   fi
 
-  info "Seeding $PINNED_TAG from $PROXY_REPO:latest ..."
+  # Prefer the latest SIGNED release so the image cosign-verifies and the host
+  # agent installs from a trusted image on a normal source-free install. Empty
+  # (no curl / non-ghcr / no releases / network error) ⇒ fall through to :latest.
+  local signed_ref
+  signed_ref="$(resolve_latest_signed_release_ref)"
+  if [[ -n "$signed_ref" ]]; then
+    info "Seeding $PINNED_TAG from the latest signed release $signed_ref ..."
+    if sudo docker pull "$signed_ref" && sudo docker tag "$signed_ref" "$PINNED_TAG"; then
+      info "Seeded $PINNED_TAG from $signed_ref (signed release — the host agent installs from a trusted image)"
+      return 0
+    fi
+    warn "Could not seed from $signed_ref — falling back to :latest ..."
+  fi
+
+  # Fallback: :latest is an unsigned main build that cannot cosign-verify against
+  # the pinned release identity, so a source-free install seeded from here leaves
+  # the maintenance agent unwired unless the operator sets
+  # CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 (or a source checkout is present).
+  info "Seeding $PINNED_TAG from $PROXY_REPO:latest (unsigned main build) ..."
   if sudo docker pull "$PROXY_REPO:latest" && sudo docker tag "$PROXY_REPO:latest" "$PINNED_TAG"; then
     info "Seeded $PINNED_TAG"
     return 0
