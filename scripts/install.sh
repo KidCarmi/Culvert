@@ -527,12 +527,16 @@ MAINT_COSIGN_IMAGE="${CULVERT_MAINT_COSIGN_IMAGE:-ghcr.io/sigstore/cosign/cosign
 # verify_pinned_image_signature — cosign-verify (keyless) the registry image
 # behind $PINNED_TAG against the pinned tag identity. No host cosign needed;
 # runs the pinned cosign container (docker is already up). Return codes:
-#   0 = verified (signature present AND pinned tag identity matched)
-#   1 = a signature was checked and REJECTED (identity mismatch / bad sig) —
-#       a possible-tampering signal worth surfacing loudly
-#   2 = could not verify (image has no registry digest — e.g. locally built —
-#       or cosign/registry/Rekor was unreachable)
-# Fail-closed callers trust the bundle ONLY on return 0.
+#   0 = VERIFIED (a keyless signature present AND the pinned tag identity matched)
+#   1 = NOT VERIFIED, for ANY reason (image has no registry digest — e.g.
+#       locally built; unsigned/main-only image; private image the cosign
+#       container has no credentials for; identity mismatch; or cosign/registry/
+#       Rekor unreachable). The reasons are deliberately NOT distinguished:
+#       cosign's "no matching signatures" text cannot reliably tell an absent
+#       signature from a present-but-mismatched one, so claiming "tampering"
+#       would cry wolf on a normal :latest. Fail-closed callers trust the
+#       bundle ONLY on return 0; every 1 falls through to the self-verifying
+#       signed-release download.
 verify_pinned_image_signature() {
   local digest_ref
   # RepoDigests carries the source-registry digest of the pulled image; a
@@ -540,25 +544,26 @@ verify_pinned_image_signature() {
   digest_ref="$(sudo docker image inspect "$PINNED_TAG" \
     --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
   if [[ "$digest_ref" != *@sha256:* ]]; then
-    return 2
-  fi
-  local out rc=0
-  out="$(sudo docker run --rm "$MAINT_COSIGN_IMAGE" verify \
-           --certificate-oidc-issuer="$MAINT_SIGSTORE_ISSUER" \
-           --certificate-identity-regexp="$MAINT_SIGSTORE_SAN_REGEX" \
-           "$digest_ref" 2>&1)" || rc=$?
-  if [[ "$rc" -eq 0 ]]; then
-    return 0
-  fi
-  # Distinguish "couldn't run" (no signature published, registry/Rekor/network
-  # unreachable, cosign image unpullable) from "ran and rejected". Both are
-  # fail-closed for the security decision; the distinction only picks the
-  # message. Default to the benign "couldn't verify" (2) unless the output is
-  # specifically an identity/signature rejection.
-  if grep -qiE 'none of the (given )?identities|no matching (signatures|certificates)|certificate identity|signature.*(mismatch|invalid|not verified)' <<<"$out"; then
     return 1
   fi
-  return 2
+  # Best-effort registry auth for the cosign container: it fetches the signature
+  # artifact from the SAME repo as the image, so a PRIVATE image needs the same
+  # credentials the earlier `sudo docker pull` used (root's docker config under
+  # sudo). Public images (the default posture) need none. Plaintext-auth entries
+  # transfer; external credential helpers do not (documented limitation).
+  local -a cred_args=()
+  if sudo test -f /root/.docker/config.json 2>/dev/null; then
+    cred_args=(-v /root/.docker:/root/.docker:ro)
+  fi
+  # --timeout bounds the Sigstore/Rekor network call so an egress-filtered
+  # appliance (sigstore.dev blackholed) fails closed instead of hanging.
+  local rc=0
+  sudo docker run --rm "${cred_args[@]}" "$MAINT_COSIGN_IMAGE" verify \
+    --timeout=60s \
+    --certificate-oidc-issuer="$MAINT_SIGSTORE_ISSUER" \
+    --certificate-identity-regexp="$MAINT_SIGSTORE_SAN_REGEX" \
+    "$digest_ref" >/dev/null 2>&1 || rc=$?
+  [[ "$rc" -eq 0 ]]
 }
 
 seed_pinned_tag() {
@@ -1342,9 +1347,7 @@ install_maint_agent() {
   # the signed-release download (which self-verifies) or the source build.
   local bundled_bin=""
   if [[ -z "${CULVERT_MAINT_FORCE_BUILD:-}" ]]; then
-    local vrc=0
-    verify_pinned_image_signature || vrc=$?
-    if [[ "$vrc" -eq 0 ]]; then
+    if verify_pinned_image_signature; then
       if extract_bundled_maint_bin "$scratch/culvert-maint-bundled"; then
         bundled_bin="$scratch/culvert-maint-bundled"
         info "Proxy image signature verified against the pinned release identity — trusting its bundled agent binary."
@@ -1359,13 +1362,11 @@ install_maint_agent() {
           fi
         fi
       fi
-    elif [[ "$vrc" -eq 1 ]]; then
-      warn "Proxy image signature did NOT match the pinned release identity ($PINNED_TAG)."
-      warn "Refusing to install the host maintenance agent from the image bundle (possible tampering)."
-      warn "Falling back to the cosign-verified signed-release download."
     else
-      info "Proxy image signature could not be verified (unsigned/main image, locally built, or cosign/registry unavailable)."
-      info "Using the signed-release download for the host agent instead of the image bundle (fail-closed)."
+      info "Proxy image could not be verified against the pinned release identity"
+      info "(unsigned/non-tag image, locally built, private image without credentials,"
+      info "or cosign/registry unreachable) — not trusting the image bundle for the host"
+      info "agent; falling back to the cosign-verified signed-release download."
     fi
   fi
 
