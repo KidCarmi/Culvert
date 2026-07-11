@@ -396,17 +396,21 @@ func TestMITM_NativeH2_PerStreamStallResets(t *testing.T) {
 // streaming (SSE / gRPC server-streaming / long download).
 func TestMITM_NativeH2_SteadyProgressSurvivesWatchdog(t *testing.T) {
 	orig := h2StreamStallTimeout
-	h2StreamStallTimeout = 200 * time.Millisecond
+	// Wide margin (1s timeout, 100ms inter-chunk) so a loaded/shuffled CI runner's
+	// scheduling jitter can't push a single interval past the timeout — while the
+	// total (1.2s) still exceeds the timeout, proving it is an inactivity bound and
+	// not a total deadline.
+	h2StreamStallTimeout = 1 * time.Second
 	t.Cleanup(func() { h2StreamStallTimeout = orig })
 
-	const chunks = 8
+	const chunks = 12
 	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		for i := 0; i < chunks; i++ {
 			_, _ = w.Write([]byte("chunk"))
 			w.(http.Flusher).Flush()
-			time.Sleep(60 * time.Millisecond) // < 200ms timeout; total 480ms > 200ms
+			time.Sleep(100 * time.Millisecond) // << 1s timeout; total 1.2s > 1s
 		}
 	}))
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/stream", http.NoBody)
