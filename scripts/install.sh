@@ -635,13 +635,23 @@ clone_source_into_install_dir() {
 seed_pinned_tag() {
   local had_stale=0
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
-    # Keep the existing tag when it tracks a LIVE/current deployment: a running
-    # culvert container (the P1.4 §8.2 stability rule — the pinned tag must match
-    # the live daemon) or an existing stack at $INSTALL_DIR. But when NEITHER is
-    # present the tag is a stale leftover from a previously-removed install
-    # (dir + volumes gone, image kept); reusing it would silently deploy a
-    # year-old image + compose + agent (#7). Fall through to refresh it.
+    # Keep the existing tag when it tracks a LIVE/current deployment: a proxy
+    # container (culvert, or culvert-dp on an HA data-plane node — running OR
+    # stopped, the P1.4 §8.2 stability rule that the pinned tag matches the live
+    # daemon), or a populated stack dir at $INSTALL_DIR (a source checkout with a
+    # locally-built tag, or an existing install). When NONE is present the tag is
+    # a stale leftover from a previously-removed install (dir + volumes gone,
+    # image kept); reusing it would silently deploy a year-old image + compose +
+    # agent (#7). Fall through to refresh it.
+    #
+    # KNOWN NARROWING: `docker compose down -v` that leaves the dir on disk still
+    # keeps the tag (compose file present) even though the data volume is gone —
+    # closing that fully would refresh a dev's locally-built pinned tag on a
+    # never-deployed checkout, so the tradeoff favours the checkout case. The
+    # operator escape hatch (CULVERT_PROXY_SEED_REF, named in the warning below)
+    # covers the rare stale-after-down-v reinstall.
     if sudo docker inspect culvert >/dev/null 2>&1 \
+       || sudo docker inspect culvert-dp >/dev/null 2>&1 \
        || [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
       info "$PINNED_TAG already present; not reseeding (tracking the current deployment)"
       return 0
