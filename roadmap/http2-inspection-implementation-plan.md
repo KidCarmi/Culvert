@@ -385,8 +385,14 @@ committed PR1+PR2a. Unanimous points, all actioned:
   in the H1 loop moves only half the seam. Model the upstream round-trip and client delivery as
   function-typed transport hooks on an exchange object (H1: `req.Write`+`ReadResponse` / `resp.Write`;
   H2: `NewClientConn.RoundTrip` / stream write) so scanners stay conn-free. (PR2b-2.)
-- **Preserve `resp.Trailer`** through the `MultiReader` reassembly (`proxy_tunnel.go:971`) — it currently
-  drops trailers (RF8); the H2 deliver needs gRPC `grpc-status` trailers. (PR2b-2.)
+- **Keep `deliver` typed as `func(*http.Response)`, NOT `func([]byte)`** so `resp.Trailer` (gRPC
+  `grpc-status`), `resp.Header`, `resp.StatusCode`, and `resp.TransferEncoding` reach the H2 deliver leg
+  intact (RF8). Correction (PR2b review): the `MultiReader` reassembly (`proxy_tunnel.go`) never *dropped*
+  trailers — `resp.Trailer` is a sibling struct field, not part of `resp.Body`, and H1 `resp.Write`
+  forwarded it before and after this refactor. The real PR2b-2 work is the *design choice* not to flatten
+  `deliver` to a byte slice; trailer survival is pinned by `TestRunInspectExchange_TransportOutcomes/
+  trailerSurvivesToDeliver`. The H2 deliver leg (PR3) must actively emit `resp.Trailer` as an H2 trailer
+  frame — that emission is new PR3 code, not a preserved H1 behavior.
 - Per-stream stall timer lives at the **transport edge**, not the seam; H1 keeps `stallDetectReadCloser`
   verbatim (PR3/RF6).
 - **Post-commit responder is still NOT frozen** — it must take a stream-state object
