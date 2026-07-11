@@ -776,7 +776,11 @@ extract_deploy_bundle() {
     # Remove the sentinel so a partial extract can't be mistaken for a complete
     # one on the next run (it may not have been written, but be certain).
     sudo rm -f "$INSTALL_DIR/docker-compose.yml" 2>/dev/null || true
-    return 1
+    # Return 2 = the bundle WAS present but writing it into $INSTALL_DIR failed
+    # (disk full / permissions), distinct from return 1 = no bundle in the image
+    # (older release). The caller errors directly on 2 instead of attempting a
+    # git clone that would fail the same way.
+    return 2
   fi
   return 0
 }
@@ -811,6 +815,14 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
   if extract_deploy_bundle; then
     info "Deployment files installed to $INSTALL_DIR (no source checkout needed)."
   else
+    extract_rc=$?
+    if [[ "$extract_rc" -eq 2 ]]; then
+      # The bundle was present but writing it failed (disk full / permissions).
+      # A git clone would fail the same way — error directly with the real cause.
+      error "Failed to write the deployment files to $INSTALL_DIR — likely out of disk space
+  or a permissions problem (not a missing image bundle). Free space / fix permissions and
+  re-run; the installer re-extracts automatically."
+    fi
     # Compat window: images built before the /app/deploy bundle. Requires the
     # source repo to be publicly readable; clone_source_into_install_dir fails
     # fast (never hangs) on a private/unreachable repo.
