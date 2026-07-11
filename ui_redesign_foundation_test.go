@@ -87,15 +87,15 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 	}
 	s := string(data)
 	for _, marker := range []string{
-		`function confirmDanger`,          // Tier-3 typed confirmation
-		`function promptAction`,           // input dialog (replaces prompt)
-		`function modalActivate`,          // shared focus mechanics
-		`function tableRows`,              // shared table renderer
-		`id="confirm-dialog-typed"`,       // typed-word gate input
-		`id="confirm-dialog-impact"`,      // impact statement region
-		`id="confirm-dialog-rollback"`,    // rollback statement region
-		`aria-live="polite"`,              // toast announcement region
-		`aria-current`,                    // nav current-page marker
+		`function confirmDanger`,       // Tier-3 typed confirmation
+		`function promptAction`,        // input dialog (replaces prompt)
+		`function modalActivate`,       // shared focus mechanics
+		`function tableRows`,           // shared table renderer
+		`id="confirm-dialog-typed"`,    // typed-word gate input
+		`id="confirm-dialog-impact"`,   // impact statement region
+		`id="confirm-dialog-rollback"`, // rollback statement region
+		`aria-live="polite"`,           // toast announcement region
+		`aria-current`,                 // nav current-page marker
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
@@ -126,11 +126,11 @@ func TestFoundation_TypedConfirmationsCoverLockoutClassActions(t *testing.T) {
 	s := string(data)
 	// One confirmWord per Tier-3 action (see M2-IMPLEMENTATION-REPORT.md §6).
 	for word, context := range map[string]string{
-		`confirmWord: toOpen ? 'OPEN' : 'REQUIRE'`:                    "default auth outcome",
+		`confirmWord: toOpen ? 'OPEN' : 'REQUIRE'`:                     "default auth outcome",
 		`confirmWord: newMode === 'allow' ? 'ALLOWLIST' : 'BLOCKLIST'`: "blocklist mode",
-		`confirmWord: 'ROTATE'`:  "session signing key",
-		`confirmWord: 'PROMOTE'`: "HA promote",
-		`confirmWord: 'IMPORT'`:  "cluster CA import",
+		`confirmWord: 'ROTATE'`:                                        "session signing key",
+		`confirmWord: 'PROMOTE'`:                                       "HA promote",
+		`confirmWord: 'IMPORT'`:                                        "cluster CA import",
 	} {
 		if !strings.Contains(s, word) {
 			t.Errorf("Tier-3 typed confirmation for %s no longer present (marker %q)", context, word)
