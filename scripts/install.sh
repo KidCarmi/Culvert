@@ -1550,7 +1550,9 @@ install_maint_agent() {
   #    idempotence block after the bundle handles that). ─────────────────────────
   if [[ -f /etc/systemd/system/culvert-maint.service && -n "$target_version" ]]; then
     local installed_now=""
-    command -v culvert-maint &>/dev/null && installed_now="$(culvert-maint --version 2>/dev/null || true)"
+    if command -v culvert-maint &>/dev/null; then
+      installed_now="$(culvert-maint --version 2>/dev/null || true)"
+    fi
     if [[ "$installed_now" == "$target_version" ]]; then
       info "Maintenance agent already at $target_version — leaving it unchanged."
       ensure_agent_traversal || true
