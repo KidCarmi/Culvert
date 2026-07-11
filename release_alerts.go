@@ -1,6 +1,10 @@
 package main
 
-// Release-catalog detection / canary / alerting (M1-3, design §3 Slice C).
+// Release-catalog detection / freshness alerting (M1-3, design §3 Slice C).
+//
+// "Canary" is deliberately not used here: update_cluster.go already owns that
+// word for its staged-rollout mechanism (CanaryCount/CanarySoak), and this
+// file implements no staged rollout — only staleness/failure alerts.
 //
 // Operators learn about catalog problems from alerts, not outages. Three alert
 // events ride the existing fireAlert seam:
