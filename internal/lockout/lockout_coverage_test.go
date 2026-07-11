@@ -1,6 +1,9 @@
 package lockout
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // Covers the constructors + SnapshotAndClear, which were exercised only through
 // package main's shim (so they read as uncovered in the gate-critical
@@ -57,6 +60,57 @@ func TestSnapshotAndClear_RestoresState(t *testing.T) {
 	// After restore, the captured locked state is back.
 	if locked, _ := l.Check("203.0.113.1", "victim"); !locked {
 		t.Error("restore() should bring back the locked state")
+	}
+}
+
+func TestSnapshot_ReportsBothTiersAndOmitsExpired(t *testing.T) {
+	l := NewLoginLimiter()
+	if got := l.Snapshot(); len(got) != 0 {
+		t.Fatalf("fresh limiter Snapshot() = %v, want empty", got)
+	}
+
+	// Trip the tier-1 pair lock for one (ip, username).
+	for range MaxAttempts {
+		l.RecordFailure("203.0.113.1", "pairlocked")
+	}
+	// Trip the tier-2 account lock (distinct IPs, same username) — untrusted
+	// IPs so the account tier isn't bypassed.
+	for i := range AccountMaxAttempts {
+		l.RecordFailure(fmt.Sprintf("198.51.100.%d", i+1), "acctlocked")
+	}
+
+	snap := l.Snapshot()
+	var sawPair, sawAccount bool
+	for _, e := range snap {
+		switch {
+		case e.Tier == "pair" && e.Username == "pairlocked":
+			sawPair = true
+			if e.IP != "203.0.113.1" {
+				t.Errorf("pair entry IP = %q, want 203.0.113.1", e.IP)
+			}
+			if e.SecondsRemaining <= 0 {
+				t.Errorf("pair entry SecondsRemaining = %d, want > 0", e.SecondsRemaining)
+			}
+		case e.Tier == "account" && e.Username == "acctlocked":
+			sawAccount = true
+			if e.IP != "" {
+				t.Errorf("account entry IP = %q, want empty", e.IP)
+			}
+		}
+	}
+	if !sawPair {
+		t.Error("Snapshot() missing the tripped pair-tier lockout")
+	}
+	if !sawAccount {
+		t.Error("Snapshot() missing the tripped account-tier lockout")
+	}
+
+	// ResetUser must remove the pair entry from a subsequent Snapshot.
+	l.ResetUser("pairlocked")
+	for _, e := range l.Snapshot() {
+		if e.Username == "pairlocked" {
+			t.Error("Snapshot() still reports a lockout ResetUser cleared")
+		}
 	}
 }
 

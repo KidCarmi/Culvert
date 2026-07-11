@@ -439,6 +439,83 @@ func TestAPIAuthUsers_WrongMethod(t *testing.T) {
 	assertStatus(t, w, http.StatusMethodNotAllowed)
 }
 
+// ─── /api/auth/lockouts ────────────────────────────────────────────────────
+
+func TestAPIAuthLockouts_List_Empty(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, getReq("/api/auth/lockouts"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	if _, ok := m["lockouts"]; !ok {
+		t.Error("response should contain 'lockouts' field")
+	}
+}
+
+func TestAPIAuthLockouts_List_RejectsViewer(t *testing.T) {
+	// The listing includes usernames and pair-lock source IPs — the same
+	// authentication-telemetry sensitivity as GET /api/auth/users, which
+	// is also admin-only. A viewer must not be able to enumerate it.
+	r := httptest.NewRequest(http.MethodGet, "/api/auth/lockouts", http.NoBody)
+	r.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, withRoleCtx(r, RoleViewer))
+	assertStatus(t, w, http.StatusForbidden)
+}
+
+func TestAPIAuthLockouts_List_ReportsActiveLockout(t *testing.T) {
+	defer loginLimiter.ResetUser("lockoutlisttest")
+	for range lockoutMaxAttempts {
+		loginLimiter.RecordFailure("198.51.100.50", "lockoutlisttest")
+	}
+
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, getReq("/api/auth/lockouts"))
+	assertStatus(t, w, http.StatusOK)
+	m := assertJSON(t, w)
+	entries, _ := m["lockouts"].([]any)
+	found := false
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		if entry["username"] == "lockoutlisttest" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a lockout entry for lockoutlisttest, got: %v", entries)
+	}
+}
+
+func TestAPIAuthLockouts_Unlock_ClearsLockout(t *testing.T) {
+	for range lockoutMaxAttempts {
+		loginLimiter.RecordFailure("198.51.100.51", "lockoutunlocktest")
+	}
+	if locked, _ := loginLimiter.Check("198.51.100.51", "lockoutunlocktest"); !locked {
+		t.Fatal("precondition: account should be locked")
+	}
+
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, jsonReq(http.MethodPost, "/api/auth/lockouts", map[string]string{"username": "lockoutunlocktest"}))
+	assertStatus(t, w, http.StatusOK)
+
+	if locked, _ := loginLimiter.Check("198.51.100.51", "lockoutunlocktest"); locked {
+		t.Error("account should no longer be locked after unlock")
+	}
+}
+
+func TestAPIAuthLockouts_Unlock_MissingUsername(t *testing.T) {
+	w := httptest.NewRecorder()
+	apiAuthLockouts(w, jsonReq(http.MethodPost, "/api/auth/lockouts", map[string]string{"username": "  "}))
+	assertStatus(t, w, http.StatusBadRequest)
+}
+
+func TestAPIAuthLockouts_WrongMethod(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodDelete, "/api/auth/lockouts", http.NoBody)
+	r.RemoteAddr = "127.0.0.1:9999"
+	apiAuthLockouts(w, adminCtx(r))
+	assertStatus(t, w, http.StatusMethodNotAllowed)
+}
+
 // ─── /api/stats ───────────────────────────────────────────────────────────────
 
 func TestAPIStats(t *testing.T) {

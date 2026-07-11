@@ -110,6 +110,11 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/auth/change-password", Handler: "apiAuthChangePassword", Domain: "auth", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, AuditExpected: true}}},
+	{Path: "/api/auth/lockouts", Handler: "apiAuthLockouts", Domain: "auth", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleAdmin},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── Generic IdP framework ─────────────────────────────────────────────
 	{Path: "/api/idp", Handler: "apiIdPList", Domain: "auth", Public: false,

@@ -2091,6 +2091,28 @@ Firefox (all platforms):
           </table>
         </div>
       </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Active Login Lockouts</span>
+          <span class="topbar-meta" id="lockouts-count">0 locked</span>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            Accounts or IP/username pairs currently blocked from logging in after too many failed attempts.
+            A lockout clears itself when the timer expires, or you can unlock it now.
+          </p>
+          <table>
+            <thead><tr>
+              <th>Username</th>
+              <th>Scope</th>
+              <th>Time Remaining</th>
+              <th style="width:110px">Actions</th>
+            </tr></thead>
+            <tbody id="lockouts-table"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- ── REWRITE ──────────────────────────────────────────────────────────── -->
@@ -3915,6 +3937,7 @@ document.addEventListener('click', e => {
     // ── Users ──
     case 'openUserModal':     openUserModal(arg, arg2); break;
     case 'deleteUser':        deleteUser(arg); break;
+    case 'unlockUser':        unlockUser(arg); break;
     case 'saveUser':          saveUser(); break;
     case 'closeUserModal':    closeUserModal(); break;
 
@@ -4537,6 +4560,52 @@ async function deleteUser(username) {
     fetchUsers();
   } catch (err) {
     toast('Delete failed: ' + err.message, 'error');
+  }
+}
+
+// ── Login Lockouts ───────────────────────────────────────────────────────
+
+function fmtLockoutRemaining(secs) {
+  if (secs >= 60) return Math.ceil(secs / 60) + 'm';
+  return secs + 's';
+}
+
+async function fetchLockouts() {
+  try {
+    const d = await api('/api/auth/lockouts');
+    renderLockoutsTable(d.lockouts || []);
+  } catch (_) {}
+}
+
+function renderLockoutsTable(lockouts) {
+  const tbody = document.getElementById('lockouts-table');
+  const count = document.getElementById('lockouts-count');
+  if (count) count.textContent = lockouts.length + ' locked';
+  if (!tbody) return;
+  if (!lockouts.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:20px">No active lockouts</td></tr>';
+    return;
+  }
+  tbody.innerHTML = lockouts.map(l => `
+    <tr>
+      <td><strong>${escHtml(l.username)}</strong></td>
+      <td>${l.tier === 'account' ? 'Account (all IPs)' : 'This IP only (' + escHtml(l.ip) + ')'}</td>
+      <td>${fmtLockoutRemaining(l.seconds_remaining)}</td>
+      <td><button class="btn ghost sm" data-click="unlockUser" data-arg="${escHtml(l.username)}">Unlock</button></td>
+    </tr>`).join('');
+}
+
+async function unlockUser(username) {
+  if (!await confirmAction('Unlock Account', `Clear all active lockouts for "${username}"? They will be able to log in immediately.`)) return;
+  try {
+    await api('/api/auth/lockouts', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username})
+    });
+    fetchLockouts();
+  } catch (err) {
+    toast('Unlock failed: ' + err.message, 'error');
   }
 }
 
@@ -8633,7 +8702,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.view === 'certificates')  { loadCACertInfo(); loadSSLBypass(); }
     if (el.dataset.view === 'idproviders')   loadIdPList();
     if (el.dataset.view === 'pac')           loadPACConfig();
-    if (el.dataset.view === 'users')         fetchUsers();
+    if (el.dataset.view === 'users')         { fetchUsers(); fetchLockouts(); }
     if (el.dataset.view === 'blocklist')     loadBlocklistMode();
   });
 });
