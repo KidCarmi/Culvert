@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Culvert</title>
 <link rel="icon" type="image/png" href="logo.png">
-<script nonce="__CSP_NONCE__" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- Chart.js v4.4.0 self-hosted (embedded via go:embed) — no CDN/runtime
+     network dependency, so the admin UI works fully air-gapped. -->
+<script nonce="__CSP_NONCE__" src="chart.umd.js"></script>
 <style>
 /* ─── Reset & Variables ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -15,22 +17,61 @@
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-hi); }
 * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+/* ── Design tokens (docs/design/DESIGN-SYSTEM.md) ──
+   Semantic layer + legacy aliases. Raw color values may appear ONLY here;
+   the dark and light blocks must stay field-for-field parallel. */
 :root {
+  /* surfaces & text */
   --bg:        #0b0f1a;
   --surface:   #111827;
+  --surface1:  #151d2e;
   --surface2:  #1a2235;
+  --card:      #111827;
   --border:    #1e2d42;
   --border-hi: #2d3f5a;
-  --accent:    #14b8a6;
-  --accent2:   #2dd4bf;
-  --green:     #22c55e;
-  --red:       #ef4444;
-  --orange:    #f97316;
-  --yellow:    #eab308;
   --text:      #e2e8f0;
   --muted:     #8892a8;
   --text-muted:#8892a8;
-  --sidebar-w: 230px;
+  /* brand */
+  --accent:        #14b8a6;
+  --accent2:       #2dd4bf;
+  --accent-hover:  #0ea395;
+  --accent-active: #0d9488;
+  /* status */
+  --ok:     #22c55e;
+  --warn:   #eab308;
+  --crit:   #ef4444;
+  --info:   #60a5fa;
+  --orange: #f97316;
+  --green:  #22c55e;
+  --red:    #ef4444;
+  --yellow: #eab308;
+  --danger: #ef4444;
+  /* tints (badge / pill / banner backgrounds) */
+  --accent-tint: rgba(20,184,166,.12);
+  --ok-tint:     rgba(34,197,94,.12);
+  --warn-tint:   rgba(234,179,8,.12);
+  --crit-tint:   rgba(239,68,68,.12);
+  --orange-tint: rgba(249,115,22,.12);
+  --info-tint:   rgba(96,165,250,.12);
+  /* typography */
+  --font-ui:   system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+  --fs-xs:  .72rem;
+  --fs-sm:  .8rem;
+  --fs-md:  .875rem;
+  --fs-lg:  1rem;
+  --fs-xl:  1.25rem;
+  --fs-2xl: 1.75rem;
+  /* spacing (4px grid) */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px;
+  /* radius & elevation */
+  --r-sm: 4px; --r-md: 6px; --r-lg: 10px; --r-full: 999px;
+  --shadow-1: 0 4px 16px rgba(0,0,0,.3);
+  --shadow-2: 0 8px 32px rgba(0,0,0,.45);
+  /* layout & legacy aliases */
+  --sidebar-w: 232px;
   --radius:    10px;
   --shadow:    0 4px 24px rgba(0,0,0,.4);
   --focus-ring: 0 0 0 3px rgba(20,184,166,.25);
@@ -39,23 +80,39 @@
 html[data-theme="light"] {
   --bg:        #f3f4f6;
   --surface:   #ffffff;
+  --surface1:  #f9fafb;
   --surface2:  #f9fafb;
+  --card:      #ffffff;
   --border:    #e5e7eb;
   --border-hi: #d1d5db;
-  --accent:    #0d9488;
-  --accent2:   #0f766e;
-  --green:     #16a34a;
-  --red:       #dc2626;
-  --orange:    #ea580c;
-  --yellow:    #ca8a04;
   --text:      #1f2937;
   --muted:     #6b7280;
   --text-muted:#6b7280;
-  --shadow:    0 4px 24px rgba(0,0,0,.08);
-  --card:      #ffffff;
-  --danger:    #dc2626;
+  --accent:        #0d9488;
+  --accent2:       #0f766e;
+  --accent-hover:  #0f766e;
+  --accent-active: #115e59;
+  --ok:     #16a34a;
+  --warn:   #ca8a04;
+  --crit:   #dc2626;
+  --info:   #2563eb;
+  --green:  #16a34a;
+  --red:    #dc2626;
+  --yellow: #ca8a04;
+  --orange: #ea580c;
+  --danger: #dc2626;
+  --accent-tint: rgba(13,148,136,.10);
+  --ok-tint:     rgba(22,163,74,.10);
+  --warn-tint:   rgba(202,138,4,.12);
+  --crit-tint:   rgba(220,38,38,.10);
+  --orange-tint: rgba(234,88,12,.10);
+  --info-tint:   rgba(37,99,235,.10);
+  --shadow-1: 0 4px 16px rgba(0,0,0,.06);
+  --shadow-2: 0 8px 32px rgba(0,0,0,.12);
+  --shadow:   0 4px 24px rgba(0,0,0,.08);
+  --focus-ring: 0 0 0 3px rgba(13,148,136,.25);
 }
-body { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+body { font-family: var(--font-ui);
        background: var(--bg); color: var(--text); height: 100vh;
        display: flex; overflow: hidden; }
 /* ─── Sidebar ───────────────────────────────────────────────────────────── */
@@ -223,15 +280,22 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   font-size: .82rem; font-weight: 600; transition: background .15s, opacity .15s;
   white-space: nowrap;
 }
-.btn:hover   { background: #0ea395; }
-.btn:active  { background: #0d9488; }
+.btn:hover   { background: var(--accent-hover); }
+.btn:active  { background: var(--accent-active); }
 .btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
 .btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
-.btn.danger  { background: var(--red); }
+.btn.danger  { background: var(--crit); }
 .btn.danger:hover { background: #dc2626; }
 .btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .btn.ghost:hover { color: var(--text); border-color: var(--border-hi); background: var(--surface2); }
 .btn.sm      { padding: 5px 10px; font-size: .75rem; }
+/* variants referenced by markup — previously undefined (see CURRENT-UI-AUDIT.md §4) */
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.accent  { background: transparent; border: 1px solid var(--accent); color: var(--accent2); }
+.btn.accent:hover { background: var(--accent-tint); }
+.btn.warn    { background: var(--warn); color: #1f2937; }
+.btn.warn:hover { filter: brightness(.92); }
 /* host chips in blocklist table */
 .host-td { font-family: monospace; font-size: .82rem; }
 .wild-tag { color: var(--yellow); font-size: .7rem; font-weight: 700;
@@ -327,9 +391,96 @@ tr.dragging  { opacity: .4; }
   border-radius: 7px; font-size: .82rem;
 }
 .country-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+/* ─── M1 redesign components (docs/design/DESIGN-SYSTEM.md §3) ───────────── */
+/* inline SVG icons — stroke inherits text color, themes automatically */
+.ico { width: 16px; height: 16px; stroke: currentColor; stroke-width: 2;
+       fill: none; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.nav-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* alert banners */
+.banner { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+          border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5;
+          border: 1px solid var(--border); margin-bottom: 14px; }
+.banner.info { background: var(--info-tint); border-color: rgba(96,165,250,.35); }
+.banner.warn { background: var(--warn-tint); border-color: rgba(234,179,8,.35); }
+.banner.crit { background: var(--crit-tint); border-color: rgba(239,68,68,.35); }
+/* skeleton loading placeholder (replaces dead .spinner usage gap) */
+.skeleton { background: var(--surface2); border-radius: var(--r-sm);
+            animation: skel-pulse 1.2s ease-in-out infinite; color: transparent !important; }
+@keyframes skel-pulse { 50% { opacity: .55; } }
+/* dashboard posture strip */
+.posture-strip { display: grid; grid-template-columns: repeat(6,1fr); gap: 10px;
+                 margin-bottom: 18px; }
+@media(max-width:1200px){ .posture-strip { grid-template-columns: repeat(3,1fr); } }
+@media(max-width:640px) { .posture-strip { grid-template-columns: repeat(2,1fr); } }
+.posture-item { display: flex; align-items: center; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 10px 14px; cursor: pointer;
+  transition: border-color .15s; min-width: 0; }
+.posture-item:hover { border-color: var(--border-hi); }
+.posture-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.posture-dot { width: 8px; height: 8px; border-radius: 50%;
+               background: var(--muted); flex-shrink: 0; }
+.posture-item[data-state="ok"]   .posture-dot { background: var(--ok); }
+.posture-item[data-state="warn"] .posture-dot { background: var(--warn); }
+.posture-item[data-state="crit"] .posture-dot { background: var(--crit); }
+.posture-label { font-size: .62rem; color: var(--muted); font-weight: 700;
+                 text-transform: uppercase; letter-spacing: .06em; }
+.posture-state { font-size: var(--fs-sm); font-weight: 600; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
+.posture-item[data-state="warn"] .posture-state { color: var(--warn); }
+.posture-item[data-state="crit"] .posture-state { color: var(--crit); }
+/* dashboard panel grids — previously inline styles that never stacked on mobile */
+.dash-grid { display: grid; gap: 14px; margin-bottom: 18px; }
+.dash-grid.cols-21 { grid-template-columns: 2fr 1fr; }
+.dash-grid.cols-2  { grid-template-columns: 1fr 1fr; }
+@media(max-width:900px){ .dash-grid.cols-21, .dash-grid.cols-2 { grid-template-columns: 1fr; } }
+.dash-grid > .panel { margin-bottom: 0; }
+.card.clickable { cursor: pointer; }
+.card.clickable:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* shared status badges (M2) — .ok/.blocked/.auth predate the semantic set */
+.badge.warn    { background: var(--warn-tint);   color: var(--warn); }
+.badge.crit    { background: var(--crit-tint);   color: var(--crit); }
+.badge.info    { background: var(--info-tint);   color: var(--info); }
+.badge.neutral { background: rgba(100,116,139,.12); color: var(--muted); }
+/* shared table empty cell (M2) */
+.tbl-empty { text-align: center; color: var(--muted); padding: 24px 14px !important;
+             font-size: var(--fs-sm); }
+/* motion floor */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}
 </style>
 </head>
 <body>
+
+<!-- ═══ ICON SPRITE (stroke icons, 24×24, inherit currentColor) ═══════════ -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24"><path d="M10 2v7.5L4.7 20.6a1 1 0 0 0 .9 1.4h12.8a1 1 0 0 0 .9-1.4L14 9.5V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></symbol>
+  <symbol id="i-file-x" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9.5" y1="12.5" x2="14.5" y2="17.5"/><line x1="14.5" y1="12.5" x2="9.5" y2="17.5"/></symbol>
+  <symbol id="i-package" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></symbol>
+  <symbol id="i-id" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></symbol>
+  <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></symbol>
+  <symbol id="i-landmark" viewBox="0 0 24 24"><line x1="3" y1="22" x2="21" y2="22"/><line x1="6" y1="18" x2="6" y2="11"/><line x1="10" y1="18" x2="10" y2="11"/><line x1="14" y1="18" x2="14" y2="11"/><line x1="18" y1="18" x2="18" y2="11"/><polygon points="12 2 20 7 4 7"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="i-arrow-up-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="16 12 12 8 8 12"/><line x1="12" y1="16" x2="12" y2="8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-check-square" viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+</svg>
 
 <!-- ═══ SIDEBAR ════════════════════════════════════════════════════════════ -->
 <aside id="sidebar">
@@ -341,96 +492,93 @@ tr.dragging  { opacity: .4; }
     </div>
   </div>
 
-  <nav>
-    <div class="nav-section">Monitor</div>
-    <div class="nav-item active" data-view="dashboard">
-      <span class="icon">📊</span> Dashboard
+  <nav aria-label="Primary">
+    <div class="nav-section">Overview</div>
+    <div class="nav-item active" data-view="dashboard" role="button" tabindex="0" aria-current="page">
+      <svg class="ico" aria-hidden="true"><use href="#i-dashboard"/></svg> Dashboard
     </div>
-    <div class="nav-item" data-view="livefeed">
-      <span class="icon">⚡</span> Live Feed
+
+    <div class="nav-section">Monitor</div>
+    <div class="nav-item" data-view="livefeed" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-activity"/></svg> Traffic
       <span class="nav-badge" id="nav-blocked-count" style="display:none">0</span>
     </div>
-
-    <div class="nav-section" data-min-role="operator">Control</div>
-    <div class="nav-item" data-view="blocklist" data-min-role="operator">
-      <span class="icon">🚫</span> Blocklist
+    <div class="nav-item" data-view="audit" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> Audit Log
     </div>
-    <div class="nav-item" data-view="security" data-min-role="operator">
-      <span class="icon">🔒</span> Security
-    </div>
-    <div class="nav-item" data-view="policy" data-min-role="operator">
-      <span class="icon">📋</span> Policy
-    </div>
-    <div class="nav-item" data-view="authpolicy">
-      <span class="icon">🪪</span> Auth Policy
-    </div>
-    <div class="nav-item" data-view="urlcat" data-min-role="operator">
-      <span class="icon">🏷️</span> URL Categories
-    </div>
-    <div class="nav-item" data-view="catgroups" data-min-role="operator">
-      <span class="icon">📦</span> Category Groups
-    </div>
-    <div class="nav-item" data-view="fileblock" data-min-role="operator">
-      <span class="icon">🛡️</span> File Block
-    </div>
-    <div class="nav-item" data-view="cdr" data-min-role="operator">
-      <span class="icon">🧬</span> CDR
-    </div>
-    <div class="nav-section" data-min-role="operator">Network</div>
-    <div class="nav-item" data-view="rewrite" data-min-role="operator">
-      <span class="icon">✏️</span> Rewrite
-    </div>
-    <div class="nav-item" data-view="upstream" data-min-role="operator">
-      <span class="icon">🔗</span> Upstream Proxies
-    </div>
-    <div class="nav-item" data-view="pac" data-min-role="operator">
-      <span class="icon">📡</span> PAC File
+    <div class="nav-item" data-view="policy-tester" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> Policy Tester
     </div>
 
-    <div class="nav-section" data-min-role="admin">Identity</div>
-    <div class="nav-item" data-view="idproviders" data-min-role="admin">
-      <span class="icon">🪪</span> Identity Providers
+    <div class="nav-section">Policies</div>
+    <div class="nav-item" data-view="policy" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Access Rules
+    </div>
+    <div class="nav-item" data-view="authpolicy" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-key"/></svg> Authentication Rules
+    </div>
+    <div class="nav-item" data-view="blocklist" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-ban"/></svg> Blocklist
+    </div>
+    <div class="nav-item" data-view="security" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg> Content &amp; Scanning
+    </div>
+    <div class="nav-item" data-view="fileblock" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-file-x"/></svg> File Control
+    </div>
+    <div class="nav-item" data-view="cdr" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-package"/></svg> CDR
     </div>
 
-    <div class="nav-section" data-min-role="admin">Certificates</div>
-    <div class="nav-item" data-view="certificates" data-min-role="admin">
-      <span class="icon">🔑</span> SSL / TLS
+    <div class="nav-section" data-min-role="operator">Objects</div>
+    <div class="nav-item" data-view="urlcat" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-tag"/></svg> URL Categories
     </div>
-    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin">
-      <span class="icon">🏛️</span> CA Management
+    <div class="nav-item" data-view="catgroups" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg> Category Groups
     </div>
-
-    <div class="nav-section" data-min-role="admin">Infrastructure</div>
-    <div class="nav-item" data-view="cluster" data-min-role="admin">
-      <span class="icon">🖥️</span> Cluster Nodes
+    <div class="nav-item" data-view="rewrite" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg> Header Rewrite
     </div>
-    <div class="nav-item" data-view="settings" data-min-role="admin">
-      <span class="icon">⚙️</span> Settings
-    </div>
-    <div class="nav-item" data-view="updates" data-min-role="admin">
-      <span class="icon">&#x2B06;</span> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
-    </div>
-    <div class="nav-item" data-view="releases">
-      <span class="icon">🚀</span> Releases
-    </div>
-    <div class="nav-item" data-view="diagnostics" data-min-role="admin">
-      <span class="icon">🩺</span> Diagnostics
-    </div>
-    <div class="nav-item" data-view="governance" data-min-role="admin">
-      <span class="icon">🛡️</span> Governance
+    <div class="nav-item" data-view="idproviders" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-id"/></svg> Identity Providers
     </div>
 
-    <div class="nav-section">Tools</div>
-    <div class="nav-item" data-view="policy-tester">
-      <span class="icon">🧪</span> Policy Tester
+    <div class="nav-section">Platform</div>
+    <div class="nav-item" data-view="certificates" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-award"/></svg> Certificates
     </div>
-    <div class="nav-item" data-view="audit">
-      <span class="icon">📋</span> Audit Log
+    <div class="nav-item" data-view="ca-mgmt" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-landmark"/></svg> CA Management
+    </div>
+    <div class="nav-item" data-view="cluster" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-server"/></svg> Cluster
+    </div>
+    <div class="nav-item" data-view="upstream" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-share"/></svg> Upstream Proxies
+    </div>
+    <div class="nav-item" data-view="pac" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-globe"/></svg> PAC File
+    </div>
+    <div class="nav-item" data-view="updates" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-arrow-up-circle"/></svg> Updates <span id="nav-update-badge" class="badge ok" style="display:none;margin-left:4px;font-size:.7rem">NEW</span>
+    </div>
+    <div class="nav-item" data-view="releases" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-send"/></svg> Releases
+    </div>
+    <div class="nav-item" data-view="diagnostics" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Diagnostics
+    </div>
+    <div class="nav-item" data-view="settings" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg> Settings
     </div>
 
-    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Admin</div>
-    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users">
-      <span class="icon">👥</span> Users &amp; Roles
+    <div class="nav-section" data-min-role="admin" id="nav-section-admin">Administration</div>
+    <div class="nav-item" data-view="users" data-min-role="admin" id="nav-users" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-users"/></svg> Administrators
+    </div>
+    <div class="nav-item" data-view="governance" data-min-role="admin" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-check-square"/></svg> Governance
     </div>
   </nav>
 
@@ -458,7 +606,7 @@ tr.dragging  { opacity: .4; }
       <button id="sidebar-toggle" data-click="toggleSidebar" aria-label="Toggle menu">&#9776;</button>
       <div>
         <div class="topbar-title" id="topbar-title">Dashboard</div>
-        <div class="topbar-meta" id="topbar-meta">Real-time proxy overview</div>
+        <div class="topbar-meta" id="topbar-meta">Security posture and real-time proxy overview</div>
       </div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
@@ -472,10 +620,51 @@ tr.dragging  { opacity: .4; }
     </div>
   </div>
 
+  <!-- Connection-lost banner — shown when the poll loop gives up (tick pause) -->
+  <div id="conn-lost-banner" class="banner crit" role="alert" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg>
+    <span>Connection to Culvert lost — automatic retries stopped. Data on screen is stale. Reload the page to resume.</span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
     <div class="view active" id="view-dashboard">
+      <!-- Posture strip — is Culvert operational? (docs/design/SCREEN-SPECS.md §2)
+           Every item is computed from existing endpoints only; unknown ≠ healthy. -->
+      <div class="posture-strip" id="posture-strip" aria-label="System posture">
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="settings" role="button" tabindex="0"
+             title="Admin API reachability and proxy listener port — from /api/stats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Proxy</div><div class="posture-state" id="po-proxy">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Live request rate over the event stream — from /api/events">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Traffic</div><div class="posture-state" id="po-traffic">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="security" role="button" tabindex="0"
+             title="Scan-engine counters reporting (ClamAV / YARA / DPI / feeds) — from /api/dashboard/threats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Engines</div><div class="posture-state" id="po-engines">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="ca-mgmt" role="button" tabindex="0"
+             title="Root CA certificate validity — from /api/ca-cert">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Root CA</div><div class="posture-state" id="po-ca">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Persistent request-log write health — logWriteErrors from /api/stats">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Logging</div><div class="posture-state" id="po-logging">Checking…</div></div>
+        </div>
+        <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="updates" role="button" tabindex="0"
+             title="Software update availability — from the update checker via /api/events">
+          <span class="posture-dot"></span>
+          <div style="min-width:0"><div class="posture-label">Updates</div><div class="posture-state" id="po-updates">Checking…</div></div>
+        </div>
+      </div>
+
       <!-- CA cert expiry warning — hidden until JS populates it -->
       <div id="ca-expiry-banner" style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500"></div>
 
@@ -498,34 +687,38 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <div class="cards">
-        <div class="card c-blue">
+        <div class="card c-blue clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="All proxied requests since process start (counters reset on restart). Click to open Traffic.">
           <div class="card-label">Total Requests</div>
           <div class="card-value" id="d-total">0</div>
-          <div class="card-sub">all time</div>
+          <div class="card-sub">since start</div>
         </div>
-        <div class="card c-green">
+        <div class="card c-green clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Requests permitted by policy since start. Click to open Traffic.">
           <div class="card-label">Allowed</div>
           <div class="card-value" id="d-allowed">0</div>
           <div class="card-sub">passed through</div>
         </div>
-        <div class="card c-red">
+        <div class="card c-red clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Requests denied by policy, blocklist, or scan engines since start. Click to open Traffic.">
           <div class="card-label">Blocked</div>
           <div class="card-value" id="d-blocked">0</div>
           <div class="card-sub">by policy &amp; blocklist</div>
         </div>
-        <div class="card c-orange">
+        <div class="card c-orange clickable" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
+             title="Proxy authentication failures since start. Click to open Traffic.">
           <div class="card-label">Auth Failures</div>
           <div class="card-value" id="d-auth">0</div>
           <div class="card-sub">bad credentials</div>
         </div>
-        <div class="card c-blue">
+        <div class="card c-blue" title="Currently open client connections and requests per second (live via event stream).">
           <div class="card-label">Active Connections</div>
           <div class="card-value" id="d-active">0</div>
           <div class="card-sub" id="d-rps">0.0 req/s</div>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-21">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Request Rate</span>
@@ -548,7 +741,7 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <!-- ── New: Threat Breakdown + System Health ─────────────────────────── -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Threat Engine Breakdown</span>
@@ -612,7 +805,7 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <!-- ── Top Policy Rules + Top Hosts ──────────────────────────────────── -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Top Policy Rules</span>
@@ -630,7 +823,7 @@ tr.dragging  { opacity: .4; }
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Top Hosts</span>
-            <span style="font-size:.72rem;color:var(--muted)">by allowed requests</span>
+            <span style="font-size:.72rem;color:var(--muted)" title="Counts are approximate lower bounds beyond 10,000 distinct hosts (decay-based cap)">by allowed requests · approx past 10k hosts</span>
           </div>
           <div class="tbl-wrap">
             <table>
@@ -641,7 +834,7 @@ tr.dragging  { opacity: .4; }
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
+      <div class="dash-grid cols-2">
         <div class="panel" style="margin-bottom:0">
           <div class="panel-header">
             <span class="panel-title">Destination Countries</span>
@@ -3115,7 +3308,7 @@ Firefox (all platforms):
               <input id="cp-ca-file" class="input" placeholder="/path/to/ca.pem" style="margin-top:4px">
             </label>
             <div style="margin-top:4px">
-              <button class="btn" data-click="enableControlPlane">Enable Control Plane</button>
+              <button class="btn" id="cp-enable-btn" data-click="enableControlPlane">Enable Control Plane</button>
             </div>
           </div>
         </div>
@@ -3747,13 +3940,28 @@ Firefox (all platforms):
   </div>
 </div>
 
-<!-- Confirmation dialog (F22) -->
-<div id="confirm-dialog" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
-  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+<!-- Confirmation dialog (F22, extended in M2 with danger tiers — see
+     docs/design/UX-PRINCIPLES.md §3). Tier 1: title+msg. Tier 2: + impact.
+     Tier 3: + rollback + typed confirmation word. Optional free-text input
+     (promptAction) reuses the same dialog for reason/name prompts. -->
+<div id="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-msg"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px 32px;max-width:460px;width:90%;box-shadow:var(--shadow-2)">
+    <div id="confirm-dialog-tier" class="badge crit" style="display:none;margin-bottom:10px">HIGH-IMPACT CHANGE</div>
     <h3 id="confirm-dialog-title" style="margin:0 0 8px;font-size:1.05rem;font-weight:700;color:var(--danger)">Confirm</h3>
-    <p id="confirm-dialog-msg" style="margin:0 0 20px;font-size:.88rem;color:var(--muted);line-height:1.6"></p>
+    <p id="confirm-dialog-msg" style="margin:0 0 12px;font-size:.88rem;color:var(--muted);line-height:1.6"></p>
+    <div id="confirm-dialog-impact" style="display:none;margin:0 0 12px;padding:10px 12px;border-radius:var(--r-md);background:var(--crit-tint);border:1px solid rgba(239,68,68,.35);font-size:.82rem;line-height:1.55"></div>
+    <p id="confirm-dialog-rollback" style="display:none;margin:0 0 12px;font-size:.8rem;color:var(--muted);line-height:1.55"></p>
+    <div id="confirm-dialog-typed-wrap" style="display:none;margin:0 0 16px">
+      <label for="confirm-dialog-typed" id="confirm-dialog-typed-label" class="form-label"></label>
+      <input id="confirm-dialog-typed" class="input w-full" autocomplete="off" spellcheck="false">
+    </div>
+    <div id="confirm-dialog-input-wrap" style="display:none;margin:0 0 16px">
+      <label for="confirm-dialog-input" id="confirm-dialog-input-label" class="form-label"></label>
+      <input id="confirm-dialog-input" class="input w-full" autocomplete="off">
+    </div>
     <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button class="btn ghost" data-click="confirmDialogResolve" data-arg="false">Cancel</button>
+      <button class="btn ghost" id="confirm-dialog-cancel" data-click="confirmDialogResolve" data-arg="false">Cancel</button>
       <button class="btn danger" id="confirm-dialog-ok" data-click="confirmDialogResolve" data-arg="true">Delete</button>
     </div>
   </div>
@@ -3792,7 +4000,7 @@ Firefox (all platforms):
   </div>
 </div>
 
-<div id="toasts"></div>
+<div id="toasts" role="status" aria-live="polite"></div>
 
 <script nonce="__CSP_NONCE__">
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4077,6 +4285,16 @@ document.addEventListener('click', e => {
   }
 });
 
+// ── keyboard activation for data-click elements exposed as buttons ───────
+// (nav items bind their own keydown; this covers cards, posture items, etc.)
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const el = e.target.closest('[data-click][role="button"]');
+  if (!el || el.classList.contains('nav-item')) return;
+  e.preventDefault();
+  el.click();
+});
+
 // ── data-change: replaces onchange="fn()" ───────────────────────────────
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-change]');
@@ -4202,6 +4420,7 @@ function toggleTheme() {
     localStorage.setItem('culvert-theme', 'light');
     document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
+  if (typeof refreshChartTheme === 'function') refreshChartTheme();
 }
 initTheme();
 
@@ -4213,15 +4432,22 @@ const _kbShortcuts = {
   '9': 'updates'
 };
 document.addEventListener('keydown', e => {
+  // Escape = close confirm dialog, then any open shared-managed modal.
+  // Handled BEFORE the input guard so Esc works from a focused field
+  // (e.g. the typed-confirmation input).
+  if (e.key === 'Escape') {
+    if (_confirmResolver) { confirmDialogResolve(false); return; }
+    if (document.getElementById('user-modal')?.classList.contains('open')) { closeUserModal(); return; }
+    const wh = document.getElementById('webhook-modal');
+    if (wh && wh.style.display === 'flex') { closeWebhookModal(); return; }
+    const rd = document.getElementById('release-dispatch-modal');
+    if (rd && rd.style.display === 'flex') { releaseDispatchCancel(); return; }
+    return;
+  }
+
   // Skip if user is typing in an input/textarea/select
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-  // Escape = close confirm dialog
-  if (e.key === 'Escape') {
-    if (_confirmResolver) confirmDialogResolve(false);
-    return;
-  }
 
   // Alt+number = panel navigation
   if (e.altKey && _kbShortcuts[e.key]) {
@@ -4251,40 +4477,49 @@ let rwRules = [];
 // Navigation
 // ═══════════════════════════════════════════════════════════════════════════
 const viewMeta = {
-  dashboard:    { title: 'Dashboard',     meta: 'Real-time proxy overview' },
-  livefeed:     { title: 'Live Feed',     meta: 'All requests in real-time' },
+  dashboard:    { title: 'Dashboard',     meta: 'Security posture and real-time proxy overview' },
+  livefeed:     { title: 'Traffic',       meta: 'All requests in real time (formerly Live Feed)' },
   blocklist:    { title: 'Blocklist',     meta: 'Manage blocked hosts & wildcards' },
-  security:     { title: 'Security',      meta: 'IP filter, rate limiting & log export' },
-  policy:       { title: 'Policy',        meta: 'Policy-Based Access Control (PBAC) rules' },
+  security:     { title: 'Content & Scanning', meta: 'Scan engines, IP filter, rate limiting & log export' },
+  policy:       { title: 'Access Rules',  meta: 'Policy-Based Access Control (PBAC) rules' },
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
-  fileblock:    { title: 'File Block',    meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
+  fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
-  rewrite:      { title: 'Rewrite',       meta: 'Header injection & removal rules' },
+  rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
   certificates: { title: 'Certificates', meta: 'Root CA management & custom TLS certificates' },
   'ca-mgmt':    { title: 'CA Management', meta: 'Root CA lifecycle, rotation, OCSP, and HSM/KMS key provider' },
   upstream:     { title: 'Upstream Proxies', meta: 'Parent proxy chaining with failover and circuit breaker' },
-  cluster:      { title: 'Cluster Nodes', meta: 'Multi-node Control Plane / Data Plane management' },
+  cluster:      { title: 'Cluster',       meta: 'Multi-node Control Plane / Data Plane management' },
   settings:     { title: 'Settings',      meta: 'Configuration & credentials' },
   updates:      { title: 'Updates',       meta: 'Docker-based self-update system' },
   diagnostics:  { title: 'Diagnostics',   meta: 'Operator contract — readiness, security posture, and risky-mode warnings' },
-  users:          { title: 'Users & Roles',   meta: 'Manage dashboard users and RBAC permissions' },
+  users:          { title: 'Administrators',  meta: 'Manage console accounts and RBAC roles' },
   'policy-tester':{ title: 'Policy Tester',   meta: 'Simulate a request to debug which rule matches' },
-  authpolicy:     { title: 'Auth Policy Rules', meta: 'Stage-1 authentication policy — Exempt skips authentication; CredentialRequired forces a 407 challenge; SSORequired forces interactive browser SSO (302) or fails closed (403). None allow traffic; Stage-2 policy still applies' },
+  authpolicy:     { title: 'Authentication Rules', meta: 'Stage-1 Auth Policy — Exempt skips authentication; CredentialRequired forces a 407 challenge; SSORequired forces interactive browser SSO (302) or fails closed (403). None allow traffic; Stage-2 policy still applies' },
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
+  governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => switchView(el.dataset.view));
+  // Keyboard activation — nav items are divs, so Enter/Space must be wired.
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchView(el.dataset.view); }
+  });
 });
 
 function switchView(name) {
   currentView = name;
-  document.querySelectorAll('.nav-item').forEach(el =>
-    el.classList.toggle('active', el.dataset.view === name));
+  document.querySelectorAll('.nav-item').forEach(el => {
+    const active = el.dataset.view === name;
+    el.classList.toggle('active', active);
+    if (active) el.setAttribute('aria-current', 'page');
+    else el.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.view').forEach(el =>
     el.classList.toggle('active', el.id === 'view-' + name));
   const m = viewMeta[name] || {};
@@ -4316,8 +4551,26 @@ function switchView(name) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Chart
 // ═══════════════════════════════════════════════════════════════════════════
+// Chart colors come from the design tokens so charts follow the active theme
+// (previously hardcoded hex values that ignored light mode).
+function themeColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function chartTheme() {
+  return {
+    accent: themeColor('--accent'), ok: themeColor('--ok'),
+    crit: themeColor('--crit'), orange: themeColor('--orange'),
+    grid: themeColor('--border'), tick: themeColor('--muted'),
+  };
+}
+
 function initChart() {
+  // Chart.js is CDN-loaded; in air-gapped deployments it may be absent.
+  // Degrade to chartless dashboards instead of killing the whole init chain
+  // (SSE, polling and view wiring run after this in the same script block).
+  if (typeof Chart === 'undefined') return;
   const ctx = document.getElementById('rateChart').getContext('2d');
+  const t = chartTheme();
   chart = new Chart(ctx, {
     type: 'line',
     data: {
@@ -4326,7 +4579,7 @@ function initChart() {
         {
           label: 'Total',
           data: new Array(60).fill(0),
-          borderColor: '#14b8a6',
+          borderColor: t.accent,
           backgroundColor: 'rgba(20,184,166,.06)',
           fill: true,
           tension: .4,
@@ -4336,7 +4589,7 @@ function initChart() {
         {
           label: 'Allowed',
           data: new Array(60).fill(0),
-          borderColor: '#22c55e',
+          borderColor: t.ok,
           backgroundColor: 'rgba(34,197,94,.06)',
           fill: false,
           tension: .4,
@@ -4347,7 +4600,7 @@ function initChart() {
         {
           label: 'Blocked',
           data: new Array(60).fill(0),
-          borderColor: '#ef4444',
+          borderColor: t.crit,
           backgroundColor: 'rgba(239,68,68,.06)',
           fill: false,
           tension: .4,
@@ -4360,16 +4613,37 @@ function initChart() {
       responsive: true, maintainAspectRatio: false,
       animation: false,
       plugins: {
-        legend: { display: true, position: 'top', labels: { color: '#64748b', font:{size:10}, boxWidth: 10 } },
+        legend: { display: true, position: 'top', labels: { color: t.tick, font:{size:10}, boxWidth: 10 } },
         tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' req/min' } }
       },
       scales: {
-        x: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', maxTicksLimit: 10, font:{size:10} } },
-        y: { grid: { color: '#1f2d45' }, ticks: { color: '#64748b', font:{size:10} },
+        x: { grid: { color: t.grid }, ticks: { color: t.tick, maxTicksLimit: 10, font:{size:10} } },
+        y: { grid: { color: t.grid }, ticks: { color: t.tick, font:{size:10} },
              beginAtZero: true, min: 0 },
       }
     }
   });
+}
+
+// Re-read token colors into both charts after a theme toggle.
+function refreshChartTheme() {
+  const t = chartTheme();
+  if (chart) {
+    chart.data.datasets[0].borderColor = t.accent;
+    chart.data.datasets[1].borderColor = t.ok;
+    chart.data.datasets[2].borderColor = t.crit;
+    chart.options.plugins.legend.labels.color = t.tick;
+    chart.options.scales.x.grid.color = t.grid;
+    chart.options.scales.x.ticks.color = t.tick;
+    chart.options.scales.y.grid.color = t.grid;
+    chart.options.scales.y.ticks.color = t.tick;
+    chart.update('none');
+  }
+  if (breakdownChart) {
+    breakdownChart.data.datasets[0].borderColor = [t.ok, t.crit, t.orange];
+    breakdownChart.options.plugins.legend.labels.color = t.tick;
+    breakdownChart.update('none');
+  }
 }
 
 function updateChart(payload) {
@@ -4384,6 +4658,7 @@ function updateChart(payload) {
 }
 
 function initBreakdownChart() {
+  if (typeof Chart === 'undefined') return; // CDN absent (air-gapped) — degrade gracefully
   const ctx = document.getElementById('breakdownChart').getContext('2d');
   breakdownChart = new Chart(ctx, {
     type: 'doughnut',
@@ -4392,7 +4667,7 @@ function initBreakdownChart() {
       datasets: [{
         data: [0, 0, 0],
         backgroundColor: ['rgba(34,197,94,.7)', 'rgba(239,68,68,.7)', 'rgba(249,115,22,.7)'],
-        borderColor: ['#22c55e', '#ef4444', '#f97316'],
+        borderColor: [chartTheme().ok, chartTheme().crit, chartTheme().orange],
         borderWidth: 1,
       }]
     },
@@ -4400,7 +4675,7 @@ function initBreakdownChart() {
       responsive: true, maintainAspectRatio: false,
       animation: false,
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#64748b', font: {size: 11}, boxWidth: 12 } },
+        legend: { position: 'bottom', labels: { color: chartTheme().tick, font: {size: 11}, boxWidth: 12 } },
       },
       cutout: '60%',
     }
@@ -4477,11 +4752,7 @@ async function fetchUsers() {
 function renderUsersTable(users) {
   const tbody = document.getElementById('users-table');
   if (!tbody) return;
-  if (!users.length) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:20px">No users yet</td></tr>';
-    return;
-  }
-  tbody.innerHTML = users.map(u => `
+  tbody.innerHTML = tableRows(users, u => `
     <tr>
       <td><strong>${escHtml(u.username)}</strong></td>
       <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
@@ -4489,7 +4760,9 @@ function renderUsersTable(users) {
         <button class="btn ghost sm" data-click="openUserModal" data-arg="${escHtml(u.username)}" data-arg2="${escHtml(u.role)}">Edit</button>
         ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" data-click="deleteUser" data-arg="${JSON.stringify(u.username).replace(/"/g,'&quot;')}">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
       </td>
-    </tr>`).join('');
+    </tr>`,
+    {colspan: 3, empty: 'No administrators yet',
+     hint: 'Add an account with "+ Add User" — roles: admin, operator, viewer'});
 }
 
 function openUserModal(username, role) {
@@ -4506,12 +4779,15 @@ function openUserModal(username, role) {
   document.getElementById('um-role').value = role || 'operator';
   document.getElementById('um-err').style.display = 'none';
   document.getElementById('um-err').textContent   = '';
-  document.getElementById('user-modal').classList.add('open');
-  if (!isEdit) setTimeout(() => document.getElementById('um-username').focus(), 50);
+  const modal = document.getElementById('user-modal');
+  modal.classList.add('open');
+  modalActivate(modal, isEdit ? '#um-role' : '#um-username');
 }
 
 function closeUserModal() {
-  document.getElementById('user-modal').classList.remove('open');
+  const modal = document.getElementById('user-modal');
+  modalDeactivate(modal);
+  modal.classList.remove('open');
   _editingUsername = null;
 }
 
@@ -4582,17 +4858,15 @@ function renderLockoutsTable(lockouts) {
   const count = document.getElementById('lockouts-count');
   if (count) count.textContent = lockouts.length + ' locked';
   if (!tbody) return;
-  if (!lockouts.length) {
-    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:20px">No active lockouts</td></tr>';
-    return;
-  }
-  tbody.innerHTML = lockouts.map(l => `
+  tbody.innerHTML = tableRows(lockouts, l => `
     <tr>
       <td><strong>${escHtml(l.username)}</strong></td>
       <td>${l.tier === 'account' ? 'Account (all IPs)' : 'This IP only (' + escHtml(l.ip) + ')'}</td>
       <td>${fmtLockoutRemaining(l.seconds_remaining)}</td>
       <td><button class="btn ghost sm" data-click="unlockUser" data-arg="${escHtml(l.username)}">Unlock</button></td>
-    </tr>`).join('');
+    </tr>`,
+    {colspan: 4, empty: 'No active lockouts',
+     hint: 'Brute-force lockouts appear here and clear automatically when they expire'});
 }
 
 async function unlockUser(username) {
@@ -4926,8 +5200,12 @@ async function removeURLCatHost(catName, host) {
   }
 }
 
-function openNewCategoryModal() {
-  const name = prompt('New category name:');
+async function openNewCategoryModal() {
+  const name = await promptAction({
+    title: 'New URL category',
+    msg: 'Create an empty admin-managed category; add hosts to it afterwards.',
+    label: 'Category name', placeholder: 'e.g. internal-tools', okLabel: 'Create',
+  });
   if (!name || !name.trim()) return;
   api('/api/urlcat', {method: 'POST', body: {name: name.trim(), hosts: []}})
     .then(() => {
@@ -4979,10 +5257,19 @@ function applyBlocklistMode(mode) {
 
 async function toggleBlocklistMode() {
   const newMode = _blMode === 'block' ? 'allow' : 'block';
-  const warn = newMode === 'allow'
-    ? 'Switch to ALLOWLIST mode?\n\nOnly the hosts in your list will be reachable. Everything else will be blocked. Make sure your list is correct before confirming.'
-    : 'Switch back to BLOCK mode?\n\nOnly the hosts in your list will be blocked. Everything else will be allowed.';
-  if (!await confirmAction('Change Default Action', warn, next === 'allow' ? 'Switch to Allow' : 'Switch to Deny')) return;
+  // Tier 3: flips global allow/deny posture for the whole host list.
+  // (Also fixes a ReferenceError: the old confirm referenced undefined `next`.)
+  const ok = await confirmDanger({
+    title: newMode === 'allow' ? 'Switch to allowlist mode' : 'Switch to blocklist mode',
+    msg: 'The mode applies immediately to all proxied traffic and is recorded in the audit log.',
+    impact: newMode === 'allow'
+      ? 'Only the hosts in your list remain reachable — EVERYTHING else is blocked. An incomplete list causes an immediate traffic outage.'
+      : 'Only the hosts in your list are blocked; everything else is allowed again.',
+    rollback: 'Toggle the mode back at any time — the host list itself is not modified by this change.',
+    confirmWord: newMode === 'allow' ? 'ALLOWLIST' : 'BLOCKLIST',
+    okLabel: newMode === 'allow' ? 'Switch to allowlist' : 'Switch to blocklist',
+  });
+  if (!ok) return;
   try {
     const d = await api('/api/blocklist/mode', {
       method: 'POST',
@@ -5216,7 +5503,22 @@ async function fetchStats() {
     // Show/hide Getting Started banner
     const gsb = document.getElementById('getting-started-banner');
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
-  } catch(e) { console.error(e); }
+    // Posture: API reachable + request-log write health (real fields only)
+    setPosture('proxy', 'ok', 'Operational · :' + s.proxyPort);
+    if ((s.logWriteErrors || 0) > 0) {
+      setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else {
+      setPosture('logging', 'ok', 'Persisting');
+    }
+    const clb = document.getElementById('conn-lost-banner');
+    if (clb) clb.style.display = 'none';
+  } catch(e) {
+    console.error(e);
+    // 401 means the session expired — the proxy itself is fine. Only report
+    // Unreachable for real transport/server failures (honest-state rule).
+    if (e && e.message === 'Unauthorized') setPosture('proxy', 'unknown', 'Sign-in required');
+    else setPosture('proxy', 'crit', 'Unreachable');
+  }
   // CA cert expiry check
   checkCACertExpiry();
 }
@@ -5226,9 +5528,17 @@ async function checkCACertExpiry() {
     const info = await fetch('/api/ca-cert', { headers: { 'Accept': 'application/json' } })
       .then(r => r.json());
     const banner = document.getElementById('ca-expiry-banner');
-    if (!info || !info.notAfter) { banner.style.display = 'none'; return; }
+    if (!info || !info.notAfter) {
+      banner.style.display = 'none';
+      setPosture('ca', 'unknown', 'Not configured');
+      return;
+    }
     const expiry = new Date(info.notAfter);
     const days   = Math.floor((expiry - Date.now()) / 86400000);
+    if (days < 0)        setPosture('ca', 'crit', 'Expired');
+    else if (days <= 7)  setPosture('ca', 'crit', 'Expires in ' + days + 'd');
+    else if (days <= 30) setPosture('ca', 'warn', 'Expires in ' + days + 'd');
+    else                 setPosture('ca', 'ok', 'Valid · ' + days + 'd left');
     if (days > 30) { banner.style.display = 'none'; return; }
     const isCritical = days <= 7;
     banner.style.background = isCritical ? 'rgba(220,53,69,.15)' : 'rgba(255,193,7,.15)';
@@ -5236,7 +5546,7 @@ async function checkCACertExpiry() {
     banner.style.color       = isCritical ? '#e74c3c' : '#b8860b';
     banner.textContent       = `⚠ CA certificate expires in ${days} day${days===1?'':'s'} (${info.notAfter}) — renew via the Certificates page`;
     banner.style.display     = 'block';
-  } catch(e) { console.error(e); }
+  } catch(e) { console.error(e); setPosture('ca', 'unknown', 'Unavailable'); }
 }
 
 async function fetchTopHosts() {
@@ -6035,6 +6345,14 @@ async function addSSLBypass() {
   const input = document.getElementById('ssl-bypass-input');
   const pattern = input.value.trim();
   if (!pattern) return;
+  // Tier 2: adding a bypass silently disables TLS inspection for the pattern.
+  const ok = await confirmAction('Add SSL-inspection bypass',
+    'Traffic to "' + pattern + '" will be tunneled WITHOUT TLS inspection.',
+    'Add bypass',
+    {impact: 'Content scanning (ClamAV/YARA/DPI/CDR) cannot see inside these connections — they are relayed encrypted.',
+     rollback: 'Remove the pattern from this list to re-enable inspection.',
+     okStyle: 'primary'});
+  if (!ok) return;
   try {
     await api('/api/ssl-bypass', {
       method: 'POST',
@@ -6834,6 +7152,20 @@ async function setDefaultAuthOutcome() {
   const sel = document.getElementById('s-default-auth-select');
   const outcome = sel ? sel.value : 'Default';
   const statusEl = document.getElementById('s-default-auth-save-status');
+  if (outcome === _defaultAuthOutcome) return; // no-op reselect
+  // Tier 3 (UX-PRINCIPLES §3): global auth gate — lockout / open-everything risk.
+  const toOpen = outcome === 'Exempt';
+  const ok = await confirmDanger({
+    title: 'Change default authentication behavior',
+    msg: 'This is the Stage-1 gate for ALL traffic that matches no authentication rule. The change takes effect immediately and is recorded in the audit log.',
+    impact: toOpen
+      ? 'Unmatched traffic will be admitted WITHOUT credentials (authSource "unauth"). Stage-2 access policy and default-deny still apply, but authentication is no longer required by default.'
+      : 'Unmatched traffic MUST authenticate. Clients without credentials or SSO lose proxy access at their next request.',
+    rollback: 'Switch back here at any time; the setting is audited and persists across restarts.',
+    confirmWord: toOpen ? 'OPEN' : 'REQUIRE',
+    okLabel: 'Change default',
+  });
+  if (!ok) { renderDefaultAuthUI(_defaultAuthOutcome); return; }
   try {
     await api('/api/settings/default-auth-outcome', {
       method: 'PUT', headers: {'Content-Type':'application/json'},
@@ -6936,6 +7268,16 @@ async function loadSessionSecret() {
 async function saveSessionSecret() {
   const secret = document.getElementById('s-session-key').value.trim();
   if (!secret || secret.length < 64) { toast('Secret must be 64+ hex characters', 'error'); return; }
+  // Tier 3: rotating the signing key invalidates every admin session at once.
+  const ok = await confirmDanger({
+    title: 'Rotate session signing key',
+    msg: 'The key signs all admin-console session cookies. Rotation takes effect immediately and is recorded in the audit log.',
+    impact: 'Every active admin session is invalidated — all signed-in administrators, INCLUDING YOU, are signed out and must sign in again.',
+    rollback: 'None for existing sessions — they cannot be re-validated. Credentials are unaffected; simply sign in again.',
+    confirmWord: 'ROTATE',
+    okLabel: 'Rotate key',
+  });
+  if (!ok) return;
   try {
     await api('/api/session-secret', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -6986,6 +7328,22 @@ function removeUIAllowIP(idx) {
 
 async function saveUIAllowIPs() {
   const statusEl = document.getElementById('s-uiip-status');
+  // Tier 3: a wrong list locks the admin console for everyone, including you.
+  const ok = await confirmDanger({
+    title: _uiAllowIPList.length ? 'Restrict admin console by IP' : 'Remove admin IP restriction',
+    msg: _uiAllowIPList.length
+      ? 'Allowed: ' + _uiAllowIPList.join(', ')
+      : 'The allowlist will be emptied.',
+    impact: _uiAllowIPList.length
+      ? 'Requests from any other IP get 403 — starting with your NEXT request. If your current IP (or your proxy/VPN egress) is not on the list, you lock yourself out.'
+      : 'The admin console becomes reachable from ALL IPs again (authentication still required).',
+    rollback: _uiAllowIPList.length
+      ? 'From an allowed IP: edit this list. If fully locked out: restart with the -ui-allow-ip flag or edit the persisted settings on the host.'
+      : 'Re-add CIDRs here at any time.',
+    confirmWord: _uiAllowIPList.length ? 'RESTRICT' : 'OPEN',
+    okLabel: _uiAllowIPList.length ? 'Apply allowlist' : 'Remove restriction',
+  });
+  if (!ok) return;
   try {
     await api('/api/ui-allow-ips', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -7187,7 +7545,7 @@ function openAddWebhookModal() {
   document.getElementById('wh-secret').value = '';
   document.getElementById('wh-enabled').checked = true;
   document.querySelectorAll('.wh-event').forEach(cb => cb.checked = false);
-  document.getElementById('webhook-modal').style.display = 'flex';
+  modalOpen(document.getElementById('webhook-modal'), '#wh-name');
 }
 
 function editWebhook(id) {
@@ -7201,12 +7559,12 @@ function editWebhook(id) {
     document.getElementById('wh-secret').value = '';
     document.getElementById('wh-enabled').checked = !!h.enabled;
     document.querySelectorAll('.wh-event').forEach(cb => { cb.checked = (h.events||[]).includes(cb.value); });
-    document.getElementById('webhook-modal').style.display = 'flex';
+    modalOpen(document.getElementById('webhook-modal'), '#wh-name');
   }).catch(e => { console.error(e); });
 }
 
 function closeWebhookModal() {
-  document.getElementById('webhook-modal').style.display = 'none';
+  modalClose(document.getElementById('webhook-modal'));
 }
 
 async function saveWebhook() {
@@ -8124,33 +8482,182 @@ async function loadFileProfileDropdown() {
 function toast(msg, type='success') {
   const el = document.createElement('div');
   el.className = 'toast ' + type;
-  el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + msg;
+  // msg often carries server-provided error text — always escape (CWE-79).
+  el.innerHTML = (type === 'success' ? '✅' : '❌') + ' ' + escHtml(msg);
   document.getElementById('toasts').appendChild(el);
   setTimeout(() => el.remove(), 3000);
 }
 
-// ── F22: Styled confirmation dialog ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// M2 shared component layer (docs/design/DESIGN-SYSTEM.md §3)
+// Dialogs · modals · tables · badges · empty/loading states
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Shared modal mechanics: focus trap, Esc, focus restore ───────────────
+// modalActivate/Deactivate carry the focus behavior and work with either
+// visibility mechanism (style.display or a CSS .open class); modalOpen/Close
+// bundle the display:flex pattern used by most overlays.
+let _modalPrevFocus = null;
+function modalActivate(el, initialFocusSel) {
+  _modalPrevFocus = document.activeElement;
+  const target = initialFocusSel ? el.querySelector(initialFocusSel)
+    : el.querySelector('input:not([type=hidden]):not([disabled]), select, textarea, button');
+  if (target) target.focus();
+  el.addEventListener('keydown', _modalTrapFocus);
+}
+function modalDeactivate(el) {
+  el.removeEventListener('keydown', _modalTrapFocus);
+  if (_modalPrevFocus && document.contains(_modalPrevFocus)) _modalPrevFocus.focus();
+  _modalPrevFocus = null;
+}
+function modalOpen(el, initialFocusSel) {
+  el.style.display = 'flex';
+  modalActivate(el, initialFocusSel);
+}
+function modalClose(el) {
+  modalDeactivate(el);
+  el.style.display = 'none';
+}
+function _modalTrapFocus(e) {
+  if (e.key !== 'Tab') return;
+  const focusables = e.currentTarget.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])');
+  if (!focusables.length) return;
+  const first = focusables[0], last = focusables[focusables.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
+// ── F22: Styled confirmation dialog (extended with danger tiers) ─────────
+// Tiers (UX-PRINCIPLES §3): 1 routine destructive · 2 service-impacting
+// (impact statement) · 3 lockout/trust-breaking (typed confirmation word).
 let _confirmResolver = null;
+let _confirmMode = 'confirm'; // 'confirm' | 'prompt'
 function confirmDialogResolve(val) {
   const d = document.getElementById('confirm-dialog');
-  d.style.display = 'none';
-  if (_confirmResolver) { _confirmResolver(val); _confirmResolver = null; }
+  const inputEl = document.getElementById('confirm-dialog-input');
+  const result = _confirmMode === 'prompt' ? (val ? inputEl.value : null) : val;
+  modalClose(d);
+  if (_confirmResolver) { _confirmResolver(result); _confirmResolver = null; }
 }
-function confirmAction(title, msg, okLabel='Delete') {
+function _confirmDialogShow(opts) {
+  const d = document.getElementById('confirm-dialog');
+  const tier    = document.getElementById('confirm-dialog-tier');
+  const impact  = document.getElementById('confirm-dialog-impact');
+  const rollb   = document.getElementById('confirm-dialog-rollback');
+  const typedW  = document.getElementById('confirm-dialog-typed-wrap');
+  const typed   = document.getElementById('confirm-dialog-typed');
+  const inputW  = document.getElementById('confirm-dialog-input-wrap');
+  const input   = document.getElementById('confirm-dialog-input');
+  const ok      = document.getElementById('confirm-dialog-ok');
+  document.getElementById('confirm-dialog-title').textContent = opts.title || 'Confirm';
+  document.getElementById('confirm-dialog-msg').textContent = opts.msg || '';
+  ok.textContent = opts.okLabel || 'Confirm';
+  ok.className = 'btn ' + (opts.okStyle || 'danger');
+  tier.style.display = opts.tier === 3 ? 'inline-block' : 'none';
+  impact.style.display = opts.impact ? '' : 'none';
+  impact.textContent = opts.impact ? 'Impact: ' + opts.impact : '';
+  rollb.style.display = opts.rollback ? '' : 'none';
+  rollb.textContent = opts.rollback ? 'Rollback: ' + opts.rollback : '';
+  // typed confirmation word (tier 3)
+  typedW.style.display = opts.confirmWord ? '' : 'none';
+  typed.value = '';
+  d.dataset.confirmWord = opts.confirmWord || '';
+  if (opts.confirmWord) {
+    document.getElementById('confirm-dialog-typed-label').textContent =
+      'Type ' + opts.confirmWord + ' to confirm:';
+    ok.disabled = true;
+  } else {
+    ok.disabled = false;
+  }
+  // free-text input (promptAction)
+  inputW.style.display = opts.inputLabel ? '' : 'none';
+  input.value = opts.inputValue || '';
+  input.placeholder = opts.inputPlaceholder || '';
+  if (opts.inputLabel) document.getElementById('confirm-dialog-input-label').textContent = opts.inputLabel;
+  modalOpen(d, opts.confirmWord ? '#confirm-dialog-typed'
+              : opts.inputLabel ? '#confirm-dialog-input' : '#confirm-dialog-cancel');
+}
+// Legacy signature kept — 38 existing call sites (tier 1/2).
+function confirmAction(title, msg, okLabel='Delete', opts={}) {
   return new Promise(resolve => {
     _confirmResolver = resolve;
-    document.getElementById('confirm-dialog-title').textContent = title;
-    document.getElementById('confirm-dialog-msg').textContent = msg;
-    document.getElementById('confirm-dialog-ok').textContent = okLabel;
-    const d = document.getElementById('confirm-dialog');
-    d.style.display = 'flex';
+    _confirmMode = 'confirm';
+    _confirmDialogShow({title, msg, okLabel, ...opts});
   });
+}
+// Tier-3 typed confirmation for lockout-class / trust-breaking actions.
+// Resolves true only after the operator types the confirmation word.
+function confirmDanger({title, msg, impact, rollback, confirmWord, okLabel='Apply'}) {
+  return new Promise(resolve => {
+    _confirmResolver = resolve;
+    _confirmMode = 'confirm';
+    _confirmDialogShow({title, msg, impact, rollback, confirmWord, okLabel, tier: 3});
+  });
+}
+// Free-text input dialog — replaces the native browser prompt (CSP/a11y-safe).
+// Resolves the string on OK, or null on cancel.
+function promptAction({title, msg, label, placeholder='', value='', okLabel='OK', okStyle='primary'}) {
+  return new Promise(resolve => {
+    _confirmResolver = resolve;
+    _confirmMode = 'prompt';
+    _confirmDialogShow({title, msg, okLabel, okStyle,
+      inputLabel: label || 'Value', inputPlaceholder: placeholder, inputValue: value});
+  });
+}
+// typed-word gate + Enter-to-submit wiring (bound once)
+document.getElementById('confirm-dialog-typed').addEventListener('input', e => {
+  const d = document.getElementById('confirm-dialog');
+  document.getElementById('confirm-dialog-ok').disabled =
+    e.target.value.trim() !== (d.dataset.confirmWord || '');
+});
+for (const id of ['confirm-dialog-typed', 'confirm-dialog-input']) {
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!document.getElementById('confirm-dialog-ok').disabled) confirmDialogResolve(true);
+  });
+}
+
+// ── Shared status badge ──────────────────────────────────────────────────
+// kind: ok | warn | crit | info | neutral | auth (status→color mapping is
+// fixed product-wide; text label always present — never color alone).
+function badge(kind, text) {
+  return `<span class="badge ${kind}">${escHtml(text)}</span>`;
+}
+
+// ── Shared table helpers ─────────────────────────────────────────────────
+// Replaces the copy-pasted `rows.length ? rows.map(...).join('') : '<tr>…empty'`
+// pattern. renderRow returns a <tr> HTML string (caller escapes via escHtml).
+function tableRows(rows, renderRow, {colspan = 99, empty = 'No entries yet', hint = ''} = {}) {
+  if (!rows || !rows.length) return emptyRow(colspan, empty, hint);
+  return rows.map(renderRow).join('');
+}
+function emptyRow(colspan, msg, hint = '') {
+  return `<tr><td colspan="${colspan}" class="tbl-empty">${escHtml(msg)}` +
+         (hint ? `<div class="empty-hint">${escHtml(hint)}</div>` : '') + '</td></tr>';
+}
+function skeletonRow(colspan, n = 3) {
+  return Array.from({length: n}, () =>
+    `<tr><td colspan="${colspan}"><span class="skeleton" style="display:block;height:14px">&nbsp;</span></td></tr>`).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dashboard: System Health, Threats, Top Rules
 // ═══════════════════════════════════════════════════════════════════════════
 function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+
+// ── Posture strip (docs/design/SCREEN-SPECS.md §2) ───────────────────────
+// state: 'ok' | 'warn' | 'crit' | 'unknown'. State is carried by BOTH the
+// dot color and the state text — never color alone (UX-PRINCIPLES §9).
+function setPosture(id, state, text) {
+  const el = document.getElementById('po-' + id);
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove('skeleton');
+  const item = el.closest('.posture-item');
+  if (item) item.dataset.state = state;
+}
 
 async function fetchDashboardHealth() {
   try {
@@ -8171,7 +8678,8 @@ async function fetchDashboardThreats() {
     setText('d-yara', fmt(t.yara || 0));
     setText('d-dpi',  fmt(t.dpi || 0));
     setText('d-feed', fmt(t.threatFeed || 0));
-  } catch(_) {}
+    setPosture('engines', 'ok', 'Reporting');
+  } catch(_) { setPosture('engines', 'unknown', 'Unavailable'); }
 }
 
 async function fetchTopRules() {
@@ -8231,7 +8739,11 @@ function connectSSE() {
   const es = new EventSource('/api/events');
   _sseInstance = es;
 
-  es.addEventListener('connected', () => { sseConnected = true; _sseRetries = 0; setLivePill(true); startTick(); });
+  es.addEventListener('connected', () => {
+    sseConnected = true; _sseRetries = 0; setLivePill(true); startTick();
+    const clb = document.getElementById('conn-lost-banner');
+    if (clb) clb.style.display = 'none';
+  });
   es.onmessage = e => {
     try {
       _sseRetries = 0; // successful message resets retry counter
@@ -8241,6 +8753,17 @@ function connectSSE() {
       document.getElementById('d-blocked').textContent = fmt(d.blocked || 0);
       document.getElementById('d-auth').textContent = fmt(d.authFail || 0);
       document.getElementById('d-rps').textContent = (d.rps || 0).toFixed(1) + ' req/s';
+      // Posture: live traffic + update availability (from the same payload)
+      if ((d.rps || 0) > 0 || (d.activeConns || 0) > 0) {
+        setPosture('traffic', 'ok', (d.rps || 0).toFixed(1) + ' req/s');
+      } else {
+        setPosture('traffic', 'ok', 'Idle');
+      }
+      if (d.updateAvailable) {
+        setPosture('updates', 'warn', (d.latestVersion ? d.latestVersion + ' ' : '') + 'available');
+      } else {
+        setPosture('updates', 'ok', 'Up to date');
+      }
       renderCountryChart(d.topCountries || []);
       // Threat engine breakdown (live from SSE)
       setText('d-clam', fmt(d.clamBlocked || 0));
@@ -8258,6 +8781,7 @@ function connectSSE() {
   es.onerror = () => {
     sseConnected = false;
     setLivePill(false);
+    setPosture('traffic', 'unknown', 'Stale');
     es.close();          // explicitly close the failed connection
     _sseInstance = null;
     _sseRetries++;
@@ -8544,10 +9068,15 @@ function updateDefaultActionBadge() {
 
 async function toggleDefaultAction() {
   const next = _defaultAction === 'allow' ? 'deny' : 'allow';
-  const warn = next === 'allow'
-    ? 'All traffic that does not match any policy rule will be permitted. This disables Zero Trust default-deny.'
-    : 'All traffic that does not match any policy rule will be blocked (Zero Trust).';
-  if (!await confirmAction('Change Default Action', warn, next === 'allow' ? 'Switch to Allow' : 'Switch to Deny')) return;
+  // Tier 2: global Stage-2 default for all unmatched traffic.
+  const ok = await confirmAction('Change default action',
+    'This is the Stage-2 decision for traffic that matches no access rule. It applies immediately and is recorded in the audit log.',
+    next === 'allow' ? 'Switch to Allow' : 'Switch to Deny',
+    {impact: next === 'allow'
+        ? 'All unmatched traffic is PERMITTED — this disables Zero-Trust default-deny.'
+        : 'All unmatched traffic is BLOCKED (Zero Trust). Clients relying on unlisted destinations lose access immediately.',
+     rollback: 'Toggle back here at any time; rules are unaffected.'});
+  if (!ok) return;
   try {
     await api('/api/default-action', {
       method: 'POST',
@@ -8646,6 +9175,10 @@ async function tick() {
       clearInterval(_tickInterval);
       _tickInterval = null;
       setLivePill(false);
+      // Surface the stall — a silently paused poll looks like a healthy idle UI.
+      const clb = document.getElementById('conn-lost-banner');
+      if (clb) clb.style.display = '';
+      setPosture('proxy', 'crit', 'Unreachable');
       console.warn('Tick: server unreachable, pausing poll. Will resume when SSE reconnects.');
     }
     return; // skip view-specific fetches when server is down
@@ -9761,7 +10294,9 @@ async function apSave() {
 }
 
 async function apDeleteRule(priority) {
-  if (!await confirmDialog('Delete this auth rule? Clients it covered will fall back to the default authentication gate.')) return;
+  // was confirmDialog(...) — an undefined helper that threw before the DELETE
+  if (!await confirmAction('Delete auth rule',
+    'Clients this rule covered will fall back to the default authentication gate.', 'Delete')) return;
   try {
     await api(`/api/authpolicy?priority=${priority}`, { method: 'DELETE' });
     toast('Auth rule deleted', 'success');
@@ -10059,10 +10594,10 @@ function releaseDispatchOpen() {
   document.getElementById('rel-disp-norollback').checked = false;
   document.getElementById('rel-disp-passphrase').value = '';
   document.getElementById('rel-disp-passlabel').style.display = 'none';
-  document.getElementById('release-dispatch-modal').style.display = 'flex';
+  modalOpen(document.getElementById('release-dispatch-modal'), '#rel-disp-release');
 }
 function releaseDispatchCancel() {
-  document.getElementById('release-dispatch-modal').style.display = 'none';
+  modalClose(document.getElementById('release-dispatch-modal'));
 }
 
 async function releaseDispatchSubmit() {
@@ -10341,19 +10876,42 @@ function showUpstreamAdd() {
 async function addUpstreamProxy() {
   const url = document.getElementById('upstream-url-input').value.trim();
   if (!url) return;
+  // Tier 2: the upstream chain carries all egress traffic.
+  const ok = await confirmAction('Add upstream proxy',
+    'Egress traffic will be forwarded through the parent proxy chain including ' + url + '.',
+    'Add proxy',
+    {impact: 'Applies to all proxied traffic immediately. An unreachable parent proxy degrades or breaks egress until the circuit breaker reacts.',
+     rollback: 'Remove the entry here; the previous chain is restored immediately.',
+     okStyle: 'primary'});
+  if (!ok) return;
   const newList = [...upstreamData.map(p=>({url:p.url})), {url}];
-  await api('/api/upstream', {method:'POST', body:{proxies: newList}});
-  document.getElementById('upstream-url-input').value = '';
-  document.getElementById('upstream-add-form').style.display = 'none';
-  toast('Upstream proxy added','success');
-  loadUpstream();
+  try {
+    await api('/api/upstream', {method:'POST', body:{proxies: newList}});
+    document.getElementById('upstream-url-input').value = '';
+    document.getElementById('upstream-add-form').style.display = 'none';
+    toast('Upstream proxy added','success');
+    loadUpstream();
+  } catch(e) { toast('Failed to add upstream proxy: ' + e.message, 'error'); }
 }
 
 async function removeUpstreamProxy(idx) {
+  const removed = upstreamData[idx] ? upstreamData[idx].url : '(unknown)';
+  const remaining = upstreamData.length - 1;
+  // Tier 2: changing the chain affects all egress immediately.
+  const ok = await confirmAction('Remove upstream proxy',
+    'Remove ' + removed + ' from the parent proxy chain.',
+    'Remove',
+    {impact: remaining > 0
+        ? 'Traffic shifts to the ' + remaining + ' remaining parent prox' + (remaining === 1 ? 'y' : 'ies') + ' immediately.'
+        : 'This is the LAST parent proxy — traffic egresses DIRECTLY from this node afterwards.',
+     rollback: 'Re-add the proxy URL here to restore the previous chain.'});
+  if (!ok) return;
   const newList = upstreamData.filter((_,i) => i !== idx).map(p=>({url:p.url}));
-  await api('/api/upstream', {method:'POST', body:{proxies: newList}});
-  toast('Upstream proxy removed','success');
-  loadUpstream();
+  try {
+    await api('/api/upstream', {method:'POST', body:{proxies: newList}});
+    toast('Upstream proxy removed','success');
+    loadUpstream();
+  } catch(e) { toast('Failed to remove upstream proxy: ' + e.message, 'error'); }
 }
 
 async function upstreamHealthCheck() {
@@ -10677,6 +11235,16 @@ async function importClusterCA() {
   const cert = document.getElementById('cca-cert-pem').value.trim();
   const key = document.getElementById('cca-key-pem').value.trim();
   if (!cert || !key) { toast('Both certificate and key PEM are required', 'error'); return; }
+  // Tier 3: the cluster CA anchors node mTLS trust.
+  const ok = await confirmDanger({
+    title: 'Import cluster CA',
+    msg: 'The cluster CA signs the mTLS certificates of every enrolled node. Recorded in the audit log.',
+    impact: 'Node certificates issued under the previous CA stop validating — enrolled nodes may disconnect until re-enrolled under the new CA.',
+    rollback: 'Re-import the previous CA certificate and key if you still have them; otherwise nodes must re-enroll.',
+    confirmWord: 'IMPORT',
+    okLabel: 'Import CA',
+  });
+  if (!ok) return;
   const btn = document.getElementById('cca-import-btn');
   btn.disabled = true; btn.textContent = 'Importing…';
   try {
@@ -10990,7 +11558,20 @@ async function enableControlPlane() {
   const keyFile = document.getElementById('cp-key-file').value.trim();
   const caFile = document.getElementById('cp-ca-file').value.trim();
 
-  const btn = event.target; btn.disabled = true; btn.textContent = 'Enabling…';
+  // Tier 3: forms a cluster and opens a gRPC listener on this node.
+  const okc = await confirmDanger({
+    title: 'Enable Control Plane mode',
+    msg: 'This node becomes the cluster Control Plane, listening for Data Plane enrollment on ' + addr + '. Recorded in the audit log.',
+    impact: 'A gRPC listener opens on ' + addr + ' immediately. Enrolled Data Plane nodes will pull policy, blocklist, and secrets from this node.',
+    rollback: 'Control Plane mode persists in cluster state; disabling requires clearing the cluster configuration.',
+    confirmWord: 'ENABLE',
+    okLabel: 'Enable Control Plane',
+  });
+  if (!okc) return;
+
+  // NOTE: must not use `event.target` here — after the awaited confirmation
+  // above, the ambient window.event of the click dispatch no longer exists.
+  const btn = document.getElementById('cp-enable-btn'); btn.disabled = true; btn.textContent = 'Enabling…';
   try {
     const r = await api('/api/cluster/mode', {
       method: 'POST',
@@ -11012,6 +11593,16 @@ async function enableHA() {
   const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
   if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
   const autoFailover = document.getElementById('ha-auto-failover').checked;
+  // Tier 3: cluster role change — this node becomes the HA leader.
+  const okh = await confirmDanger({
+    title: 'Enable high availability',
+    msg: 'This node becomes the HA leader at ' + leaderAddr + (autoFailover ? ' with auto-failover.' : ' (manual failover).') + ' Recorded in the audit log.',
+    impact: 'Standby nodes will replicate from this address. A wrong address leaves standbys unable to sync; auto-failover changes who may become leader without operator action.',
+    rollback: 'HA state persists in cluster configuration; role changes after this point go through promote/demote.',
+    confirmWord: 'ENABLE',
+    okLabel: 'Enable HA',
+  });
+  if (!okh) return;
   const btn = document.getElementById('ha-enable-btn');
   btn.disabled = true; btn.textContent = 'Enabling…';
   try {
@@ -11031,7 +11622,17 @@ async function enableHA() {
 }
 
 async function promoteHA() {
-  if (!confirm('Promote this standby to Leader?\n\nOnly do this if the current leader is truly down. Promoting while the leader is still serving will cause split-brain (two leaders, diverging state).')) return;
+  // Tier 3, replacing the last native browser confirm: manual promote bypasses
+  // the fencing-lease freshness/hysteresis checks — split-brain risk.
+  const ok = await confirmDanger({
+    title: 'Promote this standby to leader',
+    msg: 'Only do this if the current leader is truly down. Manual promotion is break-glass: it bypasses automatic failover safeguards and is recorded in the audit log.',
+    impact: 'If the current leader is still serving, the cluster ends up with TWO leaders and diverging state (split-brain).',
+    rollback: 'Demote/resync the old leader when it returns; with a fencing lease armed, its writes are fenced by the epoch check.',
+    confirmWord: 'PROMOTE',
+    okLabel: 'Promote to leader',
+  });
+  if (!ok) return;
   const btn = document.getElementById('ha-promote-btn');
   btn.disabled = true; btn.textContent = 'Promoting…';
   try {
@@ -11165,8 +11766,17 @@ function copyEnrollCmd() {
 }
 
 async function revokeNode(nodeId) {
-  if (!await confirmAction('Revoke Node', `Revoke node "${nodeId}"? This will immediately disconnect it from the cluster and invalidate its certificate.`, 'Revoke')) return;
-  let reason = prompt('Reason for revocation (optional, max 1000 chars):') || 'manual revocation';
+  // Single dialog: impact + audit reason together (reason is stored with the
+  // revocation record — see /api/cluster/revocations).
+  let reason = await promptAction({
+    title: `Revoke node "${nodeId}"`,
+    msg: 'The node is immediately disconnected from the cluster and its mTLS certificate is invalidated. Re-joining requires a new enrollment token. The reason below is recorded in the revocation log.',
+    label: 'Reason for revocation (recorded in audit trail)',
+    placeholder: 'e.g. host decommissioned / suspected compromise',
+    okLabel: 'Revoke node', okStyle: 'danger',
+  });
+  if (reason === null) return;
+  reason = reason.trim() || 'manual revocation';
   if (reason.length > 1000) { toast('Reason must be 1000 characters or less', 'error'); return; }
   try {
     const r = await api('/api/cluster/revoke', {
@@ -11254,7 +11864,13 @@ async function toggleDrain(nodeId, draining) {
 }
 
 async function editLabels(nodeId) {
-  const input = prompt(`Labels for "${nodeId}" (comma-separated key=value pairs, e.g. region=us-east,tier=dmz):`);
+  const input = await promptAction({
+    title: `Edit labels for "${nodeId}"`,
+    msg: 'Labels drive node-group selectors (and bandwidth/QoS policies that match on them). Existing labels are replaced by this list.',
+    label: 'Labels (comma-separated key=value pairs)',
+    placeholder: 'region=us-east,tier=dmz',
+    okLabel: 'Save labels',
+  });
   if (input === null) return;
   const labels = {};
   if (input.trim()) {

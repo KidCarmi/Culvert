@@ -29,12 +29,23 @@ func loadUIShell(sub fs.FS) {
 func serveUIShell(staticServer http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+			// The embedded FS has zero mod-times, so http.FileServer emits no
+			// validators — without a policy every load re-downloads the 205 KB
+			// chart bundle. The asset only changes with a binary upgrade, so a
+			// bounded max-age is safe (worst case: a day-old chart lib that
+			// still renders; the nonce'd shell below is never cached).
+			if r.URL.Path == "/chart.umd.js" {
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+			}
 			staticServer.ServeHTTP(w, r)
 			return
 		}
 		// Read nonce from context (set by securityMiddleware).
 		nonce, _ := r.Context().Value(cspNonceKey{}).(string)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// The shell embeds a per-request CSP nonce — a cached copy would carry
+		// a stale nonce and every script would be blocked. Never cache it.
+		w.Header().Set("Cache-Control", "no-store")
 		body := strings.ReplaceAll(string(cachedIndexHTML), "__CSP_NONCE__", html.EscapeString(nonce))
 		w.Write([]byte(body)) //nolint:errcheck
 	}
