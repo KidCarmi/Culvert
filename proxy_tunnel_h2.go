@@ -39,10 +39,36 @@ import (
 const h2MaxConcurrentStreams uint32 = 32
 
 // h2ConnWriteByteTimeout bounds a stuck client write on the H2 leg so a stalled
-// reader cannot pin a handler goroutine + its scan buffer indefinitely. A
-// per-stream body-read inactivity watchdog (the H2 analogue of the H1
-// stallDetectReadCloser) is PR3c; this is the cheap conn-level backstop.
+// reader cannot pin a handler goroutine + its scan buffer indefinitely.
 const h2ConnWriteByteTimeout = 30 * time.Second
+
+// h2StreamStallTimeout bounds per-stream body inactivity. It is the HTTP/2
+// analogue of the H1 stallDetectReadCloser: H2 cannot use a per-conn read deadline
+// (one conn multiplexes many streams), so each stream gets an inactivity timer
+// that cancels only that stream's context on stall. A var (not const) so tests can
+// shorten it; production keeps the H1 body-stall posture.
+var h2StreamStallTimeout = sslInspectBodyStallTimeout
+
+// h2StallReader wraps a per-stream body reader and re-arms a shared inactivity
+// timer whenever the read makes progress. Request-upload and response-download
+// share one timer, so if a byte moves in either direction the stream stays alive;
+// if neither moves within h2StreamStallTimeout the timer cancels the stream
+// context, aborting RoundTrip / delivery — a slow-loris stream cannot pin a
+// handler goroutine + its buffer indefinitely.
+type h2StallReader struct {
+	rc    io.ReadCloser
+	reset func()
+}
+
+func (s *h2StallReader) Read(p []byte) (int, error) {
+	n, err := s.rc.Read(p)
+	if n > 0 {
+		s.reset()
+	}
+	return n, err
+}
+
+func (s *h2StallReader) Close() error { return s.rc.Close() }
 
 // handleInspectNativeALPN runs the native-ALPN inspection flow for a rule with
 // StripALPN==false. It has already received the freshly-dialled (not yet
@@ -276,11 +302,28 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 	// cannot redirect it off that connection (no SSRF). Strict :authority pinning
 	// / 421 handling is a security-PR refinement.
 	reqPath := req.URL.Path
+
+	// Per-stream inactivity watchdog: cancel this stream's context if no body byte
+	// moves in either direction within h2StreamStallTimeout. This is the H2
+	// analogue of the H1 stallDetectReadCloser; a per-conn read deadline can't be
+	// used because one conn multiplexes many streams. On cancel, RoundTrip aborts
+	// (→ exRoundTripError before headers, or a body-read error → exDeliverError →
+	// stream reset). The base ServeConn context still bounds the whole tunnel.
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	stall := time.AfterFunc(h2StreamStallTimeout, cancel)
+	defer stall.Stop()
+	resetStall := func() { stall.Reset(h2StreamStallTimeout) }
+	req = req.WithContext(ctx)
+
 	req.URL.Scheme = "https"
 	if req.URL.Host == "" {
 		req.URL.Host = req.Host
 	}
 	req.RequestURI = ""
+	if req.Body != nil {
+		req.Body = &h2StallReader{rc: req.Body, reset: resetStall} // client-upload progress re-arms
+	}
 
 	ex := &inspectExchange{
 		outer:     outer,
@@ -291,10 +334,18 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		clientIP:  clientIP,
 		responder: &h2BlockResponder{w: w},
 		roundTrip: func(rq *http.Request) (*http.Response, error) { return upstreamCC.RoundTrip(rq) },
-		deliver:   func(resp *http.Response) error { return h2DeliverResponse(w, resp) },
+		deliver: func(resp *http.Response) error {
+			resp.Body = &h2StallReader{rc: resp.Body, reset: resetStall} // download progress re-arms
+			return h2DeliverResponse(w, resp)
+		},
 	}
 
-	out := runInspectExchange(ex)
+	handleH2StreamOutcome(w, runInspectExchange(ex), req, hostOnly, reqPath, clientIP, match, id)
+}
+
+// handleH2StreamOutcome maps an inspection outcome to the H2 stream's terminal
+// action. Extracted from h2InspectStream to keep it under the complexity cap.
+func handleH2StreamOutcome(w http.ResponseWriter, out exchangeOutcome, req *http.Request, hostOnly, reqPath, clientIP string, match *PolicyMatch, id ProxyIdentity) {
 	switch out.kind {
 	case exRoundTripError:
 		// Upstream failed before any byte was delivered — emit a clean 502.
@@ -310,9 +361,10 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	case exDeliverError:
 		// Delivery failed AFTER the response headers were committed (upstream body
-		// truncation, or the client went away). Reset the stream with RST_STREAM so
-		// the client observes an error rather than a clean-but-truncated 200 —
-		// http2.Server recovers ErrAbortHandler into a stream reset.
+		// truncation, a stalled stream cancelled by the watchdog, or the client went
+		// away). Reset the stream with RST_STREAM so the client observes an error
+		// rather than a clean-but-truncated 200 — http2.Server recovers
+		// ErrAbortHandler into a stream reset.
 		panic(http.ErrAbortHandler)
 	case exDelivered:
 		// Per-rule "log full URL" parity with the H1 path (log-only; the enclosing

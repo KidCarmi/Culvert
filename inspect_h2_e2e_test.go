@@ -251,7 +251,11 @@ func TestMITM_NativeH2_TruncatedBodyResetsStream(t *testing.T) {
 // validates the shared-state safety of the H2 path.
 func TestMITM_NativeH2_ConcurrentStreams(t *testing.T) {
 	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "ok:"+r.URL.Path)
+		// Echo the request path via a response header (not the body) so each
+		// concurrent stream can be correlated to its request without writing
+		// request-derived data into the response body.
+		w.Header().Set("X-Echo-Path", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
 	}))
 	const n = 20
 	var wg sync.WaitGroup
@@ -267,10 +271,10 @@ func TestMITM_NativeH2_ConcurrentStreams(t *testing.T) {
 				errs <- err
 				return
 			}
-			body, _ := io.ReadAll(resp.Body)
+			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close() //nolint:errcheck // test cleanup
-			if string(body) != "ok:"+path {
-				errs <- fmt.Errorf("stream %d body = %q", i, body)
+			if got := resp.Header.Get("X-Echo-Path"); got != path {
+				errs <- fmt.Errorf("stream %d echoed path = %q, want %q", i, got, path)
 			}
 		}(i)
 	}
@@ -286,7 +290,10 @@ func TestMITM_NativeH2_ConcurrentStreams(t *testing.T) {
 func TestMITM_NativeH2_PostBodyEcho(t *testing.T) {
 	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		_, _ = w.Write(b)
+		// Report the received length via a header rather than echoing the
+		// request-derived body back into the response.
+		w.Header().Set("X-Received-Len", strconv.Itoa(len(b)))
+		w.WriteHeader(http.StatusOK)
 	}))
 	payload := bytes.Repeat([]byte("A"), 64*1024)
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://origin.test/upload", bytes.NewReader(payload))
@@ -294,10 +301,45 @@ func TestMITM_NativeH2_PostBodyEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("round-trip: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close() //nolint:errcheck // test cleanup
-	if len(body) != len(payload) {
-		t.Fatalf("echo len = %d, want %d (POST body must stream upstream on H2)", len(body), len(payload))
+	if got := resp.Header.Get("X-Received-Len"); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("origin received %s bytes, want %d (POST body must stream upstream on H2)", got, len(payload))
+	}
+}
+
+// TestMITM_NativeH2_PerStreamStallResets proves the PR3c per-stream inactivity
+// watchdog: an origin that commits headers+a chunk then stalls indefinitely gets
+// that stream reset once h2StreamStallTimeout elapses, without hanging the tunnel.
+func TestMITM_NativeH2_PerStreamStallResets(t *testing.T) {
+	orig := h2StreamStallTimeout
+	h2StreamStallTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { h2StreamStallTimeout = orig })
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 32*1024))
+		w.(http.Flusher).Flush()
+		<-release // stall indefinitely (until test teardown) — no further bytes
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/slow", http.NoBody)
+	resp, err := cc.RoundTrip(req) //nolint:bodyclose // closed via defer below (bodyclose can't trace the goroutine read)
+	if err != nil {
+		return // reset before/at headers is also acceptable
+	}
+	defer resp.Body.Close() //nolint:errcheck // test cleanup
+	done := make(chan error, 1)
+	go func() { _, e := io.ReadAll(resp.Body); done <- e }()
+	select {
+	case e := <-done:
+		if e == nil {
+			t.Fatal("a stalled stream was delivered as a clean success — the watchdog must reset it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled stream was not reset within the watchdog window (hang)")
 	}
 }
 
