@@ -46,3 +46,5 @@ fileprofiles.json
 .DS_Store
 coverage.out
 cover.out
+scratchpad/
+ux_decexcl_e2e_test.go
