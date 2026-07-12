@@ -9772,8 +9772,9 @@ function polMarkEdited() {
 })();
 
 // polHistory — per-rule change trail: opens the Audit Log filtered to the
-// rule's name (the audit ring keys entries on the rule name today; the
-// ULID-keyed trail is the policy-identity backend record).
+// rule's stable ULID (audit entries now carry it in ObjectID), so the trail
+// survives renames — earlier entries logged under an old name still match.
+// Falls back to the rule name for legacy rules without an id.
 async function polHistory(priority) {
   const r = polRules.find(x => x.priority === Number(priority));
   if (!r) return;
@@ -9782,7 +9783,7 @@ async function polHistory(priority) {
   // cancelled navigation leaves no stale pre-filter behind on the Audit view.
   if (!await viewLeaveGuards.policy()) return;
   const f = document.getElementById('audit-filter');
-  if (f) f.value = r.name;
+  if (f) f.value = r.id || r.name;
   switchView('audit');
 }
 

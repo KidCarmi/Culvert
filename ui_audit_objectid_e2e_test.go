@@ -51,12 +51,13 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 		t.Fatalf("submit rule: %v", err)
 	}
 
-	// Resolve the created rule's ULID from the backend.
+	// Resolve the created rule's ULID + priority from the backend.
 	var ruleID string
+	var rulePriority int
 	for i := 0; i < 40; i++ {
 		for _, r := range policyStore.List() {
 			if r.Name == ruleName {
-				ruleID = r.ID
+				ruleID, rulePriority = r.ID, r.Priority
 			}
 		}
 		if ruleID != "" {
@@ -72,6 +73,12 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 	// id tooltip.
 	if err := page.Locator(`.nav-item[data-view="audit"]`).First().Click(); err != nil {
 		t.Fatalf("open audit: %v", err)
+	}
+	// Force a fresh fetch so the assertion never races the view's one-shot load
+	// (the create's audit entry is written synchronously before its response,
+	// so a re-fetch here is guaranteed to see it).
+	if _, err := page.Evaluate(`() => loadAuditLog()`); err != nil {
+		t.Fatalf("reload audit log: %v", err)
 	}
 	if err := assert.Locator(page.Locator("#audit-table")).ToContainText("policy.add"); err != nil {
 		t.Fatalf("audit log should show the policy.add entry: %v", err)
@@ -96,5 +103,18 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 	// And the filtered table must not be empty.
 	if err := assert.Locator(page.Locator("#audit-table")).Not().ToContainText("No audit entries"); err != nil {
 		t.Fatalf("id-filtered audit table should still show the matching entry: %v", err)
+	}
+
+	// The per-rule History action must preload the filter with the ULID (not the
+	// mutable name), so the trail stays correlatable after a rename.
+	if _, err := page.Evaluate(`(pri) => polHistory(pri)`, rulePriority); err != nil {
+		t.Fatalf("invoke polHistory: %v", err)
+	}
+	filterVal, err := page.Evaluate(`() => document.getElementById('audit-filter').value`)
+	if err != nil {
+		t.Fatalf("read audit filter: %v", err)
+	}
+	if filterVal != ruleID {
+		t.Errorf("polHistory preloaded audit filter with %q, want the rule ULID %q", filterVal, ruleID)
 	}
 }
