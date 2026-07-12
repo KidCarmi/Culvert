@@ -28,8 +28,9 @@ Startup is an ordered sequence of contract-tested slices (`main.go:165-216`). Tw
   ✅ This is the model corrupt-store handling should copy.
 
 **Fail-OPEN (boots degraded, logs and continues — ⚠ know these):**
-- **Root CA load failure** → SSL inspection disabled, tunnel-only bypass (F-02). Visible on
-  `/healthz`+`/readyz`+`ca_load_failed` alert.
+- **Root CA load failure** → SSL inspection disabled, tunnel-only bypass (F-02). Visible on the
+  **proxy** `/health`+`/ready` (the `ssl_inspection` field + `ca` row) + `ca_load_failed` alert — **not**
+  the admin `/healthz`, which is HA-only.
 - **Default policy = allow** when no rules and no `default_action` (F-01) — advisory log only. ⚠
 - Session revocations, file-blocking, GeoIP, scanning/ClamAV, log-store, CDR, upstream pool, cluster
   CA init — all non-fatal/degrading.
@@ -56,9 +57,12 @@ There are **three probes on two servers**. They mean different things:
 policy-loaded, GeoIP, YARA. **A DP that lost its CP or whose cert is expiring still returns `/ready`
 200** (F-08). A load balancer using `/ready` will **not** eject a degraded-but-live data plane.
 
-**LB configuration guidance (until F-08 is fixed):** point the LB liveness at `/health` and readiness at
-`/ready`, **and additionally** scrape `/api/diagnostics` (authenticated) for `dpControlPlanePollFailing`
-and cert-expiry, or scrape Prometheus for the same — do not rely on `/ready` alone to detect a stale DP.
+**LB configuration guidance (until F-08 is fixed):** point the LB liveness at the proxy `/health` and
+readiness at the proxy `/ready`, **and additionally** scrape `/api/diagnostics` (authenticated) for
+`dpControlPlanePollFailing` and node-cert expiry — these two signals are **not** exported to Prometheus
+(`metrics.go` carries only aggregate enrollment/HA counters + a successful-poll latency histogram;
+`dpControlPlanePollFailing` is read only at `diagnostics.go:196`; see audit §8). Do not rely on `/ready`
+alone, or on a Prometheus-only alert, to detect a stale or cert-expiring DP.
 
 ---
 
@@ -70,9 +74,10 @@ and cert-expiry, or scrape Prometheus for the same — do not rely on `/ready` a
 - **Prometheus (`/metrics`)** exposes `culvert_*`: per-rule hit counters, latency histogram, threat-feed
   entries/blocked, scan cache. ⚠ **Missing** metrics that this audit recommends: `culvert_scan_errors_total`
   (F-10), threat-feed staleness (F-27), upstream pool-empty transition (F-09), CP-poll-failing gauge (F-08).
-- **`/healthz` fields** (`ca_expires_days`, `ssl_inspection: ready|unavailable|load_failed`,
+- **Proxy `/health` fields** (`ca_expires_days`, `ssl_inspection: ready|unavailable|load_failed`,
   `clamav`, `threat_feed_entries`) are the fastest at-a-glance posture check — but note `ca_expires_days`
-  is the **inspection** CA, not the DP↔CP node cert.
+  is the **inspection** CA, not the DP↔CP node cert. (These fields are on the **proxy** `/health`, not
+  the admin `/healthz`.)
 - **Structured logs** (`logger.Printf`, JSON mode) carry the fail-open advisories (default-allow,
   CA-load, scan errors) — but log-only signals are not alerting; treat the advisory-log-only items
   (F-01, F-10) as **must-monitor externally** until they gain metrics/alerts.
@@ -148,7 +153,7 @@ it **auto-rolls-back and verifies the revert** (revert + digest + health).
 
 **Operator actions:** (1) protect `CULVERT_CA_PASSPHRASE` — its loss silently disables inspection on
 the next reboot; (2) if a DP was disconnected from the CP for weeks, restart it after reconnect to pick
-up any renewed cert; (3) monitor `ca_expires_days` on `/healthz` and set up an external alert well
+up any renewed cert; (3) monitor `ca_expires_days` on the proxy `/health` and set up an external alert well
 before the 30-day mark (Culvert's own proactive CA-expiry alert is not yet wired — CHAOS-30).
 
 ---
@@ -198,7 +203,8 @@ incident needs, at minimum:
 
 - `docker compose ps` + `docker logs` for `proxy`/`clamav` (crash-loop detection, F-23 — the only
   signal for a dead container).
-- `/healthz` (posture: `ssl_inspection`, `ca_expires_days`, `clamav`) and `/ready` (which gates failed).
+- Proxy `/health` (posture: `ssl_inspection`, `ca_expires_days`, `clamav`) and proxy `/ready` (which
+  gates failed); admin `/healthz` (HA role/write-authority).
 - `/api/diagnostics` (storage writability, DP last-good age, CP-poll status — where degraded-DP state
   actually lives).
 - `/metrics` scrape (rule hits, threat-feed entries, latency).
@@ -219,7 +225,7 @@ A deployment should not be called "production" / "appliance-grade" until **all**
 true (each maps to an audit finding + backlog item):
 
 **Must (P0 — block the claim):**
-1. A fresh/unconfigured proxy in passthrough+no-auth mode is **not silent**: degraded `/readyz` +
+1. A fresh/unconfigured proxy in passthrough+no-auth mode is **not silent**: degraded `/ready` +
    admin banner + alert (F-01 / P0-1). Ideally the proxy port does not serve open before setup.
 2. The maintenance agent can **recover from its own death mid-apply** — a persisted op journal and a
    working `MarkAllInterrupted()` reconciliation (F-05 / P0-2).

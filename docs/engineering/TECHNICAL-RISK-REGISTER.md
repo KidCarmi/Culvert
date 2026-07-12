@@ -333,12 +333,12 @@
   (`rewrite_default_action_startup.go:23-25` → `setDefaultPolicyAction("allow")`), and the shipped
   `docker-compose.yml` passes no `default-action` flag. Combined with credential-only `AuthEnabled()`
   (false until an admin exists, `store.go:470`), a fresh appliance with the proxy port reachable is an
-  **open forwarding proxy**. The only signal is one advisory log line — no `/readyz` degraded state, no
+  **open forwarding proxy**. The only signal is one advisory log line — no degraded `/ready` state, no
   alert, no admin banner.
 - **Impact:** an operator who exposes the proxy port before completing hardening runs an open
   relay / silent-bypass on day 0. Contradicts the headline "Default deny (Zero Trust)" architecture
   claim; the open posture is a documented onboarding tradeoff but is **silent**, which is the defect.
-- **Recommendation:** surface passthrough+no-auth as a degraded `/readyz` state + admin banner +
+- **Recommendation:** surface passthrough+no-auth as a degraded `/ready` state + admin banner +
   `security_posture_open` alert (mirror the CHAOS-06 CA-visibility pattern); the maintainer decides
   whether an internet-exposed first boot should hard-refuse to bind until setup completes. **Complexity S.**
   Acceptance test: `FAILURE-INJECTION-TEST-PLAN.md` T1.

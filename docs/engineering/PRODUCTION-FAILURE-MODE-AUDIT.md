@@ -118,7 +118,7 @@ L (log-only), N. **Mode**: OPEN (fail-open) / CLOSED (fail-closed) / SAFE (last-
 | # | Scenario | Current behavior (evidence) | Enf | Test | Vis | Mode | Rec | Sev | Conf |
 |---|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | F-01 | Fresh/unconfigured proxy exposed | Default policy → **allow/passthrough**, no auth: `rewrite_default_action_startup.go:23-25` (empty `default_action`+0 rules ⇒ `setDefaultPolicyAction("allow")`), `AuthEnabled()` false `store.go:470`. Advisory log only. `HV` | N | Y(slice) | L | OPEN | M | **HIGH** | High |
-| F-02 | CA passphrase lost / bundle corrupt on reboot | SSL inspection → tunnel-only bypass, keeps serving: `rootca_startup.go:63-73`; does NOT re-mint CA (`internal/ca/ca.go:194`). Now visible: `/healthz`+`/readyz` row + `ca_load_failed` alert (CHAOS-06 mitigation) | N (fail-open by design) | Y `rootca_failure_visibility_test.go` | Y | OPEN | M | **HIGH** | High |
+| F-02 | CA passphrase lost / bundle corrupt on reboot | SSL inspection → tunnel-only bypass, keeps serving: `rootca_startup.go:63-73`; does NOT re-mint CA (`internal/ca/ca.go:194`). Now visible: proxy `/health` `ssl_inspection` field + proxy `/ready` `ca` row + `ca_load_failed` alert (CHAOS-06 mitigation; admin `/healthz` is HA-only, no `/readyz` route) | N (fail-open by design) | Y `rootca_failure_visibility_test.go` | Y | OPEN | M | **HIGH** | High |
 | F-03 | Corrupt `ui_users.json` at boot (CHAOS-05) | Logged, roster stays empty → legacy env-admin; next `SaveUIUsersFile` **overwrites** → permanent admin/TOTP loss: `auth_startup.go:30`, `store.go:688-709,747`. `HV` | N | N (no corrupt-then-overwrite test) | L | OPEN | U | **HIGH** | High |
 | F-04 | Corrupt `cluster.json` at boot (CHAOS-07) | "starting fresh" → empty `Revoked` list + roster; `IsRevoked` revalidates revoked DP certs; next save overwrites: `cluster_startup.go:32-33`, `enrollment.go:124-137,499`. `HV` | N | N | L | OPEN | U | **HIGH** | High |
 | F-05 | Maintenance agent dies mid-apply | **No persisted op journal**; `MarkAllInterrupted()` returns 0 (`ops.go:468`); op vanishes from memory; Docker left in partial state (tag advanced, `up` half-done); no reconciliation, no auto-rollback. `HV` | N | N | N | **U** | **U** | **HIGH** | High |
@@ -159,12 +159,12 @@ These are the highest-priority class: the proxy keeps serving and dashboards sta
   when no rules and no `default_action` exist (`rewrite_default_action_startup.go:23-25`), and compose
   passes no `default-action` flag. Combined with credential-only `AuthEnabled()` (false until an admin
   exists, `store.go:470`), a fresh appliance with port 8080 reachable is an **open forwarding proxy**.
-  The only signal is one advisory log line — no `/readyz` degraded state, no alert, no admin banner.
+  The only signal is one advisory log line — no degraded `/ready` state, no alert, no admin banner.
   This is a documented usability tradeoff, but it contradicts the headline "Default deny (Zero Trust)"
   architecture claim and is the single most dangerous first-boot behavior.
 - **F-02 — CA-load failure = inspection off.** A rotated/lost `CULVERT_CA_PASSPHRASE` or a `.env`
   loss on reboot silently downgrades the core control (MITM scanning/DLP/YARA/CDR) to tunnel-only.
-  **Now mitigated to visible** post-CHAOS-06 (`/healthz`+`/readyz`+alert) — this is the model the
+  **Now mitigated to visible** post-CHAOS-06 (proxy `/health`+`/ready`+alert) — this is the model the
   other silent fail-opens should copy.
 - **F-09 — Parent-proxy bypass.** When the upstream pool empties (all unhealthy, or the single
   hardcoded probe endpoint is down), egress falls open to **direct**, silently bypassing the
@@ -345,7 +345,7 @@ Every item points at a concrete code path, test target, or workflow. Scoped smal
 
 ### P0 — data corruption, security bypass, unrecoverable appliance, unsafe upgrade
 - **P0-1 (F-01):** Make the fresh-boot default posture safe *or* loud. Minimum: surface
-  "passthrough + no-auth" as a **degraded `/readyz` state + a persistent admin banner + a
+  "passthrough + no-auth" as a **degraded `/ready` state + a persistent admin banner + a
   `security_posture_open` alert** (mirror the CHAOS-06 CA-visibility pattern). Do **not** silently
   serve open on the advisory log alone. Target: `rewrite_default_action_startup.go`, `healthcheck.go`.
 - **P0-2 (F-05):** Persist a minimal **operation journal** for the maintenance agent (op id + phase +
