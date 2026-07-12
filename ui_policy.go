@@ -928,9 +928,12 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 // findRuleByPriorityCopy returns a copy of the stored rule at the given
 // priority (nil if none) — the before-state snapshot for diff/audit.
 func findRuleByPriorityCopy(priority int) *PolicyRule {
-	for _, existing := range policyStore.List() {
-		if existing.Priority == priority {
-			r2 := existing
+	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy
+	// convention) — copy only the matched rule, not every iteration.
+	rules := policyStore.List()
+	for i := range rules {
+		if rules[i].Priority == priority {
+			r2 := rules[i]
 			return &r2
 		}
 	}

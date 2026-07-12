@@ -17,9 +17,11 @@ import (
 // findRuleByName returns a copy of the stored rule with the given name.
 func findRuleByName(t *testing.T, name string) PolicyRule {
 	t.Helper()
-	for _, r := range policyStore.List() {
-		if r.Name == name {
-			return r
+	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
+	rules := policyStore.List()
+	for i := range rules {
+		if rules[i].Name == name {
+			return rules[i]
 		}
 	}
 	t.Fatalf("rule %q not found in store", name)
