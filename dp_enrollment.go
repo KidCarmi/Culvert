@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
@@ -304,7 +305,13 @@ func checkDPCertExpiry(certFile string) error {
 // from the CP before the current one expires. Also listens for CA rotation
 // notifications to trigger immediate renewal (zero-touch CA rotation).
 func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
-	// Check every 6 hours.
+	// CHAOS-12: check once immediately — a node powered off past its renewal
+	// window must not sit on a nearly-expired cert for another 6 hours.
+	if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
+		logger.Printf("DataPlane: cert renewal check: %v", err)
+		alertDPCertRenewalFailure(nodeID, certFile, err)
+	}
+	// Then check every 6 hours.
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -314,12 +321,14 @@ func dpCertRenewalLoop(ctx context.Context, client *DataPlaneClient, nodeID, cer
 		case <-ticker.C:
 			if err := tryRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
 				logger.Printf("DataPlane: cert renewal check: %v", err)
+				alertDPCertRenewalFailure(nodeID, certFile, err)
 			}
 		case <-caRotationNotify:
 			// CP rotated its CA — renew immediately regardless of cert expiry.
 			logger.Printf("DataPlane: CA rotation detected — initiating immediate cert renewal")
 			if err := forceRenewDPCert(ctx, client, nodeID, certFile, keyFile, caFile); err != nil {
 				logger.Printf("DataPlane: CA rotation renewal failed: %v", err)
+				alertDPCertRenewalFailure(nodeID, certFile, err)
 			}
 		}
 	}
@@ -342,6 +351,75 @@ func certNeedsRenewal(certFile string) (int, bool) {
 	}
 	days := int(time.Until(cert.NotAfter).Hours() / 24)
 	return days, days <= 30
+}
+
+// ── DP cert-expiry alerting (CHAOS-12) ───────────────────────────────────────
+//
+// A DP whose renewal keeps failing (CP unreachable or refusing the RPC)
+// slides toward an expiry brick: at NotAfter the mTLS reconnect fails and a
+// still-registered node cannot re-enroll. The renewal loop logs each failure;
+// these helpers additionally surface it as a cert_expiry alert, latched once
+// per escalation (renewal window → final week → expired) so the 6h ticker
+// cannot fire four identical alerts a day (RT-H2 latch precedent). The latch
+// resets on successful renewal; a restart re-fires once at the current level
+// (documented, same posture as the release-catalog latches).
+
+var dpCertExpiryAlert struct {
+	mu    sync.Mutex
+	level int // 0 none · 1 renewal window (≤30d) · 2 final week (≤7d) · 3 expired
+}
+
+// dpCertAlertLevel maps days-until-expiry to an escalation level.
+func dpCertAlertLevel(days int) int {
+	switch {
+	case days < 0:
+		return 3
+	case days <= 7:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// alertDPCertRenewalFailure fires a latched cert_expiry alert for a failed DP
+// cert renewal when the cert is inside the renewal window or expired. A
+// rotation-triggered renewal failure on a still-fresh cert stays log-only
+// (there is no expiry clock running against it).
+func alertDPCertRenewalFailure(nodeID, certFile string, renewErr error) {
+	days, needsRenewal := certNeedsRenewal(certFile)
+	if !needsRenewal {
+		return
+	}
+	level := dpCertAlertLevel(days)
+	dpCertExpiryAlert.mu.Lock()
+	latched := level <= dpCertExpiryAlert.level
+	if !latched {
+		dpCertExpiryAlert.level = level
+	}
+	dpCertExpiryAlert.mu.Unlock()
+	if latched {
+		return
+	}
+	var detail string
+	if days < 0 {
+		detail = fmt.Sprintf("DP node certificate EXPIRED %d day(s) ago and renewal is failing — the node cannot re-authenticate to the Control Plane on its next reconnect; re-enroll if renewal cannot succeed (last error: %v)", -days, renewErr)
+	} else {
+		detail = fmt.Sprintf("DP node certificate expires in %d day(s) and renewal is failing — the node bricks at expiry if the Control Plane stays unreachable (last error: %v)", days, renewErr)
+	}
+	// deferStartupAlert: the renewal loop's immediate first check can run
+	// before loadPersistentAdminState populates the webhook store.
+	deferStartupAlert("cert_expiry", AlertPayload{
+		Host:   nodeID,
+		Detail: detail,
+		Source: "cluster",
+	})
+}
+
+// resetDPCertExpiryAlert clears the escalation latch after a successful renewal.
+func resetDPCertExpiryAlert() {
+	dpCertExpiryAlert.mu.Lock()
+	dpCertExpiryAlert.level = 0
+	dpCertExpiryAlert.mu.Unlock()
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).
@@ -404,5 +482,17 @@ func renewDPCert(ctx context.Context, client *DataPlaneClient, nodeID, certFile,
 		}
 	}
 	logger.Printf("DataPlane: certificate renewed successfully (%s)", reason)
+	resetDPCertExpiryAlert()
+	// CHAOS-12: the renewed cert/key/CA only reach the wire on a fresh TLS
+	// handshake — the gRPC connection read its material at connect() time.
+	// Redial the active CP so the new identity is presented now rather than
+	// at the next process restart (after the CP's dual-CA rotation cleanup
+	// the old cert stops validating, and the old RootCAs pool stops trusting
+	// the rotated CP — despite valid renewed material sitting on disk).
+	// A failed redial keeps the existing connection (connect swaps only
+	// after success), so this can only improve on the pre-renewal state.
+	if err := client.reconnectActive(); err != nil {
+		logger.Printf("DataPlane: post-renewal reconnect failed — renewed cert takes effect on next reconnect: %v", err)
+	}
 	return nil
 }

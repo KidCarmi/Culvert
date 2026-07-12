@@ -108,6 +108,25 @@ func (c *DataPlaneClient) connect(addr string) error {
 	return nil
 }
 
+// reconnectActive redials the currently-active CP address, re-reading the
+// node cert/key/CA from disk (connect → buildClientTLS). This is how a
+// freshly renewed DP certificate actually reaches the wire (CHAOS-12): gRPC
+// only consults TLS material when the connection is constructed, so without
+// a redial the old cert keeps being presented until process restart — and
+// once the CP's dual-CA rotation cleanup drops the old CA, every reconnect
+// with the old cert fails despite a valid renewed cert sitting on disk.
+// On failure the existing connection is kept (connect swaps only after
+// success), so the CP link degrades to the pre-renewal state instead of
+// dropping.
+func (c *DataPlaneClient) reconnectActive() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.addrs) == 0 {
+		return nil // test-constructed stub with no real connection
+	}
+	return c.connect(c.addrs[c.activeIdx])
+}
+
 // failover tries the next CP address in the list. Returns true if a new
 // connection was established, false if all addresses have been tried.
 func (c *DataPlaneClient) failover() bool {
