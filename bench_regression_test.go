@@ -110,6 +110,53 @@ func TestBenchGate_PolicyEvalCIDRAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_ResolveHostCached locks in the host→IP TTL cache on the GeoIP
+// resolution seam. Before the cache, resolveHost ran a BLOCKING net.LookupHost
+// on every call — reached per country-scoped rule per request from the policy
+// hot path (geo.LookupCached) and once more per allowed request from the
+// destination-country tracker. The gate pins BOTH contracts: the resolver is
+// invoked at most once for a warm host (the regression that matters — DNS
+// round-trips returning to the hot path), and the warm path stays within a
+// small constant allocation bound.
+func TestBenchGate_ResolveHostCached(t *testing.T) {
+	origFn := lookupHostFn
+	var resolverCalls int64
+	lookupHostFn = func(host string) ([]string, error) {
+		resolverCalls++
+		return []string{"203.0.113.99"}, nil
+	}
+	defer func() { lookupHostFn = origFn }()
+
+	const host = "benchgate-resolve.test.invalid"
+	// Evict any entry left by a prior run in the same process (the cache TTL is
+	// minutes, far longer than a test run) so the warm-up below always misses
+	// and the resolver-call assertion is deterministic under -count>1.
+	resolvedHostCache.mu.Lock()
+	delete(resolvedHostCache.entries, host)
+	resolvedHostCache.mu.Unlock()
+	if ip := resolveHost(host); ip == nil {
+		t.Fatal("warm-up resolveHost returned nil")
+	}
+	const maxAllocs int64 = 4 // steady state ~2 (SplitHostPort AddrError on a bare host)
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if ip := resolveHost(host); ip == nil {
+				b.Fatal("nil on warm cache")
+			}
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("resolveHost warm: %d allocs/op (bound %d), %d ns/op, resolver calls=%d", allocs, maxAllocs, res.NsPerOp(), resolverCalls)
+	if resolverCalls != 1 {
+		t.Errorf("REGRESSION: resolver invoked %d times for a warm host, want 1 — "+
+			"per-call blocking DNS has returned to the GeoIP resolution seam (hostIPCache bypassed?)", resolverCalls)
+	}
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: warm resolveHost allocates %d/op, exceeds bound %d", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13
