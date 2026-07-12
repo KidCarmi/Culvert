@@ -304,3 +304,125 @@ runtime state only.
   commercial decryption appliance ships for HA failover / config-push restarts, and
   is 15s the right drain envelope (reuse existing) or should inspected H2 get its
   own?
+
+---
+
+## 11. Review consolidation (v2) — APPROVED WITH AMENDMENTS
+
+Three independent reviewers — PAN-OS decryption/HA architect, HTTP/2 protocol
+correctness, Go runtime/shutdown — all returned **APPROVE-WITH-AMENDMENTS**. The
+core mechanism (shared `ConfigureServer`'d h2 server + `base.Shutdown` trigger +
+existing counter drain) was **verified correct against the actually-vendored
+`x/net@v0.57.0`** (registration gap real; `startGracefulShutdown` is the graceful
+`ErrCodeNo` variant that lets in-flight streams finish and refuses new ones; sharing
+one `*http2.Server` across conns is intended and race-free — per-conn config is a
+returned value, only the mutex-guarded `activeConns` map is shared; caps preserved,
+`IdleTimeout` only defaulted-when-zero; upstream `ClientConn` teardown independent).
+The following amendments are **binding on implementation**.
+
+### 11.1 OPEN DECISION A — SETTLED: ship the bounded hard-close backstop.
+Both the PAN-OS (F1) and HTTP/2 (#2) reviewers independently require it. Rationale:
+`base.Shutdown` here closes **nothing** (the base owns no conns); the per-conn
+graceful path has no forced timeout, so an infinite in-flight stream (SSE, gRPC
+server-streaming, multi-GB download) holds its conn — and thus `activeConns` —
+open until process exit, which is **non-deterministic and defeated by the container
+SIGKILL grace**. Graceful-only would help only short-request H2 (which already
+drains). **Design:** GOAWAY first; at the 15s drain deadline, force-close the still-
+open inspected-H2 client conns. Keep the **single 15s envelope** (no H2-specific
+longer window — an unbounded H2 drain lets one stream pin a departing node). The
+backstop is what makes 15s a real ceiling, not a lower bound.
+- Mechanism: a `sync.Map` (or mutex+map) registry of live `*tls.Conn` client legs,
+  populated on `handleInspectH2` entry, removed on exit; `forceCloseH2InspectTunnels`
+  iterates and `Close()`s them at the deadline. **Close the `*tls.Conn` directly —
+  `ServeConnOpts.Context` cancellation is NOT a reliable hard close** (PAN-OS F1).
+
+### 11.2 Admission fence + late-registrant capture (PAN-OS F2, Go-runtime MAJOR#2, HTTP/2 #7).
+Two windows leave a counted tunnel un-GOAWAY'd: (a) the publication/registration
+race — `recordActiveConn(1)` (proxy_tunnel_h2.go:180) precedes holder build /
+`ServeConn`'s `registerConn`, so a one-shot trigger's `activeConns` snapshot misses
+it; (b) a CONNECT accepted before listener-close that `ServeConn`s after the trigger.
+**Closed by three cheap changes:**
+1. **Eager-init** the shared server once at startup (kills the nil-holder race; cost
+   is two structs + one `ConfigureServer`, negligible, unconditional). This also
+   **removes the `sync.Once`/`atomic.Pointer` dance** — a plain package var set
+   during single-threaded startup wiring (happens-before serving) suffices.
+2. **Admission fence:** a package `h2InspectShuttingDown atomic.Bool`, set by the
+   trigger; `handleInspectH2` checks it at entry and, if set, refuses the new tunnel
+   (immediate GOAWAY/close) rather than admitting a new decrypted flow onto a
+   departing node.
+3. **Re-fire on each drain tick:** `net/http.Server.Shutdown` re-dispatches **all**
+   `onShutdown` funcs on **every** call, and `sc.startGracefulShutdown` is
+   `shutdownOnce`-guarded (re-fire is a no-op for already-GOAWAY'd conns). So calling
+   `base.Shutdown` on each `drainActiveTunnels` 500ms tick re-snapshots `activeConns`
+   and GOAWAYs any late registrant. Converts §6.2's "narrow residual" into "actually
+   drained."
+
+### 11.3 `stop_grace_period` reconciliation (PAN-OS F3) — REQUIRED or the feature is cosmetic.
+Confirmed: `docker-compose.yml` sets **no** `stop_grace_period`, so Docker's default
+**10s** SIGKILLs the proxy mid-drain (the 15s tunnel-drain sits after hooks 55–90
+inside the 30s late phase). In the primary production path — maintenance-agent
+`docker compose` upgrade/restart — clients would get RST and the GOAWAY becomes
+cosmetic. **Amendment:** set `stop_grace_period` on the `proxy` (and `cli` if it
+serves) service to cover the **full** shutdown envelope (early phase + 30s late +
+15s drain) — target **60s** — and document the coupling (the drain envelope must be
+≤ the orchestrator grace). Verify the maintenance-agent restart path honors it.
+
+### 11.4 HA scope statement (PAN-OS F4) — REQUIRED.
+PR3d drains on **process shutdown only** (SIGTERM / compose-restart / maintenance-
+agent upgrade). The **live** ADR-0005 transitions — `selfFence` / `enterStandbyResync`
+on lease loss (ha_lease.go/ha_failover.go) and hot `applyConfigSnapshot` — are
+in-process role/config changes that **never run these shutdown hooks**, so inspected
+H2 flows are **not** drained on a live HA failover or hot config push. State this as
+**by design**: the fencing lease governs CP write-authority, not DP proxying, so
+in-flight decrypted flows on a demoting node are unaffected by lease loss and need no
+drain there. Live-failover drain is explicitly out of scope, not an omission.
+
+### 11.5 Observability (PAN-OS F5) — REQUIRED for operability.
+`activeConns` conflates H1-inspect, H2-inspect, and raw-bypass tunnels, so the drain
+log can't tell an operator whether H2 GOAWAY'd cleanly. Add to the `culvert_*`
+namespace: a `culvert_h2_inspect_active` gauge (±1 in `handleInspectH2`),
+`culvert_h2_inspect_drain_goaway_total`, and `culvert_h2_inspect_drain_forced_total`
+(backstop closes); disambiguate the drain log line to report the H2-inspect subset
+distinctly. (Metrics are `/metrics`-surfaced — no GUI-parity obligation.) Also
+**state the invariant** that the drain waits on the `activeConns` superset while
+GOAWAY touches only the h2 subset — "order-100 drains" does NOT mean "all were
+GOAWAY'd" (Go-runtime note).
+
+### 11.6 Test-plan corrections (HTTP/2 #1/#4/#5, Go-runtime MAJOR#1 + MINOR).
+- **Test 1:** drop the un-assertable "client observes GOAWAY" via the x/net client
+  API; assert the two real observables — the in-flight stream reads a **clean EOF**
+  and a **new** stream on the same conn is **refused** — or drive the client with a
+  raw `http2.Framer` and read the single GOAWAY frame.
+- **Exactly one GOAWAY:** x/net's server emits a single `writeGoAway{maxStreamID,
+  ErrCodeNo}` — no advisory-then-real double-GOAWAY. Tests assert one.
+- **Budget waits > 1s:** after the last stream, `shutDownIn(goAwayTimeout=1s)` delays
+  `ServeConn` return, so `activeConns→0` lags by ~1s/conn. Drain-completion asserts
+  must budget > 1s (and stay ≥10× margin for the determinism gate).
+- **Nil-case off the global:** extract a testable inner
+  `gracefulShutdownH2InspectShared(sh *h2InspectShared, ctx)`; the nil test passes an
+  explicit `nil`; real-server tests build a **local** `h2InspectShared`, never
+  driving process-global state (avoids `-shuffle=on`/`-count=2` ordering flakes).
+- **Barrier-based sequencing:** handlers signal "entered / headers written" over a
+  channel and block on a release channel; the test waits on the signal, fires the
+  trigger, then releases — no `time.Sleep` (which would flake AND non-deterministically
+  exercise the §6.2 race).
+
+### 11.7 Polish (all three).
+- Re-cite **v0.57.0** with correct line refs (`configureServer :159`,
+  `RegisterOnShutdown :173`, `registerConn :299`, `startGracefulShutdown :1315`,
+  `startGracefulShutdownInternal :1338`, `goAwayTimeout :1336`).
+- Fix the `ConfigureServer` degrade-path comment: `state` + `RegisterOnShutdown` are
+  wired **before** its only error return (the TLS-1.2 cipher check), and our base has
+  no `CipherSuites`, so the error is unreachable — don't claim "graceful disabled."
+  With eager-init at startup, a `ConfigureServer` error is logged once at WARN.
+- The 2s `context.WithTimeout` on `base.Shutdown` bounds nothing (Shutdown returns in
+  µs; the drain does the waiting) — keep it but describe it honestly.
+
+### 11.8 Net design delta from v1
+Eager-init one shared `ConfigureServer`'d server at startup (plain package vars, no
+Once/atomic); `handleInspectH2` gains an admission-fence check + live-conn registry
+insert + an active gauge; a new order-95 hook sets the shutting-down flag and fires
+the first GOAWAY; `drainActiveTunnels` re-fires the GOAWAY each tick and force-closes
+the registered H2 conns at the 15s deadline (single envelope); `docker-compose.yml`
+gains `stop_grace_period: 60s`; three `culvert_*` metrics; operator doc gains the
+drain sequence + the HA-scope statement. Everything else in v1 stands.
