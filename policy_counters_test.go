@@ -36,6 +36,28 @@ func TestPolicyCounters_LastHitStampedOnMatch(t *testing.T) {
 	}
 }
 
+// TestPolicyCounters_ListNeverReportsStaleLastHit pins the fix for the
+// DP-after-snapshot staleness bug: LastHit is a computed display field, so a
+// value that leaked onto a stored rule (e.g. a CP snapshot built from List(),
+// re-applied via ReplaceAll which zeros lastHitUnix) must never be reported
+// for a rule that has not actually matched on this node.
+func TestPolicyCounters_ListNeverReportsStaleLastHit(t *testing.T) {
+	ps := &PolicyStore{}
+	// A rule carrying a computed LastHit string but no live timestamp.
+	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "leaked", Action: ActionAllow, ID: "L", LastHit: "2020-01-01T00:00:00Z"}})
+	if got := ps.List()[0]; got.LastHit != "" {
+		t.Errorf("ReplaceAll left a stale LastHit %q; want cleared", got.LastHit)
+	}
+	// Even if a stale string somehow sits on a stored rule, List recomputes.
+	ps.mu.Lock()
+	ps.rules[0].LastHit = "2020-01-01T00:00:00Z"
+	ps.rules[0].lastHitUnix = 0
+	ps.mu.Unlock()
+	if got := ps.List()[0]; got.LastHit != "" {
+		t.Errorf("List reported stale LastHit %q for a never-hit rule; want empty", got.LastHit)
+	}
+}
+
 // withCleanRuleMet swaps in a fresh global ruleMet for the test and restores
 // the real one afterward, so mutating the shared counter map can't leak across
 // tests (important under -shuffle).

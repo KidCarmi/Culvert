@@ -114,9 +114,9 @@ type PolicyRule struct {
 	RuleType          string          `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
 	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
 	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
-	HitCount          int64           `json:"hitCount"`               // match counter (atomic); persisted by ID in the .counters sidecar
-	lastHitUnix       int64           // atomic unix-seconds of the last match (0 = never); persisted by ID. Adjacent to HitCount for 64-bit atomic alignment.
-	LastHit           string          `json:"lastHit,omitempty"` // computed in List() from lastHitUnix (RFC3339 UTC); "" = never matched
+	HitCount          int64           `json:"hitCount"`               // match counter (atomic); persisted by rule NAME via ruleMet (metrics.go)
+	lastHitUnix       int64           // atomic unix-seconds of the last match (0 = never); persisted by name via ruleMet. Adjacent to HitCount (both amd64/arm64-aligned int64s).
+	LastHit           string          `json:"lastHit,omitempty"` // computed in List() from lastHitUnix (RFC3339 UTC); "" = never matched. Never stored on the live rule.
 
 	// Tier-A rule metadata (policy-metadata P1; authority
 	// docs/design/POLICY-ARCHITECTURE-FUTURE.md §2). CreatedAt/ModifiedAt/
@@ -340,6 +340,7 @@ func (ps *PolicyStore) Save() {
 	for i, r := range ps.rules {
 		snapshot[i] = *r
 		snapshot[i].HitCount = 0
+		snapshot[i].LastHit = "" // computed display field — never persist it into the rules file
 	}
 	ps.mu.RUnlock()
 
@@ -364,8 +365,14 @@ func (ps *PolicyStore) List() []PolicyRule {
 	for i, r := range ps.rules {
 		out[i] = *r
 		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // B7: atomic read of concurrently-written counter
+		// LastHit is a COMPUTED display field — always derive it from the atomic
+		// timestamp, never from a copied string. A rule whose LastHit leaked in
+		// via a List-derived snapshot + ReplaceAll (which resets lastHitUnix but
+		// not the string) would otherwise report a stale time on a never-hit node.
 		if u := atomic.LoadInt64(&r.lastHitUnix); u > 0 {
 			out[i].LastHit = time.Unix(u, 0).UTC().Format(time.RFC3339)
+		} else {
+			out[i].LastHit = ""
 		}
 	}
 	return out
@@ -396,6 +403,7 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 		}
 		r.HitCount = 0
 		r.lastHitUnix = 0
+		r.LastHit = "" // strip any computed display string that rode in via a List-derived snapshot
 		// Auto-enable FileFiltering when a profile is selected.
 		if r.FileProfile != "" && r.FileProfile != FileProfileNone {
 			r.FileFiltering = true
@@ -420,6 +428,7 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	nr := r
 	nr.HitCount = 0
 	nr.lastHitUnix = 0 // a new rule has never matched
+	nr.LastHit = ""    // computed display field is never stored on the live rule
 	// Auto-enable FileFiltering when a profile is selected (defense-in-depth).
 	if nr.FileProfile != "" && nr.FileProfile != FileProfileNone {
 		nr.FileFiltering = true
@@ -485,20 +494,21 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
-		if rule.Priority == priority {
-			r.HitCount = atomic.LoadInt64(&rule.HitCount)       // B7: atomic read of concurrently-written counter
-			r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // an edit preserves the rule's traffic counters (same rule)
-			// Preserve the existing stable ID when the incoming body omits it
-			// (PUT bodies from older clients carry no "id"). Never let an edit
-			// wipe a rule's durable identifier.
-			if r.ID == "" {
-				r.ID = rule.ID
-			}
-			ps.rules[i] = &r
-			ps.sortLocked()
-			ps.bumpVersion()
-			return true
+		if rule.Priority != priority {
+			continue
 		}
+		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // B7: atomic read of concurrently-written counter
+		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // an edit preserves the rule's traffic counters (same rule)
+		// Preserve the existing stable ID when the incoming body omits it
+		// (PUT bodies from older clients carry no "id"). Never let an edit
+		// wipe a rule's durable identifier.
+		if r.ID == "" {
+			r.ID = rule.ID
+		}
+		ps.rules[i] = &r
+		ps.sortLocked()
+		ps.bumpVersion()
+		return true
 	}
 	return false
 }
