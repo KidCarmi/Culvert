@@ -292,6 +292,47 @@ func TestMITM_NativeH2_TruncatedBodyResetsStream(t *testing.T) {
 	}
 }
 
+// TestMITM_NativeH2_ScanBufferReadErrorFailsClosed is the wire-level regression
+// guard for the H2 silent-empty-200 defect. With DPI enabled and a text
+// content-type the proxy buffers the whole body for scanning BEFORE committing any
+// response to the client; if the origin RSTs mid-buffer, the scan read fails with
+// nothing yet written. The bug conflated that read failure with a policy block
+// (exBlocked), so the H2 handler wrote nothing and http2.Server emitted a clean,
+// empty, cacheable 200 for a fetch that actually failed. The fix maps the read
+// error to exDeliverError, so the client must observe a failure — never a clean
+// empty 200. Distinct from the delivery-truncation test (that path commits headers
+// first) and the stall test (that path is a watchdog CANCEL, not a read error).
+func TestMITM_NativeH2_ScanBufferReadErrorFailsClosed(t *testing.T) {
+	origScanner := dpiScanner
+	dpiScanner = &ContentScanner{}
+	if err := dpiScanner.Add("NEVERMATCHZZZ"); err != nil {
+		t.Fatalf("enable dpi: %v", err)
+	}
+	t.Cleanup(func() { dpiScanner = origScanner })
+
+	cc := nativeH2ClientConn(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain") // → bodyNeedsBuffering true (DPI on)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("A"), 1024))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // origin RSTs its stream while the proxy is buffering for the scan
+	}))
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/scanme", http.NoBody)
+	resp, err := cc.RoundTrip(req) //nolint:bodyclose // closed below when non-nil
+	if err != nil {
+		return // a stream error at/before headers is the correct fail-closed signal
+	}
+	readErr := func() error {
+		defer resp.Body.Close() //nolint:errcheck // test cleanup
+		_, e := io.ReadAll(resp.Body)
+		return e
+	}()
+	if resp.StatusCode == http.StatusOK && readErr == nil {
+		t.Fatal("origin reset mid-scan-buffer was delivered as a clean empty 200 — " +
+			"the scan read error must fail the stream, not surface as a cacheable success")
+	}
+}
+
 // TestMITM_NativeH2_ConcurrentStreams exercises many multiplexed streams over one
 // inspected tunnel (one upstream ClientConn) concurrently; under -race this
 // validates the shared-state safety of the H2 path.

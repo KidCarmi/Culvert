@@ -796,6 +796,18 @@ const (
 	exDeliverError                              // client delivery failed (resp.Body closed)
 )
 
+// scanBodyOutcome is the result of scanInspectBody. It distinguishes a policy
+// block (block page already written) from a scan-buffer read failure (nothing
+// written — the caller must fail the exchange, never deliver a clean success),
+// so the H1 and H2 transports both fail closed on a truncated/aborted body.
+type scanBodyOutcome int
+
+const (
+	scanClean     scanBodyOutcome = iota // nothing matched; body reassembled, deliver it
+	scanBlocked                          // content blocked; block page written, stop serving
+	scanReadError                        // body read failed; nothing written, fail the exchange
+)
+
 // exchangeOutcome is returned by runInspectExchange. resp is set only for
 // exUpgrade (the 101 response the transport driver must raw-relay). closeAfter is
 // meaningful only for exDelivered (HTTP/1.x Connection: close semantics).
@@ -858,8 +870,17 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 	// Unified scan buffer: magic/polyglot + CDR + DPI + ClamAV + YARA. Buffers up
 	// to maxScanBufferBytes() before forwarding so any match blocks the response
 	// entirely (true prevention).
-	if scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP) {
+	switch scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP) {
+	case scanBlocked:
 		return exchangeOutcome{kind: exBlocked}
+	case scanReadError:
+		// The scan buffer could not read the full body and NOTHING was written to
+		// the client (scanInspectBody already closed the body). Fail the exchange
+		// like a delivery error: H1 tears the tunnel down, H2 resets the stream.
+		// Must never fall through as a clean success — on H2 that otherwise
+		// surfaced as a silent empty 200 (an origin reset mid-buffer became a
+		// cacheable success).
+		return exchangeOutcome{kind: exDeliverError}
 	}
 
 	closeAfter := ex.req.Close || resp.Close
@@ -974,17 +995,25 @@ func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyM
 
 // scanInspectBody buffers and scans a decrypted tunnel response body: magic-byte
 // archive/polyglot detection, then CDR (content disarm), then either the remote
-// scan service or local DPI + ClamAV/YARA. It returns true if the caller must
-// stop serving the tunnel — either because the content was blocked (block page
-// already written, origBody closed) or the body could not be read. On a clean
-// scan it reassembles resp.Body (buffered prefix + unread remainder) and returns
-// false. When buffering does not apply (host excluded or a content type that
-// needs no buffering) it returns false without touching the body.
-func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string) bool {
+// scan service or local DPI + ClamAV/YARA. The returned scanBodyOutcome tells the
+// caller how to terminate the exchange:
+//   - scanClean: nothing matched; resp.Body has been reassembled (buffered prefix
+//   - unread remainder) and the caller delivers it. Also returned when buffering
+//     does not apply (host excluded or a content type that needs no buffering),
+//     leaving the body untouched.
+//   - scanBlocked: content was blocked — the block page has already been written
+//     via the responder and origBody closed; the caller must stop serving.
+//   - scanReadError: the response body could not be fully read (origin RST/GOAWAY/
+//     truncation mid-buffer). NOTHING was written to the client, so the caller MUST
+//     fail the exchange (H1 tears the tunnel down; H2 resets the stream) — never
+//     let this surface as a clean, empty success. Conflating it with scanBlocked
+//     produced a silent empty 200 on the H2 path (an on-path origin reset became a
+//     cacheable success); keeping it distinct is the fail-closed contract.
+func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
 	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
 	if globalScanExclusions.IsHostExcluded(hostOnly) || !bodyNeedsBuffering(ct) {
-		return false
+		return scanClean
 	}
 
 	origBody := resp.Body
@@ -992,7 +1021,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	if readErr != nil {
 		origBody.Close()
 		logger.Printf("SSL_INSPECT: body read error for %q: %v", sanitizeLog(hostOnly), readErr)
-		return true
+		return scanReadError
 	}
 	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
 	// signatures match the actual content.
@@ -1003,13 +1032,13 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	// URL/Content-Disposition doesn't reveal the format.
 	if archType := IsBlockedArchive(scanBody); archType != "" {
 		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path)
-		return true
+		return scanBlocked
 	}
 	// File blocking: polyglot detection — block files whose Content-Type
 	// doesn't match their actual magic bytes.
 	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
 		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path)
-		return true
+		return scanBlocked
 	}
 
 	// ── CDR (Sluice content disarm & reconstruction) ──
@@ -1018,7 +1047,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	cdrDecision := runCDRStage(r, req, body, scanBody, ct, ce, br, hostOnly, clientIP, id)
 	if cdrDecision.blocked {
 		origBody.Close()
-		return true
+		return scanBlocked
 	}
 	body = cdrDecision.body
 	scanBody = cdrDecision.scanBody
@@ -1036,7 +1065,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 			origBody.Close()
 			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
 			dpiBlock(br, hostOnly, pattern)
-			return true
+			return scanBlocked
 		}
 	}
 
@@ -1057,12 +1086,12 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		atomic.AddInt64(&statBlocked, 1)
 		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
 		scanBlockConn(br, hostOnly, scanResult.Reason, scanResult.Source)
-		return true
+		return scanBlocked
 	}
 
 	// No match: reassemble the body (buffered prefix + remaining bytes).
 	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), origBody))
-	return false
+	return scanClean
 }
 
 func removeHopHeaders(h http.Header) {
