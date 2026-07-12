@@ -3323,7 +3323,7 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Audit Log</span>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter…" data-input="renderAuditLog">
+            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter (name, rule id, actor…)" data-input="renderAuditLog">
             <button class="btn ghost sm" data-click="loadAuditLog">↺ Refresh</button>
           </div>
         </div>
@@ -11999,6 +11999,7 @@ function renderAuditLog() {
     ? auditEntries.filter(e =>
         (e.action||'').toLowerCase().includes(filter) ||
         (e.object||'').toLowerCase().includes(filter) ||
+        (e.objectId||'').toLowerCase().includes(filter) ||
         (e.actor||'').toLowerCase().includes(filter) ||
         (e.detail||'').toLowerCase().includes(filter))
     : auditEntries;
@@ -12017,7 +12018,7 @@ function renderAuditLog() {
       <td style="white-space:nowrap;font-size:.75rem">${escHtml(e.time||'')}</td>
       <td style="font-size:.78rem">${escHtml(e.actor||'')}</td>
       <td><code style="font-size:.78rem">${escHtml(e.action||'')}</code></td>
-      <td style="font-size:.82rem">${escHtml(e.object||'')}</td>
+      <td style="font-size:.82rem"${e.objectId ? ` title="id: ${escHtml(e.objectId)}"` : ''}>${escHtml(e.object||'')}${e.objectId ? ` <span style="color:var(--muted);font-size:.68rem">🔗</span>` : ''}</td>
       <td style="font-size:.78rem;color:var(--muted)">${escHtml(e.detail||'')}</td>
       <td>${diffBtn}</td>
     </tr>`;

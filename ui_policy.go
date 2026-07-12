@@ -1179,7 +1179,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
 	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
-	auditEventDiff(r, "policy.add", added.Name,
+	auditEventDiffID(r, "policy.add", added.Name, added.ID,
 		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
 	saveConfigVersion(sessionAdmin(r), "policy.add")
 	jsonOK(w, added)
@@ -1232,7 +1232,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	policyStore.Save()
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
-	auditEventDiff(r, "policy.update", rule.Name,
+	auditEventDiffID(r, "policy.update", rule.Name, ruleAuditID(beforeRule),
 		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
 	saveConfigVersion(sessionAdmin(r), "policy.update")
 	jsonOK(w, map[string]any{"ok": true})
@@ -1278,9 +1278,19 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
-	auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
+	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
 	saveConfigVersion(sessionAdmin(r), "policy.remove")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ruleAuditID returns a rule's stable ULID for the audit ObjectID field, or ""
+// when the before-state copy is nil (a rare capture/mutate race) — keeps the
+// audit trail rename-correlatable without risking a nil deref.
+func ruleAuditID(r *PolicyRule) string {
+	if r == nil {
+		return ""
+	}
+	return r.ID
 }
 
 // apiPolicyUpdateByID handles PUT /api/policy?id=<ulid> — the reorder-safe
@@ -1319,8 +1329,8 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	policyStore.Save()
 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
-	auditEventDiff(r, "policy.update", rule.Name,
-		fmt.Sprintf("id=%s priority=%d action=%s", sanitizeLog(id), rule.Priority, rule.Action), beforeRule, rule)
+	auditEventDiffID(r, "policy.update", rule.Name, id,
+		fmt.Sprintf("priority=%d action=%s", rule.Priority, rule.Action), beforeRule, rule)
 	saveConfigVersion(sessionAdmin(r), "policy.update")
 	jsonOK(w, map[string]any{"ok": true})
 }
@@ -1342,7 +1352,7 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	policyStore.Save()
 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
-	auditEventDiff(r, "policy.remove", beforeRule.Name, fmt.Sprintf("id=%s", sanitizeLog(id)), beforeRule, nil)
+	auditEventDiffID(r, "policy.remove", beforeRule.Name, id, "", beforeRule, nil)
 	saveConfigVersion(sessionAdmin(r), "policy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
