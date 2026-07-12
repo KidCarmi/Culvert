@@ -535,6 +535,88 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiDecryptionProfiles is the CRUD handler for named SSL-decryption profiles
+// (the PAN-OS-style "how to decrypt" object rules reference). Mirrors
+// apiCategoryGroups: GET viewer / POST·PUT·DELETE operator, engine-side
+// validation surfaced as 400, saveConfigVersion after each mutating auditEvent,
+// and delete blocked while a rule references it (shared objectReferences walk).
+func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"profiles": globalDecryptionProfiles.List(),
+			"names":    globalDecryptionProfiles.Names(),
+		})
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var p DecryptionProfile
+		if err := decodeJSON(r, &p); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		created, err := globalDecryptionProfiles.Add(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalDecryptionProfiles.Save()
+		auditEvent(r, "decryption-profile.create", created.Name, "")
+		saveConfigVersion(sessionAdmin(r), "decryption-profile.create")
+		jsonOK(w, map[string]any{"ok": true, "profile": created})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		var p DecryptionProfile
+		if err := decodeJSON(r, &p); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := globalDecryptionProfiles.Update(p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalDecryptionProfiles.Save()
+		auditEvent(r, "decryption-profile.update", p.Name, "")
+		saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
+		jsonOK(w, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		name := strings.TrimSpace(r.URL.Query().Get("name"))
+		if name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		// Referential integrity: block while any rule references it, via the shared
+		// objectReferences walk so this 409 and GET /api/objects/references stay a
+		// single source of truth.
+		if deleteBlockedByReferences(w, r, "decryption-profile", name, "decryption-profile.remove.blocked") {
+			return
+		}
+		if err := globalDecryptionProfiles.Delete(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		globalDecryptionProfiles.Save()
+		auditEvent(r, "decryption-profile.delete", name, "")
+		saveConfigVersion(sessionAdmin(r), "decryption-profile.delete")
+		jsonOK(w, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
@@ -1561,10 +1643,11 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 
 	// URL Categories (dynamic host-list management).
-	mux.HandleFunc("/api/category-groups", apiCategoryGroups) // GET/POST/PUT/DELETE category groups
-	mux.HandleFunc("/api/urlcat", apiURLCat)                  // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)         // POST/DELETE individual hosts
-	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)     // GET — resolve a domain to its category
+	mux.HandleFunc("/api/category-groups", apiCategoryGroups)         // GET/POST/PUT/DELETE category groups
+	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles) // GET/POST/PUT/DELETE decryption profiles
+	mux.HandleFunc("/api/urlcat", apiURLCat)                          // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                 // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)             // GET — resolve a domain to its category
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update
