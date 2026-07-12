@@ -5293,8 +5293,12 @@ async function fetchDecExclusions() {
     renderDecExclusions(d.stats || {}, d.fail_open_profiles || 0, d.fail_open_rules || 0);
   } catch(e) {
     console.error(e);
-    if (el) el.innerHTML = `<p class="hint" style="color:var(--red)">Could not load decryption exclusions: ${escHtml(e.message || 'request failed')}. ` +
-      (_decExclLoaded ? 'Showing the last-known list may be stale — retry.' : '') +
+    // Mark the provable-OFF/footprint stats stale too — do not leave the prior
+    // successful "N fail-open rules" line looking current across a failed refresh.
+    const s = document.getElementById('decexcl-stats');
+    if (s && _decExclLoaded) s.innerHTML = '<span style="color:var(--muted)">Status stale — last refresh failed.</span>';
+    if (el) el.innerHTML = `<p class="hint" style="color:var(--red)">Could not load decryption exclusions: ${escHtml(e.message || 'request failed')}.` +
+      (_decExclLoaded ? ' The list and status above may be out of date.' : '') +
       ' <button class="btn ghost sm" data-click="fetchDecExclusions">Retry</button></p>';
   }
 }
@@ -5367,7 +5371,8 @@ async function evictDecExclusion(scopeId, host) {
   // Confirm: evicting re-enables inspection immediately (the safe direction), but
   // the operator must know the host may be re-learned if still incompatible.
   if (!await confirmAction('Evict decryption exclusion',
-      `Re-enable SSL inspection for "${host}" now? Inspection resumes immediately for this host under its decryption profile; if it is still incompatible it may be learned and excluded again.`)) return;
+      `Re-enable SSL inspection for "${host}" now? Inspection resumes immediately for this host under its decryption profile; if it is still incompatible it may be learned and excluded again.`,
+      'Evict')) return;
   try {
     await api('/api/decryption-exclusions?scope=' + encodeURIComponent(scopeId) + '&host=' + encodeURIComponent(host), { method: 'DELETE' });
     toast('Exclusion evicted — inspection resumes for ' + host, 'success');

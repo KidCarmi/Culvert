@@ -37,7 +37,7 @@ func benchSetCache(cfg autoexclude.Config) func() {
 
 // benchMatch builds a match referencing a profile with the given fail-open mode
 // ("" = no profile at all — the true feature-off path). Returns the match + scope.
-func benchMatch(b *testing.B, onInspectError string) (*PolicyMatch, string) {
+func benchMatch(b *testing.B, onInspectError string) (match *PolicyMatch, scopeID string) {
 	b.Helper()
 	if onInspectError == "" {
 		return &PolicyMatch{Action: ActionAllow, SSLAction: SSLInspect, Rule: &PolicyRule{Name: "r", SSLAction: SSLInspect}}, ""

@@ -215,6 +215,64 @@ func TestStats_ReportsPosture(t *testing.T) {
 	}
 }
 
+// TestAllReasons_Exhaustive is the drift guard for allReasons. The promotion path
+// prunes same-host pending under OTHER reasons by iterating allReasons (O(#reasons),
+// not an O(pending) scan). If a new Reason constant is declared but not added to
+// allReasons, a host promoted under the new reason would leave STALE pending under
+// it (a slow leak + a stale operator view). We can't reflect over Go consts, so this
+// pins the invariant two ways: (1) the known set is exactly the declared constants —
+// adding a 4th constant forces an edit here, right next to allReasons; (2) for every
+// reason, promoting a host drops that host's pending under every OTHER reason.
+func TestAllReasons_Exhaustive(t *testing.T) {
+	// (1) Pin the known set — no duplicates, exactly the declared constants. A new
+	// Reason constant must be added to allReasons (and will trip this assertion).
+	want := map[Reason]bool{
+		ReasonClientCertRequired: true,
+		ReasonUnsupportedParams:  true,
+		ReasonClientPinned:       true,
+	}
+	if len(allReasons) != len(want) {
+		t.Fatalf("allReasons has %d entries, want %d — a new Reason was declared but not registered", len(allReasons), len(want))
+	}
+	seen := map[Reason]bool{}
+	for _, r := range allReasons {
+		if seen[r] {
+			t.Fatalf("allReasons contains duplicate %q", r)
+		}
+		seen[r] = true
+		if !want[r] {
+			t.Fatalf("allReasons contains unknown reason %q — update the known set here", r)
+		}
+	}
+
+	// (2) For every reason, promotion under it must clear this host's pending under
+	// every OTHER reason. Run each reason as the promoter with all others pending.
+	for _, promoter := range allReasons {
+		clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+		c := newTestCache(Config{ConfirmN: 2}, clk)
+		const host = "drift.example"
+		// Seed one pending observation for every OTHER reason (one token each — below
+		// confirmN, so they only sit in pending).
+		for _, other := range allReasons {
+			if other != promoter {
+				obs(c, host, other, "ip:10.9.9.9")
+			}
+		}
+		// Promote under `promoter` with two distinct tokens.
+		obs(c, host, promoter, "ip:10.0.0.1")
+		if !obs(c, host, promoter, "ip:10.0.0.2") {
+			t.Fatalf("%s: host did not promote on the second distinct token", promoter)
+		}
+		if _, ok := c.Contains(sc, host); !ok {
+			t.Fatalf("%s: host not excluded after promotion", promoter)
+		}
+		// Every other-reason pending for this host must be gone.
+		if pl := c.PendingLen(); pl != 0 {
+			t.Fatalf("%s: promotion left %d stale pending — same-host cleanup missed a reason in allReasons", promoter, pl)
+		}
+	}
+}
+
 // TestEmptyScopeOrHost_NoOp guards the degenerate keys.
 func TestEmptyScopeOrHost_NoOp(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}

@@ -654,7 +654,11 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 			}
 			name := idToName[sid]
 			if name == "" {
-				name = exclusions[i].ScopeName // profile deleted — fall back to cached name
+				// Profile was deleted: DO NOT populate scope_names[sid] — its absence
+				// is the signal the UI uses to badge the row "deleted" (it falls back
+				// to the entry's cached ScopeName for display). Blast radius is 0.
+				scopeRules[sid] = 0
+				continue
 			}
 			scopeNames[sid] = name
 			_, refs := objectReferences("decryption-profile", name)

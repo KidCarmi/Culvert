@@ -133,8 +133,23 @@ func TestRolloutRehearsal(t *testing.T) {
 		t.Fatalf("step7: clear-all left %d entries", autoExclude.Len())
 	}
 
-	// 8. Restart → volatile cache is empty (a fresh cache models process restart).
-	autoExclude = autoexclude.New(autoexclude.Config{})
+	// 8. Restart → the cache is VOLATILE: no promotion survives a process restart.
+	// A fresh empty map is trivially empty, so instead prove volatility where it
+	// matters — re-promote a host, then model the restart by re-running the SAME
+	// boot wiring the composition root uses (autoexclude.New, no load/read-back),
+	// and assert the previously-excluded host is gone. If anyone ever adds a
+	// persistence load to the boot path, the re-promoted host would survive and
+	// this fails.
+	fo2, scope2 := bindFailOpenProfile(t, "byod2", "fail-open")
+	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.1", Identity: "alice"})
+	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.2", Identity: "bob"})
+	if _, ok := autoExclude.Contains(scope2, "persist-check.example"); !ok {
+		t.Fatal("step8: precondition — host should be excluded before the restart")
+	}
+	autoExclude = autoexclude.New(autoexclude.Config{}) // == the boot wiring; no on-disk load exists
+	if _, ok := autoExclude.Contains(scope2, "persist-check.example"); ok {
+		t.Fatal("step8: an exclusion survived a restart — the cache is no longer volatile (a persistence load crept into the boot path)")
+	}
 	if autoExclude.Len() != 0 {
 		t.Fatal("step8: restarted cache must be empty")
 	}
@@ -163,13 +178,20 @@ func errTLS(s string) error          { return errTLSString(s) }
 func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 	c := autoexclude.New(autoexclude.Config{ConfirmN: 5, MaxEntries: 4096, Now: time.Now})
 
+	// N floods well past the 4096 cap either way (the bound holds identically at any
+	// N >> cap); -short keeps the -race critical path light.
+	n := 12_000
+	if testing.Short() {
+		n = 5_000
+	}
+
 	runtime.GC()
 	var m0 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 
-	// Pending flood: one attacker identity across 200k distinct hosts, none ever
+	// Pending flood: one attacker identity across N distinct hosts, none ever
 	// reaching confirmN=5 → must not grow the pending map past the cap.
-	for i := 0; i < 40_000; i++ {
+	for i := 0; i < n; i++ {
 		c.Observe("scope", "prof", genHost(i), autoexclude.ReasonClientPinned, "id:attacker")
 	}
 	if pl := c.PendingLen(); pl > 4096 {
@@ -179,9 +201,9 @@ func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 		t.Fatalf("a single identity must never promote anything: active=%d", c.Len())
 	}
 
-	// Active flood: promote 200k distinct hosts (confirmN met via 5 identities) →
+	// Active flood: promote N distinct hosts (confirmN met via 5 identities) →
 	// active map must stay capped; eviction only removes (never creates a bypass).
-	for i := 0; i < 40_000; i++ {
+	for i := 0; i < n; i++ {
 		h := "active-" + genHost(i)
 		for k := 0; k < 5; k++ {
 			c.Observe("scope", "prof", h, autoexclude.ReasonUnsupportedParams, "id:"+string(rune('a'+k)))
@@ -202,9 +224,9 @@ func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 	// The two capped 4096-entry maps + keys retain single-digit MB; allow generous
 	// headroom so this is a bound, not a flaky exact-match.
 	if grownMB > 64 {
-		t.Fatalf("post-GC heap grew %d MB after 80k adversarial ops — retention not bounded", grownMB)
+		t.Fatalf("post-GC heap grew %d MB after 2N adversarial ops — retention not bounded", grownMB)
 	}
-	t.Logf("Track4: post-GC heap delta after 80k adversarial ops = %d MB (active=%d pending=%d)", grownMB, c.Len(), c.PendingLen())
+	t.Logf("Track4: post-GC heap delta after 2N adversarial ops = %d MB (active=%d pending=%d)", grownMB, c.Len(), c.PendingLen())
 
 	// Safety: a host that never reached the confirm-count is NOT excluded — pressure
 	// can only evict/re-enable, never bypass.
