@@ -128,6 +128,12 @@ func TestBenchGate_ResolveHostCached(t *testing.T) {
 	defer func() { lookupHostFn = origFn }()
 
 	const host = "benchgate-resolve.test.invalid"
+	// Evict any entry left by a prior run in the same process (the cache TTL is
+	// minutes, far longer than a test run) so the warm-up below always misses
+	// and the resolver-call assertion is deterministic under -count>1.
+	resolvedHostCache.mu.Lock()
+	delete(resolvedHostCache.entries, host)
+	resolvedHostCache.mu.Unlock()
 	if ip := resolveHost(host); ip == nil {
 		t.Fatal("warm-up resolveHost returned nil")
 	}
