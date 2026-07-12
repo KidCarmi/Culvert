@@ -42,6 +42,15 @@ func auditActor(r *http.Request) string {
 
 // auditEventDiff records an audit event with optional before/after JSON snapshots.
 func auditEventDiff(r *http.Request, action, object, detail string, before, after any) {
+	auditEventDiffID(r, action, object, "", detail, before, after)
+}
+
+// auditEventDiffID is auditEventDiff plus the changed item's stable ULID
+// (objectID), recorded in the structured ObjectID field so an object's audit
+// trail survives a rename — history is correlatable by ID, not just by the
+// mutable display name (§1 identity seam). objectID "" behaves exactly like
+// auditEventDiff (the field is omitempty).
+func auditEventDiffID(r *http.Request, action, object, objectID, detail string, before, after any) {
 	// C2c — observability hook. When the request was wrapped by
 	// uiMetadataEnforcement (the admin UI middleware chain), flip the
 	// per-request audit-emission flag to true. Plain non-UI callers
@@ -50,12 +59,13 @@ func auditEventDiff(r *http.Request, action, object, detail string, before, afte
 	markAuditEmitted(r)
 
 	entry := AuditEntry{
-		TS:     time.Now().UnixMilli(),
-		Time:   time.Now().Format("2006-01-02 15:04:05"),
-		Actor:  auditActor(r),
-		Action: action,
-		Object: object,
-		Detail: detail,
+		TS:       time.Now().UnixMilli(),
+		Time:     time.Now().Format("2006-01-02 15:04:05"),
+		Actor:    auditActor(r),
+		Action:   action,
+		Object:   object,
+		ObjectID: objectID,
+		Detail:   detail,
 	}
 	if before != nil {
 		if b, err := json.Marshal(before); err == nil {
