@@ -1289,8 +1289,8 @@ type policyTestTrace struct {
 func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, host string, groups []string) ([]policyTestTrace, *PolicyRule) {
 	var trace []policyTestTrace
 	var matched *PolicyRule
-	for _, rule := range rules {
-		r2 := rule // copy
+	for i := range rules {
+		r2 := rules[i] // copy (index-based range: PolicyRule is a large struct)
 		skip := ""
 		switch {
 		case ruleTypeOf(&r2) != ruleTypeAccess:
