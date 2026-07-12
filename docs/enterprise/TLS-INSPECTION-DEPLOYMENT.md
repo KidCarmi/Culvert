@@ -9,7 +9,9 @@ Deploying MITM TLS inspection: CA generation/import, trust distribution, bypass,
 ## 1. Enabling inspection (auto-generated CA — the supported path)
 
 1. Set `CULVERT_CA_PASSPHRASE` and `-ca-path /data/ca.bundle`.
-2. On first start Culvert generates an **ECDSA P-256 root CA** (Subject `O=Culvert, CN=Culvert Root CA`, 10-year validity) and writes `ca.bundle`. **Empty passphrase ⇒ plaintext bundle and SSL inspection silently degrades to tunnel-only** — always set the passphrase and confirm `ssl_inspection: ready` on `GET /health`.
+2. On first start Culvert generates an **ECDSA P-256 root CA** (Subject `O=Culvert, CN=Culvert Root CA`, 10-year validity) and writes `ca.bundle`.
+
+> **⚠ Empty passphrase is a key-custody risk, not a disable switch.** With `CULVERT_CA_PASSPHRASE` unset on a **fresh** install, `LoadOrInitCA` still generates the CA and `SaveCA` writes the key as **plaintext PEM** (`internal/ca/ca.go:194-235`) — **inspection stays ACTIVE and forges leaves with an unencrypted root key.** Do not assume "no passphrase = inspection off." Tunnel-only degradation happens only in a *different* case: an **existing, already-encrypted** `ca.bundle` that cannot be decrypted (wrong/missing passphrase) → CA load fails (non-fatal) → `/health` shows `ssl_inspection: load_failed`/`unavailable`. **Always set the passphrase before enabling inspection, and confirm `ssl_inspection: ready` on `GET /health`.**
 3. Key at rest: PBKDF2-SHA256 (600k iterations) + AES-256-GCM, atomic 0600 write.
 4. Leaf certs are forged on the fly (24h validity, LRU cache 10k/1h).
 
