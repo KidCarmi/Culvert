@@ -2838,6 +2838,7 @@ Firefox (all platforms):
           <div class="panel-header">
             <span class="panel-title" id="fp-editor-title">Select a profile to edit</span>
             <div style="display:flex;gap:6px" id="fp-editor-actions" style="display:none">
+              <button class="btn ghost sm" id="fp-whereused-btn" data-click="openWhereUsedProfile" title="Show policy rules that reference this profile">Where used</button>
               <button class="btn sm" data-click="saveProfile">Save</button>
               <button class="btn danger sm" id="fp-delete-btn" data-click="deleteProfile">Delete</button>
             </div>
@@ -3830,6 +3831,19 @@ Firefox (all platforms):
   </div>
 </div>
 
+<!-- Where-Used modal (P1 policy-refs): generic dependency list for a shared object -->
+<div id="where-used-dialog" role="dialog" aria-modal="true" aria-labelledby="where-used-title"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:520px;width:90%;box-shadow:var(--shadow-2)">
+    <h3 id="where-used-title" style="margin:0 0 6px;font-size:1.05rem;font-weight:700">Where used</h3>
+    <p id="where-used-msg" style="margin:0 0 14px;font-size:.82rem;color:var(--muted);line-height:1.55"></p>
+    <div id="where-used-body" style="max-height:50vh;overflow-y:auto"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+      <button class="btn ghost" id="where-used-close" data-click="closeWhereUsed">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Release dispatch modal (P1.6d-1, admin-only) -->
 <div id="release-dispatch-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
   <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px 28px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.35)">
@@ -4042,6 +4056,10 @@ document.addEventListener('click', e => {
     case 'polGotoRule':       polGotoRule(+arg); break;
     case 'trafficGotoRule':   trafficGotoRule(arg); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
+    case 'whereUsedGoto':     whereUsedGoto(arg, arg2); break;
+    case 'closeWhereUsed':    closeWhereUsed(); break;
+    case 'openWhereUsed':     openWhereUsed(arg, arg2); break;
+    case 'openWhereUsedProfile': openWhereUsedProfile(); break;
     case 'setPolActionFilter': setPolActionFilter(arg); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
     case 'runPolicyTest':     runPolicyTest(); break;
@@ -4832,6 +4850,7 @@ function renderCatGroups() {
       <strong style="font-size:.95rem">${escHtml(g.name)}</strong>
       <div style="display:flex;gap:6px">
         <span style="font-size:.72rem;color:var(--muted)">${g.categories.length} categories</span>
+        <button class="btn ghost sm" data-click="openWhereUsed" data-arg="category-group" data-arg2="${escHtml(g.name)}" title="Show policy rules that reference this group">Where used</button>
         <button class="btn ghost sm" data-click="editCatGroup" data-arg="${escHtml(g.name)}">Edit</button>
         <button class="btn ghost sm" style="color:var(--red)" data-click="deleteCatGroup" data-arg="${escHtml(g.name)}">Delete</button>
       </div>
@@ -4929,7 +4948,7 @@ async function deleteCatGroup(name) {
     await api('/api/category-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
     toast('Group deleted', 'success');
     fetchCatGroups();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) { if (!handleDeleteError(e, 'category group')) toast('Error: ' + e.message, 'error'); }
 }
 
 function loadCatGroupDropdown() {
@@ -5055,7 +5074,6 @@ function renderURLCatList(cats) {
   }
   el.innerHTML = cats.map(cat => {
     const qn = escHtml(cat.name);
-    const jn = JSON.stringify(cat.name).replace(/"/g, '&quot;');
     return `
     <div class="card" style="margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -5063,15 +5081,19 @@ function renderURLCatList(cats) {
           <strong style="font-size:15px">${qn}</strong>
           ${cat.builtIn ? '<span class="badge" style="font-size:11px;background:var(--surface2);color:var(--text-muted)">built-in</span>' : ''}
         </div>
-        <button class="btn sm danger" data-click="deleteURLCategory" data-arg="${jn}"
-          title="Delete category">Delete</button>
+        <div style="display:flex;gap:6px">
+          <button class="btn ghost sm" data-click="openWhereUsed" data-arg="category" data-arg2="${qn}"
+            title="Show policy rules and groups that reference this category">Where used</button>
+          <button class="btn sm danger" data-click="deleteURLCategory" data-arg="${qn}"
+            title="Delete category">Delete</button>
+        </div>
       </div>
       <div id="uc-chips-${qn}" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
         ${(cat.hosts || []).map(h => {
-          const jh = JSON.stringify(h).replace(/"/g, '&quot;');
+          const qh = escHtml(h);
           return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px">
-            ${escHtml(h)}
-            <button data-click="removeURLCatHost" data-arg="${jn}" data-arg2="${jh}" title="Remove host"
+            ${qh}
+            <button data-click="removeURLCatHost" data-arg="${qn}" data-arg2="${qh}" title="Remove host"
               style="background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px;padding:0;line-height:1">&times;</button>
           </span>`;
         }).join('')}
@@ -5081,8 +5103,8 @@ function renderURLCatList(cats) {
       <div style="display:flex;gap:6px">
         <input class="form-input" id="uc-new-host-${qn}" type="text"
           placeholder="add host (e.g. example.com)" style="flex:1;max-width:300px"
-          data-enter="addURLCatHost" data-enter-arg="${jn}">
-        <button class="btn sm" data-click="addURLCatHost" data-arg="${jn}">Add Host</button>
+          data-enter="addURLCatHost" data-enter-arg="${qn}">
+        <button class="btn sm" data-click="addURLCatHost" data-arg="${qn}">Add Host</button>
       </div>
     </div>`;
   }).join('');
@@ -5095,7 +5117,7 @@ async function deleteURLCategory(name) {
     toast(`Category "${name}" deleted`, 'success');
     loadURLCategories();
   } catch (err) {
-    toast('Delete failed: ' + err.message, 'error');
+    if (!handleDeleteError(err, 'category')) toast('Delete failed: ' + err.message, 'error');
   }
 }
 
@@ -8468,7 +8490,7 @@ async function deleteProfile() {
     document.getElementById('fp-editor-body').innerHTML = '<div style="color:var(--muted);font-size:.82rem;text-align:center;padding:32px 0">Select a profile on the left, or click <strong>+ New</strong> to create one.</div>';
     toast('Profile deleted', 'success');
     await reloadProfilesAndDropdowns();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) { if (!handleDeleteError(e, 'file profile')) toast('Error: ' + e.message, 'error'); }
 }
 
 function openNewProfilePanel() {
@@ -9217,6 +9239,7 @@ async function gotoAnchoredRowByName(view, tbodyId, list, name) {
   gotoAnchoredRow(view, tbodyId, r.id ? 'data-rule-id' : 'data-priority', r.id || r.priority);
 }
 function apGotoRuleByName(name) { gotoAnchoredRowByName('authpolicy', 'ap-rules', () => apRules, name); }
+function polGotoRuleByName(name) { gotoAnchoredRowByName('policy', 'pol-table', () => polRules, name); }
 
 // trafficGotoRule — the Traffic feed's rule column also carries non-rule
 // attributions (blocklist, threat-feed sources, scanner names, file
@@ -9241,6 +9264,96 @@ async function trafficGotoRule(name) {
   } catch (e) {
     toast('Rule lookup failed: ' + e.message, 'error');
   }
+}
+
+// ── P1 Where-Used (policy-refs): generic dependency presentation ────────────
+// Renders the generic consumer-entry contract (DESIGN-SYSTEM.md §3) —
+// {consumerType, id, name, detail, view} — as a type-badged, navigable list.
+// Deliberately NOT rule-shaped: switches on nothing, so PAC/report/node-group
+// consumers render the moment the backend emits them. Every interpolation is
+// escaped (innerHTML sink).
+const _consumerLabels = {
+  'access-rule': 'Access rule',
+  'auth-rule': 'Auth rule',
+  'category-group': 'Category group',
+};
+function whereUsedList(entries) {
+  if (!entries || !entries.length) {
+    return '<div class="where-used-empty">Not referenced by anything.</div>';
+  }
+  return '<ul class="where-used">' + entries.map(e => {
+    const label = _consumerLabels[e.consumerType] || e.consumerType;
+    return `<li class="where-used-item">
+      <a href="#" class="where-used-link" data-click="whereUsedGoto" data-arg="${escHtml(e.view)}" data-arg2="${escHtml(e.name)}">${escHtml(e.name || '(unnamed)')}</a>
+      <span class="badge info">${escHtml(label)}</span>
+      ${e.detail ? `<span class="where-used-detail">${escHtml(e.detail)}</span>` : ''}
+    </li>`;
+  }).join('') + '</ul>';
+}
+
+// whereUsedGoto — navigate to a consumer from its Where-Used entry. Rules
+// anchor+flash their row (reusing the S4 anchors); other views just switch.
+function whereUsedGoto(view, name) {
+  closeWhereUsed();
+  if (view === 'policy') { polGotoRuleByName(name); return; }
+  if (view === 'authpolicy') { apGotoRuleByName(name); return; }
+  if (currentView !== view) switchView(view);
+}
+
+// showWhereUsed — open the modal with a message + the generic entry list.
+function showWhereUsed(title, msg, entries) {
+  document.getElementById('where-used-title').textContent = title;
+  document.getElementById('where-used-msg').textContent = msg || '';
+  document.getElementById('where-used-body').innerHTML = whereUsedList(entries);
+  modalOpen(document.getElementById('where-used-dialog'), '#where-used-close');
+}
+function closeWhereUsed() { modalClose(document.getElementById('where-used-dialog')); }
+
+// parseRefBlock — if an api() error carries a structured reference-block 409
+// ({error, object, referencedBy}), return the parsed body; else null. api()
+// throws Error(responseText), so the 409 JSON arrives as err.message.
+function parseRefBlock(err) {
+  try {
+    const b = JSON.parse(err && err.message);
+    if (b && Array.isArray(b.referencedBy)) return b;
+  } catch (_) { /* not a structured block */ }
+  return null;
+}
+
+// handleDeleteError — render a blocked-delete 409 as the real referent list
+// (navigable) instead of dumping raw JSON in a toast. Returns true if it was
+// a reference block (caller should not also toast). Any other error → false.
+function handleDeleteError(err, objType) {
+  const block = parseRefBlock(err);
+  if (!block) return false;
+  const objName = (block.object && block.object.name) || '';
+  showWhereUsed('Cannot delete ' + objType,
+    `"${objName}" is still referenced. Repoint or remove these first, then delete it.`,
+    block.referencedBy);
+  return true;
+}
+
+// openWhereUsed — on-demand "Where used" for a shared object row: fetch the
+// generic references and show them. objType is the endpoint type key.
+async function openWhereUsed(objType, name, label) {
+  try {
+    const d = await api('/api/objects/references?type=' + encodeURIComponent(objType) +
+      '&name=' + encodeURIComponent(name));
+    showWhereUsed('Where used: ' + name,
+      (d.referencedBy || []).length ? `${label || name} is referenced by:` : '',
+      d.referencedBy);
+  } catch (e) {
+    toast('Reference lookup failed: ' + e.message, 'error');
+  }
+}
+
+// openWhereUsedProfile — Where-Used for the file profile currently open in the
+// editor. Profiles are id-keyed but the references endpoint is name-keyed
+// (rules hold the profile name), so resolve the name from the loaded profile.
+function openWhereUsedProfile() {
+  const p = fpProfiles.find(x => x.id === fpCurrentId);
+  if (!p) { toast('Select a profile first', 'error'); return; }
+  openWhereUsed('file-profile', p.name, 'File profile "' + p.name + '"');
 }
 
 // renderPolicyTrace — the shared decision-trace rows (.trace contract): one
@@ -12632,6 +12745,14 @@ function resetBlockPage() {
    long enough to scroll. */
 .reorder-bar { position:sticky;top:52px;z-index:40;display:flex;gap:10px;align-items:center;
   margin:8px 16px 0;font-size:.82rem; }
+.where-used { list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px; }
+.where-used-item { display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);
+  border-radius:var(--r-md);background:var(--surface1); }
+.where-used-link { color:var(--accent2);text-decoration:none;font-weight:600;font-size:.85rem; }
+.where-used-link:hover { text-decoration:underline; }
+.where-used-detail { color:var(--muted);font-size:.72rem;font-family:var(--font-mono);margin-left:auto; }
+.where-used-empty { color:var(--muted);font-size:.85rem;padding:8px 0; }
+.used-by-chip { cursor:pointer;font-size:.68rem; }
 @keyframes rowflash { 0%,55% { background:var(--accent-tint, rgba(20,184,166,.14)); } 100% { background:transparent; } }
 .row-flash td { animation: rowflash 2.4s ease-out; }
 .audit-diff-btn { background:none;border:none;cursor:pointer;color:var(--accent2);font-size:.75rem;padding:2px 6px;border-radius:4px; }
