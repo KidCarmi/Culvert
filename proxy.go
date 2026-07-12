@@ -621,6 +621,29 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 		sslAction = SSLBypass
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
+	// Adaptive decryption exclusion (fail-open self-heal): consult the learned
+	// exclusion cache ONLY when the matched rule opts into fail-open, and only
+	// within that rule's decryption-profile SCOPE. A fail-close rule never reads
+	// the cache; a host learned under one fail-open profile can never bypass a
+	// different profile's rule (scoped key), and critical hosts kept on fail-close
+	// rules are un-poisonable by construction. Precedence: explicit operator
+	// ssl-bypass (above) > learned auto-exclusion (same scope) > policy inspect.
+	//
+	// FailOpenScope is a no-copy accessor (one RLock + two field reads): the hot
+	// path needs only the scope ID + the fail-open bool, so it avoids the profile
+	// copyOut that a full resolve pays. A rule with no profile / a fail-close
+	// profile returns ok=false and never touches the cache — feature-off stays
+	// allocation-free here.
+	if sslAction == SSLInspect && match != nil && match.Rule != nil && match.Rule.DecryptionProfile != "" {
+		if scopeID, ok := globalDecryptionProfiles.FailOpenScope(match.Rule.DecryptionProfile); ok {
+			if reason, hit := autoExclude.Contains(scopeID, host); hit {
+				sslAction = SSLBypass
+				recordAutoExcludeHit()
+				logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%s reason=%s)",
+					sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(match.Rule.DecryptionProfile), reason)
+			}
+		}
+	}
 	return sslAction, tlsSkipVerify
 }
 

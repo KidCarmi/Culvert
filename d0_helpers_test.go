@@ -143,6 +143,8 @@ var d0KnownRoutes = func() []string {
 //     dependency walk backing the fail-open delete guards).
 //   - 137 — Decryption Profiles added /api/decryption-profiles (named
 //     "how to decrypt" object referenced per policy rule).
+//   - 138 — Adaptive decryption exclusion added /api/decryption-exclusions
+//     (read-only list + evict/clear of the volatile fail-open learn cache).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -159,7 +161,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 137
+	const want = 138
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

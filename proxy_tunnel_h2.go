@@ -163,6 +163,10 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, tlsSkipVerify, upstreamProtos, match)
 	if err != nil {
 		rawClient.Close() //nolint:errcheck // best-effort cleanup (200 already sent; cannot 502)
+		// Learn-only on the native path: the 200 is already sent, so the current
+		// session cannot be rescued (unlike the strip path). A qualifying failure
+		// still learns the host so the NEXT session self-heals via the cache.
+		maybeFailOpenOrigin(hostOnly, match, id, err)
 		logger.Printf("SSL_INSPECT(native) upstream TLS handshake %q: %v", sanitizeLog(targetHost), err)
 		return
 	}
@@ -175,8 +179,9 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, newMITMClientConfigForALPN(downstreamProtos))
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()   //nolint:errcheck // best-effort cleanup
-		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup
+		clientTLS.Close()                             //nolint:errcheck // best-effort cleanup
+		upstreamTLS.Close()                           //nolint:errcheck // best-effort cleanup
+		maybeFailOpenClient(hostOnly, match, id, err) // learn a pinning rejection (learn-only)
 		logger.Printf("SSL_INSPECT(native) client TLS handshake %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}

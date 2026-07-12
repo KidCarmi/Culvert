@@ -1,6 +1,8 @@
 package decryptprofile
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -22,6 +24,14 @@ func TestStore_AddValidateUnique(t *testing.T) {
 	}
 	if _, err := s.Add(Profile{Name: "bad2", MinTLSVersion: "1.4"}); err == nil {
 		t.Fatal("invalid minTlsVersion must be rejected")
+	}
+	// Invalid OnInspectError rejected on Add — the CP→DP / import anti-smuggling
+	// wall (also enforced in ReplaceAll below).
+	if _, err := s.Add(Profile{Name: "bad-oie", OnInspectError: "explode"}); err == nil {
+		t.Fatal("invalid onInspectError must be rejected")
+	}
+	if _, err := s.Add(Profile{Name: "ok-oie", OnInspectError: "fail-open"}); err != nil {
+		t.Fatalf("valid onInspectError rejected: %v", err)
 	}
 	// min>max rejected.
 	if _, err := s.Add(Profile{Name: "bad3", MinTLSVersion: "1.3", MaxTLSVersion: "1.2"}); err == nil {
@@ -82,8 +92,9 @@ func TestStore_ReplaceAllPreservesIDsAndSkipsInvalid(t *testing.T) {
 	s := New()
 	s.ReplaceAll([]Profile{
 		{ID: "fixed-id-01", Name: "keep", InspectHTTP2: boolPtr(false)},
-		{Name: "bad", OnUnsupported: "explode"}, // invalid → skipped
-		{Name: "backfill"},                      // valid, no ID → assigned
+		{Name: "bad", OnUnsupported: "explode"},       // invalid → skipped
+		{Name: "bad-oie", OnInspectError: "sneak-by"}, // invalid → skipped (CP→DP wall)
+		{Name: "backfill"}, // valid, no ID → assigned
 	})
 	names := s.Names()
 	if len(names) != 2 {
@@ -117,5 +128,53 @@ func TestStore_LoadSaveRoundTrip(t *testing.T) {
 	p := s2.GetByName("prod")
 	if p == nil || p.CertVerification != "strict" || p.StallTimeoutSecs != 45 || p.InspectHTTP2 == nil || !*p.InspectHTTP2 {
 		t.Fatalf("round-trip mismatch: %+v", p)
+	}
+}
+
+// TestOnInspectError_SchemaRoundTripAndDowngrade pins the config-schema-change
+// contract (B5): (a) OnInspectError survives Save→Load (forward round-trip, so
+// config export / version rollback carry it), and (b) an OLDER binary that does
+// not know the field degrades SAFELY — the unknown JSON key is ignored on load
+// and the profile still parses, resolving to fail-close (today's behavior) rather
+// than failing to load. This is why the field is additive + omitempty and why the
+// resolver treats "" / unknown as fail-close.
+func TestOnInspectError_SchemaRoundTripAndDowngrade(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dp.json")
+	s1 := New()
+	s1.SetPathForTest(path)
+	if _, err := s1.Add(Profile{Name: "fo", OnInspectError: "fail-open"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	s1.Save()
+
+	// (a) Forward round-trip preserves the field.
+	s2 := New()
+	if err := s2.Load(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if p := s2.GetByName("fo"); p == nil || p.OnInspectError != "fail-open" {
+		t.Fatalf("OnInspectError did not round-trip: %+v", p)
+	}
+
+	// (b) Downgrade safety: an old binary's profile struct has no OnInspectError
+	// field. Unmarshaling the new on-disk JSON into it must succeed and ignore the
+	// unknown key (encoding/json ignores unknown fields), so an old binary keeps
+	// loading and defaults to fail-close.
+	type oldProfile struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		// no OnInspectError
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var old []oldProfile
+	if err := json.Unmarshal(data, &old); err != nil {
+		t.Fatalf("old binary failed to parse new profile JSON (downgrade broken): %v", err)
+	}
+	if len(old) != 1 || old[0].Name != "fo" {
+		t.Fatalf("old binary lost the profile on downgrade: %+v", old)
 	}
 }
