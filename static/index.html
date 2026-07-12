@@ -3327,7 +3327,7 @@ Firefox (all platforms):
           <div id="ha-disabled-section">
             <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">
               Enable Active/Passive HA to run a standby Control Plane that automatically takes over
-              if this instance goes down. No shared filesystem needed — Culvert replicates state
+              if this Control Plane goes down. No shared filesystem needed — Culvert replicates state
               to the standby over the existing gRPC channel automatically.
             </p>
             <div style="display:grid;gap:12px;max-width:480px">
@@ -3338,7 +3338,7 @@ Firefox (all platforms):
               <label style="font-size:.8rem;color:var(--muted);display:flex;align-items:flex-start;gap:8px">
                 <input id="ha-auto-failover" type="checkbox" style="margin-top:3px">
                 <span>Automatic failover <span style="color:#f59e0b">(advanced — leave OFF unless you understand the risk)</span>
-                  <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">When ON, the standby self-promotes if it cannot reach this leader for ~15s. With only two Control Planes and no witness, a network partition where this leader is still alive causes BOTH nodes to act as leader (split-brain) and admin state diverges. Default OFF = manual failover: on leader loss the standby stays read-only until an operator promotes it or restarts it as leader.</span>
+                  <span style="font-size:.7rem;color:var(--muted);margin-top:2px;display:block">When ON, the standby self-promotes if it cannot reach this leader for ~15s. With only two Control Planes and no witness, a network partition where this leader is still alive causes BOTH Control Planes to act as leader (split-brain) and admin state diverges. Default OFF = manual failover: on leader loss the standby stays read-only until an operator promotes it or restarts it as leader.</span>
                 </span>
               </label>
               <div style="margin-top:4px">
@@ -3349,7 +3349,7 @@ Firefox (all platforms):
           <!-- Shown after HA is enabled -->
           <div id="ha-enabled-section" style="display:none">
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:16px">
-              <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Node</div></div>
+              <div class="stat-card"><div class="stat-val" id="ha-role-val">—</div><div class="stat-label">This Control Plane</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-peer-val">—</div><div class="stat-label">Peer</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-since-val">—</div><div class="stat-label">Since</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
@@ -3359,9 +3359,9 @@ Firefox (all platforms):
             <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
               Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease. The <strong>Term</strong> tile above equals the epoch of the currently-held fencing lease (ADR-0005: term = a held lease's epoch). In a failure state where no lease is held — e.g. a leader that restarted and cannot reacquire the etcd lease, running read-only — the lease card shows <code>epoch 0</code> while <strong>Term</strong> retains the last synced value, so the two can differ precisely when you are diagnosing a fencing problem.
             </p>
-            <!-- Manual failover: shown only when this node is a standby -->
+            <!-- Manual failover: shown only when this Control Plane is a standby -->
             <div id="ha-promote-row" style="display:none;margin-bottom:16px">
-              <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this node to Leader</button>
+              <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this Control Plane to Leader</button>
               <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Use when the leader is down and automatic failover is off. Confirm the leader is truly gone first — promoting while the leader still serves causes split-brain.</span>
             </div>
             <details style="margin-top:12px">
@@ -12077,11 +12077,11 @@ async function enableHA() {
   const leaderAddr = document.getElementById('ha-leader-addr').value.trim();
   if (!leaderAddr) { toast('This server\'s reachable address is required', 'error'); return; }
   const autoFailover = document.getElementById('ha-auto-failover').checked;
-  // Tier 3: cluster role change — this node becomes the HA leader.
+  // Tier 3: cluster role change — this Control Plane becomes the HA leader.
   const okh = await confirmDanger({
     title: 'Enable high availability',
-    msg: 'This node becomes the HA leader at ' + leaderAddr + (autoFailover ? ' with auto-failover.' : ' (manual failover).') + ' Recorded in the audit log.',
-    impact: 'Standby nodes will replicate from this address. A wrong address leaves standbys unable to sync; auto-failover changes who may become leader without operator action.',
+    msg: 'This Control Plane becomes the HA leader at ' + leaderAddr + (autoFailover ? ' with auto-failover.' : ' (manual failover).') + ' Recorded in the audit log.',
+    impact: 'Standby Control Planes will replicate from this address. A wrong address leaves standbys unable to sync; auto-failover changes who may become leader without operator action.',
     rollback: 'HA state persists in cluster configuration; role changes after this point go through promote/demote.',
     confirmWord: 'ENABLE',
     okLabel: 'Enable HA',
@@ -12096,7 +12096,7 @@ async function enableHA() {
       body: JSON.stringify({ leader_addr: leaderAddr, auto_failover: autoFailover })
     });
     if (!r) return;
-    toast('HA enabled - this node is now the leader', 'success');
+    toast('HA enabled - this Control Plane is now the leader', 'success');
     loadCluster();
   } catch(e) {
     toast('Failed to enable HA: ' + e.message, 'error');
@@ -12122,12 +12122,12 @@ async function promoteHA() {
   try {
     const r = await api('/api/cluster/ha/promote', { method: 'POST' });
     if (!r) return;
-    toast('This node is now the leader', 'success');
+    toast('This Control Plane is now the leader', 'success');
     loadCluster();
   } catch(e) {
     toast('Promote failed: ' + e.message, 'error');
   } finally {
-    btn.disabled = false; btn.textContent = 'Promote this node to Leader';
+    btn.disabled = false; btn.textContent = 'Promote this Control Plane to Leader';
   }
 }
 

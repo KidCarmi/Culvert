@@ -73,7 +73,7 @@ func apiBandwidthPolicies(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		auditEvent(r, "bandwidth.add",
+		auditEvent(r, "bandwidth.create",
 			sanitizeLog(added.Name),
 			fmt.Sprintf("priority=%s rate=%s",
 				strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", ""),

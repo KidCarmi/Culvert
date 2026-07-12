@@ -124,7 +124,7 @@ func createNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	auditEvent(r, "nodegroup.add", sanitizeLog(created.Name), fmt.Sprintf("label_selector=%v", created.LabelSelector))
+	auditEvent(r, "nodegroup.create", sanitizeLog(created.Name), fmt.Sprintf("label_selector=%v", created.LabelSelector))
 	jsonOK(w, map[string]any{"ok": true, "group": created})
 }
 
@@ -138,7 +138,7 @@ func deleteNodeGroupAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "group not found", http.StatusNotFound)
 		return
 	}
-	auditEvent(r, "nodegroup.remove", sanitizeLog(name), "deleted")
+	auditEvent(r, "nodegroup.delete", sanitizeLog(name), "deleted")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
