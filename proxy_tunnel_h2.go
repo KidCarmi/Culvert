@@ -19,12 +19,15 @@ package main
 //     warrants its own careful pass.
 //   - PR3d concurrency: GOAWAY-on-shutdown / drainActiveTunnels registration,
 //     upstream GOAWAY → per-stream failure mapping, graceful teardown.
-//   - perf: forged-leaf session resumption for native tunnels (ticket-key sharing).
+//   - perf: the response body copy is pooled (relayBufPool) + adaptive-flush
+//     (h2CopyBody); forged-leaf session resumption for native tunnels (ticket-key
+//     sharing) is the remaining deferred perf item.
 
 import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -454,10 +457,7 @@ func (h *h2BlockResponder) blockBeforeResponse(contentType, body string) {
 func h2DeliverResponse(w http.ResponseWriter, resp *http.Response) error {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	// Flush per chunk so a trickle-streaming origin (SSE, gRPC server-streaming,
-	// long-poll) reaches the client promptly instead of stalling in the h2 server's
-	// ~4 KB write buffer until it fills or the stream ends.
-	if _, err := io.Copy(h2FlushWriter{w: w}, resp.Body); err != nil {
+	if err := h2CopyBody(w, resp.Body); err != nil {
 		return err
 	}
 	for k, vs := range resp.Trailer {
@@ -471,16 +471,73 @@ func h2DeliverResponse(w http.ResponseWriter, resp *http.Response) error {
 	return nil
 }
 
-// h2FlushWriter flushes the HTTP/2 ResponseWriter after every write so streaming
-// responses are delivered chunk-by-chunk rather than buffered.
-type h2FlushWriter struct {
-	w http.ResponseWriter
-}
-
-func (fw h2FlushWriter) Write(p []byte) (int, error) {
-	n, err := fw.w.Write(p)
-	if f, ok := fw.w.(http.Flusher); ok {
-		f.Flush()
+// h2CopyBody streams an upstream response body onto the client H2 stream.
+//
+// The GUARANTEED win is allocation: it uses a pooled 128 KiB relay buffer (the same
+// relayBufPool every other tunnel relay uses) instead of io.Copy's fresh 32 KiB
+// per-response allocation, so the byte-moving hot path allocates nothing per
+// response.
+//
+// Flushing is ADAPTIVE and NEVER delays a byte the origin has finished sending: it
+// forces a Flush after any SHORT read (nr < 128 KiB) — every real streaming message
+// (SSE events, gRPC frames, long-poll bodies are all far below 128 KiB) lands as a
+// short read and flushes exactly as the old unconditional per-write flush did, so
+// streaming latency is unchanged. The flush is skipped ONLY when a read fills the
+// whole 128 KiB buffer, which means more data was already waiting; back-to-back
+// full reads then coalesce into the h2 write scheduler instead of paying a Flush
+// each. This coalescing is OPPORTUNISTIC, not guaranteed — a real http2.Transport
+// body reads out of a flow-control-bounded pipe and often returns < 128 KiB even
+// under sustained bulk, in which case the cadence is effectively the old per-read
+// flush (no worse). So the change is a strict improvement (pooled buffer always;
+// fewer flushes when full reads happen) but the bulk-coalescing magnitude depends
+// on the upstream's read sizes.
+//
+// A full-buffer final chunk is still delivered: a 128 KiB write goes straight
+// through the h2 handler's ~4 KiB bufio to the frame scheduler, and on normal
+// completion the h2 server flushes the sub-4 KiB remainder on END_STREAM when the
+// handler returns — no tail is stranded on the success path. The only deferral is a
+// streamed chunk that EXACTLY fills the buffer then pauses on a still-open stream;
+// its < 4 KiB bufio remainder waits for the next read, bounded by the per-stream
+// watchdog. That does not arise for real streaming protocols.
+//
+// The src is the watchdog-wrapped body (h2StallReader), so every Read here re-arms
+// the per-stream inactivity timer exactly as before — flushing less often does not
+// affect the stall bound.
+func h2CopyBody(w http.ResponseWriter, src io.Reader) error {
+	flusher, _ := w.(http.Flusher)
+	bp := getRelayBuf()
+	defer relayBufPool.Put(bp)
+	buf := *bp
+	for {
+		// Mirrors io.Copy's read/write loop (including the benign (0,nil) case: a
+		// well-behaved body — the h2StallReader-wrapped http2 body here — never spins,
+		// same assumption io.Copy makes). len(buf) is relayBufSize (getRelayBuf never
+		// returns a larger slice), so "nr < len(buf)" is the 128 KiB short-read test.
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			// Preserve io.Copy's byte-integrity guarantee: a short write with a nil
+			// error (an io.Writer contract violation the production h2 responseWriter
+			// never commits, but which the replaced io.Copy still guarded) must fail
+			// the exchange → exDeliverError → RST_STREAM, never a clean truncated 200.
+			nw, werr := w.Write(buf[:nr])
+			if werr != nil {
+				return werr
+			}
+			if nw < nr {
+				return io.ErrShortWrite
+			}
+			if flusher != nil && nr < len(buf) {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			// errors.Is (not ==) so a body that ever wraps EOF (%w) still ends the
+			// stream cleanly rather than surfacing as exDeliverError → a spurious
+			// RST_STREAM on a fully-delivered response.
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			return rerr
+		}
 	}
-	return n, err
 }
