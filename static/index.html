@@ -9641,7 +9641,15 @@ function renderPolicy() {
   // skip exactly when the proxy is busy; counters are patched in place
   // instead. JSON-array form so filter text containing separators cannot
   // collide with the other fields.
-  const sig = JSON.stringify([_polVersion, total, q, polActionFilter, _polUnusedFilter, _polStagedOrder]);
+  // When the Unused filter is active, row membership depends on lastHit, which
+  // churns under live traffic WITHOUT bumping _polVersion — so fold a coarse
+  // 1-minute time bucket into the sig. The cleanup view then re-filters roughly
+  // once a minute (a just-matched rule drops out; a rule aging past the window
+  // appears) instead of going stale until the next config change. Zero effect
+  // when the filter is off, so the normal render-skip that keeps the rulebase
+  // scalable under traffic is unchanged.
+  const unusedBucket = _polUnusedFilter ? Math.floor(Date.now() / 60000) : 0;
+  const sig = JSON.stringify([_polVersion, total, q, polActionFilter, _polUnusedFilter, unusedBucket, _polStagedOrder]);
   if (sig === _polRenderSig) { _polPatchHitCounts(accessRules); return; }
   _polRenderSig = sig;
 
