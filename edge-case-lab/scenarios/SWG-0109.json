@@ -1,0 +1,255 @@
+{
+  "schema_version": "1.0.0",
+  "id": "SWG-0109",
+  "title": "Block category 'streaming' for guest network only",
+  "administrator_requirement": "Guests may not reach 'streaming' hosts; corporate users may. Combines source zone with URL category.",
+  "enterprise_validity_rationale": "Per-audience category policy (guest vs corporate) is standard SWG location policy.",
+  "comparable_product_capability": "Compound match (source+category)",
+  "capabilities": [
+    "source_ip_subnet",
+    "url_categories",
+    "http"
+  ],
+  "semantic_fingerprint": "8b5888c823316ad9",
+  "notes": "",
+  "preconditions": {
+    "baseline": "fresh /data + open-mode",
+    "fixtures": "local origin_server on 192.0.2.2 (HTTP 18091 / HTTPS 18453), /etc/hosts routing",
+    "network_topology": "single-node Culvert; TEST-NET-1 fixture; two client sources (192.0.2.2 corp / 127.0.0.1 guest)",
+    "requires_auth": false
+  },
+  "intent": {
+    "default_action": "allow",
+    "default_auth": "Exempt",
+    "objects": {
+      "categories": {
+        "streaming": [
+          "media.corp.local"
+        ]
+      }
+    },
+    "rules": [
+      {
+        "name": "guest-block-streaming",
+        "priority": 10,
+        "kind": "access",
+        "match": {
+          "src_ip": "127.0.0.0/8",
+          "category": "streaming"
+        },
+        "action": "block_page"
+      }
+    ]
+  },
+  "expected_culvert_objects": {
+    "categories": [
+      "streaming"
+    ],
+    "category_groups": [],
+    "decryption_profiles": [],
+    "blocklist": [],
+    "ssl_bypass": [],
+    "access_rules": [
+      "guest-block-streaming"
+    ],
+    "default_action": "allow",
+    "default_auth": "Exempt"
+  },
+  "configuration_steps": [
+    {
+      "method": "POST",
+      "path": "/api/urlcat",
+      "req": {
+        "name": "streaming",
+        "hosts": [
+          "media.corp.local"
+        ]
+      },
+      "status": 200,
+      "resp_head": "{\"name\":\"streaming\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/default-action",
+      "req": {
+        "action": "allow"
+      },
+      "status": 200,
+      "resp_head": "{\"defaultAction\":\"allow\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "guest-block-streaming",
+        "priority": 10,
+        "sourceIP": "127.0.0.0/8",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "",
+        "destCategory": "streaming",
+        "destCategoryGroup": "",
+        "action": "Block_Page",
+        "sslAction": ""
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9Y3ZSA36YV9R1SCTVTVV5\",\"hitCount\""
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9Y3ZSA36YV9R1"
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/export",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:17:27Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":f"
+    }
+  ],
+  "apply_report": {
+    "errors": [],
+    "warnings": [],
+    "created": [
+      "category:streaming"
+    ],
+    "post_apply": [],
+    "readback": {
+      "persisted_rules": 1,
+      "expected_rules": 1,
+      "mismatches": []
+    }
+  },
+  "effective_config_excerpt": {
+    "defaultAction": "allow",
+    "policyRules": [
+      {
+        "priority": 10,
+        "name": "guest-block-streaming",
+        "sourceIP": "127.0.0.0/8",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "",
+        "destCategory": "streaming",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": false,
+        "action": "Block_Page",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXC9Y3ZSA36YV9R1SCTVTVV5",
+        "hitCount": 0,
+        "createdAt": "2026-07-12T23:17:27Z",
+        "modifiedAt": "2026-07-12T23:17:27Z",
+        "modifiedBy": "unknown"
+      }
+    ],
+    "blocklist": [],
+    "sslBypass": []
+  },
+  "test_vectors": [
+    {
+      "vector": {
+        "id": "guest",
+        "scheme": "http",
+        "host": "media.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": "guest-block-streaming",
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "Rule 'guest-block-streaming' action=Block_Page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "block_page",
+        "tls": null,
+        "http_status": 403,
+        "curl_exit": 0,
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+        "is_block_page": true,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:17:27 POLICY_BLOCK rule=\"guest-block-streaming\" pri=10 127.0.0.1 -> \"media.corp.local\" [srcIP=127.0.0.0/8 destCat=streaming] {req_id=a1a77fa9cbde37c1 identity= rule=guest-block-streaming action=block}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 1,
+          "allowed": 0
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'block_page' matches expected 'block_page'"
+      }
+    },
+    {
+      "vector": {
+        "id": "corp",
+        "scheme": "http",
+        "host": "media.corp.local",
+        "client_ip": "192.0.2.2"
+      },
+      "expected": {
+        "disposition": "allow",
+        "tls": null,
+        "matched_rule": null,
+        "http_status_family": "2xx",
+        "certainty": "deterministic",
+        "rationale": "No access rule matched and Stage-2 default is allow: passthrough.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": null,
+        "http_status": 200,
+        "curl_exit": 0,
+        "body_head": "origin:media.corp.local\n",
+        "is_block_page": false,
+        "decision_trace": [],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 0,
+          "allowed": 1
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'allow' matches expected 'allow'"
+      }
+    }
+  ],
+  "result_classification": "PASS",
+  "confidence_score": 0.95,
+  "cleanup_procedure": "API reset_config (delete rules, default-action allow) or fresh /data wipe + process restart between scenarios; fresh restart for bug confirmation.",
+  "reproduction": {
+    "env": {
+      "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
+      "binary": "/home/user/Culvert/culvert",
+      "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+      "fixture_ip": "192.0.2.2",
+      "proxy": "http://127.0.0.1:18080",
+      "ui": "http://127.0.0.1:19090",
+      "captured_at": "2026-07-12T23:14:33.303507+00:00"
+    },
+    "how": "python3 edge-case-lab/harness/repro_one.py SWG-0109"
+  },
+  "executed_at": "2026-07-12T23:17:28.087514+00:00"
+}

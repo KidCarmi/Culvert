@@ -1,0 +1,42 @@
+[
+  {
+    "vector": {
+      "id": "redir",
+      "scheme": "http",
+      "host": "social.example.test",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "redirect",
+      "tls": null,
+      "matched_rule": "redirect-social",
+      "http_status_family": "3xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'redirect-social' action=Redirect.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "redirect",
+      "tls": null,
+      "http_status": 302,
+      "curl_exit": 0,
+      "body_head": "<a href=\"http://intranet.corp.local:18091/policy-notice\">Found</a>.\n\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:14:56 POLICY_REDIRECT rule=\"redirect-social\" pri=10 127.0.0.1 -> \"social.example.test\" => \"http://intranet.corp.local:18091/policy-notice\" [destFQDN=social.example.test] {req_id=1894a1cbadf2793d identity= rule=redirect-social action=redirect}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'redirect' matches expected 'redirect'"
+    }
+  }
+]

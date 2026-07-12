@@ -1,0 +1,42 @@
+[
+  {
+    "vector": {
+      "id": "d",
+      "scheme": "http",
+      "host": "partner.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "drop",
+      "tls": null,
+      "matched_rule": "covert-drop",
+      "http_status_family": "conn_fail",
+      "certainty": "deterministic",
+      "rationale": "Rule 'covert-drop' action=Drop (silent RST).",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "drop",
+      "tls": null,
+      "http_status": 0,
+      "curl_exit": 52,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:19:39 POLICY_DROP rule=\"covert-drop\" pri=10 127.0.0.1 -> \"partner.corp.local\" [destFQDN=partner.corp.local] {req_id=8860594b0b05b6fc identity= rule=covert-drop action=drop}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'drop' matches expected 'drop'"
+    }
+  }
+]

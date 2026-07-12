@@ -1,0 +1,97 @@
+[
+  {
+    "vector": {
+      "id": "permit",
+      "scheme": "https",
+      "host": "tenantb.corp.local",
+      "client_ip": "127.0.0.1",
+      "upstream_cert": "untrusted"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": "tls_intercepted",
+      "matched_rule": "permit-inspect",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'permit-inspect' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": "tls_intercepted",
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:tenantb.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:19:53 POLICY_ALLOW rule=\"permit-inspect\" pri=10 127.0.0.1 CONNECT \"tenantb.corp.local:18453\" [destFQDN=tenantb.corp.local] {req_id=1ba6634d7174e1d4 identity= rule=permit-inspect action=allow}",
+        "[Culvert] 2026/07/12 23:19:53 SSL_INNER 127.0.0.1 GET tenantb.corp.local/ (profile=\"\" filter=off)",
+        "[Culvert] 2026/07/12 23:19:53 POLICY_ALLOW rule=\"permit-inspect\" pri=10 127.0.0.1 CONNECT \"tenantb.corp.local:18453\" [destFQDN=tenantb.corp.local] {req_id=9932c7c65e4a208b identity= rule=permit-inspect action=allow}",
+        "[Culvert] 2026/07/12 23:19:53 SSL_INSPECT client TLS handshake error for \"tenantb.corp.local\": local error: tls: bad record MAC"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 0,
+        "allowed": 2
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 0,
+          "status": 200,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 60,
+          "status": 0,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "deny",
+      "scheme": "http",
+      "host": "badssl.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": null,
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "No access rule matched and Stage-2 default is deny (Zero Trust): proxy serves POLICY_DEFAULT_DENY block page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:19:53 POLICY_DEFAULT_DENY 127.0.0.1 GET \"badssl.corp.local:18091\" {req_id=6cbaf5e4c686d668 identity= action=deny}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  }
+]

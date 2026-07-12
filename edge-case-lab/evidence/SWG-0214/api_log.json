@@ -1,0 +1,63 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "conflict-allow",
+      "priority": 5,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "app.corp.local",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Allow",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":5,\"name\":\"conflict-allow\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2SP07YGX343525GW034T\",\"hitCount\":0,\"createdAt\":\"202"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "conflict-block",
+      "priority": 5,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "app.corp.local",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Block_Page",
+      "sslAction": ""
+    },
+    "status": 400,
+    "resp_head": "priority 5 is already in use\n"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":5,\"name\":\"conflict-allow\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2SP07YGX343525GW034T\",\"hitCount"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:20:00Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":5,\"name\":\"conflict-allow\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":"
+  }
+]

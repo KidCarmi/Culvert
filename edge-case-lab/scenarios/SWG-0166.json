@@ -1,0 +1,315 @@
+{
+  "schema_version": "1.0.0",
+  "id": "SWG-0166",
+  "title": "Allow-all-with-social-media-carveout (category exception above broad permit)",
+  "administrator_requirement": "Permit all egress but block the 'social-media' category via a higher-priority rule; verifies priority-0 category block wins over a priority-1 allow-all.",
+  "enterprise_validity_rationale": "Layered allow-with-exceptions using categories is a very common enterprise shape.",
+  "comparable_product_capability": "Rule ordering + category",
+  "capabilities": [
+    "rule_first_match",
+    "url_categories",
+    "rule_ordering",
+    "http"
+  ],
+  "semantic_fingerprint": "953c8d92f7b70918",
+  "notes": "",
+  "preconditions": {
+    "baseline": "fresh /data + open-mode",
+    "fixtures": "local origin_server on 192.0.2.2 (HTTP 18091 / HTTPS 18453), /etc/hosts routing",
+    "network_topology": "single-node Culvert; TEST-NET-1 fixture; two client sources (192.0.2.2 corp / 127.0.0.1 guest)",
+    "requires_auth": false
+  },
+  "intent": {
+    "default_action": "deny",
+    "default_auth": "Exempt",
+    "objects": {
+      "categories": {
+        "social-media": [
+          "social.example.test"
+        ]
+      }
+    },
+    "rules": [
+      {
+        "name": "permit-corp",
+        "priority": 1,
+        "kind": "access",
+        "match": {
+          "fqdn": "*"
+        },
+        "action": "allow"
+      },
+      {
+        "name": "block-social-media",
+        "priority": 0,
+        "kind": "access",
+        "match": {
+          "category": "social-media"
+        },
+        "action": "block_page"
+      }
+    ],
+    "triage": {
+      "class": "CONFIGURATION_CONTRACT_GAP",
+      "note": "The admin set the category-exception rule to priority 0 intending TOP precedence (a common '0 = highest' convention), but Culvert treats priority 0 as the Go zero-value 'unset' and silently auto-assigns it to the END (persisted as priority 2, BELOW the priority-1 allow-all). The config is accepted with NO warning, so the intended precedence is silently INVERTED and the exception never fires. Priority 0 is unusable as a top-priority value; the coercion is not surfaced. (The same layering works correctly with priorities >=1 \u2014 see the precedence family, which passes.)"
+    }
+  },
+  "expected_culvert_objects": {
+    "categories": [
+      "social-media"
+    ],
+    "category_groups": [],
+    "decryption_profiles": [],
+    "blocklist": [],
+    "ssl_bypass": [],
+    "access_rules": [
+      "permit-corp",
+      "block-social-media"
+    ],
+    "default_action": "deny",
+    "default_auth": "Exempt"
+  },
+  "configuration_steps": [
+    {
+      "method": "POST",
+      "path": "/api/urlcat",
+      "req": {
+        "name": "social-media",
+        "hosts": [
+          "social.example.test"
+        ]
+      },
+      "status": 200,
+      "resp_head": "{\"name\":\"social-media\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/default-action",
+      "req": {
+        "action": "deny"
+      },
+      "status": 200,
+      "resp_head": "{\"defaultAction\":\"deny\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "permit-corp",
+        "priority": 1,
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "*",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "action": "Allow",
+        "sslAction": ""
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8HM6782ZMJS3GRPW5K46\",\"hitCount\":0,\"createdAt\":\"2026-07-12T23:23:08"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "block-social-media",
+        "priority": 0,
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "",
+        "destCategory": "social-media",
+        "destCategoryGroup": "",
+        "action": "Block_Page",
+        "sslAction": ""
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":2,\"name\":\"block-social-media\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"social-media\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8HMAHSX122XVVHQFZVAX\",\"hitCount\":0,\"createdA"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":2,\"rules\":[{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8HM6782ZMJS3GRPW5K46\",\"hitCount\":0,\"createdAt\":"
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/export",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:23:09Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirec"
+    }
+  ],
+  "apply_report": {
+    "errors": [],
+    "warnings": [],
+    "created": [
+      "category:social-media"
+    ],
+    "post_apply": [],
+    "readback": {
+      "persisted_rules": 2,
+      "expected_rules": 2,
+      "mismatches": []
+    }
+  },
+  "effective_config_excerpt": {
+    "defaultAction": "deny",
+    "policyRules": [
+      {
+        "priority": 1,
+        "name": "permit-corp",
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "*",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": false,
+        "action": "Allow",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXCA8HM6782ZMJS3GRPW5K46",
+        "hitCount": 0,
+        "createdAt": "2026-07-12T23:23:08Z",
+        "modifiedAt": "2026-07-12T23:23:08Z",
+        "modifiedBy": "unknown"
+      },
+      {
+        "priority": 2,
+        "name": "block-social-media",
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "",
+        "destCategory": "social-media",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": false,
+        "action": "Block_Page",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXCA8HMAHSX122XVVHQFZVAX",
+        "hitCount": 0,
+        "createdAt": "2026-07-12T23:23:08Z",
+        "modifiedAt": "2026-07-12T23:23:08Z",
+        "modifiedBy": "unknown"
+      }
+    ],
+    "blocklist": [],
+    "sslBypass": []
+  },
+  "test_vectors": [
+    {
+      "vector": {
+        "id": "blocked",
+        "scheme": "http",
+        "host": "social.example.test",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": "block-social-media",
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "Rule 'block-social-media' action=Block_Page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": null,
+        "http_status": 200,
+        "curl_exit": 0,
+        "body_head": "origin:social.example.test\n",
+        "is_block_page": false,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:23:09 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"social.example.test:18091\" [destFQDN=*] {req_id=436b98116db923cf identity= rule=permit-corp action=allow}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 0,
+          "allowed": 1
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "CONFIGURATION_CONTRACT_GAP",
+        "primary": "CONFIGURATION_CONTRACT_GAP",
+        "confidence": 0.85,
+        "reason": "expected 'block_page' but actual 'allow'. Triage: The admin set the category-exception rule to priority 0 intending TOP precedence (a common '0 = highest' convention), but Culvert treats priority 0 as the Go zero-value 'unset' and silently auto-assig"
+      }
+    },
+    {
+      "vector": {
+        "id": "allowed",
+        "scheme": "http",
+        "host": "app.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "allow",
+        "tls": null,
+        "matched_rule": "permit-corp",
+        "http_status_family": "2xx",
+        "certainty": "deterministic",
+        "rationale": "Rule 'permit-corp' action=Allow.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": null,
+        "http_status": 200,
+        "curl_exit": 0,
+        "body_head": "origin:app.corp.local\n",
+        "is_block_page": false,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:23:09 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=*] {req_id=c764e8eff5cbc6ec identity= rule=permit-corp action=allow}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 0,
+          "allowed": 1
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'allow' matches expected 'allow'"
+      }
+    }
+  ],
+  "result_classification": "CONFIGURATION_CONTRACT_GAP",
+  "confidence_score": 0.85,
+  "cleanup_procedure": "API reset_config (delete rules, default-action allow) or fresh /data wipe + process restart between scenarios; fresh restart for bug confirmation.",
+  "reproduction": {
+    "env": {
+      "culvert_commit": "eeee019fdc5b02b3a5d0f2ca147413eeec30fb83",
+      "binary": "/home/user/Culvert/culvert",
+      "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+      "fixture_ip": "192.0.2.2",
+      "proxy": "http://127.0.0.1:18080",
+      "ui": "http://127.0.0.1:19090",
+      "captured_at": "2026-07-12T23:23:06.876067+00:00"
+    },
+    "how": "python3 edge-case-lab/harness/repro_one.py SWG-0166"
+  },
+  "executed_at": "2026-07-12T23:23:09.736813+00:00"
+}

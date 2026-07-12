@@ -1,0 +1,55 @@
+[
+  {
+    "vector": {
+      "id": "p",
+      "scheme": "https",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1",
+      "upstream_cert": "untrusted"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": "tls_intercepted",
+      "matched_rule": "inspect-prof",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'inspect-prof' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "conn_fail",
+      "tls": null,
+      "http_status": 0,
+      "curl_exit": 56,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:16:27 POLICY_ALLOW rule=\"inspect-prof\" pri=1 127.0.0.1 CONNECT \"app.corp.local:18453\" [destFQDN=app.corp.local] {req_id=413c06edd18370d4 identity= rule=inspect-prof action=allow}",
+        "[Culvert] 2026/07/12 23:16:27 POLICY_ALLOW rule=\"inspect-prof\" pri=1 127.0.0.1 CONNECT \"app.corp.local:18453\" [destFQDN=app.corp.local] {req_id=cfb9c64bac401ce2 identity= rule=inspect-prof action=allow}"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 0,
+        "allowed": 2
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "CONFIGURATION_CONTRACT_GAP",
+      "primary": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "reason": "expected 'allow' but actual 'conn_fail'. Triage: certVerification='permissive' is accepted but behaves like 'strict' (blocks untrusted upstream); its documented allow+log semantics are deferred/unimplemented (decryptprofile.go:71, decryptprofile_res"
+    }
+  }
+]

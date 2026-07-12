@@ -1,0 +1,56 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "news",
+      "hosts": [
+        "news.example.test"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"news\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "block-cat-news",
+      "priority": 10,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "",
+      "destCategory": "news",
+      "destCategoryGroup": "",
+      "action": "Block_Page",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":10,\"name\":\"block-cat-news\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"news\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9V1JP8W1C9BXJG2FTRVAE\",\"hitCount\":0,\"createdAt\":\"2026-07"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"block-cat-news\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"news\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9V1JP8W1C9BXJG2FTRVAE\",\"hitCount\":0,"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:15:46Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"block-cat-news\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"news\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Pa"
+  }
+]

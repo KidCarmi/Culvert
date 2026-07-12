@@ -1,0 +1,42 @@
+[
+  {
+    "vector": {
+      "id": "b",
+      "scheme": "http",
+      "host": "news.example.test",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "obs-block",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'obs-block' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:17:46 POLICY_BLOCK rule=\"obs-block\" pri=10 127.0.0.1 -> \"news.example.test\" [destFQDN=news.example.test] {req_id=cb67e8cc46be8aed identity= rule=obs-block action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  }
+]

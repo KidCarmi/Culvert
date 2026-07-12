@@ -1,0 +1,55 @@
+[
+  {
+    "vector": {
+      "id": "strict",
+      "scheme": "https",
+      "host": "badssl.corp.local",
+      "client_ip": "127.0.0.1",
+      "upstream_cert": "untrusted"
+    },
+    "expected": {
+      "disposition": "conn_fail",
+      "tls": "tls_intercepted",
+      "matched_rule": "inspect-strict",
+      "http_status_family": "conn_fail",
+      "certainty": "deterministic",
+      "rationale": "Rule 'inspect-strict' action=Allow. Upstream cert untrusted and verification strict => inspect leg fails (fail-closed).",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "conn_fail",
+      "tls": null,
+      "http_status": 0,
+      "curl_exit": 56,
+      "body_head": "origin:partner.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:14:53 POLICY_ALLOW rule=\"inspect-strict\" pri=1 127.0.0.1 CONNECT \"badssl.corp.local:18453\" [destFQDN=badssl.corp.local] {req_id=aaeafb637e139bde identity= rule=inspect-strict action=allow}",
+        "[Culvert] 2026/07/12 23:14:53 POLICY_ALLOW rule=\"inspect-strict\" pri=1 127.0.0.1 CONNECT \"badssl.corp.local:18453\" [destFQDN=badssl.corp.local] {req_id=6616ad35c6cc18fa identity= rule=inspect-strict action=allow}"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 0,
+        "allowed": 2
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'conn_fail' matches expected 'conn_fail'"
+    }
+  }
+]

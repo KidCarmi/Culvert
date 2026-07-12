@@ -1,0 +1,56 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "streaming",
+      "hosts": [
+        "media.corp.local"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"streaming\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "guest-block-streaming",
+      "priority": 10,
+      "sourceIP": "127.0.0.0/8",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "",
+      "destCategory": "streaming",
+      "destCategoryGroup": "",
+      "action": "Block_Page",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9Y3ZSA36YV9R1SCTVTVV5\",\"hitCount\""
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9Y3ZSA36YV9R1"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:17:27Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"guest-block-streaming\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"streaming\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":f"
+  }
+]

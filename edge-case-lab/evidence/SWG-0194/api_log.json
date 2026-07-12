@@ -1,0 +1,44 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "covert-drop",
+      "priority": 10,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "example.test",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Drop",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":10,\"name\":\"covert-drop\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"example.test\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Drop\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA237JYVGHCCT5X3DKPPV4\",\"hitCount\":0,\"createdAt\":\"2026-07-"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"covert-drop\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"example.test\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Drop\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA237JYVGHCCT5X3DKPPV4\",\"hitCount\":0,\""
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:19:37Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"covert-drop\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"example.test\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Dro"
+  }
+]

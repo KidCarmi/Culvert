@@ -1,0 +1,42 @@
+[
+  {
+    "vector": {
+      "id": "unauth",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "auth_challenge",
+      "tls": null,
+      "matched_rule": null,
+      "http_status_family": "407",
+      "certainty": "deterministic",
+      "rationale": "Auth backend configured and default-auth=Default: unauthenticated request must be challenged (407 Proxy-Authenticate) before policy.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "auth_challenge",
+      "tls": null,
+      "http_status": 407,
+      "curl_exit": 0,
+      "body_head": "Proxy Authentication Required\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:10 AUTH_FAIL (no-credentials) 127.0.0.1 {req_id=5d2f178cd9871743 action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'auth_challenge' matches expected 'auth_challenge'"
+    }
+  }
+]

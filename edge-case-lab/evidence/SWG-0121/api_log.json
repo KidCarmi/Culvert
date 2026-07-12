@@ -1,0 +1,63 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "deny"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"deny\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "tenantA-app",
+      "priority": 10,
+      "sourceIP": "192.0.2.0/24",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "app.corp.local",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Allow",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":10,\"name\":\"tenantA-app\",\"sourceIP\":\"192.0.2.0/24\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9YMSEJ8PAGWB168TNZBXM\",\"hitCount\":0,\"creat"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "tenantB-app",
+      "priority": 11,
+      "sourceIP": "127.0.0.0/8",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "tenantb.corp.local",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Allow",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":11,\"name\":\"tenantB-app\",\"sourceIP\":\"127.0.0.0/8\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"tenantb.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9YMSGEYF7SSV619QH9A2H\",\"hitCount\":0,\"cr"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":2,\"rules\":[{\"priority\":10,\"name\":\"tenantA-app\",\"sourceIP\":\"192.0.2.0/24\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9YMSEJ8PAGWB168TNZBXM\""
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:17:44Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"tenantA-app\",\"sourceIP\":\"192.0.2.0/24\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false"
+  }
+]

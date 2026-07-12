@@ -798,7 +798,17 @@ class FullGen(Gen):
                       "rules": [{"name": "permit-corp", "priority": 1, "kind": "access",
                                  "match": {"fqdn": "*"}, "action": "allow"},
                                 {"name": f"block-{cat}", "priority": 0, "kind": "access",
-                                 "match": {"category": cat}, "action": "block_page"}]}
+                                 "match": {"category": cat}, "action": "block_page"}],
+                      "triage": {"class": "CONFIGURATION_CONTRACT_GAP",
+                                 "note": "The admin set the category-exception rule to priority 0 intending "
+                                         "TOP precedence (a common '0 = highest' convention), but Culvert "
+                                         "treats priority 0 as the Go zero-value 'unset' and silently "
+                                         "auto-assigns it to the END (persisted as priority 2, BELOW the "
+                                         "priority-1 allow-all). The config is accepted with NO warning, so "
+                                         "the intended precedence is silently INVERTED and the exception never "
+                                         "fires. Priority 0 is unusable as a top-priority value; the coercion "
+                                         "is not surfaced. (The same layering works correctly with priorities "
+                                         ">=1 — see the precedence family, which passes.)"}}
             self.add(
                 f"Allow-all-with-{cat}-carveout (category exception above broad permit)",
                 f"Permit all egress but block the '{cat}' category via a higher-priority rule; verifies "
@@ -863,6 +873,23 @@ class FullGen(Gen):
                       "rules": [{"name": f"permit-{cat}", "priority": 10, "kind": "access",
                                  "match": {"category": cat}, "action": "allow"}]}
             other = next(hh for hh in RESTRICTED if hh != h)
+            # Fixture caveat: the 'webmail' category host is example.test, which is a
+            # PARENT domain of social.example.test / news.example.test. Culvert's
+            # documented suffix category-matching therefore also classifies those
+            # subdomains as webmail (a host matching multiple categories resolves to
+            # the suffix-parent here), so the permit-webmail allow-list unexpectedly
+            # permits social/news. This is an AMBIGUOUS-FIXTURE artifact of the lab's
+            # category host choice, NOT a Culvert defect — recorded as test-infra.
+            if cat == "webmail":
+                intent["triage"] = {"class": "TEST_INFRA_FAILURE",
+                                    "note": "Lab fixture defect: webmail category host 'example.test' is a "
+                                            "parent domain of social.example.test/news.example.test, so "
+                                            "Culvert's (correct) suffix category matching classifies those "
+                                            "subdomains as webmail too, making the allow-list permit them. "
+                                            "Culvert behaves correctly; the scenario's category fixture is "
+                                            "ambiguous. Observation: for a host matching multiple categories "
+                                            "(exact vs suffix-parent), Culvert resolved to the suffix-parent "
+                                            "category — worth a documentation note on multi-category precedence."}
             self.add(
                 f"Category allow-list: permit only '{cat}' under default-deny",
                 f"Under default-deny, permit only the '{cat}' category; other categories (and uncategorised) "

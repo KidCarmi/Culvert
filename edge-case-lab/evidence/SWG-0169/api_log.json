@@ -1,0 +1,75 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "webmail",
+      "hosts": [
+        "example.test"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"webmail\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "deny"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"deny\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "permit-corp",
+      "priority": 1,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "*",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Allow",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8P7DT3DZ2QG2RYNX9JMG\",\"hitCount\":0,\"createdAt\":\"2026-07-12T23:23:13"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "block-webmail",
+      "priority": 0,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "",
+      "destCategory": "webmail",
+      "destCategoryGroup": "",
+      "action": "Block_Page",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":2,\"name\":\"block-webmail\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"webmail\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8P7GR0C1C0R6R42638JG\",\"hitCount\":0,\"createdAt\":\"2026-0"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":2,\"rules\":[{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA8P7DT3DZ2QG2RYNX9JMG\",\"hitCount\":0,\"createdAt\":"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:23:13Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":1,\"name\":\"permit-corp\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"*\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirec"
+  }
+]

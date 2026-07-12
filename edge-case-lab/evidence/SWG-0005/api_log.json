@@ -1,0 +1,93 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "social-media",
+      "hosts": [
+        "social.example.test"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"social-media\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "news",
+      "hosts": [
+        "news.example.test"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"news\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/urlcat",
+    "req": {
+      "name": "webmail",
+      "hosts": [
+        "example.test"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"name\":\"webmail\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/category-groups",
+    "req": {
+      "name": "non-productive",
+      "categories": [
+        "social-media",
+        "news"
+      ]
+    },
+    "status": 200,
+    "resp_head": "{\"group\":{\"id\":\"642080c1-230\",\"name\":\"non-productive\",\"categories\":[\"social-media\",\"news\"],\"created_at\":\"2026-07-12T23:14:41Z\",\"updated_at\":\"2026-07-12T23:14:41Z\"},\"ok\":true}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "block-nonproductive",
+      "priority": 10,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "",
+      "destCategory": "",
+      "destCategoryGroup": "non-productive",
+      "action": "Block_Page",
+      "sslAction": ""
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":10,\"name\":\"block-nonproductive\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"\",\"destCategoryGroup\":\"non-productive\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9S1ZFPZWZ11G2PA2WDB1W\",\"hitCount\":0,\"crea"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"block-nonproductive\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"\",\"destCategoryGroup\":\"non-productive\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9S1ZFPZWZ11G2PA2WDB1W"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:14:41Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"block-nonproductive\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"\",\"destCategory\":\"\",\"destCategoryGroup\":\"non-productive\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"ac"
+  }
+]

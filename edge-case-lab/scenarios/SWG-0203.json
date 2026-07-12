@@ -1,0 +1,252 @@
+{
+  "schema_version": "1.0.0",
+  "id": "SWG-0203",
+  "title": "Zero-Trust: only partner extranet permitted, and inspected (partner.corp.local)",
+  "administrator_requirement": "Under default-deny, permit only 'partner.corp.local' AND decrypt it for inspection \u2014 a sanctioned, inspected egress path.",
+  "enterprise_validity_rationale": "Combining allow-listing with mandatory inspection is a Zero-Trust SWG pattern.",
+  "comparable_product_capability": "Default-deny + inspection",
+  "capabilities": [
+    "default_deny",
+    "tls_inspection",
+    "https_connect",
+    "rule_first_match"
+  ],
+  "semantic_fingerprint": "62a1ecee680767ed",
+  "notes": "",
+  "preconditions": {
+    "baseline": "fresh /data + open-mode",
+    "fixtures": "local origin_server on 192.0.2.2 (HTTP 18091 / HTTPS 18453), /etc/hosts routing",
+    "network_topology": "single-node Culvert; TEST-NET-1 fixture; two client sources (192.0.2.2 corp / 127.0.0.1 guest)",
+    "requires_auth": false
+  },
+  "intent": {
+    "default_action": "deny",
+    "default_auth": "Exempt",
+    "rules": [
+      {
+        "name": "permit-inspect",
+        "priority": 10,
+        "kind": "access",
+        "match": {
+          "fqdn": "partner.corp.local"
+        },
+        "action": "allow",
+        "ssl": "inspect",
+        "tls_skip_verify": true
+      }
+    ]
+  },
+  "expected_culvert_objects": {
+    "categories": [],
+    "category_groups": [],
+    "decryption_profiles": [],
+    "blocklist": [],
+    "ssl_bypass": [],
+    "access_rules": [
+      "permit-inspect"
+    ],
+    "default_action": "deny",
+    "default_auth": "Exempt"
+  },
+  "configuration_steps": [
+    {
+      "method": "POST",
+      "path": "/api/default-action",
+      "req": {
+        "action": "deny"
+      },
+      "status": 200,
+      "resp_head": "{\"defaultAction\":\"deny\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "permit-inspect",
+        "priority": 10,
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "partner.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "action": "Allow",
+        "sslAction": "Inspect",
+        "tlsSkipVerify": true
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":10,\"name\":\"permit-inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"partner.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":true,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2GVFG46VK55BW2EYJ1Q0\",\"hitCount\":0,\"crea"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"permit-inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"partner.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":true,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2GVFG46VK55BW2EYJ1Q0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/export",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:19:51Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"permit-inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"partner.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":tru"
+    }
+  ],
+  "apply_report": {
+    "errors": [],
+    "warnings": [],
+    "created": [],
+    "post_apply": [],
+    "readback": {
+      "persisted_rules": 1,
+      "expected_rules": 1,
+      "mismatches": []
+    }
+  },
+  "effective_config_excerpt": {
+    "defaultAction": "deny",
+    "policyRules": [
+      {
+        "priority": 10,
+        "name": "permit-inspect",
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "partner.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "Inspect",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": true,
+        "action": "Allow",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXCA2GVFG46VK55BW2EYJ1Q0",
+        "hitCount": 0,
+        "createdAt": "2026-07-12T23:19:51Z",
+        "modifiedAt": "2026-07-12T23:19:51Z",
+        "modifiedBy": "unknown"
+      }
+    ],
+    "blocklist": [],
+    "sslBypass": []
+  },
+  "test_vectors": [
+    {
+      "vector": {
+        "id": "permit",
+        "scheme": "https",
+        "host": "partner.corp.local",
+        "client_ip": "127.0.0.1",
+        "upstream_cert": "untrusted"
+      },
+      "expected": {
+        "disposition": "allow",
+        "tls": "tls_intercepted",
+        "matched_rule": "permit-inspect",
+        "http_status_family": "2xx",
+        "certainty": "deterministic",
+        "rationale": "Rule 'permit-inspect' action=Allow.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": "tls_intercepted",
+        "http_status": 200,
+        "curl_exit": 0,
+        "body_head": "origin:partner.corp.local\n",
+        "is_block_page": false,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:19:51 POLICY_ALLOW rule=\"permit-inspect\" pri=10 127.0.0.1 CONNECT \"partner.corp.local:18453\" [destFQDN=partner.corp.local] {req_id=1bf02f4b4ed633be identity= rule=permit-inspect action=allow}",
+          "[Culvert] 2026/07/12 23:19:51 SSL_INNER 127.0.0.1 GET partner.corp.local/ (profile=\"\" filter=off)",
+          "[Culvert] 2026/07/12 23:19:51 POLICY_ALLOW rule=\"permit-inspect\" pri=10 127.0.0.1 CONNECT \"partner.corp.local:18453\" [destFQDN=partner.corp.local] {req_id=44e0d84792855359 identity= rule=permit-inspect action=allow}",
+          "[Culvert] 2026/07/12 23:19:51 SSL_INSPECT client TLS handshake error for \"partner.corp.local\": local error: tls: bad record MAC"
+        ],
+        "stats_delta": {
+          "total": 2,
+          "blocked": 0,
+          "allowed": 2
+        },
+        "probes": {
+          "culvert_ca": {
+            "rc": 0,
+            "status": 200,
+            "err": ""
+          },
+          "fixture_ca": {
+            "rc": 60,
+            "status": 0,
+            "err": ""
+          }
+        }
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'allow' matches expected 'allow'"
+      }
+    },
+    {
+      "vector": {
+        "id": "deny",
+        "scheme": "http",
+        "host": "badssl.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": null,
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "No access rule matched and Stage-2 default is deny (Zero Trust): proxy serves POLICY_DEFAULT_DENY block page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "block_page",
+        "tls": null,
+        "http_status": 403,
+        "curl_exit": 0,
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+        "is_block_page": true,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:19:52 POLICY_DEFAULT_DENY 127.0.0.1 GET \"badssl.corp.local:18091\" {req_id=d6eca95f2a8d3a00 identity= action=deny}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 1,
+          "allowed": 0
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'block_page' matches expected 'block_page'"
+      }
+    }
+  ],
+  "result_classification": "PASS",
+  "confidence_score": 0.95,
+  "cleanup_procedure": "API reset_config (delete rules, default-action allow) or fresh /data wipe + process restart between scenarios; fresh restart for bug confirmation.",
+  "reproduction": {
+    "env": {
+      "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
+      "binary": "/home/user/Culvert/culvert",
+      "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+      "fixture_ip": "192.0.2.2",
+      "proxy": "http://127.0.0.1:18080",
+      "ui": "http://127.0.0.1:19090",
+      "captured_at": "2026-07-12T23:14:33.303507+00:00"
+    },
+    "how": "python3 edge-case-lab/harness/repro_one.py SWG-0203"
+  },
+  "executed_at": "2026-07-12T23:19:52.392823+00:00"
+}

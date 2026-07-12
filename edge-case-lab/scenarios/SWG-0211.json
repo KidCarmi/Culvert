@@ -1,0 +1,238 @@
+{
+  "schema_version": "1.0.0",
+  "id": "SWG-0211",
+  "title": "Egress policy must apply to SOCKS5 clients (media.corp.local)",
+  "administrator_requirement": "A blocked destination 'media.corp.local' must be blocked for SOCKS5 clients exactly as for HTTP/CONNECT clients; egress policy is transport-agnostic in a mature SWG.",
+  "enterprise_validity_rationale": "SWGs enforce the same egress policy across HTTP, CONNECT, and SOCKS transports (Zscaler/PAN-OS forward proxy).",
+  "comparable_product_capability": "Authorization policy (SOCKS5)",
+  "capabilities": [
+    "socks5",
+    "authorization_policy",
+    "rule_first_match"
+  ],
+  "semantic_fingerprint": "5c3b3d31aff0f0a5",
+  "notes": "",
+  "preconditions": {
+    "baseline": "fresh /data + open-mode",
+    "fixtures": "local origin_server on 192.0.2.2 (HTTP 18091 / HTTPS 18453), /etc/hosts routing",
+    "network_topology": "single-node Culvert; TEST-NET-1 fixture; two client sources (192.0.2.2 corp / 127.0.0.1 guest)",
+    "requires_auth": false
+  },
+  "intent": {
+    "default_action": "allow",
+    "default_auth": "Exempt",
+    "rules": [
+      {
+        "name": "block",
+        "priority": 1,
+        "kind": "access",
+        "match": {
+          "fqdn": "media.corp.local"
+        },
+        "action": "block_page"
+      }
+    ],
+    "triage": {
+      "class": "MISSING_CAPABILITY",
+      "note": "Culvert SOCKS5 handler does not run the PBAC policy engine (only the legacy blocklist); destination policy cannot be represented for SOCKS5 clients. Documented architecture, but a valid enterprise requirement that is unrepresentable => missing capability."
+    }
+  },
+  "expected_culvert_objects": {
+    "categories": [],
+    "category_groups": [],
+    "decryption_profiles": [],
+    "blocklist": [],
+    "ssl_bypass": [],
+    "access_rules": [
+      "block"
+    ],
+    "default_action": "allow",
+    "default_auth": "Exempt"
+  },
+  "configuration_steps": [
+    {
+      "method": "POST",
+      "path": "/api/default-action",
+      "req": {
+        "action": "allow"
+      },
+      "status": 200,
+      "resp_head": "{\"defaultAction\":\"allow\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "block",
+        "priority": 1,
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "media.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "action": "Block_Page",
+        "sslAction": ""
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":1,\"name\":\"block\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"media.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2NHNW04Y1WMRGVHQKQ8X\",\"hitCount\":0,\"createdAt\":\"2026-"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":1,\"rules\":[{\"priority\":1,\"name\":\"block\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"media.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_Page\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXCA2NHNW04Y1WMRGVHQKQ8X\",\"hitCount\":"
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/export",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:19:56Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":1,\"name\":\"block\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"media.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Block_"
+    }
+  ],
+  "apply_report": {
+    "errors": [],
+    "warnings": [],
+    "created": [],
+    "post_apply": [],
+    "readback": {
+      "persisted_rules": 1,
+      "expected_rules": 1,
+      "mismatches": []
+    }
+  },
+  "effective_config_excerpt": {
+    "defaultAction": "allow",
+    "policyRules": [
+      {
+        "priority": 1,
+        "name": "block",
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "media.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": false,
+        "action": "Block_Page",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXCA2NHNW04Y1WMRGVHQKQ8X",
+        "hitCount": 0,
+        "createdAt": "2026-07-12T23:19:56Z",
+        "modifiedAt": "2026-07-12T23:19:56Z",
+        "modifiedBy": "unknown"
+      }
+    ],
+    "blocklist": [],
+    "sslBypass": []
+  },
+  "test_vectors": [
+    {
+      "vector": {
+        "id": "http",
+        "scheme": "http",
+        "host": "media.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": "block",
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "Rule 'block' action=Block_Page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "block_page",
+        "tls": null,
+        "http_status": 403,
+        "curl_exit": 0,
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+        "is_block_page": true,
+        "decision_trace": [
+          "[Culvert] 2026/07/12 23:19:56 POLICY_BLOCK rule=\"block\" pri=1 127.0.0.1 -> \"media.corp.local\" [destFQDN=media.corp.local] {req_id=cc0f800742f9d918 identity= rule=block action=block}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 1,
+          "allowed": 0
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'block_page' matches expected 'block_page'"
+      }
+    },
+    {
+      "vector": {
+        "id": "socks",
+        "scheme": "socks5",
+        "host": "media.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": "block",
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "Rule 'block' action=Block_Page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": null,
+        "http_status": 200,
+        "curl_exit": 0,
+        "body_head": "origin:media.corp.local\n",
+        "is_block_page": false,
+        "decision_trace": [],
+        "stats_delta": {
+          "total": 2,
+          "blocked": 0,
+          "allowed": 2
+        },
+        "probes": {
+          "transport": "socks5",
+          "stderr": ""
+        }
+      },
+      "verdict": {
+        "verdict": "MISSING_CAPABILITY",
+        "primary": "MISSING_CAPABILITY",
+        "confidence": 0.85,
+        "reason": "expected 'block_page' but actual 'allow'. Triage: Culvert SOCKS5 handler does not run the PBAC policy engine (only the legacy blocklist); destination policy cannot be represented for SOCKS5 clients. Documented architecture, but a valid enterprise req"
+      }
+    }
+  ],
+  "result_classification": "MISSING_CAPABILITY",
+  "confidence_score": 0.85,
+  "cleanup_procedure": "API reset_config (delete rules, default-action allow) or fresh /data wipe + process restart between scenarios; fresh restart for bug confirmation.",
+  "reproduction": {
+    "env": {
+      "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
+      "binary": "/home/user/Culvert/culvert",
+      "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+      "fixture_ip": "192.0.2.2",
+      "proxy": "http://127.0.0.1:18080",
+      "ui": "http://127.0.0.1:19090",
+      "captured_at": "2026-07-12T23:14:33.303507+00:00"
+    },
+    "how": "python3 edge-case-lab/harness/repro_one.py SWG-0211"
+  },
+  "executed_at": "2026-07-12T23:19:57.140107+00:00"
+}

@@ -1,0 +1,43 @@
+[
+  {
+    "vector": {
+      "id": "s",
+      "scheme": "http",
+      "host": "files.corp.local",
+      "client_ip": "127.0.0.1",
+      "path": "/chunked?n=8"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "allow-files",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'allow-files' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "chunk-0\nchunk-1\nchunk-2\nchunk-3\nchunk-4\nchunk-5\nchunk-6\nchunk-7\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:16:46 POLICY_ALLOW rule=\"allow-files\" pri=1 127.0.0.1 GET \"files.corp.local:18091\" [destFQDN=files.corp.local] {req_id=b768194395cd86c0 identity= rule=allow-files action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  }
+]

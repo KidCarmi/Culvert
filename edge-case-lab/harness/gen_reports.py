@@ -134,9 +134,16 @@ def main():
       "PBAC policy engine (only the legacy blocklist), so destination/category/source policy is "
       "silently unenforced for SOCKS5 clients. Same host + same policy: HTTP/CONNECT blocks, "
       "SOCKS5 allows. (See Bug Candidates / Missing Capabilities.)")
-    A("2. **Config-durability model.** Policy created via the admin API is in-memory unless a "
-      "persistence flag/file is configured; see the configuration-persistence scenario result.")
-    A("3. **GUI-parity of security-critical knobs.** Several release/HA/fencing knobs are "
+    A("2. **Zero-value priority footgun.** A rule submitted at `priority 0` (a common '0 = highest' "
+      "convention) is silently treated as unset and auto-assigned to the END of the list, inverting "
+      "the admin's intended precedence with no warning (4 scenarios: SWG-0166–0169). Priorities >=1 "
+      "behave correctly.")
+    A("3. **Config-durability model.** Policy created via the admin API is in-memory unless a "
+      "persistence flag/file is configured, and the API gives no ephemeral warning — a GUI-configured "
+      "policy silently vanishes on restart (SWG-0124).")
+    A("4. **Named-option/behavior drift.** `certVerification=permissive` is accepted but behaves like "
+      "`strict` (its allow+log semantics are deferred/unimplemented) — SWG-0069.")
+    A("5. **GUI-parity of security-critical knobs.** Several release/HA/fencing knobs are "
       "startup/env-scoped (documented deferrals), limiting runtime GUI control.")
     A("")
     A("## Top product opportunities\n")
@@ -227,12 +234,16 @@ def main():
     if ccg:
         for r in ccg:
             m = manifests.get(r["id"], {})
+            tri = m.get("intent", {}).get("triage", {})
             L.append(f"### {r['id']} — {r['title']}")
             L.append(f"- **Requirement:** {m.get('administrator_requirement','')}")
-            L.append(f"- **Note:** {m.get('notes','')}")
+            L.append(f"- **Finding:** {tri.get('note', m.get('notes','')) }")
             errs = m.get("apply_report", {}).get("errors", [])
-            L.append(f"- **Apply errors:** {errs if errs else 'none (divergence at enforcement)'}")
-            L.append(f"- **Evidence:** `scenarios/{r['id']}.json`\n")
+            pa = m.get("apply_report", {}).get("persistence_after_restart")
+            if pa:
+                L.append(f"- **After-restart readback:** {pa}")
+            L.append(f"- **Apply errors:** {errs if errs else 'none — config accepted; divergence at enforcement'}")
+            L.append(f"- **Evidence:** `scenarios/{r['id']}.json`, `evidence/{r['id']}/`\n")
     else:
         L.append("_None._\n")
     L.append("## UX / observability / documentation gaps\n")

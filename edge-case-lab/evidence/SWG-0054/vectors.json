@@ -1,0 +1,80 @@
+[
+  {
+    "vector": {
+      "id": "guest",
+      "scheme": "http",
+      "host": "media.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "guest-block",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'guest-block' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:16:05 POLICY_BLOCK rule=\"guest-block\" pri=10 127.0.0.1 -> \"media.corp.local\" [srcIP=127.0.0.0/8 destFQDN=media.corp.local] {req_id=7c3bda13333d03b5 identity= rule=guest-block action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  },
+  {
+    "vector": {
+      "id": "corp",
+      "scheme": "http",
+      "host": "media.corp.local",
+      "client_ip": "192.0.2.2"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": null,
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "No access rule matched and Stage-2 default is allow: passthrough.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:media.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  }
+]

@@ -1,0 +1,122 @@
+[
+  {
+    "vector": {
+      "id": "c1",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "conflict-allow",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'conflict-allow' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:20:00 POLICY_ALLOW rule=\"conflict-allow\" pri=5 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=app.corp.local] {req_id=640f4fa14a683c60 identity= rule=conflict-allow action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "c2",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "conflict-allow",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'conflict-allow' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:20:01 POLICY_ALLOW rule=\"conflict-allow\" pri=5 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=app.corp.local] {req_id=a5abc03de6339cf7 identity= rule=conflict-allow action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "c3",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "conflict-allow",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'conflict-allow' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:20:01 POLICY_ALLOW rule=\"conflict-allow\" pri=5 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=app.corp.local] {req_id=8932cb843bdb2fe8 identity= rule=conflict-allow action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  }
+]

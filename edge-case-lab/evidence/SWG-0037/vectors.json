@@ -1,0 +1,134 @@
+[
+  {
+    "vector": {
+      "id": "permit",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "permit-wildcard",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'permit-wildcard' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:35 POLICY_ALLOW rule=\"permit-wildcard\" pri=10 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=*.corp.local] {req_id=9703f76c4292b70f identity= rule=permit-wildcard action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "permit-c",
+      "scheme": "https",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": "tls_passthrough",
+      "matched_rule": "permit-wildcard",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'permit-wildcard' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": "tls_passthrough",
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:app.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:35 POLICY_ALLOW rule=\"permit-wildcard\" pri=10 127.0.0.1 CONNECT \"app.corp.local:18453\" [destFQDN=*.corp.local] {req_id=6bf949e10ca01167 identity= rule=permit-wildcard action=allow}",
+        "[Culvert] 2026/07/12 23:15:35 POLICY_ALLOW rule=\"permit-wildcard\" pri=10 127.0.0.1 CONNECT \"app.corp.local:18453\" [destFQDN=*.corp.local] {req_id=a0388657b2880487 identity= rule=permit-wildcard action=allow}"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 0,
+        "allowed": 2
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 60,
+          "status": 0,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 0,
+          "status": 200,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "deny-other",
+      "scheme": "http",
+      "host": "media.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "permit-wildcard",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'permit-wildcard' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:media.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:36 POLICY_ALLOW rule=\"permit-wildcard\" pri=10 127.0.0.1 GET \"media.corp.local:18091\" [destFQDN=*.corp.local] {req_id=de72e6bb5c70eec3 identity= rule=permit-wildcard action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  }
+]

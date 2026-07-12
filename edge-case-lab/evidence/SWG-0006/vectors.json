@@ -1,0 +1,82 @@
+[
+  {
+    "vector": {
+      "id": "corp",
+      "scheme": "http",
+      "host": "intranet.corp.local",
+      "client_ip": "192.0.2.2"
+    },
+    "expected": {
+      "disposition": "allow",
+      "tls": null,
+      "matched_rule": "corp-only-intranet",
+      "http_status_family": "2xx",
+      "certainty": "deterministic",
+      "rationale": "Rule 'corp-only-intranet' action=Allow.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "allow",
+      "tls": null,
+      "http_status": 200,
+      "curl_exit": 0,
+      "body_head": "origin:intranet.corp.local\n",
+      "is_block_page": false,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:14:43 POLICY_ALLOW rule=\"corp-only-intranet\" pri=10 192.0.2.2 GET \"intranet.corp.local:18091\" [srcIP=192.0.2.0/24 destFQDN=intranet.corp.local] {req_id=19c0dba171a3e3bb identity= rule=corp-only-intranet action=allow}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 0,
+        "allowed": 1
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'allow' matches expected 'allow'"
+    }
+  },
+  {
+    "vector": {
+      "id": "guest",
+      "scheme": "http",
+      "host": "intranet.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "block-intranet-else",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'block-intranet-else' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:14:44 POLICY_BLOCK rule=\"block-intranet-else\" pri=20 127.0.0.1 -> \"intranet.corp.local\" [destFQDN=intranet.corp.local] {req_id=087e8697af3c6078 identity= rule=block-intranet-else action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  }
+]

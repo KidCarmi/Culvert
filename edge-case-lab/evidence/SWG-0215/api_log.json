@@ -1,0 +1,45 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "bad-redirect",
+      "priority": 10,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "social.example.test",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Redirect",
+      "sslAction": "",
+      "redirectURL": "http://attacker.evil.test/phish"
+    },
+    "status": 400,
+    "resp_head": "redirectURL must be an absolute http/https URL\n"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":0,\"rules\":[],\"updatedAt\":\"\",\"version\":0}\n"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:20:02Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[],\"defaultAction\":\"allow\",\"rewriteRules\":[],\"sslBypass\":[],\"contentScanPatterns\":[],\"fileBlockExtensions\":[\".exe\",\".cmd\",\".vbs\",\".scr\",\".dll\",\".bat\",\".ps1\",\".msi\",\".pif\",\".com\"],\"ipFilterMode\":\"\",\"ipList\":[],\"rateLimitRPM\":0,\"rateLimitExempt\":[],\"blockPageHTML\":\"\\u003c!DOCTYPE html\\u003e\\n\\u003ch"
+  }
+]

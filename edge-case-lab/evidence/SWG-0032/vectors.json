@@ -1,0 +1,134 @@
+[
+  {
+    "vector": {
+      "id": "http",
+      "scheme": "http",
+      "host": "media.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "block-streaming-bare",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'block-streaming-bare' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:26 POLICY_BLOCK rule=\"block-streaming-bare\" pri=10 127.0.0.1 -> \"media.corp.local\" [destFQDN=corp.local] {req_id=554d91ce928bbd45 identity= rule=block-streaming-bare action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  },
+  {
+    "vector": {
+      "id": "connect",
+      "scheme": "https",
+      "host": "media.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "block-streaming-bare",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'block-streaming-bare' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 0,
+      "curl_exit": 56,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:26 POLICY_BLOCK rule=\"block-streaming-bare\" pri=10 127.0.0.1 -> \"media.corp.local\" [destFQDN=corp.local] {req_id=1b125f9cf746f438 identity= rule=block-streaming-bare action=block}",
+        "[Culvert] 2026/07/12 23:15:26 POLICY_BLOCK rule=\"block-streaming-bare\" pri=10 127.0.0.1 -> \"media.corp.local\" [destFQDN=corp.local] {req_id=b9cb323c96161339 identity= rule=block-streaming-bare action=block}"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 2,
+        "allowed": 0
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  },
+  {
+    "vector": {
+      "id": "neg",
+      "scheme": "http",
+      "host": "app.corp.local",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "block-streaming-bare",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'block-streaming-bare' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 403,
+      "curl_exit": 0,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:15:26 POLICY_BLOCK rule=\"block-streaming-bare\" pri=10 127.0.0.1 -> \"app.corp.local\" [destFQDN=corp.local] {req_id=8e47b0703cf8c6a4 identity= rule=block-streaming-bare action=block}"
+      ],
+      "stats_delta": {
+        "total": 1,
+        "blocked": 1,
+        "allowed": 0
+      },
+      "probes": {}
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  }
+]

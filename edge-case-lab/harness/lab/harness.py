@@ -433,6 +433,12 @@ class Executor:
         # reset; disambiguate a real policy drop from an infra failure via the trace.
         if res.disposition == oracle.CONN_FAIL and any("POLICY_DROP" in ln for ln in res.decision_trace):
             res.disposition = oracle.DROP
+        # A 3xx from an ALLOWED request is an ORIGIN-issued redirect passed through, not a
+        # proxy policy redirect. Only a POLICY_REDIRECT trace is a real policy redirect.
+        if res.disposition == oracle.REDIRECT and \
+                any("POLICY_ALLOW" in ln for ln in res.decision_trace) and \
+                not any("POLICY_REDIRECT" in ln for ln in res.decision_trace):
+            res.disposition = oracle.ALLOW
         return res
 
     def _src_iface(self, vec) -> list[str]:

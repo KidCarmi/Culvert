@@ -1,0 +1,54 @@
+[
+  {
+    "vector": {
+      "id": "c",
+      "scheme": "https",
+      "host": "social.example.test",
+      "client_ip": "127.0.0.1"
+    },
+    "expected": {
+      "disposition": "block_page",
+      "tls": null,
+      "matched_rule": "block-connect",
+      "http_status_family": "403",
+      "certainty": "deterministic",
+      "rationale": "Rule 'block-connect' action=Block_Page.",
+      "notes": []
+    },
+    "actual": {
+      "disposition": "block_page",
+      "tls": null,
+      "http_status": 0,
+      "curl_exit": 56,
+      "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+      "is_block_page": true,
+      "decision_trace": [
+        "[Culvert] 2026/07/12 23:17:07 POLICY_BLOCK rule=\"block-connect\" pri=10 127.0.0.1 -> \"social.example.test\" [destFQDN=social.example.test] {req_id=bf8b3bffb4daa408 identity= rule=block-connect action=block}",
+        "[Culvert] 2026/07/12 23:17:07 POLICY_BLOCK rule=\"block-connect\" pri=10 127.0.0.1 -> \"social.example.test\" [destFQDN=social.example.test] {req_id=04ac1575a4940436 identity= rule=block-connect action=block}"
+      ],
+      "stats_delta": {
+        "total": 2,
+        "blocked": 2,
+        "allowed": 0
+      },
+      "probes": {
+        "culvert_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        },
+        "fixture_ca": {
+          "rc": 56,
+          "status": 0,
+          "err": ""
+        }
+      }
+    },
+    "verdict": {
+      "verdict": "PASS",
+      "primary": "PASS",
+      "confidence": 0.95,
+      "reason": "actual 'block_page' matches expected 'block_page'"
+    }
+  }
+]

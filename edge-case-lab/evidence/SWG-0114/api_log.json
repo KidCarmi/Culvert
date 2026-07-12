@@ -1,0 +1,56 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/decryption-profiles",
+    "req": {
+      "name": "p-failclose",
+      "onInspectError": "fail-close"
+    },
+    "status": 200,
+    "resp_head": "{\"ok\":true,\"profile\":{\"id\":\"0e046fb9-6ba\",\"name\":\"p-failclose\",\"onInspectError\":\"fail-close\",\"created_at\":\"2026-07-12T23:17:34Z\",\"updated_at\":\"2026-07-12T23:17:34Z\"}}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/default-action",
+    "req": {
+      "action": "allow"
+    },
+    "status": 200,
+    "resp_head": "{\"defaultAction\":\"allow\"}\n"
+  },
+  {
+    "method": "POST",
+    "path": "/api/policy",
+    "req": {
+      "name": "inspect",
+      "priority": 1,
+      "sourceIP": "",
+      "sourceIdentity": "",
+      "sourceGroup": "",
+      "authSource": "",
+      "destFQDN": "app.corp.local",
+      "destCategory": "",
+      "destCategoryGroup": "",
+      "action": "Allow",
+      "sslAction": "Inspect",
+      "tlsSkipVerify": true,
+      "decryptionProfile": "p-failclose"
+    },
+    "status": 200,
+    "resp_head": "{\"priority\":1,\"name\":\"inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":true,\"decryptionProfile\":\"p-failclose\",\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXC9YB1Z7ZD1QK1559VK8S"
+  },
+  {
+    "method": "GET",
+    "path": "/api/policy",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"count\":1,\"rules\":[{\"priority\":1,\"name\":\"inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":true,\"decryptionProfile\":\"p-failclose\",\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KX"
+  },
+  {
+    "method": "GET",
+    "path": "/api/config/export",
+    "req": null,
+    "status": 200,
+    "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-12T23:17:34Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":1,\"name\":\"inspect\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"Inspect\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":true,\"decryptio"
+  }
+]
