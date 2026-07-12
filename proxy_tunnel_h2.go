@@ -226,7 +226,8 @@ func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly s
 	cfg.NextProtos = protos
 	up := tls.Client(rawUpstream, cfg)
 	if err := up.HandshakeContext(ctx); err != nil {
-		up.Close() //nolint:errcheck // best-effort cleanup (closes underlying TCP conn)
+		up.Close()                       //nolint:errcheck // best-effort cleanup (closes underlying TCP conn)
+		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
 		return nil, "", err
 	}
 	return up, up.ConnectionState().NegotiatedProtocol, nil

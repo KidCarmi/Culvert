@@ -577,8 +577,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
-		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
-		logger.Printf("upstream TLS handshake error %q: %v", sanitizeLog(targetHost), err)
+		upstreamTLS.Close()              //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
+		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
+		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), err, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}

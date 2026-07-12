@@ -128,9 +128,17 @@ func Validate(p *Profile) error {
 	return nil
 }
 
-// copyOut returns a serialization-safe value copy (InspectHTTP2 pointer aliased —
-// callers treat profiles as read-only; the store never mutates a published *bool).
-func copyOut(p *Profile) Profile { return *p }
+// copyOut returns a fully independent value copy — the InspectHTTP2 pointee is
+// deep-copied so a caller cannot mutate stored state through the returned *bool
+// (enforcing the read-only invariant rather than only documenting it).
+func copyOut(p *Profile) Profile {
+	c := *p
+	if p.InspectHTTP2 != nil {
+		v := *p.InspectHTTP2
+		c.InspectHTTP2 = &v
+	}
+	return c
+}
 
 // Load reads profiles from a JSON file. Invalid profiles on disk are skipped with
 // a log line (fail-safe — a corrupt entry never blocks startup or the valid ones).
@@ -202,7 +210,7 @@ func (s *Store) GetByName(name string) *Profile {
 }
 
 // Add creates a new profile. Validates fields, then name uniqueness. Assigns a
-// ULID when absent (ID-preserving otherwise).
+// short unique ID (a truncated UUID) when absent (ID-preserving otherwise).
 func (s *Store) Add(p Profile) (*Profile, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	if err := Validate(&p); err != nil {

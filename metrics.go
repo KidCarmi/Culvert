@@ -450,6 +450,7 @@ culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
+	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)

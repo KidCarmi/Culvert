@@ -20,6 +20,14 @@ Every field defaults to **inherit** — a profile that sets nothing changes noth
 and a rule with no profile behaves exactly as before this feature. Binding a profile
 is always a deliberate per-rule choice.
 
+> **⚠ Min TLS floor can drop traffic.** Setting `Min TLS Version = 1.3` on a rule
+> whose origin only speaks TLS 1.2 fails the inspect handshake — the tunnel is
+> dropped (a `502`) rather than downgraded. This is the intended posture (a *floor*),
+> but it is silent to the user. Watch **`culvert_decrypt_profile_mintls_reject_total
+> {profile}`** — it increments per profile on exactly this failure, and the
+> upstream-handshake error log names the profile and floor — before applying a floor
+> to a broad rule.
+
 `Max Concurrent Streams` is intentionally **not** a per-profile field — it is a
 system-wide resource bound on the one shared HTTP/2 inspection server (see
 `http2-inspection.md`), so it is global, not per-profile.

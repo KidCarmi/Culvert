@@ -16,6 +16,9 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -29,6 +32,88 @@ func recordInspectUpstreamALPN(proto string) {
 	} else {
 		atomic.AddInt64(&statInspectUpstreamH1, 1)
 	}
+}
+
+// profileRejectCounter is a cardinality-capped per-profile counter for upstream
+// inspect-handshake failures on tunnels whose profile set a min-TLS floor. It makes
+// the "floor an origin can't meet → silent 502" case VISIBLE and attributable — the
+// field guardrail the reviewers required (otherwise a MinTLSVersion=1.3 against a
+// 1.2-only origin just fails into a generic 502 with no signal).
+type profileRejectCounter struct {
+	mu     sync.RWMutex
+	counts map[string]*int64
+	order  []string
+}
+
+const maxDecProfRejectLabels = 200 // bound label cardinality (profile names are admin-created, but cap defensively)
+
+var decProfMintlsRejects = &profileRejectCounter{counts: make(map[string]*int64)}
+
+func (c *profileRejectCounter) record(profile string) {
+	if profile == "" {
+		return
+	}
+	c.mu.RLock()
+	ctr, ok := c.counts[profile]
+	c.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(ctr, 1)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ctr, ok = c.counts[profile]; ok {
+		atomic.AddInt64(ctr, 1)
+		return
+	}
+	if len(c.order) >= maxDecProfRejectLabels {
+		profile = "_other_" // fold overflow into a shared bucket
+		if ctr, ok = c.counts[profile]; ok {
+			atomic.AddInt64(ctr, 1)
+			return
+		}
+	}
+	var n int64 = 1
+	c.counts[profile] = &n
+	c.order = append(c.order, profile)
+}
+
+// writePrometheus emits the counter. Profile names are validated to a safe charset
+// (no quotes/newlines) at write time, but the label value is inline-sanitized so
+// CodeQL sees the guard.
+func (c *profileRejectCounter) writePrometheus(w *strings.Builder) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.order) == 0 {
+		return
+	}
+	w.WriteString("\n# HELP culvert_decrypt_profile_mintls_reject_total Upstream inspect-handshake failures on tunnels whose decryption profile set a min-TLS floor (visible signal for a floor an origin can't meet)\n")
+	w.WriteString("# TYPE culvert_decrypt_profile_mintls_reject_total counter\n")
+	for _, p := range c.order {
+		safe := strings.ReplaceAll(p, `"`, "")
+		fmt.Fprintf(w, "culvert_decrypt_profile_mintls_reject_total{profile=%q} %d\n", safe, atomic.LoadInt64(c.counts[p]))
+	}
+}
+
+// recordProfileMintlsReject counts an upstream inspect-handshake failure against the
+// matched profile IFF that profile set a min-TLS floor — the operator-configured
+// constraint most likely to break a rule's traffic (an origin below the floor).
+func recordProfileMintlsReject(match *PolicyMatch) {
+	if p := resolveDecryptionProfile(match); p != nil && p.MinTLSVersion != "" {
+		decProfMintlsRejects.record(p.Name)
+	}
+}
+
+// mintlsHint appends an operator-actionable hint to an upstream-handshake-error log
+// when the matched profile set a min-TLS floor, so the failure is attributable
+// rather than a generic 502 (the field-support-ticket cause the reviewers flagged).
+func mintlsHint(match *PolicyMatch) string {
+	p := resolveDecryptionProfile(match)
+	if p == nil || p.MinTLSVersion == "" {
+		return ""
+	}
+	return fmt.Sprintf(" — decryption profile %q sets min-TLS %s; the origin may not meet the floor",
+		strings.ReplaceAll(p.Name, `"`, ""), p.MinTLSVersion)
 }
 
 // resolveDecryptionProfile returns the profile named by the matched rule, or nil

@@ -9333,7 +9333,7 @@ function polReadForm() {
     enabled:        document.getElementById('pol-enabled').checked,
     fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
     fileProfile:    document.getElementById('pol-file-profile').value || '',
-    decryptionProfile: document.getElementById('pol-decryption-profile').value || '',
+    decryptionProfile: (document.getElementById('pol-ssl').value === 'Inspect' ? (document.getElementById('pol-decryption-profile').value || '') : ''),  // drop a stale binding on a non-Inspect rule (silent no-op guard)
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
     logFullUri:     document.getElementById('pol-log-uri').checked,
     logTraffic:     document.getElementById('pol-log-traffic').checked,

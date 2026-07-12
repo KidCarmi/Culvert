@@ -51,3 +51,23 @@ func TestApiDecryptionProfiles_Validation(t *testing.T) {
 		t.Fatal("invalid profile must not be stored")
 	}
 }
+
+// TestDiffDecryptionProfiles_Changed pins that a same-name-different-content edit
+// surfaces as "changed" (the diff comparator covers every operator field, incl.
+// the *bool InspectHTTP2) — config-arch reviewer hardening.
+func TestDiffDecryptionProfiles_Changed(t *testing.T) {
+	on, off := true, false
+	a := []DecryptionProfile{{Name: "p", InspectHTTP2: &on, MinTLSVersion: "1.2"}}
+	b := []DecryptionProfile{{Name: "p", InspectHTTP2: &off, MinTLSVersion: "1.3"}}
+	var changes []configChange
+	diffDecryptionProfiles(a, b, &changes)
+	if len(changes) != 1 || changes[0].Field != "decryption_profiles" {
+		t.Fatalf("expected one decryption_profiles change, got %+v", changes)
+	}
+	// A no-op (identical content) must NOT diff.
+	var none []configChange
+	diffDecryptionProfiles(a, a, &none)
+	if len(none) != 0 {
+		t.Fatalf("identical profiles must not diff, got %+v", none)
+	}
+}
