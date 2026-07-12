@@ -778,7 +778,7 @@ relayLoop:
 			if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
 				// Log-only: the enclosing CONNECT was already counted by the allow
 				// path, so this per-URL entry must not re-increment request stats.
-				recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{})
+				recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{RuleID: match.Rule.ID})
 			}
 			if out.closeAfter {
 				break relayLoop

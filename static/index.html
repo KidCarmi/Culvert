@@ -4167,7 +4167,7 @@ document.addEventListener('click', e => {
     case 'polApplyOrder':     polApplyOrder(); break;
     case 'polRevertOrder':    polRevertOrder(); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
-    case 'trafficGotoRule':   trafficGotoRule(arg); break;
+    case 'trafficGotoRule':   trafficGotoRule(arg, arg2); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
     case 'whereUsedGoto':     whereUsedGoto(arg, arg2); break;
     case 'closeWhereUsed':    closeWhereUsed(); break;
@@ -5911,7 +5911,7 @@ function rowHTML(e) {
     <td><code style="font-size:.78rem">${escHtml(e.method)}</code></td>
     <td style="font-family:monospace;font-size:.8rem">${escHtml(e.host)}${e.uri ? `<div style="font-size:.7rem;color:var(--accent2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px" title="${escHtml(e.uri)}">${escHtml(e.uri)}</div>` : ''}${(e.bytesSent || e.bytesRecv || e.durationMs) ? `<div style="font-size:.7rem;color:var(--muted)">&#8593;${fmtBytes(e.bytesSent)} &#8595;${fmtBytes(e.bytesRecv)}${e.durationMs ? ' &middot; ' + (e.durationMs >= 1000 ? (e.durationMs/1000).toFixed(1)+'s' : e.durationMs+'ms') : ''}</div>` : ''}</td>
     <td>${badgeHTML(e.status)}</td>
-    <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}">${e.ruleMatched ? `<a href="#" data-click="trafficGotoRule" data-arg="${escHtml(e.ruleMatched)}" style="color:var(--accent2);text-decoration:none" title="${escHtml(e.ruleMatched)}">${escHtml(e.ruleMatched)}</a>` : ''}</td>
+    <td style="font-size:.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(e.ruleMatched||'')}${e.ruleId ? ' ('+escHtml(e.ruleId)+')' : ''}">${e.ruleMatched ? `<a href="#" data-click="trafficGotoRule" data-arg="${escHtml(e.ruleMatched)}" data-arg2="${escHtml(e.ruleId||'')}" style="color:var(--accent2);text-decoration:none" title="${escHtml(e.ruleMatched)}">${escHtml(e.ruleMatched)}</a>` : ''}</td>
     <td>${levelBadge(e.level)}</td>
   </tr>`;
 }
@@ -9676,10 +9676,29 @@ function polGotoRuleByName(name) { gotoAnchoredRowByName('policy', 'pol-table', 
 // yanks the operator off the live feed into a dead seek, an auth rule
 // opens the right view, and a stale cached priority can't anchor the
 // wrong row. (/api/policy returns both stages; ruleType picks the view.)
-async function trafficGotoRule(name) {
+async function trafficGotoRule(name, id) {
   try {
     const pol = await api('/api/policy');
-    const r = (pol.rules || []).find(x => x.name === name);
+    const rules = pol.rules || [];
+    // With a ruleId, resolve ONLY by that exact ULID — never fall back to name.
+    // A same-named-but-different rule (after delete/recreate or an import that
+    // reassigned IDs) is exactly the ambiguity ruleId exists to avoid; report
+    // the original rule is gone instead of silently opening the wrong one. The
+    // name fallback is reserved for legacy/non-rule rows with no ruleId.
+    if (id) {
+      const byId = rules.find(x => x.id === id);
+      if (!byId) {
+        toast(`Rule "${name}" (id ${id}) no longer exists — it may have been deleted or replaced`, 'error');
+        return;
+      }
+      if (byId.ruleType === 'auth') {
+        gotoAnchoredRow('authpolicy', 'ap-rules', 'data-rule-id', byId.id);
+        return;
+      }
+      polAnchorRule(byId);
+      return;
+    }
+    const r = rules.find(x => x.name === name);
     if (!r) {
       toast(`"${name}" is not a policy rule — blocklist, scanner, and feed attributions also appear in this column`, 'error');
       return;

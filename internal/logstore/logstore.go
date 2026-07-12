@@ -68,6 +68,7 @@ type Entry struct {
 	Status      string `json:"status"`               // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
 	Level       string `json:"level"`                // INFO | WARN | ERROR
 	RuleMatched string `json:"ruleMatched"`          // policy rule name that matched, if any
+	RuleID      string `json:"ruleId,omitempty"`     // stable ULID of the matched forward-proxy policy rule (rename-safe decision attribution, §1); omitted when no rule matched
 	ActionTaken string `json:"actionTaken"`          // policy action taken, if any
 	BytesSent   int64  `json:"bytesSent,omitempty"`  // bytes sent to upstream (request body / tunnel client→dest)
 	BytesRecv   int64  `json:"bytesRecv,omitempty"`  // bytes received from upstream (response body / tunnel dest→client)
@@ -86,7 +87,7 @@ type Entry struct {
 	AuthOutcome           string   `json:"auth_outcome,omitempty"`             // Stage-1 outcome (e.g. "Exempt"); "" = none
 	AuthPolicyRuleID      string   `json:"auth_policy_rule_id,omitempty"`      // ULID of matched Stage-1 rule
 	AuthPolicyRuleName    string   `json:"auth_policy_rule_name,omitempty"`    // display name of matched Stage-1 rule
-	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // ULID of matched Stage-2 rule
+	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // dormant Stage-2 auth-observability seam (unpopulated); forward-proxy decision attribution uses the top-level RuleID/ruleId field paired with RuleMatched
 	AuthSubjectMatchTypes []string `json:"auth_subject_match_types,omitempty"` // low-cardinality predicate type names (e.g. ["cidr"])
 	AuthSchemaVersion     int      `json:"auth_schema_version,omitempty"`      // matched rule's SubjectMatch schema version
 }

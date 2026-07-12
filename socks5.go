@@ -397,7 +397,7 @@ func socks5Relay(client, dest net.Conn, clientIP, host string) {
 	}
 	<-done
 
-	recordTunnelClose(clientIP, "SOCKS5", host, "", "", toDest, toClient, start, "")
+	recordTunnelClose(clientIP, "SOCKS5", host, "", "", "", toDest, toClient, start, "")
 }
 
 // socks5Reply sends a minimal SOCKS5 reply (IPv4 bind address 0.0.0.0:0).

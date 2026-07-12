@@ -94,10 +94,21 @@ func policyLogURI(host, path string) string {
 // the URI is conditional. Counting matches the prior recordRequest path.
 func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch) {
 	uri := ""
-	if match != nil && match.Rule != nil && match.Rule.LogFullURI {
-		uri = policyLogURI(hostOnly, path)
+	auth := AuthLogFields{}
+	if match != nil && match.Rule != nil {
+		if match.Rule.LogFullURI {
+			uri = policyLogURI(hostOnly, path)
+		}
+		// Stamp the governing rule's ULID only when THIS rule's own file profile
+		// made the block (parity with the plain-HTTP file-block at
+		// applyPolicyDecision). DPI/scan/global-extension blocks are scanner
+		// decisions independent of the tunnel's allow rule, so they carry no
+		// ruleId — attributing them to the allow rule would mislead the feed.
+		if match.Rule.FileProfileBlocked(path) {
+			auth.RuleID = match.Rule.ID
+		}
 	}
-	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, AuthLogFields{})
+	recordRequestAuthURI(clientIP, "CONNECT", hostOnly, status, ruleMatched, actionTaken, "", "inspect", uri, auth)
 }
 
 // authOutcome carries the Stage-1 adaptive-auth result from
@@ -447,6 +458,10 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) bool { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
+		// Rename-safe decision attribution: stamp the matched rule's stable ULID
+		// onto every request-log entry this dispatch writes (§1 ruleId seam). The
+		// carrier is a by-value copy, so this affects only these calls.
+		authLog.RuleID = match.Rule.ID
 		// Per-rule "log full URL": capture host+path (no query) when the matched
 		// rule opts in. For a CONNECT tunnel the inner path is encrypted, so this
 		// yields host:port here; the decrypted inner URLs are logged separately in
