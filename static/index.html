@@ -664,7 +664,7 @@ tr.dragging  { opacity: .4; }
           <div style="min-width:0"><div class="posture-label">Root CA</div><div class="posture-state" id="po-ca">Checking…</div></div>
         </div>
         <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
-             title="Persistent request-log write health — logWriteErrors from /api/stats">
+             title="Persistent request/audit log write health and fallback state — from /api/stats">
           <span class="posture-dot"></span>
           <div style="min-width:0"><div class="posture-label">Logging</div><div class="posture-state" id="po-logging">Checking…</div></div>
         </div>
@@ -1899,6 +1899,10 @@ Firefox (all platforms):
             <div class="info-item">
               <span class="info-key">Auth</span>
               <span class="info-val" id="s-auth">—</span>
+            </div>
+            <div class="info-item" title="Whether audit_log_file/request_log_file are actually writing to disk. A configured path that failed to open (permissions, missing directory, full disk) falls back to volatile in-memory storage — wiped on every restart — with no error counter to flag it.">
+              <span class="info-key">Log Persistence</span>
+              <span class="info-val" id="s-log-persist">—</span>
             </div>
           </div>
         </div>
@@ -5946,6 +5950,34 @@ function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// logPersistFallback — a configured audit_log_file/request_log_file that
+// failed to open at startup (bad permissions, missing directory, full disk)
+// falls back to volatile in-memory storage with zero write errors (in-memory
+// writes never fail), so logWriteErrors alone can't reveal it. This is the
+// only place that silent fallback is surfaced.
+function logPersistFallback(s) {
+  return {
+    req: !!(s.requestLogConfigured && !s.requestLogPersisted),
+    audit: !!(s.auditLogConfigured && !s.auditLogPersisted),
+  };
+}
+
+// describeLogPersistence — human-readable Settings-panel summary of
+// logPersistFallback plus which logs are configured at all.
+function describeLogPersistence(s) {
+  const f = logPersistFallback(s);
+  if (f.req || f.audit) {
+    const parts = [];
+    if (f.req) parts.push('request log');
+    if (f.audit) parts.push('audit log');
+    return '⚠ ' + parts.join(' + ') + ' in-memory only — restart wipes history';
+  }
+  const persisted = [];
+  if (s.requestLogConfigured) persisted.push('request log');
+  if (s.auditLogConfigured) persisted.push('audit log');
+  return persisted.length ? 'Persisting (' + persisted.join(', ') + ')' : 'In-memory only (not configured)';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Stats & chart polling
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5966,6 +5998,10 @@ async function fetchStats() {
     document.getElementById('s-uptime').textContent     = s.uptime;
     document.getElementById('s-bl-sz').textContent      = s.blocklistSz + ' hosts';
     document.getElementById('s-auth').textContent       = s.authEnabled ? 'Enabled' : 'Disabled';
+    const slp = document.getElementById('s-log-persist');
+    slp.textContent = describeLogPersistence(s);
+    const slpPaths = [s.requestLogPath, s.auditLogPath].filter(Boolean);
+    slp.title = slpPaths.length ? 'Path(s): ' + slpPaths.join(', ') : '';
     // nav badge
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
@@ -5975,8 +6011,13 @@ async function fetchStats() {
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
     // Posture: API reachable + request-log write health (real fields only)
     setPosture('proxy', 'ok', 'Operational · :' + s.proxyPort);
+    const logFallback = logPersistFallback(s);
     if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else if (logFallback.req || logFallback.audit) {
+      const which = logFallback.req && logFallback.audit ? 'Request+audit log'
+        : logFallback.req ? 'Request log' : 'Audit log';
+      setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
     } else {
       setPosture('logging', 'ok', 'Persisting');
     }

@@ -330,8 +330,11 @@ func ClearPersistForTest() {
 	mu.Unlock()
 }
 
-// PersistActive reports whether a persistent file handle is wired (test
-// support for the shutdown-hook coverage).
+// PersistActive reports whether a persistent file handle is wired. Used both
+// by tests (shutdown-hook coverage) and by the admin API (GET /api/stats) to
+// surface a silent Init failure: compare against the caller's own configured
+// path to detect an operator-configured log that fell back to volatile
+// in-memory storage.
 func PersistActive() bool {
 	mu.Lock()
 	defer mu.Unlock()

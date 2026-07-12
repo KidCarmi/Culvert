@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -525,6 +528,56 @@ func TestAPIStats(t *testing.T) {
 	m := assertJSON(t, w)
 	if _, ok := m["total"]; !ok {
 		t.Error("stats response missing 'total' field")
+	}
+}
+
+// TestAPIStats_LogPersistenceFields proves the operator-blind-spot fix:
+// GET /api/stats must distinguish "log persistence never configured" from
+// "configured but silently fell back to in-memory storage" — a state that
+// previously showed up only in a startup log line (observability_startup.go).
+func TestAPIStats_LogPersistenceFields(t *testing.T) {
+	restoreAudit := audit.ResetForTest()
+	restoreReqlog := reqlog.SwapPersistenceForTest()
+	oldAuditPath, oldReqPath := auditLogConfiguredPath, requestLogConfiguredPath
+	t.Cleanup(func() {
+		restoreAudit()
+		restoreReqlog()
+		auditLogConfiguredPath, requestLogConfiguredPath = oldAuditPath, oldReqPath
+	})
+
+	// Neither log configured: both "Configured" flags false, and the
+	// dashboard must not report a degraded state for a setup that was never
+	// asked to persist anything.
+	auditLogConfiguredPath, requestLogConfiguredPath = "", ""
+	w := httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m := assertJSON(t, w)
+	if m["auditLogConfigured"] != false || m["requestLogConfigured"] != false {
+		t.Errorf("expected both *LogConfigured false with no path set, got %v / %v", m["auditLogConfigured"], m["requestLogConfigured"])
+	}
+	if m["auditLogPersisted"] != false || m["requestLogPersisted"] != false {
+		t.Errorf("expected both *LogPersisted false with no engine wired, got %v / %v", m["auditLogPersisted"], m["requestLogPersisted"])
+	}
+
+	// A path was configured but Init never succeeded (simulates the silent
+	// fallback in loadObservability): Configured=true, Persisted=false —
+	// the exact combination the GUI now needs to warn on.
+	auditLogConfiguredPath = "/var/log/culvert/audit.jsonl"
+	requestLogConfiguredPath = "/var/log/culvert/request.jsonl"
+	w = httptest.NewRecorder()
+	apiStats(w, getReq("/api/stats"))
+	m = assertJSON(t, w)
+	if m["auditLogConfigured"] != true || m["auditLogPersisted"] != false {
+		t.Errorf("expected audit log Configured=true/Persisted=false (fallback), got Configured=%v Persisted=%v", m["auditLogConfigured"], m["auditLogPersisted"])
+	}
+	if m["requestLogConfigured"] != true || m["requestLogPersisted"] != false {
+		t.Errorf("expected request log Configured=true/Persisted=false (fallback), got Configured=%v Persisted=%v", m["requestLogConfigured"], m["requestLogPersisted"])
+	}
+	if m["auditLogPath"] != auditLogConfiguredPath {
+		t.Errorf("auditLogPath = %v; want %v", m["auditLogPath"], auditLogConfiguredPath)
+	}
+	if m["requestLogPath"] != requestLogConfiguredPath {
+		t.Errorf("requestLogPath = %v; want %v", m["requestLogPath"], requestLogConfiguredPath)
 	}
 }
 

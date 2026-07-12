@@ -63,6 +63,10 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	oldSyslogConfigured := syslogConfigured
 	oldGlobalSyslog := globalSyslog
 
+	// Configured-path readback for GET /api/stats (ui_config.go).
+	oldAuditLogConfiguredPath := auditLogConfiguredPath
+	oldRequestLogConfiguredPath := requestLogConfiguredPath
+
 	// OTLP (otlp.go + otlp_traces.go).
 	oldGlobalOTLP := globalOTLP
 	oldGlobalOTLPTraces := globalOTLPTraces
@@ -78,6 +82,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 	globalSyslog = nil
 	globalOTLP = freshOTLPExporter()
 	globalOTLPTraces = freshOTLPSpanExporter()
+	auditLogConfiguredPath = ""
+	requestLogConfiguredPath = ""
 
 	t.Cleanup(func() {
 		// Close handles + stop goroutines the test opened on the
@@ -92,6 +98,8 @@ func snapshotObservabilityGlobals(t *testing.T) {
 		globalSyslog = oldGlobalSyslog
 		globalOTLP = oldGlobalOTLP
 		globalOTLPTraces = oldGlobalOTLPTraces
+		auditLogConfiguredPath = oldAuditLogConfiguredPath
+		requestLogConfiguredPath = oldRequestLogConfiguredPath
 		audit.ClearPersistForTest() // closed above; restore must not double-close
 		restoreAudit()
 		restoreReqlog()
@@ -217,6 +225,33 @@ func TestLoadObservability_AuditLogOpens(t *testing.T) {
 	if !audit.PersistActive() {
 		t.Fatal("audit persistence inactive after AuditLogPath set; want active")
 	}
+	if auditLogConfiguredPath != path {
+		t.Errorf("auditLogConfiguredPath = %q; want %q", auditLogConfiguredPath, path)
+	}
+}
+
+// TestLoadObservability_AuditLogFallbackIsDistinguishable proves the GET
+// /api/stats blind spot is closed: a configured-but-unopenable audit path
+// (here, a directory, which os.OpenFile rejects with EISDIR) leaves
+// PersistActive false while auditLogConfiguredPath stays non-empty — the
+// exact signal apiStats needs to tell "silently fell back to volatile
+// in-memory storage" apart from "operator never configured a path".
+func TestLoadObservability_AuditLogFallbackIsDistinguishable(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	dirAsPath := t.TempDir() // opening a directory for writing fails
+	loadObservability(observabilityStartupConfig{
+		AuditLogPath:    dirAsPath,
+		RequestLogMaxMB: 100,
+	})
+
+	if audit.PersistActive() {
+		t.Fatal("audit persistence active despite unopenable path; want inactive (fallback)")
+	}
+	if auditLogConfiguredPath != dirAsPath {
+		t.Errorf("auditLogConfiguredPath = %q; want %q (configured path must survive Init failure)", auditLogConfiguredPath, dirAsPath)
+	}
 }
 
 func TestLoadObservability_RequestLogOpens(t *testing.T) {
@@ -232,8 +267,32 @@ func TestLoadObservability_RequestLogOpens(t *testing.T) {
 	if !reqlog.PersistActive() {
 		t.Fatal("request-log persistence inactive after RequestLogPath set; want active")
 	}
+	if requestLogConfiguredPath != path {
+		t.Errorf("requestLogConfiguredPath = %q; want %q", requestLogConfiguredPath, path)
+	}
 	if reqlog.FilePath() != path {
 		t.Errorf("reqlog.FilePath() = %q; want %q", reqlog.FilePath(), path)
+	}
+}
+
+// TestLoadObservability_RequestLogFallbackIsDistinguishable mirrors
+// TestLoadObservability_AuditLogFallbackIsDistinguishable for the
+// request-log engine.
+func TestLoadObservability_RequestLogFallbackIsDistinguishable(t *testing.T) {
+	ensureObservabilityStartupTestLogger(t)
+	snapshotObservabilityGlobals(t)
+
+	dirAsPath := t.TempDir()
+	loadObservability(observabilityStartupConfig{
+		RequestLogPath:  dirAsPath,
+		RequestLogMaxMB: 100,
+	})
+
+	if reqlog.PersistActive() {
+		t.Fatal("request-log persistence active despite unopenable path; want inactive (fallback)")
+	}
+	if requestLogConfiguredPath != dirAsPath {
+		t.Errorf("requestLogConfiguredPath = %q; want %q (configured path must survive Init failure)", requestLogConfiguredPath, dirAsPath)
 	}
 }
 
