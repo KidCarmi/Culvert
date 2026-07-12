@@ -720,6 +720,11 @@ func (c *Config) LoadUIUsersFile() error {
 	if err := json.Unmarshal(data, &env); err == nil && env.Users != nil {
 		records = env.Users
 	} else if err := json.Unmarshal(data, &records); err != nil {
+		// CHAOS-05: present-but-corrupt roster. Quarantine before
+		// returning so the next SaveUIUsersFile (any admin mutation, or
+		// the --reset-password one-shot) cannot overwrite the only copy
+		// of the admin accounts + TOTP enrollments.
+		quarantineCorruptStateFile("ui_users", path, err)
 		return err
 	}
 	resolved := resolveLoadedDefaultAuthOutcome(env)

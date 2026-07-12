@@ -83,13 +83,26 @@ var configSnapshotValidatorOK = func() bool {
 	return validateConfigSnapshot(ConfigSnapshot{}) == nil
 }
 
+// checkResult is one row of the /readyz checks map.
+type checkResult struct {
+	Status string `json:"status"` // "ok" or "fail"
+	Detail string `json:"detail,omitempty"`
+}
+
+// appendStateFileChecks adds the report-only CHAOS-05/07 rows
+// (state_file_ui_users / state_file_cluster): a quarantined state file
+// means the node is serving with an empty roster/cluster store —
+// survivable (env fallback creds / re-enrollment) but it must stay
+// visible to probes beyond the startup log line and the alert.
+func appendStateFileChecks(checks map[string]*checkResult) {
+	for kind, detail := range stateCorruptionSnapshot() {
+		checks["state_file_"+kind] = &checkResult{Status: "fail", Detail: detail}
+	}
+}
+
 func handleReady(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	type checkResult struct {
-		Status string `json:"status"` // "ok" or "fail"
-		Detail string `json:"detail,omitempty"`
-	}
 	checks := map[string]*checkResult{}
 	allOK := true
 
@@ -167,6 +180,9 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 		checks["config_snapshot_validator"] = &checkResult{Status: "fail", Detail: "validator rejected empty baseline"}
 		allOK = false
 	}
+
+	// 8. Quarantined state files (CHAOS-05/07): report-only like the ca row.
+	appendStateFileChecks(checks)
 
 	status := "ready"
 	code := http.StatusOK

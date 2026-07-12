@@ -134,6 +134,11 @@ func (cs *ClusterStore) Load(path string) error {
 	}
 	var st ClusterState
 	if err := json.Unmarshal(data, &st); err != nil {
+		// CHAOS-07: present-but-corrupt cluster DB. The caller "starts
+		// fresh", and the next Save would overwrite the enrolled-node
+		// roster AND the revoked-cert list — revoked DP certs would
+		// validate again with no trace. Quarantine the evidence first.
+		quarantineCorruptStateFile("cluster", path, err)
 		return fmt.Errorf("parse cluster state: %w", err)
 	}
 	if st.Nodes == nil {
