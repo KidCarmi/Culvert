@@ -124,9 +124,15 @@ reviewer):
   unsupported TLS (fail-open deferred), **min/max TLS version**, per-stream **stall
   timeout**.
 - Every field defaults to **inherit** — a profile changes nothing until an operator
-  sets it, and a **dangling/deleted profile is fail-safe at eval** (falls back to
-  today's strip/verify; a bad reference can only degrade H2→H1, never disable
-  inspection or newly-skip verification).
+  sets it, and a **dangling/deleted profile is fail-safe at eval**: it falls back to
+  the rule's **inline** settings (`StripALPN` / `TLSSkipVerify`), or the strip/verify
+  default when there is no inline setting. The invariant that holds is that a bad
+  reference can **never disable inspection or newly-skip certificate verification**
+  (those decisions are independent of the profile). It does **not**, however, force
+  HTTP/1.1: on a rule that still carries a legacy inline `stripAlpn: false`, deleting
+  the referenced profile falls back to that inline field and **keeps native H2 on** —
+  so during profile deletion/sync failures, check the rule's inline settings rather
+  than assuming H2 turned off.
 - **Honest positioning is in the product** (rule editor + panel + `docs/operator/
   decryption-profiles.md`): native H2 removes signal (B) but does **not** change the
   TLS fingerprint (A), so Google-class destinations still need Bypass or warmed
