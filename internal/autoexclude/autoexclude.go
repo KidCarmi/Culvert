@@ -127,6 +127,7 @@ type Cache struct {
 	confirmN   int
 	window     time.Duration
 	maxEntries int
+	maxPending int // cap on in-progress observations (bounds c.pend independently of promotion)
 	now        func() time.Time
 }
 
@@ -157,6 +158,7 @@ func New(cfg Config) *Cache {
 	if c.maxEntries <= 0 {
 		c.maxEntries = DefaultMaxEntries
 	}
+	c.maxPending = c.maxEntries // in-progress observations share the entry cap
 	if c.now == nil {
 		c.now = time.Now
 	}
@@ -218,8 +220,20 @@ func (c *Cache) Observe(host string, reason Reason, clientIP string) (promoted b
 
 	key := h + "\x00" + string(reason)
 	p := c.pend[key]
-	if p == nil || now.Sub(p.firstSeen) > c.window {
-		// New or stale observation window — start fresh.
+	if p == nil {
+		// A brand-new observation grows c.pend. Under a fail-open rule an attacker
+		// (or just many distinct never-confirming hosts) could otherwise grow the
+		// pending map without bound, since promotion — the only path that pruned it
+		// — never fires. Bound it here: stale-first, then oldest-firstSeen eviction
+		// (evicting a pending observation only forces a host to re-accumulate; it
+		// can never create an exclusion — fail-closed).
+		if len(c.pend) >= c.maxPending {
+			c.evictPendingLocked(now)
+		}
+		p = &pend{reason: reason, clients: make(map[string]struct{}), firstSeen: now}
+		c.pend[key] = p
+	} else if now.Sub(p.firstSeen) > c.window {
+		// Stale window on an existing key — reset in place (no net growth).
 		p = &pend{reason: reason, clients: make(map[string]struct{}), firstSeen: now}
 		c.pend[key] = p
 	}
@@ -300,6 +314,36 @@ func (c *Cache) evictLocked(now time.Time) {
 	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
 	for i := 0; i < len(all) && len(c.active) > c.maxEntries; i++ {
 		delete(c.active, all[i].host)
+	}
+}
+
+// evictPendingLocked bounds the in-progress observation map: it drops entries
+// whose window has elapsed, then — if still over maxPending — the oldest by
+// firstSeen. Caller holds the lock. Runs only when a new key would push c.pend
+// over the cap, so the common (under-cap) path pays nothing. Evicting a pending
+// observation only forces its host to re-accumulate confirmations; it can never
+// create an exclusion, so the direction is fail-closed.
+func (c *Cache) evictPendingLocked(now time.Time) {
+	for k, p := range c.pend {
+		if now.Sub(p.firstSeen) > c.window {
+			delete(c.pend, k)
+		}
+	}
+	if len(c.pend) < c.maxPending {
+		return
+	}
+	type kf struct {
+		key string
+		at  time.Time
+	}
+	all := make([]kf, 0, len(c.pend))
+	for k, p := range c.pend {
+		all = append(all, kf{k, p.firstSeen})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	// Drop the oldest until we leave room for the one about to be inserted.
+	for i := 0; i < len(all) && len(c.pend) >= c.maxPending; i++ {
+		delete(c.pend, all[i].key)
 	}
 }
 

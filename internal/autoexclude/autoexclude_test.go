@@ -187,6 +187,27 @@ func TestEviction_CapBoundsGrowth(t *testing.T) {
 	}
 }
 
+// TestPendingBounded pins that unconfirmed observations cannot grow the pending
+// map without bound (Codex P2): a single client hitting many distinct hosts under
+// a fail-open rule — none reaching confirmN — must not leak memory, since
+// promotion (the only pruning trigger) never fires.
+func TestPendingBounded(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	c := newTestCache(Config{ConfirmN: 5, MaxEntries: 16}, clk) // pending cap follows MaxEntries
+	for i := 0; i < 500; i++ {
+		host := "h" + string(rune('a'+i%26)) + string(rune('0'+(i/26)%10)) + string(rune('0'+i/260)) + ".example"
+		if c.Observe(host, ReasonClientPinned, "10.0.0.1") { // one client, never reaches confirmN=5
+			t.Fatal("single client should never promote")
+		}
+	}
+	if n := c.PendingLen(); n > 16 {
+		t.Fatalf("pending map grew unbounded: PendingLen=%d > maxPending 16", n)
+	}
+	if c.Len() != 0 {
+		t.Fatalf("nothing should have promoted: active=%d", c.Len())
+	}
+}
+
 // TestStats_ReportsPosture pins the provable-OFF/config surface.
 func TestStats_ReportsPosture(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
