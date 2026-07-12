@@ -71,3 +71,32 @@ func TestDiffDecryptionProfiles_Changed(t *testing.T) {
 		t.Fatalf("identical profiles must not diff, got %+v", none)
 	}
 }
+
+// TestDecryptionProfiles_EmptyWipePropagates pins the WireWipeCapable posture: a
+// non-nil empty slice (what an empty CP store serializes with no omitempty) wipes
+// the store, so deleting the last profile clears stale copies on DP nodes rather
+// than leaving them to apply looser security settings than the CP intends.
+func TestDecryptionProfiles_EmptyWipePropagates(t *testing.T) {
+	swapDecProfileStore(t)
+	on := true
+	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "stale", InspectHTTP2: &on}})
+	if len(globalDecryptionProfiles.Names()) != 1 {
+		t.Fatalf("seed failed")
+	}
+	// The CP→DP apply path is: if snap.DecryptionProfiles != nil { ReplaceAll }. A
+	// non-nil empty slice (serialized because the field has NO omitempty) wipes.
+	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{})
+	if n := len(globalDecryptionProfiles.Names()); n != 0 {
+		t.Fatalf("empty ReplaceAll must wipe the store, %d profiles remain", n)
+	}
+	// Registry declares the WireWipeCapable posture so the empty slice reaches the wire.
+	var row *configSurfaceRow
+	for i := range configSurfaces {
+		if configSurfaces[i].ID == "decryption_profiles" {
+			row = &configSurfaces[i]
+		}
+	}
+	if row == nil || !row.WireWipeCapable {
+		t.Fatal("decryption_profiles must be WireWipeCapable so the []-wipe propagates CP→DP")
+	}
+}

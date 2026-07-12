@@ -84,10 +84,15 @@ type ConfigSnapshot struct {
 	// Category groups for policy rules.
 	CategoryGroups []CategoryGroup `json:"category_groups,omitempty"`
 
-	// Named decryption profiles referenced per policy rule. omitempty (a
-	// non-WireWipeCapable semNilSkipEmptyWipe slice) — clearing the last profile
-	// requires pushing a non-empty replacement, same posture as category_groups.
-	DecryptionProfiles []DecryptionProfile `json:"decryption_profiles,omitempty"`
+	// Named decryption profiles referenced per policy rule. NO omitempty
+	// (WireWipeCapable): unlike category_groups, an empty set MUST propagate CP→DP so
+	// deleting the last profile clears stale copies on data-plane nodes. These
+	// profiles govern security-relevant settings (cert verification, native H2, TLS
+	// floor) — a DP that retained a stale profile would apply looser settings than
+	// the CP intends (a rule re-referencing the deleted name resolves the ghost on
+	// the DP instead of the fail-safe fallback). The security-sensitivity justifies
+	// diverging from the siblings' wire-dead []-wipe posture.
+	DecryptionProfiles []DecryptionProfile `json:"decryption_profiles"`
 
 	// Global file-block extension list (day-3 audit CRIT-2).
 	FileBlockExtensions []string `json:"file_block_extensions,omitempty"`

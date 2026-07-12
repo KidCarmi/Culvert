@@ -264,8 +264,8 @@ var configSurfaces = []configSurfaceRow{
 			{Struct: "ConfigSnapshot", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe}}},
 	{ID: "decryption_profiles", Kind: kindConfig, Owner: "globalDecryptionProfiles",
 		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "decryption_profiles", DiffNilGuarded: true,
-		ClusterSynced: true, SnapshotCap: maxSnapDecryptionProfiles,
-		Note: "named 'how to decrypt' object referenced per rule; apply ordered before policy_rules (import and rollback); import never wipes (merge = upsert-by-name); configBackup field has NO omitempty, ConfigSnapshot field keeps omitempty (non-WireWipeCapable)",
+		ClusterSynced: true, SnapshotCap: maxSnapDecryptionProfiles, WireWipeCapable: true,
+		Note: "named 'how to decrypt' object referenced per rule; apply ordered before policy_rules (import and rollback); import never wipes (merge = upsert-by-name); configBackup field has NO omitempty; ConfigSnapshot field ALSO has NO omitempty (WireWipeCapable) — unlike category_groups, an empty set propagates CP→DP so a last-profile delete clears stale profiles on DP nodes (these govern security-relevant cert/H2/TLS settings)",
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "DecryptionProfiles", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "DecryptionProfiles", Apply: semNilSkipEmptyWipe}}},
