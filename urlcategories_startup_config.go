@@ -22,6 +22,11 @@ type urlCategoriesStartupConfig struct {
 	// CategoryGroupsPath is the category-groups store under the data dir.
 	CategoryGroupsPath string
 
+	// DecryptionProfilesPath is the named-decryption-profile store under the data
+	// dir (loaded alongside category groups — both are named objects that policy
+	// rules reference by name).
+	DecryptionProfilesPath string
+
 	// SaaSFeedURL / SaaSFeedInterval configure the curated SaaS category
 	// auto-sync (disabled by default; enabled via admin GUI).
 	SaaSFeedURL      string
@@ -54,12 +59,13 @@ func resolveURLCategoriesStartupConfig(fc *FileConfig, dataDirVal, catFeedDB, ca
 		}
 	}
 	return urlCategoriesStartupConfig{
-		CatPath:            catPath,
-		CategoryGroupsPath: filepath.Join(dataDirVal, "category_groups.json"),
-		SaaSFeedURL:        defaultSaaSFeedURL,
-		SaaSFeedInterval:   24 * time.Hour,
-		FeedDBPath:         catFeedDB,
-		FeedURL:            catFeedURL,
-		FeedSyncInterval:   syncD,
+		CatPath:                catPath,
+		CategoryGroupsPath:     filepath.Join(dataDirVal, "category_groups.json"),
+		DecryptionProfilesPath: filepath.Join(dataDirVal, "decryption_profiles.json"),
+		SaaSFeedURL:            defaultSaaSFeedURL,
+		SaaSFeedInterval:       24 * time.Hour,
+		FeedDBPath:             catFeedDB,
+		FeedURL:                catFeedURL,
+		FeedSyncInterval:       syncD,
 	}
 }

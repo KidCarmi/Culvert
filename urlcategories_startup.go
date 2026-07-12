@@ -29,6 +29,13 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 		logger.Printf("CategoryGroups: load error: %v", err)
 	}
 
+	// Named decryption profiles (referenced per rule; loaded alongside category
+	// groups). Non-fatal — an unreadable/corrupt store leaves the set empty and
+	// rules fall back to their inline StripALPN/default (byte-identical to today).
+	if err := globalDecryptionProfiles.Load(cfg.DecryptionProfilesPath); err != nil {
+		logger.Printf("DecryptionProfiles: load error: %v", err)
+	}
+
 	// SaaS category feed (dynamic updates from GitHub). Additive merge: new
 	// domains added, admin removals preserved. Disabled by default; enabled
 	// via the admin GUI.
