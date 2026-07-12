@@ -135,6 +135,10 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`function togglePolUnused`,     // unused-only filter toggle
 		`id="pol-unused-btn"`,          // the Unused filter button
 		`data-click="togglePolUnused"`, // its dispatch wiring
+		// P2 — optimistic concurrency (rule-set generation counter)
+		`function polV`,                 // appends ?ifVersion= to policy mutations
+		`function polVForEdit`,          // binds a form submit to its loaded version (not the live poll)
+		`function polIsVersionConflict`, // 409 rule-set-conflict → warn + reload
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
@@ -179,8 +183,9 @@ func TestFoundation_DragReorderIsStaged(t *testing.T) {
 		t.Fatalf("read static/index.html: %v", err)
 	}
 	s := string(data)
-	// Exactly one CALL site may hit /api/policy/reorder (comments may name it)…
-	call := `api('/api/policy/reorder'`
+	// Exactly one CALL site may hit /api/policy/reorder (comments may name it).
+	// The URL is wrapped in polV() for the P2 optimistic-concurrency version param.
+	call := `polV('/api/policy/reorder')`
 	if n := strings.Count(s, call); n != 1 {
 		t.Fatalf("%s appears %d times in static/index.html; want exactly 1 (inside polApplyOrder) — drag must stage, never POST", call, n)
 	}

@@ -991,6 +991,44 @@ func stampRuleMetadataForWrite(rule *PolicyRule, before *PolicyRule, actor strin
 	rule.ModifiedBy = actor
 }
 
+// policyVersionConflict enforces the OPTIONAL optimistic-concurrency
+// precondition on a policy mutation (P2 rule-set generation counter). When the
+// client sends ?ifVersion=N (the rule-set version it loaded), a mismatch with
+// the current version means another admin mutated the rulebase in between — so
+// this writes a structured 409 and returns true (caller must stop), preventing
+// a silent last-write-wins overwrite. Absent/blank param = no check, so
+// non-version-aware clients (curl, tests, older UIs) keep working unchanged.
+//
+// This is handler-level (HTTP If-Match semantics): it catches the real
+// multi-admin case — two admins load v5, one commits (→v6), the other's v5
+// write is rejected. It does NOT close the microsecond window where two writes
+// both read v5 before either commits; the store still serializes those two
+// mutations (no corruption), same as today. Truly-atomic check-and-write would
+// thread the expected version into the store mutators — a recorded follow-up.
+func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
+	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
+	if raw == "" {
+		return false
+	}
+	want, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid ifVersion", http.StatusBadRequest)
+		return true
+	}
+	cur, _ := policyStore.policyVersion()
+	if want == cur {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+		"error":          fmt.Sprintf("the rulebase changed since you loaded it (your version %d, current %d) — reload and reapply your change", want, cur),
+		"currentVersion": cur,
+		"yourVersion":    want,
+	})
+	return true
+}
+
 // apiPolicy dispatches the access-rule CRUD endpoint. The per-method branches
 // live in apiPolicyCreate/Update/Delete so this stays a thin router (gocognit).
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
@@ -1034,6 +1072,9 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	if policyVersionConflict(w, r) {
+		return
+	}
 	var rule PolicyRule
 	if err := decodeJSON(r, &rule); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1068,6 +1109,9 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 
 func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if policyVersionConflict(w, r) {
 		return
 	}
 	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
@@ -1111,6 +1155,9 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 
 func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if policyVersionConflict(w, r) { // guards both single- and bulk-delete (dispatched below)
 		return
 	}
 	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
@@ -1211,6 +1258,9 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if policyVersionConflict(w, r) {
 		return
 	}
 	var body struct {
@@ -1322,6 +1372,9 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if policyVersionConflict(w, r) {
 		return
 	}
 	var body struct {
