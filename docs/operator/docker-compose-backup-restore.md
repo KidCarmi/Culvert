@@ -60,7 +60,7 @@ start it. Every backup/restore/cleanup invocation is a one-shot
 
 | Mount | Volume | Mounted in | Contents |
 |---|---|---|---|
-| `/data` | `proxy-data` | `proxy` (rw), `cli` (rw), `updater` (ro) | Product state: identity, policy, audit, blocklists, request log, CA bundle, `cluster.json`, `config_versions/`, `ui_users.json`, etc. |
+| `/data` | `proxy-data` | `proxy` (rw), `cli` (rw) | Product state: identity, policy, audit, blocklists, request log, CA bundle, `cluster.json`, `config_versions/`, `ui_users.json`, etc. |
 | `/backup` | `culvert-backups` | **`cli` only** | Backup archives (`*.tar.gz` / `*.tar.gz.enc`). The long-running `proxy` cannot read its own backups. |
 
 Two consequences worth knowing:

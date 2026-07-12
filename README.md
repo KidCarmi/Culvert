@@ -186,6 +186,7 @@ Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 | Variable | Purpose |
 |---|---|
 | `CULVERT_CA_PASSPHRASE` | CA private-key encryption passphrase (**required** for TLS inspection) |
+| `CULVERT_LOG_PASSPHRASE` | Encryption-at-rest passphrase for the persistent log store. Falls back to `CULVERT_CA_PASSPHRASE` if unset; empty (both unset) = encryption off. |
 | `CULVERT_C2_ENFORCE` | Admin RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
 | `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
 | `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |

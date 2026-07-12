@@ -83,8 +83,8 @@ break-glass).
 Baking the official root makes the keyless scheme **ACTIVE by default** — any build
 with no operator trust config now enters **enforce** mode with the Sigstore scheme.
 With no signed catalog present this simply yields `available:false` on
-`/api/releases` (no dispatch); the legacy Docker updater remains the primary update
-path until the Phase 6 cutover. As of **P2b-2b**, the release pipeline keyless-signs
-the catalog index on tagged releases (`cosign sign-blob --bundle index.json.sigstore`)
-and the in-binary verifier can trust it — but catalog dispatch becomes the *preferred*
-path only after a real production catalog-driven update succeeds (Phase 6).
+`/api/releases` (no dispatch). The legacy Docker updater sidecar has since been
+removed; the maintenance agent (Release Management dispatch → agent
+`/v1/upgrades/apply`) is the sole day-2 update path. As of **P2b-2b**, the release
+pipeline keyless-signs the catalog index on tagged releases (`cosign sign-blob
+--bundle index.json.sigstore`) and the in-binary verifier can trust it.
