@@ -5971,7 +5971,6 @@ function renderBlocklist(preserve) {
 function blRowsHTML(list) {
   return list.map(e => {
     const h = escHtml(e.host);
-    const jh = JSON.stringify(e.host).replace(/"/g, '&quot;');
     const wild = e.host.startsWith('*.');
     let feedLabel = 'Feed';
     if (e.feed) {
@@ -5981,7 +5980,7 @@ function blRowsHTML(list) {
       ? '<span class="badge" style="background:rgba(20,184,166,.12);color:#2dd4bf;border:1px solid rgba(20,184,166,.25);font-size:10px">Admin</span>'
       : `<span class="badge" style="background:var(--surface2);color:var(--muted);font-size:10px" title="${escHtml(e.feed || 'Imported by a feed before per-feed attribution existed')}">${escHtml(feedLabel)}</span>`;
     return `<tr>
-      <td><input type="checkbox" class="bl-check" value="${jh}" data-change="blUpdateBulk"></td>
+      <td><input type="checkbox" class="bl-check" value="${h}" data-change="blUpdateBulk"></td>
       <td class="host-td">${h}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
       <td>${srcBadge}</td>
@@ -6041,7 +6040,7 @@ function blUpdateBulk() {
   if (sel > 0) btn.textContent = 'Delete Selected (' + sel + ')';
 }
 async function bulkDeleteBL() {
-  const hosts = [...document.querySelectorAll('.bl-check:checked')].map(cb => cb.value.replace(/&quot;/g, '"'));
+  const hosts = [...document.querySelectorAll('.bl-check:checked')].map(cb => cb.value);
   if (!hosts.length) return;
   if (!await confirmAction('Bulk Delete', 'Remove ' + hosts.length + ' host(s) from the blocklist?', 'Delete ' + hosts.length)) return;
   try {
@@ -6110,7 +6109,6 @@ function renderExceptions(hosts) {
     return;
   }
   tbody.innerHTML = hosts.map(h => {
-    const jh = JSON.stringify(h).replace(/"/g, '&quot;');
     const wild = h.startsWith('*.');
     return `<tr>
       <td class="host-td">${escHtml(h)}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
