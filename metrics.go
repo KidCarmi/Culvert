@@ -26,28 +26,43 @@ const maxRuleMetrics = 200
 type ruleMetrics struct {
 	mu    sync.RWMutex
 	hits  map[string]*int64 // rule name → hit count
+	last  map[string]*int64 // rule name → unix-seconds of last hit (policy-metadata P1)
 	order []string          // insertion order for cap enforcement
 }
 
-var ruleMet = &ruleMetrics{hits: make(map[string]*int64)}
+var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64)}
 
-// RecordHit increments the hit counter for the given policy rule name.
+// RecordHit increments the hit counter for the given policy rule name and
+// stamps its last-hit time. Both are the persisted source of truth (the live
+// PolicyRule.HitCount/lastHitUnix are incremented separately in Evaluate);
+// RestoreHitCounts copies these back onto the rules at startup.
 func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ruleName == "" {
 		return
 	}
+	now := time.Now().Unix()
 	rm.mu.RLock()
 	ctr, ok := rm.hits[ruleName]
+	lastPtr := rm.last[ruleName]
 	rm.mu.RUnlock()
 	if ok {
 		atomic.AddInt64(ctr, 1)
+		if lastPtr != nil {
+			atomic.StoreInt64(lastPtr, now)
+		}
 		return
 	}
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+	if rm.last == nil { // defensive: literals built with only `hits` set
+		rm.last = make(map[string]*int64)
+	}
 	// Double-check after acquiring write lock.
 	if ctr, ok = rm.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
+		if lp := rm.last[ruleName]; lp != nil {
+			atomic.StoreInt64(lp, now)
+		}
 		return
 	}
 	if len(rm.hits) >= maxRuleMetrics {
@@ -55,16 +70,30 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	}
 	v := int64(1)
 	rm.hits[ruleName] = &v
+	lv := now
+	rm.last[ruleName] = &lv
 	rm.order = append(rm.order, ruleName)
 }
 
-// saveHitCounters marshals the current hit counters to JSON and writes them
-// to path using a temp-file-then-rename pattern for crash safety.
+// persistedRuleCounter is the on-disk shape of one rule's persisted counters
+// (policy-metadata P1: lastHit joined the long-standing hit count). LastHit is
+// omitempty so a never-matched rule and the legacy loader stay compatible.
+type persistedRuleCounter struct {
+	Hits    int64 `json:"hits"`
+	LastHit int64 `json:"lastHit,omitempty"` // unix seconds; 0 = never
+}
+
+// saveHitCounters marshals the current hit counters + lastHit to JSON and
+// writes them to path using a temp-file-then-rename pattern for crash safety.
 func saveHitCounters(path string) {
 	ruleMet.mu.RLock()
-	data := make(map[string]int64, len(ruleMet.hits))
+	data := make(map[string]persistedRuleCounter, len(ruleMet.hits))
 	for name, ptr := range ruleMet.hits {
-		data[name] = atomic.LoadInt64(ptr)
+		rec := persistedRuleCounter{Hits: atomic.LoadInt64(ptr)}
+		if lp := ruleMet.last[name]; lp != nil {
+			rec.LastHit = atomic.LoadInt64(lp)
+		}
+		data[name] = rec
 	}
 	ruleMet.mu.RUnlock()
 
@@ -78,31 +107,64 @@ func saveHitCounters(path string) {
 	}
 }
 
-// loadHitCounters reads a JSON file of persisted hit counters and restores
-// them into the in-memory ruleMetrics map.
+// loadHitCounters reads a JSON file of persisted hit counters and restores them
+// into ruleMet. Accepts BOTH the current object format ({"r":{"hits","lastHit"}})
+// and the legacy bare-count format ({"r":5}), so upgrading in place never drops
+// counts.
 func loadHitCounters(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return // file may not exist on first run; silently skip
 	}
+	// Current format first.
+	var recs map[string]persistedRuleCounter
+	if json.Unmarshal(data, &recs) == nil {
+		ruleMet.restoreRecords(recs)
+		logger.Printf("HitCounters: restored %d counter(s) from %s", len(recs), path)
+		return
+	}
+	// Legacy fallback: bare name→count (no lastHit).
 	var counts map[string]int64
 	if json.Unmarshal(data, &counts) != nil {
 		logger.Printf("HitCounters: unmarshal error from %s — starting fresh", path)
 		return
 	}
-
-	ruleMet.mu.Lock()
-	for name, count := range counts {
-		if _, ok := ruleMet.hits[name]; !ok && len(ruleMet.hits) < maxRuleMetrics {
-			v := count
-			ruleMet.hits[name] = &v
-			ruleMet.order = append(ruleMet.order, name)
-		} else if ptr, ok := ruleMet.hits[name]; ok {
-			atomic.StoreInt64(ptr, count)
-		}
+	legacy := make(map[string]persistedRuleCounter, len(counts))
+	for name, c := range counts {
+		legacy[name] = persistedRuleCounter{Hits: c}
 	}
-	ruleMet.mu.Unlock()
-	logger.Printf("HitCounters: restored %d counter(s) from %s", len(counts), path)
+	ruleMet.restoreRecords(legacy)
+	logger.Printf("HitCounters: restored %d counter(s) from %s (legacy format)", len(counts), path)
+}
+
+// restoreRecords inserts persisted counters into ruleMet, honoring the
+// cardinality cap for new names and overwriting existing ones in place.
+func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if rm.last == nil {
+		rm.last = make(map[string]*int64)
+	}
+	for name, rec := range recs {
+		if ptr, ok := rm.hits[name]; ok {
+			atomic.StoreInt64(ptr, rec.Hits)
+			if lp := rm.last[name]; lp != nil {
+				atomic.StoreInt64(lp, rec.LastHit)
+			} else {
+				l := rec.LastHit
+				rm.last[name] = &l
+			}
+			continue
+		}
+		if len(rm.hits) >= maxRuleMetrics {
+			continue
+		}
+		h := rec.Hits
+		rm.hits[name] = &h
+		l := rec.LastHit
+		rm.last[name] = &l
+		rm.order = append(rm.order, name)
+	}
 }
 
 // startHitCounterPersistence loads persisted counters from path, then starts
@@ -131,9 +193,11 @@ func startHitCounterPersistence(ctx context.Context, path string) {
 	}()
 }
 
-// RestoreHitCounts copies persisted hit counter values from ruleMet back into
-// the matching PolicyRule.HitCount fields. Called once at startup after both
-// policyStore.Load() and loadHitCounters() have run.
+// RestoreHitCounts copies persisted hit counter values + lastHit from ruleMet
+// back into the matching PolicyRule fields. Called once at startup after both
+// policyStore.Load() and loadHitCounters() have run. Lock order (ruleMet then
+// policyStore) is the ONLY nesting of these two mutexes — List() reads the
+// rule's own atomics and never touches ruleMet, so no reverse-order path exists.
 func RestoreHitCounts() {
 	ruleMet.mu.RLock()
 	defer ruleMet.mu.RUnlock()
@@ -142,6 +206,9 @@ func RestoreHitCounts() {
 	for _, rule := range policyStore.rules {
 		if ctr, ok := ruleMet.hits[rule.Name]; ok {
 			atomic.StoreInt64(&rule.HitCount, atomic.LoadInt64(ctr))
+		}
+		if lp, ok := ruleMet.last[rule.Name]; ok {
+			atomic.StoreInt64(&rule.lastHitUnix, atomic.LoadInt64(lp))
 		}
 	}
 }

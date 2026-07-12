@@ -283,6 +283,7 @@ func cleanupRuleMet(names ...string) {
 	defer ruleMet.mu.Unlock()
 	for _, name := range names {
 		delete(ruleMet.hits, name)
+		delete(ruleMet.last, name)
 	}
 	// Rebuild order without the deleted names.
 	nameSet := make(map[string]bool, len(names))
@@ -316,12 +317,12 @@ func TestSaveAndLoadHitCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	var counts map[string]int64
+	var counts map[string]persistedRuleCounter
 	if err := json.Unmarshal(data, &counts); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if counts["test-save-alpha"] < 2 {
-		t.Errorf("test-save-alpha count = %d, want >= 2", counts["test-save-alpha"])
+	if counts["test-save-alpha"].Hits < 2 {
+		t.Errorf("test-save-alpha count = %d, want >= 2", counts["test-save-alpha"].Hits)
 	}
 
 	// Clear in-memory and restore.
@@ -371,11 +372,11 @@ func TestStartHitCounterPersistence_SaveOnShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	var counts map[string]int64
+	var counts map[string]persistedRuleCounter
 	if err := json.Unmarshal(data, &counts); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if counts["test-shutdown-save"] < 1 {
+	if counts["test-shutdown-save"].Hits < 1 {
 		t.Error("test-shutdown-save not saved")
 	}
 }
