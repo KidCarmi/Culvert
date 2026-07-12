@@ -59,40 +59,52 @@ func classifyOriginInspectFailure(err error) (AutoExcludeReason, bool) {
 	if err == nil {
 		return "", false
 	}
-	// Cert-verify failures are a Block signal — never learn them.
-	var cve *x509.CertificateInvalidError
-	var uae x509.UnknownAuthorityError
-	var hne x509.HostnameError
-	if errors.As(err, &cve) || errors.As(err, &uae) || errors.As(err, &hne) {
-		return "", false
+	if isOriginCertVerifyErr(err) {
+		return "", false // Block signal — never learn.
 	}
-	// Go wraps cert-verify failures in tls.CertificateVerificationError (Go 1.20+);
-	// match by unwrapping to the x509 errors above OR the wrapper's own string.
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "certificate signed by unknown authority") ||
-		strings.Contains(msg, "certificate has expired") ||
-		strings.Contains(msg, "certificate is not valid") ||
-		strings.Contains(msg, "certificate is valid for") || // hostname mismatch text
-		strings.Contains(msg, "x509:") && strings.Contains(msg, "verif") {
-		return "", false
-	}
 	// Origin requires a client certificate we cannot present (server-observed,
 	// non-spoofable). Go surfaces the origin's alert as "tls: certificate required".
-	if strings.Contains(msg, "certificate required") ||
-		strings.Contains(msg, "certificate needed") {
+	if containsAny(msg, "certificate required", "certificate needed") {
 		return autoExReasonClientCert, true
 	}
 	// Unsupported TLS version/cipher/parameters — the canonical exclusion trigger.
-	if strings.Contains(msg, "protocol version not supported") ||
-		strings.Contains(msg, "no supported versions") ||
-		strings.Contains(msg, "unsupported") ||
-		strings.Contains(msg, "no cipher suite supported") ||
-		strings.Contains(msg, "handshake failure") ||
-		strings.Contains(msg, "no application protocol") {
+	if containsAny(msg,
+		"protocol version not supported", "no supported versions", "unsupported",
+		"no cipher suite supported", "handshake failure", "no application protocol") {
 		return autoExReasonUnsupported, true
 	}
 	// Everything else (EOF, reset, timeout, unrecognized) ⇒ do not learn.
 	return "", false
+}
+
+// isOriginCertVerifyErr reports whether err is an origin certificate VERIFICATION
+// failure (untrusted issuer / expired / hostname mismatch) — the class that must
+// never be auto-excluded (it is a Block decision, and the poisoning vector). Go
+// wraps these in tls.CertificateVerificationError (Go 1.20+) over the x509 types.
+func isOriginCertVerifyErr(err error) bool {
+	var cve *x509.CertificateInvalidError
+	var uae x509.UnknownAuthorityError
+	var hne x509.HostnameError
+	if errors.As(err, &cve) || errors.As(err, &uae) || errors.As(err, &hne) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if containsAny(msg, "certificate signed by unknown authority", "certificate has expired",
+		"certificate is not valid", "certificate is valid for" /* hostname mismatch */) {
+		return true
+	}
+	return strings.Contains(msg, "x509:") && strings.Contains(msg, "verif")
+}
+
+// containsAny reports whether s contains any of subs.
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyClientInspectFailure maps a CLIENT-leg (forged-leaf) handshake error to
@@ -106,15 +118,10 @@ func classifyClientInspectFailure(err error) (AutoExcludeReason, bool) {
 	}
 	msg := strings.ToLower(err.Error())
 	// TLS alerts a pinning client sends when it rejects our forged leaf.
-	if strings.Contains(msg, "bad certificate") ||
-		strings.Contains(msg, "unknown certificate authority") ||
-		strings.Contains(msg, "certificate required") ||
-		strings.Contains(msg, "certificate expired") ||
-		strings.Contains(msg, "certificate unknown") ||
-		strings.Contains(msg, "certificate revoked") ||
-		strings.Contains(msg, "unknown ca") ||
-		strings.Contains(msg, "access denied") ||
-		strings.Contains(msg, "no application protocol") {
+	if containsAny(msg,
+		"bad certificate", "unknown certificate authority", "certificate required",
+		"certificate expired", "certificate unknown", "certificate revoked",
+		"unknown ca", "access denied", "no application protocol") {
 		return autoExReasonClientPinned, true
 	}
 	return "", false

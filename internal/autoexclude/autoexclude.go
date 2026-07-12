@@ -50,15 +50,15 @@ import (
 type Reason string
 
 const (
-	// ReasonUnsupported: the origin TLS could not be inspected because of a
+	// ReasonUnsupported is the origin TLS could-not-be-inspected reason: a
 	// version/cipher/protocol incompatibility (the canonical PAN-OS trigger).
 	ReasonUnsupported Reason = "unsupported"
-	// ReasonClientCertRequired: the origin demanded a client certificate we
-	// cannot present (server-observed CertificateRequest — non-spoofable).
+	// ReasonClientCertRequired is the origin-demanded-a-client-certificate reason:
+	// we cannot present one (server-observed CertificateRequest — non-spoofable).
 	ReasonClientCertRequired Reason = "client_cert_required"
-	// ReasonClientPinned: the client rejected our forged leaf with a certificate
-	// alert (a pinned app). Spoofable from the client side, so it is the reason
-	// most reliant on the confirm-count and gets the shorter TTL.
+	// ReasonClientPinned is the client-rejected-our-forged-leaf reason (a pinned
+	// app). Spoofable from the client side, so it is the reason most reliant on
+	// the confirm-count and gets the shorter TTL.
 	ReasonClientPinned Reason = "client_pinned"
 )
 
