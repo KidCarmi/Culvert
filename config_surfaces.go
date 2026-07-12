@@ -262,6 +262,13 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "CategoryGroups", Apply: semNilSkipEmptyWipe}}},
+	{ID: "decryption_profiles", Kind: kindConfig, Owner: "globalDecryptionProfiles",
+		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "decryption_profiles", DiffNilGuarded: true,
+		ClusterSynced: true, SnapshotCap: maxSnapDecryptionProfiles,
+		Note: "named 'how to decrypt' object referenced per rule; apply ordered before policy_rules (import and rollback); import never wipes (merge = upsert-by-name); configBackup field has NO omitempty, ConfigSnapshot field keeps omitempty (non-WireWipeCapable)",
+		Bindings: []surfaceBinding{
+			{Struct: "configBackup", Field: "DecryptionProfiles", Apply: semNilSkipEmptyWipe},
+			{Struct: "ConfigSnapshot", Field: "DecryptionProfiles", Apply: semNilSkipEmptyWipe}}},
 	{ID: "url_categories", Kind: kindConfig, Owner: "catStore",
 		Export: true, Import: true, Rollback: true, Diffed: true, DiffKey: "url_categories", DiffNilGuarded: true,
 		ClusterSynced: true, SnapshotCap: maxSnapURLCategories,

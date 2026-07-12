@@ -613,6 +613,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		// category-group rule's referents.
 		b.URLCategories = catStore.All()
 		b.CategoryGroups = globalCategoryGroups.List()
+		b.DecryptionProfiles = globalDecryptionProfiles.List()
 		b.ContentScanBypassHosts = dpiScanner.BypassHosts()
 	}
 
@@ -853,6 +854,18 @@ func importCategoryTaxonomy(b *configBackup, replaceMode bool) {
 				func(g CategoryGroup) string { return g.Name }))
 		}
 		globalCategoryGroups.Save()
+	}
+	// Decryption profiles — import never wipes (absent/empty skips); merge = upsert
+	// by name. Applied before policy rules (this runs inside importCategoryTaxonomy,
+	// called before the rule import) so a rule's DecryptionProfile ref resolves.
+	if len(b.DecryptionProfiles) > 0 {
+		if replaceMode {
+			globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
+		} else {
+			globalDecryptionProfiles.ReplaceAll(mergeByName(globalDecryptionProfiles.List(), b.DecryptionProfiles,
+				func(p DecryptionProfile) string { return p.Name }))
+		}
+		globalDecryptionProfiles.Save()
 	}
 }
 

@@ -890,6 +890,14 @@ type configBackup struct {
 	// → apply replaces.
 	CategoryGroups []CategoryGroup `json:"categoryGroups"`
 
+	// DecryptionProfiles extends the rollback surface to cover the
+	// PolicyRules → DecryptionProfile reference. json:"decryptionProfiles"
+	// WITHOUT omitempty (same posture as CategoryGroups): nil → apply skips;
+	// [] → apply wipes; populated → apply replaces. The paired ConfigSnapshot
+	// field keeps omitempty (SnapshotWireWipe requires it for a
+	// non-WireWipeCapable field).
+	DecryptionProfiles []DecryptionProfile `json:"decryptionProfiles"`
+
 	// URLCategories extends the rollback surface to cover catStore
 	// (admin-managed Layer 1; communityDB Layer 2 is intentionally
 	// out-of-band). Per roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"github.com/KidCarmi/Culvert/internal/decryptprofile"
 )
 
 // csrStructTypes maps registry Struct names to their reflect types.
@@ -138,8 +139,8 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	// validateConfigSnapshot (controlplane.go) enforces exactly this many
 	// per-slice caps. If you add a capped field there, register it here (and
 	// vice versa) — the two tables must move in lockstep.
-	if capped != 19 {
-		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 19 — the tables drifted", capped)
+	if capped != 20 {
+		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 20 — the tables drifted", capped)
 	}
 }
 
@@ -192,6 +193,12 @@ func csrNilGuardCases() map[string]struct {
 				c.CategoryGroups = []CategoryGroup{{Name: "csr-g", Categories: []string{"csr-c"}}}
 			},
 			wipe: func(c *configBackup) { c.CategoryGroups = []CategoryGroup{} },
+		},
+		"decryption_profiles": {
+			populate: func(c *configBackup) {
+				c.DecryptionProfiles = []DecryptionProfile{{Name: "csr-dp", MinTLSVersion: "1.3"}}
+			},
+			wipe: func(c *configBackup) { c.DecryptionProfiles = []DecryptionProfile{} },
 		},
 		"url_categories": {
 			populate: func(c *configBackup) {
@@ -304,6 +311,10 @@ func csrDiffMutators() map[string]func(a, b *configBackup) {
 			a.CategoryGroups = []CategoryGroup{}
 			b.CategoryGroups = []CategoryGroup{{Name: "csr-diff-g"}}
 		},
+		"decryption_profiles": func(a, b *configBackup) {
+			a.DecryptionProfiles = []DecryptionProfile{}
+			b.DecryptionProfiles = []DecryptionProfile{{Name: "csr-diff-dp"}}
+		},
 		"url_categories": func(a, b *configBackup) {
 			a.URLCategories = []CategoryEntry{}
 			b.URLCategories = []CategoryEntry{{Name: "csr-diff-c"}}
@@ -352,6 +363,13 @@ func csrIsolateRollbackStores(t *testing.T) {
 	snapshotGlobalCategoryGroups(t) // globalCategoryGroups → TempDir
 	snapshotDPIScanner(t)           // dpiScanner → TempDir
 	snapshotPolicyStoreForTest(t)   // policyStore, path="" (no persistence)
+
+	// globalDecryptionProfiles: swap for a fresh in-memory store (path="" → Save
+	// is a no-op) and restore, so the round-trip actually diverges the profile
+	// store + never leaks profile state across tests.
+	origDP := globalDecryptionProfiles
+	globalDecryptionProfiles = decryptprofile.New()
+	t.Cleanup(func() { globalDecryptionProfiles = origDP })
 
 	origBL := bl
 	bl = blocklist.New() // empty path → Save() is a no-op
@@ -410,6 +428,7 @@ func csrSeedStateA() {
 	_ = pacStore.Set(PACConfig{ProxyHost: "csr-proxy.example.com", ProxyPort: 3128, Exclusions: []string{"*.csr.local"}})
 	catStore.ReplaceAll([]CategoryEntry{{Name: "csr-cat", Hosts: []string{"csr.example.com"}}})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{{Name: "csr-group", Categories: []string{"csr-cat"}}})
+	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "csr-dp-a", MinTLSVersion: "1.2"}})
 }
 
 // csrMutateStateB moves every store somewhere else, so an apply-miss for any
@@ -435,6 +454,7 @@ func csrMutateStateB() {
 	_ = pacStore.Set(PACConfig{})
 	catStore.ReplaceAll([]CategoryEntry{})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{})
+	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{})
 }
 
 // csrCanon renders a captured field value order-insensitively for slices
