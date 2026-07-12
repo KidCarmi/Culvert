@@ -117,6 +117,13 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`function polRevertOrder`, // discard the staged order
 		`function polShadowHints`, // exactly-decidable advisory shadow detection (G4)
 		`id="pol-reorder-bar"`,    // sticky Apply/Revert commit bar
+		// P1 Where-Used — generic object-reference presentation (policy-refs)
+		`function whereUsedList`,     // generic consumer-entry renderer (switches on nothing)
+		`function handleDeleteError`, // blocked-delete 409 → navigable referent list
+		`function openWhereUsed`,     // on-demand references fetch for a shared object row
+		`id="where-used-dialog"`,     // Where-Used modal
+		`data-click="whereUsedGoto"`, // referent → consumer navigation
+		`data-click="openWhereUsed"`, // on-demand Where-Used affordance on object rows
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
