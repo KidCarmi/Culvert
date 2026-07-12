@@ -450,6 +450,8 @@ tr.dragging  { opacity: .4; }
   padding: 10px 12px; margin-bottom: 12px; background: var(--surface1);
   border: 1px solid var(--border); border-radius: var(--r-md); }
 .pol-summary strong { color: var(--text); }
+.pol-provenance { font-size: var(--fs-xs, .72rem); color: var(--muted); font-family: var(--font-mono);
+  padding: 6px 12px; margin-bottom: 12px; }
 /* motion floor */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
@@ -2547,6 +2549,13 @@ Firefox (all platforms):
               </div>
             </div>
           </details>
+
+          <!-- policy-metadata P1: admin-authored comment + read-only provenance -->
+          <div style="margin-bottom:14px">
+            <label class="form-label">Comment <span style="color:var(--muted);font-weight:400">(why this rule exists — shown in the drawer and audit log)</span></label>
+            <textarea class="input" style="width:100%;min-height:52px;resize:vertical" id="pol-comment" placeholder="Optional note" data-input="polMarkEdited"></textarea>
+          </div>
+          <div id="pol-provenance" class="pol-provenance" style="display:none"></div>
 
           <!-- S3: live human-readable rule summary + client validation errors -->
           <div id="pol-form-err" class="banner crit" role="alert" style="display:none"></div>
@@ -8954,6 +8963,8 @@ async function editPolicy(priority) {
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
+  document.getElementById('pol-comment').value = r.comment || '';
+  polRenderProvenance(r);
   // Group chip picker
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
@@ -8998,6 +9009,8 @@ function clearPolicyForm() {
   document.getElementById('pol-log-uri').checked     = false;
   document.getElementById('pol-log-traffic').checked = true;
   document.getElementById('pol-src-auth').value      = '';
+  document.getElementById('pol-comment').value       = '';
+  polRenderProvenance(null);
   clearGroupSelection();
   _selectedCountries = [];
   _syncCountryHidden();
@@ -9009,6 +9022,30 @@ function clearPolicyForm() {
   _polFormDirty = false;
   polShowFormErrors([]);
   polRenderSummary();
+}
+
+// polRenderProvenance — read-only Tier-A metadata line (createdAt / modifiedAt
+// / modifiedBy) under the rule editor. Hidden for new rules and pre-feature
+// rules that carry no metadata. Server-stamped, non-editable — provenance, not
+// input. textContent (never innerHTML) so the actor string can never inject.
+function polRenderProvenance(r) {
+  const box = document.getElementById('pol-provenance');
+  if (!box) return;
+  const parts = [];
+  if (r && r.createdAt) parts.push('Created ' + fmtProvTime(r.createdAt));
+  if (r && r.modifiedAt) {
+    let m = 'Modified ' + fmtProvTime(r.modifiedAt);
+    if (r.modifiedBy) m += ' by ' + r.modifiedBy;
+    parts.push(m);
+  }
+  box.textContent = parts.join('   ·   ');
+  box.style.display = parts.length ? '' : 'none';
+}
+// fmtProvTime — RFC3339 (or any Date-parseable) → local human string; falls
+// back to the raw value if unparseable.
+function fmtProvTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
 // polReadForm — single reader for the access-rule editor fields, shared by
@@ -9036,6 +9073,7 @@ function polReadForm() {
     logFullUri:     document.getElementById('pol-log-uri').checked,
     logTraffic:     document.getElementById('pol-log-traffic').checked,
     schedule:       getScheduleFromForm(),
+    comment:        document.getElementById('pol-comment').value.trim(),
   };
 }
 

@@ -882,6 +882,25 @@ func apiRewrite(w http.ResponseWriter, r *http.Request) {
 // ─── Policy API ───────────────────────────────────────────────────────────────
 
 // GET/POST/PUT/DELETE /api/policy — manage PBAC policy rules
+// stampRuleMetadataForWrite sets the server-authoritative Tier-A metadata on a
+// rule about to be written (policy-metadata P1). CreatedAt/ModifiedAt/ModifiedBy
+// are ALWAYS server-set here — client-supplied values are ignored, or the
+// provenance fields become theater (POLICY-ARCHITECTURE-FUTURE.md §2). On an
+// edit (before != nil) CreatedAt is carried from the stored rule so an edit
+// never rewrites when the rule was born; a pre-feature rule (empty CreatedAt)
+// stays empty rather than being back-dated to now, which would be a lie.
+// Comment is deliberately NOT touched — it is the one admin-authored field.
+func stampRuleMetadataForWrite(rule *PolicyRule, before *PolicyRule, actor string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if before == nil {
+		rule.CreatedAt = now
+	} else {
+		rule.CreatedAt = before.CreatedAt
+	}
+	rule.ModifiedAt = now
+	rule.ModifiedBy = actor
+}
+
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -917,6 +936,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 		added := policyStore.Add(rule)
 		policyStore.Save()
 		logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
@@ -965,6 +985,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 		if !policyStore.Update(priority, rule) {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
