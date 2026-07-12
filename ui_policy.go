@@ -636,11 +636,24 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		// into fail-open and how many rules reference them. 0/0 ⇒ nothing can ever
 		// auto-disable inspection (an empty cache alone does not prove this).
 		foProfiles, foRules := failOpenFootprint()
+		exclusions := autoExclude.List()
+		// Per-entry blast radius: how many policy rules each exclusion's owning
+		// profile (scope) is bound to. Computed once per distinct scope.
+		scopeRules := make(map[string]int)
+		for i := range exclusions {
+			sn := exclusions[i].ScopeName
+			if _, done := scopeRules[sn]; done || sn == "" {
+				continue
+			}
+			_, refs := objectReferences("decryption-profile", sn)
+			scopeRules[sn] = len(refs)
+		}
 		jsonOK(w, map[string]any{
-			"exclusions":         autoExclude.List(),
+			"exclusions":         exclusions,
 			"stats":              autoExclude.Stats(),
 			"fail_open_profiles": foProfiles,
 			"fail_open_rules":    foRules,
+			"scope_rule_counts":  scopeRules,
 		})
 
 	case http.MethodDelete:
@@ -648,9 +661,11 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 		if host != "" {
-			removed := autoExclude.Remove(host)
-			auditEvent(r, "decryption.autoexclude.evict", host, "manual eviction of a learned exclusion")
+			// Evict one (scope, host). scope is the owning decryption-profile ID.
+			removed := autoExclude.Remove(scope, host)
+			auditEvent(r, "decryption.autoexclude.evict", scope+"/"+host, "manual eviction of a learned exclusion")
 			jsonOK(w, map[string]any{"ok": true, "removed": removed})
 			return
 		}

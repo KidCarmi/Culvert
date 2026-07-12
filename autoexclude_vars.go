@@ -19,8 +19,8 @@ type AutoExcludeReason = autoexclude.Reason
 // Re-export the learn reasons so the hot-path classifier and metrics stay on the
 // unqualified names.
 const (
-	autoExReasonUnsupported  = autoexclude.ReasonUnsupported
 	autoExReasonClientCert   = autoexclude.ReasonClientCertRequired
+	autoExReasonUnsupported  = autoexclude.ReasonUnsupportedParams
 	autoExReasonClientPinned = autoexclude.ReasonClientPinned
 )
 

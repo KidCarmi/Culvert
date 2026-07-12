@@ -607,16 +607,19 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 		logger.Printf("SSL_BYPASS_PATTERN %s -> %q", clientIP, sanitizeLog(host))
 	}
 	// Adaptive decryption exclusion (fail-open self-heal): consult the learned
-	// exclusion cache ONLY when the matched rule opts into fail-open. A fail-close
-	// rule never reads the cache, so a host learned under one rule can never
-	// bypass a different inspect-mandatory rule, and critical hosts kept on
-	// fail-close rules are un-poisonable by construction. Precedence: explicit
-	// operator ssl-bypass (above) > learned auto-exclusion > policy inspect.
+	// exclusion cache ONLY when the matched rule opts into fail-open, and only
+	// within that rule's decryption-profile SCOPE. A fail-close rule never reads
+	// the cache; a host learned under one fail-open profile can never bypass a
+	// different profile's rule (scoped key), and critical hosts kept on fail-close
+	// rules are un-poisonable by construction. Precedence: explicit operator
+	// ssl-bypass (above) > learned auto-exclusion (same scope) > policy inspect.
 	if sslAction == SSLInspect && resolveFailOpen(match) {
-		if reason, ok := autoExclude.Contains(host); ok {
+		scopeID, scopeName := decryptionScope(match)
+		if reason, ok := autoExclude.Contains(scopeID, host); ok {
 			sslAction = SSLBypass
 			recordAutoExcludeHit()
-			logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (reason=%s)", sanitizeLog(clientIP), sanitizeLog(host), reason)
+			logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%q reason=%s)",
+				sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(scopeName), reason)
 		}
 	}
 	return sslAction, tlsSkipVerify

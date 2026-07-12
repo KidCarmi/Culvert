@@ -30,17 +30,29 @@ radius, where you can evict it.
 
 ## What it will and will NOT learn
 
-| Inspect failure | Learned? | Why |
-|---|---|---|
-| Unsupported TLS version/cipher | ✅ | genuine can't-decrypt; server-observed |
-| Origin requires a client certificate | ✅ | genuine can't-decrypt; server-observed, non-spoofable |
-| Client rejects our forged cert (pinning) | ✅ (guarded) | real pinning signal, but spoofable → needs the confirm-count and gets a shorter TTL |
-| Origin cert untrusted / expired / hostname mismatch | ❌ | this is a **block** decision, not a compatibility problem — auto-bypassing a bad cert would be an exfil channel. Stays a `502`. |
-| Connection reset / timeout / unknown error | ❌ | fail-closed default; the proxy never learns on an ambiguous signal |
+An origin controls its own TLS alerts, so the classifier trusts only **narrow,
+specific** signals — a generic origin-emitted failure is not proof of decryption
+incompatibility and never triggers a bypass.
 
-The classifier **defaults to not learning** — only a positive match on a genuine
-can't-decrypt signal populates the cache, so a misclassification can only ever
-keep inspecting (fail closed), never wrongly bypass.
+| Inspect failure | Learned? | Live-rescues the triggering session? |
+|---|---|---|
+| Origin requires a client certificate (`certificate_required` alert) | ✅ | ✅ (strip path only — the one reason allowed to rescue) |
+| TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
+| Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
+| Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
+| Origin cert untrusted / expired / hostname mismatch | ❌ | ❌ a **block** decision — auto-bypassing a bad cert is an exfil channel |
+| Connection reset / timeout / wrapped / unknown error | ❌ | ❌ fail-closed default |
+
+The classifier **defaults to not learning** — only a positive match on a narrow
+signal populates the cache, so a misclassification can only ever keep inspecting
+(fail closed), never wrongly bypass.
+
+> **Residual downgrade risk (live rescue).** Even `certificate_required` is an
+> origin-emitted alert, so an attacker-controlled origin *under a fail-open rule*
+> could demand a client cert to force a one-session bypass. This is bounded by the
+> per-profile opt-in (you chose fail-open for that traffic class) and the profile
+> scope (below), and it is why DLP-critical / inspection-mandatory hosts belong on
+> **fail-close** rules — those never rescue, learn, or consult the cache.
 
 > **Private-PKI origins:** if a business-critical SaaS uses a private/enterprise
 > CA Culvert doesn't trust, the *correct* fix is to add that CA to Culvert's trust
@@ -60,6 +72,17 @@ keep inspecting (fail closed), never wrongly bypass.
 It is **off by default** — with no fail-open profile the cache is inert and
 inspection behavior is byte-for-byte unchanged.
 
+### Scope: exclusions are per decryption profile, not global
+
+Every learned exclusion is keyed by **(profile, host)** — the decryption profile
+that matched the failing session owns it. A host learned under profile *A* is
+bypassed **only** for sessions that also match profile *A*; a different fail-open
+profile *B* targeting the same host is unaffected and keeps inspecting until it
+learns the host itself. This is real policy isolation: one team's / tenant's /
+population's fail-open profile cannot open a hole in another's. The panel shows
+each exclusion's owning profile and its **blast radius** (how many policy rules
+that profile is bound to).
+
 ### The never-exclude control
 
 The cache is consulted **only for sessions whose matched rule is fail-open**. A
@@ -70,6 +93,39 @@ rule that is **fail-close never consults the cache**, so:
   and they are un-poisonable by design.
 - A fail-open rule for one user population cannot silently disable inspection for
   a different, inspect-mandatory rule targeting the same host.
+
+### Distinct-client evidence (confirm-count)
+
+Promotion requires the same failure from **N distinct clients** (default 2). The
+"client" is the **authenticated identity** when the session is authenticated,
+otherwise the client address (IPv6 collapsed to /64 for single-host address
+churn; IPv4 kept raw). **NAT/DHCP limitation:** unauthenticated devices sharing
+one egress IP count as one client, so a host that breaks only for such a fleet
+needs failures from two distinct egress IPs (or two authenticated users) before
+it is excluded. Authenticating clients gives the best device-independence signal.
+
+### Downgrade / rollback
+
+`OnInspectError` is an additive persisted decryption-profile field (a
+config-schema change, though it adds no new top-level surface). It round-trips
+through config export and version rollback. **Downgrade is safe:** an older binary
+that does not know the field ignores the unknown JSON key on load and the profile
+still parses, resolving to **fail-close** (today's behavior) — enabling fail-open
+on a new build and rolling back never breaks profile loading.
+
+### Staged rollout (recommended)
+
+This feature disables inspection for learned hosts, so roll it out gradually:
+
+1. Enable fail-open on **one narrow profile** bound to a **specific** rule (e.g.
+   a known pinned-app or BYOD segment) — never a catch-all `*` rule.
+2. Watch the **Decryption Exclusions** panel and
+   `culvert_decrypt_autoexclude_active` for a week. Confirm the learned hosts are
+   the ones you expect and the blast radius is small.
+3. Alert on the active gauge and on the `decryption_autoexclude` learn events in
+   your SIEM. Treat an unexpected host going dark as an incident.
+4. Expand to more profiles only after the above is stable. Keep every
+   inspection-mandatory host on a fail-close rule throughout.
 
 ## Operating it
 

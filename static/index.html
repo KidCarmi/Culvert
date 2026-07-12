@@ -4240,7 +4240,7 @@ document.addEventListener('click', e => {
     case 'editDecProf':       editDecProf(arg); break;
     case 'deleteDecProf':     deleteDecProf(arg); break;
     case 'fetchDecExclusions': fetchDecExclusions(); break;
-    case 'evictDecExclusion': evictDecExclusion(arg); break;
+    case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
     case 'clearDecExclusions': clearDecExclusions(); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
     case 'editCatGroup':      editCatGroup(arg); break;
@@ -5264,10 +5264,12 @@ async function deleteDecProf(name) {
 // ── Decryption Exclusions (auto-learned fail-open cache) ──────────────────
 let _decExclusions = [];
 
+let _decExclScopeRules = {};
 async function fetchDecExclusions() {
   try {
     const d = await api('/api/decryption-exclusions');
     _decExclusions = d.exclusions || [];
+    _decExclScopeRules = d.scope_rule_counts || {};
     renderDecExclusions(d.stats || {}, d.fail_open_profiles || 0, d.fail_open_rules || 0);
   } catch(e) { console.error(e); }
 }
@@ -5291,7 +5293,7 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
         : `⚠ ${failOpenProfiles} fail-open profile(s), referenced by ${failOpenRules} policy rule(s) — those rules can auto-disable inspection.`) +
       '</div>' +
       escHtml(`Active: ${stats.active ?? 0} · Pending (unconfirmed): ${stats.pending ?? 0} · ` +
-      `Confirm-count: ${stats.confirm_n ?? '?'} distinct client subnets · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
+      `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients (identity, else IP) · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
       `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`);
   }
   const el = document.getElementById('decexcl-list');
@@ -5302,26 +5304,29 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
   }
   const now = Date.now();
   el.innerHTML = '<table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Host</th><th>Reason</th><th>Hits</th><th>Clients</th><th>Learned</th><th>Expires in</th><th></th>' +
+    '<th>Profile (scope)</th><th>Host</th><th>Reason</th><th>Rules</th><th>Hits</th><th>Clients</th><th>Learned</th><th>Expires in</th><th></th>' +
     '</tr></thead><tbody>' +
     _decExclusions.map(x => {
       const remMs = new Date(x.expires_at).getTime() - now;
       const rem = remMs > 0 ? Math.round(remMs/60000) + 'm' : 'expired';
+      const rules = _decExclScopeRules[x.scope_name] ?? '?';
       return `<tr>
+        <td>${escHtml(x.scope_name || x.scope_id || '—')}</td>
         <td style="font-family:monospace">${escHtml(x.host)}</td>
         <td><span style="font-size:.72rem;background:rgba(239,68,68,.15);color:var(--red);padding:2px 8px;border-radius:4px">${escHtml(decExclReasonLabel(x.reason))}</span></td>
+        <td title="policy rules bound to this profile (blast radius)">${escHtml(String(rules))}</td>
         <td>${x.hits ?? 0}</td>
         <td>${x.client_count ?? 0}</td>
         <td style="font-size:.78rem;color:var(--muted)">${escHtml((x.learned_at||'').replace('T',' ').slice(0,19))}</td>
         <td>${escHtml(rem)}</td>
-        <td><button class="btn ghost sm" style="color:var(--red)" data-min-role="operator" data-click="evictDecExclusion" data-arg="${escHtml(x.host)}">Evict</button></td>
+        <td><button class="btn ghost sm" style="color:var(--red)" data-min-role="operator" data-click="evictDecExclusion" data-arg="${escHtml(x.scope_id)}" data-arg2="${escHtml(x.host)}">Evict</button></td>
       </tr>`;
     }).join('') + '</tbody></table>';
 }
 
-async function evictDecExclusion(host) {
+async function evictDecExclusion(scopeId, host) {
   try {
-    await api('/api/decryption-exclusions?host=' + encodeURIComponent(host), { method: 'DELETE' });
+    await api('/api/decryption-exclusions?scope=' + encodeURIComponent(scopeId) + '&host=' + encodeURIComponent(host), { method: 'DELETE' });
     toast('Exclusion evicted — inspection resumes for ' + host, 'success');
     fetchDecExclusions();
   } catch(e) { toast('Error: ' + e.message, 'error'); }

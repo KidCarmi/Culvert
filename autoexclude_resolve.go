@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,37 +70,47 @@ func resolveFailOpen(match *PolicyMatch) bool {
 }
 
 // classifyOriginInspectFailure maps an UPSTREAM (origin-leg) inspect-handshake
-// error to a learnable reason. Returns learn=false for the cases that must NOT
-// auto-exclude:
+// error to a learnable reason PLUS whether that reason may LIVE-RESCUE the
+// triggering session. It is deliberately narrow (B2/B3): an origin controls its
+// own TLS alerts, so a generic origin-emitted failure is NOT proof of decryption
+// incompatibility and must never trigger a bypass. Only two signals are trusted:
 //
-//   - cert verification failure (untrusted issuer / expired / hostname mismatch)
-//     ⇒ this is a Block decision; auto-bypassing it is the exfil vector.
-//   - EOF / RST / timeout / anything unrecognized ⇒ fail-closed default.
+//   - client-cert-required (learn=true, rescue=true): the origin sent a
+//     CertificateRequest we structurally cannot satisfy — a specific TLS alert.
+//     This is the ONE origin-leg reason permitted to live-rescue the triggering
+//     session (B3). Residual risk documented in the operator guide: an
+//     attacker-controlled origin under a fail-open rule can demand a client cert
+//     to force a bypass — which is why fail-open is an explicit per-profile opt-in
+//     and critical hosts belong on fail-close rules.
+//   - unsupported-params (learn=true, rescue=false): a genuine TLS-parameter
+//     incompatibility our OWN stack detected locally (no version/cipher overlap),
+//     not an origin-emitted generic alert. Learn-only — it enters pending
+//     learning but never bypasses the triggering session.
 //
-// It learns only the genuine "we cannot decrypt this even though we want to"
-// signals: the origin demanded a client certificate, or the TLS parameters are
-// unsupported.
-func classifyOriginInspectFailure(err error) (AutoExcludeReason, bool) {
-	if err == nil {
-		return "", false
-	}
-	if isOriginCertVerifyErr(err) {
-		return "", false // Block signal — never learn.
+// Everything else — cert-verify failures (Block signal), generic/origin-emitted
+// alerts (handshake_failure, no_application_protocol), EOF/RST/timeout, wrapped
+// or ambiguous errors — returns learn=false: fail-closed. Misclassification can
+// therefore only ever keep inspecting, never wrongly bypass.
+func classifyOriginInspectFailure(err error) (reason AutoExcludeReason, learn, rescue bool) {
+	if err == nil || isOriginCertVerifyErr(err) {
+		return "", false, false
 	}
 	msg := strings.ToLower(err.Error())
-	// Origin requires a client certificate we cannot present (server-observed,
-	// non-spoofable). Go surfaces the origin's alert as "tls: certificate required".
-	if containsAny(msg, "certificate required", "certificate needed") {
-		return autoExReasonClientCert, true
+	// Origin demands a client certificate (specific TLS alert: certificate_required).
+	if strings.Contains(msg, "certificate required") {
+		return autoExReasonClientCert, true, true
 	}
-	// Unsupported TLS version/cipher/parameters — the canonical exclusion trigger.
+	// Genuine parameter incompatibility detected LOCALLY by our stack — distinctive
+	// Go local-error strings, NOT the origin-emitted generic "handshake failure"
+	// alert. Learn-only (rescue=false).
 	if containsAny(msg,
-		"protocol version not supported", "no supported versions", "unsupported",
-		"no cipher suite supported", "handshake failure", "no application protocol") {
-		return autoExReasonUnsupported, true
+		"no supported versions satisfy",
+		"server selected unsupported protocol version",
+		"no cipher suite supported by both") {
+		return autoExReasonUnsupported, true, false
 	}
-	// Everything else (EOF, reset, timeout, unrecognized) ⇒ do not learn.
-	return "", false
+	// Generic / ambiguous / origin-controlled failures stay fail-close.
+	return "", false, false
 }
 
 // isOriginCertVerifyErr reports whether err is an origin certificate VERIFICATION
@@ -146,43 +155,80 @@ func classifyClientInspectFailure(err error) (AutoExcludeReason, bool) {
 		return "", false
 	}
 	msg := strings.ToLower(err.Error())
-	// TLS alerts a pinning client sends when it rejects our forged leaf.
+	// Specific certificate-rejection alerts a pinning client sends when it refuses
+	// our forged leaf. Deliberately narrow: no generic "access denied"/handshake
+	// failures (ambiguous). Learn-only + confirm-count already bound this path.
 	if containsAny(msg,
-		"bad certificate", "unknown certificate authority", "certificate required",
-		"certificate expired", "certificate unknown", "certificate revoked",
-		"unknown ca", "access denied") {
+		"bad certificate", "unknown certificate authority", "unknown ca",
+		"certificate expired", "certificate unknown", "certificate revoked") {
 		return autoExReasonClientPinned, true
 	}
 	return "", false
 }
 
-// recordAutoExclude records a qualifying inspect failure and, when the observation
-// PROMOTES the host to an active exclusion (confirm-count of distinct client IPs
-// reached), fires the audit + alert + metric. Safe to call on any failure site;
-// it no-ops if the reason is empty. host is host-only-normalized inside the engine.
-func recordAutoExclude(host string, reason AutoExcludeReason, clientIP string) {
+// decryptionScope returns the policy-boundary scope (the matched decryption
+// profile's stable ID + display name) that owns any exclusion learned for this
+// session. A fail-open session always has a concrete profile (resolveFailOpen
+// required it), so the ID is non-empty on the learn/read paths.
+func decryptionScope(match *PolicyMatch) (id, name string) {
+	if p := resolveDecryptionProfile(match); p != nil {
+		return p.ID, p.Name
+	}
+	return "", ""
+}
+
+// clientEvidence derives the opaque distinct-client token the confirm-count
+// aggregates (B4). It prefers the AUTHENTICATED IDENTITY (true device/user
+// independence) and falls back to the client address. IPv6 addresses collapse to
+// /64 because a single host legitimately owns the whole prefix (SLAAC/privacy
+// churn); IPv4 uses the RAW address — a /24 is a network of many devices, so
+// bucketing it would over-collapse a legitimate enterprise fleet behind one NAT.
+// Documented NAT/DHCP limitation: unauthenticated devices sharing one egress IP
+// count as one client, so a host broken only for such a fleet needs failures from
+// two distinct egress IPs (or two authenticated users) before it is excluded.
+func clientEvidence(identity, clientIP string) string {
+	if identity != "" {
+		return "id:" + identity
+	}
+	if ip := net.ParseIP(clientIP); ip != nil && ip.To4() == nil {
+		return "net6:" + ip.Mask(net.CIDRMask(64, 128)).String()
+	}
+	return "ip:" + clientIP
+}
+
+// recordAutoExclude records a qualifying inspect failure for (scope, host) and,
+// when the observation PROMOTES it to an active exclusion (confirm-count of
+// distinct client-evidence tokens reached), fires the audit + alert + metric.
+// Safe to call on any failure site; it no-ops if the reason or scope is empty.
+func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
 	if reason == "" {
 		return
 	}
-	if !autoExclude.Observe(host, reason, clientIP) {
+	scopeID, scopeName := decryptionScope(match)
+	if scopeID == "" {
+		return // no fail-open profile to scope to (gated caller, defensive)
+	}
+	client := clientEvidence(id.Identity, id.ClientIP)
+	if !autoExclude.Observe(scopeID, scopeName, host, reason, client) {
 		return // still gathering confirmation, or already excluded
 	}
-	// Promotion: inspection is now OFF for this host until the entry expires.
-	autoExcludeLearns.record(string(reason))
+	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
+	autoExcludeLearns.record(string(reason), scopeName)
 	safeHost := strings.ReplaceAll(host, `"`, "")
-	logger.Printf("SSL_AUTOEXCLUDE_LEARN %s -> %q (reason=%s) — inspection bypassed until TTL",
-		sanitizeLog(clientIP), sanitizeLog(safeHost), reason)
+	safeScope := strings.ReplaceAll(scopeName, `"`, "")
+	logger.Printf("SSL_AUTOEXCLUDE_LEARN %s -> %q (scope=%q reason=%s) — inspection bypassed until TTL",
+		sanitizeLog(id.ClientIP), sanitizeLog(safeHost), sanitizeLog(safeScope), reason)
 	auditAdd(AuditEntry{
 		TS:     time.Now().UnixMilli(),
 		Time:   time.Now().Format("2006-01-02 15:04:05"),
-		Actor:  strings.ReplaceAll(clientIP, `"`, ""),
+		Actor:  strings.ReplaceAll(id.ClientIP, `"`, ""),
 		Action: "decryption.autoexclude.learn",
-		Object: safeHost,
-		Detail: fmt.Sprintf("reason=%s; SSL inspection auto-disabled for host until TTL", reason),
+		Object: safeScope + "/" + safeHost,
+		Detail: fmt.Sprintf("scope=%s reason=%s; SSL inspection auto-disabled for this profile+host until TTL", safeScope, reason),
 	})
 	go fireAlert("decryption_autoexclude", AlertPayload{
 		Host:   safeHost,
-		Detail: fmt.Sprintf("SSL inspection auto-disabled (reason=%s)", reason),
+		Detail: fmt.Sprintf("SSL inspection auto-disabled (profile=%s reason=%s)", safeScope, reason),
 		Source: "proxy",
 	})
 }
@@ -190,29 +236,27 @@ func recordAutoExclude(host string, reason AutoExcludeReason, clientIP string) {
 // maybeFailOpenOrigin handles an UPSTREAM (origin-leg) inspect-handshake failure
 // under a fail-open profile. It classifies the error, learns a qualifying host,
 // and reports whether the caller should RESCUE the current session as a
-// transparent bypass (true) instead of returning 502. Learn+rescue happen ONLY
-// for the server-observed can't-decrypt signals (unsupported / client-cert-
-// required — non-spoofable, so rescuing the current session is safe); a cert-
-// verify or unrecognized failure returns false (keep today's 502) and never
-// learns. host is the host-only form.
-func maybeFailOpenOrigin(r *http.Request, host string, match *PolicyMatch, err error) bool {
+// transparent bypass (true) instead of returning 502. Only client-cert-required
+// (a specific, structured signal) may rescue the triggering session (B3);
+// unsupported-params learns but returns false (the next session self-heals). A
+// cert-verify or unrecognized failure returns false and never learns.
+func maybeFailOpenOrigin(host string, match *PolicyMatch, id ProxyIdentity, err error) (rescue bool) {
 	if !resolveFailOpen(match) {
 		return false
 	}
-	reason, learn := classifyOriginInspectFailure(err)
+	reason, learn, rescueOK := classifyOriginInspectFailure(err)
 	if !learn {
 		return false
 	}
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	recordAutoExclude(host, reason, clientIP)
-	return true
+	recordAutoExclude(match, host, reason, id)
+	return rescueOK
 }
 
 // maybeFailOpenClient learns a CLIENT-leg pinning rejection under a fail-open
 // profile. Learn-only: the client already aborted its handshake against our
 // forged leaf, so the current session cannot be rescued — the NEXT session to the
-// host self-heals via the cache once the confirm-count of distinct clients is met.
-func maybeFailOpenClient(r *http.Request, host string, match *PolicyMatch, err error) {
+// (scope, host) self-heals via the cache once the confirm-count is met.
+func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err error) {
 	if !resolveFailOpen(match) {
 		return
 	}
@@ -220,8 +264,7 @@ func maybeFailOpenClient(r *http.Request, host string, match *PolicyMatch, err e
 	if !learn {
 		return
 	}
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	recordAutoExclude(host, reason, clientIP)
+	recordAutoExclude(match, host, reason, id)
 }
 
 // autoExcludeHitCounter counts sessions bypassed because of a learned exclusion
@@ -230,37 +273,54 @@ var autoExcludeHitCounter int64
 
 func recordAutoExcludeHit() { atomic.AddInt64(&autoExcludeHitCounter, 1) }
 
-// autoExcludeLearnCounter is a cardinality-capped per-reason learn counter,
-// mirroring decProfMintlsRejects. The reason set is a bounded engine enum, but
-// the label is inline-sanitized so CodeQL sees the guard.
+// autoExcludeLearnCounter is a cardinality-capped {reason,scope} learn counter,
+// mirroring decProfMintlsRejects. The reason set is a bounded engine enum and the
+// scope is an admin-created profile name (validated charset), but the pair is
+// capped defensively and inline-sanitized so CodeQL sees the guard.
 type autoExcludeLearnCounter struct {
 	mu     sync.RWMutex
-	counts map[string]*int64
+	counts map[string]*learnLabel
 	order  []string
 }
 
-var autoExcludeLearns = &autoExcludeLearnCounter{counts: make(map[string]*int64)}
+type learnLabel struct {
+	reason string
+	scope  string
+	n      int64
+}
 
-func (c *autoExcludeLearnCounter) record(reason string) {
+const maxAutoExcludeLabels = 200 // bound {reason,scope} cardinality
+
+var autoExcludeLearns = &autoExcludeLearnCounter{counts: make(map[string]*learnLabel)}
+
+func (c *autoExcludeLearnCounter) record(reason, scope string) {
 	if reason == "" {
 		return
 	}
+	k := reason + "\x00" + scope
 	c.mu.RLock()
-	ctr, ok := c.counts[reason]
+	ll, ok := c.counts[k]
 	c.mu.RUnlock()
 	if ok {
-		atomic.AddInt64(ctr, 1)
+		atomic.AddInt64(&ll.n, 1)
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if ctr, ok = c.counts[reason]; ok {
-		atomic.AddInt64(ctr, 1)
+	if ll, ok = c.counts[k]; ok {
+		atomic.AddInt64(&ll.n, 1)
 		return
 	}
-	var n int64 = 1
-	c.counts[reason] = &n
-	c.order = append(c.order, reason)
+	if len(c.order) >= maxAutoExcludeLabels {
+		k = reason + "\x00_other_" // fold overflow scopes into a shared bucket
+		scope = "_other_"
+		if ll, ok = c.counts[k]; ok {
+			atomic.AddInt64(&ll.n, 1)
+			return
+		}
+	}
+	c.counts[k] = &learnLabel{reason: reason, scope: scope, n: 1}
+	c.order = append(c.order, k)
 }
 
 func (c *autoExcludeLearnCounter) writePrometheus(w *strings.Builder) {
@@ -269,10 +329,12 @@ func (c *autoExcludeLearnCounter) writePrometheus(w *strings.Builder) {
 	if len(c.order) == 0 {
 		return
 	}
-	w.WriteString("\n# HELP culvert_decrypt_autoexclude_total Hosts auto-excluded from SSL inspection (fail-open learn events), by reason\n")
+	w.WriteString("\n# HELP culvert_decrypt_autoexclude_total Hosts auto-excluded from SSL inspection (fail-open learn events), by reason and profile scope\n")
 	w.WriteString("# TYPE culvert_decrypt_autoexclude_total counter\n")
-	for _, r := range c.order {
-		safe := strings.ReplaceAll(r, `"`, "")
-		fmt.Fprintf(w, "culvert_decrypt_autoexclude_total{reason=%q} %d\n", safe, atomic.LoadInt64(c.counts[r]))
+	for _, k := range c.order {
+		ll := c.counts[k]
+		reason := strings.ReplaceAll(ll.reason, `"`, "")
+		scope := strings.ReplaceAll(ll.scope, `"`, "")
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_total{reason=%q,scope=%q} %d\n", reason, scope, atomic.LoadInt64(&ll.n))
 	}
 }

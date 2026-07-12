@@ -17,7 +17,7 @@ import (
 // singleton on cleanup. Mirrors swapDecProfileStore — MANDATORY for any test that
 // calls Observe/recordAutoExclude or drives resolveSSLAction, so the global cache
 // cannot leak state into later tests under -shuffle (the PR3d fence-pollution
-// class of bug). cfg lets a test tune the confirm-count etc.
+// class of bug).
 func swapAutoExclude(t *testing.T, cfg autoexclude.Config) {
 	t.Helper()
 	prev := autoExclude
@@ -25,165 +25,241 @@ func swapAutoExclude(t *testing.T, cfg autoexclude.Config) {
 	t.Cleanup(func() { autoExclude = prev })
 }
 
-// bindFailOpenProfile installs a decryption-profile store with a single
-// fail-open profile and a rule match that references it. Returns the match.
-func bindFailOpenProfile(t *testing.T, onInspectError string) *PolicyMatch {
+// bindFailOpenProfile installs a decryption-profile store with a single named
+// fail-open (or fail-close) profile and returns a rule match referencing it plus
+// the profile's scope ID (the cache key).
+func bindFailOpenProfile(t *testing.T, name, onInspectError string) (*PolicyMatch, string) {
+	t.Helper()
+	if globalDecryptionProfiles.GetByName(name) == nil {
+		if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: name, OnInspectError: onInspectError}); err != nil {
+			t.Fatalf("seed profile: %v", err)
+		}
+	}
+	p := globalDecryptionProfiles.GetByName(name)
+	m := &PolicyMatch{
+		Action:    ActionAllow,
+		SSLAction: SSLInspect,
+		Rule:      &PolicyRule{Name: "r-" + name, SSLAction: SSLInspect, DecryptionProfile: name},
+	}
+	return m, p.ID
+}
+
+func swapProfiles(t *testing.T) {
 	t.Helper()
 	prev := globalDecryptionProfiles
 	globalDecryptionProfiles = decryptprofile.New()
 	t.Cleanup(func() { globalDecryptionProfiles = prev })
-	if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "fo", OnInspectError: onInspectError}); err != nil {
-		t.Fatalf("seed profile: %v", err)
-	}
-	return &PolicyMatch{
-		Action:    ActionAllow,
-		SSLAction: SSLInspect,
-		Rule:      &PolicyRule{Name: "r", SSLAction: SSLInspect, DecryptionProfile: "fo"},
-	}
 }
 
-// TestResolveSSLAction_EmptyCacheByteIdentical pins the "byte-identical when
-// unused" invariant: with an empty cache, an Inspect decision stays Inspect —
-// the added fail-open block is dead. This is the regression that guards against
-// the cache ever silently changing today's behavior for non-fail-open traffic.
+// TestResolveSSLAction_EmptyCacheByteIdentical pins "byte-identical when unused":
+// with an empty cache, an Inspect decision stays Inspect.
 func TestResolveSSLAction_EmptyCacheByteIdentical(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{})
-	// No profile at all (fail-open not opted in) → cache never consulted.
+	swapProfiles(t)
 	m := &PolicyMatch{Action: ActionAllow, SSLAction: SSLInspect, Rule: &PolicyRule{Name: "r", SSLAction: SSLInspect}}
 	if a, _ := resolveSSLAction(m, "example.com", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("empty cache changed the SSL action: got %q want Inspect", a)
 	}
-	// Even a fail-open rule, with an empty cache, stays Inspect (nothing learned).
-	fo := bindFailOpenProfile(t, "fail-open")
+	fo, _ := bindFailOpenProfile(t, "fo", "fail-open")
 	if a, _ := resolveSSLAction(fo, "example.com", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("fail-open rule + empty cache should still Inspect: got %q", a)
 	}
 }
 
-// TestResolveSSLAction_FailCloseNeverConsults pins the never-exclude control: a
-// host that IS in the cache is still inspected when the matched rule is
-// fail-close (the read is gated on fail-open). This is what makes critical hosts
-// on fail-close rules un-poisonable.
+// TestResolveSSLAction_FailCloseNeverConsults pins the never-exclude control.
 func TestResolveSSLAction_FailCloseNeverConsults(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
-	autoExclude.Observe("locked.example", autoexclude.ReasonUnsupported, "9.9.9.9") // now excluded
-	if _, ok := autoExclude.Contains("locked.example"); !ok {
-		t.Fatal("precondition: host should be excluded")
+	swapProfiles(t)
+	fo, foScope := bindFailOpenProfile(t, "fo", "fail-open")
+	autoExclude.Observe(foScope, "fo", "locked.example", autoexclude.ReasonUnsupportedParams, "id:probe")
+	if _, ok := autoExclude.Contains(foScope, "locked.example"); !ok {
+		t.Fatal("precondition: host should be excluded under fo scope")
 	}
 	// fail-close profile → resolveFailOpen false → cache NOT consulted → Inspect.
-	fc := bindFailOpenProfile(t, "fail-close")
+	fc, _ := bindFailOpenProfile(t, "fc", "fail-close")
 	if a, _ := resolveSSLAction(fc, "locked.example", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("fail-close rule consulted the cache: got %q want Inspect", a)
 	}
-	// A fail-open rule for the SAME host DOES bypass (self-heal).
-	fo := bindFailOpenProfile(t, "fail-open")
+	// The fail-open rule for the SAME host DOES self-heal.
 	if a, _ := resolveSSLAction(fo, "locked.example", "1.2.3.4"); a != SSLBypass {
 		t.Fatalf("fail-open rule did not self-heal: got %q want Bypass", a)
 	}
 }
 
-// TestClassifyOriginInspectFailure_NeverLearnsCertVerify pins the reframe: an
-// untrusted/expired/mismatch origin cert is NOT learnable (it is a Block signal,
-// and the poisoning vector), while unsupported/client-cert-required ARE.
-func TestClassifyOriginInspectFailure_NeverLearnsCertVerify(t *testing.T) {
-	certVerifyErrs := []error{
-		x509.UnknownAuthorityError{},
-		// VALUE form (how crypto/x509 actually returns it) with a reason whose
-		// Error() string does NOT match the substring fallback — so this stays
-		// no-learn ONLY if the errors.As TYPE check works (pins the value-target fix).
-		x509.CertificateInvalidError{Reason: x509.IncompatibleUsage},
-		x509.HostnameError{Host: "x"},
-		errors.New("x509: certificate signed by unknown authority"),
-		errors.New("tls: failed to verify certificate: x509: certificate has expired"),
+// TestResolveSSLAction_CrossScopeContamination pins B1: a host learned under one
+// fail-open profile must NOT be bypassed for a different fail-open profile's rule
+// targeting the same host.
+func TestResolveSSLAction_CrossScopeContamination(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
+	swapProfiles(t)
+	foA, scopeA := bindFailOpenProfile(t, "profA", "fail-open")
+	foB, _ := bindFailOpenProfile(t, "profB", "fail-open")
+	autoExclude.Observe(scopeA, "profA", "shared.example", autoexclude.ReasonClientCertRequired, "id:u1")
+	if a, _ := resolveSSLAction(foA, "shared.example", "1.2.3.4"); a != SSLBypass {
+		t.Fatalf("profA (owner) should bypass: got %q", a)
 	}
-	for _, e := range certVerifyErrs {
-		if _, learn := classifyOriginInspectFailure(e); learn {
-			t.Fatalf("cert-verify error learned (poisoning vector): %v", e)
-		}
-	}
-	learnable := map[error]AutoExcludeReason{
-		errors.New("remote error: tls: certificate required"): autoExReasonClientCert,
-		errors.New("tls: protocol version not supported"):     autoExReasonUnsupported,
-		errors.New("remote error: tls: handshake failure"):    autoExReasonUnsupported,
-		errors.New("tls: no cipher suite supported by both"):  autoExReasonUnsupported,
-	}
-	for e, want := range learnable {
-		r, learn := classifyOriginInspectFailure(e)
-		if !learn || r != want {
-			t.Fatalf("classify %q = (%q,%v), want (%q,true)", e, r, learn, want)
-		}
-	}
-	// EOF / unrecognized → do not learn (fail-closed default).
-	if _, learn := classifyOriginInspectFailure(errors.New("EOF")); learn {
-		t.Fatal("EOF must not be learnable")
+	if a, _ := resolveSSLAction(foB, "shared.example", "1.2.3.4"); a != SSLInspect {
+		t.Fatalf("profB must NOT consume profA's exclusion (cross-scope leak): got %q", a)
 	}
 }
 
-// TestClassifyClientInspectFailure pins that only a client cert-alert is a
-// pinning signal; a plain EOF/RST is not.
+// TestClassifyOriginInspectFailure_TightenedTriggers pins B2/B3: only
+// client-cert-required (learn+rescue) and locally-detected unsupported-params
+// (learn, no rescue) are trusted; generic/origin-controlled/ambiguous failures
+// and cert-verify errors never learn.
+func TestClassifyOriginInspectFailure_TightenedTriggers(t *testing.T) {
+	// Must NOT learn — cert-verify, generic origin alerts, transport failures.
+	noLearn := []error{
+		x509.UnknownAuthorityError{},
+		x509.CertificateInvalidError{Reason: x509.IncompatibleUsage},
+		x509.HostnameError{Host: "x"},
+		errors.New("remote error: tls: handshake failure"),       // origin-controlled generic alert
+		errors.New("remote error: tls: no application protocol"), // ambiguous ALPN alert
+		errors.New("remote error: tls: internal error"),
+		errors.New("remote error: tls: unrecognized name"),
+		errors.New("EOF"),
+		errors.New("read tcp 1.2.3.4:443: connection reset by peer"),
+		errors.New("dial tcp: i/o timeout"),
+		errors.New("tls: bad record MAC"),
+		&wrapErr{errors.New("remote error: tls: handshake failure")}, // wrapped generic
+	}
+	for _, e := range noLearn {
+		if _, learn, rescue := classifyOriginInspectFailure(e); learn || rescue {
+			t.Fatalf("must NOT learn/rescue %q (learn=%v rescue=%v)", e, learn, rescue)
+		}
+	}
+	// client-cert-required → learn AND rescue.
+	if r, learn, rescue := classifyOriginInspectFailure(errors.New("remote error: tls: certificate required")); !learn || !rescue || r != autoExReasonClientCert {
+		t.Fatalf("certificate required = (%q,%v,%v), want (client_cert_required,true,true)", r, learn, rescue)
+	}
+	// Locally-detected unsupported-params → learn, NO rescue.
+	localUnsup := []string{
+		"tls: no supported versions satisfy MinVersion and MaxVersion",
+		"tls: server selected unsupported protocol version 301",
+		"tls: no cipher suite supported by both client and server",
+	}
+	for _, s := range localUnsup {
+		r, learn, rescue := classifyOriginInspectFailure(errors.New(s))
+		if !learn || rescue || r != autoExReasonUnsupported {
+			t.Fatalf("classify %q = (%q,%v,%v), want (unsupported_params,true,false)", s, r, learn, rescue)
+		}
+	}
+}
+
+type wrapErr struct{ e error }
+
+func (w *wrapErr) Error() string { return "wrapped: " + w.e.Error() }
+func (w *wrapErr) Unwrap() error { return w.e }
+
+// TestClassifyClientInspectFailure pins that only a specific client cert-alert is
+// a pinning signal; generic failures are not.
 func TestClassifyClientInspectFailure(t *testing.T) {
 	if r, ok := classifyClientInspectFailure(errors.New("remote error: tls: bad certificate")); !ok || r != autoExReasonClientPinned {
 		t.Fatalf("bad-certificate alert should be client_pinned, got (%q,%v)", r, ok)
 	}
-	if _, ok := classifyClientInspectFailure(errors.New("read: connection reset by peer")); ok {
-		t.Fatal("a plain RST must not be a pinning signal")
+	for _, s := range []string{"read: connection reset by peer", "remote error: tls: access denied", "remote error: tls: handshake failure"} {
+		if _, ok := classifyClientInspectFailure(errors.New(s)); ok {
+			t.Fatalf("%q must not be a pinning signal", s)
+		}
+	}
+}
+
+// TestClientEvidence pins B4: authenticated identity preferred, IPv6 collapses to
+// /64, IPv4 stays raw.
+func TestClientEvidence(t *testing.T) {
+	if got := clientEvidence("alice@corp", "9.9.9.9"); got != "id:alice@corp" {
+		t.Fatalf("identity should win: %q", got)
+	}
+	if got := clientEvidence("", "203.0.113.5"); got != "ip:203.0.113.5" {
+		t.Fatalf("IPv4 must be raw (no /24 collapse): %q", got)
+	}
+	a := clientEvidence("", "2001:db8:a:b::1")
+	b := clientEvidence("", "2001:db8:a:b::99")
+	if a != b {
+		t.Fatalf("same IPv6 /64 must collapse: %q vs %q", a, b)
+	}
+	c := clientEvidence("", "2001:db8:a:c::1")
+	if a == c {
+		t.Fatalf("different IPv6 /64 must differ: %q vs %q", a, c)
+	}
+}
+
+// TestMaybeFailOpenOrigin_RescueOnlyClientCert pins B3: only client-cert-required
+// rescues the triggering session; unsupported-params learns but does not rescue.
+func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
+	swapProfiles(t)
+	fo, _ := bindFailOpenProfile(t, "fo", "fail-open")
+	id := ProxyIdentity{ClientIP: "1.2.3.4", Identity: "u1"}
+	if !maybeFailOpenOrigin("cc.example", fo, id, errors.New("remote error: tls: certificate required")) {
+		t.Fatal("client-cert-required must rescue the triggering session")
+	}
+	if maybeFailOpenOrigin("unsup.example", fo, id, errors.New("tls: no cipher suite supported by both client and server")) {
+		t.Fatal("unsupported-params must NOT rescue the triggering session (learn-only)")
+	}
+	// ...but it DID learn (confirmN=1) — next session self-heals.
+	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
+	if _, ok := autoExclude.Contains(scope, "unsup.example"); !ok {
+		t.Fatal("unsupported-params should have entered the cache (learn-only)")
+	}
+	// A fail-close rule never learns/rescues.
+	fc, _ := bindFailOpenProfile(t, "fc", "fail-close")
+	if maybeFailOpenOrigin("x.example", fc, id, errors.New("remote error: tls: certificate required")) {
+		t.Fatal("fail-close rule must never rescue")
 	}
 }
 
 // TestRecordAutoExclude_PromotesAndAudits pins that a confirm-count promotion
-// emits an audit event (content-asserted, NOT len-delta — the ring saturates
-// under -shuffle). Uses a TEST-NET-2 actor IP as the unique discriminator.
+// (distinct identities) emits a scoped audit event (content-asserted, not len).
 func TestRecordAutoExclude_PromotesAndAudits(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 2})
-	const host = "learn-audit.example"
+	swapProfiles(t)
+	fo, scope := bindFailOpenProfile(t, "fo", "fail-open")
 	baseline := time.Now().UnixMilli()
-	recordAutoExclude(host, autoExReasonUnsupported, "198.51.100.7") // 1st subnet → no promote
-	recordAutoExclude(host, autoExReasonUnsupported, "198.51.101.8") // 2nd distinct subnet → promote
-	if _, ok := autoExclude.Contains(host); !ok {
+	recordAutoExclude(fo, "learn-audit.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "198.51.100.7", Identity: "u1"})
+	recordAutoExclude(fo, "learn-audit.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "198.51.100.8", Identity: "u2"})
+	if _, ok := autoExclude.Contains(scope, "learn-audit.example"); !ok {
 		t.Fatal("host not excluded after confirm-count reached")
 	}
 	found := false
 	for _, e := range auditGet() {
-		if e.TS >= baseline && e.Action == "decryption.autoexclude.learn" && e.Object == host && strings.Contains(e.Actor, "198.51.101.8") {
+		if e.TS >= baseline && e.Action == "decryption.autoexclude.learn" && strings.Contains(e.Object, "learn-audit.example") && strings.Contains(e.Detail, "scope=fo") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatal("no decryption.autoexclude.learn audit entry with the triggering client IP")
+		t.Fatal("no scoped decryption.autoexclude.learn audit entry")
 	}
 }
 
-// TestApiDecryptionExclusions_ListEvictClear exercises the handler surface:
-// viewer GET lists entries + posture; operator DELETE evicts one and clears all,
-// each auditing (so C2c does not flag audit_missing).
+// TestApiDecryptionExclusions_ListEvictClear exercises the handler surface.
 func TestApiDecryptionExclusions_ListEvictClear(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
-	autoExclude.Observe("a.example", autoexclude.ReasonUnsupported, "1.1.1.1")
-	autoExclude.Observe("b.example", autoexclude.ReasonClientPinned, "1.1.1.1")
+	swapProfiles(t)
+	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
+	autoExclude.Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
+	autoExclude.Observe(scope, "fo", "b.example", autoexclude.ReasonClientPinned, "id:u1")
 
-	// GET as viewer.
 	rw := httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodGet, "/api/decryption-exclusions", nil))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("GET status = %d, want 200", rw.Code)
 	}
 	body := rw.Body.String()
-	if !strings.Contains(body, "a.example") || !strings.Contains(body, "\"stats\"") {
-		t.Fatalf("GET body missing entries or stats: %s", body)
+	if !strings.Contains(body, "a.example") || !strings.Contains(body, "\"stats\"") || !strings.Contains(body, "scope_rule_counts") {
+		t.Fatalf("GET body missing entries/stats/scope: %s", body)
 	}
 
-	// DELETE one host as operator.
 	rw = httptest.NewRecorder()
-	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions?host=a.example", nil))
+	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions?scope="+scope+"&host=a.example", nil))
 	if rw.Code != http.StatusOK {
 		t.Fatalf("DELETE one status = %d, want 200", rw.Code)
 	}
-	if _, ok := autoExclude.Contains("a.example"); ok {
+	if _, ok := autoExclude.Contains(scope, "a.example"); ok {
 		t.Fatal("evicted host still present")
 	}
 
-	// DELETE all (clear) as operator.
 	rw = httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions", nil))
 	if rw.Code != http.StatusOK || autoExclude.Len() != 0 {
@@ -191,17 +267,18 @@ func TestApiDecryptionExclusions_ListEvictClear(t *testing.T) {
 	}
 }
 
-// TestApiDecryptionExclusions_ViewerCannotDelete pins the per-method RBAC split:
-// a viewer is rejected on DELETE (operator-only) even though GET is viewer-ok.
+// TestApiDecryptionExclusions_ViewerCannotDelete pins the per-method RBAC split.
 func TestApiDecryptionExclusions_ViewerCannotDelete(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
-	autoExclude.Observe("a.example", autoexclude.ReasonUnsupported, "1.1.1.1")
+	swapProfiles(t)
+	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
+	autoExclude.Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
 	rw := httptest.NewRecorder()
-	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodDelete, "/api/decryption-exclusions?host=a.example", nil))
+	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodDelete, "/api/decryption-exclusions?scope="+scope+"&host=a.example", nil))
 	if rw.Code == http.StatusOK {
 		t.Fatal("viewer was allowed to DELETE (operator-only)")
 	}
-	if _, ok := autoExclude.Contains("a.example"); !ok {
+	if _, ok := autoExclude.Contains(scope, "a.example"); !ok {
 		t.Fatal("viewer DELETE mutated the cache")
 	}
 }
