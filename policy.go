@@ -550,6 +550,11 @@ func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
 		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // preserve concurrently-written counters
 		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // (same rule — an edit keeps its traffic history)
 		r.ID = id                                           // identity is immutable across an edit
+		// Position is managed by reorder/move, NOT by content edits. Preserve
+		// the matched rule's CURRENT priority so an id-addressed edit made against
+		// a stale-priority body (a concurrent reorder moved the rule after the
+		// client loaded it) can never write a duplicate priority slot.
+		r.Priority = rule.Priority
 		ps.rules[i] = &r
 		ps.sortLocked()
 		ps.bumpVersion()
@@ -578,17 +583,19 @@ func (ps *PolicyStore) DeleteByID(id string) bool {
 
 // findByIDCopy returns a copy of the rule with the given ULID, or nil. Used by
 // the ID-addressed API handlers to resolve the before-state for audit/validation
-// without holding the store lock across the handler.
+// without holding the store lock across the handler. Goes through List() so the
+// HitCount/lastHitUnix counters are read with atomic loads — Evaluate stamps
+// them lock-free, so a raw struct copy would race under -race (mirrors
+// findRuleByPriorityCopy).
 func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
 	if id == "" {
 		return nil
 	}
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	for i := range ps.rules {
-		if ps.rules[i].ID == id {
-			cp := *ps.rules[i]
-			return &cp
+	rules := ps.List()
+	for i := range rules {
+		if rules[i].ID == id {
+			r2 := rules[i]
+			return &r2
 		}
 	}
 	return nil

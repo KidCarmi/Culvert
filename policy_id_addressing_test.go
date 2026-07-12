@@ -19,6 +19,12 @@ import (
 	"testing"
 )
 
+// findByIDCopy reuses List() (which atomic-loads the lock-free
+// HitCount/lastHitUnix counters), so its concurrency posture is identical to
+// the established findRuleByPriorityCopy path — see the Codex-review note on
+// the residual List() plain-copy race, which is pre-existing and shared with
+// the priority path, out of scope for this slice.
+
 func snapshotPolicyForIDTest(t *testing.T) {
 	t.Helper()
 	orig := policyStore.List()
@@ -100,6 +106,38 @@ func TestUpdateByID_PreservesIdentity(t *testing.T) {
 		}
 	}
 	t.Fatal("edited rule not found by id")
+}
+
+// TestUpdateByID_PreservesCurrentPriority pins the fix for the stale-priority
+// hazard: an id-addressed edit whose body carries the rule's OLD priority (a
+// reorder moved it after load) must keep the rule at its CURRENT slot, never
+// reclaim the old one — otherwise two rules end up sharing a priority.
+func TestUpdateByID_PreservesCurrentPriority(t *testing.T) {
+	snapshotPolicyForIDTest(t)
+	policyStore.Add(PolicyRule{Priority: 1, Name: "pp-A", Action: ActionAllow})
+	policyStore.Add(PolicyRule{Priority: 2, Name: "pp-B", Action: ActionAllow})
+	var aID string
+	for _, r := range policyStore.List() {
+		if r.Name == "pp-A" {
+			aID = r.ID
+		}
+	}
+	// Reorder: pp-A moves to slot 2, pp-B to slot 1.
+	policyStore.PermutePriorities([]int{2, 1})
+
+	// Edit pp-A with a STALE body priority of 1 (what the client loaded).
+	policyStore.UpdateByID(aID, PolicyRule{Priority: 1, Name: "pp-A-edited", Action: ActionAllow})
+
+	seen := map[int]string{}
+	for _, r := range policyStore.List() {
+		if prev, dup := seen[r.Priority]; dup {
+			t.Fatalf("duplicate priority %d shared by %q and %q", r.Priority, prev, r.Name)
+		}
+		seen[r.Priority] = r.Name
+		if r.ID == aID && r.Priority != 2 {
+			t.Errorf("edited rule should keep its current priority 2, got %d", r.Priority)
+		}
+	}
 }
 
 func TestDeleteByID_SurvivesReorder(t *testing.T) {
