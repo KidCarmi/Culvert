@@ -574,14 +574,18 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
 	// cert validation for internal/self-signed hosts and is logged as a warning
 	// so it is auditable.
-	upstreamTLSCfg := upstreamInspectTLSConfig(hostOnly, tlsSkipVerify)
+	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
-		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
-		logger.Printf("upstream TLS handshake error %q: %v", sanitizeLog(targetHost), err)
+		upstreamTLS.Close()              //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
+		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
+		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), err, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
+	// Strip path offers no upstream ALPN → the origin leg is HTTP/1.1 (the
+	// downgrade); count it so the H2-vs-H1 success-delta metric is complete.
+	recordInspectUpstreamALPN("http/1.1")
 
 	// 3. Hijack the client connection and send the 200 Connection Established.
 	hijacker, ok := w.(http.Hijacker)

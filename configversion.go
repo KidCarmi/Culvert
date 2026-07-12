@@ -65,6 +65,10 @@ func captureConfigBackup() *configBackup {
 		// serializes as "categoryGroups": [] and round-trips through
 		// apply as a wipe — see spec §6.4.
 		CategoryGroups: globalCategoryGroups.List(),
+		// DecryptionProfiles: rollback-surface extension. List() returns a
+		// non-nil empty slice for an empty store, so a zero-profile state
+		// serializes as "decryptionProfiles": [] and round-trips as a wipe.
+		DecryptionProfiles: globalDecryptionProfiles.List(),
 		// URLCategories: rollback-surface extension per
 		// roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md. catStore.All()
 		// returns a non-nil empty slice for an empty store
@@ -317,6 +321,14 @@ func applyConfigBackup(b *configBackup) {
 		globalCategoryGroups.Save()
 	}
 
+	// DecryptionProfiles MUST be applied before PolicyRules (same reason as
+	// CategoryGroups: rules reference profiles by name, fail-safe-to-strip at eval
+	// on a dangling ref). nil → skip; [] → wipe; populated → replace.
+	if b.DecryptionProfiles != nil {
+		globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
+		globalDecryptionProfiles.Save()
+	}
+
 	// Policy rules: bulk replace.
 	var validRules []PolicyRule
 	for i := range b.PolicyRules {
@@ -501,6 +513,9 @@ func diffConfigs(a, b *configBackup) []configChange {
 	if b.CategoryGroups != nil {
 		diffCategoryGroups(a.CategoryGroups, b.CategoryGroups, &changes)
 	}
+	if b.DecryptionProfiles != nil {
+		diffDecryptionProfiles(a.DecryptionProfiles, b.DecryptionProfiles, &changes)
+	}
 	if b.URLCategories != nil {
 		diffURLCategories(a.URLCategories, b.URLCategories, &changes)
 	}
@@ -654,6 +669,57 @@ func diffCategoryGroups(a, b []CategoryGroup, out *[]configChange) {
 	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
 		*out = append(*out, configChange{
 			Field: "category_groups",
+			From:  map[string]any{"count": len(a), "removed": removed, "changed": changed},
+			To:    map[string]any{"count": len(b), "added": added},
+		})
+	}
+}
+
+// sameDecryptionProfile reports whether two profiles have identical operator-facing
+// content (ID/timestamps excluded — they are not config identity).
+func sameDecryptionProfile(x, y *DecryptionProfile) bool {
+	if (x.InspectHTTP2 == nil) != (y.InspectHTTP2 == nil) {
+		return false
+	}
+	if x.InspectHTTP2 != nil && *x.InspectHTTP2 != *y.InspectHTTP2 {
+		return false
+	}
+	return x.CertVerification == y.CertVerification &&
+		x.OnUnsupported == y.OnUnsupported &&
+		x.MinTLSVersion == y.MinTLSVersion &&
+		x.MaxTLSVersion == y.MaxTLSVersion &&
+		x.StallTimeoutSecs == y.StallTimeoutSecs
+}
+
+// diffDecryptionProfiles compares decryption profiles by name (case-insensitive).
+// Reports added, removed, and changed (same name, different content). Mirrors
+// diffCategoryGroups. Index maps (not value maps) avoid copying the 144-byte
+// DecryptionProfile per range iteration (gocritic rangeValCopy convention).
+func diffDecryptionProfiles(a, b []DecryptionProfile, out *[]configChange) {
+	idxA := make(map[string]int, len(a))
+	for i := range a {
+		idxA[strings.ToLower(a[i].Name)] = i
+	}
+	idxB := make(map[string]int, len(b))
+	for i := range b {
+		idxB[strings.ToLower(b[i].Name)] = i
+	}
+	var added, removed, changed []string
+	for key, bi := range idxB {
+		if ai, ok := idxA[key]; !ok {
+			added = append(added, b[bi].Name)
+		} else if !sameDecryptionProfile(&a[ai], &b[bi]) {
+			changed = append(changed, b[bi].Name)
+		}
+	}
+	for key, ai := range idxA {
+		if _, ok := idxB[key]; !ok {
+			removed = append(removed, a[ai].Name)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		*out = append(*out, configChange{
+			Field: "decryption_profiles",
 			From:  map[string]any{"count": len(a), "removed": removed, "changed": changed},
 			To:    map[string]any{"count": len(b), "added": added},
 		})

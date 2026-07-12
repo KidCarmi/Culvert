@@ -38,9 +38,10 @@ type objectRef struct {
 // fails SSO 403, not open). It joins this walk with the object-ID work that
 // makes ID-vs-name references first-class (see roadmap/POLICY-REFS-PLAN.md).
 var objectRefTypes = map[string]bool{
-	"category":       true,
-	"category-group": true,
-	"file-profile":   true,
+	"category":           true,
+	"category-group":     true,
+	"file-profile":       true,
+	"decryption-profile": true,
 }
 
 // consumerTypeForRule maps a rule's stage to its whereUsed consumerType/view.
@@ -110,6 +111,10 @@ func ruleReferencesObject(r *PolicyRule, objType, name string) string {
 	case "file-profile":
 		if strings.EqualFold(string(r.FileProfile), name) {
 			return "fileProfile"
+		}
+	case "decryption-profile":
+		if strings.EqualFold(r.DecryptionProfile, name) {
+			return "decryptionProfile"
 		}
 	}
 	return ""

@@ -257,6 +257,13 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/decryption-profiles", Handler: "apiDecryptionProfiles", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
+		}},
 	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},

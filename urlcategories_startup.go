@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
@@ -27,6 +28,19 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 
 	if err := globalCategoryGroups.Load(cfg.CategoryGroupsPath); err != nil {
 		logger.Printf("CategoryGroups: load error: %v", err)
+	}
+
+	// Named decryption profiles (referenced per rule; loaded alongside category
+	// groups). Non-fatal — an unreadable/corrupt store leaves the set empty and
+	// rules fall back to their inline StripALPN/default (byte-identical to today).
+	// First run (no file yet) seeds the non-auto-bound recommended-h2 on-ramp.
+	_, statErr := os.Stat(cfg.DecryptionProfilesPath)
+	dpFirstRun := os.IsNotExist(statErr)
+	if err := globalDecryptionProfiles.Load(cfg.DecryptionProfilesPath); err != nil {
+		logger.Printf("DecryptionProfiles: load error: %v", err)
+	}
+	if dpFirstRun && cfg.DecryptionProfilesPath != "" {
+		seedDefaultDecryptionProfiles()
 	}
 
 	// SaaS category feed (dynamic updates from GitHub). Additive merge: new

@@ -84,6 +84,16 @@ type ConfigSnapshot struct {
 	// Category groups for policy rules.
 	CategoryGroups []CategoryGroup `json:"category_groups,omitempty"`
 
+	// Named decryption profiles referenced per policy rule. NO omitempty
+	// (WireWipeCapable): unlike category_groups, an empty set MUST propagate CP→DP so
+	// deleting the last profile clears stale copies on data-plane nodes. These
+	// profiles govern security-relevant settings (cert verification, native H2, TLS
+	// floor) — a DP that retained a stale profile would apply looser settings than
+	// the CP intends (a rule re-referencing the deleted name resolves the ghost on
+	// the DP instead of the fail-safe fallback). The security-sensitivity justifies
+	// diverging from the siblings' wire-dead []-wipe posture.
+	DecryptionProfiles []DecryptionProfile `json:"decryption_profiles"`
+
 	// Global file-block extension list (day-3 audit CRIT-2).
 	FileBlockExtensions []string `json:"file_block_extensions,omitempty"`
 
@@ -122,6 +132,7 @@ const (
 	maxSnapBandwidthPolicies   = 1_000
 	maxSnapNodeGroups          = 1_000
 	maxSnapCategoryGroups      = 1_000
+	maxSnapDecryptionProfiles  = 1_000
 	maxSnapIdPProfiles         = 1_000
 )
 
@@ -153,6 +164,7 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"bandwidth_policies", len(snap.BandwidthPolicies), maxSnapBandwidthPolicies},
 		{"node_groups", len(snap.NodeGroups), maxSnapNodeGroups},
 		{"category_groups", len(snap.CategoryGroups), maxSnapCategoryGroups},
+		{"decryption_profiles", len(snap.DecryptionProfiles), maxSnapDecryptionProfiles},
 		{"idp_profiles", len(snap.IdPProfiles), maxSnapIdPProfiles},
 	}
 	for _, c := range checks {
@@ -568,6 +580,13 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 		globalCategoryGroups.Save()
 	}
 
+	// Named decryption profiles (nil-skip; applied here alongside category groups —
+	// both are named objects the policy rules reference by name).
+	if snap.DecryptionProfiles != nil {
+		globalDecryptionProfiles.ReplaceAll(snap.DecryptionProfiles)
+		globalDecryptionProfiles.Save()
+	}
+
 	// Global file-block extensions (CRIT-2).
 	// CL-13: ReplaceAll triggers exactly one atomicWriteFile call
 	// regardless of len(snap.FileBlockExtensions). The previous
@@ -763,6 +782,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 
 	// Category groups.
 	snap.CategoryGroups = globalCategoryGroups.List()
+	snap.DecryptionProfiles = globalDecryptionProfiles.List()
 
 	// Global file-block extensions (CRIT-2: DP nodes need the blocklist).
 	snap.FileBlockExtensions = fileBlocker.List()

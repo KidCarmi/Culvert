@@ -609,24 +609,8 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 	return sslAction, tlsSkipVerify
 }
 
-// resolveStripALPN decides whether an SSL-inspected tunnel is downgraded to
-// HTTP/1.1 (strip ALPN — today's behavior) or inspected natively as HTTP/2.
-// Presence-aware per the H2-inspection product model (plan C2): a rule that
-// predates the feature has StripALPN==nil and MUST keep downgrading, so an
-// upgrade never silently switches existing deployments to native H2.
-//
-//	nil (absent, pre-feature) → true  (strip: HTTP/1.1 downgrade)
-//	explicit *true            → true  (strip)
-//	explicit *false           → false (native HTTP/2 inspection)
-//
-// Only meaningful when the effective SSLAction is Inspect; callers on the Bypass
-// path never consult it.
-func resolveStripALPN(match *PolicyMatch) bool {
-	if match == nil || match.Rule == nil || match.Rule.StripALPN == nil {
-		return true
-	}
-	return *match.Rule.StripALPN
-}
+// resolveStripALPN and the DecryptionProfile-aware resolve* family live in
+// decryptprofile_resolve.go (the "how to decrypt" hot-path resolvers).
 
 // geoTrackSem bounds concurrent destination-country trackers. A tracker can
 // block in DNS resolution (resolveHost — memoised per host with a TTL, so

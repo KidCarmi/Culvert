@@ -45,7 +45,7 @@ import (
 //   - 135 — Legacy updater removal: dropped the 11 /api/update/* routes from the 146 baseline.
 //   - 136 — policy-refs P0 added /api/objects/references (Where-Used dependency walk).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 136
+	const want = 137
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

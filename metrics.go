@@ -504,8 +504,20 @@ culvert_h2_inspect_drain_forced_total %d
 		atomic.LoadInt64(&statH2InspectForced),
 	)
 
+	// Decryption-profile success delta: which protocol inspected tunnels negotiated
+	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
+	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol
+# TYPE culvert_inspect_upstream_alpn_total counter
+culvert_inspect_upstream_alpn_total{protocol="h2"} %d
+culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
+`,
+		atomic.LoadInt64(&statInspectUpstreamH2),
+		atomic.LoadInt64(&statInspectUpstreamH1),
+	)
+
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
+	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)
