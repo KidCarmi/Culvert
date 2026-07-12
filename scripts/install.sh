@@ -119,7 +119,6 @@ dump_docker_diagnostics() {
 # Source repo — used ONLY by the legacy clone fallback in §6b (images built
 # before the /app/deploy bundle). Everything a normal install needs comes from
 # the public proxy image on ghcr.io.
-REPO_URL="https://github.com/KidCarmi/Culvert.git"
 # Where to run the stack. Honor CULVERT_DIR if set; default /srv/culvert for
 # EVERY user — it matches the maintenance-agent config's compose_project_dir
 # default, and its ancestors (/, /srv) are world-searchable, so the
@@ -450,20 +449,8 @@ else
   error "Docker engine started but is not responding. See diagnostics above."
 fi
 
-###############################################################################
-# 4. git (helper) — only the legacy clone fallback in §6b needs it
-###############################################################################
-ensure_git() {
-  command -v git &>/dev/null && return 0
-  info "Installing git..."
-  case "$DISTRO_FAMILY" in
-    debian) apt_install_with_repair git ;;
-    rhel|fedora) sudo dnf install -y git 2>/dev/null || sudo yum install -y git ;;
-    amzn) sudo yum install -y git ;;
-    arch) sudo pacman -Sy --noconfirm git ;;
-  esac
-  info "git installed"
-}
+# NOTE: the git-install helper (ensure_git) was removed alongside the source-clone
+# fallback — a source-free, build-free install never needs git.
 
 ###############################################################################
 # 5. Provision the install dir (no source checkout required)
@@ -600,37 +587,12 @@ verify_pinned_image_signature() {
   [[ "$rc" -eq 0 ]]
 }
 
-# clone_source_into_install_dir — LAST-RESORT population of $INSTALL_DIR from
-# the source repo, used when the registry image is unreachable (nothing to seed
-# or extract from) or the pulled image predates the /app/deploy bundle. Requires
-# the repo to be publicly readable. GIT_TERMINAL_PROMPT=0 makes a PRIVATE or
-# unreachable repo fail FAST with a clear message instead of blocking forever on
-# a credential prompt on /dev/tty (a `curl | bash` run has no way to answer it).
-# `cp -a` of the clone CONTENTS merges into $INSTALL_DIR WITHOUT overwriting a
-# carried-forward .env (the repo ships none). Returns non-zero on any failure;
-# never hangs, never aborts the caller.
-clone_source_into_install_dir() {
-  ensure_git
-  local tmp="$INSTALL_DIR/.culvert-src.tmp"
-  sudo rm -rf "$tmp" 2>/dev/null || true
-  # Airtight no-hang: GIT_TERMINAL_PROMPT=0 stops git's own /dev/tty prompt,
-  # `-c credential.helper=` empties the helper list so a configured (possibly
-  # GUI) credential helper can't block, and GIT_ASKPASS=/bin/true neutralizes
-  # any askpass path. A private/unreachable repo then fails fast, never prompts.
-  if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-       git -c credential.helper= clone "$REPO_URL" "$tmp"; then
-    warn "Could not clone $REPO_URL — the source repo may be private or unreachable."
-    sudo rm -rf "$tmp" 2>/dev/null || true
-    return 1
-  fi
-  if ! sudo cp -a "$tmp/." "$INSTALL_DIR/" 2>/dev/null; then
-    warn "Could not populate $INSTALL_DIR from the clone."
-    sudo rm -rf "$tmp" 2>/dev/null || true
-    return 1
-  fi
-  sudo rm -rf "$tmp" 2>/dev/null || true
-  return 0
-}
+# NOTE: the historical source-clone-then-build helper has been REMOVED. Culvert
+# only ever deploys a SIGNED PUBLISHED image and takes its docker-compose.yml from
+# that same image's /app/deploy bundle, so the binary and its compose command are
+# always the same release. Cloning HEAD + building is exactly how the compose
+# drifted a release ahead of the binary and crash-looped the proxy; there is no
+# longer a build path. Offline hosts preload an image and set CULVERT_PROXY_SEED_REF.
 
 # resolve_latest_signed_release_ref — echo "<PROXY_REPO>:vX.Y.Z" for the newest
 # vMAJOR.MINOR.PATCH tag published to the (public) GHCR proxy repo. A default
@@ -659,10 +621,17 @@ resolve_latest_signed_release_ref() {
   [[ -n "$token" ]] || return 0
   tags="$(curl -fsS --max-time 15 -H "Authorization: Bearer $token" \
     "https://ghcr.io/v2/${repo_path}/tags/list?n=1000" 2>/dev/null)" || return 0
-  # Newest final vMAJOR.MINOR.PATCH by version sort. Pre-releases (v1.2.3-rc1)
-  # are excluded — the require-closing-quote pattern only matches bare vX.Y.Z
-  # tags, and the pinned identity/pipeline sign final release tags.
-  latest="$(printf '%s' "$tags" | grep -oE '"v[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' | sort -V -u | tail -n1)" || return 0
+  # Newest final MAJOR.MINOR.PATCH by version sort. The proxy image tags are
+  # produced by docker/metadata-action `type=semver,pattern={{version}}` (ci.yml),
+  # which emits the semver WITHOUT a leading "v" (git tag v1.0.79 → image tag
+  # 1.0.79). Match THAT shape and deliberately IGNORE any legacy "v"-prefixed
+  # tags: the opening-quote-then-digit pattern "[0-9]... never matches "v0.0.238",
+  # so a stray old tag can no longer win the sort. (The historical `"v[0-9]...`
+  # pattern matched none of the real {{version}} tags and picked up a year-old
+  # "v0.0.238" leftover instead — the crash-loop-inducing wrong-version pull.)
+  # Pre-releases (1.2.3-rc1) are excluded — the closing quote only follows bare
+  # X.Y.Z, and the pinned identity/pipeline sign final release tags.
+  latest="$(printf '%s' "$tags" | grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' | tr -d '"' | sort -V -u | tail -n1)" || return 0
   [[ -n "$latest" ]] || return 0
   printf '%s:%s\n' "$PROXY_REPO" "$latest"
 }
@@ -752,24 +721,26 @@ seed_pinned_tag() {
     return 0
   fi
 
-  if [[ -f Dockerfile ]]; then
-    warn "Registry pull failed. Building $PINNED_TAG locally from this checkout (slower)..."
-    if sudo docker build -t "$PINNED_TAG" .; then
-      info "Built and seeded $PINNED_TAG locally"
-      return 0
-    fi
-  else
-    warn "Registry pull failed and no source checkout is present to build from."
-  fi
+  # NO local build. Culvert is a signed-release product: the deployed binary and
+  # the docker-compose.yml it is launched with MUST come from the SAME published
+  # image, or the compose can pass a CLI flag the binary does not define and the
+  # proxy crash-loops on "flag provided but not defined". A local `docker build`
+  # from an arbitrary checkout (whose source may be a release ahead of the pulled
+  # image) is exactly how that skew was introduced, so it is deliberately NOT a
+  # seed source. A registry-unreachable host must preload an image and point the
+  # installer at it via CULVERT_PROXY_SEED_REF (see the caller's error message).
+  warn "Registry pull failed and no seedable image is available (local build is disabled)."
 
   # Every refresh source failed. If we were only trying to REFRESH a stale
   # leftover (the tag still exists), keep it rather than failing — a possibly-old
   # image is better than no install when the registry is unreachable. A genuine
-  # fresh seed with no leftover still returns 1 so the caller can clone+build.
+  # fresh seed with no leftover still returns 1 so the caller fails closed with the
+  # preload-an-image guidance (there is no build/clone fallback). The §6c preflight
+  # still runs on the kept leftover and re-aligns the compose to it if they differ.
   if [[ "$had_stale" -eq 1 ]] && sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
     warn "Could not refresh $PINNED_TAG — keeping the existing (possibly STALE) leftover image."
     warn "If this host previously ran a different Culvert version, seed a current image explicitly:"
-    warn "  CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh"
+    warn "  CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
     return 0
   fi
 
@@ -777,35 +748,24 @@ seed_pinned_tag() {
 }
 
 if ! seed_pinned_tag; then
-  # The registry was unreachable and there was no local source to build from
-  # (source-free install). Last resort: clone the (public) source repo and build
-  # the image locally — this restores the "github reachable but ghcr blocked"
-  # completion path that a plain seed-then-error ordering removes.
-  #
-  # If a Dockerfile was ALREADY present (running from a source checkout),
-  # seed_pinned_tag already attempted the local build and it failed — don't
-  # repeat the identical doomed build; go straight to the actionable error.
-  had_dockerfile_before=0
-  [[ -f "$INSTALL_DIR/Dockerfile" ]] && had_dockerfile_before=1
-  if [[ "$had_dockerfile_before" -eq 0 ]]; then
-    warn "Could not seed $PINNED_TAG from the registry — cloning the source repo to build locally..."
-    clone_source_into_install_dir || true
-    cd "$INSTALL_DIR"
-  fi
-  if [[ "$had_dockerfile_before" -eq 0 && -f "$INSTALL_DIR/Dockerfile" ]]; then
-    info "Building $PINNED_TAG from source (slower than a registry pull)..."
-    sudo docker build -t "$PINNED_TAG" "$INSTALL_DIR" \
-      || error "Building $PINNED_TAG from the cloned source failed — see the build output above."
-    info "Built $PINNED_TAG from source."
-  else
-    error "Could not obtain $PINNED_TAG: the registry is unreachable AND the source repo
-  could not be cloned (private or offline).
+  # NO local build, NO source clone. Culvert deploys a SIGNED PUBLISHED image and
+  # takes its docker-compose.yml from that same image's /app/deploy bundle, so the
+  # binary and the compose command it is launched with are always the same release.
+  # Building from an arbitrary checkout (or a HEAD clone) is what let the compose
+  # drift a release ahead of the binary and crash-loop the proxy; that path is gone.
+  # A registry-unreachable / air-gapped host must preload the image and point the
+  # installer at it — the ONLY supported offline path.
+  error "Could not obtain $PINNED_TAG: the registry is unreachable (or blocked) and this
+  installer never builds from source.
 
-  Provide a reachable image instead — e.g. a signed release tag on a host that can reach it:
-    CULVERT_PROXY_SEED_REF=$PROXY_REPO:vX.Y.Z sudo bash scripts/install.sh
-  or seed the tag by hand and re-run:
-    docker pull $PROXY_REPO:latest && docker tag $PROXY_REPO:latest $PINNED_TAG"
-  fi
+  On a host that CAN reach the registry, note the current signed release tag, then bring
+  that image to THIS host and re-run pointing the installer at it:
+    # on a connected host:  docker pull $PROXY_REPO:<X.Y.Z> && docker save $PROXY_REPO:<X.Y.Z> -o culvert.tar
+    # copy culvert.tar over, then on THIS host:
+    docker load -i culvert.tar
+    CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh
+  (CULVERT_PROXY_SEED_REF may name any image tag/digest already present on this host or in
+  a private/mirror registry it can reach.)"
 fi
 
 ###############################################################################
@@ -916,17 +876,118 @@ if [[ ! -f "$INSTALL_DIR/docker-compose.yml" \
   or a permissions problem (not a missing image bundle). Free space / fix permissions and
   re-run; the installer re-extracts automatically."
     fi
-    # Compat window: images built before the /app/deploy bundle. Requires the
-    # source repo to be publicly readable; clone_source_into_install_dir fails
-    # fast (never hangs) on a private/unreachable repo.
-    warn "The image has no /app/deploy bundle (older release) — falling back to a git clone."
-    clone_source_into_install_dir \
-      || error "The pulled image has no /app/deploy bundle and the source repo could not be
-  cloned (private or offline). Use an image that includes the deploy bundle (a current
-  release), or run this script from a source checkout."
-    info "Populated $INSTALL_DIR from the source repo."
+    # The pinned image predates the /app/deploy bundle (a very old release). We no
+    # longer fall back to a git clone: a bundle-less image cannot supply a compose
+    # file guaranteed to match its binary, which is the whole failure mode we are
+    # closing. Fail closed and tell the operator to seed a current release.
+    error "The pulled image ($PINNED_TAG) has no /app/deploy bundle — it is older than the
+  source-free deployment format and cannot supply a matching docker-compose.yml. Seed a
+  current signed release instead and re-run:
+    CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
   fi
 fi
+
+###############################################################################
+# 6c. Compose ↔ image compatibility preflight
+###############################################################################
+# The proxy is launched with the flags in docker-compose.yml's `command:`. If the
+# seeded image's binary does not DEFINE one of those flags, Go's flag parser exits
+# non-zero on startup ("flag provided but not defined: -X") and the container
+# crash-loops. This happens when the on-disk compose is NEWER than the image — e.g.
+# the installer ran inside a source checkout (§5 keeps that dir's HEAD compose) or
+# an operator left a hand-edited/previously-extracted compose in place while the
+# pulled image is an older release. §6b only extracts when compose is ABSENT, so it
+# does not catch this. Detect the mismatch and heal by re-extracting the compose
+# from THIS image's own /app/deploy bundle — the copy that matches the binary by
+# construction. (Fresh source-free installs are already safe: their compose came
+# from the bundle in §6b; this is the belt-and-suspenders guard for every other
+# path, and the direct fix for the -idp-profiles-file crash loop.)
+
+# compose_command_flags — culvert flags from the proxy service's `command:` array.
+# Scoped to the "command: [ ... ]" block so healthcheck test tokens (wget -qO-,
+# clamav --ping) and other services' args are never misread as culvert flags.
+# Comment lines are dropped so a commented-out "-flag" example never counts.
+compose_command_flags() {
+  # `|| true`: grep -o exits 1 on a (hypothetical) flagless command block; under
+  # `set -o pipefail` that would surface as a function failure — degrade to empty.
+  { awk '/command:[ \t]*\[/{inblk=1} inblk{print} inblk && /\]/{inblk=0}' \
+      "$INSTALL_DIR/docker-compose.yml" 2>/dev/null \
+    | grep -vE '^[[:space:]]*#' \
+    | grep -oE '"-[a-zA-Z0-9-]+"' | tr -d '"' | sort -u; } || true
+}
+
+# image_supported_flags — flag names the seeded binary DEFINES, scraped from its
+# -help usage. `culvert -help` prints the usage block and exits 2; we only need the
+# flag list, so the non-zero exit is ignored. Args are appended to the image's
+# `./culvert` entrypoint, matching how compose launches it. Leading whitespace is
+# stripped PER LINE (sed, not `tr -d [:space:]`) so each flag stays on its own line.
+image_supported_flags() {
+  # `culvert -help` exits 2 (and grep exits 1 if it somehow prints no flags); under
+  # `set -euo pipefail` an unguarded pipeline failure here would abort the whole
+  # install at the `supported="$(image_supported_flags)"` assignment. `|| true`
+  # degrades any failure to empty output, which the caller treats as "skip".
+  { sudo docker run --rm "$PINNED_TAG" -help 2>&1 \
+    | grep -oE '^[[:space:]]+-[a-zA-Z0-9-]+' | sed -E 's/^[[:space:]]+//' | sort -u; } || true
+}
+
+# missing_compose_flags SUPPORTED — echo the compose flags absent from SUPPORTED.
+# `grep -- "$f"` terminates option parsing so a leading-dash flag ("-audit-log")
+# is treated as a pattern, not a grep option.
+missing_compose_flags() {
+  local supported="$1" f missing=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    grep -qxF -- "$f" <<<"$supported" || missing+="$f "
+  done < <(compose_command_flags)
+  printf '%s' "$missing"
+}
+
+preflight_compose_image_compat() {
+  local supported missing
+  supported="$(image_supported_flags)"
+  # If the flag list could not be read, do NOT guess — skip rather than block a
+  # healthy install on a transient scrape failure.
+  if [[ -z "$supported" ]]; then
+    info "Skipping compose/image flag preflight (could not enumerate image flags)."
+    return 0
+  fi
+  missing="$(missing_compose_flags "$supported")"
+  [[ -z "$missing" ]] && return 0
+
+  warn "docker-compose.yml passes flags the seeded image does not define: $missing"
+  warn "As-is this crash-loops the proxy (\"flag provided but not defined\"). Re-extracting"
+  warn "the compose file from the image's own /app/deploy bundle so it matches the binary."
+  sudo cp -a "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.bak" 2>/dev/null || true
+  sudo rm -f "$INSTALL_DIR/docker-compose.yml"
+  local ex_rc=0
+  extract_deploy_bundle || ex_rc=$?  # capture the REAL rc (1=no bundle, 2=write failed)
+  if [[ "$ex_rc" -ne 0 ]]; then
+    # Restore the backup so `up` at least attempts the (still-broken) stack and the
+    # diagnostics surface the real cause, rather than leaving no compose at all.
+    [[ -f "$INSTALL_DIR/docker-compose.yml.bak" ]] \
+      && sudo cp -a "$INSTALL_DIR/docker-compose.yml.bak" "$INSTALL_DIR/docker-compose.yml"
+    if [[ "$ex_rc" -eq 2 ]]; then
+      error "Could not re-extract the compose file from $PINNED_TAG — writing to $INSTALL_DIR
+  failed (likely out of disk space or a permissions problem). Free space / fix permissions
+  and re-run."
+    fi
+    error "The seeded image ($PINNED_TAG) has no /app/deploy bundle to re-extract a matching
+  compose from — it is older than the source-free deployment format. Seed a current signed
+  release and re-run:
+    CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
+  fi
+
+  # Confirm the refreshed compose is actually compatible now; fail loudly rather
+  # than deploy a still-broken stack (the bundle should match, but never assume).
+  missing="$(missing_compose_flags "$supported")"
+  if [[ -n "$missing" ]]; then
+    error "Compose still references flags the image does not define after refreshing from the
+  bundle: $missing. This indicates a compose/binary mismatch inside the image itself — seed a
+  different signed release: CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh"
+  fi
+  info "Compose file refreshed from $PINNED_TAG (previous saved as docker-compose.yml.bak)."
+}
+preflight_compose_image_compat
 
 ###############################################################################
 # 7. Pull and start
@@ -1654,8 +1715,8 @@ install_maint_agent() {
   # here (it gates the fast-path re-wire too):
   #   1. A real source checkout — cmd/culvert-maint/go.mod is NEVER shipped in
   #      the image bundle (only the compiled binary + packaging/), so its
-  #      presence positively identifies the operator's own tree (git checkout or
-  #      the clone_source_into_install_dir compat fallback). Trusted; cheap.
+  #      presence positively identifies the operator's own tree (a git checkout
+  #      the operator populated themselves). Trusted; cheap.
   #   2. Otherwise the installer is image-derived: trust it (and the bundled
   #      binary, via trust_image_bundle) ONLY when the pinned proxy image
   #      cosign-verifies against the pinned release identity.

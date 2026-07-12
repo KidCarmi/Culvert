@@ -38,10 +38,25 @@ func TestQuickStartInstallerSeedsPinnedTag(t *testing.T) {
 		`PINNED_TAG="culvert/proxy:pinned"`,  // the tag the compose file resolves
 		`docker image inspect "$PINNED_TAG"`, // idempotence guard (already-seeded hosts untouched)
 		`docker tag`,                         // registry / running-container seed path
-		`docker build -t "$PINNED_TAG"`,      // air-gapped / registry-down fallback
+		`CULVERT_PROXY_SEED_REF`,             // the ONLY supported offline path (preloaded image)
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("scripts/install.sh missing %q — docker-compose.yml resolves the LOCAL-ONLY tag culvert/proxy:pinned, so quick-start hosts fail `docker compose up` with pull-access-denied unless the installer seeds it", want)
+		}
+	}
+
+	// No-local-build contract: the deployed binary and its docker-compose.yml MUST
+	// come from the SAME published image (§6b extracts compose from the image's
+	// /app/deploy bundle). Building the pinned tag from an arbitrary checkout — or
+	// cloning HEAD to build — lets the compose drift a release ahead of the binary
+	// and crash-loop the proxy ("flag provided but not defined"). Those paths were
+	// removed; guard against their reintroduction.
+	for _, forbidden := range []string{
+		`docker build -t "$PINNED_TAG"`, // local build of the pinned tag
+		`clone_source_into_install_dir`, // source-clone-then-build fallback
+	} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("scripts/install.sh contains %q — Culvert must only deploy a signed PUBLISHED image (with a matching bundled compose), never a locally built one; offline hosts use CULVERT_PROXY_SEED_REF", forbidden)
 		}
 	}
 
