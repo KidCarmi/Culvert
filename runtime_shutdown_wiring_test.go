@@ -51,6 +51,7 @@ var canonicalLateShutdownHooks = []struct {
 	{"admin-ui-shutdown", shutdownOrderAdminUIShutdown},
 	{"socks5-listener-stop", shutdownOrderSOCKS5ListenerStop},
 	{"proxy-server-shutdown", shutdownOrderProxyServerShutdown},
+	{"h2-inspect-goaway", shutdownOrderH2InspectGOAWAY},
 	{"tunnel-drain", shutdownOrderTunnelDrain},
 	{"syslog-close", shutdownOrderSyslogClose},
 	{"community-db-close", shutdownOrderCommunityDBClose},

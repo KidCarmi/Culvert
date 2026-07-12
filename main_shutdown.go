@@ -68,13 +68,17 @@ const (
 	shutdownOrderAdminUIShutdown     = 70
 	shutdownOrderSOCKS5ListenerStop  = 80
 	shutdownOrderProxyServerShutdown = 90
-	shutdownOrderTunnelDrain         = 100
-	shutdownOrderSyslogClose         = 110
-	shutdownOrderCommunityDBClose    = 120
-	shutdownOrderLogStoreClose       = 125
-	shutdownOrderRequestLogClose     = 130
-	shutdownOrderAuditLogClose       = 135
-	shutdownOrderLogCloser           = 140
+	// PR3d: after the CONNECT listener is closed (no new inspected-H2 tunnels can
+	// begin) and before the tunnel drain waits, fence new tunnels and send the first
+	// GOAWAY wave to every active inspected-H2 tunnel.
+	shutdownOrderH2InspectGOAWAY  = 95
+	shutdownOrderTunnelDrain      = 100
+	shutdownOrderSyslogClose      = 110
+	shutdownOrderCommunityDBClose = 120
+	shutdownOrderLogStoreClose    = 125
+	shutdownOrderRequestLogClose  = 130
+	shutdownOrderAuditLogClose    = 135
+	shutdownOrderLogCloser        = 140
 )
 
 // registerEarlyShutdownHooks registers the pre-budget shutdown hooks: HA,
@@ -125,16 +129,30 @@ func drainActiveTunnels(context.Context) error {
 	if active <= 0 {
 		return nil
 	}
-	logger.Printf("Draining %d active tunnel(s)…", active)
+	// activeConns is a SUPERSET of inspected-H2 tunnels (it also counts H1-inspect and
+	// raw-bypass tunnels), so "drained" here does not imply every waited-on conn was
+	// GOAWAY'd — only the inspected-H2 subset is (PR3d).
+	logger.Printf("Draining %d active tunnel(s) (%d inspected H2)…", active, atomic.LoadInt64(&statH2InspectActive))
 	drainDeadline := time.After(15 * time.Second)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-drainDeadline:
-			logger.Printf("Drain timeout: %d tunnel(s) still active", atomic.LoadInt64(&activeConns))
+			// PR3d backstop: force-close inspected-H2 tunnels whose in-flight streams
+			// did not finish within the window (infinite SSE/gRPC/large-download
+			// streams keep the conn — and activeConns — open under a graceful GOAWAY),
+			// so laggards get a deterministic teardown instead of relying on process
+			// exit / the container SIGKILL grace.
+			forced := forceCloseH2InspectTunnels()
+			logger.Printf("Drain timeout: %d tunnel(s) still active (force-closed %d inspected H2)", atomic.LoadInt64(&activeConns), forced)
 			return nil
 		case <-ticker.C:
+			// PR3d: re-fire the GOAWAY so any inspected-H2 tunnel that registered after
+			// the initial order-95 trigger (a late-accepted CONNECT still handshaking)
+			// is also signaled. startGracefulShutdown is shutdownOnce-guarded, so
+			// already-GOAWAY'd conns are unaffected; no-op when native H2 was unused.
+			_ = refireH2InspectGoaway()
 			if atomic.LoadInt64(&activeConns) <= 0 {
 				logger.Println("All tunnels drained")
 				return nil
@@ -203,6 +221,9 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		}
 		return nil
 	})
+	// PR3d: send the first GOAWAY wave to active inspected-H2 tunnels (and fence new
+	// ones) before the drain waits on them. No-op when native H2 was never used.
+	reg.Register("h2-inspect-goaway", shutdownOrderH2InspectGOAWAY, beginH2InspectDrain)
 	// Drain active tunnels (CONNECT/WebSocket). proxySrv.Shutdown only
 	// closes HTTP/1.x idle connections; hijacked tunnels need time to
 	// finish. 15s drain budget is independent of the parent ctx, matching

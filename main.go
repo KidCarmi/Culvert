@@ -199,6 +199,7 @@ func main() {
 	initURLCategories(s)
 	initFileBlocking(s)
 	initSSLBypassAndDPI(s)
+	initH2InspectServer() // PR3d: eager-build the shared graceful-shutdown H2 server
 	initRewriteAndDefaultAction(s)
 	initScanning(s)
 	initUpstreamProxy(s)

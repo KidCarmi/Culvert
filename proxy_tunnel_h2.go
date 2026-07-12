@@ -17,11 +17,17 @@ package main
 //     confusion; deferred because a naive 421 risks breaking legitimate edge cases
 //     (IP-target CONNECT, single-SAN forged leaves already prevent coalescing) and
 //     warrants its own careful pass.
-//   - PR3d concurrency: GOAWAY-on-shutdown / drainActiveTunnels registration,
-//     upstream GOAWAY → per-stream failure mapping, graceful teardown.
+//   - upstream (origin-initiated) GOAWAY → per-stream failure mapping is already
+//     handled: an origin GOAWAY errors the in-flight upstreamCC.RoundTrip, mapped to
+//     exRoundTripError/exDeliverError by handleH2StreamOutcome. No extra work.
 //   - perf: the response body copy is pooled (relayBufPool) + adaptive-flush
 //     (h2CopyBody); forged-leaf session resumption for native tunnels (ticket-key
 //     sharing) is the remaining deferred perf item.
+//
+// PR3d graceful GOAWAY-on-shutdown is implemented in proxy_tunnel_h2_drain.go: the
+// shared ConfigureServer'd server (used below) + the order-95 drain hook +
+// drainActiveTunnels re-fire/backstop send every active inspected-H2 client a GOAWAY
+// on process shutdown and force-close laggards at the drain deadline.
 
 import (
 	"bufio"
@@ -276,6 +282,17 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	defer clientTLS.Close()   //nolint:errcheck // best-effort cleanup at tunnel end
 	defer upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at tunnel end
 
+	// Admission fence (PR3d): once the shutdown drain has begun, do not start
+	// inspecting a NEW decrypted flow on a departing node — close so the client
+	// re-routes/retries against the surviving node rather than being force-closed
+	// mid-flow in ≤15s. A tunnel racing this check (shutdown between here and the
+	// registry insert) is still caught by the drain's per-tick GOAWAY re-fire and
+	// the deadline backstop.
+	if h2InspectShuttingDown.Load() {
+		logger.Printf("SSL_INSPECT(h2) refusing new tunnel %q during shutdown drain", sanitizeLog(hostOnly))
+		return
+	}
+
 	// One upstream H2 client connection carries every stream of this tunnel;
 	// http2.ClientConn.RoundTrip is safe for concurrent use (h2 multiplexing).
 	tr := &http2.Transport{}
@@ -296,24 +313,28 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 		h2InspectStream(outer, w, req, upstreamCC, hostOnly, clientIP, match, id)
 	})
 
-	// MaxConcurrentStreams is the primary per-connection resource bound (and the
-	// effective Rapid-Reset cap). IdleTimeout GOAWAYs a fully-idle tunnel;
-	// WriteByteTimeout bounds a stuck client write. MaxReadFrameSize caps a single
-	// frame. A per-STREAM body-read inactivity watchdog is wired in h2InspectStream.
-	srv := &http2.Server{
-		MaxConcurrentStreams: h2MaxConcurrentStreams,
-		IdleTimeout:          tunnelIdleTimeout,
-		WriteByteTimeout:     h2ConnWriteByteTimeout,
-		MaxReadFrameSize:     h2MaxReadFrameSize,
+	// Serve on the SHARED, ConfigureServer'd server (PR3d) so this tunnel's
+	// serverConn registers into the graceful-shutdown state and receives a client
+	// GOAWAY on process shutdown. The server carries the same caps as before —
+	// MaxConcurrentStreams (primary per-connection bound + effective Rapid-Reset
+	// cap), IdleTimeout, WriteByteTimeout, MaxReadFrameSize, and BaseConfig's
+	// MaxHeaderBytes — moved onto the shared instance, not changed. Eager-init makes
+	// h2InspectSrv non-nil in production; the fallback covers direct-call tests.
+	sh := h2InspectSrv
+	if sh == nil {
+		sh = newH2InspectServer()
 	}
+	// Track the client leg for the drain deadline backstop; bump the active gauge.
+	registerH2InspectConn(clientTLS)
+	defer unregisterH2InspectConn(clientTLS)
+
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
-	// the client connection is no longer readable. BaseConfig.MaxHeaderBytes bounds
-	// the decoded header-list size (SETTINGS_MAX_HEADER_LIST_SIZE) — a defense
-	// against oversized/compression-amplified header blocks.
-	srv.ServeConn(clientTLS, &http2.ServeConnOpts{
+	// the client connection is no longer readable (or a shutdown GOAWAY + stream
+	// completion, or the backstop force-close).
+	sh.srv.ServeConn(clientTLS, &http2.ServeConnOpts{
 		Context:    outer.Context(),
 		Handler:    handler,
-		BaseConfig: &http.Server{MaxHeaderBytes: h2MaxHeaderBytes, ReadHeaderTimeout: h2ConnWriteByteTimeout},
+		BaseConfig: sh.base,
 	})
 }
 
