@@ -1069,16 +1069,18 @@ func recordTunnelBytes(bytesSent, bytesRecv int64) {
 // allow path when it was established, so running the stats fan-out again would
 // double-count statTotal/topHosts. Byte counters are handled separately by
 // recordTunnelBytes so they are not tied to the log gate.
-func persistTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+// ruleID is the matched rule's stable ULID (rename-safe decision attribution,
+// §1) — empty when no policy rule is attributed (e.g. raw SOCKS5).
+func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
 	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
-		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{})
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID})
 }
 
 // recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
 // unconditionally. Used by the always-logged paths (SOCKS5) and tests.
-func recordTunnelClose(ip, method, host, identity, ruleMatched string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+func recordTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
 	recordTunnelBytes(bytesSent, bytesRecv)
-	persistTunnelClose(ip, method, host, identity, ruleMatched, bytesSent, bytesRecv, start, sslAction)
+	persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction)
 }
 
 // recordTunnelCloseGated is the raw-relay call-site helper. It ALWAYS folds the
@@ -1091,11 +1093,12 @@ func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host s
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
 	}
-	ruleName := ""
+	ruleName, ruleID := "", ""
 	if match != nil && match.Rule != nil {
 		ruleName = match.Rule.Name
+		ruleID = match.Rule.ID
 	}
-	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, bytesSent, bytesRecv, start, sslAction)
+	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,

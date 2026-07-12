@@ -244,7 +244,7 @@ func TestRecordTunnelClose_FeedsGlobalByteCounters(t *testing.T) {
 	sent0 := atomic.LoadInt64(&statBytesSent)
 	recv0 := atomic.LoadInt64(&statBytesRecv)
 
-	recordTunnelClose("198.51.100.7", "WS", "chat.example:80", "alice", "allow-ws", 1200, 3400, time.Now().Add(-2*time.Second), "")
+	recordTunnelClose("198.51.100.7", "WS", "chat.example:80", "alice", "allow-ws", "01HRULEIDws000000000000000", 1200, 3400, time.Now().Add(-2*time.Second), "")
 
 	if got := atomic.LoadInt64(&statBytesSent) - sent0; got != 1200 {
 		t.Errorf("statBytesSent delta = %d, want 1200", got)

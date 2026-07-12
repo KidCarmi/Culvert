@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ruleIDByName returns the store-assigned ULID for the named rule (IDs are
@@ -81,6 +82,29 @@ func TestRuleID_BlockPath_StampsMatchedRuleID(t *testing.T) {
 	}
 	if e.RuleID != wantID {
 		t.Errorf("RuleID = %q, want the matched rule's ULID %q", e.RuleID, wantID)
+	}
+}
+
+// TestRuleID_TunnelClose_StampsMatchedRuleID covers the raw-tunnel close feed
+// entry (recordTunnelCloseGated → persistTunnelClose): a TUNNEL_CLOSED row for a
+// matched rule must carry that rule's ULID, not just its name — the rename-safe
+// gap flagged in review for the largest traffic class (CONNECT/WS).
+func TestRuleID_TunnelClose_StampsMatchedRuleID(t *testing.T) {
+	setupProxyTest(t)
+	const host = "tunnel.example.com"
+	policyStore.Add(PolicyRule{Priority: 1, Name: "allow-tunnel", Action: ActionAllow, DestFQDN: host})
+	wantID := ruleIDByName(t, "allow-tunnel")
+	rule := PolicyRule{Priority: 1, Name: "allow-tunnel", Action: ActionAllow, DestFQDN: host, ID: wantID}
+
+	recordTunnelCloseGated(&PolicyMatch{Rule: &rule}, ProxyIdentity{ClientIP: "203.0.113.9"},
+		"CONNECT", host, 100, 200, time.Now().Add(-time.Second), "bypass")
+
+	e := findLogByHost(t, host)
+	if e.Status != "TUNNEL_CLOSED" {
+		t.Fatalf("expected TUNNEL_CLOSED, got %q", e.Status)
+	}
+	if e.RuleMatched != "allow-tunnel" || e.RuleID != wantID {
+		t.Errorf("tunnel-close entry: RuleMatched=%q RuleID=%q, want allow-tunnel / %q", e.RuleMatched, e.RuleID, wantID)
 	}
 }
 

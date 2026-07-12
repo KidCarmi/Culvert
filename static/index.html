@@ -9680,12 +9680,25 @@ async function trafficGotoRule(name, id) {
   try {
     const pol = await api('/api/policy');
     const rules = pol.rules || [];
-    // Prefer the exact rule by ULID when the log entry carries a ruleId
-    // (rename-safe; disambiguates rules that share a name). Fall back to the
-    // name for legacy entries logged before ruleId, and for non-rule
-    // attributions (blocklist/scanner/feed) that never have one.
-    let r = id ? rules.find(x => x.id === id) : null;
-    if (!r) r = rules.find(x => x.name === name);
+    // With a ruleId, resolve ONLY by that exact ULID — never fall back to name.
+    // A same-named-but-different rule (after delete/recreate or an import that
+    // reassigned IDs) is exactly the ambiguity ruleId exists to avoid; report
+    // the original rule is gone instead of silently opening the wrong one. The
+    // name fallback is reserved for legacy/non-rule rows with no ruleId.
+    if (id) {
+      const byId = rules.find(x => x.id === id);
+      if (!byId) {
+        toast(`Rule "${name}" (id ${id}) no longer exists — it may have been deleted or replaced`, 'error');
+        return;
+      }
+      if (byId.ruleType === 'auth') {
+        gotoAnchoredRow('authpolicy', 'ap-rules', 'data-rule-id', byId.id);
+        return;
+      }
+      polAnchorRule(byId);
+      return;
+    }
+    const r = rules.find(x => x.name === name);
     if (!r) {
       toast(`"${name}" is not a policy rule — blocklist, scanner, and feed attributions also appear in this column`, 'error');
       return;
