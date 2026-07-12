@@ -770,17 +770,14 @@ type PolicyMatch struct {
 // groups is the list of IdP group/role memberships for the authenticated user.
 // Returns nil when no rule matches (caller should default to Deny — Zero Trust).
 func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, groups []string) *PolicyMatch {
-	// Hold RLock for the whole scan (not just the slice-header snapshot): the
-	// match bumps rule.HitCount/lastHitUnix via lock-free atomics, and the
-	// counter-reading snapshots in List()/Save() take the EXCLUSIVE Lock — so the
-	// shared RLock here serializes those rare readers against the atomic writes
-	// (closing the read/atomic-write data race) while leaving concurrent
-	// Evaluate calls fully parallel (RLock is shared; atomic-vs-atomic is safe).
-	// The scan is pure + fast and acquires no other lock, so holding RLock adds
-	// no contention on the request hot path.
+	// Snapshot the slice header under RLock, then release BEFORE the scan: the
+	// scan can block (matchDestNorm → geo.LookupCached → DNS on an uncached
+	// DestCountry host; category lookups hit the community DB), so the lock must
+	// NOT be held across it — otherwise a config-plane List()/Save() (exclusive
+	// Lock) waiting on a DNS-blocked scan would stall all policy evaluation.
 	ps.mu.RLock()
-	defer ps.mu.RUnlock()
 	rules := ps.rules
+	ps.mu.RUnlock()
 
 	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
 	// check reuses it (the host is identical across rules). This, plus each
@@ -812,11 +809,18 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchDestNorm(rule, host, normHost) {
 			continue
 		}
+		// Bump the match counters under RLock — NOT to protect the atomics from
+		// each other (concurrent Evaluates share RLock and the ops are atomic),
+		// but so the EXCLUSIVE Lock taken by List()/Save() serializes their
+		// plain-read struct snapshot against these writes (closing the
+		// read/atomic-write data race). This holds the lock only across two
+		// nanosecond atomic ops — never across the (DNS-capable) scan above — so
+		// it adds no blocking coupling. time.Now().Unix() does not allocate, so
+		// the perf/benchgate contract holds.
+		ps.mu.RLock()
 		atomic.AddInt64(&rule.HitCount, 1)
-		// lastHit: unix-seconds via a single atomic store — allocation-free on
-		// the proxy hot path (time.Now().Unix() does not allocate), so the
-		// perf/benchgate contract holds. Read back + formatted only in List().
 		atomic.StoreInt64(&rule.lastHitUnix, time.Now().Unix())
+		ps.mu.RUnlock()
 		// Precomputed by sortLocked (never "" there — empty conditions render
 		// as "any"); fall back for rules that bypassed the mutators.
 		conds := rule.matchedConds
