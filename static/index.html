@@ -544,6 +544,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="catgroups" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg> Category Groups
     </div>
+    <div class="nav-item" data-view="decprofiles" data-min-role="operator" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Profiles
+    </div>
     <div class="nav-item" data-view="rewrite" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg> Header Rewrite
     </div>
@@ -2487,7 +2490,7 @@ Firefox (all platforms):
           <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
             <div>
               <label class="form-label">SSL Action</label>
-              <select class="select" style="width:100%" id="pol-ssl">
+              <select class="select" style="width:100%" id="pol-ssl" data-change="syncDecProfRow">
                 <option value="Bypass">Bypass (transparent tunnel)</option>
                 <option value="Inspect">Inspect (MITM / SSL decryption)</option>
               </select>
@@ -2515,6 +2518,22 @@ Firefox (all platforms):
                 <input type="checkbox" id="pol-log-traffic" checked> <span>Log traffic</span>
               </label>
             </div>
+          </div>
+
+          <!-- Decryption Profile (SSL-inspect only) -->
+          <div id="pol-decprof-row" style="margin-bottom:14px;display:none">
+            <label class="form-label">Decryption Profile <span style="color:var(--muted);font-weight:400">(applies when SSL Action = Inspect)</span></label>
+            <select class="select" style="width:100%" id="pol-decryption-profile" data-change="syncDecProfHint">
+              <option value="">None (use defaults / inline settings)</option>
+            </select>
+            <p class="hint" id="pol-decprof-hint" style="margin-top:6px">
+              A Decryption Profile controls <em>how</em> this tunnel is decrypted — including
+              <strong>Inspect as HTTP/2</strong>, which removes the HTTP/1.1-downgrade anti-bot signal.
+              Note: it does <strong>not</strong> change the TLS fingerprint (Culvert re-originates TLS with Go's
+              stack), so destinations that fingerprint the ClientHello (JA3/JA4) or key on egress-IP reputation —
+              e.g. Google — may still challenge; those need a Bypass rule or a warmed dedicated egress.
+              Manage profiles under <a href="#" data-click="switchView" data-arg="decprofiles" style="color:var(--accent)">Decryption Profiles</a>.
+            </p>
           </div>
 
           <!-- Schedule (optional) -->
@@ -2815,6 +2834,85 @@ Firefox (all platforms):
             </div>
           </div>
           <div id="catgroup-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DECRYPTION PROFILES ─────────────────────────────────────────── -->
+    <div class="view" id="view-decprofiles">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Decryption Profiles</span>
+          <button class="btn sm" data-click="showAddDecProfForm">+ New Profile</button>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            A Decryption Profile is the "how to decrypt" object a policy rule references (the rule's match criteria
+            are the "what"). It controls <strong>Inspect as HTTP/2</strong> (removes the HTTP/1.1-downgrade anti-bot
+            signal), upstream certificate verification, the TLS version floor/cap, and the per-stream stall bound.
+            <br><strong>Honest scope:</strong> native HTTP/2 does <em>not</em> change the TLS fingerprint — Google-class
+            destinations that fingerprint the ClientHello or key on egress-IP reputation may still challenge; those
+            need a Bypass rule or warmed dedicated egress. Best fit: business-critical H2 SaaS you must keep inspected.
+          </p>
+          <div id="decprof-form" style="display:none;margin-bottom:16px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)">
+            <input type="hidden" id="dp-editing" value="">
+            <div style="margin-bottom:12px">
+              <label class="form-label">Profile Name</label>
+              <input type="text" class="input wide" id="dp-name" placeholder="e.g. recommended-h2" maxlength="64">
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:12px">
+              <div>
+                <label class="form-label">Inspect as HTTP/2</label>
+                <select class="select" style="width:100%" id="dp-http2">
+                  <option value="">Inherit (strip → HTTP/1.1)</option>
+                  <option value="true">On (native HTTP/2)</option>
+                  <option value="false">Off (force HTTP/1.1)</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Certificate Verification</label>
+                <select class="select" style="width:100%" id="dp-cert">
+                  <option value="">Inherit (rule setting)</option>
+                  <option value="strict">Strict (block untrusted/expired)</option>
+                  <option value="permissive">Permissive (verify, allow + log)</option>
+                  <option value="skip">Skip (no verification ⚠)</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">On Unsupported TLS</label>
+                <select class="select" style="width:100%" id="dp-onunsup">
+                  <option value="">Inherit (fail-close)</option>
+                  <option value="fail-close">Fail-close (drop)</option>
+                  <option value="fail-open" disabled>Fail-open (bypass) — coming soon</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Min TLS Version</label>
+                <select class="select" style="width:100%" id="dp-mintls">
+                  <option value="">Inherit (1.2)</option>
+                  <option value="1.2">1.2</option>
+                  <option value="1.3">1.3</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Max TLS Version</label>
+                <select class="select" style="width:100%" id="dp-maxtls">
+                  <option value="">Inherit (highest)</option>
+                  <option value="1.2">1.2</option>
+                  <option value="1.3">1.3</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Per-stream Stall Timeout (s)</label>
+                <input type="number" class="input wide" id="dp-stall" placeholder="0 = default" min="0" max="3600">
+              </div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn" data-click="saveDecProf">Save Profile</button>
+              <button class="btn ghost" data-click="cancelDecProf">Cancel</button>
+            </div>
+          </div>
+          <div id="decprof-list"></div>
         </div>
       </div>
     </div>
@@ -4080,6 +4178,11 @@ document.addEventListener('click', e => {
     // -- Category groups --
     case 'showAddCatGroupForm': showAddCatGroupForm(); break;
     case 'saveCatGroup':      saveCatGroup(); break;
+    case 'showAddDecProfForm': showAddDecProfForm(); break;
+    case 'saveDecProf':       saveDecProf(); break;
+    case 'cancelDecProf':     cancelDecProf(); break;
+    case 'editDecProf':       editDecProf(arg); break;
+    case 'deleteDecProf':     deleteDecProf(arg); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
     case 'editCatGroup':      editCatGroup(arg); break;
     case 'deleteCatGroup':    deleteCatGroup(arg); break;
@@ -4200,6 +4303,8 @@ document.addEventListener('change', e => {
     case 'importConfig':      importConfig(el); break;
     case 'toggleOCSP':        toggleOCSP(el.checked); break;
     case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
+    case 'syncDecProfRow':    syncDecProfRow(); break;
+    case 'syncDecProfHint':   syncDecProfHint(); break;
     case 'addCgCat':          addCgCat(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
     case 'releaseAgentChange':      releaseAgentChange(); break;
@@ -4394,6 +4499,7 @@ const viewMeta = {
   policy:       { title: 'Access Rules',  meta: 'Policy-Based Access Control (PBAC) rules' },
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
+  decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -4469,7 +4575,8 @@ function switchView(name) {
   if (name === 'audit')          loadAuditLog();
   if (name === 'blocklist')      fetchBlocklistFeed();
   if (name === 'settings')       loadSettings();
-  if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); }
+  if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); loadDecryptionProfileDropdown(); }
+  if (name === 'decprofiles')    fetchDecProfiles();
   if (name === 'authpolicy')     loadAuthPolicy();
   if (name === 'urlcat')         loadURLCategories();
   if (name === 'catgroups')      fetchCatGroups();
@@ -4965,6 +5072,152 @@ function loadCatGroupDropdown() {
   if (!sel) return;
   const names = _catGroups.map(g => g.name);
   sel.innerHTML = '<option value="">None</option>' + names.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+}
+
+// ── Decryption Profiles ───────────────────────────────────────────────────
+let _decProfiles = [];
+
+async function fetchDecProfiles() {
+  try {
+    const d = await api('/api/decryption-profiles');
+    _decProfiles = d.profiles || [];
+    renderDecProfiles();
+    loadDecryptionProfileDropdown();
+  } catch(e) { console.error(e); }
+}
+
+function decProfSummary(p) {
+  const bits = [];
+  if (p.inspectHttp2 === true) bits.push('Inspect as HTTP/2');
+  else if (p.inspectHttp2 === false) bits.push('Force HTTP/1.1');
+  if (p.certVerification) bits.push('cert: ' + p.certVerification);
+  if (p.onUnsupported) bits.push(p.onUnsupported);
+  if (p.minTlsVersion) bits.push('min TLS ' + p.minTlsVersion);
+  if (p.maxTlsVersion) bits.push('max TLS ' + p.maxTlsVersion);
+  if (p.stallTimeoutSecs) bits.push('stall ' + p.stallTimeoutSecs + 's');
+  return bits.length ? bits : ['inherits all defaults'];
+}
+
+function renderDecProfiles() {
+  const el = document.getElementById('decprof-list');
+  if (!el) return;
+  if (!_decProfiles.length) {
+    el.innerHTML = '<div class="empty-state"><div class="empty-icon">🔐</div>No decryption profiles yet</div>';
+    return;
+  }
+  el.innerHTML = _decProfiles.map(p => `<div style="padding:12px;margin-bottom:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <strong style="font-size:.95rem">${escHtml(p.name)}</strong>
+      <div style="display:flex;gap:6px">
+        <button class="btn ghost sm" data-click="openWhereUsed" data-arg="decryption-profile" data-arg2="${escHtml(p.name)}" title="Show policy rules that reference this profile">Where used</button>
+        <button class="btn ghost sm" data-click="editDecProf" data-arg="${escHtml(p.name)}">Edit</button>
+        <button class="btn ghost sm" style="color:var(--red)" data-click="deleteDecProf" data-arg="${escHtml(p.name)}">Delete</button>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px">${decProfSummary(p).map(b => `<span style="font-size:.72rem;background:rgba(20,184,166,.15);color:var(--accent);padding:2px 8px;border-radius:4px">${escHtml(b)}</span>`).join('')}</div>
+  </div>`).join('');
+}
+
+function decProfFormReset() {
+  document.getElementById('dp-editing').value = '';
+  document.getElementById('dp-name').value = '';
+  document.getElementById('dp-name').disabled = false;
+  ['dp-http2','dp-cert','dp-onunsup','dp-mintls','dp-maxtls'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('dp-stall').value = '';
+}
+
+function showAddDecProfForm() {
+  decProfFormReset();
+  document.getElementById('decprof-form').style.display = 'block';
+}
+
+function editDecProf(name) {
+  const p = _decProfiles.find(x => x.name === name);
+  if (!p) return;
+  decProfFormReset();
+  document.getElementById('dp-editing').value = p.name;
+  document.getElementById('dp-name').value = p.name;
+  document.getElementById('dp-name').disabled = true; // name is the identity/reference
+  document.getElementById('dp-http2').value = p.inspectHttp2 === true ? 'true' : (p.inspectHttp2 === false ? 'false' : '');
+  document.getElementById('dp-cert').value = p.certVerification || '';
+  document.getElementById('dp-onunsup').value = p.onUnsupported || '';
+  document.getElementById('dp-mintls').value = p.minTlsVersion || '';
+  document.getElementById('dp-maxtls').value = p.maxTlsVersion || '';
+  document.getElementById('dp-stall').value = p.stallTimeoutSecs || '';
+  document.getElementById('decprof-form').style.display = 'block';
+}
+
+function cancelDecProf() {
+  document.getElementById('decprof-form').style.display = 'none';
+  decProfFormReset();
+}
+
+async function saveDecProf() {
+  const name = document.getElementById('dp-name').value.trim();
+  if (!name) { toast('Profile name is required', 'error'); return; }
+  const h2 = document.getElementById('dp-http2').value;
+  const body = { name };
+  if (h2 !== '') body.inspectHttp2 = (h2 === 'true');
+  const cert = document.getElementById('dp-cert').value; if (cert) body.certVerification = cert;
+  const onu = document.getElementById('dp-onunsup').value; if (onu) body.onUnsupported = onu;
+  const minv = document.getElementById('dp-mintls').value; if (minv) body.minTlsVersion = minv;
+  const maxv = document.getElementById('dp-maxtls').value; if (maxv) body.maxTlsVersion = maxv;
+  const stall = parseInt(document.getElementById('dp-stall').value, 10);
+  if (!isNaN(stall) && stall > 0) body.stallTimeoutSecs = stall;
+  const editing = document.getElementById('dp-editing').value !== '';
+  try {
+    await api('/api/decryption-profiles', {
+      method: editing ? 'PUT' : 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    toast(editing ? 'Profile updated' : 'Profile created', 'success');
+    cancelDecProf();
+    fetchDecProfiles();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteDecProf(name) {
+  if (!await confirmAction('Delete Decryption Profile', `Delete profile "${name}"? Rules referencing it fall back to their inline SSL settings.`)) return;
+  try {
+    await api('/api/decryption-profiles?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Profile deleted', 'success');
+    fetchDecProfiles();
+  } catch(e) { if (!handleDeleteError(e, 'decryption profile')) toast('Error: ' + e.message, 'error'); }
+}
+
+// loadDecryptionProfileDropdown populates the policy-editor profile <select>.
+async function loadDecryptionProfileDropdown() {
+  const sel = document.getElementById('pol-decryption-profile');
+  if (!sel) return;
+  try {
+    if (!_decProfiles.length) {
+      const d = await api('/api/decryption-profiles');
+      _decProfiles = d.profiles || [];
+    }
+  } catch(e) { /* dropdown stays "None" only */ }
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">None (use defaults / inline settings)</option>' +
+    _decProfiles.map(p => `<option value="${escHtml(p.name)}">${escHtml(p.name)}</option>`).join('');
+  sel.value = cur;
+}
+
+// syncDecProfRow shows the profile picker only for SSL Action = Inspect, and warns
+// (via the hint) when a profile is bound to a non-Inspect rule (silent no-op).
+function syncDecProfRow() {
+  const row = document.getElementById('pol-decprof-row');
+  if (!row) return;
+  const inspect = (document.getElementById('pol-ssl').value === 'Inspect');
+  row.style.display = inspect ? 'block' : 'none';
+  syncDecProfHint();
+}
+
+function syncDecProfHint() {
+  const hint = document.getElementById('pol-decprof-hint');
+  if (!hint) return;
+  const bound = document.getElementById('pol-decryption-profile').value !== '';
+  const inspect = (document.getElementById('pol-ssl').value === 'Inspect');
+  hint.style.color = (bound && !inspect) ? 'var(--red)' : '';
 }
 
 // ── URL Categories ────────────────────────────────────────────────────────
@@ -7141,6 +7394,8 @@ async function clonePolicy(pri) {
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
+  document.getElementById('pol-decryption-profile').value = r.decryptionProfile || '';
+  syncDecProfRow();
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
@@ -8965,6 +9220,8 @@ async function editPolicy(priority) {
   document.getElementById('pol-enabled').checked     = r.enabled !== false;
   document.getElementById('pol-file-filter').checked  = !!r.fileFiltering;
   document.getElementById('pol-file-profile').value   = r.fileProfile || '';
+  document.getElementById('pol-decryption-profile').value = r.decryptionProfile || '';
+  syncDecProfRow();
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
@@ -9010,6 +9267,8 @@ function clearPolicyForm() {
   document.getElementById('pol-enabled').checked     = true;
   document.getElementById('pol-file-filter').checked = false;
   document.getElementById('pol-file-profile').value  = '';
+  document.getElementById('pol-decryption-profile').value = '';
+  syncDecProfRow();
   document.getElementById('pol-tls-skip').checked    = false;
   document.getElementById('pol-log-uri').checked     = false;
   document.getElementById('pol-log-traffic').checked = true;
@@ -9074,6 +9333,7 @@ function polReadForm() {
     enabled:        document.getElementById('pol-enabled').checked,
     fileFiltering:  document.getElementById('pol-file-filter').checked || (document.getElementById('pol-file-profile').value !== ''),
     fileProfile:    document.getElementById('pol-file-profile').value || '',
+    decryptionProfile: document.getElementById('pol-decryption-profile').value || '',
     tlsSkipVerify:  document.getElementById('pol-tls-skip').checked,
     logFullUri:     document.getElementById('pol-log-uri').checked,
     logTraffic:     document.getElementById('pol-log-traffic').checked,
