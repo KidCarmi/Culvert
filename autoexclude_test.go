@@ -28,7 +28,7 @@ func swapAutoExclude(t *testing.T, cfg autoexclude.Config) {
 // bindFailOpenProfile installs a decryption-profile store with a single named
 // fail-open (or fail-close) profile and returns a rule match referencing it plus
 // the profile's scope ID (the cache key).
-func bindFailOpenProfile(t *testing.T, name, onInspectError string) (*PolicyMatch, string) {
+func bindFailOpenProfile(t *testing.T, name, onInspectError string) (match *PolicyMatch, scopeID string) {
 	t.Helper()
 	if globalDecryptionProfiles.GetByName(name) == nil {
 		if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: name, OnInspectError: onInspectError}); err != nil {
@@ -122,6 +122,10 @@ func TestClassifyOriginInspectFailure_TightenedTriggers(t *testing.T) {
 		errors.New("dial tcp: i/o timeout"),
 		errors.New("tls: bad record MAC"),
 		&wrapErr{errors.New("remote error: tls: handshake failure")}, // wrapped generic
+		// Deliberately NOT learned (SWG N1/N2): host-independent local config error
+		// and a Go server-side string that never fires on the origin (client) leg.
+		errors.New("tls: no supported versions satisfy MinVersion and MaxVersion"),
+		errors.New("tls: no cipher suite supported by both client and server"),
 	}
 	for _, e := range noLearn {
 		if _, learn, rescue := classifyOriginInspectFailure(e); learn || rescue {
@@ -132,17 +136,12 @@ func TestClassifyOriginInspectFailure_TightenedTriggers(t *testing.T) {
 	if r, learn, rescue := classifyOriginInspectFailure(errors.New("remote error: tls: certificate required")); !learn || !rescue || r != autoExReasonClientCert {
 		t.Fatalf("certificate required = (%q,%v,%v), want (client_cert_required,true,true)", r, learn, rescue)
 	}
-	// Locally-detected unsupported-params → learn, NO rescue.
-	localUnsup := []string{
-		"tls: no supported versions satisfy MinVersion and MaxVersion",
-		"tls: server selected unsupported protocol version 301",
-		"tls: no cipher suite supported by both client and server",
-	}
-	for _, s := range localUnsup {
-		r, learn, rescue := classifyOriginInspectFailure(errors.New(s))
-		if !learn || rescue || r != autoExReasonUnsupported {
-			t.Fatalf("classify %q = (%q,%v,%v), want (unsupported_params,true,false)", s, r, learn, rescue)
-		}
+	// Genuine per-origin version mismatch → learn, NO rescue. (Only this string;
+	// the host-independent config error and the server-side cipher string are in
+	// the noLearn set above per SWG N1/N2.)
+	r, learn, rescue := classifyOriginInspectFailure(errors.New("tls: server selected unsupported protocol version 301"))
+	if !learn || rescue || r != autoExReasonUnsupported {
+		t.Fatalf("server-selected-version = (%q,%v,%v), want (unsupported_params,true,false)", r, learn, rescue)
 	}
 }
 
@@ -194,7 +193,7 @@ func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {
 	if !maybeFailOpenOrigin("cc.example", fo, id, errors.New("remote error: tls: certificate required")) {
 		t.Fatal("client-cert-required must rescue the triggering session")
 	}
-	if maybeFailOpenOrigin("unsup.example", fo, id, errors.New("tls: no cipher suite supported by both client and server")) {
+	if maybeFailOpenOrigin("unsup.example", fo, id, errors.New("tls: server selected unsupported protocol version 301")) {
 		t.Fatal("unsupported-params must NOT rescue the triggering session (learn-only)")
 	}
 	// ...but it DID learn (confirmN=1) — next session self-heals.

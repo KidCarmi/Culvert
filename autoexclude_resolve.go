@@ -100,13 +100,16 @@ func classifyOriginInspectFailure(err error) (reason AutoExcludeReason, learn, r
 	if strings.Contains(msg, "certificate required") {
 		return autoExReasonClientCert, true, true
 	}
-	// Genuine parameter incompatibility detected LOCALLY by our stack — distinctive
-	// Go local-error strings, NOT the origin-emitted generic "handshake failure"
-	// alert. Learn-only (rescue=false).
-	if containsAny(msg,
-		"no supported versions satisfy",
-		"server selected unsupported protocol version",
-		"no cipher suite supported by both") {
+	// The origin selected a TLS version our inspection config does not support — a
+	// genuine PER-ORIGIN incompatibility our own (client-side) stack detects, not
+	// an origin-emitted generic alert. Learn-only (rescue=false). We deliberately
+	// do NOT match "no supported versions satisfy MinVersion and MaxVersion" (a
+	// host-independent local config error — it reflects the profile's floor, not
+	// the origin, so it would learn every host) nor "no cipher suite supported by
+	// both" (a Go SERVER-side string; on the origin leg we are the client, so it
+	// never fires — origin cipher mismatch surfaces as the origin's handshake_failure
+	// alert, which is correctly dropped as origin-controlled).
+	if strings.Contains(msg, "server selected unsupported protocol version") {
 		return autoExReasonUnsupported, true, false
 	}
 	// Generic / ambiguous / origin-controlled failures stay fail-close.
@@ -133,6 +136,13 @@ func isOriginCertVerifyErr(err error) bool {
 		return true
 	}
 	return strings.Contains(msg, "x509:") && strings.Contains(msg, "verif")
+}
+
+// auditSafe strips quotes and CR/LF so a value cannot forge a field in the audit
+// ring / alert payload (log-injection defense-in-depth).
+func auditSafe(s string) string {
+	r := strings.NewReplacer(`"`, "", "\n", "", "\r", "")
+	return r.Replace(s)
 }
 
 // containsAny reports whether s contains any of subs.
@@ -214,8 +224,11 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
 	autoExcludeLearns.record(string(reason), scopeName)
-	safeHost := strings.ReplaceAll(host, `"`, "")
-	safeScope := strings.ReplaceAll(scopeName, `"`, "")
+	// Strip quotes AND newlines from the audit/alert fields: host passed the IDNA
+	// gate and scope passed nameRe (both newline-free today), but strip inline so a
+	// future upstream relaxation can't inject into the audit ring (log-injection DiD).
+	safeHost := auditSafe(host)
+	safeScope := auditSafe(scopeName)
 	logger.Printf("SSL_AUTOEXCLUDE_LEARN %s -> %q (scope=%q reason=%s) — inspection bypassed until TTL",
 		sanitizeLog(id.ClientIP), sanitizeLog(safeHost), sanitizeLog(safeScope), reason)
 	auditAdd(AuditEntry{

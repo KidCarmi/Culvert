@@ -5,8 +5,8 @@ package main
 // shim over internal/decryptprofile). The cache is a VOLATILE, in-memory learned
 // set — never persisted, never synced CP→DP, and therefore off every config
 // surface. main owns the singleton + the hot-path resolvers (resolveFailOpen /
-// recordAutoExclude / classifyInspectFailure in decryptprofile_resolve.go) + the
-// admin API + UI; the engine exposes only the store.
+// recordAutoExclude / classify{Origin,Client}InspectFailure in
+// autoexclude_resolve.go) + the admin API + UI; the engine exposes only the store.
 
 import "github.com/KidCarmi/Culvert/internal/autoexclude"
 

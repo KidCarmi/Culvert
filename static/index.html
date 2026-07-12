@@ -5265,17 +5265,19 @@ async function deleteDecProf(name) {
 let _decExclusions = [];
 
 let _decExclScopeRules = {};
+let _decExclScopeNames = {};
 async function fetchDecExclusions() {
   try {
     const d = await api('/api/decryption-exclusions');
     _decExclusions = d.exclusions || [];
     _decExclScopeRules = d.scope_rule_counts || {};
+    _decExclScopeNames = d.scope_names || {};
     renderDecExclusions(d.stats || {}, d.fail_open_profiles || 0, d.fail_open_rules || 0);
   } catch(e) { console.error(e); }
 }
 
 function decExclReasonLabel(r) {
-  if (r === 'unsupported') return 'unsupported TLS';
+  if (r === 'unsupported_params') return 'unsupported TLS (origin version)';
   if (r === 'client_cert_required') return 'origin needs client cert';
   if (r === 'client_pinned') return 'client pinned (rejected our cert)';
   return r || '—';
@@ -5309,9 +5311,10 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
     _decExclusions.map(x => {
       const remMs = new Date(x.expires_at).getTime() - now;
       const rem = remMs > 0 ? Math.round(remMs/60000) + 'm' : 'expired';
-      const rules = _decExclScopeRules[x.scope_name] ?? '?';
+      const rules = _decExclScopeRules[x.scope_id] ?? '?';
+      const scopeLabel = _decExclScopeNames[x.scope_id] || x.scope_name || x.scope_id || '—';
       return `<tr>
-        <td>${escHtml(x.scope_name || x.scope_id || '—')}</td>
+        <td>${escHtml(scopeLabel)}</td>
         <td style="font-family:monospace">${escHtml(x.host)}</td>
         <td><span style="font-size:.72rem;background:rgba(239,68,68,.15);color:var(--red);padding:2px 8px;border-radius:4px">${escHtml(decExclReasonLabel(x.reason))}</span></td>
         <td title="policy rules bound to this profile (blast radius)">${escHtml(String(rules))}</td>

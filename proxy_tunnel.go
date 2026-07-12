@@ -579,12 +579,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		upstreamTLS.Close()              //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
 		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
-		// Adaptive fail-open: a fail-open rule + a server-observed can't-decrypt
-		// signal (unsupported params / origin wants a client cert) learns the host
-		// and RESCUES this session as a transparent bypass. We have not written to
-		// w yet, so handleTunnelBypass re-dials (its own inline isPrivateHost +
-		// ssrfControl guard) and relays. A cert-verify/other failure returns false
-		// and keeps today's 502 — auto-bypassing a bad cert is not a compat fix.
+		// Adaptive fail-open: a fail-open rule learns a qualifying host, and RESCUES
+		// this session as a transparent bypass ONLY for the narrow client-cert-
+		// required signal (maybeFailOpenOrigin returns true just for that reason;
+		// unsupported-params learns but returns false → keeps today's 502 and
+		// self-heals next session). We have not written to w yet, so
+		// handleTunnelBypass re-dials (its own inline isPrivateHost + ssrfControl
+		// guard) and relays. A cert-verify/other failure never learns or rescues.
 		if maybeFailOpenOrigin(hostOnly, match, id, err) {
 			logger.Printf("SSL_AUTOEXCLUDE_RESCUE %q: origin inspect failed (client-cert-required), failing open to bypass", sanitizeLog(targetHost))
 			handleTunnelBypass(w, r, match, id)

@@ -637,23 +637,36 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		// auto-disable inspection (an empty cache alone does not prove this).
 		foProfiles, foRules := failOpenFootprint()
 		exclusions := autoExclude.List()
-		// Per-entry blast radius: how many policy rules each exclusion's owning
-		// profile (scope) is bound to. Computed once per distinct scope.
+		// Resolve each scope's CURRENT profile name + rule-count blast radius by ID
+		// (a rename keeps the profile ID; the entry's cached ScopeName may be stale).
+		// Both maps are keyed by scope ID; the UI prefers the current name.
+		idToName := make(map[string]string)
+		profs := globalDecryptionProfiles.List()
+		for i := range profs {
+			idToName[profs[i].ID] = profs[i].Name
+		}
 		scopeRules := make(map[string]int)
+		scopeNames := make(map[string]string)
 		for i := range exclusions {
-			sn := exclusions[i].ScopeName
-			if _, done := scopeRules[sn]; done || sn == "" {
+			sid := exclusions[i].ScopeID
+			if _, done := scopeRules[sid]; done || sid == "" {
 				continue
 			}
-			_, refs := objectReferences("decryption-profile", sn)
-			scopeRules[sn] = len(refs)
+			name := idToName[sid]
+			if name == "" {
+				name = exclusions[i].ScopeName // profile deleted — fall back to cached name
+			}
+			scopeNames[sid] = name
+			_, refs := objectReferences("decryption-profile", name)
+			scopeRules[sid] = len(refs)
 		}
 		jsonOK(w, map[string]any{
 			"exclusions":         exclusions,
 			"stats":              autoExclude.Stats(),
 			"fail_open_profiles": foProfiles,
 			"fail_open_rules":    foRules,
-			"scope_rule_counts":  scopeRules,
+			"scope_rule_counts":  scopeRules, // keyed by scope_id
+			"scope_names":        scopeNames, // scope_id -> current display name
 		})
 
 	case http.MethodDelete:

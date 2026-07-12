@@ -141,7 +141,7 @@ This feature disables inspection for learned hosts, so roll it out gradually:
   fail-open rules does. A high rule count is your over-adoption signal (a fail-open
   profile bound to a broad/catch-all rule).
 - The stats line shows the posture: active/pending counts, confirm-count (distinct
-  client **subnets**), TTLs, and cap.
+  clients — authenticated identity when present, else client IP), TTLs, and cap.
 - **Evict** one host (inspection resumes immediately; it may re-learn if still
   incompatible) or **Clear all**. Both actions are audited.
 
@@ -151,7 +151,8 @@ version rollback. It is cleared on restart and re-learns cheaply.
 
 ### Metrics
 
-- `culvert_decrypt_autoexclude_total{reason}` — learn events by reason.
+- `culvert_decrypt_autoexclude_total{reason,scope}` — learn events by reason and
+  owning decryption profile (scope).
 - `culvert_decrypt_autoexclude_hit_total` — sessions bypassed due to a learned
   exclusion.
 - `culvert_decrypt_autoexclude_active` — current active exclusions (gauge). Alert
@@ -172,21 +173,24 @@ For a **never-before-seen** incompatible host, the *first* connection can still
 fail — you cannot rescue a client that refuses your certificate without prior
 knowledge of the host. Behavior by path:
 
-- **Strip inspection path, server-observed failure** (unsupported params /
-  origin-requires-client-cert): the current session **is rescued live** — no
-  visible failure. This live rescue is **confirm-count-exempt**: it bypasses the
-  *triggering* session on the first non-spoofable server signal (the confirm-count
-  protects the *persistent* cache that future sessions read, not the session that
-  hit the failure). Because it only applies to hosts an operator deliberately put
-  on a fail-open rule, size fail-open rule scope accordingly — keep DLP-critical
-  hosts on fail-close.
-- **Native-HTTP/2 inspection path, or client-pinning**: **learn-only** — the
-  first session fails, and the *next* session to that host self-heals via the
-  cache once the confirm-count is met.
+- **Strip inspection path, origin-requires-client-cert ONLY**: the current
+  session **is rescued live** — no visible failure. This is the single
+  live-rescued case, and it is **confirm-count-exempt** (it bypasses the
+  *triggering* session on the first `certificate_required` signal; the
+  confirm-count protects the *persistent* cache future sessions read). Because it
+  applies only to hosts an operator deliberately put on a fail-open rule, size
+  fail-open scope accordingly — keep DLP-critical hosts on fail-close.
+- **Everything else** — unsupported-params (strip path), the native-HTTP/2 path,
+  and client-pinning — is **learn-only**: the first session fails with a `502`,
+  and the *next* session to that host self-heals via the cache once the
+  confirm-count is met. (Unsupported-params does NOT live-rescue: it is
+  origin-influenced and lower-confidence than client-cert-required.)
 
-For **known** pinned apps where you want guaranteed first-session success, add
-them to the manual **SSL Bypass** list (precedence: manual bypass > auto-exclusion
-> policy inspect). A curated predefined pinned-app list is a planned enhancement.
+For **known** pinned apps — the most persistent incompatibility, and one the
+`client_pinned` short (1h) TTL deliberately does not durably cache — add them to
+the manual **SSL Bypass** list for guaranteed first-session success (precedence:
+manual bypass > auto-exclusion > policy inspect). A curated predefined pinned-app
+list is a planned enhancement.
 
 ## Deferred (planned)
 
