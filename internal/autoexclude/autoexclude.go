@@ -356,11 +356,11 @@ func (c *Cache) PendingLen() int {
 // an operator can prove the feature's configuration (and that a no-fail-open
 // deployment has an inert, empty cache).
 type Stats struct {
-	Active     int           `json:"active"`
-	Pending    int           `json:"pending"`
-	ConfirmN   int           `json:"confirm_n"`
-	TTLSecs    int           `json:"ttl_secs"`
-	PinnedSecs int           `json:"pinned_ttl_secs"`
+	Active     int `json:"active"`
+	Pending    int `json:"pending"`
+	ConfirmN   int `json:"confirm_n"`
+	TTLSecs    int `json:"ttl_secs"`
+	PinnedSecs int `json:"pinned_ttl_secs"`
 	WindowSecs int `json:"window_secs"`
 	MaxEntries int `json:"max_entries"`
 }

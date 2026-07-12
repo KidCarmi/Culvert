@@ -617,6 +617,46 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 	}
 }
 
+// apiDecryptionExclusions is the read-mostly surface over the adaptive
+// decryption-exclusion cache (internal/autoexclude): learned hosts that a
+// fail-open rule currently bypasses inspection for. GET (viewer) lists the active
+// entries with their blast-radius (reason, hit count, learned/expires) plus the
+// cache posture (Stats) so an operator can prove the configuration. DELETE
+// (operator) evicts one host (?host=) or clears all — both audit, so C2c does not
+// flag audit_missing. The cache is VOLATILE runtime state (not persisted, not
+// synced, off every config surface), so there is intentionally no create/update
+// path and no saveConfigVersion.
+func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"exclusions": autoExclude.List(),
+			"stats":      autoExclude.Stats(),
+		})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		host := strings.TrimSpace(r.URL.Query().Get("host"))
+		if host != "" {
+			removed := autoExclude.Remove(host)
+			auditEvent(r, "decryption.autoexclude.evict", host, "manual eviction of a learned exclusion")
+			jsonOK(w, map[string]any{"ok": true, "removed": removed})
+			return
+		}
+		n := autoExclude.Clear()
+		auditEvent(r, "decryption.autoexclude.clear", "*", fmt.Sprintf("cleared %d learned exclusion(s)", n))
+		jsonOK(w, map[string]any{"ok": true, "cleared": n})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
@@ -1704,11 +1744,12 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 
 	// URL Categories (dynamic host-list management).
-	mux.HandleFunc("/api/category-groups", apiCategoryGroups)         // GET/POST/PUT/DELETE category groups
-	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles) // GET/POST/PUT/DELETE decryption profiles
-	mux.HandleFunc("/api/urlcat", apiURLCat)                          // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                 // POST/DELETE individual hosts
-	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)             // GET — resolve a domain to its category
+	mux.HandleFunc("/api/category-groups", apiCategoryGroups)             // GET/POST/PUT/DELETE category groups
+	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)     // GET/POST/PUT/DELETE decryption profiles
+	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions) // GET list learned exclusions / DELETE evict one (?host=) or clear all
+	mux.HandleFunc("/api/urlcat", apiURLCat)                              // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                     // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                 // GET — resolve a domain to its category
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

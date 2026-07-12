@@ -78,7 +78,7 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerSetupRoutes(mux)                // ui_auth.go        —  2 routes
 	registerAuthRoutes(mux)                 // ui_auth.go        — 12 routes
 	registerDashboardRoutes(mux)            // ui_config.go      — 10 routes
-	registerPolicyRoutes(mux)               // ui_policy.go      — 18 routes
+	registerPolicyRoutes(mux)               // ui_policy.go      — 19 routes
 	registerPACRoutes(mux)                  // pac.go            —  2 routes
 	// Phase B2.
 	registerSecurityRoutes(mux)      // ui_security.go    — 27 routes

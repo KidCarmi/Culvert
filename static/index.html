@@ -547,6 +547,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="decprofiles" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Profiles
     </div>
+    <div class="nav-item" data-view="decexclusions" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Exclusions
+    </div>
     <div class="nav-item" data-view="rewrite" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg> Header Rewrite
     </div>
@@ -2889,7 +2892,15 @@ Firefox (all platforms):
                 <select class="select" style="width:100%" id="dp-onunsup">
                   <option value="">Inherit (fail-close)</option>
                   <option value="fail-close">Fail-close (drop)</option>
-                  <option value="fail-open" disabled>Fail-open (bypass) — coming soon</option>
+                  <option value="fail-open" disabled>Fail-open (bypass) — use On Inspect Failure</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">On Inspect Failure ⚠</label>
+                <select class="select" style="width:100%" id="dp-oninspecterr" data-change="syncDecProfFailOpenHint">
+                  <option value="">Inherit (fail-close)</option>
+                  <option value="fail-close">Fail-close (502)</option>
+                  <option value="fail-open">Fail-open (auto-exclude + learn)</option>
                 </select>
               </div>
               <div>
@@ -2913,12 +2924,48 @@ Firefox (all platforms):
                 <input type="number" class="input wide" id="dp-stall" placeholder="0 = default" min="0" max="3600">
               </div>
             </div>
+            <p class="hint" id="dp-failopen-hint" style="display:none;margin-bottom:12px;color:var(--red)">
+              ⚠ <strong>Fail-open auto-excludes hosts from inspection.</strong> When an inspected tunnel can't be
+              established because a host is incompatible with decryption (unsupported TLS, the origin requires a
+              client cert, or a pinned client rejects our cert), the host is learned into a volatile cache after a
+              confirm-count of distinct clients, and subsequent sessions to it <em>bypass inspection</em> until the
+              entry expires (12h; 1h for pinned). It does <em>not</em> fire on an untrusted/expired cert (that stays
+              a block). Every learn is alerted, audited, and listed under
+              <a href="#" data-click="switchView" data-arg="decexclusions" style="color:var(--accent)">Decryption Exclusions</a>.
+              Keep inspection-mandatory hosts on <em>fail-close</em> rules — those are never auto-excluded.
+            </p>
             <div style="display:flex;gap:8px">
               <button class="btn" data-click="saveDecProf">Save Profile</button>
               <button class="btn ghost" data-click="cancelDecProf">Cancel</button>
             </div>
           </div>
           <div id="decprof-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DECRYPTION EXCLUSIONS (auto-learned fail-open cache) ─────────── -->
+    <div class="view" id="view-decexclusions">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Decryption Exclusions</span>
+          <button class="btn sm ghost" data-click="fetchDecExclusions">Refresh</button>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            These are hosts SSL inspection is <strong>currently OFF for</strong> — learned automatically because an
+            inspected tunnel could not be established (unsupported TLS, the origin required a client certificate, or a
+            pinned client rejected our certificate) under a rule whose Decryption Profile opts into <em>fail-open</em>.
+            A host is only excluded after a confirm-count of distinct clients, and entries expire (12h; 1h for pinned).
+            An untrusted/expired origin certificate is <em>never</em> auto-excluded — that stays a block. This cache is
+            volatile (cleared on restart, never synced between nodes) and is not part of config export/rollback.
+            Every entry below means inspection coverage is reduced; evict any you don't expect.
+          </p>
+          <div id="decexcl-stats" class="hint" style="margin-bottom:12px"></div>
+          <div style="margin-bottom:12px">
+            <button class="btn sm" style="color:var(--red)" data-min-role="operator" data-click="clearDecExclusions">Clear all exclusions</button>
+          </div>
+          <div id="decexcl-list"></div>
         </div>
       </div>
     </div>
@@ -4190,6 +4237,9 @@ document.addEventListener('click', e => {
     case 'cancelDecProf':     cancelDecProf(); break;
     case 'editDecProf':       editDecProf(arg); break;
     case 'deleteDecProf':     deleteDecProf(arg); break;
+    case 'fetchDecExclusions': fetchDecExclusions(); break;
+    case 'evictDecExclusion': evictDecExclusion(arg); break;
+    case 'clearDecExclusions': clearDecExclusions(); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
     case 'editCatGroup':      editCatGroup(arg); break;
     case 'deleteCatGroup':    deleteCatGroup(arg); break;
@@ -4312,6 +4362,7 @@ document.addEventListener('change', e => {
     case 'syncFileFilter':    document.getElementById('pol-file-filter').checked = (el.value !== ''); break;
     case 'syncDecProfRow':    syncDecProfRow(); break;
     case 'syncDecProfHint':   syncDecProfHint(); break;
+    case 'syncDecProfFailOpenHint': syncDecProfFailOpenHint(); break;
     case 'addCgCat':          addCgCat(); break;
     case 'blToggleAll':       blToggleAll(el.checked); break;
     case 'releaseAgentChange':      releaseAgentChange(); break;
@@ -4507,6 +4558,7 @@ const viewMeta = {
   urlcat:       { title: 'URL Categories', meta: 'Manage host lists for each URL category used in policy rules' },
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
+  decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) — volatile, per-node, expiring; every entry reduces inspection coverage' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -4584,6 +4636,7 @@ function switchView(name) {
   if (name === 'settings')       loadSettings();
   if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); loadDecryptionProfileDropdown(); }
   if (name === 'decprofiles')    fetchDecProfiles();
+  if (name === 'decexclusions')  fetchDecExclusions();
   if (name === 'authpolicy')     loadAuthPolicy();
   if (name === 'urlcat')         loadURLCategories();
   if (name === 'catgroups')      fetchCatGroups();
@@ -5099,6 +5152,8 @@ function decProfSummary(p) {
   else if (p.inspectHttp2 === false) bits.push('Force HTTP/1.1');
   if (p.certVerification) bits.push('cert: ' + p.certVerification);
   if (p.onUnsupported) bits.push(p.onUnsupported);
+  if (p.onInspectError === 'fail-open') bits.push('⚠ fail-open (auto-exclude)');
+  else if (p.onInspectError) bits.push('on-fail: ' + p.onInspectError);
   if (p.minTlsVersion) bits.push('min TLS ' + p.minTlsVersion);
   if (p.maxTlsVersion) bits.push('max TLS ' + p.maxTlsVersion);
   if (p.stallTimeoutSecs) bits.push('stall ' + p.stallTimeoutSecs + 's');
@@ -5129,8 +5184,16 @@ function decProfFormReset() {
   document.getElementById('dp-editing').value = '';
   document.getElementById('dp-name').value = '';
   document.getElementById('dp-name').disabled = false;
-  ['dp-http2','dp-cert','dp-onunsup','dp-mintls','dp-maxtls'].forEach(id => document.getElementById(id).value = '');
+  ['dp-http2','dp-cert','dp-onunsup','dp-oninspecterr','dp-mintls','dp-maxtls'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('dp-stall').value = '';
+  syncDecProfFailOpenHint();
+}
+
+// syncDecProfFailOpenHint shows the auto-exclusion warning only when the profile
+// opts into fail-open, so the security implication is loud at the point of choice.
+function syncDecProfFailOpenHint() {
+  const on = document.getElementById('dp-oninspecterr').value === 'fail-open';
+  document.getElementById('dp-failopen-hint').style.display = on ? 'block' : 'none';
 }
 
 function showAddDecProfForm() {
@@ -5148,9 +5211,11 @@ function editDecProf(name) {
   document.getElementById('dp-http2').value = p.inspectHttp2 === true ? 'true' : (p.inspectHttp2 === false ? 'false' : '');
   document.getElementById('dp-cert').value = p.certVerification || '';
   document.getElementById('dp-onunsup').value = p.onUnsupported || '';
+  document.getElementById('dp-oninspecterr').value = p.onInspectError || '';
   document.getElementById('dp-mintls').value = p.minTlsVersion || '';
   document.getElementById('dp-maxtls').value = p.maxTlsVersion || '';
   document.getElementById('dp-stall').value = p.stallTimeoutSecs || '';
+  syncDecProfFailOpenHint();
   document.getElementById('decprof-form').style.display = 'block';
 }
 
@@ -5167,6 +5232,7 @@ async function saveDecProf() {
   if (h2 !== '') body.inspectHttp2 = (h2 === 'true');
   const cert = document.getElementById('dp-cert').value; if (cert) body.certVerification = cert;
   const onu = document.getElementById('dp-onunsup').value; if (onu) body.onUnsupported = onu;
+  const oie = document.getElementById('dp-oninspecterr').value; if (oie) body.onInspectError = oie;
   const minv = document.getElementById('dp-mintls').value; if (minv) body.minTlsVersion = minv;
   const maxv = document.getElementById('dp-maxtls').value; if (maxv) body.maxTlsVersion = maxv;
   const stall = parseInt(document.getElementById('dp-stall').value, 10);
@@ -5191,6 +5257,73 @@ async function deleteDecProf(name) {
     toast('Profile deleted', 'success');
     fetchDecProfiles();
   } catch(e) { if (!handleDeleteError(e, 'decryption profile')) toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Decryption Exclusions (auto-learned fail-open cache) ──────────────────
+let _decExclusions = [];
+
+async function fetchDecExclusions() {
+  try {
+    const d = await api('/api/decryption-exclusions');
+    _decExclusions = d.exclusions || [];
+    renderDecExclusions(d.stats || {});
+  } catch(e) { console.error(e); }
+}
+
+function decExclReasonLabel(r) {
+  if (r === 'unsupported') return 'unsupported TLS';
+  if (r === 'client_cert_required') return 'origin needs client cert';
+  if (r === 'client_pinned') return 'client pinned (rejected our cert)';
+  return r || '—';
+}
+
+function renderDecExclusions(stats) {
+  const s = document.getElementById('decexcl-stats');
+  if (s) {
+    s.textContent = `Active: ${stats.active ?? 0} · Pending (unconfirmed): ${stats.pending ?? 0} · ` +
+      `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
+      `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`;
+  }
+  const el = document.getElementById('decexcl-list');
+  if (!el) return;
+  if (!_decExclusions.length) {
+    el.innerHTML = '<p class="hint">No active exclusions — SSL inspection is applied everywhere policy dictates.</p>';
+    return;
+  }
+  const now = Date.now();
+  el.innerHTML = '<table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Host</th><th>Reason</th><th>Hits</th><th>Clients</th><th>Learned</th><th>Expires in</th><th></th>' +
+    '</tr></thead><tbody>' +
+    _decExclusions.map(x => {
+      const remMs = new Date(x.expires_at).getTime() - now;
+      const rem = remMs > 0 ? Math.round(remMs/60000) + 'm' : 'expired';
+      return `<tr>
+        <td style="font-family:monospace">${escHtml(x.host)}</td>
+        <td><span style="font-size:.72rem;background:rgba(239,68,68,.15);color:var(--red);padding:2px 8px;border-radius:4px">${escHtml(decExclReasonLabel(x.reason))}</span></td>
+        <td>${x.hits ?? 0}</td>
+        <td>${x.client_count ?? 0}</td>
+        <td style="font-size:.78rem;color:var(--muted)">${escHtml((x.learned_at||'').replace('T',' ').slice(0,19))}</td>
+        <td>${escHtml(rem)}</td>
+        <td><button class="btn ghost sm" style="color:var(--red)" data-min-role="operator" data-click="evictDecExclusion" data-arg="${escHtml(x.host)}">Evict</button></td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+}
+
+async function evictDecExclusion(host) {
+  try {
+    await api('/api/decryption-exclusions?host=' + encodeURIComponent(host), { method: 'DELETE' });
+    toast('Exclusion evicted — inspection resumes for ' + host, 'success');
+    fetchDecExclusions();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function clearDecExclusions() {
+  if (!await confirmAction('Clear all exclusions', 'Clear every learned decryption exclusion? Inspection resumes for all listed hosts (they may re-learn if still incompatible).')) return;
+  try {
+    await api('/api/decryption-exclusions', { method: 'DELETE' });
+    toast('All exclusions cleared', 'success');
+    fetchDecExclusions();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 // loadDecryptionProfileDropdown populates the policy-editor profile <select>.

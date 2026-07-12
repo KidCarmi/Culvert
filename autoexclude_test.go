@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/x509"
 	"errors"
 	"net/http"
@@ -152,9 +151,54 @@ func TestRecordAutoExclude_PromotesAndAudits(t *testing.T) {
 	}
 }
 
-// stripRoleReq builds a request with an operator role in context (for handler tests).
-func opReq(method, target, body string) *http.Request {
-	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	return req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleOperator))
+// TestApiDecryptionExclusions_ListEvictClear exercises the handler surface:
+// viewer GET lists entries + posture; operator DELETE evicts one and clears all,
+// each auditing (so C2c does not flag audit_missing).
+func TestApiDecryptionExclusions_ListEvictClear(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
+	autoExclude.Observe("a.example", autoexclude.ReasonUnsupported, "1.1.1.1")
+	autoExclude.Observe("b.example", autoexclude.ReasonClientPinned, "1.1.1.1")
+
+	// GET as viewer.
+	rw := httptest.NewRecorder()
+	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodGet, "/api/decryption-exclusions", nil))
+	if rw.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rw.Code)
+	}
+	body := rw.Body.String()
+	if !strings.Contains(body, "a.example") || !strings.Contains(body, "\"stats\"") {
+		t.Fatalf("GET body missing entries or stats: %s", body)
+	}
+
+	// DELETE one host as operator.
+	rw = httptest.NewRecorder()
+	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions?host=a.example", nil))
+	if rw.Code != http.StatusOK {
+		t.Fatalf("DELETE one status = %d, want 200", rw.Code)
+	}
+	if _, ok := autoExclude.Contains("a.example"); ok {
+		t.Fatal("evicted host still present")
+	}
+
+	// DELETE all (clear) as operator.
+	rw = httptest.NewRecorder()
+	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions", nil))
+	if rw.Code != http.StatusOK || autoExclude.Len() != 0 {
+		t.Fatalf("clear failed: status=%d len=%d", rw.Code, autoExclude.Len())
+	}
+}
+
+// TestApiDecryptionExclusions_ViewerCannotDelete pins the per-method RBAC split:
+// a viewer is rejected on DELETE (operator-only) even though GET is viewer-ok.
+func TestApiDecryptionExclusions_ViewerCannotDelete(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
+	autoExclude.Observe("a.example", autoexclude.ReasonUnsupported, "1.1.1.1")
+	rw := httptest.NewRecorder()
+	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodDelete, "/api/decryption-exclusions?host=a.example", nil))
+	if rw.Code == http.StatusOK {
+		t.Fatal("viewer was allowed to DELETE (operator-only)")
+	}
+	if _, ok := autoExclude.Contains("a.example"); !ok {
+		t.Fatal("viewer DELETE mutated the cache")
+	}
 }

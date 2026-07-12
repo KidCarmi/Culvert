@@ -9,7 +9,7 @@ import (
 // (the determinism gate re-runs -shuffle; time.Sleep would be flaky and slow).
 type fakeClock struct{ t time.Time }
 
-func (f *fakeClock) now() time.Time { return f.t }
+func (f *fakeClock) now() time.Time      { return f.t }
 func (f *fakeClock) add(d time.Duration) { f.t = f.t.Add(d) }
 
 func newTestCache(cfg Config, clk *fakeClock) *Cache {
