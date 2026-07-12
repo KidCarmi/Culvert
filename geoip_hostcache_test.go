@@ -19,20 +19,20 @@ import (
 	"time"
 )
 
-// stubResolver replaces lookupHostFn with a counting stub returning addrs/err,
-// and returns (counter, restore). Callers must defer restore().
-func stubResolver(addrs []string, err error) (*atomic.Int64, func()) {
-	var calls atomic.Int64
+// stubResolver replaces lookupHostFn with a counting stub returning addrs/err.
+// Callers must defer restore(); calls counts resolver invocations.
+func stubResolver(addrs []string, err error) (calls *atomic.Int64, restore func()) {
+	var counter atomic.Int64
 	orig := lookupHostFn
 	lookupHostFn = func(host string) ([]string, error) {
-		calls.Add(1)
+		counter.Add(1)
 		return addrs, err
 	}
 	origCache := resolvedHostCache.entries
 	resolvedHostCache.mu.Lock()
 	resolvedHostCache.entries = map[string]hostIPEntry{}
 	resolvedHostCache.mu.Unlock()
-	return &calls, func() {
+	return &counter, func() {
 		lookupHostFn = orig
 		resolvedHostCache.mu.Lock()
 		resolvedHostCache.entries = origCache
