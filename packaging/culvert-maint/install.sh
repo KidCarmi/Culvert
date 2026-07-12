@@ -468,10 +468,12 @@ RENDERED_SUDOERS=$(mktemp)
 RENDERED_SUDOERS_TMP=$(mktemp)
 
 # Pass 1 — substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets
-# the path/registry slashes pass through unescaped. proxy_repo is colon-escaped
-# for sudoers FIRST (a registry port like 127.0.0.1:5000 would otherwise render a
-# bare ':' that visudo rejects), THEN sed-escaped so the added backslash survives.
-sed -e "s|{compose_path}|$(sed_escape_replacement "$COMPOSE_PATH")|g" \
+# the path/registry slashes pass through unescaped. Both values are
+# colon-escaped for sudoers FIRST (compose_project_dir may legally contain a
+# ':' — e.g. a path with a timestamp or mount label — and a registry port
+# like 127.0.0.1:5000 would otherwise render a bare ':' that visudo rejects),
+# THEN sed-escaped so the added backslash survives.
+sed -e "s|{compose_path}|$(sed_escape_replacement "$(sudoers_escape_colon "$COMPOSE_PATH")")|g" \
     -e "s|{proxy_repo}|$(sed_escape_replacement "$(sudoers_escape_colon "$PROXY_REPO")")|g" \
     "$SUDOERS_TEMPLATE" > "$RENDERED_SUDOERS_TMP"
 
@@ -483,7 +485,7 @@ sed -e "s|{compose_path}|$(sed_escape_replacement "$COMPOSE_PATH")|g" \
 # no arrays, so this is a plain if/else over two one-line sed programs.
 if [ -n "$COMPOSE_OVERRIDE_FILE" ]; then
     COMPOSE_OVERRIDE_PATH="$PROJECT_DIR/$COMPOSE_OVERRIDE_FILE"
-    sed "s|{compose_override_path}|$(sed_escape_replacement "$COMPOSE_OVERRIDE_PATH")|g" \
+    sed "s|{compose_override_path}|$(sed_escape_replacement "$(sudoers_escape_colon "$COMPOSE_OVERRIDE_PATH")")|g" \
         "$RENDERED_SUDOERS_TMP" > "$RENDERED_SUDOERS"
 else
     sed '/{compose_override_path}/d' "$RENDERED_SUDOERS_TMP" > "$RENDERED_SUDOERS"
