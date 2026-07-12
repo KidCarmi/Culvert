@@ -80,6 +80,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Admin-API RBAC enforcement mode ("enforce"/"shadow"). Surfaced here
+		// (in addition to the Governance panel) so shadow mode — where the
+		// metadata-driven role gate is log-only, not blocking — is visible
+		// on the Dashboard instead of requiring the admin to know to check
+		// the Governance nav item.
+		"c2Mode": c2Mode(),
 	})
 }
 
