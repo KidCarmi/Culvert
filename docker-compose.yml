@@ -66,6 +66,14 @@ services:
     # build: .
     container_name: culvert
     restart: unless-stopped
+    # Graceful-shutdown envelope (PR3d). On `docker compose down`/`stop` and on the
+    # maintenance-agent upgrade restart, the proxy needs time to run its shutdown
+    # sequence — including the inspected-HTTP/2 GOAWAY drain (up to a 15s tunnel-drain
+    # window inside the ~30s late-phase budget). Docker's DEFAULT grace is only 10s,
+    # which would SIGKILL the proxy mid-drain and turn the client GOAWAY cosmetic. Set
+    # it to cover the full envelope so in-flight decrypted flows drain cleanly. Must
+    # stay >= the drain envelope; the maintenance-agent restart path honors it.
+    stop_grace_period: 60s
     # Wait for ClamAV to pass its health check before starting the proxy.
     # The proxy still handles transient ClamAV unavailability gracefully
     # (per-request retry), so this just avoids "unreachable" log noise on startup.

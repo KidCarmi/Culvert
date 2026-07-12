@@ -412,6 +412,31 @@ culvert_auth_sso_required_total %d
 		atomic.LoadInt64(&statAuthSSORequired),
 	)
 
+	// PR3d — inspected native-HTTP/2 tunnel drain observability. activeConns above
+	// conflates H1-inspect, H2-inspect, and raw-bypass tunnels; these disambiguate
+	// the H2-inspect subset so an operator can confirm a node GOAWAY'd cleanly on
+	// shutdown. goaway = tunnels active when the drain STARTED (one-shot snapshot;
+	// late registrants caught by the re-fire are not counted), forced = backstop
+	// closes at the deadline. `goaway - forced` APPROXIMATES graceful drains but is
+	// not an exact identity (a late-registered, force-closed tunnel is in forced but
+	// not goaway), so treat it as an operator heuristic.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_h2_inspect_active Currently active inspected native-HTTP/2 tunnels
+# TYPE culvert_h2_inspect_active gauge
+culvert_h2_inspect_active %d
+
+# HELP culvert_h2_inspect_drain_goaway_total Inspected H2 tunnels signaled with GOAWAY at shutdown-drain start
+# TYPE culvert_h2_inspect_drain_goaway_total counter
+culvert_h2_inspect_drain_goaway_total %d
+
+# HELP culvert_h2_inspect_drain_forced_total Inspected H2 tunnels force-closed by the drain-deadline backstop
+# TYPE culvert_h2_inspect_drain_forced_total counter
+culvert_h2_inspect_drain_forced_total %d
+`,
+		atomic.LoadInt64(&statH2InspectActive),
+		atomic.LoadInt64(&statH2InspectGoaway),
+		atomic.LoadInt64(&statH2InspectForced),
+	)
+
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)

@@ -104,6 +104,30 @@ sibling streams.
 - **Truncation safety** — an upstream that commits response headers then aborts
   mid-body resets the client stream rather than delivering a clean-but-truncated
   `200`.
+- **Graceful GOAWAY on shutdown** — on process shutdown (SIGTERM, `docker compose
+  down`/`stop`, maintenance-agent upgrade restart) every active inspected-H2 tunnel
+  is sent a client **GOAWAY** so it stops opening new streams and its in-flight
+  streams finish, rather than being cut by a bare FIN/RST. The drain sequence:
+  (1) close the CONNECT listener; (2) fence new inspected-H2 tunnels and send the
+  first GOAWAY wave; (3) wait up to **15s** on the tunnel-drain, re-sending GOAWAY
+  each 500 ms so a late-registering tunnel is also signaled; (4) at the 15s deadline,
+  **force-close** any still-open inspected-H2 client legs (the backstop) so an
+  endless in-flight stream (SSE, gRPC server-streaming, multi-GB download) gets a
+  deterministic teardown instead of relying on the container SIGKILL grace. The
+  compose `proxy` service sets `stop_grace_period: 60s` to cover the full envelope —
+  **keep it ≥ the drain envelope or the orchestrator will SIGKILL mid-drain and the
+  GOAWAY becomes cosmetic.** Observability: `culvert_h2_inspect_active` (gauge),
+  `culvert_h2_inspect_drain_goaway_total` (tunnels active when the drain started),
+  `culvert_h2_inspect_drain_forced_total` (backstop closes). `goaway − forced`
+  *approximates* how many drained gracefully — treat it as a heuristic, not an exact
+  identity (a tunnel that registered after the drain start and was then force-closed
+  counts in `forced` but not `goaway`).
+  - **Scope:** this drains on *process shutdown only*. Live ADR-0005 HA transitions
+    (`selfFence`/`enterStandbyResync` on lease loss) and hot config-snapshot pushes
+    are in-process role/config changes that do **not** run the shutdown hooks, so
+    inspected-H2 flows are **not** drained there — by design: the fencing lease
+    governs Control-Plane write-authority, not Data-Plane proxying, so in-flight
+    decrypted flows on a demoting node are unaffected by lease loss and need no drain.
 
 ## Known limitations / deferred hardening
 
@@ -114,9 +138,6 @@ These are safe to run opt-in but should be understood before enabling widely:
   pinned upstream identically today, and the single-SAN forged leaf already prevents
   a conformant client from coalescing unrelated origins. It is tracked as a **shared
   HTTP/1.1 + HTTP/2** hardening item, not an H2-only one.
-- **Graceful GOAWAY on shutdown** — inspected H2 tunnels are counted and drained on
-  shutdown; the `ServeConn` path hard-closes rather than sending a client GOAWAY.
-  In-flight streams are cut on a forced shutdown after the drain window.
 - **TLS session resumption** for native tunnels is disabled (a perf optimization,
   not a correctness gap) — native tunnels use a per-connection forged-leaf config.
 - **Configurability** — the stall timeout and `MaxConcurrentStreams` are currently
