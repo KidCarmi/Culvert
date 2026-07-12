@@ -2839,7 +2839,7 @@ Firefox (all platforms):
             <span class="panel-title" id="fp-editor-title">Select a profile to edit</span>
             <div style="display:flex;gap:6px" id="fp-editor-actions" style="display:none">
               <button class="btn ghost sm" id="fp-whereused-btn" data-click="openWhereUsedProfile" title="Show policy rules that reference this profile">Where used</button>
-              <button class="btn sm" data-click="saveProfile">Save</button>
+              <button class="btn sm" id="fp-save-btn" data-click="saveProfile">Save</button>
               <button class="btn danger sm" id="fp-delete-btn" data-click="deleteProfile">Delete</button>
             </div>
           </div>
@@ -8511,8 +8511,10 @@ function openNewProfilePanel() {
         data-enter="fpAddExt">
       <button class="btn ghost sm" data-click="fpAddExt">+ Add</button>
     </div>`;
-  // Override saveProfile for create path
-  document.getElementById('fp-editor-actions').querySelector('.btn.sm').onclick = async function() {
+  // Override saveProfile for create path. Bind by stable id, not a
+  // `.btn.sm` class selector — sibling buttons (e.g. the Where-used
+  // affordance) also carry `.btn.sm` and querySelector would grab the first.
+  document.getElementById('fp-save-btn').onclick = async function() {
     const name = document.getElementById('fp-edit-name').value.trim();
     const exts = fpGetCurrentExts();
     if (!name) { toast('Profile name is required', 'error'); return; }
@@ -8523,7 +8525,7 @@ function openNewProfilePanel() {
       await reloadProfilesAndDropdowns();
       const p = fpProfiles.find(x => x.id === created.id);
       if (p) renderProfileEditor(p);
-      document.getElementById('fp-editor-actions').querySelector('.btn.sm').onclick = saveProfile;
+      document.getElementById('fp-save-btn').onclick = saveProfile;
     } catch(e) { toast('Error: ' + e.message, 'error'); }
   };
   renderProfileList();
