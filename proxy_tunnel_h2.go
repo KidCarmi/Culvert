@@ -160,7 +160,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	if clientOffersH2(clientOffer) {
 		upstreamProtos = []string{"h2", "http/1.1"}
 	}
-	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, tlsSkipVerify, upstreamProtos)
+	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, tlsSkipVerify, upstreamProtos, match)
 	if err != nil {
 		rawClient.Close() //nolint:errcheck // best-effort cleanup (200 already sent; cannot 502)
 		logger.Printf("SSL_INSPECT(native) upstream TLS handshake %q: %v", sanitizeLog(targetHost), err)
@@ -220,8 +220,8 @@ func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUps
 // the given ALPN protocols and returns the connection and the negotiated protocol.
 // It closes the connection on handshake failure. tlsSkipVerify (admin-configured
 // per rule) disables upstream cert verification for internal/self-signed hosts.
-func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly string, tlsSkipVerify bool, protos []string) (*tls.Conn, string, error) {
-	cfg := upstreamInspectTLSConfig(hostOnly, tlsSkipVerify)
+func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly string, tlsSkipVerify bool, protos []string, match *PolicyMatch) (*tls.Conn, string, error) {
+	cfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
 	cfg.NextProtos = protos
 	up := tls.Client(rawUpstream, cfg)
 	if err := up.HandshakeContext(ctx); err != nil {
@@ -383,9 +383,10 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 	// stream reset). The base ServeConn context still bounds the whole tunnel.
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
-	stall := time.AfterFunc(h2StreamStallTimeout, cancel)
+	stallTO := resolveH2StallTimeout(match) // profile StallTimeoutSecs, else engine default
+	stall := time.AfterFunc(stallTO, cancel)
 	defer stall.Stop()
-	resetStall := func() { stall.Reset(h2StreamStallTimeout) }
+	resetStall := func() { stall.Reset(stallTO) }
 	req = req.WithContext(ctx)
 
 	req.URL.Scheme = "https"

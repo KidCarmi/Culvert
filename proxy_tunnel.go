@@ -574,7 +574,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
 	// cert validation for internal/self-signed hosts and is logged as a warning
 	// so it is auditable.
-	upstreamTLSCfg := upstreamInspectTLSConfig(hostOnly, tlsSkipVerify)
+	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn

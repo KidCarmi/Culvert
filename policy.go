@@ -91,22 +91,23 @@ var fileProfileExts = map[FileProfileName][]string{
 type PolicyRule struct {
 	Priority          int             `json:"priority"`
 	Name              string          `json:"name"`
-	SourceIP          string          `json:"sourceIP"`             // single IP or CIDR; empty = any
-	SourceIdentity    string          `json:"sourceIdentity"`       // authenticated username; empty = any
-	SourceGroup       string          `json:"sourceGroup"`          // IdP group/role membership; empty = any
-	AuthSource        string          `json:"authSource"`           // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN          string          `json:"destFQDN"`             // exact or wildcard FQDN; empty = any
-	DestCategory      URLCategory     `json:"destCategory"`         // URL category; empty = any
-	DestCategoryGroup string          `json:"destCategoryGroup"`    // category group name; empty = any
-	DestCountry       []string        `json:"destCountry"`          // ISO 3166-1 alpha-2 country codes; empty = any
-	Schedule          *PolicySchedule `json:"schedule,omitempty"`   // nil = always active
-	SSLAction         SSLAction       `json:"sslAction"`            // Inspect | Bypass
-	FileFiltering     bool            `json:"fileFiltering"`        // enable file-type scanning
-	FileProfile       FileProfileName `json:"fileProfile"`          // named file-extension block profile
-	LogFullURI        bool            `json:"logFullUri"`           // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
-	LogTraffic        *bool           `json:"logTraffic,omitempty"` // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
-	TLSSkipVerify     bool            `json:"tlsSkipVerify"`        // skip upstream cert verification (use with caution)
-	StripALPN         *bool           `json:"stripAlpn,omitempty"`  // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN).
+	SourceIP          string          `json:"sourceIP"`                    // single IP or CIDR; empty = any
+	SourceIdentity    string          `json:"sourceIdentity"`              // authenticated username; empty = any
+	SourceGroup       string          `json:"sourceGroup"`                 // IdP group/role membership; empty = any
+	AuthSource        string          `json:"authSource"`                  // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
+	DestFQDN          string          `json:"destFQDN"`                    // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory     `json:"destCategory"`                // URL category; empty = any
+	DestCategoryGroup string          `json:"destCategoryGroup"`           // category group name; empty = any
+	DestCountry       []string        `json:"destCountry"`                 // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule          *PolicySchedule `json:"schedule,omitempty"`          // nil = always active
+	SSLAction         SSLAction       `json:"sslAction"`                   // Inspect | Bypass
+	FileFiltering     bool            `json:"fileFiltering"`               // enable file-type scanning
+	FileProfile       FileProfileName `json:"fileProfile"`                 // named file-extension block profile
+	LogFullURI        bool            `json:"logFullUri"`                  // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
+	LogTraffic        *bool           `json:"logTraffic,omitempty"`        // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
+	TLSSkipVerify     bool            `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
+	StripALPN         *bool           `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
+	DecryptionProfile string          `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
 	Action            PolicyAction    `json:"action"`
 	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect
 	Enabled           *bool           `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation
