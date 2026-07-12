@@ -175,7 +175,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
-	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
+	ssoCapable := idpRegistry.HasEnabledProviders() // allocation-free probe — EnabledProviders() builds a slice per call, and this runs per request
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)

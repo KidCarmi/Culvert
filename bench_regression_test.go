@@ -157,6 +157,35 @@ func TestBenchGate_ResolveHostCached(t *testing.T) {
 	}
 }
 
+// TestBenchGate_AuthCapabilityProbeAllocs locks in the allocation-free IdP
+// capability probes on the per-request auth hot path. resolveRequestAuth
+// evaluates credCapable + ssoCapable on EVERY proxied request; before the
+// HasEnabledProviders/HasEnabledOIDC probes, an IdP-only SSO deployment paid
+// a deep clone of every IdP profile (idpRegistry.All(), ~5 allocs/profile)
+// plus an EnabledProviders slice build per request just to answer the two
+// booleans (~9 allocs/op measured at 4 profiles). The probes are read-only
+// scans under RLock — the bound is ZERO, independent of profile count.
+func TestBenchGate_AuthCapabilityProbeAllocs(t *testing.T) {
+	const maxAllocs int64 = 0
+	for _, profiles := range []int{1, 4, 16} {
+		reg := buildProbeRegistry(profiles, true, true)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = reg.HasEnabledProviders()
+				_ = reg.HasEnabledOIDC()
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("capability probes profiles=%d: %d allocs/op (bound %d), %d ns/op", profiles, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: IdP capability probes allocate %d/op at %d profiles, exceed bound %d — "+
+				"per-request profile cloning/slice building has returned to the auth hot path "+
+				"(All()/EnabledProviders() in a boolean probe?)", allocs, profiles, maxAllocs)
+		}
+	}
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13
