@@ -680,7 +680,17 @@ seed_pinned_tag() {
   #   5. Local build from this checkout — air-gapped / registry-down fallback.
   if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
     info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
-    if sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
+    # Prefer an image ALREADY PRESENT locally (a `docker load`-ed tarball on an
+    # air-gapped host, or an out-of-band mirror pull) so the documented offline
+    # path never touches the registry — the local-build/clone fallback is gone, so
+    # a pull-only seed would strand an air-gapped host with a loaded image. Only
+    # reach for a registry pull when the ref is not already on this host.
+    if sudo docker image inspect "$CULVERT_PROXY_SEED_REF" >/dev/null 2>&1; then
+      if sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
+        info "Seeded $PINNED_TAG from the locally present image (no pull)"
+        return 0
+      fi
+    elif sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
       info "Seeded $PINNED_TAG"
       return 0
     fi
