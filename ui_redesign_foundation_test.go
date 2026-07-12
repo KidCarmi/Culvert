@@ -128,6 +128,8 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`function polRenderProvenance`, // read-only createdAt/modifiedAt/modifiedBy line
 		`id="pol-comment"`,             // admin-authored rule comment field
 		`id="pol-provenance"`,          // server-stamped provenance display
+		// policy-metadata P1 — persisted hit counters + lastHit
+		`function polHitsTitle`, // Hits-cell hover: total matches + last-match time
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)

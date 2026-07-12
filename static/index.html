@@ -2615,7 +2615,7 @@ Firefox (all platforms):
                 <th>File Profile</th>
                 <th>SSL</th>
                 <th>Action</th>
-                <th class="text-right" title="Matches since process start — counters reset on restart">Hits <span style="font-weight:400;text-transform:none;letter-spacing:0">· since start</span></th>
+                <th class="text-right" title="Total matches — persisted across restart (keyed by rule ID). Hover a count for the last-match time.">Hits <span style="font-weight:400;text-transform:none;letter-spacing:0">· total</span></th>
                 <th></th>
               </tr>
             </thead>
@@ -9512,12 +9512,22 @@ let _polShadowMap = new Map();
 // In-place hit-counter patch for skipped renders: counters churn under live
 // traffic, so they are deliberately NOT in the render signature — otherwise
 // the skip would never fire on a busy proxy (the exact case it exists for).
+// polHitsTitle — hover text for a rule's Hits cell: total matches + when it
+// last matched (persisted across restart now, so "never" is meaningful for
+// spotting unused rules). fmtProvTime is the shared RFC3339→local formatter.
+function polHitsTitle(r) {
+  const n = r.hitCount || 0;
+  if (!r.lastHit) return n ? `${n} matches` : 'Never matched';
+  return `${n} matches · last match ${fmtProvTime(r.lastHit)}`;
+}
 function _polPatchHitCounts(rules) {
   for (const r of rules) {
     const cell = document.querySelector(`#pol-table tr[data-priority="${r.priority}"] td[data-hits]`);
     if (!cell) continue;
     const v = String(fmt(r.hitCount || 0)); // fmt returns a Number below 1e3
     if (cell.textContent !== v) cell.textContent = v;
+    const title = polHitsTitle(r);
+    if (cell.title !== title) cell.title = title;
   }
 }
 
@@ -9677,7 +9687,7 @@ function renderPolicy() {
       <td style="font-size:.78rem">${fileProfileCell}</td>
       <td>${sslBadge(r.sslAction, r.tlsSkipVerify)}</td>
       <td>${actionBadge(r.action)}</td>
-      <td data-hits style="text-align:right;font-family:var(--font-mono);font-weight:700;color:var(--accent2)">${fmt(r.hitCount || 0)}</td>
+      <td data-hits title="${escHtml(polHitsTitle(r))}" style="text-align:right;font-family:var(--font-mono);font-weight:700;color:var(--accent2)">${fmt(r.hitCount || 0)}</td>
       <td style="text-align:right;white-space:nowrap;position:relative">
         <button class="btn ghost sm" data-click="editPolicy" data-arg="${r.priority}" style="margin-right:4px">Edit</button>
         <button class="btn ghost sm" data-click="togglePolActions" data-arg="${r.priority}" title="Actions">⋮</button>
