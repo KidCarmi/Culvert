@@ -447,6 +447,10 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host, reqID, authenticatedIdentity string, authLog AuthLogFields, match *PolicyMatch) bool { //nolint:gocognit,cyclop,funlen // policy-action dispatch is inherently branchy; isolated and independently testable (DEBT-002)
 	if match != nil { //nolint:nestif // policy action dispatch is inherently branchy
 		ruleMet.RecordHit(match.Rule.Name)
+		// Rename-safe decision attribution: stamp the matched rule's stable ULID
+		// onto every request-log entry this dispatch writes (§1 ruleId seam). The
+		// carrier is a by-value copy, so this affects only these calls.
+		authLog.RuleID = match.Rule.ID
 		// Per-rule "log full URL": capture host+path (no query) when the matched
 		// rule opts in. For a CONNECT tunnel the inner path is encrypted, so this
 		// yields host:port here; the decrypted inner URLs are logged separately in

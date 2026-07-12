@@ -68,6 +68,7 @@ type Entry struct {
 	Status      string `json:"status"`               // OK | BLOCKED | AUTH_FAIL | RATE_LIMITED | IP_BLOCKED | POLICY_*
 	Level       string `json:"level"`                // INFO | WARN | ERROR
 	RuleMatched string `json:"ruleMatched"`          // policy rule name that matched, if any
+	RuleID      string `json:"ruleId,omitempty"`     // stable ULID of the matched forward-proxy policy rule (rename-safe decision attribution, §1); omitted when no rule matched
 	ActionTaken string `json:"actionTaken"`          // policy action taken, if any
 	BytesSent   int64  `json:"bytesSent,omitempty"`  // bytes sent to upstream (request body / tunnel client→dest)
 	BytesRecv   int64  `json:"bytesRecv,omitempty"`  // bytes received from upstream (response body / tunnel dest→client)

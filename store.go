@@ -140,6 +140,11 @@ type AuthLogFields struct {
 	PolicyRuleName    string
 	SubjectMatchTypes []string
 	SchemaVersion     int
+	// RuleID is the ULID of the matched FORWARD-PROXY policy rule (distinct
+	// from the Stage-1 auth PolicyRuleID above) — the §1 rename-safe
+	// decision-attribution seam. Rides this structured-fields carrier so the
+	// hot-path recorders need no new positional param. Maps to LogEntry.RuleID.
+	RuleID string
 }
 
 // applyTo copies the auth observability fields onto a log entry. It never touches
@@ -150,6 +155,7 @@ func (a AuthLogFields) applyTo(e *LogEntry) {
 	e.AuthPolicyRuleName = a.PolicyRuleName
 	e.AuthSubjectMatchTypes = a.SubjectMatchTypes
 	e.AuthSchemaVersion = a.SchemaVersion
+	e.RuleID = a.RuleID
 }
 
 // The request-log engine (ring + persistent JSONL layer + TTL read cache +
