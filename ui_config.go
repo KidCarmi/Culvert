@@ -623,8 +623,175 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 	auditEvent(r, "config.export", filename, fmt.Sprintf("section=%s exported at %s", section, b.ExportedAt))
 }
 
+// importPreviewSection describes the effect an import would have on one
+// collection-typed config section: how many entries the backup carries
+// (Incoming), how many currently exist (Current), and a human-readable Effect.
+// Only sections the import would actually touch (Incoming > 0) are emitted.
+type importPreviewSection struct {
+	Section  string `json:"section"`
+	Incoming int    `json:"incoming"`
+	Current  int    `json:"current"`
+	Effect   string `json:"effect"`
+	Note     string `json:"note,omitempty"`
+}
+
+// importPreviewSetting describes a scalar (non-collection) setting the import
+// would apply. Unlike collections these overwrite rather than accumulate, so
+// they carry no count — just the value that would be set.
+type importPreviewSetting struct {
+	Setting string `json:"setting"`
+	Value   string `json:"value"`
+}
+
+// importSectionEffect renders the effect string for a collection section under
+// the given mode. Callers only invoke this for incoming > 0 (a zero-incoming
+// section is a no-op in both modes — import never wipes on an absent field).
+func importSectionEffect(replaceMode bool, incoming, current int) string {
+	if replaceMode {
+		return fmt.Sprintf("replace %d existing with %d incoming", current, incoming)
+	}
+	return fmt.Sprintf("add %d to %d existing", incoming, current)
+}
+
+// buildImportPreview computes the read-only preview of an import: the
+// per-collection change summary and the scalar settings that would be applied.
+// It mirrors apiConfigImport's section membership and mode semantics exactly
+// (replace clears then loads; merge appends/upserts) but mutates nothing —
+// every count is read from the live store, every incoming count from the
+// parsed backup.
+func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSection, []importPreviewSetting) {
+	var sections []importPreviewSection
+	add := func(name string, incoming, current int, note string) {
+		if incoming == 0 {
+			return // absent/empty field — no change in either mode
+		}
+		sections = append(sections, importPreviewSection{
+			Section:  name,
+			Incoming: incoming,
+			Current:  current,
+			Effect:   importSectionEffect(replaceMode, incoming, current),
+			Note:     note,
+		})
+	}
+	// addFixed emits a section whose effect is FIXED regardless of the import
+	// mode — for the two sections whose apply path ignores the mode flag
+	// (upstream proxies always replace via SetProxies; rate-limit exemptions
+	// always append). Using the generic mode-aware add() for these would make
+	// the preview claim the opposite of what the import does.
+	addFixed := func(name string, incoming, current int, effect, note string) {
+		if incoming == 0 {
+			return
+		}
+		sections = append(sections, importPreviewSection{
+			Section:  name,
+			Incoming: incoming,
+			Current:  current,
+			Effect:   effect,
+			Note:     note,
+		})
+	}
+
+	policyNote := ""
+	if !replaceMode && len(b.PolicyRules) > 0 {
+		policyNote = "merge appends — duplicate rules may accumulate"
+	}
+	add("Policy Rules", len(b.PolicyRules), len(policyStore.List()), policyNote)
+	add("Blocklist", len(b.Blocklist), bl.Count(), "")
+
+	taxonomyNote := ""
+	if !replaceMode {
+		taxonomyNote = "merge upserts by name"
+	}
+	add("URL Categories", len(b.URLCategories), len(catStore.All()), taxonomyNote)
+	add("Category Groups", len(b.CategoryGroups), len(globalCategoryGroups.List()), taxonomyNote)
+	add("Decryption Profiles", len(b.DecryptionProfiles), len(globalDecryptionProfiles.List()), taxonomyNote)
+
+	add("Rewrite Rules", len(b.RewriteRules), len(rewriter.List()), "")
+	add("SSL Bypass", len(b.SSLBypass), len(sslBypass.List()), "")
+	add("Content Scan Patterns", len(b.ContentScanPatterns), len(dpiScanner.List()), "")
+	add("Content Scan Bypass Hosts", len(b.ContentScanBypassHosts), len(dpiScanner.BypassHosts()), "")
+	add("File Block Extensions", len(b.FileBlockExtensions), fileBlocker.Count(), "")
+	add("IP Filter List", len(b.IPList), len(ipf.List()), "")
+	// Rate-limit exemptions: apiConfigImport always APPENDS (rl.AddExemption),
+	// even in replace mode — the effect is additive regardless of mode.
+	rlExemptCur := len(rl.ListExemptions())
+	addFixed("Rate Limit Exemptions", len(b.RateLimitExempt), rlExemptCur,
+		fmt.Sprintf("add %d to %d existing", len(b.RateLimitExempt), rlExemptCur),
+		"import always appends exemptions (mode-independent)")
+	add("PAC Exclusions", len(b.PACExclusions), len(pacStore.Get().Exclusions), "")
+	add("Alert Webhooks", len(b.AlertWebhooks), len(globalAlertStore.List()), "")
+	// Upstream proxies: apiConfigImport always REPLACES the pool via SetProxies
+	// when the backup carries any — the effect is a full replace regardless of mode.
+	upstreamCur := len(upstreamPool.List())
+	addFixed("Upstream Proxies", len(b.UpstreamProxies), upstreamCur,
+		fmt.Sprintf("replace %d existing with %d incoming", upstreamCur, len(b.UpstreamProxies)),
+		"import always replaces the upstream pool (mode-independent)")
+
+	return sections, buildImportSettingsPreview(b)
+}
+
+// buildImportSettingsPreview reports the scalar (non-collection) settings an
+// import would apply. Split from buildImportPreview to keep each under the
+// cyclop threshold; mirrors apiConfigImport's scalar-field guards exactly.
+func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
+	var settings []importPreviewSetting
+	setting := func(name, value string) {
+		settings = append(settings, importPreviewSetting{Setting: name, Value: value})
+	}
+	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
+		setting("Default Policy Action", b.DefaultAction)
+	}
+	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
+		setting("Blocklist Mode", b.BlocklistMode)
+	}
+	if b.IPFilterMode != "" {
+		setting("IP Filter Mode", b.IPFilterMode)
+	}
+	if b.RateLimitRPM > 0 {
+		setting("Rate Limit", fmt.Sprintf("%d req/min", b.RateLimitRPM))
+	}
+	if b.PACProxyHost != "" {
+		setting("PAC Proxy Host", b.PACProxyHost)
+	}
+	if b.PACProxyPort != 0 {
+		setting("PAC Proxy Port", fmt.Sprintf("%d", b.PACProxyPort))
+	}
+	if b.BlockPageHTML != "" {
+		setting("Block Page", "custom template")
+	}
+	if b.ConnLimitMaxPerIP > 0 {
+		state := "disabled"
+		if b.ConnLimitEnabled {
+			state = "enabled"
+		}
+		setting("Connection Limit", fmt.Sprintf("%d per IP (%s)", b.ConnLimitMaxPerIP, state))
+	}
+	return settings
+}
+
+// writeImportPreview renders the read-only dry-run response for an import: the
+// per-section change summary and the scalar settings that would be applied. It
+// mutates nothing (the audit-ring append mirrors the also-read-only
+// config.export path and satisfies the route's AuditExpected metadata).
+func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool) {
+	sections, settings := buildImportPreview(b, replaceMode)
+	mode := "merge"
+	if replaceMode {
+		mode = "replace"
+	}
+	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	jsonOK(w, map[string]any{
+		"dryRun":     true,
+		"mode":       mode,
+		"exportedAt": b.ExportedAt,
+		"sections":   sections,
+		"settings":   settings,
+	})
+}
+
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
+// With ?dryRun=true the handler returns a read-only preview and applies nothing.
 func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -646,6 +813,16 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Import mode: "replace" clears existing state before importing;
 	// "merge" (default) appends to existing state.
 	replaceMode := r.URL.Query().Get("mode") == "replace"
+
+	// Dry-run/preview: compute what the import WOULD change and return the
+	// summary WITHOUT touching any store. Read-only — no audit, no config
+	// version, no admin-settings write. This is the safety gate the import UI
+	// shows before an admin commits a (potentially destructive replace-mode)
+	// import (P2 import-preview, POLICY-ARCHITECTURE-FUTURE §6).
+	if r.URL.Query().Get("dryRun") == "true" {
+		writeImportPreview(w, r, &b, replaceMode)
+		return
+	}
 
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
