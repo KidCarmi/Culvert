@@ -490,6 +490,22 @@ func apiFileblockProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing id param", http.StatusBadRequest)
 			return
 		}
+		// The DELETE addresses a profile by id, but rules reference it by
+		// NAME. Resolve the name under the store lock (NameByID copies it —
+		// reading GetByID().Name outside the lock races a concurrent rename).
+		// A bad/stale id falls through to Delete's own 404 (never a spurious
+		// 409). Then block via the shared walk if any rule still references
+		// the profile — deleting a referenced profile was fail-open for the
+		// file-control dimension.
+		// NOTE: this closes DELETE only. A profile RENAME still dangles every
+		// rule holding the old name (profiles are id-keyed with a mutable
+		// name) — an open fail-open the object-ID work (P3) closes; see
+		// roadmap/POLICY-REFS-PLAN.md.
+		if profName, ok := globalProfileStore.NameByID(id); ok {
+			if deleteBlockedByReferences(w, r, "file-profile", profName, "fileprofile.delete.blocked") {
+				return
+			}
+		}
 		if err := globalProfileStore.Delete(id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return

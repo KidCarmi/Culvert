@@ -215,6 +215,8 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "access-only: moves a Stage-2 access rule among access rules (PermutePriorities); an auth rule is not found among them and is rejected"}}},
 	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "POST is read-only in spirit (dry-run policy match), no audit"}}},
+	{Path: "/api/objects/references", Handler: "apiObjectReferences", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "read-only generic dependency walk (Where-Used); no audit, no mutation (policy-refs P0)"}}},
 	{Path: "/api/authpolicy", Handler: "apiAuthPolicy", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

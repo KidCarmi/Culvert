@@ -171,6 +171,21 @@ func (s *FileProfileStore) GetByID(id string) *FileExtProfile {
 	return nil
 }
 
+// NameByID returns the profile's name (a value copy, read under the lock) and
+// whether it exists. Callers needing only the name must use this rather than
+// GetByID().Name — GetByID returns the LIVE pointer, and reading .Name off it
+// outside the lock races a concurrent Update (which mutates p.Name in place).
+func (s *FileProfileStore) NameByID(id string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.profiles {
+		if p.ID == id {
+			return p.Name, true
+		}
+	}
+	return "", false
+}
+
 // Create adds a new profile. Returns an error if the name is already taken.
 func (s *FileProfileStore) Create(name string, exts []string) (*FileExtProfile, error) {
 	name = strings.TrimSpace(name)
