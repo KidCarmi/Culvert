@@ -617,7 +617,7 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 	}
 }
 
-func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen // CRUD handler: one branch per HTTP method is intentional
+func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
 		all := catStore.All()
