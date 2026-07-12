@@ -6060,6 +6060,7 @@ function fmt(n) {
 // ═══════════════════════════════════════════════════════════════════════════
 let polRules = [];
 let polEditPriority = null; // null = adding new rule
+let _polEditId = null; // stable ULID of the rule being edited (reorder-safe addressing); null for new rules / legacy rules without an id
 let polActionFilter = ''; // F20: filter by action (allow/block/'')
 let _polUnusedFilter = false;      // policy-metadata P1: show only stale/never-matched rules
 const POL_UNUSED_DAYS = 90;        // "unused" = not matched within this many days (incl. never)
@@ -7400,6 +7401,7 @@ function sslBadge(ssl, skipVerify) {
 
 function cancelPolicyEdit() {
   polEditPriority = null;
+  _polEditId = null;
   clearPolicyForm();
   document.getElementById('policy-form-title').textContent = 'Add Policy Rule';
   document.getElementById('policy-submit-btn').textContent = '+ Add Rule';
@@ -7414,7 +7416,10 @@ async function deletePolicy(priority) {
   if (!await confirmAction('Delete Policy Rule', 'Delete "' + name + '"? This cannot be undone.')) return;
   _polMutateInFlight = true;
   try {
-    await api(polV('/api/policy?priority=' + priority), { method: 'DELETE' });
+    // Address by stable ULID when available (reorder-safe); fall back to
+    // priority for rules that predate IDs.
+    const addr = (rule && rule.id) ? 'id=' + encodeURIComponent(rule.id) : 'priority=' + priority;
+    await api(polV('/api/policy?' + addr), { method: 'DELETE' });
     toast('Rule deleted', 'success');
     if (polEditPriority === priority) cancelPolicyEdit();
     await fetchPolicy();
@@ -7699,6 +7704,7 @@ async function clonePolicy(pri) {
       'Cloning this rule will overwrite the edits in the rule form.', 'Discard')) return;
   // Switch to "Add" mode (not edit) — cloned rule is not live until Save.
   polEditPriority = null;
+  _polEditId = null; // a clone is a NEW rule, not an edit of the source
   _polEditVersion = _polVersion; // bind the clone to the version we cloned from
   document.getElementById('pol-priority').value  = '';
   document.getElementById('pol-name').value       = r.name + ' (copy)';
@@ -9526,6 +9532,7 @@ async function editPolicy(priority) {
   if (_polFormDirty && !await confirmAction('Discard unsaved rule changes?',
       'Loading this rule will overwrite the edits in the rule form.', 'Discard')) return;
   polEditPriority = priority;
+  _polEditId = r.id || null; // prefer reorder-safe id addressing on save
   _polEditVersion = _polVersion; // bind the edit to the version we loaded it at
   document.getElementById('pol-priority').value  = r.priority;
   document.getElementById('pol-name').value       = r.name;
@@ -9574,6 +9581,7 @@ async function editPolicy(priority) {
 
 function clearPolicyForm() {
   _polEditVersion = _polVersion; // a fresh new-rule form is bound to the current version
+  _polEditId = null; // and carries no edit-id binding (new-rule mode)
   ['pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = '';
   });
@@ -10069,7 +10077,11 @@ async function submitPolicyRule() {
   _polMutateInFlight = true;
   try {
     if (polEditPriority !== null) {
-      await api(polVForEdit('/api/policy?priority=' + polEditPriority), {
+      // Address by stable ULID when the loaded rule has one (reorder-safe:
+      // the edit lands on the rule we loaded even if priorities shifted);
+      // fall back to priority for legacy rules without an id.
+      const addr = _polEditId ? 'id=' + encodeURIComponent(_polEditId) : 'priority=' + polEditPriority;
+      await api(polVForEdit('/api/policy?' + addr), {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(rule),

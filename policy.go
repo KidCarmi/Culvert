@@ -528,6 +528,79 @@ func (ps *PolicyStore) Delete(priority int) bool {
 	return false
 }
 
+// UpdateByID replaces the rule with the given stable ULID. Unlike Update
+// (which keys on mutable priority), addressing by ID is safe against a
+// concurrent reorder shifting priorities between a client's load and save —
+// the edit always lands on the rule the client loaded (§1 identity seam).
+// Returns false if no rule carries the id.
+func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
+	if id == "" {
+		return false
+	}
+	// Auto-enable FileFiltering when a profile is selected (parity with Update).
+	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+		r.FileFiltering = true
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i, rule := range ps.rules {
+		if rule.ID != id {
+			continue
+		}
+		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // preserve concurrently-written counters
+		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // (same rule — an edit keeps its traffic history)
+		r.ID = id                                           // identity is immutable across an edit
+		// Position is managed by reorder/move, NOT by content edits. Preserve
+		// the matched rule's CURRENT priority so an id-addressed edit made against
+		// a stale-priority body (a concurrent reorder moved the rule after the
+		// client loaded it) can never write a duplicate priority slot.
+		r.Priority = rule.Priority
+		ps.rules[i] = &r
+		ps.sortLocked()
+		ps.bumpVersion()
+		return true
+	}
+	return false
+}
+
+// DeleteByID removes the rule with the given stable ULID. Rename/reorder-safe
+// counterpart to Delete. Returns false if not found.
+func (ps *PolicyStore) DeleteByID(id string) bool {
+	if id == "" {
+		return false
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i, rule := range ps.rules {
+		if rule.ID == id {
+			ps.rules = append(ps.rules[:i], ps.rules[i+1:]...)
+			ps.bumpVersion()
+			return true
+		}
+	}
+	return false
+}
+
+// findByIDCopy returns a copy of the rule with the given ULID, or nil. Used by
+// the ID-addressed API handlers to resolve the before-state for audit/validation
+// without holding the store lock across the handler. Goes through List() so the
+// HitCount/lastHitUnix counters are read with atomic loads — Evaluate stamps
+// them lock-free, so a raw struct copy would race under -race (mirrors
+// findRuleByPriorityCopy).
+func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
+	if id == "" {
+		return nil
+	}
+	rules := ps.List()
+	for i := range rules {
+		if rules[i].ID == id {
+			r2 := rules[i]
+			return &r2
+		}
+	}
+	return nil
+}
+
 // Reorder reassigns priorities according to the provided ordered list of old
 // priorities. The caller provides priorities in the desired new order (index 0
 // becomes priority 1, etc.). Returns false if lengths mismatch.
