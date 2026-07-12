@@ -196,7 +196,7 @@ func csrNilGuardCases() map[string]struct {
 		},
 		"decryption_profiles": {
 			populate: func(c *configBackup) {
-				c.DecryptionProfiles = []DecryptionProfile{{Name: "csr-dp", MinTLSVersion: "1.3"}}
+				c.DecryptionProfiles = []DecryptionProfile{{Name: "csr-dp", MinTLSVersion: "1.3", OnInspectError: "fail-open"}}
 			},
 			wipe: func(c *configBackup) { c.DecryptionProfiles = []DecryptionProfile{} },
 		},
@@ -312,8 +312,10 @@ func csrDiffMutators() map[string]func(a, b *configBackup) {
 			b.CategoryGroups = []CategoryGroup{{Name: "csr-diff-g"}}
 		},
 		"decryption_profiles": func(a, b *configBackup) {
-			a.DecryptionProfiles = []DecryptionProfile{}
-			b.DecryptionProfiles = []DecryptionProfile{{Name: "csr-diff-dp"}}
+			// Same NAME, different OnInspectError — exercises sameDecryptionProfile's
+			// per-field comparison (a rollback that flips only fail-open must diff).
+			a.DecryptionProfiles = []DecryptionProfile{{Name: "csr-diff-dp", OnInspectError: "fail-close"}}
+			b.DecryptionProfiles = []DecryptionProfile{{Name: "csr-diff-dp", OnInspectError: "fail-open"}}
 		},
 		"url_categories": func(a, b *configBackup) {
 			a.URLCategories = []CategoryEntry{}
@@ -428,7 +430,7 @@ func csrSeedStateA() {
 	_ = pacStore.Set(PACConfig{ProxyHost: "csr-proxy.example.com", ProxyPort: 3128, Exclusions: []string{"*.csr.local"}})
 	catStore.ReplaceAll([]CategoryEntry{{Name: "csr-cat", Hosts: []string{"csr.example.com"}}})
 	globalCategoryGroups.ReplaceAll([]CategoryGroup{{Name: "csr-group", Categories: []string{"csr-cat"}}})
-	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "csr-dp-a", MinTLSVersion: "1.2"}})
+	globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{Name: "csr-dp-a", MinTLSVersion: "1.2", OnInspectError: "fail-open"}})
 }
 
 // csrMutateStateB moves every store somewhere else, so an apply-miss for any
