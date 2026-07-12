@@ -17,10 +17,12 @@ situation. Audience: engineers + operators deciding when to inspect vs. bypass.
 - **Before:** Culvert always did (B) — it stripped ALPN and forced inspected
   tunnels to HTTP/1.1, and there was *no* way to turn that off. Every inspected
   "Chrome" looked anomalous.
-- **Now:** Culvert removes (B) on demand — **native HTTP/2 inspection**, opt-in per
-  rule via a **Decryption Profile**, through one protocol-neutral pipeline — and
-  gives operators the honest tools for (A): keep bot-sensitive origins on a
-  **Bypass** rule (and, roadmap, warmed/dedicated egress).
+- **Now:** Culvert removes (B) on demand — **native HTTP/2 inspection**, enabled via
+  a **Decryption Profile attached to the decryption policy** (opt-in; the profile,
+  not the rule, owns the setting), through one protocol-neutral pipeline — and gives
+  operators the honest posture for (A): keep identity-preserving / fingerprint-
+  sensitive origins on a **no-decrypt exception** (and, roadmap, warmed/dedicated
+  egress).
 - **PAN-OS does essentially the same thing.** It inspects HTTP/2 **by default** and
   exposes **"Strip ALPN"** as the per-profile downgrade escape hatch ([PAN-OS
   HTTP/2 inspection][panh2]); it routes the un-inspectable/anti-bot cases through
@@ -29,9 +31,12 @@ situation. Audience: engineers + operators deciding when to inspect vs. bypass.
   either. Nobody "beats" TLS fingerprinting from inside a MITM; the industry answer
   is *don't decrypt that destination*.
 
-The upshot: Culvert's model is now **PAN-OS-parity** — the same "inspect-H2 by
-default-able, Strip-ALPN as the exception, exclude what you can't safely decrypt"
-posture — with the same honest limit on the TLS-fingerprint half.
+The upshot: Culvert now follows an **architectural model aligned with commercial SWG
+platforms** — the same "inspect-H2 where you choose, downgrade as the exception,
+exclude what you can't safely decrypt" *structure*, with the same honest limit on the
+TLS-fingerprint half. This is alignment of the **model**, not a claim of equivalent
+maturity across every decryption capability (PAN-OS carries far more: auto-populated
+exclusion caches, App-ID-driven policy, HSM-backed keys, etc.).
 
 ---
 
@@ -82,7 +87,7 @@ Four increments, each reviewed by an independent panel (commercial-SWG/decryptio
 HTTP/2+TLS security, Go runtime, and — added later — a field-CISO voice-of-customer
 reviewer):
 
-### 3.1 Native HTTP/2 inspection — removes signal (B) on demand
+### 3.1 Native HTTP/2 inspection — removes signal (B) where policy selects it
 - Culvert can inspect an HTTPS tunnel **as HTTP/2 end-to-end**: client and origin
   both negotiate `h2`, and Culvert decrypts/inspects/re-encrypts each stream through
   the **same** policy/scan/CDR/file-block pipeline used for HTTP/1.1 (`runInspectExchange`
@@ -92,8 +97,13 @@ reviewer):
   both allow → constrain the forged leaf to what the origin negotiated. Mixed
   quadrants are impossible by construction; an HTTP/1.1-only client is never
   stranded (transparent H1 fallback).
-- **Opt-in, presence-aware.** Absent config ⇒ today's strip/H1 downgrade — an
-  upgrade never silently changes inspection behavior.
+- **Controlled by the Decryption Profile, not by the rule.** Whether a flow is
+  inspected as H2 is an attribute of the **Decryption Profile attached to the
+  decryption policy** (§3.3) — the policy rule selects *which* traffic and *whether*
+  to decrypt; the profile it references decides *how* (including Inspect-as-HTTP/2).
+  A rule does not carry its own H2 implementation settings; many rules can share one
+  profile. Absent a profile setting ⇒ today's strip/H1 downgrade — an upgrade never
+  silently changes inspection behavior.
 
 ### 3.2 Performance + resource correctness (so it's safe to leave on)
 - Zero-alloc pooled + adaptive-flush response-body copy (`h2CopyBody`); per-stream
@@ -104,12 +114,15 @@ reviewer):
   tunnels get a client GOAWAY on shutdown, drain in-flight streams within a bounded
   window, then a hard-close backstop — deterministic teardown, not a SIGKILL cut.
 
-### 3.3 Decryption Profiles — the PAN-OS-style control surface
-- A named **`DecryptionProfile`** (`internal/decryptprofile`) referenced per policy
-  rule (`PolicyRule.DecryptionProfile`), managed entirely from the admin UI. Fields:
-  **Inspect-as-HTTP/2**, **certificate-verification** posture (strict/permissive/
-  skip — folds the old per-rule `TLSSkipVerify`), **fail-close** on unsupported TLS
-  (fail-open deferred), **min/max TLS version**, per-stream **stall timeout**.
+### 3.3 Decryption Profiles — the "how to decrypt" control surface
+- A named **`DecryptionProfile`** (`internal/decryptprofile`) is the reusable "how to
+  decrypt" object. A **decryption policy rule attaches a profile by name**
+  (`PolicyRule.DecryptionProfile`); the profile — not the rule — owns the decryption
+  mechanics, and one profile can serve many rules. Managed entirely from the admin
+  UI. Fields: **Inspect-as-HTTP/2**, **certificate-verification** posture (strict/
+  permissive/skip — folds the old per-rule `TLSSkipVerify`), **fail-close** on
+  unsupported TLS (fail-open deferred), **min/max TLS version**, per-stream **stall
+  timeout**.
 - Every field defaults to **inherit** — a profile changes nothing until an operator
   sets it, and a **dangling/deleted profile is fail-safe at eval** (falls back to
   today's strip/verify; a bad reference can only degrade H2→H1, never disable
@@ -123,9 +136,19 @@ reviewer):
   min-TLS-floor drop attributable, not a silent 502).
 
 ### 3.4 The other halves — how (A) and (C) are handled today
-- **(A) TLS fingerprint:** *not fixed by inspection* (see §5). The sanctioned lever
-  is **not inspecting** the destination: a **Bypass** rule (`SSLAction: Bypass`,
-  `resolveSSLAction`) or the smart-bypass FQDN/pattern list (`internal/sslbypass`).
+- **(A) TLS fingerprint:** *not fixed by inspection* (see §5). It is an inherent
+  MITM limitation, addressed only by **not decrypting** the destination.
+- **Bypass / no-decrypt is a controlled decryption *exception*, not an anti-bot
+  feature.** A **Bypass** rule (`SSLAction: Bypass`, `resolveSSLAction`) or the
+  no-decrypt FQDN/pattern list (`internal/sslbypass`) exists to serve, in order of
+  intent: **compatibility** (certificate-pinned apps, non-HTTP-over-CONNECT, clients
+  that break under interception), **privacy boundaries** (regulated categories —
+  banking, health — kept out of inspection by policy), and **applications where
+  identity preservation is required** (the client's own TLS/HTTP identity must reach
+  the origin unchanged). Fingerprint/anti-bot-sensitive destinations fall into that
+  last category — you exclude them *because they need their own identity*, which is
+  the same reason you'd exclude any identity-preserving application; anti-bot is a
+  symptom, not a new bypass "mode."
 - **(C) IP reputation:** out of the proxy's protocol layer; the roadmap item is a
   **warmed/dedicated egress-IP** program (per-destination egress selection).
 
@@ -137,7 +160,7 @@ choose, bypass where you must, and be honest about what inspection can't launder
 ## 4. If it were Palo Alto — what PAN-OS does
 
 PAN-OS is the reference commercial SWG/NGFW for this exact problem, and Culvert's
-model was deliberately built to match it.
+model was deliberately aligned with it (aligned in structure, not claiming equivalent maturity).
 
 ### 4.1 HTTP/2 inspection — same posture
 - PAN-OS **inspects HTTP/2 by default** when SSL decryption (SSL Forward Proxy) is
@@ -147,7 +170,7 @@ model was deliberately built to match it.
   Proxy tab of the Decryption Profile** attached to the Decryption Policy rule.
   Selecting it removes the ALPN extension so the firewall negotiates HTTP/1.1 (or
   classifies the flow as unknown TCP). ([PAN-OS HTTP/2 inspection][panh2])
-- This is *exactly* Culvert's `DecryptionProfile.InspectHTTP2` / the legacy
+- This is the same structural choice as Culvert's `DecryptionProfile.InspectHTTP2` / the legacy
   `StripALPN` field: a per-profile toggle, H2 the intended default, strip the
   escape hatch.
 
@@ -187,37 +210,81 @@ model was deliberately built to match it.
 
 | Dimension | Culvert **before** | Culvert **now** | **PAN-OS** |
 |---|---|---|---|
-| HTTP/2 under inspection | always downgraded to H1 (no choice) | native H2, opt-in per rule (Decryption Profile) | native H2 **by default** |
+| HTTP/2 under inspection | always downgraded to H1 (no choice) | native H2, opt-in via a Decryption Profile attached to policy | native H2 **by default** |
 | Downgrade control | hard-wired on | `Inspect-as-HTTP/2` toggle / `Strip ALPN` | **"Strip ALPN"** per profile |
 | "How to decrypt" object | none (per-rule bool only) | **Decryption Profile** (H2, cert-verify, TLS floor/cap, stall) | **Decryption Profile** (protocol, cert, failure checks) |
 | Match vs. how split | rule only | policy rule + profile | Decryption Policy + profile |
-| Anti-bot destination | bypass (all-or-nothing) | **Bypass rule / `sslbypass`** + honest UI copy | **decryption exclusion** (predefined + local cache) |
+| Un-decryptable / identity-preserving destination | bypass (all-or-nothing) | **no-decrypt exception** (Bypass rule / `sslbypass`) + honest UI copy | **decryption exclusion** (predefined + local cache) |
 | Un-decryptable auto-handling | none | fail-close (fail-open deferred) | **local exclusion cache** auto-adds (12h) |
 | TLS fingerprint (JA3/JA4) | changed (unavoidable) | changed (unavoidable) — stated in-product | changed (unavoidable) |
 | Egress IP reputation | shared | shared (warmed-egress on roadmap) | shared unless SNAT-designed |
 
 ---
 
-## 6. The honest crux (say this to any customer)
+## 6. The honest crux — two distinct fingerprints, two distinct answers
 
-Native H2 inspection is a **real** fix for the **class of destinations that key on
-the HTTP-protocol anomaly** — CDN/WAF bot-managers that *score* rather than hard-
-block, and business-critical H2 SaaS you must keep under DLP. It is **not** the
-Google reCAPTCHA cure: Google keys on **JA3/JA4 + IP reputation**, and **no MITM —
-Culvert or PAN-OS — changes those from inside inspection.** For those destinations
-the answer is, and on PAN-OS has always been, **don't decrypt them** (Bypass /
-exclusion), optionally paired with a **warmed/dedicated egress IP**.
+The single most important thing to communicate is that "the fingerprint" is really
+**two** independent problems with **two** different resolutions:
 
-Culvert now states this **in the product**, so the operator who enables the profile
-for Google sees the expectation *before* they file the same ticket twice.
+- **HTTP-protocol-downgrade fingerprint (signal B) — SOLVED by native HTTP/2
+  inspection.** The "Chrome-that-speaks-HTTP/1.1" anomaly is a *product* behavior, and
+  native H2 removes it. This is a real fix for the class of destinations that score
+  the protocol anomaly — CDN/WAF bot-managers that *score* rather than hard-block, and
+  business-critical H2 SaaS you must keep under DLP.
+- **TLS fingerprint (signal A, JA3/JA4) + egress-IP reputation (signal C) — an
+  INHERENT MITM LIMITATION, NOT solved by inspection.** A TLS-terminating proxy
+  presents its *own* ClientHello; the origin sees the proxy's JA3/JA4, never the
+  client's. This is true of **any** MITM — Culvert and PAN-OS alike. It is addressed
+  **only** by a **decryption exception** (don't decrypt the destination) and/or a
+  **future egress strategy** (warmed/dedicated egress IP for reputation). No inspection
+  setting changes it.
+
+So native H2 is **not** the Google reCAPTCHA cure — Google keys on A + C — and it was
+never meant to be. Culvert now states this distinction **in the product**, so the
+operator who enables the profile for Google sees the expectation *before* they file
+the same ticket twice.
 
 ---
 
-## 7. What's left (roadmap, in priority order)
+## 7. Customer impact — what changes for a security administrator
+
+Enabling native HTTP/2 inspection (by attaching a Decryption Profile with
+Inspect-as-HTTP/2 to a decryption policy rule) changes the following, and nothing
+else — it does not alter which traffic is decrypted, the DLP/threat pipeline, or the
+data an admin sees per request:
+
+| | **Before** (H1 downgrade, no choice) | **After** (native H2 where policy selects it) |
+|---|---|---|
+| Protocol the origin sees on inspected flows | HTTP/1.1 for every inspected "Chrome" (anomalous) | `h2` when the client and origin both support it (matches a real browser) |
+| Soft bot-challenges on scored H2 SaaS | frequent (protocol anomaly counts against the flow) | materially reduced (the protocol anomaly is gone) |
+| DLP / scanning / policy on inspected flows | full | full — **unchanged** (same one pipeline) |
+| Control granularity | none — all inspected traffic downgraded | a reusable **Decryption Profile** attached per policy; many rules share one |
+| Google / hard-fingerprinting destinations | CAPTCHA loops | **unchanged** — still challenge (A + C survive); handle via a no-decrypt exception |
+| Compatibility risk | n/a | native path transparently falls back to H1 for H1-only / gRPC / WebSocket origins — no flow is stranded |
+
+**Concrete examples an admin will recognize:**
+
+- **"DLP on a sanctioned HR/ERP SaaS behind a bot-manager was breaking users."**
+  Before: keep inspecting and users hit soft challenges, or bypass and lose DLP.
+  After: attach an Inspect-as-HTTP/2 profile to that rule → the H1 anomaly disappears,
+  challenges drop, DLP stays on. **This is the headline win.**
+- **"Google Search throws reCAPTCHA when inspected."** Before *and* after: still
+  challenges (TLS fingerprint + IP reputation are untouched). The correct action is
+  unchanged — a **no-decrypt exception** for Google (and, later, warmed egress). The
+  difference is the product now *tells* the admin this at bind time instead of leaving
+  them to discover it.
+- **"What do I actually do day one?"** Nothing changes unless you act: no profile ⇒
+  identical to before. To adopt, create one profile (a `recommended-h2` on-ramp is
+  seeded, unbound), attach it to the specific rules where you want H2, and watch
+  `culvert_inspect_upstream_alpn_total{protocol="h2"}` climb to confirm the
+  negotiation changed.
+
+## 8. What's left (roadmap, in priority order)
 
 1. **Warmed/dedicated egress-IP** program (`LocalAddr` pin + per-destination egress
    selection) — the only sanctioned lever against the (A)+(C) residual.
-2. **Auto-exclusion cache** (PAN-OS parity): fail-open posture + a local
+2. **Auto-exclusion cache** (aligning further with commercial SWG behavior):
+   fail-open posture + a local
    decryption-exclusion cache that auto-adds origins that break under inspection.
 3. `permissive` cert-verification (verify-but-allow+log) and the fail-open *action*
    (deferred slice 6).
