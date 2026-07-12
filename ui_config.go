@@ -671,7 +671,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode && len(b.PolicyRules) > 0 {
 		policyStore.ReplaceAll(b.PolicyRules)
 	} else {
-		for _, rule := range b.PolicyRules {
+		// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
+		for i := range b.PolicyRules {
+			rule := b.PolicyRules[i]
 			if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
 				logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 				continue

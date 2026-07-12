@@ -84,8 +84,8 @@ func setupProxyIdentityE2EWithRules(t *testing.T, provider IdentityProvider, rul
 	t.Cleanup(func() { idpRegistry = origRegistry })
 
 	policyStore.rules = nil
-	for _, rule := range rules {
-		policyStore.Add(rule)
+	for i := range rules {
+		policyStore.Add(rules[i])
 	}
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

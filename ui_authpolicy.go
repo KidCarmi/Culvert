@@ -135,6 +135,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	added := policyStore.Add(rule)
 	policyStore.Save()
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
@@ -180,6 +181,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	stampRuleMetadataForWrite(&rule, before, sessionAdmin(r))
 	if !policyStore.Update(priority, rule) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return

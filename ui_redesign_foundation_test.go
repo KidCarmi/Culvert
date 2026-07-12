@@ -124,6 +124,10 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="where-used-dialog"`,     // Where-Used modal
 		`data-click="whereUsedGoto"`, // referent → consumer navigation
 		`data-click="openWhereUsed"`, // on-demand Where-Used affordance on object rows
+		// policy-metadata P1 — Tier-A rule metadata (comment + provenance)
+		`function polRenderProvenance`, // read-only createdAt/modifiedAt/modifiedBy line
+		`id="pol-comment"`,             // admin-authored rule comment field
+		`id="pol-provenance"`,          // server-stamped provenance display
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)

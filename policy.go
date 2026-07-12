@@ -116,6 +116,31 @@ type PolicyRule struct {
 	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
 	HitCount          int64           `json:"hitCount"`               // runtime counter, not persisted
 
+	// Tier-A rule metadata (policy-metadata P1; authority
+	// docs/design/POLICY-ARCHITECTURE-FUTURE.md §2). CreatedAt/ModifiedAt/
+	// ModifiedBy are stamped SERVER-SIDE ONLY in the write handlers
+	// (stampRuleMetadataForWrite) — never trusted from the client, or they
+	// become theater. ModifiedAt/By are a denormalized cache of audit truth
+	// for list rendering; the audit log stays authoritative. Comment is the one
+	// admin-authored field (free text, "why this rule exists"), included in the
+	// audit diff. All omitempty so pre-feature rules and the many tests that
+	// construct PolicyRule directly are byte-unchanged.
+	CreatedAt  string `json:"createdAt,omitempty"`  // RFC3339 UTC; set once at create, preserved across edits
+	ModifiedAt string `json:"modifiedAt,omitempty"` // RFC3339 UTC; restamped on every CONTENT edit (create/update)
+	ModifiedBy string `json:"modifiedBy,omitempty"` // actor identity of the last content edit
+	Comment    string `json:"comment,omitempty"`    // admin free-text note (client-authoritative, like Name/Action)
+
+	// Metadata scope (policy-metadata P1): ModifiedAt/ModifiedBy track the last
+	// edit to a rule's DEFINITION (its fields), stamped by
+	// stampRuleMetadataForWrite in the create/update handlers. Position-only
+	// changes — reorder (Reorder/PermutePriorities) and move (apiPolicyMove) —
+	// are rulebase-level operations, NOT content edits: they deliberately do
+	// NOT restamp, so a drag that repositions many rules never overwrites every
+	// rule's "who last edited it" with the reorderer. Those operations are
+	// tracked authoritatively by the config-version history and the
+	// policy.reorder / policy.move audit events, which is where "who moved this"
+	// belongs.
+
 	// normFQDN is the IDNA-normalized form of DestFQDN, precomputed by
 	// sortLocked() whenever rules are mutated. The proxy hot path (Evaluate)
 	// reads it instead of re-normalizing DestFQDN on every request — normalizing
