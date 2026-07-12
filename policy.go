@@ -335,7 +335,11 @@ func (ps *PolicyStore) Save() {
 	if ps.path == "" {
 		return
 	}
-	ps.mu.RLock()
+	// EXCLUSIVE Lock (not RLock): like List(), the snapshot plain-reads
+	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
+	// shared RLock — only the exclusive Lock serializes this copy against those
+	// writes. Save is config-plane, so the brief exclusion is acceptable.
+	ps.mu.Lock()
 	// Snapshot without hit counts for persistence.
 	snapshot := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
@@ -343,7 +347,7 @@ func (ps *PolicyStore) Save() {
 		snapshot[i].HitCount = 0
 		snapshot[i].LastHit = "" // computed display field — never persist it into the rules file
 	}
-	ps.mu.RUnlock()
+	ps.mu.Unlock()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -360,12 +364,18 @@ func (ps *PolicyStore) Save() {
 
 // List returns a copy of all rules (including live HitCount).
 func (ps *PolicyStore) List() []PolicyRule {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
+	// EXCLUSIVE Lock (not RLock): the whole-struct copy below plain-reads
+	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
+	// shared RLock. Only the exclusive Lock serializes this snapshot against
+	// those atomic writes (RLock would not — it is shared with Evaluate's RLock).
+	// List is a config-plane call (not on the request hot path), so excluding
+	// Evaluate for the brief copy is acceptable.
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
 		out[i] = *r
-		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // B7: atomic read of concurrently-written counter
+		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // atomic read of the concurrently-written counter (belt-and-suspenders under Lock)
 		// LastHit is a COMPUTED display field — always derive it from the atomic
 		// timestamp, never from a copied string. A rule whose LastHit leaked in
 		// via a List-derived snapshot + ReplaceAll (which resets lastHitUnix but
@@ -760,9 +770,17 @@ type PolicyMatch struct {
 // groups is the list of IdP group/role memberships for the authenticated user.
 // Returns nil when no rule matches (caller should default to Deny — Zero Trust).
 func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, groups []string) *PolicyMatch {
+	// Hold RLock for the whole scan (not just the slice-header snapshot): the
+	// match bumps rule.HitCount/lastHitUnix via lock-free atomics, and the
+	// counter-reading snapshots in List()/Save() take the EXCLUSIVE Lock — so the
+	// shared RLock here serializes those rare readers against the atomic writes
+	// (closing the read/atomic-write data race) while leaving concurrent
+	// Evaluate calls fully parallel (RLock is shared; atomic-vs-atomic is safe).
+	// The scan is pure + fast and acquires no other lock, so holding RLock adds
+	// no contention on the request hot path.
 	ps.mu.RLock()
+	defer ps.mu.RUnlock()
 	rules := ps.rules
-	ps.mu.RUnlock()
 
 	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
 	// check reuses it (the host is identical across rules). This, plus each
