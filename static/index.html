@@ -6819,6 +6819,30 @@ async function removeRewriteRule(id) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Policy (PBAC)
 // ═══════════════════════════════════════════════════════════════════════════
+
+// polV — append the loaded rule-set version to a mutation URL for optimistic
+// concurrency (P2). The server 409s if another admin changed the rulebase since
+// _polVersion was loaded, so a stale edit can't silently overwrite theirs.
+function polV(path) {
+  return path + (path.includes('?') ? '&' : '?') + 'ifVersion=' + _polVersion;
+}
+
+// polIsVersionConflict — if an api() error is a rule-set version conflict (the
+// structured 409 from policyVersionConflict), warn the admin and reload the
+// rulebase so they re-apply against the current state. Returns true so callers
+// skip their own generic error toast.
+function polIsVersionConflict(err) {
+  try {
+    const b = JSON.parse(err && err.message);
+    if (b && typeof b.currentVersion === 'number') {
+      toast('Another admin changed the rulebase — reloading so you can re-apply your change', 'error');
+      fetchPolicy();
+      return true;
+    }
+  } catch (_) { /* not a version conflict */ }
+  return false;
+}
+
 async function fetchPolicy() {
   loadPolicyCategoryOptions();
   try {
@@ -6871,11 +6895,11 @@ async function deletePolicy(priority) {
   const name = rule ? rule.name || ('Rule #' + priority) : ('Rule #' + priority);
   if (!await confirmAction('Delete Policy Rule', 'Delete "' + name + '"? This cannot be undone.')) return;
   try {
-    await api('/api/policy?priority=' + priority, { method: 'DELETE' });
+    await api(polV('/api/policy?priority=' + priority), { method: 'DELETE' });
     toast('Rule deleted', 'success');
     if (polEditPriority === priority) cancelPolicyEdit();
     fetchPolicy();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) { if (!polIsVersionConflict(e)) toast('Error: ' + e.message, 'error'); }
 }
 
 // ── Drag-and-drop reordering (event delegation — no per-row listeners) ──
@@ -6998,7 +7022,7 @@ async function polApplyOrder() {
   const btn = document.querySelector('#pol-reorder-bar [data-click="polApplyOrder"]');
   if (btn) btn.disabled = true;
   try {
-    await api('/api/policy/reorder', {
+    await api(polV('/api/policy/reorder'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ priorities: _polStagedOrder }),
@@ -7013,7 +7037,7 @@ async function polApplyOrder() {
     await fetchPolicy();
   } catch (e) {
     // Fail honest: the staged order stays visible so nothing is lost.
-    toast('Apply failed: ' + e.message + ' — order left staged', 'error');
+    if (!polIsVersionConflict(e)) toast('Apply failed: ' + e.message + ' — order left staged', 'error');
   } finally {
     _polApplyInFlight = false;
     if (btn) btn.disabled = false;
@@ -7078,14 +7102,14 @@ async function movePolicy(pri, position, targetName) {
   const body = { priority: pri, position };
   if (targetName) body.targetName = targetName;
   try {
-    await api('/api/policy/move', {
+    await api(polV('/api/policy/move'), {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
     toast('Rule moved to ' + position, 'success');
     fetchPolicy();
-  } catch(e) { toast('Move failed: ' + e.message, 'error'); }
+  } catch(e) { if (!polIsVersionConflict(e)) toast('Move failed: ' + e.message, 'error'); }
 }
 
 function showMoveTarget(pri, direction) {
@@ -9473,7 +9497,7 @@ async function submitPolicyRule() {
   polShowFormErrors([]);
   try {
     if (polEditPriority !== null) {
-      await api('/api/policy?priority=' + polEditPriority, {
+      await api(polV('/api/policy?priority=' + polEditPriority), {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(rule),
@@ -9482,7 +9506,7 @@ async function submitPolicyRule() {
       _polFormDirty = false;
       cancelPolicyEdit();
     } else {
-      await api('/api/policy', {
+      await api(polV('/api/policy'), {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(rule),
@@ -9492,7 +9516,7 @@ async function submitPolicyRule() {
       clearPolicyForm();
     }
     fetchPolicy();
-  } catch(e) { toast('Error: ' + e.message, 'error'); }
+  } catch(e) { if (!polIsVersionConflict(e)) toast('Error: ' + e.message, 'error'); }
 }
 
 // Extend renderPolicy to show country and file profile columns
