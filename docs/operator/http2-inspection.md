@@ -88,6 +88,12 @@ sibling streams.
   `maxScanBufferBytes` per in-flight response, so worst-case buffered memory is
   `maxScanBufferBytes × 32` per malicious connection. Plan connection capacity
   accordingly. It also equals the effective Rapid-Reset (CVE-2023-44487) cap.
+  Separately, the response-delivery copy uses a pooled 128 KiB relay buffer per
+  in-flight stream (shared `relayBufPool`, the same buffer every other tunnel relay
+  uses), so the delivery-side copy footprint is up to `128 KiB × 32 = 4 MiB` per
+  inspected H2 connection. These buffers are pooled and GC-reclaimed, not leaked;
+  the copy path itself allocates nothing per response (it replaced `io.Copy`'s
+  per-response 32 KiB allocation).
 - **Frame/header caps** — `MaxReadFrameSize` and header-list-size (`MaxHeaderBytes`)
   pinned at 1 MiB.
 - **Rapid Reset (CVE-2023-44487)** and the HTTP/2 **CONTINUATION flood
