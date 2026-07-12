@@ -579,6 +579,17 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
 		upstreamTLS.Close()              //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
 		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
+		// Adaptive fail-open: a fail-open rule + a server-observed can't-decrypt
+		// signal (unsupported params / origin wants a client cert) learns the host
+		// and RESCUES this session as a transparent bypass. We have not written to
+		// w yet, so handleTunnelBypass re-dials (its own inline isPrivateHost +
+		// ssrfControl guard) and relays. A cert-verify/other failure returns false
+		// and keeps today's 502 — auto-bypassing a bad cert is not a compat fix.
+		if maybeFailOpenOrigin(r, hostOnly, match, err) {
+			logger.Printf("SSL_AUTOEXCLUDE_RESCUE %q: origin inspect failed, failing open to bypass", sanitizeLog(targetHost))
+			handleTunnelBypass(w, r, match, id)
+			return
+		}
 		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), err, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -659,8 +670,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// stable across connections and clients can resume.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, mitmClientTLSConfig)
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()   //nolint:errcheck // best-effort cleanup on handshake failure
-		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on handshake failure
+		clientTLS.Close()                            //nolint:errcheck // best-effort cleanup on handshake failure
+		upstreamTLS.Close()                          //nolint:errcheck // best-effort cleanup on handshake failure
+		maybeFailOpenClient(r, hostOnly, match, err) // learn a pinning rejection (learn-only; next session self-heals)
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}

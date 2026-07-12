@@ -686,6 +686,7 @@ func sameDecryptionProfile(x, y *DecryptionProfile) bool {
 	}
 	return x.CertVerification == y.CertVerification &&
 		x.OnUnsupported == y.OnUnsupported &&
+		x.OnInspectError == y.OnInspectError &&
 		x.MinTLSVersion == y.MinTLSVersion &&
 		x.MaxTLSVersion == y.MaxTLSVersion &&
 		x.StallTimeoutSecs == y.StallTimeoutSecs

@@ -515,9 +515,30 @@ culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
 		atomic.LoadInt64(&statInspectUpstreamH1),
 	)
 
+	// Adaptive decryption-exclusion (fail-open) observability: sessions bypassed
+	// because of a learned exclusion, and current cache occupancy (inspection-
+	// coverage erosion the operator can alert on). Learn events (by reason) append
+	// via autoExcludeLearns.writePrometheus below.
+	aeStats := autoExclude.Stats()
+	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion
+# TYPE culvert_decrypt_autoexclude_hit_total counter
+culvert_decrypt_autoexclude_hit_total %d
+# HELP culvert_decrypt_autoexclude_active Current count of active learned decryption exclusions (hosts inspection is OFF for)
+# TYPE culvert_decrypt_autoexclude_active gauge
+culvert_decrypt_autoexclude_active %d
+# HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
+# TYPE culvert_decrypt_autoexclude_pending gauge
+culvert_decrypt_autoexclude_pending %d
+`,
+		atomic.LoadInt64(&autoExcludeHitCounter),
+		aeStats.Active,
+		aeStats.Pending,
+	)
+
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
+	autoExcludeLearns.writePrometheus(&ruleMetBuf)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)

@@ -48,6 +48,7 @@ const (
 var (
 	validCertVerification = map[string]bool{"": true, "strict": true, "permissive": true, "skip": true}
 	validOnUnsupported    = map[string]bool{"": true, "fail-close": true, "fail-open": true}
+	validOnInspectError   = map[string]bool{"": true, "fail-close": true, "fail-open": true}
 	validTLSVersion       = map[string]bool{"": true, "1.2": true, "1.3": true}
 	// nameRe bounds the profile name charset (referenced by rules, rendered in the
 	// UI); keep it to printable identifier-ish characters to avoid surprises.
@@ -72,8 +73,20 @@ type Profile struct {
 
 	// OnUnsupported posture when the origin TLS can't be inspected (version/cipher
 	// below floor): "" inherit | "fail-close" (drop — today's behavior) | "fail-open"
-	// (raw-relay bypass — DEFERRED enforcement).
+	// (raw-relay bypass — DEFERRED, superseded by OnInspectError for fail-open).
 	OnUnsupported string `json:"onUnsupported,omitempty"`
+
+	// OnInspectError is the adaptive decryption-exclusion / fail-open posture when
+	// an inspected tunnel CANNOT be established because the host is incompatible
+	// with inspection (origin demands a client cert we can't present, or the TLS
+	// parameters are unsupported, or a pinned client rejects our forged leaf):
+	// "" inherit (fail-close, today's behavior) | "fail-close" (502/drop) |
+	// "fail-open" (record the host in the auto-exclusion cache after a
+	// confirm-count of distinct clients, rescue the current session where it has
+	// not yet committed to the client, and bypass subsequent sessions to the host
+	// until the entry expires). It deliberately does NOT fire on an untrusted/
+	// expired origin cert — that stays a block. See internal/autoexclude.
+	OnInspectError string `json:"onInspectError,omitempty"`
 
 	// MinTLSVersion / MaxTLSVersion floor and cap on the inspect handshakes:
 	// "" inherit | "1.2" | "1.3".
@@ -112,6 +125,9 @@ func Validate(p *Profile) error {
 	}
 	if !validOnUnsupported[p.OnUnsupported] {
 		return fmt.Errorf("invalid onUnsupported %q", p.OnUnsupported)
+	}
+	if !validOnInspectError[p.OnInspectError] {
+		return fmt.Errorf("invalid onInspectError %q", p.OnInspectError)
 	}
 	if !validTLSVersion[p.MinTLSVersion] {
 		return fmt.Errorf("invalid minTlsVersion %q", p.MinTLSVersion)

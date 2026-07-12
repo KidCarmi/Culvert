@@ -268,3 +268,216 @@ Mirror `decProfMintlsRejects.writePrometheus` for the labeled counter (inline
 - Bounded, attacker-aware cache (TTL + cap + decay, mirroring `topHosts`).
 - GUI parity (every knob has an API + panel); audit on every inspection-disabling
   act; observable via metrics.
+
+---
+
+# v2 — reviewer consolidation (4-seat panel)
+
+Four independent reviewers pressure-tested the v1 plan: a PAN-OS SWG architect,
+a config/security architect, a config-arch/codebase-fit engineer, and a
+voice-of-customer/field-CISO. Their findings converge on a **reframe of the
+trigger set** plus a set of hard guardrails. This section is authoritative where
+it differs from §1–§9 above.
+
+## V2-1 — Trigger set REFRAMED (PAN-OS M1/M2, Security M1)
+
+The v1 premise ("learn on origin cert-verify failure") was backwards. A real SWG
+does NOT auto-exclude on an untrusted/expired/name-mismatch origin cert — that is
+a **Block** decision, and auto-bypassing it is precisely the poisoning/exfil
+vector (an on-path attacker presents a bad cert → earns a TTL-long uninspected
+channel). Reclassify the inspect-handshake failure into learnable vs not:
+
+| Reason | Trigger | Learn? | Live rescue |
+|---|---|---|---|
+| `unsupported` | TLS version/cipher/protocol incompatibility (the canonical PAN-OS trigger) | YES | strip path |
+| `client_cert_required` | origin sent `CertificateRequest`; we cannot present a client cert (server-observed, non-spoofable) | YES | strip path |
+| `client_pinned` | client rejected our forged leaf with a cert alert (`bad_certificate`/`unknown_ca`/`certificate_*`) | YES, **guarded** (confirm-count, shorter TTL) | none (post-`200` in BOTH paths — inherent) |
+| `origin_cert_verify` | untrusted issuer / expired / hostname mismatch | **NO** — stays a `502` (today's behavior) | — |
+| `other` | EOF / RST / network / unrecognized | **NO** — fail-closed default | — |
+
+A new `classifyInspectFailure(err)` maps the handshake error to one of these.
+**It defaults to no-learn:** only a positive match on `unsupported` /
+`client_cert_required` (origin leg) or a client cert-alert (client leg) learns;
+every unrecognized error keeps today's `502`. Misclassification therefore can
+only ever fail *closed* (inspect/block), never wrongly bypass. Classification is
+`errors.As` on `*tls.CertificateVerificationError` + `x509.UnknownAuthorityError`/
+`CertificateInvalidError`/`HostnameError` for the do-NOT-learn `origin_cert_verify`
+bucket, and substring matching on the known TLS alert descriptions for the
+learnable buckets (brittleness is safe because the default is no-learn).
+
+This reframe also **resolves the private-PKI "root-cause masking" concern** (VoC
+Scenario B): an untrusted corporate-CA origin now stays a hard `502`, surfacing
+"add this CA and keep inspecting" instead of silently going dark.
+
+`unsupported` folds the previously-deferred `OnUnsupported=fail-open` into the
+SAME plumbing (PAN-OS M2): ONE operator knob (`OnInspectError=fail-open`), with
+distinct audit/metric *reasons*. `OnUnsupported` stays a documented, superseded
+no-op for fail-open purposes.
+
+## V2-2 — Confirm-count over DISTINCT client IPs (Security M1, VoC #1, PAN-OS M4)
+
+A host does not enter the active cache on the first failure. The engine holds a
+**pending observation** per `(host, reason)` accumulating the set of *distinct
+client IPs* that hit a qualifying failure within a rolling `window` (default
+10m). Only when `len(distinctIPs) >= confirmN` (default **2**) is the host
+promoted to an active exclusion. This single mechanism does the heavy lifting:
+
+- A single malicious/insider endpoint cannot self-poison (one IP never reaches
+  the threshold) — closes the `client_pinned` forge vector.
+- A genuine fleet-wide pinned app trips failures from many devices and crosses
+  the threshold almost immediately — the flagship UX still self-heals fast.
+- A transient single-origin blip (one client, one moment) does not disable
+  inspection for 12h (VoC edge-case 5.1).
+
+Promotion (`Observe` → `promoted=true`) is the security-relevant event that fires
+the audit + alert + metric. `client_pinned` entries get a **shorter TTL**
+(`pinnedTTL`, default 1h) than the server-observed reasons (`ttl`, default 12h)
+because the client signal is the spoofable class (PAN-OS N4/M4, Security S1).
+
+## V2-3 — Cache READ gated on fail-open (Security M2, PAN-OS M3/N3, config-arch S4)
+
+`resolveSSLAction` consults the cache **only when `resolveFailOpen(match)`** for
+the session's matched rule — NOT globally. Consequences:
+
+- A **fail-close rule never consults the cache** ⇒ hosts covered only by
+  fail-close rules can never be auto-bypassed. **This is the never-exclude /
+  force-inspect control** (Security M3, PAN-OS N1/M3): keep the IdP/SSO, banking,
+  software-update, DLP-critical origins on fail-close rules and they are
+  un-poisonable by design — no separate list needed for v1.
+- Kills the cross-policy downgrade leak (a fail-open rule's learned entry cannot
+  silently bypass a *different* inspect-mandatory rule for the same host).
+- Makes "byte-identical when unused" airtight: with zero fail-open profiles the
+  cache is never read AND (per V2-2 gating) never written.
+
+Deliberately more conservative than PAN-OS's per-firewall global cache;
+documented as such. `sslBypass.Matches` (explicit operator bypass) still wins
+first; precedence is **manual ssl-bypass > auto-exclusion (fail-open rules only)
+> policy inspect**.
+
+## V2-4 — SSRF inline on the live-rescue re-dial (Security M4)
+
+The strip-path rescue re-dials the origin and raw-relays. There is **no new
+TOCTOU** (the re-dial re-resolves DNS and `ssrfControl` rejects a private result
+at connect time exactly as the first dial does), but the re-dial MUST reproduce
+`isPrivateHost(targetHost)` + the `ssrfControl` dialer **inline at the call site**
+(CodeQL visibility + CLAUDE.md convention), not via a helper that hides the guard.
+A test asserts the rescue path dials through `ssrfControl` (rejects a
+private-IP-rebinding origin). `relayBypassRawDial` must be unreachable with a
+dialer lacking `Control: ssrfControl`.
+
+## V2-5 — Host-only normalization on BOTH read and write (Security M5, config-arch M6)
+
+The engine normalizes with `hostutil.NormalizeHost` **inside** `Record`/`Observe`
+AND `Contains` (do not trust call sites; `resolveSSLAction` passes raw `host`),
+and keys on **host-only** (port stripped — the matcher/`sslBypass` space is
+host-only; keying `host:443` lets a port-varying attacker evade the operator's
+mental model / the fail-close scoping). Pinned by a test that `EXAMPLE.com.` and
+`example.com` collide.
+
+## V2-6 — Observability upgraded from pull to push (VoC #2/#3/#5, PAN-OS N6)
+
+- **Alert on learn:** promotion fires `fireAlert("decryption_autoexclude", …)` so
+  the inspection-went-dark event reaches syslog/SIEM, not just the 500-entry
+  audit ring. This is what makes the feature acceptable to regulated buyers
+  instead of disqualifying (VoC Scenarios B/C).
+- **Audit on learn + evict + clear** (all three), actor = triggering client IP
+  (sanitized) on learn so a poisoning source is traceable (Security S2).
+- **Blast-radius fields** in the list/API: per-entry **hit count** (how much
+  traffic rode the bypass) + `learned_at` / `expires_at` / `ttl_remaining_secs`,
+  so the security team can triage benign-vs-exfil. Per-*hit* audit is
+  deliberately omitted (would flood); metric + per-entry counter suffice.
+- **Provable OFF state:** `/api/decryption-exclusions` reports config
+  (`confirm_n`, `ttl`, `pinned_ttl`, active/pending counts) so an operator can
+  show an auditor the feature's posture; a deployment with no fail-open profile
+  shows an empty, inert cache.
+
+## V2-7 — Engine mechanics (config-arch S1/S2/S3)
+
+- **No dedicated Prune goroutine.** Follow the `topHosts` precedent: `List()` and
+  `Len()` filter expired at call time (the gauge is scrape-time), and the bounded
+  eviction (expired-first, then oldest `learnedAt`) runs **amortized inside
+  `Observe`**. Eliminates the ticker, its shutdown wiring, and the test-start
+  hazard. Eviction direction is safe (evicting = re-enabling inspection =
+  fail-closed), so a distinct-host flood only restores inspection.
+- **Injected clock:** `now func() time.Time` (defaults to `time.Now`) so
+  expiry/window tests never `time.Sleep` (determinism gate re-runs `-shuffle`).
+- **Placement:** a distinct pure engine `internal/autoexclude` (NOT folded into
+  `sslbypass`, which is persisted + config-synced, nor `decryptprofile`, which is
+  validated persistent storage — wrong lifecycles). Package `main` keeps the
+  `autoExclude` singleton + resolvers + API + UI (ADR-0002 shim pattern).
+
+## V2-8 — Config-surface / parity seams that have NO reflection guard (config-arch M1/M2)
+
+The `DecryptionProfile` inner struct is hand-enumerated in two places that no
+reflection test forces to update:
+
+- `configversion.go:680 sameDecryptionProfile` — **add `x.OnInspectError ==
+  y.OnInspectError`** or a rollback that changes only this field reports "no
+  change" and the dry-run lies.
+- `config_surfaces_test.go` fixtures — set `OnInspectError` to a non-default in
+  the seed/diff states (`:199`, `:315/316`, `:431`, `:457`) so the round-trip and
+  diff paths actually exercise the field surviving `ReplaceAll`/`copyOut`.
+
+`Validate` (add `validOnInspectError`) covers all three write paths
+(Add/Update/ReplaceAll) — no import/snapshot bypass. `copyOut` needs no change
+(`OnInspectError` is a value `string`). No new `config_surfaces.go` row (the
+registry binds the top-level slice; the cache is a separate global off all
+surfaces). All confirmed clean by the config-arch review.
+
+## V2-9 — API RBAC/metadata correctness (config-arch M4/M5)
+
+One `uiRoutes` path `/api/decryption-exclusions` with TWO `Methods` rows
+(GET→viewer, DELETE→operator), NOT `MethodAny`. The handler branches on method
+with a **per-branch `requireRole`** (viewer on GET, operator on DELETE) or it
+trips C1.5 AST parity / fires C4 role-divergence. **Both** DELETE variants
+(single-host `?host=` evict AND clear-all) must emit an `auditEvent` or C2c logs
+`audit_missing`. D0 canonical route count is **+1 path** (both methods share it).
+
+## V2-10 — Global-singleton test discipline (config-arch M3 — the PR3d fence class)
+
+`autoExclude` is the same global-mutable-state hazard that caused the PR3d
+determinism-gate failure. Mandatory:
+
+- `swapAutoExclude(t)` helper (mirrors `swapDecProfileStore`, decryptprofile_api_test.go:14):
+  stash + install a fresh empty cache + `t.Cleanup` restore. Every test touching
+  `Observe`/`resolveSSLAction` uses it.
+- A regression pin that `resolveSSLAction` with an empty cache is **byte-identical
+  to today** (empty-map `Contains` → false → dead block).
+- Learn emits an audit event into the 500-entry ring → tests assert on entry
+  **content** (unique discriminator: a TEST-NET client IP + action + baseline
+  `TS`), never `len(auditGet())` deltas.
+
+## V2-11 — Explicit v1 scope vs deferrals
+
+**In v1 (this PR):** the reframed trigger set + classifier; confirm-count
+(distinct IPs); fail-open-gated read; strip-path live rescue (unsupported +
+client_cert_required) with inline SSRF; client_pinned learn-only (guarded);
+`OnInspectError` field + validation + resolver; `internal/autoexclude` engine
+(injected clock, amortized prune, hit-count, host-only normalize); API + UI panel
++ profile dropdown; alert + audit + metrics (`learn_total{reason}`, `hit_total`,
+`active` gauge, `pending` gauge); parity (V2-8/9/10); operator doc.
+
+**Deferred to v1.1 (documented, with rationale):**
+- **Predefined curated pinned-app list** (Apple/Dropbox/Windows-Update/… as a
+  versioned content feed) for *first-session* success on KNOWN pinned apps
+  (PAN-OS N1). v1 documents the precedence and recommends operators add known
+  pinned apps to the manual `ssl-bypass` list for first-contact success.
+- **Native-path live rescue** (re-dial+relay for the H2 path) — v1 is learn-only
+  there and documents the strip-vs-native fail-open asymmetry (PAN-OS N2, VoC #6).
+- **`learn-review` third posture** (record+alert, bypass only after operator
+  approval) — the enum is designed to admit it later (VoC #7).
+- **Weekly compliance digest**, **adaptive TTL**, **broad-profile UI guardrail /
+  admin-role gate on enabling fail-open** (VoC #4/#8/#9) — v1 surfaces a UI
+  warning when fail-open is enabled; the rest is v1.1.
+
+## V2-12 — The honest customer-facing framing (VoC)
+
+This is a **compatibility/availability** control that is *also* a security
+decision, so the product must never make it quietly. First-contact with a
+never-seen pinned host still fails (inherent — you cannot rescue a client that
+refuses your cert without prior knowledge; PAN-OS solves this only via its
+predefined list, deferred here). The doc states plainly: expect one failed
+connection per newly-incompatible host per TTL window; use the manual bypass +
+(future) predefined list for guaranteed first-session success; and every host the
+proxy stops inspecting is alerted, audited, listed with its blast radius, and
+clearable.
