@@ -677,7 +677,7 @@ func diffCategoryGroups(a, b []CategoryGroup, out *[]configChange) {
 
 // sameDecryptionProfile reports whether two profiles have identical operator-facing
 // content (ID/timestamps excluded — they are not config identity).
-func sameDecryptionProfile(x, y DecryptionProfile) bool {
+func sameDecryptionProfile(x, y *DecryptionProfile) bool {
 	if (x.InspectHTTP2 == nil) != (y.InspectHTTP2 == nil) {
 		return false
 	}
@@ -693,28 +693,28 @@ func sameDecryptionProfile(x, y DecryptionProfile) bool {
 
 // diffDecryptionProfiles compares decryption profiles by name (case-insensitive).
 // Reports added, removed, and changed (same name, different content). Mirrors
-// diffCategoryGroups.
+// diffCategoryGroups. Index maps (not value maps) avoid copying the 144-byte
+// DecryptionProfile per range iteration (gocritic rangeValCopy convention).
 func diffDecryptionProfiles(a, b []DecryptionProfile, out *[]configChange) {
-	mapA := make(map[string]DecryptionProfile, len(a))
+	idxA := make(map[string]int, len(a))
 	for i := range a {
-		mapA[strings.ToLower(a[i].Name)] = a[i]
+		idxA[strings.ToLower(a[i].Name)] = i
 	}
-	mapB := make(map[string]DecryptionProfile, len(b))
+	idxB := make(map[string]int, len(b))
 	for i := range b {
-		mapB[strings.ToLower(b[i].Name)] = b[i]
+		idxB[strings.ToLower(b[i].Name)] = i
 	}
 	var added, removed, changed []string
-	for key, pb := range mapB {
-		pa, ok := mapA[key]
-		if !ok {
-			added = append(added, pb.Name)
-		} else if !sameDecryptionProfile(pa, pb) {
-			changed = append(changed, pb.Name)
+	for key, bi := range idxB {
+		if ai, ok := idxA[key]; !ok {
+			added = append(added, b[bi].Name)
+		} else if !sameDecryptionProfile(&a[ai], &b[bi]) {
+			changed = append(changed, b[bi].Name)
 		}
 	}
-	for key, pa := range mapA {
-		if _, ok := mapB[key]; !ok {
-			removed = append(removed, pa.Name)
+	for key, ai := range idxA {
+		if _, ok := idxB[key]; !ok {
+			removed = append(removed, a[ai].Name)
 		}
 	}
 	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {

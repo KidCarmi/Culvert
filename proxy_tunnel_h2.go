@@ -182,6 +182,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 
 	down := clientTLS.ConnectionState().NegotiatedProtocol
+	recordInspectUpstreamALPN(up)
 	logger.Printf("SSLInspect(native): tunnel %q up=%q down=%q", sanitizeLog(targetHost), sanitizeLog(up), sanitizeLog(down))
 	recordActiveConn(1)
 	defer recordActiveConn(-1)

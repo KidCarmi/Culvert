@@ -582,6 +582,9 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
+	// Strip path offers no upstream ALPN → the origin leg is HTTP/1.1 (the
+	// downgrade); count it so the H2-vs-H1 success-delta metric is complete.
+	recordInspectUpstreamALPN("http/1.1")
 
 	// 3. Hijack the client connection and send the 200 Connection Established.
 	hijacker, ok := w.(http.Hijacker)

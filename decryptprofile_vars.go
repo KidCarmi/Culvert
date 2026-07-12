@@ -24,3 +24,17 @@ type DecryptionProfileStore = decryptprofile.Store
 // the proxy hot path by the profile-aware resolvers and mutated by the admin API,
 // config import, and CP→DP snapshot apply.
 var globalDecryptionProfiles = decryptprofile.New()
+
+// seedDefaultDecryptionProfiles adds the documented, NON-auto-bound "recommended-h2"
+// profile as a safe on-ramp. Called on FIRST RUN ONLY (no profiles file existed), so
+// an operator who deletes it keeps it deleted. It is not bound to any rule — enabling
+// native H2 stays a deliberate per-rule choice.
+func seedDefaultDecryptionProfiles() {
+	h2 := true
+	if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "recommended-h2", InspectHTTP2: &h2}); err != nil {
+		logger.Printf("DecryptionProfiles: seed recommended-h2: %v", err)
+		return
+	}
+	globalDecryptionProfiles.Save()
+	logger.Printf("DecryptionProfiles: seeded 'recommended-h2' on-ramp profile (not bound to any rule)")
+}

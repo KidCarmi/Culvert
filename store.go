@@ -41,6 +41,14 @@ var (
 	statAuthCredentialRequired int64 // Stage-1 CredentialRequired decisions (Phase 2 Slice 3: wired onto the runtime path)
 
 	statAuthSSORequired int64 // Stage-1 SSORequired decisions (Phase 3 Slice 3: defined, NOT incremented from runtime yet)
+
+	// Decryption-profile success-delta observability: which HTTP protocol the
+	// inspected tunnel negotiated on the UPSTREAM (origin) leg. h2 counts native
+	// HTTP/2 inspection (the profile working); http/1.1 counts the strip/downgrade
+	// path. The ratio is how an operator confirms enabling Inspect-as-HTTP/2 changed
+	// the negotiated protocol per destination.
+	statInspectUpstreamH2 int64
+	statInspectUpstreamH1 int64
 )
 
 // ─── Time-series: requests per minute, last 60 minutes ───────────────────────

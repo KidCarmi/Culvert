@@ -16,8 +16,20 @@ package main
 
 import (
 	"crypto/tls"
+	"sync/atomic"
 	"time"
 )
+
+// recordInspectUpstreamALPN counts the HTTP protocol negotiated on the upstream
+// (origin) leg of an inspected tunnel — the success-delta signal for
+// Inspect-as-HTTP/2 (h2 = native inspection working; anything else = HTTP/1.1).
+func recordInspectUpstreamALPN(proto string) {
+	if proto == "h2" {
+		atomic.AddInt64(&statInspectUpstreamH2, 1)
+	} else {
+		atomic.AddInt64(&statInspectUpstreamH1, 1)
+	}
+}
 
 // resolveDecryptionProfile returns the profile named by the matched rule, or nil
 // when the rule names none OR the named profile does not exist (dangling ref).

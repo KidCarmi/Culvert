@@ -83,7 +83,7 @@ func TestStore_ReplaceAllPreservesIDsAndSkipsInvalid(t *testing.T) {
 	s.ReplaceAll([]Profile{
 		{ID: "fixed-id-01", Name: "keep", InspectHTTP2: boolPtr(false)},
 		{Name: "bad", OnUnsupported: "explode"}, // invalid → skipped
-		{Name: "backfill"},                       // valid, no ID → assigned
+		{Name: "backfill"},                      // valid, no ID → assigned
 	})
 	names := s.Names()
 	if len(names) != 2 {

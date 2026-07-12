@@ -14,9 +14,9 @@ func withProfiles(t *testing.T, profiles ...DecryptionProfile) {
 	t.Helper()
 	prev := globalDecryptionProfiles
 	s := decryptprofile.New()
-	for _, p := range profiles {
-		if _, err := s.Add(p); err != nil {
-			t.Fatalf("seed profile %q: %v", p.Name, err)
+	for i := range profiles {
+		if _, err := s.Add(profiles[i]); err != nil {
+			t.Fatalf("seed profile %q: %v", profiles[i].Name, err)
 		}
 	}
 	globalDecryptionProfiles = s
