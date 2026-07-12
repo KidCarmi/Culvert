@@ -2595,6 +2595,8 @@ Firefox (all platforms):
             <button class="btn sm ghost" id="pol-act-allow" data-click="setPolActionFilter" data-arg="allow">Allow</button>
             <button class="btn sm ghost" id="pol-act-block" data-click="setPolActionFilter" data-arg="block">Block</button>
           </div>
+          <button class="btn sm ghost" id="pol-unused-btn" data-click="togglePolUnused"
+            title="Show only rules not matched in the last 90 days (candidates for cleanup). Requires hit tracking — freshly-deployed systems have no history yet.">🕗 Unused</button>
         </div>
         <div id="pol-reorder-bar" class="banner warn reorder-bar" style="display:none" role="status">
           <span>⚠ Rule order edited — <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
@@ -4070,6 +4072,7 @@ document.addEventListener('click', e => {
     case 'openWhereUsed':     openWhereUsed(arg, arg2); break;
     case 'openWhereUsedProfile': openWhereUsedProfile(); break;
     case 'setPolActionFilter': setPolActionFilter(arg); break;
+    case 'togglePolUnused':   togglePolUnused(); break;
     case 'toggleDefaultAction': toggleDefaultAction(); break;
     case 'runPolicyTest':     runPolicyTest(); break;
     case 'clearGroupSelection': clearGroupSelection(); polMarkEdited(); break;
@@ -5545,6 +5548,8 @@ function fmt(n) {
 let polRules = [];
 let polEditPriority = null; // null = adding new rule
 let polActionFilter = ''; // F20: filter by action (allow/block/'')
+let _polUnusedFilter = false;      // policy-metadata P1: show only stale/never-matched rules
+const POL_UNUSED_DAYS = 90;        // "unused" = not matched within this many days (incl. never)
 let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '', logIdentityFilter = '';
 
 function badgeHTML(status) {
@@ -9261,6 +9266,7 @@ function polAnchorRule(r) {
   const f = document.getElementById('pol-filter');
   if (f && f.value) f.value = '';
   if (polActionFilter) setPolActionFilter('');
+  if (_polUnusedFilter) togglePolUnused(); // don't let the unused filter hide the row we're jumping to
   gotoAnchoredRow('policy', 'pol-table', r.id ? 'data-rule-id' : 'data-priority', r.id || r.priority);
 }
 
@@ -9498,6 +9504,26 @@ function setPolActionFilter(f) {
   renderPolicy();
 }
 
+// polRuleIsUnused — a rule is a cleanup candidate when it has NOT matched within
+// POL_UNUSED_DAYS, which includes never-matched rules (no lastHit). Built on the
+// persisted lastHit signal (policy-metadata P1); honest about "no history yet"
+// — a rule with no lastHit reads as unused, which on a freshly-deployed system
+// means "not seen since tracking began", surfaced via the button tooltip.
+function polRuleIsUnused(r) {
+  if (!r.lastHit) return true;
+  const t = Date.parse(r.lastHit);
+  if (isNaN(t)) return true;
+  return (Date.now() - t) > POL_UNUSED_DAYS * 86400 * 1000;
+}
+
+// togglePolUnused — flip the "unused only" filter and re-render.
+function togglePolUnused() {
+  _polUnusedFilter = !_polUnusedFilter;
+  const btn = document.getElementById('pol-unused-btn');
+  if (btn) btn.className = _polUnusedFilter ? 'btn sm active' : 'btn sm ghost';
+  renderPolicy();
+}
+
 // Signature of the last rendered rulebase state. The 3s tick calls
 // renderPolicy on every cycle while the view is open; rebuilding the whole
 // <tbody> (and re-initializing drag handlers) for identical data is the
@@ -9615,7 +9641,15 @@ function renderPolicy() {
   // skip exactly when the proxy is busy; counters are patched in place
   // instead. JSON-array form so filter text containing separators cannot
   // collide with the other fields.
-  const sig = JSON.stringify([_polVersion, total, q, polActionFilter, _polStagedOrder]);
+  // When the Unused filter is active, row membership depends on lastHit, which
+  // churns under live traffic WITHOUT bumping _polVersion — so fold a coarse
+  // 1-minute time bucket into the sig. The cleanup view then re-filters roughly
+  // once a minute (a just-matched rule drops out; a rule aging past the window
+  // appears) instead of going stale until the next config change. Zero effect
+  // when the filter is off, so the normal render-skip that keeps the rulebase
+  // scalable under traffic is unchanged.
+  const unusedBucket = _polUnusedFilter ? Math.floor(Date.now() / 60000) : 0;
+  const sig = JSON.stringify([_polVersion, total, q, polActionFilter, _polUnusedFilter, unusedBucket, _polStagedOrder]);
   if (sig === _polRenderSig) { _polPatchHitCounts(accessRules); return; }
   _polRenderSig = sig;
 
@@ -9633,6 +9667,7 @@ function renderPolicy() {
   // F20: client-side search + action filter (computed only when rebuilding)
   const filtered = ordered.filter(r => {
     if (polActionFilter && r.action !== polActionFilter) return false;
+    if (_polUnusedFilter && !polRuleIsUnused(r)) return false;
     if (!q) return true;
     const haystack = [r.name, r.sourceIP, r.sourceIdentity, r.sourceGroup, r.authSource,
       r.destFQDN, r.destCategory, r.action, r.fileProfile,
@@ -9652,8 +9687,13 @@ function renderPolicy() {
   document.getElementById('pol-count').textContent = showing;
 
   if (!filtered.length) {
-    tbody.innerHTML = emptyRow(11, 'No rules match the current filter',
-      'Clear the search box or the action filter to see all rules');
+    if (_polUnusedFilter && !q && !polActionFilter) {
+      tbody.innerHTML = emptyRow(11, `✓ No unused rules — every rule matched within ${POL_UNUSED_DAYS} days`,
+        'Turn off the Unused filter to see all rules');
+    } else {
+      tbody.innerHTML = emptyRow(11, 'No rules match the current filter',
+        'Clear the search box, action, or Unused filter to see all rules');
+    }
     return;
   }
   tbody.innerHTML = filtered.map((r, idx) => {

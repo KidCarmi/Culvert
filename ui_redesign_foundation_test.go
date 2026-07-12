@@ -130,6 +130,11 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`id="pol-provenance"`,          // server-stamped provenance display
 		// policy-metadata P1 — persisted hit counters + lastHit
 		`function polHitsTitle`, // Hits-cell hover: total matches + last-match time
+		// policy-metadata P1 — unused-rules filter
+		`function polRuleIsUnused`,     // "not matched within N days (incl. never)" predicate
+		`function togglePolUnused`,     // unused-only filter toggle
+		`id="pol-unused-btn"`,          // the Unused filter button
+		`data-click="togglePolUnused"`, // its dispatch wiring
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("static/index.html missing foundation marker %q", marker)
