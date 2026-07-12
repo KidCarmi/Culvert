@@ -24,8 +24,9 @@ import (
 // countRulesAtPriority returns the number of rules in the store at the given priority.
 func countRulesAtPriority(pri int) int {
 	n := 0
-	for _, r := range policyStore.List() {
-		if r.Priority == pri {
+	rules := policyStore.List()
+	for i := range rules {
+		if rules[i].Priority == pri {
 			n++
 		}
 	}
