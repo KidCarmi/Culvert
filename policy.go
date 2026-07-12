@@ -528,6 +528,72 @@ func (ps *PolicyStore) Delete(priority int) bool {
 	return false
 }
 
+// UpdateByID replaces the rule with the given stable ULID. Unlike Update
+// (which keys on mutable priority), addressing by ID is safe against a
+// concurrent reorder shifting priorities between a client's load and save —
+// the edit always lands on the rule the client loaded (§1 identity seam).
+// Returns false if no rule carries the id.
+func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
+	if id == "" {
+		return false
+	}
+	// Auto-enable FileFiltering when a profile is selected (parity with Update).
+	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
+		r.FileFiltering = true
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i, rule := range ps.rules {
+		if rule.ID != id {
+			continue
+		}
+		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // preserve concurrently-written counters
+		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // (same rule — an edit keeps its traffic history)
+		r.ID = id                                           // identity is immutable across an edit
+		ps.rules[i] = &r
+		ps.sortLocked()
+		ps.bumpVersion()
+		return true
+	}
+	return false
+}
+
+// DeleteByID removes the rule with the given stable ULID. Rename/reorder-safe
+// counterpart to Delete. Returns false if not found.
+func (ps *PolicyStore) DeleteByID(id string) bool {
+	if id == "" {
+		return false
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i, rule := range ps.rules {
+		if rule.ID == id {
+			ps.rules = append(ps.rules[:i], ps.rules[i+1:]...)
+			ps.bumpVersion()
+			return true
+		}
+	}
+	return false
+}
+
+// findByIDCopy returns a copy of the rule with the given ULID, or nil. Used by
+// the ID-addressed API handlers to resolve the before-state for audit/validation
+// without holding the store lock across the handler.
+func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
+	if id == "" {
+		return nil
+	}
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	for i := range ps.rules {
+		if ps.rules[i].ID == id {
+			cp := *ps.rules[i]
+			return &cp
+		}
+	}
+	return nil
+}
+
 // Reorder reassigns priorities according to the provided ordered list of old
 // priorities. The caller provides priorities in the desired new order (index 0
 // becomes priority 1, etc.). Returns false if lengths mismatch.

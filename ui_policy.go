@@ -1114,6 +1114,13 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	if policyVersionConflict(w, r) {
 		return
 	}
+	// Prefer stable-ID addressing when the client supplies ?id= — it is safe
+	// against a concurrent reorder shifting priorities between load and save
+	// (§1 identity seam). ?priority= stays supported for the deprecation window.
+	if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+		apiPolicyUpdateByID(w, r, id)
+		return
+	}
 	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
 	var priority int
 	if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
@@ -1160,6 +1167,11 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	if policyVersionConflict(w, r) { // guards both single- and bulk-delete (dispatched below)
 		return
 	}
+	// Stable-ID addressing (?id=) — reorder-safe, preferred over ?priority=.
+	if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+		apiPolicyDeleteByID(w, r, id)
+		return
+	}
 	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
 	// F19: support bulk delete via JSON body with priorities array.
 	if priorityStr == "" {
@@ -1189,6 +1201,70 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
 	auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
+	saveConfigVersion(sessionAdmin(r), "policy.remove")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// apiPolicyUpdateByID handles PUT /api/policy?id=<ulid> — the reorder-safe
+// addressing path. Mirrors the priority path's validation, auth-rule guard, and
+// metadata stamping but resolves the target by stable ULID (§1 identity seam).
+func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
+	beforeRule := policyStore.findByIDCopy(id)
+	if beforeRule == nil {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+	if ruleTypeOf(beforeRule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	var rule PolicyRule
+	if err := decodeJSON(r, &rule); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if ruleTypeOf(&rule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	// Exclude the rule's CURRENT slot from duplicate checks (same as the
+	// priority path passes the URL priority).
+	if err := validatePolicyRule(rule, policyStore.List(), beforeRule.Priority); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	if !policyStore.UpdateByID(id, rule) {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	policyStore.Save()
+	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
+	auditEventDiff(r, "policy.update", rule.Name,
+		fmt.Sprintf("id=%s priority=%d action=%s", sanitizeLog(id), rule.Priority, rule.Action), beforeRule, rule)
+	saveConfigVersion(sessionAdmin(r), "policy.update")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+// apiPolicyDeleteByID handles DELETE /api/policy?id=<ulid> — reorder-safe delete.
+func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
+	beforeRule := policyStore.findByIDCopy(id)
+	if beforeRule == nil {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	if ruleTypeOf(beforeRule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	if !policyStore.DeleteByID(id) {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	policyStore.Save()
+	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
+	auditEventDiff(r, "policy.remove", beforeRule.Name, fmt.Sprintf("id=%s", sanitizeLog(id)), beforeRule, nil)
 	saveConfigVersion(sessionAdmin(r), "policy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
