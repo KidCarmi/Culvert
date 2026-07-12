@@ -26,8 +26,10 @@ type FileConfig struct {
 		CAPath                string   `yaml:"ca_path"`                 // Path for encrypted Root CA bundle
 		SSLBypassFile         string   `yaml:"ssl_bypass_file"`         // JSON file for persistent/dynamic SSL bypass patterns
 		SSLBypassPatterns     []string `yaml:"ssl_bypass_patterns"`     // Initial patterns (seeded into ssl_bypass_file on first run)
-		ContentScanFile       string   `yaml:"content_scan_file"`       // JSON file for persistent DPI signature patterns
-		ContentScanPatterns   []string `yaml:"content_scan_patterns"`   // Initial DPI patterns (seeded into content_scan_file on first run)
+		ContentScanFile       string   `yaml:"content_scan_file"`       // JSON file for persistent DPI signature patterns. Deprecated: use dpi_file (DPIFile below).
+		ContentScanPatterns   []string `yaml:"content_scan_patterns"`   // Initial DPI patterns. Deprecated: use dpi_patterns (DPIPatterns below).
+		DPIFile               string   `yaml:"dpi_file"`                // JSON file for persistent DPI signature patterns (canonical key; content_scan_file is a deprecated alias)
+		DPIPatterns           []string `yaml:"dpi_patterns"`            // Initial DPI patterns, seeded into dpi_file on first run (canonical key; content_scan_patterns is a deprecated alias)
 		GeoIPDB               string   `yaml:"geoip_db"`                // Path to GeoLite2-Country.mmdb; empty = GeoIP disabled
 		IdPProfilesFile       string   `yaml:"idp_profiles_file"`       // JSON file for generic IdP profiles
 		URLCategoriesFile     string   `yaml:"url_categories_file"`     // JSON file for dynamic URL categories (host lists per category)
@@ -317,7 +319,29 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	if err := fc.validate(); err != nil {
 		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
+	fc.reconcileDeprecatedDPIKeys()
 	return &fc, nil
+}
+
+// reconcileDeprecatedDPIKeys resolves the canonical dpi_file/dpi_patterns
+// YAML keys against the deprecated content_scan_file/content_scan_patterns
+// aliases they replace (terminology governance T-10: the DPI engine had two
+// names split across config/API vs. GUI/logs/metrics). The canonical key
+// wins when both are set; the deprecated key still works but logs a
+// one-line startup notice so operators can migrate on their own schedule.
+// Downstream code keeps reading ContentScanFile/ContentScanPatterns
+// unchanged — this is the single reconciliation point.
+func (fc *FileConfig) reconcileDeprecatedDPIKeys() {
+	if fc.Proxy.DPIFile != "" {
+		fc.Proxy.ContentScanFile = fc.Proxy.DPIFile
+	} else if fc.Proxy.ContentScanFile != "" {
+		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "content_scan_file", "dpi_file")
+	}
+	if len(fc.Proxy.DPIPatterns) > 0 {
+		fc.Proxy.ContentScanPatterns = fc.Proxy.DPIPatterns
+	} else if len(fc.Proxy.ContentScanPatterns) > 0 {
+		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "content_scan_patterns", "dpi_patterns")
+	}
 }
 
 // validate checks FileConfig fields for invalid values at startup.

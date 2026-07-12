@@ -149,6 +149,9 @@ var d0KnownRoutes = func() []string {
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
 //   - 142 — F10 added /api/decryption-exclusions/tunables (GET defaults+bounds /
 //     PUT admin runtime tunables for the auto-exclusion cache).
+//   - 140 — Terminology governance T-10: added canonical /api/dpi and
+//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
+//     /api/content-scan/bypass aliases (same handlers).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
