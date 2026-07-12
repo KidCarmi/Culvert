@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://culvert.local/edge-case-scenario-schema-v1.json",
+  "title": "Culvert Edge-Case Validation Lab — Scenario Manifest",
+  "description": "Versioned schema for a single accepted scenario manifest, covering the full lifecycle: administrator requirement -> configuration -> validation -> traffic execution -> enforcement result -> decision trace -> failure classification.",
+  "type": "object",
+  "required": [
+    "schema_version", "id", "title", "administrator_requirement",
+    "enterprise_validity_rationale", "comparable_product_capability",
+    "capabilities", "semantic_fingerprint", "preconditions", "intent",
+    "expected_culvert_objects", "configuration_steps", "apply_report",
+    "test_vectors", "result_classification", "confidence_score",
+    "cleanup_procedure", "reproduction", "executed_at"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0.0"},
+    "id": {"type": "string", "pattern": "^SWG-[0-9]{4}$"},
+    "title": {"type": "string"},
+    "administrator_requirement": {"type": "string", "description": "Natural-language admin ask."},
+    "enterprise_validity_rationale": {"type": "string", "description": "Why a mature SWG would support this."},
+    "comparable_product_capability": {"type": "string", "description": "PAN-OS/Zscaler/Netskope-class category."},
+    "capabilities": {"type": "array", "items": {"type": "string"}, "description": "Capability-matrix tags."},
+    "semantic_fingerprint": {"type": "string", "description": "16-hex dedup key over match+action+ssl+failure dimensions."},
+    "notes": {"type": "string"},
+    "preconditions": {
+      "type": "object",
+      "required": ["baseline", "fixtures", "network_topology", "requires_auth"],
+      "properties": {
+        "baseline": {"type": "string"},
+        "fixtures": {"type": "string"},
+        "network_topology": {"type": "string"},
+        "requires_auth": {"type": "boolean"}
+      }
+    },
+    "intent": {
+      "type": "object",
+      "description": "Product-neutral policy intent consumed by BOTH the Operator (translated to Culvert API) and the Oracle (independent simulator).",
+      "properties": {
+        "default_action": {"enum": ["allow", "deny"]},
+        "default_auth": {"enum": ["Default", "Exempt"]},
+        "configure_auth": {"type": "boolean"},
+        "auth_backend": {"type": "boolean"},
+        "limitation": {"type": "boolean"},
+        "persistence_check": {"type": "boolean"},
+        "objects": {
+          "type": "object",
+          "properties": {
+            "categories": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+            "category_groups": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+            "decryption_profiles": {"type": "object"},
+            "blocklist": {"type": "array", "items": {"type": "string"}},
+            "ssl_bypass": {"type": "array", "items": {"type": "string"}},
+            "file_profiles": {"type": "object"}
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "priority", "action"],
+            "properties": {
+              "name": {"type": "string"},
+              "priority": {"type": "integer"},
+              "kind": {"enum": ["access", "auth"]},
+              "enabled": {"type": "boolean"},
+              "match": {
+                "type": "object",
+                "properties": {
+                  "src_ip": {"type": ["string", "null"]},
+                  "identity": {"type": ["string", "null"]},
+                  "group": {"type": ["string", "null"]},
+                  "auth_source": {"type": ["string", "null"]},
+                  "fqdn": {"type": ["string", "null"]},
+                  "category": {"type": ["string", "null"]},
+                  "category_group": {"type": ["string", "null"]},
+                  "country": {"type": ["array", "null"], "items": {"type": "string"}},
+                  "schedule": {
+                    "type": ["object", "null"],
+                    "properties": {
+                      "days": {"type": "array", "items": {"type": "string"}},
+                      "start": {"type": "string"}, "end": {"type": "string"},
+                      "tz": {"type": "string"}
+                    }
+                  }
+                }
+              },
+              "action": {"enum": ["allow", "block_page", "drop", "redirect"]},
+              "redirect_url": {"type": ["string", "null"]},
+              "ssl": {"enum": ["inspect", "bypass", "", null]},
+              "tls_skip_verify": {"type": "boolean"},
+              "decryption_profile": {"type": ["string", "null"]},
+              "file_profile": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "post_apply": {"type": "array", "description": "Optional lifecycle mutations (e.g. delete referenced object)."},
+        "triage": {"type": "object", "properties": {"class": {"type": "string"}, "note": {"type": "string"}}}
+      }
+    },
+    "expected_culvert_objects": {"type": "object", "description": "Culvert config objects the Operator expects to create."},
+    "configuration_steps": {
+      "type": "array",
+      "description": "Every admin-API request/response the Operator made.",
+      "items": {"type": "object", "required": ["method", "path", "status"]}
+    },
+    "apply_report": {
+      "type": "object",
+      "description": "Operator's apply + readback outcome; surfaces silent drops / coercion / config errors.",
+      "properties": {
+        "errors": {"type": "array"}, "warnings": {"type": "array"},
+        "created": {"type": "array"},
+        "readback": {"type": "object"},
+        "persistence_after_restart": {"type": "object"}
+      }
+    },
+    "effective_config_excerpt": {"type": "object", "description": "Excerpt of GET /api/config/export after apply."},
+    "test_vectors": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["vector", "expected", "actual", "verdict"],
+        "properties": {
+          "vector": {
+            "type": "object",
+            "required": ["id", "scheme", "host"],
+            "properties": {
+              "id": {"type": "string"},
+              "scheme": {"enum": ["http", "https", "socks5"]},
+              "host": {"type": "string"},
+              "port": {"type": "integer"},
+              "path": {"type": "string"},
+              "method": {"type": "string"},
+              "client_ip": {"type": "string"},
+              "when": {"type": "string"},
+              "upstream_cert": {"enum": ["trusted", "untrusted"]},
+              "inject_headers": {"type": "object"},
+              "assert_header_absent": {"type": "string"}
+            }
+          },
+          "expected": {
+            "type": "object",
+            "description": "Independent Oracle expectation (computed BEFORE the actual).",
+            "required": ["disposition", "certainty", "rationale"],
+            "properties": {
+              "disposition": {"enum": ["allow", "block_page", "drop", "redirect", "auth_challenge", "conn_fail"]},
+              "tls": {"enum": ["tls_intercepted", "tls_passthrough", null]},
+              "matched_rule": {"type": ["string", "null"]},
+              "http_status_family": {"type": ["string", "null"]},
+              "certainty": {"enum": ["deterministic", "uncertain"]},
+              "rationale": {"type": "string"}
+            }
+          },
+          "actual": {
+            "type": "object",
+            "required": ["disposition"],
+            "properties": {
+              "disposition": {"type": "string"},
+              "tls": {"type": ["string", "null"]},
+              "http_status": {"type": "integer"},
+              "curl_exit": {"type": "integer"},
+              "body_head": {"type": "string"},
+              "is_block_page": {"type": "boolean"},
+              "decision_trace": {"type": "array", "items": {"type": "string"}},
+              "stats_delta": {"type": "object"},
+              "probes": {"type": "object"}
+            }
+          },
+          "verdict": {
+            "type": "object",
+            "required": ["verdict", "confidence", "reason"],
+            "properties": {
+              "verdict": {"enum": [
+                "PASS", "PRODUCT_BUG", "MISSING_CAPABILITY", "CONFIGURATION_CONTRACT_GAP",
+                "UX_GAP", "OBSERVABILITY_GAP", "DOCUMENTATION_GAP", "EXPECTED_LIMITATION",
+                "TEST_INFRA_FAILURE", "INVALID_SCENARIO"]},
+              "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+              "reason": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "result_classification": {"enum": [
+      "PASS", "PRODUCT_BUG", "MISSING_CAPABILITY", "CONFIGURATION_CONTRACT_GAP",
+      "UX_GAP", "OBSERVABILITY_GAP", "DOCUMENTATION_GAP", "EXPECTED_LIMITATION",
+      "TEST_INFRA_FAILURE", "INVALID_SCENARIO"]},
+    "confidence_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "cleanup_procedure": {"type": "string"},
+    "reproduction": {
+      "type": "object",
+      "required": ["env", "how"],
+      "properties": {
+        "env": {
+          "type": "object",
+          "description": "Environment fingerprint for reproducibility.",
+          "properties": {
+            "culvert_commit": {"type": "string"},
+            "binary": {"type": "string"},
+            "binary_mtime": {"type": "string"},
+            "fixture_ip": {"type": "string"}
+          }
+        },
+        "how": {"type": "string"}
+      }
+    },
+    "executed_at": {"type": "string", "format": "date-time"}
+  }
+}

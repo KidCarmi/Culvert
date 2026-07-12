@@ -1,0 +1,11 @@
+# Regenerable fixture TLS material — never commit private keys (gitleaks) or certs
+fixtures/certs/*.key
+fixtures/certs/*.crt
+# Regenerable / large fixture payloads
+fixtures/files/*.bin
+fixtures/files/*.exe
+# Python caches
+harness/**/__pycache__/
+**/*.pyc
+harness/cluster.json
+harness/*.json
