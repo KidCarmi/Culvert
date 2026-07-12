@@ -201,3 +201,46 @@ func TestImportPreview_OmitsAbsentSectionsAndSurfacesSettings(t *testing.T) {
 		t.Errorf("settings missing Rate Limit 120: %+v", resp.Settings)
 	}
 }
+
+// TestImportPreview_ModeIndependentSections pins the two sections whose apply
+// path ignores the import mode (flagged by review): upstream proxies always
+// REPLACE (SetProxies) and rate-limit exemptions always APPEND (AddExemption),
+// regardless of the mode flag. The preview must report the real effect, not the
+// generic mode-derived one — otherwise it tells the admin the opposite of what
+// the import will do.
+func TestImportPreview_ModeIndependentSections(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+
+	// Merge mode: upstream import still REPLACES the pool, not appends.
+	respMerge := importPreview(t, "/api/config/import?dryRun=true", map[string]any{
+		"version":         1,
+		"exportedAt":      "2026-02-02T00:00:00Z",
+		"upstreamProxies": []map[string]any{{"url": "http://imp-proxy:8080"}},
+		"rateLimitExempt": []string{"10.1.2.3"},
+	})
+	up, ok := previewSection(respMerge, "Upstream Proxies")
+	if !ok {
+		t.Fatalf("merge preview missing Upstream Proxies section: %+v", respMerge.Sections)
+	}
+	if !strings.HasPrefix(up.Effect, "replace ") {
+		t.Errorf("upstream merge effect = %q; want a 'replace ...' effect (import always replaces the pool)", up.Effect)
+	}
+	if up.Note == "" {
+		t.Errorf("upstream section should carry a mode-independent note")
+	}
+
+	// Replace mode: rate-limit exemptions still APPEND, not replace.
+	respReplace := importPreview(t, "/api/config/import?dryRun=true&mode=replace", map[string]any{
+		"version":         1,
+		"exportedAt":      "2026-02-02T00:00:00Z",
+		"rateLimitExempt": []string{"10.9.9.9"},
+	})
+	rle, ok := previewSection(respReplace, "Rate Limit Exemptions")
+	if !ok {
+		t.Fatalf("replace preview missing Rate Limit Exemptions section: %+v", respReplace.Sections)
+	}
+	if !strings.HasPrefix(rle.Effect, "add ") {
+		t.Errorf("rate-limit-exempt replace-mode effect = %q; want an 'add ...' effect (import always appends)", rle.Effect)
+	}
+}

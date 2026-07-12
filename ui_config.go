@@ -673,6 +673,23 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 			Note:     note,
 		})
 	}
+	// addFixed emits a section whose effect is FIXED regardless of the import
+	// mode — for the two sections whose apply path ignores the mode flag
+	// (upstream proxies always replace via SetProxies; rate-limit exemptions
+	// always append). Using the generic mode-aware add() for these would make
+	// the preview claim the opposite of what the import does.
+	addFixed := func(name string, incoming, current int, effect, note string) {
+		if incoming == 0 {
+			return
+		}
+		sections = append(sections, importPreviewSection{
+			Section:  name,
+			Incoming: incoming,
+			Current:  current,
+			Effect:   effect,
+			Note:     note,
+		})
+	}
 
 	policyNote := ""
 	if !replaceMode && len(b.PolicyRules) > 0 {
@@ -695,10 +712,20 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 	add("Content Scan Bypass Hosts", len(b.ContentScanBypassHosts), len(dpiScanner.BypassHosts()), "")
 	add("File Block Extensions", len(b.FileBlockExtensions), fileBlocker.Count(), "")
 	add("IP Filter List", len(b.IPList), len(ipf.List()), "")
-	add("Rate Limit Exemptions", len(b.RateLimitExempt), len(rl.ListExemptions()), "")
+	// Rate-limit exemptions: apiConfigImport always APPENDS (rl.AddExemption),
+	// even in replace mode — the effect is additive regardless of mode.
+	rlExemptCur := len(rl.ListExemptions())
+	addFixed("Rate Limit Exemptions", len(b.RateLimitExempt), rlExemptCur,
+		fmt.Sprintf("add %d to %d existing", len(b.RateLimitExempt), rlExemptCur),
+		"import always appends exemptions (mode-independent)")
 	add("PAC Exclusions", len(b.PACExclusions), len(pacStore.Get().Exclusions), "")
 	add("Alert Webhooks", len(b.AlertWebhooks), len(globalAlertStore.List()), "")
-	add("Upstream Proxies", len(b.UpstreamProxies), len(upstreamPool.List()), "")
+	// Upstream proxies: apiConfigImport always REPLACES the pool via SetProxies
+	// when the backup carries any — the effect is a full replace regardless of mode.
+	upstreamCur := len(upstreamPool.List())
+	addFixed("Upstream Proxies", len(b.UpstreamProxies), upstreamCur,
+		fmt.Sprintf("replace %d existing with %d incoming", upstreamCur, len(b.UpstreamProxies)),
+		"import always replaces the upstream pool (mode-independent)")
 
 	return sections, buildImportSettingsPreview(b)
 }
@@ -742,6 +769,26 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 	return settings
 }
 
+// writeImportPreview renders the read-only dry-run response for an import: the
+// per-section change summary and the scalar settings that would be applied. It
+// mutates nothing (the audit-ring append mirrors the also-read-only
+// config.export path and satisfies the route's AuditExpected metadata).
+func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool) {
+	sections, settings := buildImportPreview(b, replaceMode)
+	mode := "merge"
+	if replaceMode {
+		mode = "replace"
+	}
+	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	jsonOK(w, map[string]any{
+		"dryRun":     true,
+		"mode":       mode,
+		"exportedAt": b.ExportedAt,
+		"sections":   sections,
+		"settings":   settings,
+	})
+}
+
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
@@ -773,22 +820,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// shows before an admin commits a (potentially destructive replace-mode)
 	// import (P2 import-preview, POLICY-ARCHITECTURE-FUTURE §6).
 	if r.URL.Query().Get("dryRun") == "true" {
-		sections, settings := buildImportPreview(&b, replaceMode)
-		mode := "merge"
-		if replaceMode {
-			mode = "replace"
-		}
-		// Audit the preview like the (also read-only) config.export path — an
-		// admin uploaded a config file to inspect its impact. Satisfies the
-		// route's AuditExpected metadata without mutating state.
-		auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
-		jsonOK(w, map[string]any{
-			"dryRun":     true,
-			"mode":       mode,
-			"exportedAt": b.ExportedAt,
-			"sections":   sections,
-			"settings":   settings,
-		})
+		writeImportPreview(w, r, &b, replaceMode)
 		return
 	}
 
