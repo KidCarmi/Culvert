@@ -88,7 +88,10 @@ func TestResolveSSLAction_FailCloseNeverConsults(t *testing.T) {
 func TestClassifyOriginInspectFailure_NeverLearnsCertVerify(t *testing.T) {
 	certVerifyErrs := []error{
 		x509.UnknownAuthorityError{},
-		&x509.CertificateInvalidError{Reason: x509.Expired},
+		// VALUE form (how crypto/x509 actually returns it) with a reason whose
+		// Error() string does NOT match the substring fallback — so this stays
+		// no-learn ONLY if the errors.As TYPE check works (pins the value-target fix).
+		x509.CertificateInvalidError{Reason: x509.IncompatibleUsage},
 		x509.HostnameError{Host: "x"},
 		errors.New("x509: certificate signed by unknown authority"),
 		errors.New("tls: failed to verify certificate: x509: certificate has expired"),
@@ -134,14 +137,14 @@ func TestRecordAutoExclude_PromotesAndAudits(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 2})
 	const host = "learn-audit.example"
 	baseline := time.Now().UnixMilli()
-	recordAutoExclude(host, autoExReasonUnsupported, "198.51.100.7") // 1st distinct IP → no promote
-	recordAutoExclude(host, autoExReasonUnsupported, "198.51.100.8") // 2nd → promote
+	recordAutoExclude(host, autoExReasonUnsupported, "198.51.100.7") // 1st subnet → no promote
+	recordAutoExclude(host, autoExReasonUnsupported, "198.51.101.8") // 2nd distinct subnet → promote
 	if _, ok := autoExclude.Contains(host); !ok {
 		t.Fatal("host not excluded after confirm-count reached")
 	}
 	found := false
 	for _, e := range auditGet() {
-		if e.TS >= baseline && e.Action == "decryption.autoexclude.learn" && e.Object == host && strings.Contains(e.Actor, "198.51.100.8") {
+		if e.TS >= baseline && e.Action == "decryption.autoexclude.learn" && e.Object == host && strings.Contains(e.Actor, "198.51.101.8") {
 			found = true
 			break
 		}

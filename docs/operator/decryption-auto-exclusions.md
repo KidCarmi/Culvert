@@ -77,9 +77,15 @@ rule that is **fail-close never consults the cache**, so:
 
 - Each row: host, reason, **hit count** (how much traffic rode the bypass —
   triage signal), distinct-client count, learned time, and expiry.
-- The stats line shows the posture: active/pending counts, confirm-count, TTLs,
-  and cap — so you can prove the configuration to an auditor. A deployment with no
-  fail-open profile shows an empty, inert cache.
+- The panel's first line is the **provable-OFF / footprint** evidence: it states
+  either "Fail-open is not configured — SSL inspection cannot be auto-disabled on
+  this node" (0 fail-open profiles) or how many fail-open profiles exist and **how
+  many policy rules reference them**. This is the affirmative fact an auditor asks
+  for — an empty cache alone does not prove inspection *cannot* be disabled; 0
+  fail-open rules does. A high rule count is your over-adoption signal (a fail-open
+  profile bound to a broad/catch-all rule).
+- The stats line shows the posture: active/pending counts, confirm-count (distinct
+  client **subnets**), TTLs, and cap.
 - **Evict** one host (inspection resumes immediately; it may re-learn if still
   incompatible) or **Clear all**. Both actions are audited.
 
@@ -112,7 +118,12 @@ knowledge of the host. Behavior by path:
 
 - **Strip inspection path, server-observed failure** (unsupported params /
   origin-requires-client-cert): the current session **is rescued live** — no
-  visible failure.
+  visible failure. This live rescue is **confirm-count-exempt**: it bypasses the
+  *triggering* session on the first non-spoofable server signal (the confirm-count
+  protects the *persistent* cache that future sessions read, not the session that
+  hit the failure). Because it only applies to hosts an operator deliberately put
+  on a fail-open rule, size fail-open rule scope accordingly — keep DLP-critical
+  hosts on fail-close.
 - **Native-HTTP/2 inspection path, or client-pinning**: **learn-only** — the
   first session fails, and the *next* session to that host self-heals via the
   cache once the confirm-count is met.

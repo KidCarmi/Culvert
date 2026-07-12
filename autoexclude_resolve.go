@@ -34,6 +34,32 @@ import (
 	"time"
 )
 
+// failOpenFootprint reports how many decryption profiles opt into fail-open and
+// how many DISTINCT policy rules reference such a profile. It is the affirmative
+// "can this deployment auto-disable inspection at all" evidence an auditor asks
+// for: 0 profiles / 0 rules means the auto-exclusion cache is not just empty but
+// inert (nothing can ever learn), which an empty cache alone does not prove. It
+// also surfaces over-adoption — a broad rule bound to a fail-open profile shows
+// up as a high rule count.
+func failOpenFootprint() (profiles, rules int) {
+	seen := make(map[string]bool)
+	list := globalDecryptionProfiles.List()
+	for i := range list { // index-based: Profile is 160 bytes (gocritic rangeValCopy)
+		if list[i].OnInspectError != "fail-open" {
+			continue
+		}
+		profiles++
+		_, refs := objectReferences("decryption-profile", list[i].Name)
+		for j := range refs {
+			if key := refs[j].ID; key != "" && !seen[key] {
+				seen[key] = true
+				rules++
+			}
+		}
+	}
+	return profiles, rules
+}
+
 // resolveFailOpen reports whether the matched rule's decryption profile opts into
 // fail-open (OnInspectError=="fail-open"). Fail-safe at eval: a dangling profile
 // ref resolves to false (fail-close), so a bad/absent reference can never
@@ -83,7 +109,10 @@ func classifyOriginInspectFailure(err error) (AutoExcludeReason, bool) {
 // never be auto-excluded (it is a Block decision, and the poisoning vector). Go
 // wraps these in tls.CertificateVerificationError (Go 1.20+) over the x509 types.
 func isOriginCertVerifyErr(err error) bool {
-	var cve *x509.CertificateInvalidError
+	// crypto/x509 returns these by VALUE, so the errors.As targets must be value
+	// types (a *CertificateInvalidError target would never match and the check
+	// would be dead code — the string fallback below would silently carry it).
+	var cve x509.CertificateInvalidError
 	var uae x509.UnknownAuthorityError
 	var hne x509.HostnameError
 	if errors.As(err, &cve) || errors.As(err, &uae) || errors.As(err, &hne) {
@@ -121,7 +150,7 @@ func classifyClientInspectFailure(err error) (AutoExcludeReason, bool) {
 	if containsAny(msg,
 		"bad certificate", "unknown certificate authority", "certificate required",
 		"certificate expired", "certificate unknown", "certificate revoked",
-		"unknown ca", "access denied", "no application protocol") {
+		"unknown ca", "access denied") {
 		return autoExReasonClientPinned, true
 	}
 	return "", false

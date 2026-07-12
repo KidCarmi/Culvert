@@ -23,6 +23,14 @@ func TestStore_AddValidateUnique(t *testing.T) {
 	if _, err := s.Add(Profile{Name: "bad2", MinTLSVersion: "1.4"}); err == nil {
 		t.Fatal("invalid minTlsVersion must be rejected")
 	}
+	// Invalid OnInspectError rejected on Add — the CP→DP / import anti-smuggling
+	// wall (also enforced in ReplaceAll below).
+	if _, err := s.Add(Profile{Name: "bad-oie", OnInspectError: "explode"}); err == nil {
+		t.Fatal("invalid onInspectError must be rejected")
+	}
+	if _, err := s.Add(Profile{Name: "ok-oie", OnInspectError: "fail-open"}); err != nil {
+		t.Fatalf("valid onInspectError rejected: %v", err)
+	}
 	// min>max rejected.
 	if _, err := s.Add(Profile{Name: "bad3", MinTLSVersion: "1.3", MaxTLSVersion: "1.2"}); err == nil {
 		t.Fatal("min>max must be rejected")
@@ -82,8 +90,9 @@ func TestStore_ReplaceAllPreservesIDsAndSkipsInvalid(t *testing.T) {
 	s := New()
 	s.ReplaceAll([]Profile{
 		{ID: "fixed-id-01", Name: "keep", InspectHTTP2: boolPtr(false)},
-		{Name: "bad", OnUnsupported: "explode"}, // invalid → skipped
-		{Name: "backfill"},                      // valid, no ID → assigned
+		{Name: "bad", OnUnsupported: "explode"},       // invalid → skipped
+		{Name: "bad-oie", OnInspectError: "sneak-by"}, // invalid → skipped (CP→DP wall)
+		{Name: "backfill"}, // valid, no ID → assigned
 	})
 	names := s.Names()
 	if len(names) != 2 {

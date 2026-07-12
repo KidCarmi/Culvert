@@ -632,9 +632,15 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
+		// Affirmative provable-OFF / over-adoption evidence: how many profiles opt
+		// into fail-open and how many rules reference them. 0/0 ⇒ nothing can ever
+		// auto-disable inspection (an empty cache alone does not prove this).
+		foProfiles, foRules := failOpenFootprint()
 		jsonOK(w, map[string]any{
-			"exclusions": autoExclude.List(),
-			"stats":      autoExclude.Stats(),
+			"exclusions":         autoExclude.List(),
+			"stats":              autoExclude.Stats(),
+			"fail_open_profiles": foProfiles,
+			"fail_open_rules":    foRules,
 		})
 
 	case http.MethodDelete:

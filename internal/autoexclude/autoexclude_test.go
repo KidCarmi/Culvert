@@ -32,12 +32,39 @@ func TestConfirmCount_DistinctIPs(t *testing.T) {
 	if _, ok := c.Contains("evil.example"); ok {
 		t.Fatal("host excluded from a single client — confirm-count bypassed")
 	}
-	// A second DISTINCT client crosses the threshold → promote.
-	if promoted := c.Observe("evil.example", ReasonClientPinned, "10.0.0.2"); !promoted {
+	// A second client in a DISTINCT subnet crosses the threshold → promote.
+	if promoted := c.Observe("evil.example", ReasonClientPinned, "10.1.0.2"); !promoted {
 		t.Fatal("second distinct client did not promote")
 	}
 	if r, ok := c.Contains("evil.example"); !ok || r != ReasonClientPinned {
 		t.Fatalf("post-promotion Contains = (%q,%v), want (client_pinned,true)", r, ok)
+	}
+}
+
+// TestConfirmCount_SubnetBuckets pins that the distinct-client count aggregates
+// by subnet prefix (/64 v6, /24 v4), so one host that owns many addresses in a
+// single prefix cannot self-poison — the IPv6 /64 self-poison the security review
+// flagged.
+func TestConfirmCount_SubnetBuckets(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	c := newTestCache(Config{ConfirmN: 2}, clk)
+	// Two addresses in the SAME IPv6 /64 collapse to one bucket → no promotion.
+	c.Observe("v6.example", ReasonClientPinned, "2001:db8:a:b::1")
+	if c.Observe("v6.example", ReasonClientPinned, "2001:db8:a:b::2") {
+		t.Fatal("two addrs in one /64 promoted — subnet bucketing not applied")
+	}
+	// A different /64 crosses the threshold.
+	if !c.Observe("v6.example", ReasonClientPinned, "2001:db8:a:c::9") {
+		t.Fatal("distinct /64 did not promote")
+	}
+	// Same for IPv4 /24.
+	c2 := newTestCache(Config{ConfirmN: 2}, clk)
+	c2.Observe("v4.example", ReasonClientPinned, "203.0.113.10")
+	if c2.Observe("v4.example", ReasonClientPinned, "203.0.113.250") {
+		t.Fatal("two addrs in one /24 promoted — subnet bucketing not applied")
+	}
+	if !c2.Observe("v4.example", ReasonClientPinned, "203.0.114.1") {
+		t.Fatal("distinct /24 did not promote")
 	}
 }
 

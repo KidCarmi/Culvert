@@ -2930,7 +2930,9 @@ Firefox (all platforms):
               client cert, or a pinned client rejects our cert), the host is learned into a volatile cache after a
               confirm-count of distinct clients, and subsequent sessions to it <em>bypass inspection</em> until the
               entry expires (12h; 1h for pinned). It does <em>not</em> fire on an untrusted/expired cert (that stays
-              a block). Every learn is alerted, audited, and listed under
+              a block). The <em>first</em> connection to a never-before-seen pinned host will still fail — add known
+              pinned apps to the manual SSL Bypass list for guaranteed first-session success. Every learn is alerted,
+              audited, and listed under
               <a href="#" data-click="switchView" data-arg="decexclusions" style="color:var(--accent)">Decryption Exclusions</a>.
               Keep inspection-mandatory hosts on <em>fail-close</em> rules — those are never auto-excluded.
             </p>
@@ -5266,7 +5268,7 @@ async function fetchDecExclusions() {
   try {
     const d = await api('/api/decryption-exclusions');
     _decExclusions = d.exclusions || [];
-    renderDecExclusions(d.stats || {});
+    renderDecExclusions(d.stats || {}, d.fail_open_profiles || 0, d.fail_open_rules || 0);
   } catch(e) { console.error(e); }
 }
 
@@ -5277,12 +5279,20 @@ function decExclReasonLabel(r) {
   return r || '—';
 }
 
-function renderDecExclusions(stats) {
+function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
   const s = document.getElementById('decexcl-stats');
   if (s) {
-    s.textContent = `Active: ${stats.active ?? 0} · Pending (unconfirmed): ${stats.pending ?? 0} · ` +
-      `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
-      `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`;
+    // Affirmative provable-OFF line first: 0 fail-open rules ⇒ inspection can
+    // never be auto-disabled, regardless of the (momentarily empty) cache.
+    const off = (failOpenProfiles === 0);
+    s.innerHTML = `<div style="margin-bottom:6px;font-weight:600;color:${off ? 'var(--green,#16a34a)' : 'var(--red)'}">` +
+      (off
+        ? 'Fail-open is not configured — SSL inspection cannot be auto-disabled on this node.'
+        : `⚠ ${failOpenProfiles} fail-open profile(s), referenced by ${failOpenRules} policy rule(s) — those rules can auto-disable inspection.`) +
+      '</div>' +
+      escHtml(`Active: ${stats.active ?? 0} · Pending (unconfirmed): ${stats.pending ?? 0} · ` +
+      `Confirm-count: ${stats.confirm_n ?? '?'} distinct client subnets · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
+      `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`);
   }
   const el = document.getElementById('decexcl-list');
   if (!el) return;

@@ -616,7 +616,7 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 		if reason, ok := autoExclude.Contains(host); ok {
 			sslAction = SSLBypass
 			recordAutoExcludeHit()
-			logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (reason=%s)", clientIP, sanitizeLog(host), reason)
+			logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (reason=%s)", sanitizeLog(clientIP), sanitizeLog(host), reason)
 		}
 	}
 	return sslAction, tlsSkipVerify

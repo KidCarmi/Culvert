@@ -35,6 +35,7 @@
 package autoexclude
 
 import (
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -170,6 +171,24 @@ func normHost(host string) string {
 	return hostutil.NormalizeHost(hostutil.StripHostPort(host))
 }
 
+// clientBucket collapses a client IP to its provider-assignable prefix so the
+// "distinct client" confirm-count cannot be gamed by one host that owns many
+// addresses. A single machine legitimately holds an entire IPv6 /64 (SLAAC /
+// privacy extensions) and often a NATed IPv4 /24, so counting raw addresses
+// would let one attacker present N "distinct" sources against a fail-open rule.
+// We count distinct /64 (v6) and /24 (v4) buckets instead. An unparseable IP
+// falls back to itself (still requires confirmN distinct such values).
+func clientBucket(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(24, 32)).String()
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String()
+}
+
 func (c *Cache) reasonTTL(r Reason) time.Duration {
 	if r == ReasonClientPinned {
 		return c.pinnedTTL
@@ -205,7 +224,7 @@ func (c *Cache) Observe(host string, reason Reason, clientIP string) (promoted b
 		c.pend[key] = p
 	}
 	if clientIP != "" {
-		p.clients[clientIP] = struct{}{}
+		p.clients[clientBucket(clientIP)] = struct{}{} // count distinct subnets, not raw addresses
 	}
 	if len(p.clients) < c.confirmN {
 		return false // still gathering confirmation
