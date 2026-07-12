@@ -465,6 +465,43 @@ The panel shows, top to bottom:
 | **Learned / Expires** | When it entered the cache and when it will auto-clear. |
 | **Footprint** | The auditable “can inspection be disabled here at all” fact. A high *rule* count is your over-adoption signal. |
 
+### Step 4b — Verify it is working (post-enable checklist)
+
+Run this once after enabling fail-open on a profile, to confirm the feature is live
+and correctly scoped **before** relying on it in production. Each step names exactly
+what to look for.
+
+1. **Footprint is correct.** Open **Monitor → Decryption Exclusions**. The footprint
+   line should read “⚠ 1 fail-open profile(s), referenced by N policy rule(s)” with
+   **N equal to the number of rules you intentionally bound** to the profile. If N is
+   higher than expected, a broad rule is sharing the profile — narrow it before
+   proceeding (see [7.17](#717-footprint-shows-more-rules-than-expected)).
+2. **Learning happens.** From a client matched by the fail-open rule, reach a
+   host you know is inspection-incompatible (a pinned app, or a lab origin requiring a
+   client cert). Repeat from a **second distinct client** (or two authenticated
+   users). Expected: the `pending` stat rises to 1 after the first failure, then an
+   **active row** appears after the second.
+3. **The learn is observable.** Confirm all three fire on promotion:
+   - **Log:** `SSL_AUTOEXCLUDE_LEARN <ip> -> "<host>" (scope="<profile>" reason=…)`.
+   - **Audit:** an `decryption.autoexclude.learn` entry, actor = the triggering client
+     IP, object `<profile>/<host>`.
+   - **Metric:** `culvert_decrypt_autoexclude_total{reason,scope}` increments and
+     `culvert_decrypt_autoexclude_active` = 1.
+4. **Self-heal works.** From a third session to the same host under the same rule,
+   confirm it now **bypasses**: `SSL_AUTOEXCLUDE_BYPASS` in the log and
+   `culvert_decrypt_autoexclude_hit_total` increments; the row's **Hits** column
+   climbs.
+5. **Scope isolation holds.** From a rule bound to a **different** (or fail-close)
+   profile, reach the same host and confirm it is **still inspected** (no bypass log).
+   This proves one profile's exclusion does not leak into another's traffic.
+6. **Eviction restores inspection.** Click **Evict** on the row; confirm the next
+   session to that host is inspected again (and an `decryption.autoexclude.evict`
+   audit entry is written).
+
+If any step deviates, go to [Part 7](#part-7--troubleshooting-guide) — the failing
+step maps directly to a ticket there (learning → 7.1, self-heal → 7.3, isolation →
+7.3/7.11, metrics → 7.5).
+
 ### Step 5 — Evict an entry
 
 Click **Evict** on a row. A **confirmation dialog** ("Re-enable SSL inspection for
@@ -761,6 +798,115 @@ Metrics → Audit → Resolution.**
   keep it working, it must be bypassed (auto or manual). To inspect it, resolve the
   incompatibility (trust the CA, adjust TLS params) — or accept the `502`.
 
+### 7.11 First connection to a new host fails (expected)
+
+- **Symptoms:** a user reports the *first* attempt to a newly-incompatible host
+  failed, then it worked.
+- **Likely cause:** **by design.** For pinning / unsupported-params / native-HTTP/2,
+  the feature is learn-only — the first sessions fail (`502`) until the confirm-count
+  promotes the host; the next session self-heals. Only origin-requires-client-cert on
+  the strip path rescues the first session.
+- **Verification:** the timeline shows early `502`s then `SSL_AUTOEXCLUDE_BYPASS`.
+- **Metrics:** `…_pending` then `…_active` +1, then `…_hit_total` climbing.
+- **Resolution:** expected; explain the confirm-count. For a **known-permanent**
+  incompatibility, add the host to **manual SSL Bypass** for guaranteed first-session
+  success.
+
+### 7.12 Feature enabled but nothing ever learns anywhere
+
+- **Symptoms:** fail-open is set, but no host ever appears and `pending` stays 0.
+- **Likely cause:** (a) SSL **inspection is not actually happening** on that traffic
+  (the rule bypasses, or a manual SSL Bypass pattern already matches), so there is no
+  inspect failure to observe; (b) the profile is set on a rule that no live traffic
+  matches; (c) the traffic genuinely inspects fine.
+- **Verification:** confirm the rule's SSLAction is *inspect*; confirm no manual
+  bypass pattern shadows the traffic (look for `SSL_BYPASS_PATTERN`); confirm live
+  sessions match the rule (policy simulator / rule hit counters).
+- **Resolution:** if inspection isn't occurring, fix the rule/bypass first —
+  auto-exclusion only learns from *inspect failures*.
+
+### 7.13 Two nodes show different exclusions
+
+- **Symptoms:** the Decryption Exclusions panel differs between CP and DP (or two DPs).
+- **Likely cause:** **by design.** The cache is **per-node and volatile**; each node
+  learns independently and nothing is synced across the HA fence.
+- **Verification:** compare `learned_at`/hosts per node — they reflect each node's own
+  traffic.
+- **Resolution:** none needed. If you want a host bypassed cluster-wide and durably,
+  use **manual SSL Bypass** (which *is* config and *is* synced), not the adaptive
+  cache. See [HA behavior](#part-6--edge-cases).
+
+### 7.14 After a config rollback, exclusions didn't change
+
+- **Symptoms:** you rolled config back to an earlier version, but the panel is
+  unchanged.
+- **Likely cause:** **by design.** The cache is **off the config-version surface** —
+  rollback restores profiles/rules, not runtime learned state. What *changes* is which
+  scope is consulted going forward.
+- **Verification:** confirm the rolled-back profile's `OnInspectError` value; entries
+  under a now-fail-close scope simply stop being read and expire out.
+- **Resolution:** if you need entries gone now, **Clear all** (they are volatile
+  anyway).
+
+### 7.15 I renamed a profile — will exclusions break?
+
+- **Symptoms:** concern that renaming a fail-open profile orphans its exclusions.
+- **Likely cause:** none — entries key on the profile **ID**, stable across rename.
+- **Verification:** after rename, the panel shows the **new** name for existing rows
+  (resolved by ID); bypass continues uninterrupted.
+- **Resolution:** none needed. Rename freely.
+
+### 7.16 Panel shows rows badged "deleted profile"
+
+- **Symptoms:** rows appear with a "deleted" badge and blast radius 0.
+- **Likely cause:** the owning profile was deleted while entries were still cached.
+  They are no longer consulted (no rule references the profile) and will expire out.
+- **Verification:** the row's scope name falls back to the cached value; `scope_names`
+  omits the ID (the deletion signal).
+- **Resolution:** cosmetic; **Evict** them to clear immediately, or let TTL handle it.
+
+### 7.17 Footprint shows more rules than expected
+
+- **Symptoms:** the footprint line reads a higher rule count than the rules you
+  knowingly bound.
+- **Likely cause:** **over-adoption** — multiple rules (or a broad/catch-all rule)
+  reference the same fail-open profile, so its blast radius is larger than intended.
+- **Verification:** `GET /api/decryption-exclusions` → `scope_rule_counts`; find every
+  rule referencing the profile.
+- **Resolution:** narrow or unbind the unintended rules. **Never** leave a fail-open
+  profile on a catch-all rule. This is a security finding, not cosmetic.
+
+### 7.18 Memory / "cache full" concern
+
+- **Symptoms:** an operator worries the cache could grow unbounded.
+- **Likely cause:** none — active and pending maps are each capped at 4096 with
+  amortized oldest-first eviction; measured retention is single-digit MB even under a
+  12k-host flood.
+- **Verification:** `stats.active` / `stats.pending` vs `max_entries` (4096).
+- **Resolution:** if `active` regularly nears 4096 you have genuine broad
+  incompatibility (reconsider inspecting that traffic) or over-adoption (narrow the
+  rules) — not a capacity bug.
+
+### 7.19 A pinned app breaks again every hour
+
+- **Symptoms:** a known pinned app works, then fails on first use ~hourly, then
+  recovers.
+- **Likely cause:** `client_pinned` entries use the **shorter 1h TTL** by design
+  (client-side, spoofable). On expiry the host is re-inspected, fails once per
+  confirming client, then re-learns.
+- **Verification:** the row's reason is **Client pinned** and expiry is ~1h;
+  `learned_at` advances hourly.
+- **Resolution:** for a known-permanent pinned app, add it to **manual SSL Bypass**
+  (durable, no re-learn gap, first-session success).
+
+### 7.20 Operator/viewer cannot evict (permission denied)
+
+- **Symptoms:** a user can see the panel but the Evict/Clear action returns 403.
+- **Likely cause:** **RBAC** — reading is **viewer**, evicting/clearing is
+  **operator** (or admin).
+- **Verification:** check the user's role; `GET` succeeds, `DELETE` 403 ⇒ viewer.
+- **Resolution:** grant operator role, or have an operator perform the eviction.
+
 ---
 
 ## Part 8 — FAQ
@@ -921,6 +1067,30 @@ Proven end-to-end by the staged-rollout rehearsal test (`TestRolloutRehearsal`).
   `fail_open_rules`, `stats`. `0/0` = inert.
 - **Occupancy:** `stats.active` / `stats.pending` vs `max_entries` (4096).
 - **Node scope:** remember the cache is per-node; check each CP/DP.
+
+### Daily checks
+
+- **New learns since yesterday.** Scan `decryption.autoexclude.learn` audit events
+  (or the `…_total` rate). For each new host, confirm it is an *expected* class of
+  incompatibility. **Any learn for a host on your inspection-mandatory allowlist is a
+  same-day incident** ([incident response](#incident-response--an-inspection-mandatory-host-is-bypassed)).
+- **Active gauge trend.** `culvert_decrypt_autoexclude_active` per node — flat or
+  slow growth is normal; a step change means a new broadly-incompatible host or an
+  over-adopted rule.
+- **Pending pressure.** `…_pending` near 4096 on any node = a flood/poison attempt or
+  a very noisy segment — investigate the actor IPs in the learn audits.
+
+### Weekly checks
+
+- **Blast-radius drift.** Re-read the footprint (`fail_open_rules` /
+  `scope_rule_counts`). If the rule count grew, a rule was bound to a fail-open
+  profile — confirm it was intentional and narrow if not ([7.17](#717-footprint-shows-more-rules-than-expected)).
+- **Review the active list.** Confirm every entry is an expected host. Promote any
+  **known-permanent** incompatibility to **manual SSL Bypass** and evict its learned
+  entry (durable, first-session, no hourly re-learn gap).
+- **Rescue-reason mix.** Break `…_total` down by `reason`. A rising `client_cert_required`
+  share on internet-facing traffic warrants a look (it is the one live-rescue reason —
+  see [residual risks](#residual-risks-stated-plainly)).
 
 ### Monitoring
 
