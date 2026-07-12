@@ -901,6 +901,8 @@ func stampRuleMetadataForWrite(rule *PolicyRule, before *PolicyRule, actor strin
 	rule.ModifiedBy = actor
 }
 
+// apiPolicy dispatches the access-rule CRUD endpoint. The per-method branches
+// live in apiPolicyCreate/Update/Delete so this stays a thin router (gocognit).
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -912,139 +914,143 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			"version":   ver,
 			"updatedAt": updatedAt,
 		})
-
 	case http.MethodPost:
-		if !requireRole(w, r, RoleOperator) {
-			return
-		}
-		var rule PolicyRule
-		if err := decodeJSON(r, &rule); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if rule.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
-			return
-		}
-		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only —
-		// this operator-level endpoint must not create authentication waivers.
-		if ruleTypeOf(&rule) == ruleTypeAuth {
-			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-			return
-		}
-		if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
-		added := policyStore.Add(rule)
-		policyStore.Save()
-		logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
-		logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
-		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
-		logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
-		auditEventDiff(r, "policy.add", added.Name,
-			fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
-		saveConfigVersion(sessionAdmin(r), "policy.add")
-		jsonOK(w, added)
-
+		apiPolicyCreate(w, r)
 	case http.MethodPut:
-		if !requireRole(w, r, RoleOperator) {
-			return
-		}
-		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
-		var priority int
-		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
-			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
-			return
-		}
-		// Snapshot before state for diff.
-		var beforeRule *PolicyRule
-		for _, existing := range policyStore.List() {
-			if existing.Priority == priority {
-				r2 := existing
-				beforeRule = &r2
-				break
-			}
-		}
-		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
-		if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
-			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-			return
-		}
-		var rule PolicyRule
-		if err := decodeJSON(r, &rule); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if ruleTypeOf(&rule) == ruleTypeAuth {
-			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-			return
-		}
-		if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-		if !policyStore.Update(priority, rule) {
-			http.Error(w, "rule not found", http.StatusNotFound)
-			return
-		}
-		policyStore.Save()
-		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
-		logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
-		auditEventDiff(r, "policy.update", rule.Name,
-			fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
-		saveConfigVersion(sessionAdmin(r), "policy.update")
-		jsonOK(w, map[string]any{"ok": true})
-
+		apiPolicyUpdate(w, r)
 	case http.MethodDelete:
-		if !requireRole(w, r, RoleOperator) {
-			return
-		}
-		priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
-		// F19: support bulk delete via JSON body with priorities array.
-		if priorityStr == "" {
-			apiPolicyBulkDelete(w, r)
-			return
-		}
-		var priority int
-		if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
-			http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
-			return
-		}
-		// Snapshot before deletion.
-		var beforeRule *PolicyRule
-		for _, existing := range policyStore.List() {
-			if existing.Priority == priority {
-				r2 := existing
-				beforeRule = &r2
-				break
-			}
-		}
-		// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
-		if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
-			http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
-			return
-		}
-		if !policyStore.Delete(priority) {
-			http.Error(w, "rule not found", http.StatusNotFound)
-			return
-		}
-		policyStore.Save()
-		name := fmt.Sprintf("priority=%d", priority)
-		if beforeRule != nil {
-			name = beforeRule.Name
-		}
-		logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
-		logger.Printf("UI: policy rule deleted priority=%s", logPriority)
-		auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
-		saveConfigVersion(sessionAdmin(r), "policy.remove")
-		w.WriteHeader(http.StatusNoContent)
-
+		apiPolicyDelete(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// findRuleByPriorityCopy returns a copy of the stored rule at the given
+// priority (nil if none) — the before-state snapshot for diff/audit.
+func findRuleByPriorityCopy(priority int) *PolicyRule {
+	for _, existing := range policyStore.List() {
+		if existing.Priority == priority {
+			r2 := existing
+			return &r2
+		}
+	}
+	return nil
+}
+
+func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var rule PolicyRule
+	if err := decodeJSON(r, &rule); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if rule.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only —
+	// this operator-level endpoint must not create authentication waivers.
+	if ruleTypeOf(&rule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
+	added := policyStore.Add(rule)
+	policyStore.Save()
+	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
+	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
+	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
+	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
+	auditEventDiff(r, "policy.add", added.Name,
+		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
+	saveConfigVersion(sessionAdmin(r), "policy.add")
+	jsonOK(w, added)
+}
+
+func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+	var priority int
+	if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+		http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+		return
+	}
+	beforeRule := findRuleByPriorityCopy(priority)
+	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+	if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	var rule PolicyRule
+	if err := decodeJSON(r, &rule); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if ruleTypeOf(&rule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+	if !policyStore.Update(priority, rule) {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	policyStore.Save()
+	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
+	auditEventDiff(r, "policy.update", rule.Name,
+		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
+	saveConfigVersion(sessionAdmin(r), "policy.update")
+	jsonOK(w, map[string]any{"ok": true})
+}
+
+func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	priorityStr := strings.TrimSpace(r.URL.Query().Get("priority"))
+	// F19: support bulk delete via JSON body with priorities array.
+	if priorityStr == "" {
+		apiPolicyBulkDelete(w, r)
+		return
+	}
+	var priority int
+	if _, err := fmt.Sscanf(priorityStr, "%d", &priority); err != nil {
+		http.Error(w, "missing or invalid priority param", http.StatusBadRequest)
+		return
+	}
+	beforeRule := findRuleByPriorityCopy(priority)
+	// Auth (Stage-1) rules are admin-managed via /api/authpolicy only.
+	if beforeRule != nil && ruleTypeOf(beforeRule) == ruleTypeAuth {
+		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+		return
+	}
+	if !policyStore.Delete(priority) {
+		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	policyStore.Save()
+	name := fmt.Sprintf("priority=%d", priority)
+	if beforeRule != nil {
+		name = beforeRule.Name
+	}
+	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
+	auditEventDiff(r, "policy.remove", name, "", beforeRule, nil)
+	saveConfigVersion(sessionAdmin(r), "policy.remove")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // validateMoveBody checks the /api/policy/move position/targetName combination.

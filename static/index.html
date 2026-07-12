@@ -7144,6 +7144,11 @@ async function clonePolicy(pri) {
   document.getElementById('pol-tls-skip').checked = !!r.tlsSkipVerify;
   document.getElementById('pol-log-uri').checked = !!r.logFullUri;
   document.getElementById('pol-log-traffic').checked = r.logTraffic !== false;
+  // Carry the source rule's comment into the clone, and clear provenance — the
+  // clone is a NEW unsaved rule (server stamps fresh createdAt/modifiedBy on
+  // create), so it must not show the source's or a prior edit's birth history.
+  document.getElementById('pol-comment').value = r.comment || '';
+  polRenderProvenance(null);
   clearGroupSelection();
   if (r.sourceGroup) selectGroup(r.sourceGroup);
   _selectedCountries = [...(r.destCountry || [])];

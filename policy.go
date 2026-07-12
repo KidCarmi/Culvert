@@ -126,9 +126,20 @@ type PolicyRule struct {
 	// audit diff. All omitempty so pre-feature rules and the many tests that
 	// construct PolicyRule directly are byte-unchanged.
 	CreatedAt  string `json:"createdAt,omitempty"`  // RFC3339 UTC; set once at create, preserved across edits
-	ModifiedAt string `json:"modifiedAt,omitempty"` // RFC3339 UTC; restamped on every write
-	ModifiedBy string `json:"modifiedBy,omitempty"` // actor identity of the last write
-	Comment    string `json:"comment,omitempty"`    // admin free-text note
+	ModifiedAt string `json:"modifiedAt,omitempty"` // RFC3339 UTC; restamped on every CONTENT edit (create/update)
+	ModifiedBy string `json:"modifiedBy,omitempty"` // actor identity of the last content edit
+	Comment    string `json:"comment,omitempty"`    // admin free-text note (client-authoritative, like Name/Action)
+
+	// Metadata scope (policy-metadata P1): ModifiedAt/ModifiedBy track the last
+	// edit to a rule's DEFINITION (its fields), stamped by
+	// stampRuleMetadataForWrite in the create/update handlers. Position-only
+	// changes — reorder (Reorder/PermutePriorities) and move (apiPolicyMove) —
+	// are rulebase-level operations, NOT content edits: they deliberately do
+	// NOT restamp, so a drag that repositions many rules never overwrites every
+	// rule's "who last edited it" with the reorderer. Those operations are
+	// tracked authoritatively by the config-version history and the
+	// policy.reorder / policy.move audit events, which is where "who moved this"
+	// belongs.
 
 	// normFQDN is the IDNA-normalized form of DestFQDN, precomputed by
 	// sortLocked() whenever rules are mutated. The proxy hot path (Evaluate)
