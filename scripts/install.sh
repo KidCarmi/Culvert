@@ -638,6 +638,33 @@ resolve_latest_signed_release_ref() {
 
 seed_pinned_tag() {
   local had_stale=0
+
+  # CULVERT_PROXY_SEED_REF is an EXPLICIT operator override and wins over
+  # everything below — including the "already tracking a deployment" idempotency
+  # guard. This is the documented remedy for migrating a host OFF a stale pinned
+  # tag whose image is too old to carry a matching /app/deploy compose bundle (the
+  # exact state a crash-looping v0.0.238 host is in): the guard used to return
+  # early because the crash-looping `culvert` container / on-disk compose still
+  # exists, so the override was never consulted and the remedy did nothing.
+  # Prefer an image already present locally (a `docker load`-ed tarball on an
+  # air-gapped host, or an out-of-band mirror pull) so the offline path never
+  # touches the registry; only pull when the ref is not already on this host.
+  # Fail CLOSED if an explicitly-named ref cannot be obtained — silently falling
+  # back to :latest (or keeping the stale tag) would defeat the operator's intent.
+  if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
+    info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
+    if sudo docker image inspect "$CULVERT_PROXY_SEED_REF" >/dev/null 2>&1; then
+      sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG" \
+        && { info "Seeded $PINNED_TAG from the locally present image (no pull)"; return 0; }
+    elif sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
+      info "Seeded $PINNED_TAG"
+      return 0
+    fi
+    error "Could not seed $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF:
+  the ref is not present locally and the registry pull/tag failed. Check the ref name and, for
+  an online host, registry connectivity; for an air-gapped host, \`docker load\` the image first."
+  fi
+
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
     # Keep the existing tag when it tracks a LIVE/current deployment: a proxy
     # container (culvert, or culvert-dp on an HA data-plane node — running OR
@@ -652,8 +679,9 @@ seed_pinned_tag() {
     # keeps the tag (compose file present) even though the data volume is gone —
     # closing that fully would refresh a dev's locally-built pinned tag on a
     # never-deployed checkout, so the tradeoff favours the checkout case. The
-    # operator escape hatch (CULVERT_PROXY_SEED_REF, named in the warning below)
-    # covers the rare stale-after-down-v reinstall.
+    # operator escape hatch (CULVERT_PROXY_SEED_REF, handled first above and
+    # bypassing this guard) covers the rare stale-after-down-v reinstall — and the
+    # migrate-off-a-too-old-pinned-image case that motivated moving it up front.
     if sudo docker inspect culvert >/dev/null 2>&1 \
        || sudo docker inspect culvert-dp >/dev/null 2>&1 \
        || [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
@@ -667,36 +695,17 @@ seed_pinned_tag() {
   fi
 
   # Seed source precedence (mirrors packaging/culvert-maint/install.sh):
-  #   1. CULVERT_PROXY_SEED_REF — operator-supplied (existing-install
-  #      migration: the currently-running repo@sha256 digest).
+  #   1. CULVERT_PROXY_SEED_REF — operator-supplied override, handled FIRST above
+  #      (before the idempotency guard) and fail-closed; never falls through here.
   #   2. The image of an already-running `culvert` container (auto-captured,
   #      keeps the pinned tag identical to the live daemon — §8.2).
-  #   3. The latest SIGNED release ${PROXY_REPO}:vX.Y.Z — fresh-install default.
+  #   3. The latest SIGNED release ${PROXY_REPO}:X.Y.Z — fresh-install default.
   #      A signed release digest cosign-verifies, so the host maintenance agent
   #      installs from a trusted image (no override needed).
   #   4. ${PROXY_REPO}:latest — fallback when no signed release resolves. It
   #      cannot cosign-verify, so a source-free install seeded here leaves the
   #      agent unwired unless CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 is set.
-  #   5. Local build from this checkout — air-gapped / registry-down fallback.
-  if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
-    info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
-    # Prefer an image ALREADY PRESENT locally (a `docker load`-ed tarball on an
-    # air-gapped host, or an out-of-band mirror pull) so the documented offline
-    # path never touches the registry — the local-build/clone fallback is gone, so
-    # a pull-only seed would strand an air-gapped host with a loaded image. Only
-    # reach for a registry pull when the ref is not already on this host.
-    if sudo docker image inspect "$CULVERT_PROXY_SEED_REF" >/dev/null 2>&1; then
-      if sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
-        info "Seeded $PINNED_TAG from the locally present image (no pull)"
-        return 0
-      fi
-    elif sudo docker pull "$CULVERT_PROXY_SEED_REF" && sudo docker tag "$CULVERT_PROXY_SEED_REF" "$PINNED_TAG"; then
-      info "Seeded $PINNED_TAG"
-      return 0
-    fi
-    warn "Could not seed from CULVERT_PROXY_SEED_REF — trying the next source..."
-  fi
-
+  #      (There is intentionally no local-build fallback — see the note below.)
   local running_image
   running_image=$(sudo docker inspect culvert --format '{{.Image}}' 2>/dev/null || true)
   if [[ -n "$running_image" ]]; then
