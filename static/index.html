@@ -6836,6 +6836,10 @@ function polIsVersionConflict(err) {
     const b = JSON.parse(err && err.message);
     if (b && typeof b.currentVersion === 'number') {
       toast('Another admin changed the rulebase — reloading so you can re-apply your change', 'error');
+      // Re-bind the open form to the now-current version so a DELIBERATE
+      // re-submit (the admin has been warned) is accepted instead of looping
+      // on the same stale version. Prefer the server-reported currentVersion.
+      _polEditVersion = b.currentVersion;
       fetchPolicy();
       return true;
     }
@@ -6890,16 +6894,19 @@ function cancelPolicyEdit() {
 }
 
 async function deletePolicy(priority) {
+  if (_polMutateInFlight) return;
   if (polBlockWhileStaged()) return;
   const rule = polRules.find(r => r.priority === priority);
   const name = rule ? rule.name || ('Rule #' + priority) : ('Rule #' + priority);
   if (!await confirmAction('Delete Policy Rule', 'Delete "' + name + '"? This cannot be undone.')) return;
+  _polMutateInFlight = true;
   try {
     await api(polV('/api/policy?priority=' + priority), { method: 'DELETE' });
     toast('Rule deleted', 'success');
     if (polEditPriority === priority) cancelPolicyEdit();
-    fetchPolicy();
+    await fetchPolicy();
   } catch(e) { if (!polIsVersionConflict(e)) toast('Error: ' + e.message, 'error'); }
+  finally { _polMutateInFlight = false; }
 }
 
 // ── Drag-and-drop reordering (event delegation — no per-row listeners) ──
@@ -6985,6 +6992,24 @@ function initPolicyDragDrop() {
 let _polStagedOrder = null;   // null = no pending order
 let _polStagedVersion = 0;    // _polVersion the staged order was built against
 let _polApplyInFlight = false;
+// Re-entrancy guard for the single-shot policy mutations (create/update/delete/
+// move). Without it a double-click fires a second request carrying the SAME
+// _polVersion the first mutation already advanced past → a self-inflicted 409
+// ("another admin changed the rulebase") from the operator's own double-click.
+let _polMutateInFlight = false;
+// Version an OPEN editor form is bound to (captured when the form is populated).
+// The 3s tick keeps _polVersion (the table) fresh, but an edit form stays open
+// across ticks — submitting must be checked against the version the admin
+// actually edited, NOT the live-polled one, or a stale form would silently
+// overwrite another admin's change (the whole point of the version gate).
+let _polEditVersion = null;
+// polVForEdit — like polV but binds to the form's loaded version, so a form
+// left open while the rulebase changes underneath 409s on save instead of
+// clobbering. Falls back to the live version if no form-open was recorded.
+function polVForEdit(path) {
+  const v = (_polEditVersion !== null) ? _polEditVersion : _polVersion;
+  return path + (path.includes('?') ? '&' : '?') + 'ifVersion=' + v;
+}
 
 // _polSetStagedState — single owner of the staged-order state + commit bar
 // (no render; polStageOrder renders, the renderPolicy staleness path is
@@ -7098,9 +7123,11 @@ function togglePolActions(e, pri) {
 
 
 async function movePolicy(pri, position, targetName) {
+  if (_polMutateInFlight) return;
   if (polBlockWhileStaged()) return;
   const body = { priority: pri, position };
   if (targetName) body.targetName = targetName;
+  _polMutateInFlight = true;
   try {
     await api(polV('/api/policy/move'), {
       method: 'POST',
@@ -7108,8 +7135,9 @@ async function movePolicy(pri, position, targetName) {
       body: JSON.stringify(body),
     });
     toast('Rule moved to ' + position, 'success');
-    fetchPolicy();
+    await fetchPolicy();
   } catch(e) { if (!polIsVersionConflict(e)) toast('Move failed: ' + e.message, 'error'); }
+  finally { _polMutateInFlight = false; }
 }
 
 function showMoveTarget(pri, direction) {
@@ -7158,6 +7186,7 @@ async function clonePolicy(pri) {
       'Cloning this rule will overwrite the edits in the rule form.', 'Discard')) return;
   // Switch to "Add" mode (not edit) — cloned rule is not live until Save.
   polEditPriority = null;
+  _polEditVersion = _polVersion; // bind the clone to the version we cloned from
   document.getElementById('pol-priority').value  = '';
   document.getElementById('pol-name').value       = r.name + ' (copy)';
   document.getElementById('pol-action').value     = r.action;
@@ -8982,6 +9011,7 @@ async function editPolicy(priority) {
   if (_polFormDirty && !await confirmAction('Discard unsaved rule changes?',
       'Loading this rule will overwrite the edits in the rule form.', 'Discard')) return;
   polEditPriority = priority;
+  _polEditVersion = _polVersion; // bind the edit to the version we loaded it at
   document.getElementById('pol-priority').value  = r.priority;
   document.getElementById('pol-name').value       = r.name;
   document.getElementById('pol-action').value     = r.action;
@@ -9026,6 +9056,7 @@ async function editPolicy(priority) {
 }
 
 function clearPolicyForm() {
+  _polEditVersion = _polVersion; // a fresh new-rule form is bound to the current version
   ['pol-name','pol-src-ip','pol-src-id','pol-redirect','pol-dest-fqdn'].forEach(id => {
     const el = document.getElementById(id); if (el) el.value = '';
   });
@@ -9495,9 +9526,11 @@ async function submitPolicyRule() {
   const errs = polValidateClient(rule);
   if (errs.length) { polShowFormErrors(errs); return; }
   polShowFormErrors([]);
+  if (_polMutateInFlight) return;
+  _polMutateInFlight = true;
   try {
     if (polEditPriority !== null) {
-      await api(polV('/api/policy?priority=' + polEditPriority), {
+      await api(polVForEdit('/api/policy?priority=' + polEditPriority), {
         method: 'PUT',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(rule),
@@ -9506,7 +9539,7 @@ async function submitPolicyRule() {
       _polFormDirty = false;
       cancelPolicyEdit();
     } else {
-      await api(polV('/api/policy'), {
+      await api(polVForEdit('/api/policy'), {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify(rule),
@@ -9515,8 +9548,9 @@ async function submitPolicyRule() {
       _polFormDirty = false;
       clearPolicyForm();
     }
-    fetchPolicy();
+    await fetchPolicy();
   } catch(e) { if (!polIsVersionConflict(e)) toast('Error: ' + e.message, 'error'); }
+  finally { _polMutateInFlight = false; }
 }
 
 // Extend renderPolicy to show country and file profile columns

@@ -137,6 +137,7 @@ func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
 		`data-click="togglePolUnused"`, // its dispatch wiring
 		// P2 — optimistic concurrency (rule-set generation counter)
 		`function polV`,                 // appends ?ifVersion= to policy mutations
+		`function polVForEdit`,          // binds a form submit to its loaded version (not the live poll)
 		`function polIsVersionConflict`, // 409 rule-set-conflict → warn + reload
 	} {
 		if !strings.Contains(s, marker) {
