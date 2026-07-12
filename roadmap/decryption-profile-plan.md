@@ -262,3 +262,179 @@ code is reverted, and rules keep working via inline `StripALPN`/default).
   in the API/SPA plan? Should the policy editor hide the legacy inline `StripALPN`
   once a profile is bound?
 - **Q6 (scope):** Is 4 slices the right cut, and should slice 2 fold into slice 1?
+
+---
+
+## 11. Review consolidation (v2) — four reviewers
+
+Four independent reviewers: **PAN-OS product** (APPROVE-WITH-AMENDMENTS),
+**config-architecture/anti-drift** (APPROVE-WITH-AMENDMENTS), **UI/API+security**
+(APPROVE-WITH-AMENDMENTS), and **customer/field voice-of-customer**
+(HELPS-WITH-CAVEATS). The architecture is validated; two themes reshape v1:
+**(A) the field set is too thin to honestly be a "Decryption Profile,"** and
+**(B) the feature ships sharp knobs without the operability guardrails that make
+them safe to touch — and its value must be positioned honestly.**
+
+### 11.1 Field set — REVISED (PAN-OS product MAJOR-1/2/3 + customer)
+The v1 set {InspectHTTP2, StallTimeoutSecs, MinTLSVersion} is an H2-tuning object,
+not a PAN-OS Decryption Profile — whose *defining* content is cert-verification +
+failure posture. Deferring those forces a **second migration of every walled config
+surface** later (config-arch agrees this is the churn the anti-drift wall exists to
+avoid). **Decision: define the fuller field set NOW (migrate surfaces once); split
+enforce-vs-defer:**
+
+```go
+type DecryptionProfile struct {
+	ID   string; Name string
+	InspectHTTP2     *bool  // H2 toggle (back-compat fallback: rule.StripALPN → strip default)
+	CertVerification string // "" inherit | "strict" | "permissive" | "skip"  (folds per-rule TLSSkipVerify)
+	OnUnsupported    string // "" inherit | "fail-close" | "fail-open"  (unsupported TLS version/cipher)
+	MinTLSVersion    string // "" | "1.2" | "1.3"
+	MaxTLSVersion    string // "" | "1.2" | "1.3"   (PAN-OS parity: floor AND cap — NIT-1)
+	StallTimeoutSecs int    // 0 = default; Advanced UI section; clamped [5s, tunnel-idle ceiling]
+}
+```
+- **Enforced in v1:** `InspectHTTP2`; `MinTLSVersion`/`MaxTLSVersion`;
+  `StallTimeoutSecs`; `CertVerification` limited to `strict` (= today's verify) and
+  `skip` (= today's `TLSSkipVerify=true`) — both already exist in the upstream
+  handshake, so this just re-homes them onto the profile as the expected PAN-OS
+  field; `OnUnsupported=fail-close` (= today's emergent behavior when a handshake
+  can't proceed — now *declared* and operator-visible).
+- **Deferred to slice 5 (field present, not yet enforced / greyed in UI):**
+  `CertVerification=permissive` (verify-but-allow+log) and `OnUnsupported=fail-open`
+  (raw-relay bypass out of inspection) — both are "relax safety" behaviors that touch
+  the CONNECT relay path and need their own review.
+- **Back-compat, same precedence as StripALPN:** `CertVerification==""` inherits the
+  rule's existing `TLSSkipVerify` (skip if true, else strict); an absent/dangling
+  profile is byte-identical to today. Fold, don't migrate.
+
+### 11.2 Fail-open/close DEFAULT — the one reviewer conflict, resolved
+PAN-OS product said "declare `OnUnsupported`, default fail-close"; customer said "a
+fail-*close* default black-holes pinned/critical apps (Scenario D — M365)". They are
+about **different axes** and both are right: `OnUnsupported` (unsupported TLS
+version/cipher) legitimately defaults **fail-close** because that IS today's behavior
+(unmet floor → handshake fails → tunnel drops) and making it explicit is honest. The
+customer's black-hole fear is the future **cert-verification fail-close** and the
+**fail-open ACTION** — so: **`OnUnsupported` default = fail-close (honest, = today);
+the deferred fail-open ACTION, when it lands (slice 5), defaults OFF/opt-in; and
+`CertVerification` defaults to inherit (= today), never a new stricter default that
+would silently start blocking previously-allowed certs.** No default changes existing
+behavior on upgrade.
+
+### 11.3 Operability guardrails — NEW v1 requirements (customer)
+The plan under-invested in operability; these determine whether the knob helps in the
+field. Added to scope:
+- **Honest positioning IN THE PRODUCT (not just docs).** UI copy + the profile panel
+  must state: *"Inspect-as-HTTP/2 removes the HTTP/1.1-downgrade anti-bot signal. It
+  does NOT change the TLS fingerprint (Culvert re-originates TLS with Go's stack), so
+  Google-class destinations that fingerprint the ClientHello (JA3/JA4) or key on
+  egress-IP reputation may still challenge — those need a bypass rule or warmed
+  dedicated egress."* This is decisive: the origin reCAPTCHA customer will otherwise
+  file the same ticket twice. (Rewrites Q1's framing.)
+- **Warn-on-binding guardrails (slice 3 UI + a validation warning):** (1) binding a
+  profile to a `SSLAction:Bypass` (non-Inspect) rule is a silent no-op — the editor
+  must warn/gray-out (also PAN-OS MINOR-2); (2) binding to a broad/category rule that
+  fans out H2 across many origins risks an H1-only/gRPC/WebSocket origin — surface a
+  caution + the "protocols observed" signal below.
+- **Success-delta + failure observability (metrics):** land the investigation's
+  per-destination ALPN metric so an operator can SEE the knob worked —
+  `culvert_inspect_upstream_alpn_total{protocol}` (H2-vs-H1 negotiated) plus
+  `culvert_decrypt_profile_mintls_reject_total{profile}` (min-TLS silent-drop made
+  visible) and reuse the PR3d `stall`-reset signal per profile. Without a before/after
+  number the customer can't tell it helped.
+- **Guardrailed default:** ship a **documented, NON-auto-bound** `recommended-h2` seed
+  profile as a safe on-ramp (revises OPEN DECISION D — a non-bound seed is safe and
+  is an on-ramp, unlike auto-binding).
+
+The heavier guardrails — the **"test this profile against a destination" preview
+tool** (customer's #1: probe a host, report negotiated ALPN/TLS + the honest
+fingerprint verdict) and a **24h dry-run/shadow mode** — are high value but are their
+own subsystems; scoped as a dedicated **operability slice (post-core, pre-GA)**, not
+gating the core object.
+
+### 11.4 Correctness amendments — config-architecture (all verified vs code)
+- **(MAJOR)** The `RollbackRoundTrip` parity test passes **vacuously** unless the
+  three hand-maintained helpers `csrIsolateRollbackStores` / `csrSeedStateA` /
+  `csrMutateStateB` (config_surfaces_test.go) are extended so State B **diverges the
+  profile store** — otherwise a capture-without-apply half-migration ships green (the
+  RateLimitExempt class). Slice 4 MUST name these three edits; do NOT rely on "the
+  parity test enumerates everything" for apply-wiring. Also add `globalDecryptionProfiles`
+  to the isolation helper or the round-trip leaks global state across tests.
+- **(MINOR)** ULID stability: `ReplaceAll` must preserve incoming IDs (backfill only
+  when empty), OR add `decryption_profiles` to the `csrCanon` `stripID` set (mirror
+  `rewrite_rules`) — else the round-trip mismatches on `id`.
+- **(MINOR)** Opposite JSON tags: `configBackup.DecryptionProfiles` **no** `omitempty`
+  (rollback `[]`-wipe must survive), `ConfigSnapshot.DecryptionProfiles` **with**
+  `omitempty` (SnapshotWireWipe requires it for a non-WireWipeCapable field). Both
+  test-enforced; call out the asymmetry.
+- **(MINOR)** Snapshot cap wiring is three items, not two: `maxSnapDecryptionProfiles`
+  (=1000, like siblings), a `validateConfigSnapshot` row, AND bump `capped 19→20` in
+  `SnapshotCapParity`. Capture via a direct receiver call (`snap.DecryptionProfiles =
+  globalDecryptionProfiles.List()`) for `SnapshotCaptureOwner`; apply nil-skip in
+  `applySnapshotExtendedState` for `SnapshotApplyParity`.
+- **(MINOR)** Downgrade the apply-ordering claim: the DP snapshot path is
+  CLOSED-BY-ANALYSIS (no load-bearing order; `resolveStripALPN` reads the store at
+  eval time, fail-safe to strip in a transient window). Keep profiles-before-rules for
+  rollback/import (cheap, mirrors category_groups) but it is belt-and-suspenders on
+  the DP, not a correctness requirement. **The real invariant is fail-safe-at-eval.**
+
+### 11.5 Correctness amendments — UI/API + security (all verified vs code)
+- **(MAJOR)** Slice 3's DELETE branch must **explicitly call**
+  `deleteBlockedByReferences(w, r, "decryption-profile", name, …)` — registering the
+  ref type only powers the read endpoint, not the 409-on-delete.
+- **(MAJOR)** Field validation (name uniqueness/charset, `StallTimeoutSecs` clamp,
+  `MinTLSVersion`/`MaxTLSVersion` enum, `CertVerification`/`OnUnsupported` enum) MUST
+  live in the engine `Store.Add/Update`, not just the handler — config-import and
+  CP→DP snapshot-apply are other write paths that bypass a handler-only check.
+- **(MINOR)** Concrete `StallTimeoutSecs` bound: `[5s, sslInspectBodyStallTimeout /
+  tunnel-idle ceiling]`, hard-reject out of range (not silent clamp).
+- **(MINOR)** Every interpolation of `Name`/`MinTLSVersion`/etc. into the render list,
+  policy-editor dropdown, and Where-Used view MUST use `escHtml()` (house pattern is
+  innerHTML+escHtml — following it is sufficient; the "no innerHTML" framing was an
+  overstatement).
+- **(MINOR)** GET branch calls `requireRole(RoleViewer)` explicitly (keeps C1.5 AST
+  parity clean, no metadata `Note` exception).
+- **(NIT)** D0 count is `136` (d0_helpers_test.go), not 141 — adding
+  `/api/decryption-profiles` → `137`; bump the constant + append a count-history line.
+
+### 11.6 Resolved OPEN DECISIONS
+- **A (MaxConcurrentStreams global):** CONFIRMED global by product + config-arch (no
+  PAN-OS gap; per-profile would break PR3d graceful drain).
+- **B (keep inline StripALPN):** CONFIRMED keep-both with the §2 precedence; UI
+  **disables** the inline `StripALPN` (and `TLSSkipVerify`) control when a profile is
+  bound, showing the profile-derived effective value read-only.
+- **C (fail-open deferral):** REVISED — declare `OnUnsupported` in v1 (fail-close
+  enforced), defer only the fail-open ACTION (§11.2).
+- **D (no seed):** REVISED — ship a documented, non-auto-bound `recommended-h2` seed
+  as a safe on-ramp (§11.3).
+
+### 11.7 Verdict on the core promise (customer — must be baked into the product)
+Native-H2-via-profile **reduces but does not eliminate** reCAPTCHA, and for **Google
+specifically likely does not stop it** (JA3/JA4 + egress-IP reputation survive). It is
+a clean win for the *middle tier* — H2 SaaS with self-tuned bot defense that must stay
+under inspection (Scenario B) — and closes the real GUI-parity gap. It is NOT the
+Google cure; that stays bypass + warmed egress. §11.3's positioning requirement makes
+this honest in-product, not just in this roadmap.
+
+### 11.8 Re-cut slices (v2)
+1. **Engine + persistence** (dormant): `internal/decryptprofile` (full struct §11.1) +
+   shim + `globalDecryptionProfiles` + JSON + startup slice. Engine-side validation
+   (§11.5 MAJOR-2). ULID-preserving `ReplaceAll` (§11.4).
+2. **Binding + resolvers** (behavior): `PolicyRule.DecryptionProfile`; profile-aware
+   `resolveStripALPN`, `resolveH2StallTimeout`, `resolveMinTLS`/`resolveMaxTLS`,
+   `resolveCertVerification` (strict/skip enforced); fail-safe-at-eval; objectRefTypes
+   + ruleReferencesObject. Positioning-honest inline doc.
+3. **Admin API + SPA** (closes GUI gap): `apiDecryptionProfiles` (+ explicit
+   `deleteBlockedByReferences`, GET `requireRole`), `uiRoutes` row, `saveConfigVersion`,
+   D0 137; SPA panel + policy-editor dropdown + **disable-inline-when-bound** +
+   **warn-on-Bypass/broad-binding** + **positioning copy** + `escHtml` everywhere.
+4. **Config-surface parity** (cluster+rollback+export/import): the CategoryGroups
+   mirror + the §11.4 test-helper edits (isolate/seed/mutate), cap wiring, tag
+   asymmetry — `config_surfaces_test.go` green.
+5. **Observability + guardrailed default:** the §11.3 metrics + the non-auto-bound
+   `recommended-h2` seed.
+6. **(deferred, own review)** fail-open action + `CertVerification=permissive`; and the
+   **operability preview tool + dry-run/shadow** subsystem (customer #1 guardrail).
+
+Slices 1–5 are the release; 6 is fast-follow. This is the honest, PAN-OS-credible,
+field-safe shape.
