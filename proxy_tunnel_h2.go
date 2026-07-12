@@ -282,16 +282,28 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	defer clientTLS.Close()   //nolint:errcheck // best-effort cleanup at tunnel end
 	defer upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at tunnel end
 
-	// Admission fence (PR3d): once the shutdown drain has begun, do not start
-	// inspecting a NEW decrypted flow on a departing node — close so the client
-	// re-routes/retries against the surviving node rather than being force-closed
-	// mid-flow in ≤15s. A tunnel racing this check (shutdown between here and the
-	// registry insert) is still caught by the drain's per-tick GOAWAY re-fire and
-	// the deadline backstop.
+	// Admission fence (PR3d): once the shutdown drain has begun, do not serve a NEW
+	// inspected flow on a departing node — close so the client re-routes/retries
+	// against the surviving node rather than being force-closed mid-flow in ≤15s. By
+	// the time we reach here the 200 was sent and both TLS handshakes completed
+	// (that work is in handleInspectNativeALPN); the fence prevents SERVING H2
+	// streams, and the refused client sees a bare TLS close (no h2 GOAWAY frame — the
+	// h2 server never starts), which is the intended "don't admit the flow" signal,
+	// distinct from the graceful GOAWAY the ALREADY-serving tunnels get. A tunnel
+	// racing this check (shutdown fires after it) is still caught by the drain's
+	// per-tick GOAWAY re-fire and the deadline backstop.
 	if h2InspectShuttingDown.Load() {
 		logger.Printf("SSL_INSPECT(h2) refusing new tunnel %q during shutdown drain", sanitizeLog(hostOnly))
 		return
 	}
+
+	// Register the client leg for the drain backstop BEFORE any upstream work, so a
+	// stalled tr.NewClientConn cannot leave this tunnel invisible to BOTH the GOAWAY
+	// re-fire (it isn't in the h2 server state until ServeConn) AND the deadline
+	// force-close. The active gauge tracks from here; the deferred unregister
+	// balances every exit path below.
+	registerH2InspectConn(clientTLS)
+	defer unregisterH2InspectConn(clientTLS)
 
 	// One upstream H2 client connection carries every stream of this tunnel;
 	// http2.ClientConn.RoundTrip is safe for concurrent use (h2 multiplexing).
@@ -322,11 +334,13 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// h2InspectSrv non-nil in production; the fallback covers direct-call tests.
 	sh := h2InspectSrv
 	if sh == nil {
+		// A nil here in production would mean init ordering regressed — the tunnel
+		// would use a per-conn server the global GOAWAY trigger can't reach (only the
+		// backstop registry closes it). Warn once so that regression is loud, not a
+		// silently dropped graceful shutdown.
+		warnH2InspectFallbackOnce()
 		sh = newH2InspectServer()
 	}
-	// Track the client leg for the drain deadline backstop; bump the active gauge.
-	registerH2InspectConn(clientTLS)
-	defer unregisterH2InspectConn(clientTLS)
 
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
 	// the client connection is no longer readable (or a shutdown GOAWAY + stream

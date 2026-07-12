@@ -117,8 +117,11 @@ sibling streams.
   compose `proxy` service sets `stop_grace_period: 60s` to cover the full envelope —
   **keep it ≥ the drain envelope or the orchestrator will SIGKILL mid-drain and the
   GOAWAY becomes cosmetic.** Observability: `culvert_h2_inspect_active` (gauge),
-  `culvert_h2_inspect_drain_goaway_total`, `culvert_h2_inspect_drain_forced_total`
-  (`goaway − forced` = drained gracefully).
+  `culvert_h2_inspect_drain_goaway_total` (tunnels active when the drain started),
+  `culvert_h2_inspect_drain_forced_total` (backstop closes). `goaway − forced`
+  *approximates* how many drained gracefully — treat it as a heuristic, not an exact
+  identity (a tunnel that registered after the drain start and was then force-closed
+  counts in `forced` but not `goaway`).
   - **Scope:** this drains on *process shutdown only*. Live ADR-0005 HA transitions
     (`selfFence`/`enterStandbyResync` on lease loss) and hot config-snapshot pushes
     are in-process role/config changes that do **not** run the shutdown hooks, so

@@ -66,9 +66,23 @@ var (
 	// SUPERSET of these — it also counts H1-inspect and raw-bypass tunnels — so the
 	// drain waiting on activeConns does NOT imply everything it waits on was GOAWAY'd.
 	statH2InspectActive int64 // gauge: currently-active inspected H2 tunnels
-	statH2InspectGoaway int64 // counter: tunnels signaled to drain (snapshot at drain start)
+	statH2InspectGoaway int64 // counter: tunnels active at drain START (one-shot snapshot; excludes late registrants)
 	statH2InspectForced int64 // counter: tunnels force-closed by the deadline backstop
+
+	// h2InspectFallbackWarnOnce bounds the "shared server not initialized" warning to
+	// one line even if many tunnels hit the (production-unreachable) fallback.
+	h2InspectFallbackWarnOnce sync.Once
 )
+
+// warnH2InspectFallbackOnce logs (at most once) that handleInspectH2 built a per-conn
+// server because the eager-init global was nil — a signal that init ordering
+// regressed and graceful GOAWAY is unavailable for such tunnels. In tests (which
+// never call initH2InspectServer) this fires once and is harmless.
+func warnH2InspectFallbackOnce() {
+	h2InspectFallbackWarnOnce.Do(func() {
+		logger.Printf("SSL_INSPECT(h2) shared server not initialized — per-conn fallback in use; graceful GOAWAY-on-shutdown unavailable for these tunnels")
+	})
+}
 
 // newH2InspectServer builds and ConfigureServer-wires a shared server. Split from
 // initH2InspectServer so tests can build a LOCAL instance without driving the global.

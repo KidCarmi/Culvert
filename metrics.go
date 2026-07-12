@@ -415,7 +415,11 @@ culvert_auth_sso_required_total %d
 	// PR3d — inspected native-HTTP/2 tunnel drain observability. activeConns above
 	// conflates H1-inspect, H2-inspect, and raw-bypass tunnels; these disambiguate
 	// the H2-inspect subset so an operator can confirm a node GOAWAY'd cleanly on
-	// shutdown (goaway signaled, forced = backstop close; goaway-forced = graceful).
+	// shutdown. goaway = tunnels active when the drain STARTED (one-shot snapshot;
+	// late registrants caught by the re-fire are not counted), forced = backstop
+	// closes at the deadline. `goaway - forced` APPROXIMATES graceful drains but is
+	// not an exact identity (a late-registered, force-closed tunnel is in forced but
+	// not goaway), so treat it as an operator heuristic.
 	_, _ = fmt.Fprintf(w, `# HELP culvert_h2_inspect_active Currently active inspected native-HTTP/2 tunnels
 # TYPE culvert_h2_inspect_active gauge
 culvert_h2_inspect_active %d
