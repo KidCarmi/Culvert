@@ -24,7 +24,9 @@
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
 | RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
 | RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
-| RISK-011 | MEDIUM | OPEN | Cluster rolling-update auto-rollback unverified | `update_cluster.go:804-852` |
+| RISK-011 | MEDIUM | ⚠ STALE→RE-POINTED | ~~Cluster rolling-update auto-rollback unverified~~ cited code REMOVED; concern resolved in successor, new residual = RISK-022 | `update_cluster.go` deleted; successor `inline_rollback.go` verifies revert+health (2026-07-11 audit) |
+| RISK-021 | HIGH | OPEN | Fresh/unconfigured proxy runs default-allow + no-auth (silent, advisory-log only) | `rewrite_default_action_startup.go:23-25`, `store.go:470` (HV 2026-07-11) |
+| RISK-022 | HIGH | OPEN | Maintenance agent death mid-apply is unrecoverable (no op journal; `MarkAllInterrupted` no-op) | `cmd/culvert-maint/internal/ops/ops.go:468` (HV 2026-07-11) |
 | RISK-012 | LOW | ✅ CLOSED | Account lockout is username-keyed (lockout-as-DoS) | two-tier (IP,user)+account keying w/ trusted-IP bypass (2026-07-05); adversarially reviewed 2× |
 | RISK-019 | MEDIUM | ✅ CLOSED | Admin-UI per-IP logic keys on direct peer IP; no trusted-proxy XFF extraction (lockout collapses behind an L7 proxy) | trusted-proxy `realClientIP` (2026-07-05); adversarially reviewed |
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
@@ -309,13 +311,51 @@
   RISK-ACC-1), NOT by editing `update.go`. Stays OPEN until the production catalog cutover completes.
   **Complexity M (as migration, tracked under DEBT-008).**
 
-## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · OPEN
-- **Current state:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushes the previous tag
-  but never confirms the node reverted; it can mark `rollback_failed` while the node still runs the
-  broken version. No failure-path tests.
-- **Impact:** "Auto-rollback" cannot be trusted to restore service; mid-rollout failure can strand a
-  mixed-version cluster.
-- **Recommendation:** Post-rollback health verification + failure-path tests. **Complexity M.**
+## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · ⚠ STALE→RE-POINTED 2026-07-11
+- **Was:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushed the previous tag but never
+  confirmed the node reverted; could mark `rollback_failed` while the node ran the broken version.
+- **Update (2026-07-11 failure-mode audit, HV):** the cited symbol and file **no longer exist** —
+  the legacy cluster updater was removed (DEBT-008). The successor is the maintenance-agent inline
+  auto-rollback (`cmd/culvert-maint/internal/server/inline_rollback.go` + `rollback_stages.go`), which
+  **does verify the revert**: `imageRollbackStages` runs `rollback_pull → rollback_restart →
+  rollback_health → rollback_verify`, and `rollback_verify` asserts the prior digest is in the running
+  image's `RepoDigests` (`rollback_stages.go:70-124`); `guardInlineRollback` sets `rollbackSucceeded`
+  only after that passes (`inline_rollback.go:118`). **The original concern is resolved in the
+  successor.** The register entry's citation is stale.
+- **Re-pointed residual → RISK-022:** the *new* unverified-recovery gap on this surface is
+  agent-death mid-apply (no persisted op journal; no reconciliation). RISK-011 should be CLOSED (concern
+  resolved) with RISK-022 carrying the successor's residual.
+
+## RISK-021 — Fresh appliance runs default-allow + no-auth (silent) · HIGH · OPEN
+- **Found (2026-07-11 failure-mode audit, HV):** the policy engine's in-memory zero value is deny
+  (`proxy.go:16`), but the first-boot startup slice **deliberately flips the default action to
+  `"allow"` (passthrough)** when no rules and no `default_action` are configured
+  (`rewrite_default_action_startup.go:23-25` → `setDefaultPolicyAction("allow")`), and the shipped
+  `docker-compose.yml` passes no `default-action` flag. Combined with credential-only `AuthEnabled()`
+  (false until an admin exists, `store.go:470`), a fresh appliance with the proxy port reachable is an
+  **open forwarding proxy**. The only signal is one advisory log line — no degraded `/ready` state, no
+  alert, no admin banner.
+- **Impact:** an operator who exposes the proxy port before completing hardening runs an open
+  relay / silent-bypass on day 0. Contradicts the headline "Default deny (Zero Trust)" architecture
+  claim; the open posture is a documented onboarding tradeoff but is **silent**, which is the defect.
+- **Recommendation:** surface passthrough+no-auth as a degraded `/ready` state + admin banner +
+  `security_posture_open` alert (mirror the CHAOS-06 CA-visibility pattern); the maintainer decides
+  whether an internet-exposed first boot should hard-refuse to bind until setup completes. **Complexity S.**
+  Acceptance test: `FAILURE-INJECTION-TEST-PLAN.md` T1.
+
+## RISK-022 — Maintenance-agent death mid-apply is unrecoverable · HIGH · OPEN
+- **Found (2026-07-11 failure-mode audit, HV):** the maintenance agent holds operation state **only in
+  memory** (`ops.Manager.active`, `ops.go:206`); there is no persisted op journal, and
+  `MarkAllInterrupted()` is a literal `return 0` (`ops.go:468`, called at agent startup `main.go:130`).
+  A process kill between retag (`tagAndUp`) and the health-gate leaves Docker in an unknown partial
+  state (fixed tag `culvert/proxy:pinned` advanced to the new digest, `up` possibly half-done) with
+  **no reconciliation and no automatic rollback** on the next agent start; the op is not queryable.
+- **Impact:** an interrupted upgrade (agent crash, host reboot mid-apply, OOM) can strand the appliance
+  with no automatic recovery — manual `docker` surgery required. This is the successor's residual that
+  RISK-011 was re-pointed to.
+- **Recommendation:** persist a minimal op journal (op id + phase + target/prior digest via
+  `AtomicWrite`) and make `MarkAllInterrupted()` reconcile Docker (running digest vs journal) on
+  restart, resuming or rolling back. **Complexity M.** Acceptance test: `FAILURE-INJECTION-TEST-PLAN.md` T3.
 
 ## RISK-012 — Username-keyed lockout (DoS) · LOW · ✅ CLOSED 2026-07-05
 - **Was:** `internal/lockout` keyed the login lockout by username ONLY, so any remote party who
@@ -496,6 +536,19 @@
   bounded-LWW window ≤TTL on partition (F4 option A) and the legacy opt-in flag, both in
   `docs/operator/ha-lease-failover.md`.
 
+- **2026-07-11** — **Production Failure-Mode & Day-2 audit (evidence pass, no code change).** Six
+  parallel failure-domain sweeps + ~12 hand-verifications produced
+  `docs/engineering/PRODUCTION-FAILURE-MODE-AUDIT.md`, `DAY2-OPERATIONS-READINESS.md`,
+  `FAILURE-INJECTION-TEST-PLAN.md`. Register updates (strong-evidence only): **RISK-021** (fresh
+  appliance default-allow + no-auth, silent — HIGH, HV), **RISK-022** (maintenance-agent death
+  mid-apply unrecoverable, `MarkAllInterrupted` no-op — HIGH, HV), **RISK-011** re-pointed to
+  STALE→RE-POINTED (cited `update_cluster.go` removed; concern resolved in the successor
+  `inline_rollback.go` which verifies revert+health; residual carried by RISK-022). Validated-at-HEAD:
+  CHAOS-01 and CHAOS-24 (revocation sync, `controlplane_client.go:140`) found **already closed**;
+  CHAOS-05/06/07/09/10/11/12/16/17/22/27/33 confirmed **still open** with fresh file:line evidence.
+  Governance note: the CHAOS review series has an **ID collision** (07-07 and 07-10 both define
+  CHAOS-22…27 differently) — recommended renumbering to a single append-only ledger. Full backlog
+  (P0–P3) in the audit doc §14.
 - **2026-07-05** — **RISK-012 + RISK-013 CLOSED (one focused security PR).**
   RISK-012: two-tier `(clientIP,username)`-pair + account lockout with trusted-IP bypass
   (`internal/lockout`), replacing username-only keying that let a remote party lock an admin out
