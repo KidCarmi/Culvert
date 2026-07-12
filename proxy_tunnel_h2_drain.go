@@ -132,7 +132,17 @@ func unregisterH2InspectConn(c net.Conn) {
 // beginH2InspectDrain is the order-95 shutdown hook: fence new tunnels, snapshot how
 // many are draining (for the goaway metric), and fire the first GOAWAY wave. The
 // order-100 tunnel drain then re-fires per tick and force-closes laggards.
+//
+// No-op when the shared server was never built (h2InspectSrv == nil): there are then
+// no shared-server tunnels to drain, so there is no reason to raise the process-global
+// fence. This is always true in production (initH2InspectServer eager-builds it at
+// startup) and is what keeps shutdown-sequence tests that RunAll the late hooks
+// without initializing native H2 from leaving the fence stuck true and poisoning
+// later native-H2 tests.
 func beginH2InspectDrain(ctx context.Context) error {
+	if h2InspectSrv == nil {
+		return nil
+	}
 	h2InspectShuttingDown.Store(true)
 	atomic.AddInt64(&statH2InspectGoaway, atomic.LoadInt64(&statH2InspectActive))
 	return gracefulShutdownH2InspectShared(h2InspectSrv, ctx)
