@@ -1954,8 +1954,12 @@ Firefox (all platforms):
               ⬆ Import Configuration
               <input type="file" accept=".json" style="display:none" data-change="importConfig">
             </label>
+            <label style="display:inline-flex;align-items:center;gap:6px;font-size:.8rem;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="import-replace-mode"> Replace mode (clears existing before import)
+            </label>
           </div>
           <div id="config-export-status" style="display:none;margin-top:10px;font-size:.82rem"></div>
+          <div id="import-preview" style="display:none;margin-top:12px"></div>
           <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">
             <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;font-weight:600">Export Individual Sections</p>
             <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -5515,17 +5519,76 @@ async function exportSection(section) {
   toast('Exported ' + section, 'success');
 }
 
+function renderImportPreview(data) {
+  const el = document.getElementById('import-preview');
+  const modeLabel = data.mode === 'replace'
+    ? '<span style="color:var(--red);font-weight:600">REPLACE</span>'
+    : '<span style="color:var(--green);font-weight:600">MERGE</span>';
+  let html = `<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:.82rem">`;
+  html += `<strong>Import preview</strong> — mode: ${modeLabel}`;
+  if (data.exportedAt) html += ` · backup exported ${escHtml(data.exportedAt)}`;
+  const sections = data.sections || [];
+  if (sections.length === 0) {
+    html += `<p style="color:var(--muted);margin-top:8px">No collection sections in this backup would change.</p>`;
+  } else {
+    html += `<table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Section</th><th class="text-right">Incoming</th><th class="text-right">Current</th><th>Effect</th></tr></thead><tbody>`;
+    sections.forEach(s => {
+      const note = s.note ? `<br><span style="color:var(--yellow);font-size:.72rem">${escHtml(s.note)}</span>` : '';
+      html += `<tr><td>${escHtml(s.section)}</td><td class="text-right">${s.incoming}</td><td class="text-right" style="color:var(--muted)">${s.current}</td><td>${escHtml(s.effect)}${note}</td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  const settings = data.settings || [];
+  if (settings.length > 0) {
+    html += `<p style="margin-top:10px;font-weight:600">Settings applied</p><ul style="margin:4px 0 0 18px;color:var(--muted)">`;
+    settings.forEach(s => { html += `<li>${escHtml(s.setting)}: <span style="color:var(--fg)">${escHtml(s.value)}</span></li>`; });
+    html += `</ul>`;
+  }
+  html += `</div>`;
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
 async function importConfig(input) {
   const file = input.files[0];
   if (!file) return;
-  const ok = await confirmAction('Import Configuration', 'Imported rules will be MERGED with existing config (not replaced). Duplicate rules may accumulate. This cannot be undone.', 'Import');
-  if (!ok) { input.value = ''; return; }
+  const replaceMode = !!document.getElementById('import-replace-mode')?.checked;
+  const modeQ = replaceMode ? '&mode=replace' : '';
   const statusEl = document.getElementById('config-export-status');
+  const previewEl = document.getElementById('import-preview');
   statusEl.style.display = 'none';
+  previewEl.style.display = 'none';
+  let text;
   try {
-    const text = await file.text();
+    text = await file.text();
     JSON.parse(text); // validate JSON before sending
-    const r = await fetch('/api/config/import', {
+    // Dry-run first: show the admin exactly what will change before committing.
+    const pr = await fetch('/api/config/import?dryRun=true' + modeQ, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: text
+    });
+    const preview = await pr.json().catch(() => ({}));
+    if (!pr.ok) {
+      statusEl.style.cssText = 'display:block;color:var(--red)';
+      statusEl.textContent = '✗ Import failed: ' + (preview.error || pr.statusText);
+      input.value = '';
+      return;
+    }
+    renderImportPreview(preview);
+  } catch(err) {
+    statusEl.style.cssText = 'display:block;color:var(--red)';
+    statusEl.textContent = '✗ ' + err.message;
+    input.value = '';
+    return;
+  }
+  const warn = replaceMode
+    ? 'REPLACE mode CLEARS existing entries in each section shown above before importing. This cannot be undone.'
+    : 'Imported entries will be MERGED with existing config (see preview above). Duplicate rules may accumulate. This cannot be undone.';
+  const ok = await confirmAction('Apply Import', warn, replaceMode ? 'Replace' : 'Import');
+  if (!ok) { input.value = ''; return; }
+  try {
+    const r = await fetch('/api/config/import?dryRun=false' + modeQ, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: text
@@ -5533,7 +5596,8 @@ async function importConfig(input) {
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
       statusEl.style.cssText = 'display:block;color:var(--green)';
-      statusEl.textContent = `✓ Configuration imported (exported ${data.exportedAt || 'unknown date'})`;
+      statusEl.textContent = `✓ Configuration imported (${data.mode || 'merge'} mode, exported ${data.exportedAt || 'unknown date'})`;
+      previewEl.style.display = 'none';
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
     } else {
