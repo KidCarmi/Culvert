@@ -213,6 +213,24 @@ func (s *Store) List() []Profile {
 	return out
 }
 
+// FailOpenScope returns the profile's ID and true IFF a profile with the given
+// name exists AND opts into fail-open (OnInspectError=="fail-open"). It is a
+// HOT-PATH accessor (resolveSSLAction calls it per CONNECT for fail-open rules):
+// it reads only two string fields under the RLock and returns NO copy, avoiding
+// the copyOut allocation a full GetByName pays. The learn/cold paths keep the
+// copy-returning accessors.
+func (s *Store) FailOpenScope(name string) (id string, ok bool) {
+	s.mu.RLock()
+	p := s.profiles[strings.ToLower(strings.TrimSpace(name))]
+	if p == nil || p.OnInspectError != "fail-open" {
+		s.mu.RUnlock()
+		return "", false
+	}
+	id = p.ID
+	s.mu.RUnlock()
+	return id, true
+}
+
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
 func (s *Store) GetByName(name string) *Profile {
 	s.mu.RLock()

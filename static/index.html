@@ -513,6 +513,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="audit" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-list"/></svg> Audit Log
     </div>
+    <div class="nav-item" data-view="decexclusions" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Exclusions
+    </div>
     <div class="nav-item" data-view="policy-tester" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> Policy Tester
     </div>
@@ -546,9 +549,6 @@ tr.dragging  { opacity: .4; }
     </div>
     <div class="nav-item" data-view="decprofiles" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Profiles
-    </div>
-    <div class="nav-item" data-view="decexclusions" data-min-role="viewer" role="button" tabindex="0">
-      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Exclusions
     </div>
     <div class="nav-item" data-view="rewrite" data-min-role="operator" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg> Header Rewrite
@@ -2894,6 +2894,7 @@ Firefox (all platforms):
                   <option value="fail-close">Fail-close (drop)</option>
                   <option value="fail-open" disabled>Fail-open (bypass) — use On Inspect Failure</option>
                 </select>
+                <div class="hint" style="font-size:.7rem;margin-top:2px">TLS parameter negotiation only (version/cipher below floor).</div>
               </div>
               <div>
                 <label class="form-label">On Inspect Failure ⚠</label>
@@ -2902,6 +2903,7 @@ Firefox (all platforms):
                   <option value="fail-close">Fail-close (502)</option>
                   <option value="fail-open">Fail-open (auto-exclude + learn)</option>
                 </select>
+                <div class="hint" style="font-size:.7rem;margin-top:2px">Whole inspect-failure class (can't-decrypt / client cert / pinning). Drives auto-exclusion.</div>
               </div>
               <div>
                 <label class="form-label">Min TLS Version</label>
@@ -2924,18 +2926,28 @@ Firefox (all platforms):
                 <input type="number" class="input wide" id="dp-stall" placeholder="0 = default" min="0" max="3600">
               </div>
             </div>
-            <p class="hint" id="dp-failopen-hint" style="display:none;margin-bottom:12px;color:var(--red)">
-              ⚠ <strong>Fail-open auto-excludes hosts from inspection.</strong> When an inspected tunnel can't be
-              established because a host is incompatible with decryption (unsupported TLS, the origin requires a
-              client cert, or a pinned client rejects our cert), the host is learned into a volatile cache after a
-              confirm-count of distinct clients, and subsequent sessions to it <em>bypass inspection</em> until the
-              entry expires (12h; 1h for pinned). It does <em>not</em> fire on an untrusted/expired cert (that stays
-              a block). The <em>first</em> connection to a never-before-seen pinned host will still fail — add known
-              pinned apps to the manual SSL Bypass list for guaranteed first-session success. Every learn is alerted,
-              audited, and listed under
-              <a href="#" data-click="switchView" data-arg="decexclusions" style="color:var(--accent)">Decryption Exclusions</a>.
-              Keep inspection-mandatory hosts on <em>fail-close</em> rules — those are never auto-excluded.
-            </p>
+            <div class="hint" id="dp-failopen-hint" style="display:none;margin-bottom:12px">
+              <p style="color:var(--red);margin:0 0 4px">
+                ⚠ <strong>Fail-open disables SSL inspection for hosts it can't decrypt.</strong> After a confirm-count
+                of distinct clients, an incompatible host is auto-excluded and later sessions <strong>bypass
+                inspection</strong> until it expires (12h; 1h pinned). Untrusted/expired certs are <strong>never</strong>
+                excluded — they stay blocked. Learning is scoped to <em>this</em> profile only.
+              </p>
+              <details>
+                <summary style="cursor:pointer;color:var(--accent);font-size:.8rem">How auto-exclusion works</summary>
+                <div style="margin-top:6px">
+                  Learns on a genuine can't-decrypt signal only — the origin requires a client certificate, an
+                  unsupported TLS version, or a pinned client rejects our forged cert; generic origin errors and
+                  cert-validation failures do <em>not</em> qualify (they stay a 502 / block). Only the
+                  client-cert-required case rescues the <em>current</em> session; everything else is learn-only, so the
+                  <em>first</em> connection to a never-before-seen incompatible host still fails and the <em>next</em>
+                  self-heals — add known pinned apps to the manual SSL Bypass list for guaranteed first-session success.
+                  The cache is volatile and per-node. Every learn is alerted, audited, and listed under
+                  <a href="#" data-click="switchView" data-arg="decexclusions" style="color:var(--accent)">Decryption Exclusions</a>.
+                  Keep inspection-mandatory hosts on <em>fail-close</em> rules — those are never learned or bypassed.
+                </div>
+              </details>
+            </div>
             <div style="display:flex;gap:8px">
               <button class="btn" data-click="saveDecProf">Save Profile</button>
               <button class="btn ghost" data-click="cancelDecProf">Cancel</button>
@@ -2959,13 +2971,15 @@ Firefox (all platforms):
             inspected tunnel could not be established (unsupported TLS, the origin required a client certificate, or a
             pinned client rejected our certificate) under a rule whose Decryption Profile opts into <em>fail-open</em>.
             A host is only excluded after a confirm-count of distinct clients, and entries expire (12h; 1h for pinned).
+            Each exclusion is <strong>scoped to the decryption profile</strong> that learned it — a host excluded under
+            one profile is still inspected for rules using a different profile.
             An untrusted/expired origin certificate is <em>never</em> auto-excluded — that stays a block. This cache is
             volatile (cleared on restart, never synced between nodes) and is not part of config export/rollback.
             Every entry below means inspection coverage is reduced; evict any you don't expect.
           </p>
           <div id="decexcl-stats" class="hint" style="margin-bottom:12px"></div>
           <div style="margin-bottom:12px">
-            <button class="btn sm" style="color:var(--red)" data-min-role="operator" data-click="clearDecExclusions">Clear all exclusions</button>
+            <button class="btn sm danger" data-min-role="operator" data-click="clearDecExclusions">Clear all exclusions</button>
           </div>
           <div id="decexcl-list"></div>
         </div>
@@ -5266,14 +5280,23 @@ let _decExclusions = [];
 
 let _decExclScopeRules = {};
 let _decExclScopeNames = {};
+let _decExclLoaded = false;
 async function fetchDecExclusions() {
+  const el = document.getElementById('decexcl-list');
+  if (el && !_decExclLoaded) el.innerHTML = '<p class="hint">Loading exclusions…</p>';
   try {
     const d = await api('/api/decryption-exclusions');
     _decExclusions = d.exclusions || [];
     _decExclScopeRules = d.scope_rule_counts || {};
     _decExclScopeNames = d.scope_names || {};
+    _decExclLoaded = true;
     renderDecExclusions(d.stats || {}, d.fail_open_profiles || 0, d.fail_open_rules || 0);
-  } catch(e) { console.error(e); }
+  } catch(e) {
+    console.error(e);
+    if (el) el.innerHTML = `<p class="hint" style="color:var(--red)">Could not load decryption exclusions: ${escHtml(e.message || 'request failed')}. ` +
+      (_decExclLoaded ? 'Showing the last-known list may be stale — retry.' : '') +
+      ' <button class="btn ghost sm" data-click="fetchDecExclusions">Retry</button></p>';
+  }
 }
 
 function decExclReasonLabel(r) {
@@ -5305,17 +5328,23 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
     return;
   }
   const now = Date.now();
-  el.innerHTML = '<table class="tbl" style="width:100%"><thead><tr>' +
+  // Wrap in an overflow-x container: the host is attacker-influenced and can be a
+  // 253-char FQDN; the host cell truncates with ellipsis (title=full) so one long
+  // row can never push the action columns off-screen or overflow the page body.
+  el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Profile (scope)</th><th>Host</th><th>Reason</th><th>Rules</th><th>Hits</th><th>Clients</th><th>Learned</th><th>Expires in</th><th></th>' +
     '</tr></thead><tbody>' +
     _decExclusions.map(x => {
       const remMs = new Date(x.expires_at).getTime() - now;
-      const rem = remMs > 0 ? Math.round(remMs/60000) + 'm' : 'expired';
+      const rem = remMs > 0 ? fmtExpiry(remMs) : 'expired';
       const rules = _decExclScopeRules[x.scope_id] ?? '?';
-      const scopeLabel = _decExclScopeNames[x.scope_id] || x.scope_name || x.scope_id || '—';
+      const curName = _decExclScopeNames[x.scope_id];
+      // If the scope ID no longer maps to a live profile it was deleted — badge it.
+      const orphaned = !curName;
+      const scopeLabel = curName || x.scope_name || x.scope_id || '—';
       return `<tr>
-        <td>${escHtml(scopeLabel)}</td>
-        <td style="font-family:monospace">${escHtml(x.host)}</td>
+        <td>${escHtml(scopeLabel)}${orphaned ? ' <span style="font-size:.66rem;background:rgba(239,68,68,.15);color:var(--red);padding:1px 6px;border-radius:4px" title="the owning decryption profile was deleted; this entry expires on its own">deleted</span>' : ''}</td>
+        <td style="font-family:monospace;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(x.host)}">${escHtml(x.host)}</td>
         <td><span style="font-size:.72rem;background:rgba(239,68,68,.15);color:var(--red);padding:2px 8px;border-radius:4px">${escHtml(decExclReasonLabel(x.reason))}</span></td>
         <td title="policy rules bound to this profile (blast radius)">${escHtml(String(rules))}</td>
         <td>${x.hits ?? 0}</td>
@@ -5324,10 +5353,21 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
         <td>${escHtml(rem)}</td>
         <td><button class="btn ghost sm" style="color:var(--red)" data-min-role="operator" data-click="evictDecExclusion" data-arg="${escHtml(x.scope_id)}" data-arg2="${escHtml(x.host)}">Evict</button></td>
       </tr>`;
-    }).join('') + '</tbody></table>';
+    }).join('') + '</tbody></table></div>';
+}
+
+// fmtExpiry renders a remaining-ms as "Nh" for >=1h, else "Nm" (never "0h" for a
+// sub-hour TTL like the 1h pinned class).
+function fmtExpiry(ms) {
+  const mins = Math.round(ms / 60000);
+  return mins >= 60 ? Math.round(mins / 60) + 'h' : mins + 'm';
 }
 
 async function evictDecExclusion(scopeId, host) {
+  // Confirm: evicting re-enables inspection immediately (the safe direction), but
+  // the operator must know the host may be re-learned if still incompatible.
+  if (!await confirmAction('Evict decryption exclusion',
+      `Re-enable SSL inspection for "${host}" now? Inspection resumes immediately for this host under its decryption profile; if it is still incompatible it may be learned and excluded again.`)) return;
   try {
     await api('/api/decryption-exclusions?scope=' + encodeURIComponent(scopeId) + '&host=' + encodeURIComponent(host), { method: 'DELETE' });
     toast('Exclusion evicted — inspection resumes for ' + host, 'success');

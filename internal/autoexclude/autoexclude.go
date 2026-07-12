@@ -32,15 +32,17 @@
 //     config surface. A restart re-learns cheaply. (Per-node exclusions match
 //     PAN-OS's per-firewall local cache.)
 //
-// Concurrency: a single Mutex guards both maps. Contains is on the per-CONNECT
-// hot path but only for fail-open rules (a rare opt-in), and the critical
-// section is a map lookup + expiry check, so a plain Mutex is adequate.
+// Concurrency: an RWMutex guards both maps. Contains (the per-CONNECT hot read,
+// fail-open rules only) takes the READ lock and bumps the per-entry hit counter
+// ATOMICALLY, so concurrent reads on different hosts run fully parallel; writers
+// (Observe/Remove/Clear/evict) take the write lock, which excludes all readers so
+// an entry is never mutated or deleted while a reader holds it.
 package autoexclude
 
 import (
 	"sort"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -67,6 +69,10 @@ const (
 	// the confirm-count and gets the shorter TTL. Learn-only.
 	ReasonClientPinned Reason = "client_pinned"
 )
+
+// allReasons is the fixed reason set, used for O(#reasons) same-host pending
+// cleanup on promotion (avoids an O(pending) map scan under the write lock).
+var allReasons = []Reason{ReasonClientCertRequired, ReasonUnsupportedParams, ReasonClientPinned}
 
 // Defaults. TTL matches the PAN-OS local-cache default (12h) for the
 // server-observed reasons; PinnedTTL is shorter because the client signal is the
@@ -129,7 +135,7 @@ type pend struct {
 
 // Cache is the learned-exclusion store. The zero value is NOT ready; use New.
 type Cache struct {
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	active map[string]*entry // key: scopeID \x00 host
 	pend   map[string]*pend  // key: scopeID \x00 host \x00 reason
 
@@ -251,11 +257,13 @@ func (c *Cache) Observe(scopeID, scopeName, host string, reason Reason, client s
 		clientCount: len(p.clients),
 	}
 	delete(c.pend, pk)
-	// Drop any other pending observations for the SAME (scope, host) — it's excluded.
-	prefix := ak + "\x00"
-	for k := range c.pend {
-		if strings.HasPrefix(k, prefix) {
-			delete(c.pend, k)
+	// Drop any other pending observations for the SAME (scope, host) under a
+	// different reason — it's excluded now. Keyed on the fixed reason set, so this
+	// is O(#reasons), NOT an O(pending) scan (which would be a per-promotion CPU/
+	// lock-hold cost under load).
+	for _, r := range allReasons {
+		if r != reason {
+			delete(c.pend, ak+"\x00"+string(r))
 		}
 	}
 	c.evictLocked(now)
@@ -271,19 +279,39 @@ func (c *Cache) Contains(scopeID, host string) (Reason, bool) {
 		return "", false
 	}
 	now := c.now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// RLock (not Lock): the read path only reads the map + immutable entry fields
+	// and bumps the hit counter atomically, so concurrent Contains on DIFFERENT
+	// hosts run fully parallel. Writers (Observe/Remove/Clear/evict) still take the
+	// write Lock, which excludes all readers, so an entry cannot be mutated/deleted
+	// while a reader holds it. hits MUST be atomic because multiple RLock-holding
+	// readers may bump the same counter concurrently.
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	e, ok := c.active[key(scopeID, h)]
 	if !ok || !now.Before(e.expiresAt) {
 		return "", false
 	}
-	e.hits++
+	atomic.AddInt64(&e.hits, 1)
 	return e.reason, true
 }
 
+// lowWater returns the batch-eviction floor (~94% of cap). Evicting DOWN to the
+// low-water mark (rather than to exactly the cap) amortizes the O(n log n) sort:
+// under a sustained over-cap flood the sort fires once per (cap-lowWater) inserts
+// instead of on every insert — turning an O(cap log cap)-per-Observe CPU/lock-hold
+// DoS into an amortized O(log cap) per insert.
+func lowWater(size int) int {
+	lw := size - size/16
+	if lw < 1 {
+		lw = 1
+	}
+	return lw
+}
+
 // evictLocked drops expired active entries and, if still over the cap, the oldest
-// by learnedAt. Caller holds the lock. Eviction only ever RE-ENABLES inspection
-// (fail-closed), so a flood can at worst restore inspection.
+// by learnedAt DOWN TO the low-water mark (batched — see lowWater). Caller holds
+// the lock. Eviction only ever RE-ENABLES inspection (fail-closed), so a flood can
+// at worst restore inspection.
 func (c *Cache) evictLocked(now time.Time) {
 	for k, e := range c.active {
 		if !now.Before(e.expiresAt) {
@@ -298,6 +326,7 @@ func (c *Cache) evictLocked(now time.Time) {
 	if len(c.active) <= c.maxEntries {
 		return
 	}
+	target := lowWater(c.maxEntries)
 	type ka struct {
 		k  string
 		at time.Time
@@ -307,17 +336,17 @@ func (c *Cache) evictLocked(now time.Time) {
 		all = append(all, ka{k, e.learnedAt})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
-	for i := 0; i < len(all) && len(c.active) > c.maxEntries; i++ {
+	for i := 0; i < len(all) && len(c.active) > target; i++ {
 		delete(c.active, all[i].k)
 	}
 }
 
 // evictPendingLocked bounds the in-progress observation map: it drops entries
 // whose window has elapsed, then — if still over maxPending — the oldest by
-// firstSeen. Caller holds the lock. Runs only when a new key would push c.pend
-// over the cap, so the common (under-cap) path pays nothing. Evicting a pending
-// observation only forces its (scope,host) to re-accumulate confirmations; it can
-// never create an exclusion, so the direction is fail-closed.
+// firstSeen DOWN TO the low-water mark (batched, same amortization as
+// evictLocked). Caller holds the lock. Runs only when a new key would push c.pend
+// over the cap. Evicting a pending observation only forces its (scope,host) to
+// re-accumulate confirmations; it can never create an exclusion (fail-closed).
 func (c *Cache) evictPendingLocked(now time.Time) {
 	for k, p := range c.pend {
 		if now.Sub(p.firstSeen) > c.window {
@@ -327,6 +356,7 @@ func (c *Cache) evictPendingLocked(now time.Time) {
 	if len(c.pend) < c.maxPending {
 		return
 	}
+	target := lowWater(c.maxPending)
 	type kf struct {
 		key string
 		at  time.Time
@@ -336,7 +366,7 @@ func (c *Cache) evictPendingLocked(now time.Time) {
 		all = append(all, kf{k, p.firstSeen})
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
-	for i := 0; i < len(all) && len(c.pend) >= c.maxPending; i++ {
+	for i := 0; i < len(all) && len(c.pend) > target; i++ {
 		delete(c.pend, all[i].key)
 	}
 }
@@ -345,8 +375,8 @@ func (c *Cache) evictPendingLocked(now time.Time) {
 // by learnedAt (newest first) for a predictable UI ordering.
 func (c *Cache) List() []Entry {
 	now := c.now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := make([]Entry, 0, len(c.active))
 	for _, e := range c.active {
 		if !now.Before(e.expiresAt) {
@@ -359,7 +389,7 @@ func (c *Cache) List() []Entry {
 			Reason:      e.reason,
 			LearnedAt:   e.learnedAt,
 			ExpiresAt:   e.expiresAt,
-			Hits:        e.hits,
+			Hits:        atomic.LoadInt64(&e.hits),
 			ClientCount: e.clientCount,
 		})
 	}
@@ -394,8 +424,8 @@ func (c *Cache) Clear() int {
 // Len is the current count of active (non-expired) exclusions.
 func (c *Cache) Len() int {
 	now := c.now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	n := 0
 	for _, e := range c.active {
 		if now.Before(e.expiresAt) {
@@ -407,8 +437,8 @@ func (c *Cache) Len() int {
 
 // PendingLen is the current count of in-progress (unconfirmed) observations.
 func (c *Cache) PendingLen() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return len(c.pend)
 }
 
@@ -427,8 +457,8 @@ type Stats struct {
 
 // Stats returns a snapshot of the cache configuration and occupancy.
 func (c *Cache) Stats() Stats {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	now := c.now()
 	active := 0
 	for _, e := range c.active {
