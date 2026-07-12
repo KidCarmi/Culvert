@@ -1,7 +1,7 @@
 # Adaptive Decryption Exclusions (Fail-Open + Auto-Learn)
 
 **Official product documentation** · Culvert Secure Web Gateway
-Feature area: SSL/TLS Decryption · Status: GA · Audience: administrators, support, security, engineering
+Feature area: SSL/TLS Decryption · Availability: shipped (operator-tuning enhancements planned — see [Part 12](#future-improvements-planned)) · Audience: administrators, support, security, engineering
 
 > **What this is in one sentence.** Culvert can *learn at runtime* which hosts are
 > incompatible with SSL inspection and transparently bypass decryption for them —
@@ -252,8 +252,9 @@ stateDiagram-v2
     Absent --> [*]
 ```
 
-- **Pending** observations live in a separate map, bounded independently
-  (`maxPending`, default 4096). They never bypass anything.
+- **Pending** observations live in a separate map, evicted independently but sharing
+  the active cap (`maxPending = MaxEntries` = 4096 — it is not a separate tunable).
+  They never bypass anything.
 - **Active** entries are what the hot path reads. Bounded by `MaxEntries`
   (default 4096) with oldest-first eviction down to a low-water mark.
 - **Expiry is lazy**: an expired entry reads as absent immediately; physical removal
@@ -341,7 +342,10 @@ it does not live-rescue even for `client_cert_required` (a documented deferral).
 | `culvert_decrypt_autoexclude_pending` | gauge | Current in-progress (unconfirmed) observations |
 
 `{reason,scope}` cardinality is capped at 200 label pairs; overflow scopes fold into
-a shared `_other_` bucket.
+a shared `_other_` bucket. Note the `_total` series only appears **after the first
+learn** (there is no series until there is data); the `_hit_total` counter and the
+`_active`/`_pending` gauges are always present. A "missing metric" symptom usually
+just means nothing has been learned yet — see [7.5](#75-no-metrics).
 
 ### Audit events & alerts
 
@@ -518,10 +522,14 @@ TTL 12h, pinned TTL 1h.
   Reason `client_cert_required` → **the triggering session is rescued live**
   (transparent bypass, no `502`) *and* an observation is recorded.
 - **Why:** this is a specific, structured signal and the one reason permitted to
-  live-rescue (strip path). It is **confirm-count-exempt for the rescue** — but the
-  *persistent* cache entry future sessions read still requires the confirm-count.
-- **Audit/metric/UI:** learn event fires once the confirm-count is met (or
-  immediately if configured otherwise); reason **Client-cert required**, expiry 12h.
+  live-rescue (strip path). The rescue of the *triggering* session is
+  **confirm-count-exempt** — but the **learn event** (the persistent cache entry
+  future sessions read, plus its audit/alert/metric) *always* requires the
+  confirm-count of distinct clients. There is no configuration that makes the learn
+  fire on a single observation.
+- **Audit/metric/UI:** the learn event fires once the confirm-count is met (2 distinct
+  clients); reason **Client-cert required**, expiry 12h. The very first user is
+  rescued transparently even though no entry has been promoted yet.
 - **Operator action:** none required; verify the host is expected. If DLP-critical,
   move it to a fail-close rule and add trust instead.
 
@@ -535,6 +543,11 @@ TTL 12h, pinned TTL 1h.
 - **Why:** a genuine per-origin incompatibility detected locally; lower confidence
   than client-cert-required, so it never rescues the triggering session — the next
   session self-heals.
+- **Classifier note (support):** only the client-side *"server selected unsupported
+  protocol version"* signal learns here. The look-alike local config error *"no
+  supported versions satisfy MinVersion and MaxVersion"* is deliberately **not**
+  matched — it reflects the profile's own floor, not the origin, and matching it
+  would learn every host. Do not confuse the two when triaging.
 - **Operator action:** consider whether lowering the profile's min-TLS is
   appropriate, or leave the exclusion to manage it.
 
@@ -605,7 +618,7 @@ succeeds without inspection.
 | **High availability (CP/DP)** | The cache is **per-node**. CP and each DP learn independently; nothing is synced. A failover node starts with an empty cache and re-learns. This is intentional — a learned bypass is never propagated across the fence. |
 | **Restart** | Cache empties; hosts re-learn on demand. No on-disk state. Proven by `TestRolloutRehearsal` step 8. |
 | **Cache full (active)** | At `MaxEntries` (4096) a new promotion triggers oldest-first eviction down to a low-water mark (~94%). Eviction only ever **re-enables inspection** (fail-closed). |
-| **Pending map full** | `maxPending` (4096) bounds in-progress observations independently; over-cap triggers window-drop then oldest-first eviction. Evicting a pending observation only forces re-accumulation — it can never create an exclusion. |
+| **Pending map full** | `maxPending` (= `MaxEntries` = 4096; evicted separately, not a separate tunable) bounds in-progress observations; over-cap triggers window-drop then oldest-first eviction. Evicting a pending observation only forces re-accumulation — it can never create an exclusion. |
 | **TTL expiry** | Lazy: expired entries read as absent immediately; physical removal on next eviction/`List`. Pinned reason = 1h, others = 12h. |
 | **Concurrent observations** | Writers take the write lock; the confirm-count set is a map of distinct tokens, so concurrent failures from the same client count once. Reads (`Contains`) take the read lock and bump hits atomically — fully parallel across hosts. |
 | **Repeated failures from one client** | Count as **one** distinct token; cannot alone reach `confirmN`. This is the core anti-poison property. |
