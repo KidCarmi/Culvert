@@ -481,3 +481,56 @@ connection per newly-incompatible host per TTL window; use the manual bypass +
 (future) predefined list for guaranteed first-session success; and every host the
 proxy stops inspecting is alerted, audited, listed with its blast radius, and
 clearable.
+
+---
+
+# v3 — post-merge-review blocker resolution (PR #693)
+
+A follow-up security review of the implemented PR raised six merge-blockers. All
+are resolved on the branch; this section is authoritative where it differs above.
+
+- **B1 — Scoped key (policy isolation).** Exclusions are keyed by
+  `(scopeID, host)` where `scopeID` is the matched decryption profile's identity
+  (`resolveDecryptionProfile(match).ID`), NOT host-only. `Observe`/`Contains`/
+  `Remove` all take the scope; `resolveSSLAction` consults within the session's
+  profile scope only. A host learned under profile A can never bypass profile B's
+  rule. §4.1's "consulted globally" is SUPERSEDED — consumption is scoped, which
+  also subsumes the cross-policy-leak concern. Scope + per-scope rule blast-radius
+  surfaced in the API (`scope_rule_counts`), metric label (`{reason,scope}`), UI
+  (Profile + Rules columns), and audit (object = `scope/host`). Pinned by
+  `TestScopeIsolation` + `TestResolveSSLAction_CrossScopeContamination`.
+
+- **B2 — Tightened classifier.** An origin controls its own TLS alerts, so the
+  learnable origin set drops the generic/origin-emitted strings (`handshake
+  failure`, broad `unsupported`, `no application protocol`). It keeps only the
+  specific `certificate_required` alert and the LOCAL Go param-mismatch strings
+  (`no supported versions satisfy`, `server selected unsupported protocol
+  version`, `no cipher suite supported by both`). Unknown/ambiguous/wrapped/
+  cert-verify → fail-close. Negative tests cover generic alerts, wrapped errors,
+  transport failures, and origin-controlled rejection.
+
+- **B3 — Restricted live rescue.** `classifyOriginInspectFailure` returns a third
+  `rescue` bool; only `client_cert_required` sets it. `maybeFailOpenOrigin`
+  returns that bool, so ONLY client-cert-required live-rescues the triggering
+  strip-path session; `unsupported_params` is learn-only. The §2/§4.3 "the strip
+  path rescues on any server signal" is narrowed. Residual downgrade risk (origin
+  controls the alert) documented in the operator guide, bounded by the per-profile
+  opt-in + scope.
+
+- **B4 — Distinct-client evidence.** The confirm-count counts distinct
+  client-evidence tokens: authenticated `ProxyIdentity.Identity` (trustworthy,
+  not a client header) when present, else the client IP — IPv6 collapsed to /64
+  (single-host churn), IPv4 RAW (a /24 over-collapses NAT fleets). The engine
+  treats the token opaquely; `clientEvidence` (main) owns the policy. NAT/DHCP
+  limitation documented.
+
+- **B5 — Config-schema / rollback.** `OnInspectError` is acknowledged as an
+  additive PERSISTED profile field (a schema change, no new top-level surface).
+  `TestOnInspectError_SchemaRoundTripAndDowngrade` proves forward round-trip AND
+  that an older binary ignores the unknown key and degrades to fail-close.
+
+- **B6 — Risk + rollout.** PR reclassified 🔴 High security. Operator guide gains
+  a staged-rollout section (narrow profile first → watch panel + gauge + SIEM →
+  expand; critical hosts stay fail-close). Independent security/SWG/Go reviewers
+  re-run against the diff with focused cross-scope + ambiguous-TLS regression
+  tests.
