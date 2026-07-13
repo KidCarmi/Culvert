@@ -109,10 +109,17 @@ A new rename capability on each object store + handler:
   change) with the usual name-uniqueness validation.
 - **Handler cascade** (main package, where both stores are visible — the
   `internal/` object stores cannot import `policyStore`): after renaming the
-  object, `cascadeObjectRefName(kind, id, newName)` walks `policyStore` (and, for
-  category groups, is scoped to rules referencing that group ID) and rewrites the
-  denormalized name field on every rule whose `…ID` matches. One
-  `saveConfigVersion`; DP sync then ships both the renamed object and the updated
+  object, `cascadeObjectRefName(kind, id, newName)` walks `policyStore` and
+  rewrites the denormalized name field on every rule whose `…ID` matches.
+- **The cascade MUST persist the policy store.** Rewriting `PolicyRule` fields is
+  a policy-store mutation, so the handler must call `policyStore.Save()` (the
+  same durability the normal policy-write path gives via `afterPolicyWrite`)
+  BEFORE `saveConfigVersion`. Otherwise, if the process restarts after a rename
+  but before any later policy edit, the denormalized rule names reload STALE from
+  the policy file — the config-version history would have the new name but the
+  live rulebase (UI/export/DP snapshot) would not (Codex design review). Order:
+  rename object → object-store Save → cascade rule names → `policyStore.Save()` →
+  `saveConfigVersion`. DP sync then ships both the renamed object and the updated
   rules in the next `ConfigSnapshot`.
 - **Referential integrity unchanged**: delete is still blocked by the
   `objectReferences` walk. Rename is now the safe alternative to
@@ -129,9 +136,14 @@ A new rename capability on each object store + handler:
   `…ID` resolves against the same object IDs on every node. (This is why the
   migration is safe for these two objects but was deferred for rules themselves,
   whose IDs were historically node-local.)
-- `policy_refs.go` (`objectReferences`) continues to correlate by name for the
-  delete-block UX; it MAY additionally match by ID once rules carry them
-  (belt-and-suspenders), but name correlation stays for un-migrated rules.
+- `policy_refs.go` (`objectReferences`) MUST check the object **ID first**, with
+  name correlation kept only as the legacy fallback for un-migrated rules.
+  ID-first is required, not optional (Codex design review): a rule can carry the
+  object's `…ID` while its denormalized name is momentarily stale (e.g. a
+  partial/interrupted cascade), and a name-only delete-block would then fail to
+  find it — letting the UI delete an object that is still referenced by ID and
+  turning the rule into a dangling reference. Since the ID link is what the match
+  path honors, the delete-block must honor it too, or the two disagree.
 
 ## 9. UI
 
