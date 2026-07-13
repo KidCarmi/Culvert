@@ -55,26 +55,35 @@ func TestFailOpenScopeByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope, ok := s.FailOpenScopeByID(fo.ID)
-	if !ok || scope != fo.ID {
-		t.Errorf("FailOpenScopeByID = (%q,%v), want (%q,true)", scope, ok, fo.ID)
+	// Resolved + fail-open → (id, true).
+	scope, resolved := s.FailOpenScopeByID(fo.ID)
+	if !resolved || scope != fo.ID {
+		t.Errorf("FailOpenScopeByID(fail-open) = (%q,%v), want (%q,true)", scope, resolved, fo.ID)
 	}
-	// A fail-close profile (default) does not scope.
+	// A fail-close profile is RESOLVED but scopeless: ("", true). The
+	// resolved=true is load-bearing — the caller must NOT fall back to the
+	// name (the ID is authoritative), so we distinguish it from not-found.
 	fc, err := s.Add(Profile{Name: "FC", CertVerification: "strict"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.FailOpenScopeByID(fc.ID); ok {
-		t.Error("fail-close profile must not produce a scope")
+	if scope, resolved := s.FailOpenScopeByID(fc.ID); scope != "" || !resolved {
+		t.Errorf("FailOpenScopeByID(fail-close) = (%q,%v), want (\"\",true)", scope, resolved)
 	}
-	if _, ok := s.FailOpenScopeByID(""); ok {
-		t.Error("empty id must not scope")
+	// Not found → ("", false): the ID resolves to no profile, so the caller
+	// may fall back to the denormalized name.
+	if scope, resolved := s.FailOpenScopeByID("nonexistent"); scope != "" || resolved {
+		t.Errorf("FailOpenScopeByID(missing) = (%q,%v), want (\"\",false)", scope, resolved)
+	}
+	// Empty id → ("", false).
+	if scope, resolved := s.FailOpenScopeByID(""); scope != "" || resolved {
+		t.Errorf("FailOpenScopeByID(\"\") = (%q,%v), want (\"\",false)", scope, resolved)
 	}
 	// Scope tracks the profile across a rename (ID unchanged).
 	if _, err := s.Rename(fo.ID, "FO-renamed"); err != nil {
 		t.Fatal(err)
 	}
-	if scope, ok := s.FailOpenScopeByID(fo.ID); !ok || scope != fo.ID {
+	if scope, resolved := s.FailOpenScopeByID(fo.ID); !resolved || scope != fo.ID {
 		t.Error("scope should survive a rename (keyed by stable id)")
 	}
 }

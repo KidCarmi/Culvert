@@ -654,8 +654,13 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 // allocation-free on this per-CONNECT path).
 func failOpenScopeForRule(rule *PolicyRule) (scope string, ok bool) {
 	if id := rule.DecryptionProfileID; id != "" {
-		if scope, ok = globalDecryptionProfiles.FailOpenScopeByID(id); ok {
-			return scope, true
+		// ID is authoritative: if it resolves to a profile at all, that
+		// profile's fail-open decision is final. Only fall back to the
+		// name when the id resolves to NO profile (un-migrated / dangling),
+		// mirroring resolveDecryptionProfile — a resolved fail-close profile
+		// must NOT be rescued by a stale name pointing at a fail-open one.
+		if s, resolved := globalDecryptionProfiles.FailOpenScopeByID(id); resolved {
+			return s, s != ""
 		}
 	}
 	if rule.DecryptionProfile != "" {

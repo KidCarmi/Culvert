@@ -193,6 +193,26 @@ func (c *policyDraftCoordinator) clear() {
 	}
 }
 
+// cascadeDecryptionProfileRename mirrors PolicyStore.CascadeDecryptionProfileRename
+// onto the open candidate so a profile rename keeps the DRAFT's denormalized names
+// honest too — otherwise a rename during an active draft would refresh running but
+// leave the candidate carrying stale names that a later commit would write back.
+// No-op when no draft is open. Persists only when a rule was actually touched.
+// Lock order c.mu → PolicyStore.mu (as in stageTarget); persist() takes c.mu
+// itself, so it runs after the unlock.
+func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, newName string) {
+	c.mu.Lock()
+	if !c.state.Active {
+		c.mu.Unlock()
+		return
+	}
+	n := c.cand.CascadeDecryptionProfileRename(id, oldName, newName)
+	c.mu.Unlock()
+	if n > 0 {
+		c.persist()
+	}
+}
+
 // reconcile auto-discards the draft when its candidate has become identical to
 // running — i.e. the last edit was a NO-OP (re-save with no change, drag-in-place,
 // bulk-delete of absent priorities) or FAILED (TOCTOU mutation returned false

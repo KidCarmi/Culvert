@@ -242,12 +242,17 @@ func (s *Store) FailOpenScope(name string) (id string, ok bool) {
 	return id, true
 }
 
-// FailOpenScopeByID is FailOpenScope keyed by the profile's stable ULID
-// (references-by-id / rename-safe): the autoexclude scope identity tracks the
-// profile across a rename, and the rule's possibly-stale denormalized name is
-// not consulted. Same no-copy fast-path contract; O(profiles) which is a small
-// admin-defined set, and only on the SSL-inspect fail-open CONNECT path.
-func (s *Store) FailOpenScopeByID(id string) (scope string, ok bool) {
+// FailOpenScopeByID resolves the autoexclude scope by the profile's stable ULID
+// (references-by-id / rename-safe). resolved=true iff a profile with that id
+// EXISTS; scope is its ID when that profile is fail-open, else "". The ID is
+// AUTHORITATIVE: a resolved fail-close profile returns ("", true) so the caller
+// does NOT fall back to the name — otherwise a rule whose id points at a
+// fail-close profile but whose stale name points at a different fail-open one
+// could get its (fail-close) session bypassed, violating the "fail-close is
+// un-poisonable" invariant. Mirrors resolveDecryptionProfile: name fallback only
+// when the id resolves to no profile at all. No-copy fast path; O(profiles), a
+// small admin set, only on the SSL-inspect CONNECT path.
+func (s *Store) FailOpenScopeByID(id string) (scope string, resolved bool) {
 	if id == "" {
 		return "", false
 	}
@@ -255,13 +260,13 @@ func (s *Store) FailOpenScopeByID(id string) (scope string, ok bool) {
 	defer s.mu.RUnlock()
 	for _, p := range s.profiles {
 		if p.ID == id {
-			if p.OnInspectError != "fail-open" {
-				return "", false
+			if p.OnInspectError == "fail-open" {
+				return p.ID, true // resolved + fail-open → scope
 			}
-			return p.ID, true
+			return "", true // resolved but fail-close → no scope, and no name fallback
 		}
 	}
-	return "", false
+	return "", false // not found → caller may fall back to the name
 }
 
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.

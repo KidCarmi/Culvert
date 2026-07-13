@@ -147,3 +147,63 @@ func TestApiDecryptionProfile_RenameCascades(t *testing.T) {
 		t.Errorf("rule no longer resolves its profile after rename: %+v", got)
 	}
 }
+
+// TestApiDecryptionProfile_RenameCascadesDraft pins Finding 2: a profile rename
+// during an ACTIVE draft must also refresh the candidate's denormalized names,
+// so a later commit does not write stale names back over running.
+func TestApiDecryptionProfile_RenameCascadesDraft(t *testing.T) {
+	draftTestSetup(t)
+	snapshotDecProfilesForTest(t)
+	p, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "old", CertVerification: "strict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open a draft and stage a rule that references the profile by ID.
+	setRequireCommit(true)
+	cand := policyDraft.stageTarget("admin@test")
+	cand.Add(PolicyRule{Name: "cr", DecryptionProfile: "old", DecryptionProfileID: p.ID, Action: ActionAllow})
+
+	body := `{"name":"new","certVerification":"strict"}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut,
+		"/api/decryption-profiles?id="+p.ID, strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiDecryptionProfiles(w, adminCtx(req))
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename PUT = %d (%s)", w.Code, w.Body.String())
+	}
+	crules := policyDraft.candidateList()
+	if len(crules) != 1 || crules[0].DecryptionProfile != "new" {
+		t.Errorf("draft candidate's denormalized name not cascaded: %+v", crules)
+	}
+}
+
+// TestApiDecryptionProfile_RenameCollision409 pins Finding 3's pre-check: a
+// rename onto a name owned by a DIFFERENT profile is rejected with 409 and
+// mutates nothing (neither profile content nor name).
+func TestApiDecryptionProfile_RenameCollision409(t *testing.T) {
+	snapshotDecProfilesForTest(t)
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+	p, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "a", CertVerification: "strict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "b", CertVerification: "strict"}); err != nil {
+		t.Fatal(err)
+	}
+	// Try to rename "a" → "b" while ALSO changing content (skip verify).
+	body := `{"name":"b","certVerification":"skip"}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut,
+		"/api/decryption-profiles?id="+p.ID, strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiDecryptionProfiles(w, adminCtx(req))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("collision rename = %d (%s), want 409", w.Code, w.Body.String())
+	}
+	// Nothing changed: "a" keeps its name AND its original content (not "skip").
+	if g := globalDecryptionProfiles.GetByID(p.ID); g == nil || g.Name != "a" || g.CertVerification != "strict" {
+		t.Errorf("collision must not mutate the profile: %+v", g)
+	}
+}

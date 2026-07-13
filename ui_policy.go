@@ -635,24 +635,40 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			newName := strings.TrimSpace(p.Name)
 			renamed := newName != "" && !strings.EqualFold(newName, before.Name)
 			if renamed {
+				// Pre-check the name collision BEFORE mutating anything so a taken
+				// name fails cleanly (Rename re-checks under its own lock — this only
+				// avoids applying the content update below and then bouncing on the
+				// rename). A different profile owning the target name is a conflict.
+				if g := globalDecryptionProfiles.GetByName(newName); g != nil && g.ID != id {
+					http.Error(w, "a profile named "+newName+" already exists", http.StatusConflict)
+					return
+				}
+			}
+			// Apply the content update FIRST: it validates the profile body, so a
+			// bad-field rejection returns before any rename is applied (no partial
+			// state where the name changed but the content update bounced).
+			if err := globalDecryptionProfiles.UpdateByID(id, p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if renamed {
 				if _, err := globalDecryptionProfiles.Rename(id, newName); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 			}
-			if err := globalDecryptionProfiles.UpdateByID(id, p); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
 			globalDecryptionProfiles.Save()
 			detail := ""
 			if renamed {
-				// Refresh referencing rules, then persist the policy store BEFORE
-				// versioning (durability: a restart before the next policy edit must
-				// not reload stale names — the cascade is a real policy mutation).
+				// Refresh referencing rules on running AND the open draft candidate,
+				// then persist the policy store BEFORE versioning (durability: a
+				// restart before the next policy edit must not reload stale names —
+				// the cascade is a real policy mutation). The draft cascade keeps a
+				// staged candidate from re-writing stale names back at commit time.
 				if n := policyStore.CascadeDecryptionProfileRename(id, before.Name, newName); n > 0 {
 					policyStore.Save()
 				}
+				policyDraft.cascadeDecryptionProfileRename(id, before.Name, newName)
 				detail = "renamed from " + sanitizeLog(before.Name)
 			}
 			auditName := before.Name
