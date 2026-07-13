@@ -80,6 +80,18 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Audit/request-log persistence state: if the operator configured a
+		// file path but the engine could not open it at startup (bad
+		// permissions, missing directory, full disk), both silently fall
+		// back to volatile in-memory storage — wiped on every restart — with
+		// only a startup log line as evidence. "Configured" true + "Persisted"
+		// false means that silent fallback is currently active.
+		"auditLogConfigured":   auditLogConfiguredPath != "",
+		"auditLogPersisted":    auditPersistActive(),
+		"auditLogPath":         auditLogConfiguredPath,
+		"requestLogConfigured": requestLogConfiguredPath != "",
+		"requestLogPersisted":  requestLogPersistActive(),
+		"requestLogPath":       requestLogConfiguredPath,
 		// Admin-API RBAC enforcement mode ("enforce"/"shadow"). Surfaced here
 		// (in addition to the Governance panel) so shadow mode — where the
 		// metadata-driven role gate is log-only, not blocking — is visible
@@ -1243,6 +1255,17 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 
 // syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
 var syslogConfigured string // the addr string, empty = not configured
+
+// auditLogConfiguredPath / requestLogConfiguredPath record the operator-
+// configured persistent-log path (set in loadObservability regardless of
+// whether the underlying engine's Init() actually succeeded). apiStats
+// compares these against {audit,requestLog}PersistActive() so the GUI can
+// tell an intentional in-memory-only setup apart from a configured path
+// that silently fell back to volatile storage on open failure.
+var (
+	auditLogConfiguredPath   string
+	requestLogConfiguredPath string
+)
 
 // GET/POST /api/syslog — configure remote syslog/SIEM forwarding at runtime.
 // GET  → returns current syslog address and format.

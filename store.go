@@ -171,6 +171,7 @@ var (
 	logGet                   = reqlog.Get
 	initRequestLog           = reqlog.Init
 	requestLogReadPersistent = reqlog.ReadPersistent
+	requestLogPersistActive  = reqlog.PersistActive
 )
 
 // The queryable-history hook: the closure performs the same lock-free atomic
@@ -211,6 +212,7 @@ var (
 	auditGetPersistent      = audit.GetPersistent
 	drainPendingAuditEvents = audit.Drain
 	requeueAuditEvents      = audit.Requeue
+	auditPersistActive      = audit.PersistActive
 )
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
