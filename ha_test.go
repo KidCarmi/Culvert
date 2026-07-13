@@ -279,6 +279,79 @@ func TestAPIClusterHA_GET(t *testing.T) {
 	}
 }
 
+func TestAPIClusterHA_GET_StandbySyncHealth(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "standby"
+	globalHA.peerAddr = "cp1:50051"
+	globalHA.since = time.Now()
+	globalHA.syncFailCount = 2
+	globalHA.lastSyncOK = time.Now().Add(-30 * time.Second)
+	globalHA.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", nil)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["role"] != "standby" {
+		t.Fatalf("expected standby, got %v", resp["role"])
+	}
+	failCount, _ := resp["sync_fail_count"].(float64)
+	if int(failCount) != 2 {
+		t.Errorf("expected sync_fail_count=2, got %v", resp["sync_fail_count"])
+	}
+	maxFail, _ := resp["sync_max_fail"].(float64)
+	if int(maxFail) != haStandbyMaxFail {
+		t.Errorf("expected sync_max_fail=%d, got %v", haStandbyMaxFail, resp["sync_max_fail"])
+	}
+	if resp["last_sync_ok"] == nil || resp["last_sync_ok"] == "" {
+		t.Error("expected non-empty last_sync_ok")
+	}
+	if resp["deploy_cmd"] != nil {
+		t.Error("standby should not carry a leader-only deploy_cmd")
+	}
+}
+
+func TestAPIClusterHA_GET_LeaderOmitsStandbySyncFields(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.since = time.Now()
+	globalHA.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", nil)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if _, ok := resp["sync_fail_count"]; ok {
+		t.Error("leader response should not carry standby-only sync_fail_count")
+	}
+}
+
+func TestStandbyLoopState_SetFail_MirrorsOntoHAState(t *testing.T) {
+	defer swapGlobalHA(t)()
+	s := &standbyLoopState{h: globalHA}
+
+	s.setFail(2)
+	if got := globalHA.Status().SyncFailCount; got != 2 {
+		t.Errorf("expected HAState.syncFailCount=2, got %d", got)
+	}
+
+	s.setFail(0)
+	if got := globalHA.Status().SyncFailCount; got != 0 {
+		t.Errorf("expected HAState.syncFailCount=0 after reset, got %d", got)
+	}
+}
+
 func TestAPIClusterHA_EnableRequiresCP(t *testing.T) {
 	defer swapGlobalHA(t)()
 
