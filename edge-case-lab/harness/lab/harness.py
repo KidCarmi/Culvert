@@ -27,7 +27,12 @@ from typing import Any, Optional
 from . import oracle
 
 # ---- Lab configuration (single source of truth) ----------------------------
-REPO = "/home/user/Culvert"
+# REPO is derived from this file's location so the lab runs from ANY checkout
+# (e.g. /workspace/Culvert in CI), not just /home/user/Culvert. Layout:
+#   <REPO>/edge-case-lab/harness/lab/harness.py  -> four dirnames up = <REPO>.
+# CULVERT_LAB_REPO overrides it explicitly if ever needed.
+REPO = os.environ.get("CULVERT_LAB_REPO") or os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 LAB = os.path.join(REPO, "edge-case-lab")
 # CULVERT_LAB_BIN lets mutation-validation / acceptance-review runs point the lab at
 # an alternate (e.g. deliberately-mutated, worktree-built) binary WITHOUT editing the
@@ -705,6 +710,10 @@ class Executor:
         host = vec["host"]; port = vec.get("port", FIXTURE_HTTPS); path = vec.get("path", "/")
         url = f"https://{host}:{port}{path}"
         base = ["-x", self._proxy_url(vec), "-o", "/tmp/body.out", "-w", "%{http_code}"] + self._src_iface(vec)
+        # Inject client-supplied headers (identity-scrub / header-hygiene vectors run
+        # over HTTPS too — must reach the origin the same way as the HTTP path).
+        for hk, hv in (vec.get("inject_headers") or {}).items():
+            base += ["-H", f"{hk}: {hv}"]
         # Probe with both trust anchors to detect interception vs passthrough.
         rc_c, out_c, err_c = self._curl(base + ["--cacert", CULVERT_CA, url])
         body_c = _read_head("/tmp/body.out")
@@ -736,9 +745,13 @@ class Executor:
         disp = oracle.ALLOW if tls else oracle.CONN_FAIL
         curl_exit = 0 if (c_ok or f_ok) else (rc_c or rc_f)
         curl_err = (err_c if not c_ok else "") + " " + (err_f if not f_ok else "")
-        return ActualResult(disposition=disp, tls=tls, http_status=status,
-                            curl_exit=curl_exit, curl_err=curl_err[-200:], body_head=body[:300],
-                            is_block_page=blockpage, probes=probes)
+        res = ActualResult(disposition=disp, tls=tls, http_status=status,
+                           curl_exit=curl_exit, curl_err=curl_err[-200:], body_head=body[:300],
+                           is_block_page=blockpage, probes=probes)
+        # Forwarded-header hygiene under TLS inspection: the echo body (from the
+        # trust anchor that completed) is what the origin actually received.
+        self._check_header_assertions(vec, body, res)
+        return res
 
 
 def _read_head(path, n=500) -> str:
@@ -827,5 +840,11 @@ class Reviewer:
             return False
         # if a TLS expectation is set, check it
         if exp.tls and act.tls and exp.tls != act.tls:
+            return False
+        # a forwarded-header hygiene probe that DETECTED a leak fails the vector even
+        # when disposition/TLS match — otherwise a scrub-failure security scenario
+        # would score PASS purely on the allow/inspect result (Codex P2).
+        hs = act.probes.get("header_scrub") if act.probes else None
+        if hs and hs.get("leaked") is True:
             return False
         return True

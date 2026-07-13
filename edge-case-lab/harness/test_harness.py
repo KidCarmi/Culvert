@@ -182,6 +182,24 @@ def test_upstream_fail_live():
 
 
 # ------------------------------------------------- deterministic replay (live)
+def test_header_scrub_scoring():
+    """A forwarded-header hygiene probe must drive the verdict: a scrubbed header
+    PASSes, but a DETECTED leak must NOT be scored PASS even when disposition/TLS
+    match (otherwise the identity-scrub security scenario validates nothing)."""
+    rv = H.Reviewer()
+    exp = oracle.Expectation(disposition=oracle.ALLOW, tls=oracle.TLS_INTERCEPTED,
+                             matched_rule="inspect-app", rationale="r", certainty="certain")
+    scrubbed = H.ActualResult(disposition=oracle.ALLOW, tls=oracle.TLS_INTERCEPTED, http_status=200,
+                              probes={"header_scrub": {"header": "X-User-Identity", "leaked": False}})
+    leaked = H.ActualResult(disposition=oracle.ALLOW, tls=oracle.TLS_INTERCEPTED, http_status=200,
+                            probes={"header_scrub": {"header": "X-User-Identity", "leaked": True}})
+    check("header_scrub.scrubbed_passes", rv._agree(exp, scrubbed) is True
+          and rv.classify_vector(exp, scrubbed, {"errors": []}, None)["verdict"] == "PASS")
+    check("header_scrub.leak_fails", rv._agree(exp, leaked) is False
+          and rv.classify_vector(exp, leaked, {"errors": []}, None)["verdict"] != "PASS",
+          "a detected header leak must not score PASS")
+
+
 def test_deterministic_replay():
     from lab.scenarios_full import FullGen
     sc = next(s for s in FullGen().build_full() if s["id"] == "SWG-0009")
@@ -200,6 +218,7 @@ def main():
     test_oracle()
     test_attribution()
     test_schema()
+    test_header_scrub_scoring()
     if live:
         test_ownership_refuses_unmanaged()
         test_zombie_regression()
