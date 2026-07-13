@@ -133,7 +133,11 @@ This feature disables inspection for learned hosts, so roll it out gradually:
    `culvert_decrypt_autoexclude_active` for a week. Confirm the learned hosts are
    the ones you expect and the blast radius is small.
 3. Alert on the active gauge and on the `decryption_autoexclude` learn events in
-   your SIEM. Treat an unexpected host going dark as an incident.
+   your SIEM. Treat an unexpected host going dark as an incident. Culvert also
+   emits a built-in **abnormal-rate** alert (`decryption_autoexclude_surge`, audit
+   `decryption.autoexclude.surge`, metric `culvert_decrypt_autoexclude_surge_total`)
+   that fires once per window when the promotion rate crosses the surge threshold —
+   the aggregate poisoning-campaign signal the per-host learn alerts cannot give.
 4. Expand to more profiles only after the above is stable. Keep every
    inspection-mandatory host on a fail-close rule throughout.
 

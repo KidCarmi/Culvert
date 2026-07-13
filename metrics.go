@@ -532,11 +532,15 @@ culvert_decrypt_autoexclude_pending %d
 # HELP culvert_decrypt_autoexclude_rescue_total Sessions live-bypassed on the first client_cert_required signal (confirm-count-exempt, before any persistent promotion)
 # TYPE culvert_decrypt_autoexclude_rescue_total counter
 culvert_decrypt_autoexclude_rescue_total %d
+# HELP culvert_decrypt_autoexclude_surge_total Abnormal-learning-rate alerts fired (promotion rate crossed the surge threshold within a window) — a poisoning-campaign indicator
+# TYPE culvert_decrypt_autoexclude_surge_total counter
+culvert_decrypt_autoexclude_surge_total %d
 `,
 		atomic.LoadInt64(&autoExcludeHitCounter),
 		aeStats.Active,
 		aeStats.Pending,
 		atomic.LoadInt64(&autoExcludeRescueCounter),
+		atomic.LoadInt64(&autoExcludeSurgeCounter),
 	)
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
