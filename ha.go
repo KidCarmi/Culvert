@@ -126,19 +126,26 @@ func (h *HAState) Status() HAStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s := HAStatus{
-		Enabled:       h.role != "",
-		Role:          h.role,
-		PeerAddr:      h.peerAddr,
-		AutoFailover:  h.autoFailover,
-		Term:          h.term,
-		StandbyAddr:   h.standbyAddr,
-		SyncFailCount: h.syncFailCount,
+		Enabled:      h.role != "",
+		Role:         h.role,
+		PeerAddr:     h.peerAddr,
+		AutoFailover: h.autoFailover,
+		Term:         h.term,
+		StandbyAddr:  h.standbyAddr,
 	}
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
 	}
-	if !h.lastSyncOK.IsZero() {
-		s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
+	// Standby-only: on auto-promotion setFail(N) can run just before promote()
+	// flips h.role to "leader" (nothing else resets syncFailCount), so gate
+	// here rather than trust callers not to leak a stale failure streak onto
+	// a freshly-promoted leader (e.g. via apiClusterStatus, which embeds this
+	// struct verbatim).
+	if h.role == "standby" {
+		s.SyncFailCount = h.syncFailCount
+		if !h.lastSyncOK.IsZero() {
+			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
+		}
 	}
 	return s
 }

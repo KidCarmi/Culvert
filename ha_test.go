@@ -57,6 +57,33 @@ func TestHAState_Status_Leader(t *testing.T) {
 	}
 }
 
+// TestHAState_Status_PromotedLeaderOmitsStaleSyncFailCount pins a promotion-race
+// scenario: onMaxFail's auto-failover path calls setFail(N) (recording the
+// failure streak that triggered promotion) and only afterwards does promote()
+// flip h.role to "leader" — nothing resets syncFailCount in between. Status()
+// must not let that stale standby-side counter leak onto a leader's status,
+// since apiClusterStatus (ui_cluster.go) embeds Status() verbatim regardless
+// of role, unlike apiClusterHA which additionally gates on role itself.
+func TestHAState_Status_PromotedLeaderOmitsStaleSyncFailCount(t *testing.T) {
+	h := &HAState{}
+	h.mu.Lock()
+	h.role = "standby"
+	h.syncFailCount = haStandbyMaxFail // simulates setFail(N) just before promote()
+	h.mu.Unlock()
+
+	h.mu.Lock()
+	h.role = "leader" // promote() flips role; syncFailCount is left as-is
+	h.mu.Unlock()
+
+	s := h.Status()
+	if s.Role != "leader" {
+		t.Fatalf("expected leader, got %q", s.Role)
+	}
+	if s.SyncFailCount != 0 {
+		t.Errorf("promoted leader must not report a stale standby sync_fail_count, got %d", s.SyncFailCount)
+	}
+}
+
 func TestHAState_IsLeader(t *testing.T) {
 	h := &HAState{}
 	if h.IsLeader() {
@@ -339,6 +366,9 @@ func TestAPIClusterHA_GET_LeaderOmitsStandbySyncFields(t *testing.T) {
 
 func TestStandbyLoopState_SetFail_MirrorsOntoHAState(t *testing.T) {
 	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "standby" // Status() only surfaces SyncFailCount for a standby
+	globalHA.mu.Unlock()
 	s := &standbyLoopState{h: globalHA}
 
 	s.setFail(2)
