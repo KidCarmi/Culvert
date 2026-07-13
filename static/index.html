@@ -5020,6 +5020,7 @@ async function unlockUser(username) {
 
 let _catGroups = [];
 let _editingCatGroup = null;
+let _editingCatGroupId = null; // stable ID of the group being edited (rename-safe addressing); null for new groups / legacy groups without one
 
 async function fetchCatGroups() {
   try {
@@ -5053,6 +5054,7 @@ function renderCatGroups() {
 
 function showAddCatGroupForm() {
   _editingCatGroup = null;
+  _editingCatGroupId = null;
   document.getElementById('cg-name').value = '';
   document.getElementById('cg-name').disabled = false;
   _cgSelectedCats = [];
@@ -5065,6 +5067,7 @@ function editCatGroup(name) {
   const g = _catGroups.find(x => x.name === name);
   if (!g) return;
   _editingCatGroup = name;
+  _editingCatGroupId = g.id || null;
   document.getElementById('cg-name').value = g.name;
   document.getElementById('cg-name').disabled = true;
   _cgSelectedCats = [...g.categories];
@@ -5076,6 +5079,7 @@ function editCatGroup(name) {
 function cancelCatGroup() {
   document.getElementById('catgroup-form').style.display = 'none';
   _editingCatGroup = null;
+  _editingCatGroupId = null;
 }
 
 let _cgSelectedCats = [];
@@ -5123,8 +5127,10 @@ async function saveCatGroup() {
   if (!name) { toast('Group name is required', 'error'); return; }
   if (!_cgSelectedCats.length) { toast('Select at least one category', 'error'); return; }
   const method = _editingCatGroup ? 'PUT' : 'POST';
+  // On edit, address by stable ID (rename-safe) when the group has one.
+  const q = (_editingCatGroup && _editingCatGroupId) ? '?id=' + encodeURIComponent(_editingCatGroupId) : '';
   try {
-    await api('/api/category-groups', {
+    await api('/api/category-groups' + q, {
       method, headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ name, categories: _cgSelectedCats })
     });
@@ -5136,8 +5142,11 @@ async function saveCatGroup() {
 
 async function deleteCatGroup(name) {
   if (!await confirmAction('Delete Category Group', `Delete group "${name}"? Policy rules referencing it will no longer match.`)) return;
+  // Address by stable ID (rename-safe) when available; fall back to name.
+  const g = _catGroups.find(x => x.name === name);
+  const addr = (g && g.id) ? 'id=' + encodeURIComponent(g.id) : 'name=' + encodeURIComponent(name);
   try {
-    await api('/api/category-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    await api('/api/category-groups?' + addr, { method: 'DELETE' });
     toast('Group deleted', 'success');
     fetchCatGroups();
   } catch(e) { if (!handleDeleteError(e, 'category group')) toast('Error: ' + e.message, 'error'); }
