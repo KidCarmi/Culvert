@@ -128,7 +128,7 @@ func (c *policyDraftCoordinator) stageTarget(actor string) *PolicyStore {
 // candidateList / candidateVersion expose the candidate for the effective-read
 // helpers (list rendering + optimistic concurrency while drafting).
 func (c *policyDraftCoordinator) candidateList() []PolicyRule { return c.cand.List() }
-func (c *policyDraftCoordinator) candidateVersion() (int64, string) {
+func (c *policyDraftCoordinator) candidateVersion() (version int64, updatedAt string) {
 	return c.cand.policyVersion()
 }
 
@@ -343,7 +343,7 @@ func effectivePolicyList() []PolicyRule {
 // effectivePolicyVersion is the generation clients echo via ?ifVersion=: the
 // candidate's while drafting (so two admins editing the shared draft collide),
 // else running's.
-func effectivePolicyVersion() (int64, string) {
+func effectivePolicyVersion() (version int64, updatedAt string) {
 	if policyDraft.active() {
 		return policyDraft.candidateVersion()
 	}
