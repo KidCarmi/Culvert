@@ -125,6 +125,11 @@ func (cs *ClusterStore) Load(path string) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.path = path
+	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-07):
+	// after a corrupt load the node saves a fresh EMPTY cluster.json that
+	// parses cleanly next time, so the /readyz row and the revoked-cert
+	// amnesia would go silent while the .corrupt.* evidence persists.
+	noteResidualQuarantine("cluster", path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -134,6 +139,11 @@ func (cs *ClusterStore) Load(path string) error {
 	}
 	var st ClusterState
 	if err := json.Unmarshal(data, &st); err != nil {
+		// CHAOS-07: present-but-corrupt cluster DB. The caller "starts
+		// fresh", and the next Save would overwrite the enrolled-node
+		// roster AND the revoked-cert list — revoked DP certs would
+		// validate again with no trace. Quarantine the evidence first.
+		quarantineCorruptStateFile("cluster", path, err)
 		return fmt.Errorf("parse cluster state: %w", err)
 	}
 	if st.Nodes == nil {

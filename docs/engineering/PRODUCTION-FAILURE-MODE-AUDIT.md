@@ -119,8 +119,8 @@ L (log-only), N. **Mode**: OPEN (fail-open) / CLOSED (fail-closed) / SAFE (last-
 |---|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | F-01 | Fresh/unconfigured proxy exposed | Default policy → **allow/passthrough**, no auth: `rewrite_default_action_startup.go:23-25` (empty `default_action`+0 rules ⇒ `setDefaultPolicyAction("allow")`), `AuthEnabled()` false `store.go:470`. Advisory log only. `HV` | N | Y(slice) | L | OPEN | M | **HIGH** | High |
 | F-02 | CA passphrase lost / bundle corrupt on reboot | SSL inspection → tunnel-only bypass, keeps serving: `rootca_startup.go:63-73`; does NOT re-mint CA (`internal/ca/ca.go:194`). Now visible: proxy `/health` `ssl_inspection` field + proxy `/ready` `ca` row + `ca_load_failed` alert (CHAOS-06 mitigation; admin `/healthz` is HA-only, no `/readyz` route) | N (fail-open by design) | Y `rootca_failure_visibility_test.go` | Y | OPEN | M | **HIGH** | High |
-| F-03 | Corrupt `ui_users.json` at boot (CHAOS-05) | Logged, roster stays empty → legacy env-admin; next `SaveUIUsersFile` **overwrites** → permanent admin/TOTP loss: `auth_startup.go:30`, `store.go:688-709,747`. `HV` | N | N (no corrupt-then-overwrite test) | L | OPEN | U | **HIGH** | High |
-| F-04 | Corrupt `cluster.json` at boot (CHAOS-07) | "starting fresh" → empty `Revoked` list + roster; `IsRevoked` revalidates revoked DP certs; next save overwrites: `cluster_startup.go:32-33`, `enrollment.go:124-137,499`. `HV` | N | N | L | OPEN | U | **HIGH** | High |
+| F-03 | Corrupt `ui_users.json` at boot (CHAOS-05) | **MITIGATED (2026-07-12):** corrupt roster quarantined to `.corrupt.<ts>` before any save can overwrite (`state_corruption.go`, hooked at `store.go` `LoadUIUsersFile`), `state_file_corrupt` alert + report-only `/readyz` row. Roster still boots empty (env fallback creds live) — refuse-to-boot is the recorded remainder | Y (quarantine) | Y `state_corruption_test.go` | Y | SAFE (evidence kept) | M | MED | High |
+| F-04 | Corrupt `cluster.json` at boot (CHAOS-07) | **MITIGATED (2026-07-12):** corrupt DB quarantined before the "starting fresh" save (`state_corruption.go`, hooked at `enrollment.go` `ClusterStore.Load`), alert + `/readyz` row. `IsRevoked` amnesia persists until the operator restores the quarantined file — the revoked-cert list is no longer silently destroyed, but fail-closed refusal is the recorded remainder | Y (quarantine) | Y `state_corruption_test.go` | Y | SAFE (evidence kept) | M | MED | High |
 | F-05 | Maintenance agent dies mid-apply | **No persisted op journal**; `MarkAllInterrupted()` returns 0 (`ops.go:468`); op vanishes from memory; Docker left in partial state (tag advanced, `up` half-done); no reconciliation, no auto-rollback. `HV` | N | N | N | **U** | **U** | **HIGH** | High |
 | F-06 | Rollback itself fails | `rollbackFailed` → `OutcomeFailed`, reason promoted `rollback_failed`, `final_running_digest` reported; worst case new unhealthy image still running (service down): `inline_rollback.go:78-79,102,158-173` | Y | Y `inline_rollback_test.go:132` | Y | CLOSED (paged) | **M** | **HIGH** | High |
 | F-07 | Validly-signed but incompatible release | No runtime min-version/compat gate (only catalog `schema_version` `release_catalog.go:381`); relies **reactively** on post-apply health probe → rollback: `handlers_upgrade_apply.go:315`. Silent-misbehaving-but-healthy release undefined | N (preventively) | N | Y (if unhealthy) | OPEN (compat) | A/U | **MED-HIGH** | High |
@@ -206,7 +206,7 @@ same mistake fails loud on one path and silent on the other.
 |---|---|---|
 | Agent dies mid-apply (F-05) | **Undefined** | no op journal; `MarkAllInterrupted` no-op; Docker unreconciled |
 | Rollback fails (F-06) | Manual (paged) | operator must re-pull/retry or data-rollback |
-| Corrupt `ui_users.json`/`cluster.json` (F-03/04) | **Undefined** → data loss | no quarantine; corrupt file overwritten on next save |
+| Corrupt `ui_users.json`/`cluster.json` (F-03/04) | **Manual (guided)** — quarantined `.corrupt.<ts>` + alert + `/readyz` row (2026-07-12) | restore-from-quarantine is manual; refuse-to-boot posture still open |
 | Lost/unmounted volume (F-24) | **Undefined** → silent fresh start | no "expected state present" boot assertion |
 | Incompatible healthy-but-wrong release (F-07) | Undefined | health probe only catches *unhealthy* |
 | Config rollback partial-disk (F-12) | Manual | errors swallowed; re-apply after disk fixed |
@@ -352,10 +352,11 @@ Every item points at a concrete code path, test target, or workflow. Scoped smal
   target/prior digest, `AtomicWrite`) and make `MarkAllInterrupted()` real: on agent restart, detect an
   in-flight apply, reconcile Docker (running digest vs journal), and either resume or roll back.
   Target: `cmd/culvert-maint/internal/ops/ops.go:468`, `handlers_upgrade_apply.go`.
-- **P0-3 (F-03/F-04):** **Quarantine-don't-overwrite** for `ui_users.json` and `cluster.json`: on a
-  present-but-corrupt file, rename to `.corrupt.<ts>`, **refuse to boot** (or fail-closed to a locked
-  admin) with an actionable message + alert — reuse the `readVersionFloor` fail-closed pattern.
-  Target: `auth_startup.go:30`, `cluster_startup.go:32`, `store.go:688`, `enrollment.go:124`.
+- **P0-3 (F-03/F-04):** ~~Quarantine-don't-overwrite~~ **SHIPPED 2026-07-12** (`state_corruption.go`):
+  present-but-corrupt `ui_users.json`/`cluster.json` is renamed to `.corrupt.<unixnano>` before any
+  save can overwrite it, with a `state_file_corrupt` alert (deferred until the webhook store loads)
+  and a report-only `/readyz` row. **Remainder:** the refuse-to-boot / locked-admin fail-closed
+  posture (`readVersionFloor` pattern) is still open — boot currently proceeds with an empty store.
 
 ### P1 — prolonged outage, silent policy failure, broken restore, misleading health
 - **P1-1 (F-08/F-25):** Add readiness gates for sustained CP-poll failure and imminent node-cert

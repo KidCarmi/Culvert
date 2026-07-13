@@ -708,6 +708,11 @@ func (c *Config) LoadUIUsersFile() error {
 	if path == "" {
 		return nil
 	}
+	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05):
+	// the fresh file we write after a corrupt load parses cleanly next
+	// time, so the /readyz row would otherwise vanish while the evidence
+	// and the empty-roster state persist.
+	noteResidualQuarantine("ui_users", path)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		logger.Printf("Loader: ui_users.json: file %q missing — caller may bootstrap defaults (D1.2-flag-F1)", sanitizeLog(path))
@@ -722,6 +727,11 @@ func (c *Config) LoadUIUsersFile() error {
 	if err := json.Unmarshal(data, &env); err == nil && env.Users != nil {
 		records = env.Users
 	} else if err := json.Unmarshal(data, &records); err != nil {
+		// CHAOS-05: present-but-corrupt roster. Quarantine before
+		// returning so the next SaveUIUsersFile (any admin mutation, or
+		// the --reset-password one-shot) cannot overwrite the only copy
+		// of the admin accounts + TOTP enrollments.
+		quarantineCorruptStateFile("ui_users", path, err)
 		return err
 	}
 	resolved := resolveLoadedDefaultAuthOutcome(env)
