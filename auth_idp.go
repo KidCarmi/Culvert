@@ -547,6 +547,47 @@ func (r *IdPRegistry) EnabledProviders() []IdentityProvider {
 	return out
 }
 
+// HasEnabledProviders reports whether at least one enabled profile has a live
+// (compiled) provider instance — the exact predicate EnabledProviders applies,
+// without building the slice. It exists for the per-request ssoCapable probe
+// in resolveRequestAuth (proxy.go), which runs on EVERY proxied request and
+// needs only the boolean: going through EnabledProviders allocates a fresh
+// slice per call whenever any provider is enabled, which at proxy request
+// rates is pure per-request garbage. Callers that use the providers keep
+// calling EnabledProviders. Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledProviders() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled {
+			if _, ok := r.live[p.ID]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasEnabledOIDC reports whether any profile is enabled with Type OIDC — the
+// credential-capable predicate hasCredentialCapableProvider (diagnostics.go)
+// evaluates on EVERY proxied request. It reads the profiles in place: the
+// previous implementation went through All(), which deep-clones every profile
+// (struct + EmailDomains/KnownGroups/Scopes slices + OIDC/SAML sub-structs)
+// per call just to answer a boolean. Same predicate as before — profile-level
+// only, deliberately NOT gated on a live compiled instance (a compile failure
+// must not silently flip the deployment into the no-backend inert path).
+// Allocation-free (pinned by the benchgate).
+func (r *IdPRegistry) HasEnabledOIDC() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type == IdPTypeOIDC {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // URL validation helper
 // ---------------------------------------------------------------------------

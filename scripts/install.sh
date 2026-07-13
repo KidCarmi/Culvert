@@ -1191,14 +1191,23 @@ setup_at_rest_encryption() {
 step "Encryption at rest"
 setup_at_rest_encryption
 
-info "Pulling images and starting services (first run may take 1-2 minutes)..."
+info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 
 # `docker compose up -d --wait` (Compose v2.17+) blocks until containers are
 # either healthy or exited, and returns non-zero on failure. Much more
 # reliable than the old "sleep + grep healthy" loop, which silently passed
 # even when services crash-looped.
+#
+# --wait-timeout must cover clamav's healthcheck start_period (300s in
+# docker-compose.yml — first boot downloads ~250 MB of virus signatures, which
+# alone can take longer than that on a modest-bandwidth host). --wait blocks on
+# EVERY service with a healthcheck, including clamav, even though the proxy
+# only depends_on it for start order and tolerates it being unreachable at
+# runtime. A shorter timeout here reports a false install failure while
+# ClamAV is still downloading signatures. Keep in sync with docker-compose.yml
+# (pinned by TestInstallScript_ComposeWaitTimeout_CoversClamAVStartPeriod).
 COMPOSE_UP_OK=0
-if sudo docker compose up -d --wait --wait-timeout 180; then
+if sudo docker compose up -d --wait --wait-timeout 330; then
   COMPOSE_UP_OK=1
 else
   # Fallback for older Compose versions that don't support --wait.

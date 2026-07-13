@@ -3,6 +3,10 @@ proxy
 culvert
 /Culvert
 
+# Go compiled test binaries (`go test -c` / stray `-o *.test` output).
+# A 59MB unstripped Culvert.test was accidentally committed once — never again.
+*.test
+
 # Runtime artifacts (pid files from local/CI proxy runs)
 *.pid
 

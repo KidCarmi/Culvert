@@ -335,7 +335,11 @@ func (ps *PolicyStore) Save() {
 	if ps.path == "" {
 		return
 	}
-	ps.mu.RLock()
+	// EXCLUSIVE Lock (not RLock): like List(), the snapshot plain-reads
+	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
+	// shared RLock — only the exclusive Lock serializes this copy against those
+	// writes. Save is config-plane, so the brief exclusion is acceptable.
+	ps.mu.Lock()
 	// Snapshot without hit counts for persistence.
 	snapshot := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
@@ -343,7 +347,7 @@ func (ps *PolicyStore) Save() {
 		snapshot[i].HitCount = 0
 		snapshot[i].LastHit = "" // computed display field — never persist it into the rules file
 	}
-	ps.mu.RUnlock()
+	ps.mu.Unlock()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -360,12 +364,18 @@ func (ps *PolicyStore) Save() {
 
 // List returns a copy of all rules (including live HitCount).
 func (ps *PolicyStore) List() []PolicyRule {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
+	// EXCLUSIVE Lock (not RLock): the whole-struct copy below plain-reads
+	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
+	// shared RLock. Only the exclusive Lock serializes this snapshot against
+	// those atomic writes (RLock would not — it is shared with Evaluate's RLock).
+	// List is a config-plane call (not on the request hot path), so excluding
+	// Evaluate for the brief copy is acceptable.
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
 		out[i] = *r
-		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // B7: atomic read of concurrently-written counter
+		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // atomic read of the concurrently-written counter (belt-and-suspenders under Lock)
 		// LastHit is a COMPUTED display field — always derive it from the atomic
 		// timestamp, never from a copied string. A rule whose LastHit leaked in
 		// via a List-derived snapshot + ReplaceAll (which resets lastHitUnix but
@@ -601,6 +611,51 @@ func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
 	return nil
 }
 
+// matchForImport resolves an incoming (imported) rule to an existing rule for
+// upsert-on-import (POLICY-ARCHITECTURE-FUTURE §1). Match order: (1) stable
+// ULID when the incoming rule carries one — idempotent re-import, the true
+// migration case; (2) a one-time name-match fallback for pre-ID or
+// hand-authored backups that never carried an id. Returns nil when the rule is
+// new (the caller Adds it, preserving its carried id or minting a fresh one).
+// Returns a COPY; callers address the live rule via UpdateByID(match.ID, …).
+// Names are unique across the whole store (validatePolicyRule enforces it over
+// both rule types), so the name fallback can never be ambiguous.
+func (ps *PolicyStore) matchForImport(r PolicyRule) *PolicyRule {
+	if m := ps.findByIDCopy(r.ID); m != nil {
+		return m
+	}
+	if r.Name == "" {
+		return nil
+	}
+	rules := ps.List()
+	for i := range rules {
+		if strings.EqualFold(rules[i].Name, r.Name) {
+			r2 := rules[i]
+			return &r2
+		}
+	}
+	return nil
+}
+
+// countImportUpserts reports how many of the incoming rules would UPDATE an
+// existing rule (matched by matchForImport) versus be ADDED fresh, under
+// merge-import upsert semantics. Read-only — used by the import preview to
+// report the real split instead of a misleading "add N" when some incoming
+// rules are re-imports. Computed against current store state: for a well-formed
+// export (unique ids and names — a store invariant at export time) this equals
+// the progressive apply exactly; only a hand-crafted backup with intra-file
+// duplicates could diverge, and then only in the displayed split.
+func (ps *PolicyStore) countImportUpserts(incoming []PolicyRule) (updates, adds int) {
+	for i := range incoming {
+		if ps.matchForImport(incoming[i]) != nil {
+			updates++
+		} else {
+			adds++
+		}
+	}
+	return updates, adds
+}
+
 // Reorder reassigns priorities according to the provided ordered list of old
 // priorities. The caller provides priorities in the desired new order (index 0
 // becomes priority 1, etc.). Returns false if lengths mismatch.
@@ -760,6 +815,11 @@ type PolicyMatch struct {
 // groups is the list of IdP group/role memberships for the authenticated user.
 // Returns nil when no rule matches (caller should default to Deny — Zero Trust).
 func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, groups []string) *PolicyMatch {
+	// Snapshot the slice header under RLock, then release BEFORE the scan: the
+	// scan can block (matchDestNorm → geo.LookupCached → DNS on an uncached
+	// DestCountry host; category lookups hit the community DB), so the lock must
+	// NOT be held across it — otherwise a config-plane List()/Save() (exclusive
+	// Lock) waiting on a DNS-blocked scan would stall all policy evaluation.
 	ps.mu.RLock()
 	rules := ps.rules
 	ps.mu.RUnlock()
@@ -794,11 +854,18 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchDestNorm(rule, host, normHost) {
 			continue
 		}
+		// Bump the match counters under RLock — NOT to protect the atomics from
+		// each other (concurrent Evaluates share RLock and the ops are atomic),
+		// but so the EXCLUSIVE Lock taken by List()/Save() serializes their
+		// plain-read struct snapshot against these writes (closing the
+		// read/atomic-write data race). This holds the lock only across two
+		// nanosecond atomic ops — never across the (DNS-capable) scan above — so
+		// it adds no blocking coupling. time.Now().Unix() does not allocate, so
+		// the perf/benchgate contract holds.
+		ps.mu.RLock()
 		atomic.AddInt64(&rule.HitCount, 1)
-		// lastHit: unix-seconds via a single atomic store — allocation-free on
-		// the proxy hot path (time.Now().Unix() does not allocate), so the
-		// perf/benchgate contract holds. Read back + formatted only in List().
 		atomic.StoreInt64(&rule.lastHitUnix, time.Now().Unix())
+		ps.mu.RUnlock()
 		// Precomputed by sortLocked (never "" there — empty conditions render
 		// as "any"); fall back for rules that bypassed the mutators.
 		conds := rule.matchedConds

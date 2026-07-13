@@ -160,10 +160,12 @@ Run these once when bringing up a new node, in order:
    `-cp-grpc-cert/-cp-grpc-key/-cp-grpc-ca` (Data Plane nodes use
    `-dp-cert/-dp-key/-dp-ca`). Do **not** keep `--cluster-insecure` past
    development.
-5. **Updater allowlist.** If you point the updater at anything other
-   than the in-cluster sidecar, list the URL in
-   `--updater-url-allowlist` (or `update.url_allowlist` in YAML). The
-   admin API alone cannot widen this list.
+5. **Day-2 updates.** The legacy Docker self-update sidecar has been
+   removed; there is no updater allowlist to configure. Upgrades flow
+   through Release Management (the signed release catalog) and the
+   host maintenance agent — see §8 below. `--updater-url-allowlist` /
+   `update.url_allowlist` are inert, parse-only holdovers that do
+   nothing; do not rely on them.
 6. **External auth callback URL.** Before enabling production OIDC or
    SAML profiles, set `proxy.base_url` to the externally reachable UI URL
    (for example `https://proxy.example.com` or

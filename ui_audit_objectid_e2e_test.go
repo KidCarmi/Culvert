@@ -83,8 +83,12 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 	if err := assert.Locator(page.Locator("#audit-table")).ToContainText("policy.add"); err != nil {
 		t.Fatalf("audit log should show the policy.add entry: %v", err)
 	}
+	// Assert the object cell carries the ULID in its title tooltip. Use
+	// ToBeAttached (DOM presence), not ToBeVisible: the intent is that the id was
+	// rendered into the title attribute — its CSS visibility depends on which
+	// view is active, a timing-flaky signal irrelevant to this check.
 	titled := page.Locator(`#audit-table td[title="id: ` + ruleID + `"]`)
-	if err := assert.Locator(titled).ToBeVisible(); err != nil {
+	if err := assert.Locator(titled).ToBeAttached(); err != nil {
 		t.Fatalf("the policy.add row's object cell should carry the rule ULID as a tooltip: %v", err)
 	}
 
