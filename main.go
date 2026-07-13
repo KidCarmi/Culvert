@@ -141,6 +141,7 @@ type startupState struct {
 	fc             *FileConfig
 	pPort          int
 	uPort          int
+	socks5PortVal  int // resolved in loadFileConfigAndFlags; reused by initSOCKS5 and validatePortCollisions
 	lPath          string
 	blPath         string
 	lMaxMB         int
@@ -490,6 +491,18 @@ func loadFileConfigAndFlags(s *startupState) {
 	// CLI flags override file config.
 	s.pPort = firstNonZero(*s.proxyPort, s.fc.Proxy.Port, 8080)
 	s.uPort = firstNonZero(*s.uiPortFlag, s.fc.Proxy.UIPort, 9090)
+	s.socks5PortVal = firstNonZero(*s.socks5Port, s.fc.Proxy.SOCKS5Port)
+	// Checked on the RESOLVED values (after CLI overrides and firstNonZero
+	// defaults), not the raw config.yaml fields: a raw-field check would both
+	// reject a config a CLI override later makes non-colliding, and miss a
+	// collision created by an omitted field silently taking its default
+	// (e.g. ui_port explicitly 8080 with port omitted, which defaults to
+	// 8080 too). Must run before any of the three listeners bind, so a
+	// collision fails fast here instead of deep into startup with a bare
+	// OS-level "listen tcp :N: bind: address already in use".
+	if err := validatePortCollisions(s.pPort, s.uPort, s.socks5PortVal); err != nil {
+		log.Fatalf("Invalid port configuration: %v", err)
+	}
 	s.lPath = firstStr(*s.logFilePath, s.fc.Proxy.LogFile)
 	s.blPath = firstStr(*s.blockFile, s.fc.Proxy.Blocklist)
 	s.lMaxMB = firstNonZero(*s.logMaxMB, s.fc.Proxy.LogMaxMB, 50)
@@ -827,9 +840,12 @@ func initBackgroundServices(s *startupState) {
 // runProxyUntilShutdown. P1.5 / S4.SOCKS5.
 func initSOCKS5(s *startupState) {
 	// ── SOCKS5 server (optional) ─────────────────────────────────────────────
-	socks5PortVal := firstNonZero(*s.socks5Port, s.fc.Proxy.SOCKS5Port)
-	if socks5PortVal > 0 {
-		s.socks5Srv = startSOCKS5(socks5PortVal)
+	// s.socks5PortVal is resolved once in loadFileConfigAndFlags (and already
+	// checked there for collisions against pPort/uPort) — reused here rather
+	// than recomputed so the bound port is guaranteed to be the same value
+	// that was validated.
+	if s.socks5PortVal > 0 {
+		s.socks5Srv = startSOCKS5(s.socks5PortVal)
 	}
 }
 
@@ -1062,6 +1078,35 @@ func firstNonZero(vals ...int) int {
 		}
 	}
 	return 0
+}
+
+// validatePortCollisions checks the three RESOLVED listener ports (proxy,
+// admin UI, SOCKS5 — already merged through firstNonZero(CLI, config.yaml,
+// default)) for duplicates. SOCKS5's documented "disabled" sentinel (0) is
+// exempt. Returns an error naming the two colliding ports, or nil.
+func validatePortCollisions(proxyPort, uiPort, socks5Port int) error {
+	named := []struct {
+		name string
+		port int
+	}{
+		{"proxy port", proxyPort},
+		{"UI port", uiPort},
+		{"SOCKS5 port", socks5Port},
+	}
+	for i := range named {
+		if named[i].port == 0 {
+			continue
+		}
+		for j := i + 1; j < len(named); j++ {
+			if named[j].port == 0 {
+				continue
+			}
+			if named[i].port == named[j].port {
+				return fmt.Errorf("%s and %s must not both be %d", named[i].name, named[j].name, named[i].port)
+			}
+		}
+	}
+	return nil
 }
 
 func firstStr(vals ...string) string {

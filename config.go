@@ -368,35 +368,14 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 		errs = append(errs, fmt.Sprintf("proxy.socks5_port: must be 1–65535, got %d", p))
 	}
 
-	// port collisions — two enabled listeners bound to the same port. Without
-	// this, a colliding config (e.g. proxy.port and proxy.ui_port both left
-	// at a copy-pasted 8080) passes validate() silently and only fails much
-	// later in startup, once policy/threat-feed/GeoIP/etc. have already
-	// initialized, with a bare OS-level "listen tcp :N: bind: address
-	// already in use" that never names which two config keys collided.
-	// SOCKS5Port's documented "disabled" sentinel (0) is exempt, matching
-	// the range checks above.
-	namedPorts := []struct {
-		name string
-		port int
-	}{
-		{"proxy.port", fc.Proxy.Port},
-		{"proxy.ui_port", fc.Proxy.UIPort},
-		{"proxy.socks5_port", fc.Proxy.SOCKS5Port},
-	}
-	for i := range namedPorts {
-		if namedPorts[i].port == 0 {
-			continue
-		}
-		for j := i + 1; j < len(namedPorts); j++ {
-			if namedPorts[j].port == 0 {
-				continue
-			}
-			if namedPorts[i].port == namedPorts[j].port {
-				errs = append(errs, fmt.Sprintf("%s and %s must not both be %d", namedPorts[i].name, namedPorts[j].name, namedPorts[i].port))
-			}
-		}
-	}
+	// NOTE: port-collision checking deliberately does NOT live here. This
+	// validate() runs on the raw FileConfig fields BEFORE CLI-flag overrides
+	// and firstNonZero defaults are resolved (loadFileConfigAndFlags, in
+	// main.go), so a raw-field check would both reject configs a CLI
+	// override later makes non-colliding, and miss collisions created by an
+	// unset field silently taking its default (e.g. ui_port explicitly 8080
+	// with port omitted, which defaults to 8080 too). See
+	// validatePortCollisions in main.go, which runs on the resolved values.
 
 	// max_conns_per_ip
 	if n := fc.Security.MaxConnsPerIP; n < 0 {
