@@ -23,11 +23,13 @@ GLOBAL_FLOOR=55
 
 # file → floor%. Every file listed is security-sensitive.
 FLOORS="
-totp.go        85
-security.go    70
-session.go     75
-lockout.go     80
-policy.go      60
+totp.go                85
+security.go            70
+session.go             75
+lockout.go             80
+policy.go              60
+autoexclude.go         85
+autoexclude_resolve.go 80
 "
 
 FUNC=$(go tool cover -func="$COVERAGE_OUT")
