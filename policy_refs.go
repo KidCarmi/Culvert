@@ -68,10 +68,15 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 	if name == "" {
 		return true, nil
 	}
+	// Resolve the object's stable ID ONCE (references-by-id delete-block): a rule
+	// may link by ID with a momentarily-stale denormalized name, so the walk must
+	// match the ID too, not just the name (else a still-referenced object could be
+	// deleted → dangling ref). "" for name-referenced types / not-found.
+	objID := resolveObjectID(objType, name)
 	rules := policyStore.List()
 	for i := range rules {
 		r := &rules[i]
-		if detail := ruleReferencesObject(r, objType, name); detail != "" {
+		if detail := ruleReferencesObject(r, objType, name, objID); detail != "" {
 			consumerType, view := consumerTypeForRule(r)
 			refs = append(refs, objectRef{
 				ConsumerType: consumerType, ID: r.ID, Name: r.Name,
@@ -93,7 +98,20 @@ func objectReferences(objType, name string) (found bool, refs []objectRef) {
 // ruleReferencesObject returns the referencing field name if the rule points
 // at the named object of the given type, else "". Case-insensitive to match
 // the engine.
-func ruleReferencesObject(r *PolicyRule, objType, name string) string {
+// resolveObjectID returns the stable ULID of the named object for the ID-bearing
+// object types (references-by-id delete-block), or "" when the type is
+// name-referenced or the object is not found. Called ONCE per walk, not per rule.
+func resolveObjectID(objType, name string) string {
+	if objType == "decryption-profile" {
+		if p := globalDecryptionProfiles.GetByName(name); p != nil {
+			return p.ID
+		}
+	}
+	// category-group joins here in S2.
+	return ""
+}
+
+func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 	switch objType {
 	case "category":
 		// CategoryAny ("Any") is the wildcard "any destination", NOT a
@@ -114,6 +132,11 @@ func ruleReferencesObject(r *PolicyRule, objType, name string) string {
 		}
 	case "decryption-profile":
 		if strings.EqualFold(r.DecryptionProfile, name) {
+			return "decryptionProfile"
+		}
+		// ID-first (references-by-id): match a rule that links by the profile's
+		// stable ID even if its denormalized name is momentarily stale.
+		if objID != "" && r.DecryptionProfileID == objID {
 			return "decryptionProfile"
 		}
 	}

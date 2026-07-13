@@ -108,16 +108,22 @@ type PolicyRule struct {
 	TLSSkipVerify     bool            `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
 	StripALPN         *bool           `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
 	DecryptionProfile string          `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
-	Action            PolicyAction    `json:"action"`
-	RedirectURL       string          `json:"redirectURL"`            // used when Action == Redirect
-	Enabled           *bool           `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation
-	ID                string          `json:"id,omitempty"`           // stable ULID; backfilled on load (Phase 0 seam)
-	RuleType          string          `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
-	SubjectMatch      *SubjectMatch   `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
-	Auth              *AuthRuleSpec   `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
-	HitCount          int64           `json:"hitCount"`               // match counter (atomic); persisted by rule NAME via ruleMet (metrics.go)
-	lastHitUnix       int64           // atomic unix-seconds of the last match (0 = never); persisted by name via ruleMet. Adjacent to HitCount (both amd64/arm64-aligned int64s).
-	LastHit           string          `json:"lastHit,omitempty"` // computed in List() from lastHitUnix (RFC3339 UTC); "" = never matched. Never stored on the live rule.
+	// DecryptionProfileID is the AUTHORITATIVE, rename-safe link to the profile
+	// (references-by-id, OBJECT-REFERENCES-BY-ID.md). Resolution prefers the ID
+	// and falls back to the name for un-migrated/dangling rules; the name above is
+	// a denormalized display cache kept honest by the rename cascade. Backfilled
+	// name→id on load; omitempty so pre-migration rules are byte-unchanged.
+	DecryptionProfileID string        `json:"decryptionProfileId,omitempty"`
+	Action              PolicyAction  `json:"action"`
+	RedirectURL         string        `json:"redirectURL"`            // used when Action == Redirect
+	Enabled             *bool         `json:"enabled,omitempty"`      // nil or true = active; false = skipped during evaluation
+	ID                  string        `json:"id,omitempty"`           // stable ULID; backfilled on load (Phase 0 seam)
+	RuleType            string        `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
+	SubjectMatch        *SubjectMatch `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
+	Auth                *AuthRuleSpec `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
+	HitCount            int64         `json:"hitCount"`               // match counter (atomic); persisted by rule NAME via ruleMet (metrics.go)
+	lastHitUnix         int64         // atomic unix-seconds of the last match (0 = never); persisted by name via ruleMet. Adjacent to HitCount (both amd64/arm64-aligned int64s).
+	LastHit             string        `json:"lastHit,omitempty"` // computed in List() from lastHitUnix (RFC3339 UTC); "" = never matched. Never stored on the live rule.
 
 	// Tier-A rule metadata (policy-metadata P1; authority
 	// docs/design/POLICY-ARCHITECTURE-FUTURE.md §2). CreatedAt/ModifiedAt/
@@ -571,6 +577,42 @@ func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
 		return true
 	}
 	return false
+}
+
+// CascadeDecryptionProfileRename refreshes the denormalized DecryptionProfile
+// name on every rule that references the renamed profile — by its stable ID
+// (migrated rules) or, for un-migrated name-only rules, by its OLD name (which
+// also stamps the ID, migrating them so the reference is ID-stable henceforth).
+// References-by-id: the match path already resolves by ID, so matching survives
+// the rename regardless; this keeps the human-readable denormalized copy honest
+// for display/export/DP-sync. Returns the number of rules touched; the caller
+// persists via Save(). Race-safe by pointer swap (like UpdateByID) — never
+// in-place field mutation, which would race Evaluate's lock-free field reads.
+func (ps *PolicyStore) CascadeDecryptionProfileRename(id, oldName, newName string) int {
+	if id == "" {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	n := 0
+	for i, rule := range ps.rules {
+		byID := rule.DecryptionProfileID == id && rule.DecryptionProfile != newName
+		byName := rule.DecryptionProfileID == "" && strings.EqualFold(rule.DecryptionProfile, oldName)
+		if !byID && !byName {
+			continue
+		}
+		nr := *rule
+		nr.HitCount = atomic.LoadInt64(&rule.HitCount)
+		nr.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix)
+		nr.DecryptionProfile = newName
+		nr.DecryptionProfileID = id // stamp/keep the authoritative link
+		ps.rules[i] = &nr
+		n++
+	}
+	if n > 0 {
+		ps.bumpVersion()
+	}
+	return n
 }
 
 // DeleteByID removes the rule with the given stable ULID. Rename/reorder-safe
