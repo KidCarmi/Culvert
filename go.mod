@@ -5,7 +5,7 @@ go 1.25.12
 require (
 	github.com/KidCarmi/Sluice v0.2.0
 	github.com/andybalholm/brotli v1.2.2
-	github.com/beevik/etree v1.6.0
+	github.com/beevik/etree v1.7.0
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.4
 	github.com/go-ldap/ldap/v3 v3.4.13
