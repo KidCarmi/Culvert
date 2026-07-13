@@ -43,13 +43,16 @@ func failOpenInspectRule(t *testing.T, profileName string) {
 	})
 }
 
+// TestMITM_ClientCertOrigin_RescuesAndBypasses covers a TLS 1.2 origin that
+// REQUIRES a client cert: the proxy's upstream handshake FAILS (no cert to
+// present), which proves inspection cannot continue, so the session is rescued to
+// a bypass and the real client (which has a cert) completes its own mTLS. (A TLS
+// 1.3 required origin completes our client handshake before rejecting, so it is
+// deliberately NOT auto-rescued — see clientCertRescueDecision / ADR-0009 — which
+// is what keeps OPTIONAL-mTLS origins inspected; that case is
+// TestMITM_OptionalClientCertOrigin_StaysInspected.)
 func TestMITM_ClientCertOrigin_RescuesAndBypasses(t *testing.T) {
-	for _, ver := range []struct {
-		name string
-		v    uint16
-	}{{"TLS1.2", tls.VersionTLS12}, {"TLS1.3", tls.VersionTLS13}} {
-		t.Run(ver.name, func(t *testing.T) { runClientCertRescueE2E(t, ver.name, ver.v) })
-	}
+	runClientCertRescueE2E(t, "TLS1.2", tls.VersionTLS12)
 }
 
 // runClientCertRescueE2E drives one TLS-version cell of the rescue e2e.
@@ -145,5 +148,58 @@ func runClientCertRescueE2E(t *testing.T, verName string, verNum uint16) {
 	}
 	if entry.SSLAction != "bypass" {
 		t.Errorf("%s: feed SSLAction = %q, want bypass (the rescue is a bypass)", verName, entry.SSLAction)
+	}
+}
+
+// TestMITM_OptionalClientCertOrigin_StaysInspected is the guard for the review
+// finding: an origin that merely REQUESTS a client cert (tls.RequestClientCert,
+// optional mTLS) completes the upstream handshake and is perfectly inspectable, so
+// under a fail-open rule it must be INSPECTED, never bypassed. Proven by a client
+// that trusts ONLY the proxy CA completing its handshake (it sees the proxy's
+// forged leaf ⇒ MITM happened) and round-tripping a request, with zero rescues.
+func TestMITM_OptionalClientCertOrigin_StaysInspected(t *testing.T) {
+	t.Cleanup(reqlog.SwapRingForTest())
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("optional-inspected-ok"))
+	}))
+	origin.TLS = &tls.Config{ //nolint:gosec // G402: pin TLS 1.3 — the version the review flagged
+		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequestClientCert, // OPTIONAL: requests but does not require
+	}
+	origin.StartTLS()
+	defer origin.Close()
+	target := origin.Listener.Addr().String()
+
+	proxyURL := startTestProxy(t)
+	failOpenInspectRule(t, "fo-optional")
+	beforeRescue := atomic.LoadInt64(&autoExcludeRescueCounter)
+
+	// Client trusts ONLY the proxy CA: success ⇒ it saw the proxy's forged leaf ⇒
+	// the connection was INSPECTED (MITM), not bypassed to the origin's real cert.
+	tc, err := connectAndTLS(proxyURL.Host, target, "example.com", proxyRoots)
+	if err != nil {
+		t.Fatalf("optional-mTLS origin must be INSPECTED (client trusting the proxy CA should handshake): %v — the rescue must NOT bypass optional client-cert origins", err)
+	}
+	defer tc.Close() //nolint:errcheck // test cleanup
+	_, _ = fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+	if err != nil {
+		t.Fatalf("read inspected response: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "optional-inspected-ok" {
+		t.Fatalf("optional-mTLS inspected round-trip: status=%d body=%q, want 200 optional-inspected-ok", resp.StatusCode, body)
+	}
+
+	// The proxy-CA handshake succeeding above already proves MITM (inspection); the
+	// rescue counter must not have moved (no bypass).
+	if got := atomic.LoadInt64(&autoExcludeRescueCounter); got != beforeRescue {
+		t.Errorf("optional-mTLS origin triggered %d rescue(s) — it must be inspected, not bypassed", got-beforeRescue)
 	}
 }

@@ -30,7 +30,7 @@ import (
 // the real config's RootCAs at the test origin so a positive case isolates the
 // client-cert signal from cert verification; leave it false (with skipVerify
 // false) to exercise the cert-verify-precedence path.
-func probeClientCertDetection(t *testing.T, originMax uint16, requireClientCert, skipVerify, trustOrigin bool) (originAsked bool, herr error) {
+func probeClientCertDetection(t *testing.T, originMax uint16, clientAuth tls.ClientAuthType, skipVerify, trustOrigin bool) (originAsked bool, herr error) {
 	t.Helper()
 	cert, pool := canarySelfSigned(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -40,10 +40,6 @@ func probeClientCertDetection(t *testing.T, originMax uint16, requireClientCert,
 		t.Fatalf("listen: %v", err)
 	}
 	defer func() { _ = ln.Close() }()
-	clientAuth := tls.NoClientCert
-	if requireClientCert {
-		clientAuth = tls.RequireAnyClientCert
-	}
 	go func() {
 		c, e := ln.Accept()
 		if e != nil {
@@ -76,26 +72,58 @@ func probeClientCertDetection(t *testing.T, originMax uint16, requireClientCert,
 }
 
 // TestClientCertRescue_DecisionRealHandshakes pins clientCertRescueDecision
-// against real handshakes for every required case: TLS 1.2/1.3 positive and
-// negative, cert-verify precedence, and fail-close isolation.
+// against real handshakes: rescue ONLY when a REQUIRED client cert actually breaks
+// the handshake; a successful (inspectable) handshake — optional-mTLS, or a TLS 1.3
+// required origin that completes our client handshake before rejecting — is never
+// bypassed. Plus cert-verify precedence and fail-close isolation.
 func TestClientCertRescue_DecisionRealHandshakes(t *testing.T) {
-	// POSITIVE: origin requires a client cert → we detect it and rescue, in BOTH
-	// TLS versions (herr==nil on 1.3, a generic handshake failure on 1.2).
+	// POSITIVE — TLS 1.2 REQUIRED client cert: the origin requires a cert we can't
+	// present, the handshake FAILS, and we have proven inspection cannot continue.
+	t.Run("positive_TLS1.2_required", func(t *testing.T) {
+		asked, herr := probeClientCertDetection(t, tls.VersionTLS12, tls.RequireAnyClientCert, true, false)
+		if !asked || herr == nil {
+			t.Fatalf("TLS1.2 required: want (asked=true, herr!=nil), got (asked=%v, herr=%v)", asked, herr)
+		}
+		if !clientCertRescueDecision(true, asked, herr) {
+			t.Fatalf("TLS1.2 required-mTLS should rescue (asked=%v herr=%v)", asked, herr)
+		}
+	})
+
+	// INSPECTABLE — a SUCCESSFUL handshake must NEVER be bypassed, even though the
+	// origin asked for a client cert. Two real sub-cases, both herr==nil:
+	//   (a) OPTIONAL mTLS (tls.RequestClientCert) — the reviewer's case: the origin
+	//       merely requests a cert and completes the handshake; it is inspectable.
+	//   (b) TLS 1.3 REQUIRED mTLS — our client handshake completes locally before
+	//       the origin rejects, so we cannot prove it's un-inspectable here; safe
+	//       posture is to keep inspecting (manual bypass list if it truly breaks).
+	inspectable := []struct {
+		name string
+		max  uint16
+		auth tls.ClientAuthType
+	}{
+		{"optional_TLS1.2", tls.VersionTLS12, tls.RequestClientCert},
+		{"optional_TLS1.3", tls.VersionTLS13, tls.RequestClientCert},
+		{"required_TLS1.3_success", tls.VersionTLS13, tls.RequireAnyClientCert},
+	}
+	for _, tc := range inspectable {
+		t.Run("inspectable_"+tc.name, func(t *testing.T) {
+			asked, herr := probeClientCertDetection(t, tc.max, tc.auth, true, false)
+			if herr != nil {
+				t.Fatalf("%s: expected a SUCCESSFUL (inspectable) handshake, got herr=%v", tc.name, herr)
+			}
+			if clientCertRescueDecision(true, asked, herr) {
+				t.Fatalf("%s: a successful handshake must NOT be bypassed (asked=%v) — optional-mTLS/inspectable origins stay inspected", tc.name, asked)
+			}
+		})
+	}
+
+	// NEGATIVE — no client cert requested at all.
 	for _, ver := range []struct {
 		name string
 		max  uint16
-	}{{"TLS1.3", tls.VersionTLS13}, {"TLS1.2", tls.VersionTLS12}} {
-		t.Run("positive_"+ver.name, func(t *testing.T) {
-			asked, herr := probeClientCertDetection(t, ver.max, true, true, false)
-			if !asked {
-				t.Fatalf("%s: origin CertificateRequest was NOT detected (callback never fired)", ver.name)
-			}
-			if !clientCertRescueDecision(true, asked, herr) {
-				t.Fatalf("%s: fail-open + origin-asked should rescue (herr=%v)", ver.name, herr)
-			}
-		})
+	}{{"TLS1.2", tls.VersionTLS12}, {"TLS1.3", tls.VersionTLS13}} {
 		t.Run("negative_no_client_cert_"+ver.name, func(t *testing.T) {
-			asked, herr := probeClientCertDetection(t, ver.max, false, true, false)
+			asked, herr := probeClientCertDetection(t, ver.max, tls.NoClientCert, true, false)
 			if asked {
 				t.Fatalf("%s: origin did NOT request a client cert, but the signal fired", ver.name)
 			}
@@ -105,12 +133,11 @@ func TestClientCertRescue_DecisionRealHandshakes(t *testing.T) {
 		})
 	}
 
-	// NEGATIVE — cert-verify precedence: an untrusted origin cert must stay
-	// fail-closed. With verification ON the handshake aborts at cert-verify BEFORE
-	// the client responds to any CertificateRequest, so the signal never fires and
-	// the decision is false either way.
+	// NEGATIVE — cert-verify precedence: an untrusted origin cert stays fail-closed.
+	// With verification ON the handshake aborts at cert-verify BEFORE the client
+	// responds to any CertificateRequest, so the signal never fires.
 	t.Run("negative_cert_verify_fails_closed", func(t *testing.T) {
-		asked, herr := probeClientCertDetection(t, tls.VersionTLS13, true, false, false)
+		asked, herr := probeClientCertDetection(t, tls.VersionTLS13, tls.RequireAnyClientCert, false, false)
 		if herr == nil {
 			t.Fatal("expected a cert-verify failure against the untrusted origin")
 		}
@@ -122,14 +149,22 @@ func TestClientCertRescue_DecisionRealHandshakes(t *testing.T) {
 		}
 	})
 
-	// NEGATIVE — fail-close isolation: a fail-close rule never rescues, even if the
-	// origin asked for a client cert.
+	// NEGATIVE — fail-close isolation: a fail-close rule never rescues, even on a
+	// genuine required-cert handshake failure.
 	t.Run("negative_fail_close_never_rescues", func(t *testing.T) {
-		if clientCertRescueDecision(false, true, nil) {
+		if clientCertRescueDecision(false, true, errPlaceholderHandshake) {
 			t.Fatal("fail-close (failOpen=false) must never rescue")
 		}
 	})
 }
+
+// errPlaceholderHandshake is a non-nil, non-cert-verify handshake error for the
+// fail-close decision case (the decision must reject on failOpen=false regardless).
+var errPlaceholderHandshake = errPlaceholder("remote error: tls: handshake failure")
+
+type errPlaceholder string
+
+func (e errPlaceholder) Error() string { return string(e) }
 
 // TestClientCertRescue_SSRFRedialRejected proves the rescue's re-dial cannot be
 // used to reach an internal host: handleTunnelBypass runs its own isPrivateHost

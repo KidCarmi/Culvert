@@ -46,7 +46,7 @@ incompatibility and never triggers a bypass.
 
 | Inspect failure | Learned? | Live-rescues the triggering session? |
 |---|---|---|
-| Origin requires a client certificate (detected structurally via its `CertificateRequest`) | ✅ | ✅ (strip path only — the one reason allowed to rescue) |
+| Origin requires a client certificate (detected structurally via its `CertificateRequest`) | ✅ | ✅ only on a proven handshake failure — required mTLS on TLS 1.2 (strip path only). Optional mTLS and TLS-1.3 required mTLS stay inspected |
 | TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
 | Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
 | Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
@@ -63,13 +63,23 @@ signal populates the cache, so a misclassification can only ever keep inspecting
 > the missing cert, and on **TLS 1.2** it arrives as a generic `handshake_failure`.
 > So Culvert does **not** rely on the handshake error string here: it detects the
 > origin's `CertificateRequest` **structurally** (via a signal-only
-> `GetClientCertificate` callback, attached for fail-open rules only). This works in
-> **both** TLS 1.2 and 1.3, before the client `200` is sent, so the strip-inspect
-> path live-rescues the session to a bypass tunnel — where the real client (which
-> has a client certificate) completes its own mTLS straight to the origin. The
-> callback is a signal producer only; it never provides a client certificate and
-> makes no policy decision. Cert-verify failures (untrusted/expired/mismatched
-> origin certs) stay fail-closed, and fail-close rules never participate.
+> `GetClientCertificate` callback, attached for fail-open rules only). The callback
+> is a signal producer only; it never provides a client certificate and makes no
+> policy decision.
+>
+> The live rescue fires only when that signal is paired with a **proven handshake
+> failure** — i.e. **required mTLS on TLS 1.2**, where the origin demands a cert we
+> cannot present and the handshake genuinely breaks, so inspection provably cannot
+> continue. The strip-inspect path then bypasses the session to a raw tunnel and the
+> real client (which has a client certificate) completes its own mTLS straight to the
+> origin. A **successful** handshake is never bypassed: an origin that merely
+> *requests* a cert (**optional mTLS**, `tls.RequestClientCert`) completes the
+> handshake and stays inspected. **Required mTLS on TLS 1.3** also completes our
+> client handshake (the client finishes before the origin rejects), so it is
+> indistinguishable from the optional case at that point and is **not** auto-rescued
+> — put those origins on the manual **SSL Bypass** list. Cert-verify failures
+> (untrusted/expired/mismatched origin certs) stay fail-closed, and fail-close rules
+> never participate.
 
 > **Residual downgrade risk (live rescue).** Even `certificate_required` is an
 > origin-emitted alert, so an attacker-controlled origin *under a fail-open rule*
@@ -201,13 +211,16 @@ For a **never-before-seen** incompatible host, the *first* connection can still
 fail — you cannot rescue a client that refuses your certificate without prior
 knowledge of the host. Behavior by path:
 
-- **Strip inspection path, origin-requires-client-cert ONLY**: the current
-  session **is rescued live** — no visible failure. This is the single
+- **Strip inspection path, origin-requires-client-cert on TLS 1.2 ONLY**: the
+  current session **is rescued live** — no visible failure. This is the single
   live-rescued case, and it is **confirm-count-exempt** (it bypasses the
-  *triggering* session on the first `certificate_required` signal; the
-  confirm-count protects the *persistent* cache future sessions read). Because it
-  applies only to hosts an operator deliberately put on a fail-open rule, size
-  fail-open scope accordingly — keep DLP-critical hosts on fail-close.
+  *triggering* session on the first proven client-cert handshake failure; the
+  confirm-count protects the *persistent* cache future sessions read). It fires
+  only on a genuine handshake failure, so optional-mTLS origins (which complete the
+  handshake) and TLS-1.3 required-mTLS origins (which also complete our client
+  handshake) are **not** rescued — the latter go on the manual **SSL Bypass** list.
+  Because it applies only to hosts an operator deliberately put on a fail-open rule,
+  size fail-open scope accordingly — keep DLP-critical hosts on fail-close.
 - **Everything else** — unsupported-params (strip path), the native-HTTP/2 path,
   and client-pinning — is **learn-only**: the first session fails with a `502`,
   and the *next* session to that host self-heals via the cache once the

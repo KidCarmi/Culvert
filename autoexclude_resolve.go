@@ -258,29 +258,36 @@ const feedReasonClientCertRescue = "autoexclude_client_cert_rescue"
 // clientCertRescueDecision is the SOLE policy gate for the strip-path client-cert
 // live-rescue (ADR-0009). The GetClientCertificate callback only produces the
 // `originAsked` signal and never decides or bypasses; this function makes the
-// decision. It requires, in this order:
+// decision. It requires ALL of:
 //
 //   - failOpen: the matched rule resolved to a CONCRETE fail-open decryption
 //     profile (resolveFailOpen). A fail-close rule can never reach here — the
 //     caller attaches the detection callback only when failOpen — but we re-check
 //     defensively (invariant: fail-close never rescues/learns/consults).
-//   - originAsked: the origin sent a CertificateRequest (structural signal,
-//     version-independent — set in BOTH TLS 1.2 and TLS 1.3, unlike the handshake
-//     error string, which a real client dial never surfaces as "certificate
-//     required").
+//   - originAsked: the origin sent a CertificateRequest (structural signal, set in
+//     both TLS 1.2 and 1.3, unlike the handshake error string which a real client
+//     dial never surfaces as "certificate required").
+//   - herr != nil: the handshake actually FAILED. This is the required-vs-optional
+//     mTLS distinction. An origin using tls.RequestClientCert /
+//     VerifyClientCertIfGiven (OPTIONAL client auth) ALSO sends a CertificateRequest
+//     but then COMPLETES the handshake without our cert (herr==nil) — that
+//     connection is perfectly inspectable, so we must NOT bypass it. Only when the
+//     missing client cert actually breaks the handshake have we PROVEN inspection
+//     cannot continue; a successful handshake is never rescued. (Consequence: a
+//     TLS 1.3 origin that REQUIRES a client cert completes our client handshake
+//     locally before rejecting — herr==nil — so it is not auto-rescued and uses the
+//     manual SSL Bypass list; this is the safe posture. See ADR-0009 §Alternatives.)
 //   - NOT a cert-verify failure: an untrusted/expired/hostname-mismatched origin
-//     cert must stay fail-closed (the poisoning/exfil vector). herr may be nil
-//     (TLS 1.3 handshake succeeded) — guard the string check on herr != nil so
-//     isOriginCertVerifyErr is never called with a nil error.
+//     cert must stay fail-closed (the poisoning/exfil vector).
 //
-// Generic TLS alerts and every other failure are NOT client-cert signals: they
-// leave originAsked false, so they can never rescue here.
+// Generic TLS alerts and every other failure leave originAsked false, so they can
+// never rescue here.
 func clientCertRescueDecision(failOpen, originAsked bool, herr error) bool {
-	if !failOpen || !originAsked {
-		return false
+	if !failOpen || !originAsked || herr == nil {
+		return false // no fail-open / no CertificateRequest / a SUCCESSFUL (inspectable) handshake
 	}
-	if herr != nil && isOriginCertVerifyErr(herr) {
-		return false
+	if isOriginCertVerifyErr(herr) {
+		return false // untrusted/expired/mismatched origin cert — stay fail-closed
 	}
 	return true
 }
