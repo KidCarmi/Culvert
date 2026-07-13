@@ -214,6 +214,78 @@ func TestQuarantineCorruptStateFile_RenameFailureStillAlertsAndRecords(t *testin
 	}
 }
 
+// TestLoadUIUsersFile_ResidualQuarantineResurfacedAcrossRestart pins the
+// Codex P2 follow-up: the corruption signal is process-local, so after a
+// restart it must be re-derived from the on-disk quarantine sibling.
+// Otherwise the flow "corrupt load → run → save fresh empty file → reboot"
+// silently goes green while the roster/revocation loss persists.
+func TestLoadUIUsersFile_ResidualQuarantineResurfacedAcrossRestart(t *testing.T) {
+	captured := captureStartupAlerts(t)
+	isolateStateCorruption(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ui_users.json")
+
+	// Boot 1: corrupt file → quarantined, one alert queued.
+	if err := os.WriteFile(path, []byte(`{"users":[bad`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c1 := &Config{}
+	c1.SetUIUsersFile(path)
+	if err := c1.LoadUIUsersFile(); err == nil {
+		t.Fatal("expected parse error on boot 1")
+	}
+	qfiles := quarantinedFiles(t, path)
+	if len(qfiles) != 1 {
+		t.Fatalf("boot 1 must produce exactly 1 quarantine file, got %v", qfiles)
+	}
+
+	// The node keeps running and saves a fresh, VALID roster — the file
+	// that would fool the next boot into thinking all is well.
+	if err := c1.SetUIUser("rescue", "Password123", RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.SaveUIUsersFile(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the restart: a brand-new process (empty corruption map, new
+	// Config) loads the now-VALID file. Pre-fix this returns nil with an
+	// empty map and probes go green — the regression this test guards.
+	resetStateCorruption()
+	c2 := &Config{}
+	c2.SetUIUsersFile(path)
+	if err := c2.LoadUIUsersFile(); err != nil {
+		t.Fatalf("boot 2 load of the fresh valid file must succeed: %v", err)
+	}
+	snap := stateCorruptionSnapshot()
+	detail, ok := snap["ui_users"]
+	if !ok {
+		t.Fatal("boot 2: unreconciled quarantine sibling must re-surface the /readyz record")
+	}
+	if !strings.Contains(detail, "unreconciled") {
+		t.Fatalf("boot 2 detail should flag the residual quarantine: %q", detail)
+	}
+	flushStartupAlerts()
+	if len(*captured) != 2 {
+		t.Fatalf("want 2 alerts total (boot 1 corrupt + boot 2 residual), got %d", len(*captured))
+	}
+
+	// Operator reconciles by removing the quarantine file → boot 3 clean.
+	if err := os.Remove(qfiles[0]); err != nil {
+		t.Fatal(err)
+	}
+	resetStateCorruption()
+	c3 := &Config{}
+	c3.SetUIUsersFile(path)
+	if err := c3.LoadUIUsersFile(); err != nil {
+		t.Fatal(err)
+	}
+	if snap := stateCorruptionSnapshot(); len(snap) != 0 {
+		t.Fatalf("boot 3 after reconciliation must be clean, got %v", snap)
+	}
+}
+
 // TestHandleReady_SurfacesStateFileCorruption pins the /readyz row: a
 // recorded corruption shows as a failing state_file_<kind> check, and it
 // is report-only — the readiness verdict must not change (the node still

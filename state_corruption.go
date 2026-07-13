@@ -36,6 +36,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -89,4 +90,43 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
 	return qpath
+}
+
+// noteResidualQuarantine re-surfaces an UNRECONCILED corruption from a
+// PRIOR boot. The in-memory record is process-local, so without this the
+// /readyz row and alert vanish on the next restart even though the problem
+// persists: a corrupt cluster.json is quarantined, the node keeps running
+// and later saves a fresh EMPTY cluster.json, and on reboot that
+// replacement parses cleanly — probes go green while the node still runs
+// with the lost roster/revocation state and the .corrupt.* evidence sits
+// unreconciled on disk. Called at load time (before the parse attempt, so
+// a still-present quarantine surfaces whether or not the current file
+// parses); the signal persists until the operator repairs/restores or
+// removes the quarantined file. Fires at most once per boot, and never
+// clobbers a richer same-boot record from quarantineCorruptStateFile.
+func noteResidualQuarantine(kind, path string) {
+	if path == "" {
+		return
+	}
+	matches, err := filepath.Glob(path + ".corrupt.*")
+	if err != nil || len(matches) == 0 {
+		return
+	}
+
+	stateCorruptionMu.Lock()
+	_, already := stateCorruptionByKind[kind]
+	stateCorruptionMu.Unlock()
+	if already {
+		// A fresh quarantine this boot already recorded the richer detail.
+		return
+	}
+
+	detail := fmt.Sprintf("%s state file %s has %d unreconciled quarantined sibling(s) from a prior corrupt load (e.g. %s) — the node may be running with an EMPTY %s store; repair/restore the quarantined file or remove it once reconciled, then restart", kind, path, len(matches), matches[0], kind)
+	logger.Printf("StateCorruption: %q", sanitizeLog(detail))
+
+	stateCorruptionMu.Lock()
+	stateCorruptionByKind[kind] = detail
+	stateCorruptionMu.Unlock()
+
+	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
 }
