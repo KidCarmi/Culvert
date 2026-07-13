@@ -2627,12 +2627,22 @@ Firefox (all platforms):
           </div>
           <button class="btn sm ghost" id="pol-unused-btn" data-click="togglePolUnused"
             title="Show only rules not matched in the last 90 days (candidates for cleanup). Requires hit tracking — freshly-deployed systems have no history yet.">🕗 Unused</button>
+          <span style="flex:1"></span>
+          <button class="btn sm ghost" id="pol-commit-mode-btn" data-min-role="admin" data-click="polToggleCommitMode"
+            title="When ON, rule edits are staged in a draft and require an explicit commit before they go live (Palo Alto-style candidate config). When OFF, edits apply immediately.">Commit mode: <span id="pol-commit-mode-state">off</span></button>
         </div>
         <div id="pol-reorder-bar" class="banner warn reorder-bar" style="display:none" role="status">
           <span>⚠ Rule order edited — <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
           <span style="flex:1"></span>
           <button class="btn sm primary" data-click="polApplyOrder">Apply order</button>
           <button class="btn ghost sm" data-click="polRevertOrder">Revert</button>
+        </div>
+        <div id="pol-draft-bar" class="banner warn reorder-bar" style="display:none" role="status">
+          <span>📝 <strong id="pol-draft-count">0 changes</strong> staged — <strong>not yet live</strong>. The proxy still enforces the committed rulebase.</span>
+          <span id="pol-draft-actor" style="font-size:.72rem;color:var(--muted)"></span>
+          <span style="flex:1"></span>
+          <button class="btn sm primary" data-click="polCommitDraft">Review &amp; commit</button>
+          <button class="btn ghost sm" data-click="polRevertDraft">Discard</button>
         </div>
         <div class="tbl-wrap">
           <table id="policy-table">
@@ -4233,6 +4243,9 @@ document.addEventListener('click', e => {
     case 'polTestRule':       polTestRule(+arg); break;
     case 'polApplyOrder':     polApplyOrder(); break;
     case 'polRevertOrder':    polRevertOrder(); break;
+    case 'polToggleCommitMode': polToggleCommitMode(); break;
+    case 'polCommitDraft':    polCommitDraft(); break;
+    case 'polRevertDraft':    polRevertDraft(); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
     case 'trafficGotoRule':   trafficGotoRule(arg, arg2); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
@@ -7440,6 +7453,9 @@ async function fetchPolicy() {
     }
     renderPolicy();
   } catch(e) { console.error(e); }
+  // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
+  // Fired here so it stays in sync on view-open and after every mutation.
+  fetchDraftState();
 }
 
 function actionBadge(action) {
@@ -7648,6 +7664,115 @@ async function polApplyOrder() {
 function polRevertOrder() {
   polStageOrder(null);
   toast('Staged order discarded — showing the applied order', 'success');
+}
+
+// ── Candidate/commit (policy-draft, G2) ──────────────────────────────────────
+// Opt-in "require commit" mode: rule edits stage into a shared candidate and go
+// live only on an explicit commit. Backend: /api/policy/draft (state+diff / PUT
+// mode), /api/policy/draft/commit, /api/policy/draft/revert. GET /api/policy
+// already returns the candidate rules while a draft is open, so the rulebase
+// table below renders what will be committed.
+let _polDraftState = null;
+
+async function fetchDraftState() {
+  try {
+    _polDraftState = await api('/api/policy/draft');
+    renderDraftState(_polDraftState);
+  } catch (_) { /* viewer / transient — leave the last known state */ }
+}
+
+function renderDraftState(st) {
+  st = st || {};
+  const modeState = document.getElementById('pol-commit-mode-state');
+  const modeBtn   = document.getElementById('pol-commit-mode-btn');
+  if (modeState) modeState.textContent = st.requireCommit ? 'on' : 'off';
+  if (modeBtn)   modeBtn.classList.toggle('active', !!st.requireCommit);
+  const bar = document.getElementById('pol-draft-bar');
+  if (!bar) return;
+  if (st.active) {
+    const n = st.pendingCount || 0;
+    document.getElementById('pol-draft-count').textContent = n + (n === 1 ? ' change' : ' changes');
+    const actor = document.getElementById('pol-draft-actor');
+    if (actor) actor.textContent = st.actor ? ('opened by ' + st.actor) : '';
+    bar.style.display = 'flex';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function polToggleCommitMode() {
+  const turningOn = !(_polDraftState && _polDraftState.requireCommit);
+  try {
+    await api('/api/policy/draft', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ require_commit: turningOn }),
+    });
+    toast(turningOn
+      ? 'Commit mode ON — rule edits now stage into a draft until you commit'
+      : 'Commit mode OFF — rule edits apply immediately', 'success');
+    await fetchDraftState();
+  } catch (e) {
+    // 409 when disabling with a pending draft.
+    toast(e.message || 'Could not change commit mode', 'error');
+  }
+}
+
+// polDraftDiffSummary renders the candidate→running change set as one line.
+function polDraftDiffSummary(d) {
+  d = d || {};
+  const add = d.added || [], mod = d.modified || [], rem = d.removed || [];
+  const bits = [];
+  if (add.length) bits.push('+' + add.length + ' added (' + add.join(', ') + ')');
+  if (mod.length) bits.push('~' + mod.length + ' modified (' + mod.join(', ') + ')');
+  if (rem.length) bits.push('−' + rem.length + ' removed (' + rem.join(', ') + ')');
+  return bits.length ? bits.join('; ') : 'No changes';
+}
+
+async function polCommitDraft() {
+  let st;
+  try { st = await api('/api/policy/draft'); }
+  catch (e) { toast('Could not load draft: ' + e.message, 'error'); return; }
+  if (!st.active) { toast('No staged changes to commit', 'error'); await fetchDraftState(); return; }
+  const comment = await promptAction({
+    title: 'Commit policy changes',
+    msg: polDraftDiffSummary(st.diff) + '  —  Committing activates these rules for live traffic. A comment is required (recorded in the audit log).',
+    label: 'Commit comment',
+    placeholder: 'Why these changes?',
+    okLabel: 'Commit',
+    okStyle: 'primary',
+  });
+  if (comment === null) return;                 // cancelled
+  if (!comment.trim()) { toast('A commit comment is required', 'error'); return; }
+  try {
+    const res = await api('/api/policy/draft/commit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment: comment.trim() }),
+    });
+    const n = res.committed || 0;
+    toast('Committed ' + n + ' change' + (n === 1 ? '' : 's') + ' — now live', 'success');
+    await fetchPolicy();
+  } catch (e) {
+    toast('Commit failed: ' + e.message, 'error');
+    await fetchDraftState();
+  }
+}
+
+async function polRevertDraft() {
+  const n = (_polDraftState && _polDraftState.pendingCount) || 0;
+  const ok = await confirmAction('Discard staged changes',
+    'Discard ' + n + ' staged policy change' + (n === 1 ? '' : 's') +
+    '? The committed rulebase stays exactly as it is now.', 'Discard');
+  if (!ok) return;
+  try {
+    await api('/api/policy/draft/revert', { method: 'POST' });
+    toast('Staged changes discarded', 'success');
+    await fetchPolicy();
+  } catch (e) {
+    toast('Discard failed: ' + e.message, 'error');
+    await fetchDraftState();
+  }
 }
 
 // polBlockWhileStaged — rule mutations under a pending staged order would
