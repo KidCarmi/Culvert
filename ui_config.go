@@ -691,11 +691,18 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 		})
 	}
 
-	policyNote := ""
-	if !replaceMode && len(b.PolicyRules) > 0 {
-		policyNote = "merge appends — duplicate rules may accumulate"
+	// Policy rules: merge now UPSERTS by identity (ID then name), so report the
+	// real update/add split instead of a flat "add N" — and drop the old
+	// duplicate-accumulation warning, which no longer applies.
+	polCur := len(policyStore.List())
+	if replaceMode || len(b.PolicyRules) == 0 {
+		add("Policy Rules", len(b.PolicyRules), polCur, "")
+	} else {
+		updates, adds := policyStore.countImportUpserts(b.PolicyRules)
+		addFixed("Policy Rules", len(b.PolicyRules), polCur,
+			fmt.Sprintf("upsert %d: %d update, %d add", len(b.PolicyRules), updates, adds),
+			"merge upserts by ID then name — duplicates no longer accumulate")
 	}
-	add("Policy Rules", len(b.PolicyRules), len(policyStore.List()), policyNote)
 	add("Blocklist", len(b.Blocklist), bl.Count(), "")
 
 	taxonomyNote := ""
@@ -849,14 +856,32 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode && len(b.PolicyRules) > 0 {
 		policyStore.ReplaceAll(b.PolicyRules)
 	} else {
+		// Merge mode UPSERTS by identity so an idempotent re-import does not
+		// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1): match by stable
+		// ULID first, then a one-time name fallback for pre-ID backups, else
+		// create fresh. matchForImport returns the existing rule (or nil for a
+		// new one); on a match we exclude that rule's slot from validation
+		// (editPriority) so re-importing the same rule never trips its own
+		// name/priority uniqueness check, and UpdateByID preserves the live
+		// rule's position + hit history.
 		// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
 		for i := range b.PolicyRules {
 			rule := b.PolicyRules[i]
-			if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
+			existing := policyStore.matchForImport(rule)
+			editPriority := -1
+			if existing != nil {
+				editPriority = existing.Priority
+			}
+			if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
 				logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 				continue
 			}
-			policyStore.Add(rule)
+			if existing != nil {
+				rule.ID = existing.ID // carry identity for the name-match upsert path
+				policyStore.UpdateByID(existing.ID, rule)
+			} else {
+				policyStore.Add(rule)
+			}
 		}
 	}
 	policyStore.Save()

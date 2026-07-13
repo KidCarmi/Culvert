@@ -52,8 +52,9 @@ func previewSection(resp importPreviewResp, name string) (importPreviewSection, 
 }
 
 // TestImportPreview_MergeCountsAndEffect: a merge-mode preview reports the
-// incoming/current counts and an "add N to M existing" effect, plus the
-// duplicate-accumulation note for policy rules.
+// incoming/current counts and, for policy rules, the upsert-split effect
+// ("upsert N: X update, Y add") plus the upsert note (merge no longer
+// accumulates duplicates).
 func TestImportPreview_MergeCountsAndEffect(t *testing.T) {
 	csrTaxIsolate(t)
 	snapshotPolicyStoreForTest(t)
@@ -81,11 +82,13 @@ func TestImportPreview_MergeCountsAndEffect(t *testing.T) {
 	if pol.Incoming != 3 || pol.Current != 2 {
 		t.Errorf("policy counts = incoming %d current %d; want 3/2", pol.Incoming, pol.Current)
 	}
-	if !strings.Contains(pol.Effect, "add 3 to 2 existing") {
-		t.Errorf("policy effect = %q; want 'add 3 to 2 existing'", pol.Effect)
+	// Merge now upserts by identity: the 3 incoming rules are all new names
+	// (no id, no name match against existing-1/2), so the split is 0 update / 3 add.
+	if !strings.Contains(pol.Effect, "upsert 3: 0 update, 3 add") {
+		t.Errorf("policy effect = %q; want 'upsert 3: 0 update, 3 add'", pol.Effect)
 	}
-	if pol.Note == "" {
-		t.Errorf("policy merge note empty; want duplicate-accumulation warning")
+	if !strings.Contains(pol.Note, "upsert") {
+		t.Errorf("policy merge note = %q; want mention of upsert", pol.Note)
 	}
 	cat, ok := previewSection(resp, "URL Categories")
 	if !ok || cat.Incoming != 1 || cat.Current != 1 {
