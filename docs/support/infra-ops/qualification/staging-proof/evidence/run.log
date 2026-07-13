@@ -1,0 +1,30 @@
+========================================================================
+TAC PROOF-SLICE — 13 REQUIRED DEMONSTRATIONS (synthetic, offline, $0)
+========================================================================
+[1] inspect worker: tac-analysis-worker-1 env=staging running=sha256:aaaaaaaaaaaaa… healthy=True allowlisted=True
+[2] request safe restart (L2)
+    op=OP-2026-69bc14
+[3] deterministic policy: passed=True rules=13/13
+[4] execute through single mutation spine (executor only)
+[5] validate with synthetic job
+    restart outcome=ok validation_passed=True gates=5/5  (0.151s)
+[6] request new worker version (L3 deploy)
+    op=OP-2026-9097f8
+[7] exact plan produced: PLAN-8e2261014fac target=sha256:bbbbbbbbbbbbb… policy_passed=True
+[8] require plan-bound human approval
+    self-approval(author) -> REJECTED: approver is author
+    human approval -> APPROVAL-308b9777e3cb bound_to_plan_sig=d8b4c2a278cc…
+[9] deploy the approved image digest
+    deploy outcome=ok validation_passed=True  running=sha256:bbbbbbbbbbbbb…  (0.301s)
+[10] deploy a bad version -> detect failed validation
+     validation_passed=False failing_gates=['V1_health', 'V3_synthetic_lease', 'V4_synthetic_task']
+[11] roll back to previous known-good digest
+     rollback=ROLLED_BACK restored=sha256:aaaaaaaaaaaaa…  (0.301s)
+[12] preserve operation after session ends — reconstruct from DB in a NEW process:
+     OP OP-2026-9097f8  kind=deploy level=L3 state=SUCCEEDED worker=tac-analysis-worker-1
+       intent=deploy tac-analysis-worker-1 -> new digest  plan=PLAN-8e2261014fac  by=human:alice
+       events=9  audit_chain_valid=True
+         # 1 08:38:00 claude:planner   operation.created      None->CREATED
+     audit chain intact for OP-2026-9097f8: True
+[13] same workflow via tacctl (AI unavailable): running an L2 restart through CLI subprocess
+     tacctl(no-AI): OP-2026-590fe4 restart validated=True state=SUCCEEDED

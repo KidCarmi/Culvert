@@ -1,0 +1,12 @@
+OP OP-2026-b63630  kind=deploy level=L3 state=SUCCEEDED worker=tac-analysis-worker-1
+  intent=deploy tac-analysis-worker-1 -> new digest  plan=PLAN-3d0d84681082  by=human:alice
+  events=9  audit_chain_valid=True
+    # 1 08:36:02 claude:planner   operation.created      None->CREATED
+    # 2 08:36:02 operation-svc    operation.discovering  CREATED->DISCOVERING
+    # 3 08:36:02 planner          operation.planning     DISCOVERING->PLANNING
+    # 4 08:36:02 policy           policy.passed          PLANNING->REVIEW_PENDING
+    # 5 08:36:02 human:bob        operation.approved     REVIEW_PENDING->APPROVED
+    # 6 08:36:02 operation-svc    operation.queued       APPROVED->EXECUTION_QUEUED
+    # 7 08:36:02 executor:exec-1  execution.started      EXECUTION_QUEUED->EXECUTING
+    # 8 08:36:03 executor:exec-1  execution.applied      EXECUTING->VALIDATING
+    # 9 08:36:03 validator        operation.succeeded    VALIDATING->SUCCEEDED

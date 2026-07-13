@@ -1,0 +1,98 @@
+[
+  {
+    "case": 1,
+    "scenario": "chat disconnect during planning",
+    "persisted_state": "REVIEW_PENDING",
+    "recovery": "reconnect via get_operation; plan intact"
+  },
+  {
+    "case": 2,
+    "scenario": "chat disconnect during execution",
+    "persisted_state": "VALIDATING",
+    "recovery": "op continues in executor; reconnect resumes"
+  },
+  {
+    "case": 3,
+    "scenario": "duplicate execution request",
+    "persisted_state": "same_op",
+    "recovery": "idempotency UNIQUE; dup returned existing (True)"
+  },
+  {
+    "case": 4,
+    "scenario": "stale approval",
+    "persisted_state": "APPROVAL_PENDING",
+    "recovery": "execute rejected: REJECTED:approval expired"
+  },
+  {
+    "case": 5,
+    "scenario": "plan changes after approval",
+    "persisted_state": "APPROVAL_PENDING",
+    "recovery": "execute REJECTED:approval/plan mismatch (pidA=PLAN-564358adf9a3 != pidB=PLAN-1b91f13080d5); re-approval required"
+  },
+  {
+    "case": 6,
+    "scenario": "policy rejection (unapproved digest)",
+    "persisted_state": "POLICY_REJECTED",
+    "recovery": "rejected rules=P4"
+  },
+  {
+    "case": 7,
+    "scenario": "executor crash before provider call",
+    "persisted_state": "FAILED",
+    "recovery": "reconciler: resolved->FAILED"
+  },
+  {
+    "case": 8,
+    "scenario": "executor crash after provider call",
+    "persisted_state": "VALIDATING",
+    "recovery": "reconciler read provider truth: resumed->VALIDATING"
+  },
+  {
+    "case": 9,
+    "scenario": "partial provider success",
+    "persisted_state": "ROLLED_BACK",
+    "recovery": "reverse-deploy -> ROLLED_BACK"
+  },
+  {
+    "case": 10,
+    "scenario": "validation failure",
+    "persisted_state": "ROLLED_BACK",
+    "recovery": "auto rollback -> ROLLED_BACK"
+  },
+  {
+    "case": 11,
+    "scenario": "rollback failure / prev image gone",
+    "persisted_state": "MANUAL_INTERVENTION_REQUIRED",
+    "recovery": "-> MANUAL (human via tacctl)"
+  },
+  {
+    "case": 12,
+    "scenario": "concurrent op on same worker",
+    "persisted_state": "second_blocked",
+    "recovery": "per-worker apply lease serializes; B waits"
+  },
+  {
+    "case": 13,
+    "scenario": "malicious log prompt injection",
+    "persisted_state": "inert",
+    "recovery": "no run_arbitrary_* tool; L3 needs human approval; worst case = a rejected/low-impact proposal, audited"
+  },
+  {
+    "case": 14,
+    "scenario": "expired credentials mid-apply",
+    "persisted_state": "FAILED",
+    "recovery": "re-mint + safe re-apply; reconciler: resolved->FAILED"
+  },
+  {
+    "case": 15,
+    "scenario": "provider unavailable",
+    "persisted_state": "FAILED",
+    "recovery": "FAILED cleanly; retry same saved plan later"
+  },
+  {
+    "case": 16,
+    "scenario": "AI unavailable",
+    "persisted_state": "SUCCEEDED",
+    "recovery": "tacctl-only; platform fully operable without AI"
+  }
+]
