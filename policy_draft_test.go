@@ -352,6 +352,35 @@ func TestDraft_RealEditSurvivesReconcile(t *testing.T) {
 	}
 }
 
+// TestDraft_Commit_VersionPrecondition: a commit carrying a stale ?ifVersion
+// (another admin staged into the shared candidate since the diff was reviewed)
+// is rejected 409; the correct version commits.
+func TestDraft_Commit_VersionPrecondition(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	createRuleViaAPI(t, "r1", "")
+	v, _ := policyDraft.candidateVersion()
+
+	// Stale precondition → 409, draft preserved.
+	w := httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit?ifVersion="+int64ToStr(v-1),
+		map[string]any{"comment": "x"}))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("stale-version commit = %d, want 409 (%s)", w.Code, w.Body.String())
+	}
+	if !policyDraft.active() {
+		t.Error("a rejected commit cleared the draft")
+	}
+
+	// Correct precondition → committed.
+	w = httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit?ifVersion="+int64ToStr(v),
+		map[string]any{"comment": "x"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("correct-version commit = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+}
+
 // TestDraft_GetState surfaces the mode + pending count.
 func TestDraft_GetState(t *testing.T) {
 	draftTestSetup(t)

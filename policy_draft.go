@@ -441,6 +441,14 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no draft to commit", http.StatusBadRequest)
 		return
 	}
+	// Optimistic-concurrency precondition on the SHARED candidate: if the client
+	// sends ?ifVersion=N (the candidate generation it reviewed) and another admin
+	// staged a change in between, this 409s instead of committing unreviewed
+	// changes. policyVersionConflict compares against effectivePolicyVersion,
+	// which is the candidate's generation while a draft is open.
+	if policyVersionConflict(w, r) {
+		return
+	}
 	var body struct {
 		Comment string `json:"comment"`
 	}
