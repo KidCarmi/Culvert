@@ -29,7 +29,10 @@ from . import oracle
 # ---- Lab configuration (single source of truth) ----------------------------
 REPO = "/home/user/Culvert"
 LAB = os.path.join(REPO, "edge-case-lab")
-CULVERT_BIN = os.path.join(REPO, "culvert")
+# CULVERT_LAB_BIN lets mutation-validation / acceptance-review runs point the lab at
+# an alternate (e.g. deliberately-mutated, worktree-built) binary WITHOUT editing the
+# main tree. Defaults to the repo binary for normal campaigns.
+CULVERT_BIN = os.environ.get("CULVERT_LAB_BIN", os.path.join(REPO, "culvert"))
 DATA_DIR = "/data"
 PROXY_PORT = 18080
 UI_PORT = 19090
@@ -439,6 +442,12 @@ class Executor:
                 any("POLICY_ALLOW" in ln for ln in res.decision_trace) and \
                 not any("POLICY_REDIRECT" in ln for ln in res.decision_trace):
             res.disposition = oracle.ALLOW
+        # If the proxy ALLOWED the request but the client still failed, the upstream
+        # fixture was unreachable (502/504/reset) — infrastructure, not a policy block.
+        if res.disposition == oracle.CONN_FAIL and any(
+                t in ln for ln in res.decision_trace
+                for t in ("POLICY_ALLOW", "AUTH_DEFAULT_EXEMPT", "default-allow")):
+            res.probes["upstream_fail"] = True
         return res
 
     def _src_iface(self, vec) -> list[str]:
@@ -507,6 +516,13 @@ class Executor:
 
     def _classify_http(self, status, rc, blockpage, body) -> str:
         if rc in (7, 28, 52, 56) and status == 0:
+            return oracle.CONN_FAIL
+        # 502/504 = proxy accepted the request but the UPSTREAM (fixture) was
+        # unreachable/timed out. This is an infrastructure failure, NOT a policy
+        # block — a flaky origin must never be mistaken for a Culvert block. The
+        # run() wrapper cross-checks the decision trace (POLICY_ALLOW) and marks
+        # these TEST_INFRA at review time.
+        if status in (502, 504) and not blockpage:
             return oracle.CONN_FAIL
         if status in (301, 302, 303, 307, 308):
             return oracle.REDIRECT
@@ -624,6 +640,13 @@ class Reviewer:
 
         # Divergence. Triage.
         if act.disposition == oracle.CONN_FAIL and exp.disposition != oracle.CONN_FAIL:
+            # Proxy ALLOWED the request but the upstream fixture was unreachable
+            # (502/504) — an origin/infra failure, never a Culvert policy block.
+            if act.probes.get("upstream_fail"):
+                return {"verdict": TEST_INFRA_FAILURE, "primary": TEST_INFRA_FAILURE,
+                        "confidence": 0.5,
+                        "reason": f"proxy allowed (trace={act.decision_trace[:1]}) but upstream "
+                                  f"fixture unreachable (status={act.http_status}); infra, not policy"}
             # Could be infra (fixture) — flagged for confirmation, not a bug yet.
             if not act.decision_trace and act.http_status == 0:
                 return {"verdict": TEST_INFRA_FAILURE, "primary": TEST_INFRA_FAILURE,

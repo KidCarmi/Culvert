@@ -1,0 +1,8 @@
+{"mut":"M1","cap":"rule_ordering","expect_detect":"yes","result":# 8 scenarios, 4 non-PASS}
+{"mut":"M2","cap":"file_type_mime","expect_detect":"yes","result":# 2 scenarios, 2 non-PASS}
+{"mut":"M3","cap":"source_ip_subnet","expect_detect":"yes","result":# 8 scenarios, 8 non-PASS}
+{"mut":"M4","cap":"config_persistence","expect_detect":"no","result":# 2 scenarios, 1 non-PASS}
+{"mut":"M5","cap":"threat_intel","expect_detect":"yes","result":# 4 scenarios, 4 non-PASS}
+{"mut":"M6","cap":"schedule_time","expect_detect":"yes","result":# 6 scenarios, 6 non-PASS}
+{"mut":"M7","cap":"default_deny","expect_detect":"yes","result":# 8 scenarios, 4 non-PASS}
+{"mut":"M8","cap":"manual_ssl_bypass","expect_detect":"yes","result":# 6 scenarios, 1 non-PASS}
