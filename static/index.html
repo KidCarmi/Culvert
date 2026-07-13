@@ -7650,7 +7650,11 @@ async function polApplyOrder() {
     // show the staged order — which now IS the server order — and
     // fetchPolicy paints the re-stamped truth.
     _polSetStagedState(null);
-    toast('Rule order applied', 'success');
+    // Under commit mode the reorder went into the draft candidate, not live —
+    // say so honestly (the pending-changes bar will appear after fetchPolicy).
+    toast(_polDraftState && _polDraftState.requireCommit
+      ? 'Rule order staged in the draft — commit to apply'
+      : 'Rule order applied', 'success');
     await fetchPolicy();
   } catch (e) {
     // Fail honest: the staged order stays visible so nothing is lost.
@@ -7701,6 +7705,9 @@ function renderDraftState(st) {
 }
 
 async function polToggleCommitMode() {
+  // Resolve the true current mode before flipping — a stale/failed last fetch
+  // would otherwise always compute "turn on" and the toggle couldn't turn off.
+  if (!_polDraftState) await fetchDraftState();
   const turningOn = !(_polDraftState && _polDraftState.requireCommit);
   try {
     await api('/api/policy/draft', {
@@ -7730,6 +7737,10 @@ function polDraftDiffSummary(d) {
 }
 
 async function polCommitDraft() {
+  // A pending client-side row reorder is NOT yet in the candidate — committing
+  // now would activate rules without the order shown on screen. Force the
+  // operator to Apply or Revert the staged order first.
+  if (polBlockWhileStaged()) return;
   let st;
   try { st = await api('/api/policy/draft'); }
   catch (e) { toast('Could not load draft: ' + e.message, 'error'); return; }
@@ -7745,7 +7756,11 @@ async function polCommitDraft() {
   if (comment === null) return;                 // cancelled
   if (!comment.trim()) { toast('A commit comment is required', 'error'); return; }
   try {
-    const res = await api('/api/policy/draft/commit', {
+    // Precondition on the candidate generation reviewed above: if another admin
+    // staged a change while this dialog was open, the commit 409s so their
+    // unreviewed change is not activated on our comment.
+    const q = (typeof st.version === 'number') ? ('?ifVersion=' + st.version) : '';
+    const res = await api('/api/policy/draft/commit' + q, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ comment: comment.trim() }),
@@ -7754,13 +7769,19 @@ async function polCommitDraft() {
     toast('Committed ' + n + ' change' + (n === 1 ? '' : 's') + ' — now live', 'success');
     await fetchPolicy();
   } catch (e) {
+    // A 409 here means the shared candidate changed since the diff was reviewed.
     toast('Commit failed: ' + e.message, 'error');
     await fetchDraftState();
   }
 }
 
 async function polRevertDraft() {
-  const n = (_polDraftState && _polDraftState.pendingCount) || 0;
+  // Re-fetch first: discard is destructive on the SHARED candidate, so the
+  // count shown must reflect what will actually be discarded (another admin may
+  // have staged more since the last poll).
+  await fetchDraftState();
+  if (!(_polDraftState && _polDraftState.active)) { toast('No staged changes to discard', 'error'); return; }
+  const n = _polDraftState.pendingCount || 0;
   const ok = await confirmAction('Discard staged changes',
     'Discard ' + n + ' staged policy change' + (n === 1 ? '' : 's') +
     '? The committed rulebase stays exactly as it is now.', 'Discard');
