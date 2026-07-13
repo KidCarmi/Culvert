@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -389,8 +390,10 @@ type shadowFinding struct {
 // claims completeness — it is advisory ("verify with the tester"), never blocking.
 // Auth (Stage-1) rules are excluded; they have their own diagnostics.
 func detectShadowedRules(rules []PolicyRule) []shadowFinding {
-	// Access rules, enabled only, in the (priority-sorted) input order.
-	act := make([]PolicyRule, 0, len(rules))
+	// Access rules, enabled only, in the (priority-sorted) input order. Index-based
+	// range + pointer slice: PolicyRule is a large struct (CLAUDE.md rangeValCopy)
+	// and this runs on every draft poll, so avoid copying rules by value.
+	act := make([]*PolicyRule, 0, len(rules))
 	for i := range rules {
 		if ruleTypeOf(&rules[i]) != ruleTypeAccess {
 			continue
@@ -398,7 +401,7 @@ func detectShadowedRules(rules []PolicyRule) []shadowFinding {
 		if rules[i].Enabled != nil && !*rules[i].Enabled {
 			continue
 		}
-		act = append(act, rules[i])
+		act = append(act, &rules[i])
 	}
 	var out []shadowFinding
 	for j := 1; j < len(act); j++ {
@@ -417,7 +420,7 @@ func detectShadowedRules(rules []PolicyRule) []shadowFinding {
 
 // ruleProvablyCovers reports whether always-active rule a matches every request
 // rule b could match, using only exactly-decidable field coverage.
-func ruleProvablyCovers(a, b PolicyRule) bool {
+func ruleProvablyCovers(a, b *PolicyRule) bool {
 	return fieldCovers(a.SourceIP, b.SourceIP) &&
 		fieldCovers(a.SourceIdentity, b.SourceIdentity) &&
 		fieldCovers(a.SourceGroup, b.SourceGroup) &&
@@ -454,20 +457,11 @@ func countryCovers(a, b []string) bool {
 		return false
 	}
 	for _, c := range b {
-		if !strSliceContains(a, c) {
+		if !slices.Contains(a, c) {
 			return false
 		}
 	}
 	return true
-}
-
-func strSliceContains(s []string, v string) bool {
-	for i := range s {
-		if s[i] == v {
-			return true
-		}
-	}
-	return false
 }
 
 // ── HTTP handlers ──────────────────────────────────────────────────────────

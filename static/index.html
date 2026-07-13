@@ -7701,7 +7701,9 @@ function renderDraftState(st) {
     // else — committing/discarding would act on THEIR staged changes.
     const actor = document.getElementById('pol-draft-actor');
     if (actor) {
-      const other = st.actor && uiUsername && st.actor !== uiUsername;
+      // Fail toward the warning: if we can't confirm the draft is OURS (actor
+      // differs, or our own identity is unknown), treat it as another admin's.
+      const other = !!st.actor && st.actor !== uiUsername;
       actor.textContent = st.actor
         ? (other ? '⚠ opened by ' + st.actor + ' — committing/discarding acts on their staged changes' : 'opened by you')
         : '';
