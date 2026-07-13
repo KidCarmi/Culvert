@@ -213,6 +213,23 @@ func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, new
 	}
 }
 
+// cascadeDestCategoryGroupRename mirrors PolicyStore.CascadeDestCategoryGroupRename
+// onto the open candidate (references-by-id S2), so a group rename keeps the
+// DRAFT's denormalized names honest too. No-op when no draft is open; persists
+// only when a rule was actually touched. Lock order c.mu → PolicyStore.mu.
+func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, newName string) {
+	c.mu.Lock()
+	if !c.state.Active {
+		c.mu.Unlock()
+		return
+	}
+	n := c.cand.CascadeDestCategoryGroupRename(id, oldName, newName)
+	c.mu.Unlock()
+	if n > 0 {
+		c.persist()
+	}
+}
+
 // reconcile auto-discards the draft when its candidate has become identical to
 // running — i.e. the last edit was a NO-OP (re-save with no change, drag-in-place,
 // bulk-delete of absent priorities) or FAILED (TOCTOU mutation returned false

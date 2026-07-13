@@ -175,9 +175,15 @@ A new rename capability on each object store + handler:
   backfill, write-path stamp, `resolveDecryptionProfile` + `FailOpenScope`
   ID-first, store `Rename` + handler cascade, UI rename, tests. Self-contained
   and the cleanest (single-object resolution, no membership chain).
-- **S2 — category-group references-by-id + rename.** Same pattern for
-  `DestCategoryGroupID` + `categoryGroupMatchesHost` ID-first + group rename +
-  cascade + UI. (Group→member category links stay by name — §2.)
+- **S2 — category-group references-by-id + rename (SHIPPED).** Same pattern:
+  `DestCategoryGroupID` schema, `categoryGroupMatchesHostRule` ID-first match
+  (`Store.MatchesCategoryByID` returns `(matched, resolved)` so a resolved group's
+  membership is authoritative and the stale name is never consulted), write-path
+  stamp, `Store.Rename` (re-keys name map + order), `PolicyStore.CascadeDestCategoryGroupRename`
+  (hit-preserving pointer swap), draft-candidate cascade, ID-first delete-block,
+  and the handler rename flow (collision pre-check → 409, UpdateByID-before-Rename
+  so a bad body can't leave a half-applied rename), UI rename for ID-bearing groups.
+  (Group→member category links stay by name — §2.)
 
 Each slice is an independent, reviewable PR that leaves the tree green and the
 feature off-nobody's-path until its own match/rename wiring lands.
