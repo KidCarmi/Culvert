@@ -3,6 +3,16 @@
 Goal: extract durable value from the lab **without** bloating the repo or slowing the PR gate,
 and without letting a 215-scenario AI campaign become a permanent load-bearing test.
 
+> **Status: IMPLEMENTED.** The tiered runner is wired in `.github/workflows/edge-case-lab.yml`
+> (smoke on relevant PRs + the 24 harness self-tests; nightly canonical 05:00 UTC; full campaign
+> weekly Mon 06:00 UTC + `workflow_dispatch`). The hermetic environment is bootstrapped by
+> `edge-case-lab/ci/bootstrap.sh` (TEST-NET IP, fixture certs via `gen_fixtures.sh`, `/etc/hosts`
+> routing, proxy build, origin fixture behind a ready-file health gate). The intentional-mutation
+> gate is deliberately **not** wired — product mutations never run in normal CI and are never
+> pushed; that stays a manual, worktree-only step (`EDGE-CASE-MUTATION-VALIDATION.md`). The PR smoke
+> job is advisory (fails red on a real regression) and can be promoted to a required check via
+> branch protection.
+
 ## Guiding principle
 **Every confirmed product finding must become a small, deterministic Go regression test.** The
 215-scenario campaign is a *discovery and coverage* instrument, not a merge gate. The gate is a

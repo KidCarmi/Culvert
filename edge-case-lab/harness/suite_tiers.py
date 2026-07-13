@@ -97,8 +97,14 @@ def main():
         rows, unexpected, dur = run_ids(reps, "nightly-canonical")
         sys.exit(1 if unexpected else 0)
     if tier == "full":
-        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "run_campaign.py"), "--per", "30"])
-        return
+        # Propagate the campaign's exit status so an infra / Python startup failure
+        # in run_campaign.py surfaces as a red CI job instead of a green one with a
+        # failed log. run_campaign is advisory (0 on normal completion even with
+        # findings), so only a genuine crash turns the tier red.
+        rc = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "run_campaign.py"), "--per", "30"]
+        ).returncode
+        sys.exit(rc)
     print("unknown tier", tier); sys.exit(2)
 
 
