@@ -634,18 +634,8 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 	// copyOut that a full resolve pays. A rule with no profile / a fail-close
 	// profile returns ok=false and never touches the cache — feature-off stays
 	// allocation-free here.
-	if sslAction == SSLInspect && match != nil && match.Rule != nil &&
-		(match.Rule.DecryptionProfileID != "" || match.Rule.DecryptionProfile != "") {
-		// ID-authoritative scope (rename-safe): resolve the fail-open scope by the
-		// profile's stable ULID first, fall back to the name for un-migrated rules.
-		scopeID, ok := "", false
-		if id := match.Rule.DecryptionProfileID; id != "" {
-			scopeID, ok = globalDecryptionProfiles.FailOpenScopeByID(id)
-		}
-		if !ok && match.Rule.DecryptionProfile != "" {
-			scopeID, ok = globalDecryptionProfiles.FailOpenScope(match.Rule.DecryptionProfile)
-		}
-		if ok {
+	if sslAction == SSLInspect && match != nil && match.Rule != nil {
+		if scopeID, ok := failOpenScopeForRule(match.Rule); ok {
 			if reason, hit := autoExclude.Contains(scopeID, host); hit {
 				sslAction = SSLBypass
 				recordAutoExcludeHit()
@@ -655,6 +645,23 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 		}
 	}
 	return sslAction, tlsSkipVerify
+}
+
+// failOpenScopeForRule resolves the autoexclude fail-open scope for a matched
+// rule's decryption profile — ID-first (rename-safe), name fallback for
+// un-migrated rules. Returns ok=false for a rule with no profile or a
+// fail-close profile (the cache is never touched — feature-off stays
+// allocation-free on this per-CONNECT path).
+func failOpenScopeForRule(rule *PolicyRule) (scope string, ok bool) {
+	if id := rule.DecryptionProfileID; id != "" {
+		if scope, ok = globalDecryptionProfiles.FailOpenScopeByID(id); ok {
+			return scope, true
+		}
+	}
+	if rule.DecryptionProfile != "" {
+		return globalDecryptionProfiles.FailOpenScope(rule.DecryptionProfile)
+	}
+	return "", false
 }
 
 // resolveStripALPN and the DecryptionProfile-aware resolve* family live in
