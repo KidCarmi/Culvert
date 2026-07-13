@@ -5252,7 +5252,11 @@ function editDecProf(name) {
   _editingDecProfId = p.id || null; // after reset (reset clears it) — prefer id addressing on save
   document.getElementById('dp-editing').value = p.name;
   document.getElementById('dp-name').value = p.name;
-  document.getElementById('dp-name').disabled = true; // name is the identity/reference
+  // Rename-safe (references-by-id): the profile is addressed by its stable ID on
+  // save, so the NAME is now editable on edit — renaming cascades to every
+  // referencing rule automatically. Only lock the name for a legacy profile with
+  // no ID (name is still its only handle there).
+  document.getElementById('dp-name').disabled = !_editingDecProfId;
   document.getElementById('dp-http2').value = p.inspectHttp2 === true ? 'true' : (p.inspectHttp2 === false ? 'false' : '');
   document.getElementById('dp-cert').value = p.certVerification || '';
   document.getElementById('dp-onunsup').value = p.onUnsupported || '';

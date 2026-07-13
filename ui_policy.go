@@ -627,12 +627,39 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 				http.Error(w, "profile not found", http.StatusNotFound)
 				return
 			}
+			// Rename (references-by-id): UpdateByID keeps the current name, so a
+			// name change must be applied explicitly via Rename (re-keys the store)
+			// and cascaded onto referencing rules. Rules link by the profile ID, so
+			// matching survives regardless; the cascade keeps the denormalized name
+			// honest for display/export/DP-sync.
+			newName := strings.TrimSpace(p.Name)
+			renamed := newName != "" && !strings.EqualFold(newName, before.Name)
+			if renamed {
+				if _, err := globalDecryptionProfiles.Rename(id, newName); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
 			if err := globalDecryptionProfiles.UpdateByID(id, p); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			globalDecryptionProfiles.Save()
-			auditEventDiffID(r, "decryption-profile.update", before.Name, id, "", nil, nil)
+			detail := ""
+			if renamed {
+				// Refresh referencing rules, then persist the policy store BEFORE
+				// versioning (durability: a restart before the next policy edit must
+				// not reload stale names — the cascade is a real policy mutation).
+				if n := policyStore.CascadeDecryptionProfileRename(id, before.Name, newName); n > 0 {
+					policyStore.Save()
+				}
+				detail = "renamed from " + sanitizeLog(before.Name)
+			}
+			auditName := before.Name
+			if renamed {
+				auditName = newName
+			}
+			auditEventDiffID(r, "decryption-profile.update", auditName, id, detail, nil, nil)
 			saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
 			jsonOK(w, map[string]any{"ok": true})
 			return
@@ -1147,6 +1174,22 @@ func stampRuleMetadataForWrite(rule *PolicyRule, before *PolicyRule, actor strin
 	}
 	rule.ModifiedAt = now
 	rule.ModifiedBy = actor
+	stampObjectRefIDs(rule)
+}
+
+// stampObjectRefIDs derives the authoritative, rename-safe object-link IDs from
+// the object NAMES the client submitted (references-by-id write path,
+// OBJECT-REFERENCES-BY-ID.md). Resolved SERVER-SIDE ONLY — any client-supplied
+// ID is discarded and re-derived, so a rule can never point at an object the
+// operator did not pick. An unknown or empty name leaves the ID empty
+// (fail-safe: the match path falls back to the name). S2 adds DestCategoryGroupID.
+func stampObjectRefIDs(rule *PolicyRule) {
+	rule.DecryptionProfileID = ""
+	if rule.DecryptionProfile != "" {
+		if p := globalDecryptionProfiles.GetByName(rule.DecryptionProfile); p != nil {
+			rule.DecryptionProfileID = p.ID
+		}
+	}
 }
 
 // policyVersionConflict enforces the OPTIONAL optimistic-concurrency

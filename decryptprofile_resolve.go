@@ -119,7 +119,18 @@ func mintlsHint(match *PolicyMatch) string {
 // resolveDecryptionProfile returns the profile named by the matched rule, or nil
 // when the rule names none OR the named profile does not exist (dangling ref).
 func resolveDecryptionProfile(match *PolicyMatch) *DecryptionProfile {
-	if match == nil || match.Rule == nil || match.Rule.DecryptionProfile == "" {
+	if match == nil || match.Rule == nil {
+		return nil
+	}
+	// ID-authoritative (rename-safe): prefer the stable ULID, fall back to the
+	// name for un-migrated rules. Byte-identical to the old name-only path when
+	// the ID is empty (OBJECT-REFERENCES-BY-ID.md).
+	if id := match.Rule.DecryptionProfileID; id != "" {
+		if p := globalDecryptionProfiles.GetByID(id); p != nil {
+			return p
+		}
+	}
+	if match.Rule.DecryptionProfile == "" {
 		return nil
 	}
 	return globalDecryptionProfiles.GetByName(match.Rule.DecryptionProfile)

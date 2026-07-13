@@ -242,6 +242,28 @@ func (s *Store) FailOpenScope(name string) (id string, ok bool) {
 	return id, true
 }
 
+// FailOpenScopeByID is FailOpenScope keyed by the profile's stable ULID
+// (references-by-id / rename-safe): the autoexclude scope identity tracks the
+// profile across a rename, and the rule's possibly-stale denormalized name is
+// not consulted. Same no-copy fast-path contract; O(profiles) which is a small
+// admin-defined set, and only on the SSL-inspect fail-open CONNECT path.
+func (s *Store) FailOpenScopeByID(id string) (scope string, ok bool) {
+	if id == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.profiles {
+		if p.ID == id {
+			if p.OnInspectError != "fail-open" {
+				return "", false
+			}
+			return p.ID, true
+		}
+	}
+	return "", false
+}
+
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
 func (s *Store) GetByName(name string) *Profile {
 	s.mu.RLock()
@@ -407,6 +429,53 @@ func (s *Store) UpdateByID(id string, p Profile) error {
 		return nil
 	}
 	return fmt.Errorf("profile id %q not found", id)
+}
+
+// Rename changes the display name of the profile with the given stable ID,
+// re-keying the name index (references-by-id: rules link by ID, so the rename is
+// safe — the caller cascades the denormalized name onto referencing rules).
+// Validates the new name is non-empty and not already taken by a DIFFERENT
+// profile. Returns the OLD name (for audit + the caller's cascade). A case-only
+// change updates the display name in place without a collision check.
+func (s *Store) Rename(id, newName string) (oldName string, err error) {
+	newName = strings.TrimSpace(newName)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	if newName == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var curKey string
+	var cur *Profile
+	for key, p := range s.profiles {
+		if p.ID == id {
+			curKey, cur = key, p
+			break
+		}
+	}
+	if cur == nil {
+		return "", fmt.Errorf("profile id %q not found", id)
+	}
+	oldName = cur.Name
+	newKey := strings.ToLower(newName)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if newKey == curKey {
+		// Same key (no change or case-only) — update the display name in place.
+		cur.Name = newName
+		cur.UpdatedAt = now
+		return oldName, nil
+	}
+	if _, taken := s.profiles[newKey]; taken {
+		return "", fmt.Errorf("a profile named %q already exists", newName)
+	}
+	np := *cur
+	np.Name = newName
+	np.UpdatedAt = now
+	delete(s.profiles, curKey)
+	s.profiles[newKey] = &np
+	return oldName, nil
 }
 
 // DeleteByID removes the profile with the given stable ID. Returns the removed

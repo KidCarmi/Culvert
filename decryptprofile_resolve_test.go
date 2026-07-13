@@ -123,10 +123,12 @@ func TestApplyProfileUpstreamTLSVersions(t *testing.T) {
 // TestRuleReferencesDecryptionProfile pins the Where-Used / delete-block wiring.
 func TestRuleReferencesDecryptionProfile(t *testing.T) {
 	r := &PolicyRule{DecryptionProfile: "Prod-H2"}
-	if got := ruleReferencesObject(r, "decryption-profile", "prod-h2"); got != "decryptionProfile" {
+	// objID "" here — name-only rule, name matching path (references-by-id adds the
+	// ID param; the ID-match branch is covered by TestObjectReferences_DecryptionProfileIDFirst).
+	if got := ruleReferencesObject(r, "decryption-profile", "prod-h2", ""); got != "decryptionProfile" {
 		t.Fatalf("case-insensitive ref = %q, want decryptionProfile", got)
 	}
-	if got := ruleReferencesObject(r, "decryption-profile", "other"); got != "" {
+	if got := ruleReferencesObject(r, "decryption-profile", "other", ""); got != "" {
 		t.Fatalf("non-matching ref = %q, want empty", got)
 	}
 	if !objectRefTypes["decryption-profile"] {
