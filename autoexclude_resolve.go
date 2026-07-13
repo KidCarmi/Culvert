@@ -250,6 +250,41 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	maybeFireAutoExcludeSurge(scopeName)
 }
 
+// feedReasonClientCertRescue is the structured feed ActionTaken tag for a
+// client-cert live-rescue (ADR-0009), so the TUNNEL_CLOSED entry is queryable in
+// the request/tunnel feed rather than only inferable from SSLAction=="bypass".
+const feedReasonClientCertRescue = "autoexclude_client_cert_rescue"
+
+// clientCertRescueDecision is the SOLE policy gate for the strip-path client-cert
+// live-rescue (ADR-0009). The GetClientCertificate callback only produces the
+// `originAsked` signal and never decides or bypasses; this function makes the
+// decision. It requires, in this order:
+//
+//   - failOpen: the matched rule resolved to a CONCRETE fail-open decryption
+//     profile (resolveFailOpen). A fail-close rule can never reach here — the
+//     caller attaches the detection callback only when failOpen — but we re-check
+//     defensively (invariant: fail-close never rescues/learns/consults).
+//   - originAsked: the origin sent a CertificateRequest (structural signal,
+//     version-independent — set in BOTH TLS 1.2 and TLS 1.3, unlike the handshake
+//     error string, which a real client dial never surfaces as "certificate
+//     required").
+//   - NOT a cert-verify failure: an untrusted/expired/hostname-mismatched origin
+//     cert must stay fail-closed (the poisoning/exfil vector). herr may be nil
+//     (TLS 1.3 handshake succeeded) — guard the string check on herr != nil so
+//     isOriginCertVerifyErr is never called with a nil error.
+//
+// Generic TLS alerts and every other failure are NOT client-cert signals: they
+// leave originAsked false, so they can never rescue here.
+func clientCertRescueDecision(failOpen, originAsked bool, herr error) bool {
+	if !failOpen || !originAsked {
+		return false
+	}
+	if herr != nil && isOriginCertVerifyErr(herr) {
+		return false
+	}
+	return true
+}
+
 // autoExcludeRescueCounter counts LIVE-RESCUE events: sessions transparently
 // bypassed on the FIRST client_cert_required origin signal (confirm-count-exempt),
 // BEFORE — and independently of — any persistent-cache promotion. This closes the

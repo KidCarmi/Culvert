@@ -1,8 +1,8 @@
 # ADR-0009: Detect the origin CertificateRequest to make client-cert fail-open functional
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-07-13 — ratified: repair, not deletion) — implemented
 - **Date:** 2026-07-13
-- **Deciders:** Engineering Advisor (proposed); project maintainer (to ratify — this changes runtime behavior on the SSL-inspect bypass path)
+- **Deciders:** Engineering Advisor (proposed); project maintainer (ratified the repair direction)
 
 ## Context
 
@@ -94,6 +94,44 @@ Fail-close rules are unchanged: the flag is consulted only when `resolveFailOpen
    client-cert origins is not wanted at all — in which case the fix is to *delete* the path rather
    than repair it. This ADR recommends repair (option in the Decision) but records deletion as the
    explicit conservative alternative.
+
+## Invariants (enforced by tests)
+
+Implemented on the strip path (`handleTunnelInspect`); the decision lives in
+`clientCertRescueDecision` and the signal in a fail-open-only `GetClientCertificate`
+callback. Each invariant is pinned by a test:
+
+1. **Signal-only callback.** `GetClientCertificate` records `originRequestedClientCert`
+   and returns an EMPTY `tls.Certificate` — it never provides/synthesizes a client
+   certificate and makes no policy decision.
+2. **Decision is the sole gate.** Rescue requires `clientCertRescueDecision(failOpen,
+   originAsked, herr)` == true: a concrete fail-open profile **and** the origin-asked
+   signal **and** NOT a cert-verify failure. *(TestClientCertRescue_DecisionRealHandshakes)*
+3. **Both TLS versions.** Detected in TLS 1.2 (handshake fails) and TLS 1.3
+   (handshake returns nil) alike — positive + negative cells for each.
+   *(TestClientCertRescue_DecisionRealHandshakes, TestMITM_ClientCertOrigin_RescuesAndBypasses/{TLS1.2,TLS1.3})*
+4. **Strip path only.** The callback + rescue live in `handleTunnelInspect`; the
+   native-ALPN path is unchanged (it has already sent the 200).
+5. **Fail-close never participates.** The callback is attached ONLY when
+   `resolveFailOpen(match)`; a fail-close rule never learns, rescues, or consults the
+   mechanism, and the decision re-checks `failOpen` defensively.
+   *(TestClientCertRescue_DecisionRealHandshakes/negative_fail_close_never_rescues)*
+6. **Cert-verify stays fail-closed.** An untrusted/expired/mismatched origin cert
+   aborts before the callback and is excluded by `isOriginCertVerifyErr` (nil-guarded).
+   *(…/negative_cert_verify_fails_closed)*
+7. **Generic alerts never rescue.** They leave `originAsked` false, so they can never
+   reach the rescue branch (they fall through to the existing learn/502 path).
+8. **Feature-off is byte-identical.** No fail-open profile ⇒ no callback attached ⇒
+   inspection behaves exactly as before.
+9. **SSRF-guarded re-dial.** The rescue bypasses via `handleTunnelBypass`, which
+   re-runs `isPrivateHost` + the `ssrfControl` connect gate.
+   *(TestClientCertRescue_SSRFRedialRejected)*
+10. **Observable independent of promotion.** Every rescue emits a
+    `decryption.autoexclude.rescue` audit event, the `decryption_autoexclude_rescue`
+    alert, the `culvert_decrypt_autoexclude_rescue_total` metric, AND a structured
+    `autoexclude_client_cert_rescue` ActionTaken on the TUNNEL_CLOSED feed entry —
+    plus it LEARNS (confirm-count) for the next session.
+    *(TestMITM_ClientCertOrigin_RescuesAndBypasses, TestClientCertRescue_FeedReasonPlumbing)*
 
 ## Related
 

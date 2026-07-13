@@ -1084,7 +1084,15 @@ func recordTunnelBytes(bytesSent, bytesRecv int64) {
 // ruleID is the matched rule's stable ULID (rename-safe decision attribution,
 // §1) — empty when no policy rule is attributed (e.g. raw SOCKS5).
 func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
-	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
+	persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, "")
+}
+
+// persistTunnelCloseReason is persistTunnelClose with a structured actionTaken
+// reason (surfaced in the feed entry's ActionTaken field) — e.g. an adaptive
+// decryption client-cert live-rescue (ADR-0009), so the bypass is queryable in
+// the request/tunnel feed and not just inferable from SSLAction.
+func persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
+	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, actionTaken, identity,
 		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID})
 }
 
@@ -1101,6 +1109,13 @@ func recordTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, b
 // LogTraffic=false suppresses the entry but not the byte accounting). A nil
 // match (no rule matched, default-allow) always logs.
 func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelCloseGatedReason(match, id, method, host, bytesSent, bytesRecv, start, sslAction, "")
+}
+
+// recordTunnelCloseGatedReason is recordTunnelCloseGated with a structured
+// actionTaken reason for the feed entry (ADR-0009 client-cert rescue). Byte
+// accounting is unconditional; the reason rides only the (gated) feed entry.
+func recordTunnelCloseGatedReason(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
 	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
@@ -1110,7 +1125,7 @@ func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host s
 		ruleName = match.Rule.Name
 		ruleID = match.Rule.ID
 	}
-	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction)
+	persistTunnelCloseReason(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,

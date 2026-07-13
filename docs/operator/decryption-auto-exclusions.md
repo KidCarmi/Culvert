@@ -46,7 +46,7 @@ incompatibility and never triggers a bypass.
 
 | Inspect failure | Learned? | Live-rescues the triggering session? |
 |---|---|---|
-| Origin requires a client certificate (`certificate_required` alert) | ⚠️ not today — see note | ⚠️ not today — see note |
+| Origin requires a client certificate (detected structurally via its `CertificateRequest`) | ✅ | ✅ (strip path only — the one reason allowed to rescue) |
 | TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
 | Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
 | Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
@@ -57,19 +57,19 @@ The classifier **defaults to not learning** — only a positive match on a narro
 signal populates the cache, so a misclassification can only ever keep inspecting
 (fail closed), never wrongly bypass.
 
-> **Known limitation — client-certificate origins do not auto-heal yet.** A Go
-> TLS *client* dialing an origin that requires a client certificate does not
-> surface the `certificate_required` signal on the handshake the proxy classifies:
-> on **TLS 1.3** the client handshake completes (returns success) before the origin
-> rejects the missing cert, and on **TLS 1.2** the origin's response arrives as a
-> generic `handshake_failure` that we deliberately never learn. So a
-> client-certificate origin under a fail-open rule is **not** live-rescued and is
-> **not** learned via this path today — the session fails (a `502`, or, on TLS 1.3,
-> a tunnel that breaks shortly after connect). The remedy today is the **manual SSL
-> Bypass list** for such origins. A fix that detects the origin's
-> `CertificateRequest` directly (independent of TLS version) is proposed in
-> **ADR-0009**; the `unsupported-params` and `client-pinned` learn paths are
-> unaffected and work as described.
+> **How client-certificate origins are detected (ADR-0009).** A Go TLS *client*
+> dialing a cert-requiring origin never surfaces `certificate_required` on the
+> handshake — on **TLS 1.3** the handshake returns success before the origin rejects
+> the missing cert, and on **TLS 1.2** it arrives as a generic `handshake_failure`.
+> So Culvert does **not** rely on the handshake error string here: it detects the
+> origin's `CertificateRequest` **structurally** (via a signal-only
+> `GetClientCertificate` callback, attached for fail-open rules only). This works in
+> **both** TLS 1.2 and 1.3, before the client `200` is sent, so the strip-inspect
+> path live-rescues the session to a bypass tunnel — where the real client (which
+> has a client certificate) completes its own mTLS straight to the origin. The
+> callback is a signal producer only; it never provides a client certificate and
+> makes no policy decision. Cert-verify failures (untrusted/expired/mismatched
+> origin certs) stay fail-closed, and fail-close rules never participate.
 
 > **Residual downgrade risk (live rescue).** Even `certificate_required` is an
 > origin-emitted alert, so an attacker-controlled origin *under a fail-open rule*
