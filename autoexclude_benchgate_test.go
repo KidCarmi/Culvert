@@ -34,6 +34,12 @@ import (
 //     (miss 5, hit 9 allocs/op) so runtime noise never flakes the gate while an
 //     O(n) or per-request-alloc regression fails immediately.
 func TestBenchGate_AutoExcludeResolveAllocs(t *testing.T) {
+	// Silence the logger: the fail-open HIT path emits SSL_AUTOEXCLUDE_BYPASS every
+	// iteration. Without this the gate does real stderr I/O and dumps thousands of
+	// log lines (CI-log/timeout noise), matching BenchmarkResolveSSLAction_FailOpenHit.
+	// The sanitizeLog string allocations still occur before the discarded write, so
+	// the measured allocs/op are unchanged — only the I/O flood is removed.
+	defer benchSilenceLogger()()
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
 	swapProfiles(t)
 
