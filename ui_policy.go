@@ -1326,6 +1326,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
+		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1367,6 +1368,7 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
+		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1422,6 +1424,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
 	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
+		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1444,6 +1447,7 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
+		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
@@ -1555,6 +1559,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
+		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
@@ -1668,6 +1673,7 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
+		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
 		return
 	}

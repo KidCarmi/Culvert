@@ -297,6 +297,61 @@ func TestDraft_Diff(t *testing.T) {
 	}
 }
 
+// TestDraft_NoOpEditAutoDiscards: a no-op edit (re-save identical content) must
+// NOT leave a zero-diff "active" draft — reconcile auto-discards it, so
+// commit-mode can still be disarmed and reads stay on running.
+func TestDraft_NoOpEditAutoDiscards(t *testing.T) {
+	draftTestSetup(t)
+	seed := policyStore.Add(PolicyRule{Name: "noop", Action: ActionAllow})
+	setRequireCommit(true)
+
+	// Re-save the rule with identical content by id (a real UI save sends the
+	// full rule, incl. enabled — matching the seeded rule's Enabled=true).
+	w := httptest.NewRecorder()
+	apiPolicyUpdateByID(w, jsonReq("PUT", "/api/policy?id="+seed.ID,
+		map[string]any{"name": "noop", "action": "Allow", "enabled": true}), seed.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("no-op update = %d (%s)", w.Code, w.Body.String())
+	}
+	if policyDraft.active() {
+		t.Error("a no-op edit left an active zero-diff draft")
+	}
+}
+
+// TestDraft_FailedEditDoesNotStickDraft: a failed mutation (delete of an absent
+// rule) that opened the draft must reconcile it away, not leave it active.
+func TestDraft_FailedEditDoesNotStickDraft(t *testing.T) {
+	draftTestSetup(t)
+	policyStore.Add(PolicyRule{Name: "present", Action: ActionAllow})
+	setRequireCommit(true)
+
+	w := httptest.NewRecorder()
+	apiPolicyDelete(w, jsonReq("DELETE", "/api/policy?priority=99999", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("delete of absent rule = %d, want 404", w.Code)
+	}
+	if policyDraft.active() {
+		t.Error("a failed edit left an active draft")
+	}
+}
+
+// TestDraft_RealEditSurvivesReconcile: a genuine staged change is NOT discarded
+// by reconcile (its diff is non-zero).
+func TestDraft_RealEditSurvivesReconcile(t *testing.T) {
+	draftTestSetup(t)
+	seed := policyStore.Add(PolicyRule{Name: "real", Action: ActionAllow})
+	setRequireCommit(true)
+
+	w := httptest.NewRecorder()
+	apiPolicyUpdateByID(w, jsonReq("PUT", "/api/policy?id="+seed.ID, map[string]any{"name": "real", "action": "Drop"}), seed.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("real update = %d (%s)", w.Code, w.Body.String())
+	}
+	if !policyDraft.active() {
+		t.Error("a real staged edit was discarded by reconcile")
+	}
+}
+
 // TestDraft_GetState surfaces the mode + pending count.
 func TestDraft_GetState(t *testing.T) {
 	draftTestSetup(t)

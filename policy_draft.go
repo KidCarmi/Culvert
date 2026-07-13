@@ -14,6 +14,7 @@ package main
 // policyStore directly and are untouched by this file.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -136,10 +137,21 @@ func (c *policyDraftCoordinator) candidateVersion() (int64, string) {
 // does not fail the API mutation (the in-memory draft is still authoritative
 // for this process).
 func (c *policyDraftCoordinator) persist() {
+	// Capture path, state, AND the candidate rules under the SAME lock. Reading
+	// c.cand.List() after releasing c.mu races a concurrent clear() (commit /
+	// revert by another admin): clear could empty the candidate and delete the
+	// file between the unlock and the read, so we'd re-create policy_draft.json
+	// with state.Active=true and zero rules — a corrupt draft that, on restart,
+	// renders an empty rulebase and (baseGeneration permitting) lets a commit
+	// wipe running. Snapshotting rules under the lock closes that window.
 	c.mu.Lock()
 	path := c.path
 	active := c.state.Active
 	st := c.state
+	var rules []PolicyRule
+	if active {
+		rules = c.cand.List()
+	}
 	c.mu.Unlock()
 	if path == "" {
 		return
@@ -151,7 +163,7 @@ func (c *policyDraftCoordinator) persist() {
 	p := struct {
 		State draftState   `json:"state"`
 		Rules []PolicyRule `json:"rules"`
-	}{State: st, Rules: c.cand.List()}
+	}{State: st, Rules: rules}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		logger.Printf("PolicyDraft: marshal error: %v", err)
@@ -162,16 +174,69 @@ func (c *policyDraftCoordinator) persist() {
 	}
 }
 
+// clearLocked resets the candidate + state; caller holds c.mu. Returns the
+// persistence path so the caller can remove the file after releasing the lock.
+func (c *policyDraftCoordinator) clearLocked() string {
+	c.cand.ReplaceAll(nil)
+	c.state = draftState{}
+	return c.path
+}
+
 // clear discards the candidate and marks the draft inactive.
 func (c *policyDraftCoordinator) clear() {
 	c.mu.Lock()
-	c.cand.ReplaceAll(nil)
-	c.state = draftState{}
-	path := c.path
+	path := c.clearLocked()
 	c.mu.Unlock()
 	if path != "" {
 		_ = os.Remove(path)
 	}
+}
+
+// reconcile auto-discards the draft when its candidate has become identical to
+// running — i.e. the last edit was a NO-OP (re-save with no change, drag-in-place,
+// bulk-delete of absent priorities) or FAILED (TOCTOU mutation returned false
+// after the draft was opened). Without this, such an edit would leave a
+// zero-diff "active" draft that blocks commit-mode disarm and makes reads render
+// the (identical) candidate — undermining the byte-identical-when-nothing-changed
+// promise. A draft carrying REAL prior staged changes is never cleared (its diff
+// is non-zero). Returns true if it cleared. No-op (returns false) when no draft
+// is open, so callers can invoke it unconditionally, including in live-write mode.
+func (c *policyDraftCoordinator) reconcile() bool {
+	c.mu.Lock()
+	if !c.state.Active {
+		c.mu.Unlock()
+		return false
+	}
+	// Compare under c.mu (lock order c.mu → PolicyStore.mu, as in stageTarget).
+	if !sameRuleSet(policyStore.List(), c.cand.List()) {
+		c.mu.Unlock()
+		return false
+	}
+	path := c.clearLocked()
+	c.mu.Unlock()
+	if path != "" {
+		_ = os.Remove(path)
+	}
+	return true
+}
+
+// sameRuleSet reports whether two rule sets are content-identical (by stable ID,
+// order-independent; Priority is part of the content so a real reorder differs).
+func sameRuleSet(a, b []PolicyRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	am := make(map[string]PolicyRule, len(a))
+	for i := range a {
+		am[a[i].ID] = a[i]
+	}
+	for i := range b {
+		av, ok := am[b[i].ID]
+		if !ok || !sameRuleContent(av, b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // baseGenerationStale reports whether running advanced past the generation the
@@ -228,8 +293,14 @@ func (c *policyDraftCoordinator) diffVsRunning() policyDraftDiff {
 	return d
 }
 
-// sameRuleContent compares two rules ignoring live-only fields (hit counters,
-// computed display strings) that never represent an operator edit.
+// sameRuleContent compares two rules by DEFINITION, ignoring fields that are not
+// an operator edit to the rule's meaning: live counters, computed display
+// strings, precomputed hot-path caches, and the provenance stamps
+// (CreatedAt/ModifiedAt/ModifiedBy). The stamps matter especially here —
+// stampRuleMetadataForWrite restamps ModifiedAt/By on EVERY save, so without
+// ignoring them a re-save with no real change would read as "modified" (and a
+// no-op would never reconcile away). Comment is admin-authored content and IS
+// compared.
 func sameRuleContent(a, b PolicyRule) bool {
 	a.HitCount, b.HitCount = 0, 0
 	a.lastHitUnix, b.lastHitUnix = 0, 0
@@ -238,9 +309,13 @@ func sameRuleContent(a, b PolicyRule) bool {
 	a.normFQDN, b.normFQDN = "", ""
 	a.srcIPNet, b.srcIPNet = nil, nil
 	a.matchedConds, b.matchedConds = "", ""
+	// Provenance stamps are a denormalized cache of audit truth, not definition.
+	a.CreatedAt, b.CreatedAt = "", ""
+	a.ModifiedAt, b.ModifiedAt = "", ""
+	a.ModifiedBy, b.ModifiedBy = "", ""
 	ba, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
-	return string(ba) == string(bb)
+	return bytes.Equal(ba, bb)
 }
 
 // ── Effective-read + write helpers used by the policy handlers ─────────────
@@ -282,6 +357,11 @@ func effectivePolicyVersion() (int64, string) {
 // config would be misleading no-ops.
 func afterPolicyWrite(r *http.Request, action string) {
 	if policyDraft.active() {
+		// A no-op edit (candidate == running) auto-discards the draft rather
+		// than leaving a zero-diff pending draft; otherwise persist the change.
+		if policyDraft.reconcile() {
+			return
+		}
 		policyDraft.persist()
 		return
 	}
@@ -336,8 +416,9 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 		}
 		setRequireCommit(body.RequireCommit)
 		adminSettingsSave()
-		auditEvent(r, "policy.draft.mode", boolToOnOff(body.RequireCommit), "")
-		logger.Printf("UI: policy commit-mode set to %v", body.RequireCommit)
+		mode := boolToOnOff(body.RequireCommit) // constant "on"/"off" — breaks the taint flow (CodeQL log-injection)
+		auditEvent(r, "policy.draft.mode", mode, "")
+		logger.Printf("UI: policy commit-mode set to %s", mode)
 		jsonOK(w, map[string]any{"requireCommit": body.RequireCommit})
 
 	default:
