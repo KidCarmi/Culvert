@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -229,6 +230,53 @@ func TestRecordAutoExclude_PromotesAndAudits(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no scoped decryption.autoexclude.learn audit entry")
+	}
+}
+
+// TestRecordAutoExcludeRescue_EmitsObservability pins F1: the confirm-count-exempt
+// live rescue emits the full observability triple (metric counter + audit entry +
+// alert) on the rescue ACT — not just a log line, and independent of any
+// persistent-cache promotion. Asserts audit CONTENT (unique host discriminator +
+// baseline TS), never len(auditGet()) (audit-ring-saturation pitfall).
+func TestRecordAutoExcludeRescue_EmitsObservability(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 2})
+	swapProfiles(t)
+	fo, _ := bindFailOpenProfile(t, "fo", "fail-open")
+
+	before := atomic.LoadInt64(&autoExcludeRescueCounter)
+	baseline := time.Now().UnixMilli()
+	id := ProxyIdentity{ClientIP: "198.51.100.42", Identity: "u1"}
+
+	// A SINGLE rescue: no promotion happens (confirm-count is 2, one client), so
+	// this is exactly the previously-invisible case.
+	recordAutoExcludeRescue(fo, "rescue-obs.example", autoExReasonClientCert, id)
+
+	if got := atomic.LoadInt64(&autoExcludeRescueCounter); got != before+1 {
+		t.Fatalf("rescue counter = %d, want %d (metric did not increment)", got, before+1)
+	}
+	// The rescue must NOT have created a persistent exclusion (it is confirm-count-
+	// exempt for the live session only; the cache still requires the confirm-count).
+	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
+	if _, ok := autoExclude.Contains(scope, "rescue-obs.example"); ok {
+		t.Fatal("live rescue must not itself promote a persistent exclusion")
+	}
+	found := false
+	for _, e := range auditGet() {
+		if e.TS >= baseline && e.Action == "decryption.autoexclude.rescue" &&
+			strings.Contains(e.Object, "rescue-obs.example") && strings.Contains(e.Detail, "scope=fo") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no decryption.autoexclude.rescue audit entry with the expected scope/host content")
+	}
+
+	// The counter must surface on /metrics.
+	rw := httptest.NewRecorder()
+	handleMetrics(rw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(rw.Body.String(), "culvert_decrypt_autoexclude_rescue_total") {
+		t.Fatal("/metrics missing culvert_decrypt_autoexclude_rescue_total")
 	}
 }
 
