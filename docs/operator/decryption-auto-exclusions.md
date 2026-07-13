@@ -46,7 +46,7 @@ incompatibility and never triggers a bypass.
 
 | Inspect failure | Learned? | Live-rescues the triggering session? |
 |---|---|---|
-| Origin requires a client certificate (`certificate_required` alert) | ✅ | ✅ (strip path only — the one reason allowed to rescue) |
+| Origin requires a client certificate (`certificate_required` alert) | ⚠️ not today — see note | ⚠️ not today — see note |
 | TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
 | Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
 | Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
@@ -56,6 +56,20 @@ incompatibility and never triggers a bypass.
 The classifier **defaults to not learning** — only a positive match on a narrow
 signal populates the cache, so a misclassification can only ever keep inspecting
 (fail closed), never wrongly bypass.
+
+> **Known limitation — client-certificate origins do not auto-heal yet.** A Go
+> TLS *client* dialing an origin that requires a client certificate does not
+> surface the `certificate_required` signal on the handshake the proxy classifies:
+> on **TLS 1.3** the client handshake completes (returns success) before the origin
+> rejects the missing cert, and on **TLS 1.2** the origin's response arrives as a
+> generic `handshake_failure` that we deliberately never learn. So a
+> client-certificate origin under a fail-open rule is **not** live-rescued and is
+> **not** learned via this path today — the session fails (a `502`, or, on TLS 1.3,
+> a tunnel that breaks shortly after connect). The remedy today is the **manual SSL
+> Bypass list** for such origins. A fix that detects the origin's
+> `CertificateRequest` directly (independent of TLS version) is proposed in
+> **ADR-0009**; the `unsupported-params` and `client-pinned` learn paths are
+> unaffected and work as described.
 
 > **Residual downgrade risk (live rescue).** Even `certificate_required` is an
 > origin-emitted alert, so an attacker-controlled origin *under a fail-open rule*
