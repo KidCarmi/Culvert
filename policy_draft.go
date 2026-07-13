@@ -1,0 +1,436 @@
+package main
+
+// policy_draft.go — Candidate/commit (draft/staging) for the Stage-2 policy
+// rulebase (P3 policy-draft / gap G2). Authority: docs/design/POLICY-DRAFT-DESIGN.md.
+//
+// Opt-in: the persisted RequireCommit setting (default false) gates the whole
+// feature. When OFF, policyWriteStore()==policyStore and every policy write
+// path is byte-identical to the pre-feature live-write behavior — the
+// coordinator below is never consulted. When ON, rulebase writes stage into a
+// single shared candidate (a second *PolicyStore, persisted to policy_draft.json
+// so a draft survives a restart) and an explicit commit activates them.
+//
+// Enforcement (policyStore.Evaluate) and every proxy hot-path read ALWAYS use
+// policyStore directly and are untouched by this file.
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
+)
+
+// ── Opt-in flag ────────────────────────────────────────────────────────────
+
+var requireCommitFlag atomicBoolShim
+
+func requireCommitEnabled() bool { return requireCommitFlag.Load() }
+func setRequireCommit(v bool)    { requireCommitFlag.Store(v) }
+
+// atomicBoolShim is a tiny mutex-guarded bool (avoids importing sync/atomic just
+// for one flag and keeps the zero value usable). Read-heavy, write-rare.
+type atomicBoolShim struct {
+	mu sync.RWMutex
+	v  bool
+}
+
+func (a *atomicBoolShim) Load() bool   { a.mu.RLock(); defer a.mu.RUnlock(); return a.v }
+func (a *atomicBoolShim) Store(v bool) { a.mu.Lock(); a.v = v; a.mu.Unlock() }
+
+// ── Coordinator ────────────────────────────────────────────────────────────
+
+// draftState is the persisted metadata for the single shared candidate.
+type draftState struct {
+	Active         bool   `json:"active"`         // a draft diverging from running exists
+	Actor          string `json:"actor"`          // admin who opened the current draft
+	StartedAt      string `json:"startedAt"`      // RFC3339 UTC
+	BaseGeneration int64  `json:"baseGeneration"` // policyStore generation the draft forked from
+}
+
+// policyDraftCoordinator owns the candidate rulebase and its lifecycle.
+type policyDraftCoordinator struct {
+	mu    sync.Mutex
+	cand  *PolicyStore // candidate rules; in-memory (path=""), persisted by this coordinator
+	state draftState
+	path  string // policy_draft.json ("" ⇒ in-memory, no persistence)
+}
+
+var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
+
+// initPolicyDraft wires the coordinator's persistence path (sibling of the
+// policy file) and reloads any draft left pending by a prior run. A "" policy
+// path (in-memory mode) leaves the draft in-memory too.
+func initPolicyDraft(policyPath string) {
+	policyDraft.mu.Lock()
+	defer policyDraft.mu.Unlock()
+	if policyPath == "" {
+		policyDraft.path = ""
+		return
+	}
+	policyDraft.path = filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+	data, err := os.ReadFile(policyDraft.path)
+	if err != nil {
+		return // no pending draft
+	}
+	var p struct {
+		State draftState   `json:"state"`
+		Rules []PolicyRule `json:"rules"`
+	}
+	if json.Unmarshal(data, &p) != nil || !p.State.Active {
+		return
+	}
+	policyDraft.cand.ReplaceAll(p.Rules)
+	policyDraft.state = p.State
+	logger.Printf("PolicyDraft: reloaded pending draft (%d rules) opened by %s", len(p.Rules), sanitizeLog(p.State.Actor))
+}
+
+// active reports whether a dirty draft exists.
+func (c *policyDraftCoordinator) active() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Active
+}
+
+// snapshotState returns a copy of the draft metadata.
+func (c *policyDraftCoordinator) snapshotState() draftState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state
+}
+
+// stageTarget returns the candidate store for a policy WRITE, opening the draft
+// (seeding it from running) on the first write of a new draft. Only called when
+// RequireCommit is on.
+func (c *policyDraftCoordinator) stageTarget(actor string) *PolicyStore {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.state.Active {
+		// Fork the candidate from the current running rulebase.
+		baseGen, _ := policyStore.policyVersion()
+		c.cand.ReplaceAll(policyStore.List())
+		c.state = draftState{
+			Active:         true,
+			Actor:          actor,
+			StartedAt:      time.Now().UTC().Format(time.RFC3339),
+			BaseGeneration: baseGen,
+		}
+	}
+	return c.cand
+}
+
+// candidateList / candidateVersion expose the candidate for the effective-read
+// helpers (list rendering + optimistic concurrency while drafting).
+func (c *policyDraftCoordinator) candidateList() []PolicyRule { return c.cand.List() }
+func (c *policyDraftCoordinator) candidateVersion() (int64, string) {
+	return c.cand.policyVersion()
+}
+
+// persist writes the candidate + state to disk (or clears the file when the
+// draft is no longer active). Best-effort; a persistence failure is logged but
+// does not fail the API mutation (the in-memory draft is still authoritative
+// for this process).
+func (c *policyDraftCoordinator) persist() {
+	c.mu.Lock()
+	path := c.path
+	active := c.state.Active
+	st := c.state
+	c.mu.Unlock()
+	if path == "" {
+		return
+	}
+	if !active {
+		_ = os.Remove(path)
+		return
+	}
+	p := struct {
+		State draftState   `json:"state"`
+		Rules []PolicyRule `json:"rules"`
+	}{State: st, Rules: c.cand.List()}
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		logger.Printf("PolicyDraft: marshal error: %v", err)
+		return
+	}
+	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
+		logger.Printf("PolicyDraft: write error: %v", err)
+	}
+}
+
+// clear discards the candidate and marks the draft inactive.
+func (c *policyDraftCoordinator) clear() {
+	c.mu.Lock()
+	c.cand.ReplaceAll(nil)
+	c.state = draftState{}
+	path := c.path
+	c.mu.Unlock()
+	if path != "" {
+		_ = os.Remove(path)
+	}
+}
+
+// baseGenerationStale reports whether running advanced past the generation the
+// draft forked from (a direct import/rollback bypassed the draft). Commit fails
+// closed in that case rather than clobber the out-of-band change.
+func (c *policyDraftCoordinator) baseGenerationStale() bool {
+	c.mu.Lock()
+	base := c.state.BaseGeneration
+	c.mu.Unlock()
+	cur, _ := policyStore.policyVersion()
+	return cur != base
+}
+
+// policyDraftDiff summarizes the candidate against running (by stable ID).
+type policyDraftDiff struct {
+	Added    []string `json:"added"`    // rule names present in candidate, not running
+	Removed  []string `json:"removed"`  // present in running, not candidate
+	Modified []string `json:"modified"` // same ID, changed content
+}
+
+func (d policyDraftDiff) total() int { return len(d.Added) + len(d.Removed) + len(d.Modified) }
+
+// diffVsRunning computes the candidate→running change set. Keyed by rule ID
+// (backfilled on load, so always present); content equality via JSON so every
+// field participates without a hand-maintained comparator.
+func (c *policyDraftCoordinator) diffVsRunning() policyDraftDiff {
+	run := policyStore.List()
+	cand := c.candidateList()
+	runByID := make(map[string]PolicyRule, len(run))
+	for i := range run {
+		runByID[run[i].ID] = run[i]
+	}
+	candByID := make(map[string]PolicyRule, len(cand))
+	for i := range cand {
+		candByID[cand[i].ID] = cand[i]
+	}
+	var d policyDraftDiff
+	for id := range candByID {
+		cr := candByID[id]
+		rr, ok := runByID[id]
+		if !ok {
+			d.Added = append(d.Added, cr.Name)
+			continue
+		}
+		if !sameRuleContent(rr, cr) {
+			d.Modified = append(d.Modified, cr.Name)
+		}
+	}
+	for id := range runByID {
+		if _, ok := candByID[id]; !ok {
+			d.Removed = append(d.Removed, runByID[id].Name)
+		}
+	}
+	return d
+}
+
+// sameRuleContent compares two rules ignoring live-only fields (hit counters,
+// computed display strings) that never represent an operator edit.
+func sameRuleContent(a, b PolicyRule) bool {
+	a.HitCount, b.HitCount = 0, 0
+	a.lastHitUnix, b.lastHitUnix = 0, 0
+	a.LastHit, b.LastHit = "", ""
+	// Precomputed unexported hot-path caches are derived, not content.
+	a.normFQDN, b.normFQDN = "", ""
+	a.srcIPNet, b.srcIPNet = nil, nil
+	a.matchedConds, b.matchedConds = "", ""
+	ba, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	return string(ba) == string(bb)
+}
+
+// ── Effective-read + write helpers used by the policy handlers ─────────────
+
+// policyWriteStore returns the store a policy WRITE handler mutates: the
+// candidate when commit-mode is engaged (opening the draft on first write),
+// else the running store (today's live-write path).
+func policyWriteStore(actor string) *PolicyStore {
+	if requireCommitEnabled() {
+		return policyDraft.stageTarget(actor)
+	}
+	return policyStore
+}
+
+// effectivePolicyList is the rulebase the admin is currently editing/viewing:
+// the candidate when a draft is open, else running. Used by write handlers for
+// validation and by the policy GET/reorder read paths. Does NOT open a draft.
+func effectivePolicyList() []PolicyRule {
+	if policyDraft.active() {
+		return policyDraft.candidateList()
+	}
+	return policyStore.List()
+}
+
+// effectivePolicyVersion is the generation clients echo via ?ifVersion=: the
+// candidate's while drafting (so two admins editing the shared draft collide),
+// else running's.
+func effectivePolicyVersion() (int64, string) {
+	if policyDraft.active() {
+		return policyDraft.candidateVersion()
+	}
+	return policyStore.policyVersion()
+}
+
+// afterPolicyWrite finalizes a successful policy mutation. Live-write mode
+// persists running and writes a per-edit config version (today's behavior).
+// Draft mode persists the candidate and SKIPS config-versioning — the version
+// is captured once at commit, so per-edit snapshots of the unchanged running
+// config would be misleading no-ops.
+func afterPolicyWrite(r *http.Request, action string) {
+	if policyDraft.active() {
+		policyDraft.persist()
+		return
+	}
+	policyStore.Save()
+	saveConfigVersion(sessionAdmin(r), action)
+}
+
+// ── HTTP handlers ──────────────────────────────────────────────────────────
+
+// apiPolicyDraft — GET the draft state + diff + mode; PUT sets RequireCommit.
+//
+//	GET  /api/policy/draft            → {requireCommit, active, actor, startedAt, diff, version}
+//	PUT  /api/policy/draft  {require_commit:bool}  (admin) — arm/disarm commit mode
+func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		st := policyDraft.snapshotState()
+		resp := map[string]any{
+			"requireCommit": requireCommitEnabled(),
+			"active":        st.Active,
+			"actor":         st.Actor,
+			"startedAt":     st.StartedAt,
+		}
+		if st.Active {
+			d := policyDraft.diffVsRunning()
+			ver, _ := policyDraft.candidateVersion()
+			resp["diff"] = d
+			resp["pendingCount"] = d.total()
+			resp["version"] = ver
+		}
+		jsonOK(w, resp)
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			RequireCommit bool `json:"require_commit"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		// Disarming while a dirty draft is pending would strand staged changes
+		// the operator believed were in flight — force an explicit commit/revert.
+		if !body.RequireCommit && policyDraft.active() {
+			http.Error(w, "a draft with pending changes exists — commit or revert it before disabling commit mode", http.StatusConflict)
+			return
+		}
+		setRequireCommit(body.RequireCommit)
+		adminSettingsSave()
+		auditEvent(r, "policy.draft.mode", boolToOnOff(body.RequireCommit), "")
+		logger.Printf("UI: policy commit-mode set to %v", body.RequireCommit)
+		jsonOK(w, map[string]any{"requireCommit": body.RequireCommit})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// apiPolicyDraftCommit — POST /api/policy/draft/commit {comment} (operator).
+// Validates the candidate as a set, requires an audit comment, atomically
+// activates it, snapshots, and clears the draft.
+func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if !policyDraft.active() {
+		http.Error(w, "no draft to commit", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Comment string `json:"comment"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	comment := strings.TrimSpace(body.Comment)
+	if comment == "" {
+		http.Error(w, "a commit comment is required", http.StatusBadRequest)
+		return
+	}
+	// Fail closed if running changed out-of-band under the draft (import/rollback).
+	if policyDraft.baseGenerationStale() {
+		http.Error(w, "the running rulebase changed since this draft was opened (an import or rollback) — revert and re-stage to avoid clobbering it", http.StatusConflict)
+		return
+	}
+	// Validate the candidate as a set. Per-rule validity was enforced at stage
+	// time; re-run it defensively over the whole candidate before activation.
+	cand := policyDraft.candidateList()
+	for i := range cand {
+		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
+			http.Error(w, "candidate rule "+sanitizeLog(cand[i].Name)+" is invalid: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	diff := policyDraft.diffVsRunning()
+
+	// Activate: running := candidate, persist, clear the draft.
+	policyStore.ReplaceAll(cand)
+	policyStore.Save()
+	policyDraft.clear()
+
+	actor := sessionAdmin(r)
+	detail := commitDetail(diff, comment)
+	auditEvent(r, "policy.commit", actor, detail)
+	saveConfigVersion(actor, "policy.commit")
+	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
+	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
+}
+
+// apiPolicyDraftRevert — POST /api/policy/draft/revert (operator). Discards the
+// candidate; running is untouched.
+func apiPolicyDraftRevert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if !policyDraft.active() {
+		http.Error(w, "no draft to revert", http.StatusBadRequest)
+		return
+	}
+	diff := policyDraft.diffVsRunning()
+	policyDraft.clear()
+	auditEvent(r, "policy.draft.revert", sessionAdmin(r), commitDetail(diff, "discarded"))
+	logger.Printf("UI: policy draft reverted (%d changes discarded)", diff.total())
+	jsonOK(w, map[string]any{"ok": true, "discarded": diff.total()})
+}
+
+// commitDetail renders a compact audit detail for a draft transition.
+func commitDetail(d policyDraftDiff, comment string) string {
+	return fmt.Sprintf("+%d ~%d -%d — %s", len(d.Added), len(d.Modified), len(d.Removed),
+		strings.ReplaceAll(strings.ReplaceAll(comment, "\n", " "), "\r", " "))
+}
+
+func boolToOnOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}

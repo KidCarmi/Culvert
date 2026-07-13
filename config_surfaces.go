@@ -282,6 +282,9 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ContentScanBypassHosts", Apply: semNilSkipEmptyWipe}}},
 
 	// ── AdminSettings-only settings ──────────────────────────────────────
+	{ID: "require_commit", Kind: kindConfig, Owner: "policyDraft", AdminDurable: true,
+		Note:     "policy-draft opt-in governance mode; admin-durable only (governance posture, NOT rulebase content), NOT cluster-synced, NOT on the rollback surface — a rules rollback must not silently flip the commit mode",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "RequireCommit"}}},
 	{ID: "syslog_addr", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SyslogAddr"}}},
 	{ID: "syslog_format", Kind: kindConfig, Owner: "syslog", AdminDurable: true,

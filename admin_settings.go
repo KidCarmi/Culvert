@@ -23,6 +23,7 @@ import (
 type AdminSettings struct {
 	// Policy
 	DefaultAction string `json:"default_action,omitempty"` // "allow" or "deny"
+	RequireCommit bool   `json:"require_commit"`           // policy-draft opt-in: stage rulebase edits + require an explicit commit (default false ⇒ live-write)
 
 	// Security
 	IPFilterMode        string   `json:"ip_filter_mode,omitempty"`
@@ -157,6 +158,10 @@ func applyAdminSecurity(s *AdminSettings) {
 	if s.DefaultAction != "" {
 		setDefaultPolicyAction(s.DefaultAction)
 	}
+	// policy-draft opt-in. Plain bool (no sentinel): the default is false and
+	// there is no YAML seed to protect, so a pre-feature settings file (field
+	// absent ⇒ false) correctly lands on live-write mode.
+	setRequireCommit(s.RequireCommit)
 	if s.IPFilterMode != "" {
 		ipf.SetMode(s.IPFilterMode)
 		for _, ip := range s.IPFilterList {
@@ -350,6 +355,7 @@ func SaveAdminSettings() {
 
 	s := AdminSettings{
 		DefaultAction:          defaultPolicyAction(),
+		RequireCommit:          requireCommitEnabled(),
 		IPFilterMode:           ipf.Mode(),
 		IPFilterList:           ipf.List(),
 		RateLimitRPM:           rl.Limit(),

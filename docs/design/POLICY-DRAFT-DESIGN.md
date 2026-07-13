@@ -104,6 +104,13 @@ type draftState struct {
   Commit refuses if running has advanced past it via a path that bypassed the
   draft (defense-in-depth; with the draft as the sole write target while active,
   this should not happen, but a direct config-import/rollback could).
+- **Candidate generation (multi-admin on the shared draft).** Because the
+  candidate is itself a `*PolicyStore`, it carries its OWN generation counter
+  (`policyVersion()`), bumped by every staged edit. This is what the
+  optimistic-concurrency guard must read *while drafting* — the running store's
+  version does not move during staging, so guarding on it would let two admins
+  who loaded the same draft silently overwrite each other's staged edits before
+  commit (raised in design review, Codex P2). See §7.
 
 ## 5. Write routing
 
@@ -175,6 +182,16 @@ func policyWriteStore() *PolicyStore {
   it just arms the machinery.)
 - **Restart with a dirty draft:** `policy_draft.json` reloads into the candidate;
   `draftState` reloads (persisted alongside). The pending-changes bar reappears.
+- **Concurrent edits on the shared candidate (multi-admin):** the existing
+  `?ifVersion=` optimistic-concurrency precondition (`policyVersionConflict`)
+  reads the **effective** store's generation — the candidate's while a draft is
+  open, running's otherwise. `GET /api/policy` and `GET /api/policy/draft`
+  return that same effective version so a client sends back the version it
+  actually loaded. Two admins who load the shared draft at candidate-version 5,
+  one stages an edit (→ 6), the other's `ifVersion=5` write is rejected 409 —
+  exactly the running-store guarantee, now extended to the draft. (Closes the
+  design-review gap: staged edits don't bump running, so guarding on running
+  would miss shared-candidate collisions.)
 - **Direct import/rollback while drafting:** these write `policyStore` directly
   (they are whole-config operations). The `BaseGeneration` guard makes the next
   commit fail closed with a clear "running config changed under your draft —

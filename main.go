@@ -697,6 +697,10 @@ func initPolicy(s *startupState) {
 		policyStore.path = ""
 		logger.Printf("Policy: in-memory only (set -policy <file> for persistence)")
 	}
+	// policy-draft (G2): wire the candidate persistence path (sibling of the
+	// policy file) and reload any draft a prior run left pending. In-memory
+	// policy ⇒ in-memory draft.
+	initPolicyDraft(polPath)
 }
 
 // initURLCategories loads URL categories, category groups, SaaS feed, and the community BadgerDB feed.

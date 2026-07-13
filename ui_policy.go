@@ -1173,7 +1173,9 @@ func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "invalid ifVersion", http.StatusBadRequest)
 		return true
 	}
-	cur, _ := policyStore.policyVersion()
+	// Effective version: the candidate's while a draft is open (so two admins
+	// editing the shared draft collide), else running's (policy-draft G2).
+	cur, _ := effectivePolicyVersion()
 	if want == cur {
 		return false
 	}
@@ -1192,13 +1194,16 @@ func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rules := policyStore.List()
-		ver, updatedAt := policyStore.policyVersion()
+		// Effective view: the candidate while a draft is open (so the editor
+		// shows what will be committed), else running (policy-draft G2).
+		rules := effectivePolicyList()
+		ver, updatedAt := effectivePolicyVersion()
 		jsonOK(w, map[string]any{
 			"rules":     rules,
 			"count":     len(rules),
 			"version":   ver,
 			"updatedAt": updatedAt,
+			"draft":     policyDraft.active(),
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)
@@ -1216,9 +1221,25 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 func findRuleByPriorityCopy(priority int) *PolicyRule {
 	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy
 	// convention) — copy only the matched rule, not every iteration.
-	rules := policyStore.List()
+	// Effective list: candidate while drafting, else running (policy-draft G2) —
+	// the before-state for a diff/audit must come from what is being edited.
+	rules := effectivePolicyList()
 	for i := range rules {
 		if rules[i].Priority == priority {
+			r2 := rules[i]
+			return &r2
+		}
+	}
+	return nil
+}
+
+// effectiveRuleByID returns a copy of the rule with the given ID from the
+// effective rulebase (candidate while drafting, else running), or nil. The
+// before-state lookup for the id-addressed update/delete paths (policy-draft G2).
+func effectiveRuleByID(id string) *PolicyRule {
+	rules := effectivePolicyList()
+	for i := range rules {
+		if rules[i].ID == id {
 			r2 := rules[i]
 			return &r2
 		}
@@ -1248,20 +1269,19 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
+	if err := validatePolicyRule(rule, effectivePolicyList(), -1); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
-	added := policyStore.Add(rule)
-	policyStore.Save()
+	added := policyWriteStore(sessionAdmin(r)).Add(rule)
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
 	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
 	auditEventDiffID(r, "policy.add", added.Name, added.ID,
 		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
-	saveConfigVersion(sessionAdmin(r), "policy.add")
+	afterPolicyWrite(r, "policy.add")
 	jsonOK(w, added)
 }
 
@@ -1300,21 +1320,20 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if err := validatePolicyRule(rule, policyStore.List(), priority); err != nil {
+	if err := validatePolicyRule(rule, effectivePolicyList(), priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	if !policyStore.Update(priority, rule) {
+	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, ruleAuditID(beforeRule),
 		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
-	saveConfigVersion(sessionAdmin(r), "policy.update")
+	afterPolicyWrite(r, "policy.update")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1347,11 +1366,10 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if !policyStore.Delete(priority) {
+	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
 	name := fmt.Sprintf("priority=%d", priority)
 	if beforeRule != nil {
 		name = beforeRule.Name
@@ -1359,7 +1377,7 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
 	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
-	saveConfigVersion(sessionAdmin(r), "policy.remove")
+	afterPolicyWrite(r, "policy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1377,7 +1395,7 @@ func ruleAuditID(r *PolicyRule) string {
 // addressing path. Mirrors the priority path's validation, auth-rule guard, and
 // metadata stamping but resolves the target by stable ULID (§1 identity seam).
 func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
-	beforeRule := policyStore.findByIDCopy(id)
+	beforeRule := effectiveRuleByID(id)
 	if beforeRule == nil {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
@@ -1398,26 +1416,25 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	// Exclude the rule's CURRENT slot from duplicate checks (same as the
 	// priority path passes the URL priority).
-	if err := validatePolicyRule(rule, policyStore.List(), beforeRule.Priority); err != nil {
+	if err := validatePolicyRule(rule, effectivePolicyList(), beforeRule.Priority); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	if !policyStore.UpdateByID(id, rule) {
+	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, id,
 		fmt.Sprintf("priority=%d action=%s", rule.Priority, rule.Action), beforeRule, rule)
-	saveConfigVersion(sessionAdmin(r), "policy.update")
+	afterPolicyWrite(r, "policy.update")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
 // apiPolicyDeleteByID handles DELETE /api/policy?id=<ulid> — reorder-safe delete.
 func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
-	beforeRule := policyStore.findByIDCopy(id)
+	beforeRule := effectiveRuleByID(id)
 	if beforeRule == nil {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
@@ -1426,14 +1443,13 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if !policyStore.DeleteByID(id) {
+	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
 	auditEventDiffID(r, "policy.remove", beforeRule.Name, id, "", beforeRule, nil)
-	saveConfigVersion(sessionAdmin(r), "policy.remove")
+	afterPolicyWrite(r, "policy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1466,16 +1482,16 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	ws := policyWriteStore(sessionAdmin(r))
 	deleted := 0
 	for _, p := range body.Priorities {
-		if policyStore.Delete(p) {
+		if ws.Delete(p) {
 			deleted++
 		}
 	}
-	policyStore.Save()
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
 	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
-	saveConfigVersion(sessionAdmin(r), "policy.bulk_remove")
+	afterPolicyWrite(r, "policy.bulk_remove")
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 
@@ -1484,7 +1500,10 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 // excluded — they are managed via /api/authpolicy and keep their priorities
 // through every policy-side reorder.
 func listPolicyRules() []PolicyRule {
-	rules := policyStore.List()
+	// Effective list: candidate while a draft is open, else running. The
+	// reorder/move write handlers permute the effective store, so they must
+	// validate against it (policy-draft G2).
+	rules := effectivePolicyList()
 	out := make([]PolicyRule, 0, len(rules))
 	for i := range rules {
 		if ruleTypeOf(&rules[i]) == ruleTypeAccess {
@@ -1535,14 +1554,13 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !policyStore.PermutePriorities(body.Priorities) {
+	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
-	policyStore.Save()
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
-	saveConfigVersion(sessionAdmin(r), "policy.reorder")
+	afterPolicyWrite(r, "policy.reorder")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1649,16 +1667,15 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !policyStore.PermutePriorities(priorities) {
+	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
 		return
 	}
-	policyStore.Save()
 	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
 	safePos := sanitizeLog(body.Position)
 	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
 	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
-	saveConfigVersion(sessionAdmin(r), "policy.move")
+	afterPolicyWrite(r, "policy.move")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1934,6 +1951,10 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/policy/reorder", apiPolicyReorder)
 	mux.HandleFunc("/api/policy/move", apiPolicyMove)
 	mux.HandleFunc("/api/policy/test", apiPolicyTest)
+	// policy-draft (G2): candidate/commit for the rulebase.
+	mux.HandleFunc("/api/policy/draft", apiPolicyDraft)              // GET state+diff / PUT require-commit mode (admin)
+	mux.HandleFunc("/api/policy/draft/commit", apiPolicyDraftCommit) // POST commit the candidate (operator)
+	mux.HandleFunc("/api/policy/draft/revert", apiPolicyDraftRevert) // POST discard the candidate (operator)
 	mux.HandleFunc("/api/objects/references", apiObjectReferences)
 
 	// Stage-1 authentication-policy (auth/exempt) rules — admin-only writes.
