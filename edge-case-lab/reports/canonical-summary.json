@@ -1,0 +1,9 @@
+{
+  "raw_scenarios": 215,
+  "canonical_behaviors": 49,
+  "effective_unique_coverage": 49,
+  "parameter_only_variations": 166,
+  "invalid_or_misleading_scenarios": 0,
+  "quarantined_ids": [],
+  "behavioral_collapse_ratio": 4.39
+}

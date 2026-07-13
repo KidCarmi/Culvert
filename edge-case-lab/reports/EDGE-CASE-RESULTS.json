@@ -1,0 +1,3006 @@
+{
+  "campaign": "edge-case-validation",
+  "generated_at": "2026-07-13T07:19:48.877913+00:00",
+  "env": {
+    "culvert_commit": "14a1cf6616475829ac4111e932687793c4d99539",
+    "binary": "/home/user/Culvert/culvert",
+    "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+    "fixture_ip": "192.0.2.2",
+    "proxy": "http://127.0.0.1:18080",
+    "ui": "http://127.0.0.1:19090",
+    "captured_at": "2026-07-13T07:14:12.910679+00:00"
+  },
+  "counts": {
+    "PASS": 201,
+    "CONFIGURATION_CONTRACT_GAP": 5,
+    "TEST_INFRA_FAILURE": 1,
+    "EXPECTED_LIMITATION": 6,
+    "SECURITY_BYPASS": 2,
+    "total": 215,
+    "pass_rate": 0.935
+  },
+  "confirmations": {},
+  "results": [
+    {
+      "id": "SWG-0001",
+      "title": "Block destination FQDN (exact: news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 2034,
+      "manifest": "scenarios/SWG-0001.json"
+    },
+    {
+      "id": "SWG-0002",
+      "title": "Block destination FQDN (wildcard: *.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1202,
+      "manifest": "scenarios/SWG-0002.json"
+    },
+    {
+      "id": "SWG-0003",
+      "title": "Block destination FQDN (bare_implies_sub: corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1200,
+      "manifest": "scenarios/SWG-0003.json"
+    },
+    {
+      "id": "SWG-0004",
+      "title": "Block a URL category (social-media)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1234,
+      "manifest": "scenarios/SWG-0004.json"
+    },
+    {
+      "id": "SWG-0005",
+      "title": "Block a category GROUP (non-productive = social+news)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 4,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1515,
+      "manifest": "scenarios/SWG-0005.json"
+    },
+    {
+      "id": "SWG-0006",
+      "title": "Restrict intranet to the corporate subnet",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 970,
+      "manifest": "scenarios/SWG-0006.json"
+    },
+    {
+      "id": "SWG-0007",
+      "title": "Rule precedence: specific permit above broad block",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 956,
+      "manifest": "scenarios/SWG-0007.json"
+    },
+    {
+      "id": "SWG-0008",
+      "title": "Rule precedence: broad block above specific permit (shadowing)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 958,
+      "manifest": "scenarios/SWG-0008.json"
+    },
+    {
+      "id": "SWG-0009",
+      "title": "Zero-Trust default deny with an explicit allow-list",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1208,
+      "manifest": "scenarios/SWG-0009.json"
+    },
+    {
+      "id": "SWG-0010",
+      "title": "Selective TLS inspection (inspect app, bypass partner)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1073,
+      "manifest": "scenarios/SWG-0010.json"
+    },
+    {
+      "id": "SWG-0011",
+      "title": "Manual SSL-bypass list overrides an inspect rule",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1071,
+      "manifest": "scenarios/SWG-0011.json"
+    },
+    {
+      "id": "SWG-0012",
+      "title": "TLS inspection fails closed on an untrusted upstream certificate",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 695,
+      "manifest": "scenarios/SWG-0012.json"
+    },
+    {
+      "id": "SWG-0013",
+      "title": "Threat-intel/blocklist pre-empts an allow rule",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 989,
+      "manifest": "scenarios/SWG-0013.json"
+    },
+    {
+      "id": "SWG-0014",
+      "title": "Redirect blocked category to an acceptable-use notice",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 682,
+      "manifest": "scenarios/SWG-0014.json"
+    },
+    {
+      "id": "SWG-0015",
+      "title": "Silently drop connections to a destination",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 681,
+      "manifest": "scenarios/SWG-0015.json"
+    },
+    {
+      "id": "SWG-0016",
+      "title": "A disabled rule must not enforce",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 682,
+      "manifest": "scenarios/SWG-0016.json"
+    },
+    {
+      "id": "SWG-0017",
+      "title": "Wildcard scope boundary (no over-matching of sibling domains)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1212,
+      "manifest": "scenarios/SWG-0017.json"
+    },
+    {
+      "id": "SWG-0018",
+      "title": "Destination block applies regardless of HTTP method",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 939,
+      "manifest": "scenarios/SWG-0018.json"
+    },
+    {
+      "id": "SWG-0019",
+      "title": "Time-of-day policy (block social during a scheduled window)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 688,
+      "manifest": "scenarios/SWG-0019.json"
+    },
+    {
+      "id": "SWG-0020",
+      "title": "Time-of-day policy (rule inactive outside its window)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 682,
+      "manifest": "scenarios/SWG-0020.json"
+    },
+    {
+      "id": "SWG-0021",
+      "title": "Compound condition: block streaming for guest source only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1211,
+      "manifest": "scenarios/SWG-0021.json"
+    },
+    {
+      "id": "SWG-0022",
+      "title": "Allowed traffic preserves chunked and large-body responses",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 945,
+      "manifest": "scenarios/SWG-0022.json"
+    },
+    {
+      "id": "SWG-0023",
+      "title": "Require proxy authentication for unmatched/uncredentialed traffic",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": true,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 1154,
+      "manifest": "scenarios/SWG-0023.json"
+    },
+    {
+      "id": "SWG-0024",
+      "title": "Block 'social-media' destination by exact FQDN (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1216,
+      "manifest": "scenarios/SWG-0024.json"
+    },
+    {
+      "id": "SWG-0025",
+      "title": "Block 'social-media' destination by wildcard FQDN (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1209,
+      "manifest": "scenarios/SWG-0025.json"
+    },
+    {
+      "id": "SWG-0026",
+      "title": "Block 'social-media' destination by bare FQDN (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1210,
+      "manifest": "scenarios/SWG-0026.json"
+    },
+    {
+      "id": "SWG-0027",
+      "title": "Block 'news' destination by exact FQDN (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1207,
+      "manifest": "scenarios/SWG-0027.json"
+    },
+    {
+      "id": "SWG-0028",
+      "title": "Block 'news' destination by wildcard FQDN (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1231,
+      "manifest": "scenarios/SWG-0028.json"
+    },
+    {
+      "id": "SWG-0029",
+      "title": "Block 'news' destination by bare FQDN (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1216,
+      "manifest": "scenarios/SWG-0029.json"
+    },
+    {
+      "id": "SWG-0030",
+      "title": "Block 'streaming' destination by exact FQDN (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1219,
+      "manifest": "scenarios/SWG-0030.json"
+    },
+    {
+      "id": "SWG-0031",
+      "title": "Block 'streaming' destination by wildcard FQDN (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1207,
+      "manifest": "scenarios/SWG-0031.json"
+    },
+    {
+      "id": "SWG-0032",
+      "title": "Block 'streaming' destination by bare FQDN (corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1206,
+      "manifest": "scenarios/SWG-0032.json"
+    },
+    {
+      "id": "SWG-0033",
+      "title": "Block 'webmail' destination by exact FQDN (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1207,
+      "manifest": "scenarios/SWG-0033.json"
+    },
+    {
+      "id": "SWG-0034",
+      "title": "Block 'webmail' destination by wildcard FQDN (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1213,
+      "manifest": "scenarios/SWG-0034.json"
+    },
+    {
+      "id": "SWG-0035",
+      "title": "Block 'webmail' destination by bare FQDN (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1207,
+      "manifest": "scenarios/SWG-0035.json"
+    },
+    {
+      "id": "SWG-0036",
+      "title": "Default-deny egress with exact allow-list for app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1264,
+      "manifest": "scenarios/SWG-0036.json"
+    },
+    {
+      "id": "SWG-0037",
+      "title": "Default-deny egress with wildcard allow-list for app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1257,
+      "manifest": "scenarios/SWG-0037.json"
+    },
+    {
+      "id": "SWG-0038",
+      "title": "Default-deny egress with exact allow-list for intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1259,
+      "manifest": "scenarios/SWG-0038.json"
+    },
+    {
+      "id": "SWG-0039",
+      "title": "Default-deny egress with wildcard allow-list for intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1263,
+      "manifest": "scenarios/SWG-0039.json"
+    },
+    {
+      "id": "SWG-0040",
+      "title": "Default-deny egress with exact allow-list for files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1258,
+      "manifest": "scenarios/SWG-0040.json"
+    },
+    {
+      "id": "SWG-0041",
+      "title": "Default-deny egress with wildcard allow-list for files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1263,
+      "manifest": "scenarios/SWG-0041.json"
+    },
+    {
+      "id": "SWG-0042",
+      "title": "Block URL category 'social-media'",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1213,
+      "manifest": "scenarios/SWG-0042.json"
+    },
+    {
+      "id": "SWG-0043",
+      "title": "Block URL category 'news'",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1215,
+      "manifest": "scenarios/SWG-0043.json"
+    },
+    {
+      "id": "SWG-0044",
+      "title": "Block URL category 'streaming'",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1211,
+      "manifest": "scenarios/SWG-0044.json"
+    },
+    {
+      "id": "SWG-0045",
+      "title": "Block URL category 'webmail'",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1213,
+      "manifest": "scenarios/SWG-0045.json"
+    },
+    {
+      "id": "SWG-0046",
+      "title": "Block category group 'non-productive' (social-media+news)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1244,
+      "manifest": "scenarios/SWG-0046.json"
+    },
+    {
+      "id": "SWG-0047",
+      "title": "Block category group 'recreational' (streaming+social-media)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1251,
+      "manifest": "scenarios/SWG-0047.json"
+    },
+    {
+      "id": "SWG-0048",
+      "title": "Block category group 'personal-comms' (webmail+social-media)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1243,
+      "manifest": "scenarios/SWG-0048.json"
+    },
+    {
+      "id": "SWG-0049",
+      "title": "Corporate-subnet-only access to intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0049.json"
+    },
+    {
+      "id": "SWG-0050",
+      "title": "Block guest network from intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0050.json"
+    },
+    {
+      "id": "SWG-0051",
+      "title": "Corporate-subnet-only access to files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0051.json"
+    },
+    {
+      "id": "SWG-0052",
+      "title": "Block guest network from files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0052.json"
+    },
+    {
+      "id": "SWG-0053",
+      "title": "Corporate-subnet-only access to media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0053.json"
+    },
+    {
+      "id": "SWG-0054",
+      "title": "Block guest network from media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 940,
+      "manifest": "scenarios/SWG-0054.json"
+    },
+    {
+      "id": "SWG-0055",
+      "title": "Corporate-subnet-only access to app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0055.json"
+    },
+    {
+      "id": "SWG-0056",
+      "title": "Block guest network from app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 952,
+      "manifest": "scenarios/SWG-0056.json"
+    },
+    {
+      "id": "SWG-0057",
+      "title": "Rule precedence shape: permit-above-block",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 961,
+      "manifest": "scenarios/SWG-0057.json"
+    },
+    {
+      "id": "SWG-0058",
+      "title": "Rule precedence shape: block-above-permit",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 953,
+      "manifest": "scenarios/SWG-0058.json"
+    },
+    {
+      "id": "SWG-0059",
+      "title": "Rule precedence shape: three-tier",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 4,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1486,
+      "manifest": "scenarios/SWG-0059.json"
+    },
+    {
+      "id": "SWG-0060",
+      "title": "TLS inspection (decrypt) of app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 740,
+      "manifest": "scenarios/SWG-0060.json"
+    },
+    {
+      "id": "SWG-0061",
+      "title": "TLS bypass (no decrypt) of app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 793,
+      "manifest": "scenarios/SWG-0061.json"
+    },
+    {
+      "id": "SWG-0062",
+      "title": "TLS inspection (decrypt) of intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 741,
+      "manifest": "scenarios/SWG-0062.json"
+    },
+    {
+      "id": "SWG-0063",
+      "title": "TLS bypass (no decrypt) of intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 738,
+      "manifest": "scenarios/SWG-0063.json"
+    },
+    {
+      "id": "SWG-0064",
+      "title": "TLS inspection (decrypt) of files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 748,
+      "manifest": "scenarios/SWG-0064.json"
+    },
+    {
+      "id": "SWG-0065",
+      "title": "TLS bypass (no decrypt) of files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 745,
+      "manifest": "scenarios/SWG-0065.json"
+    },
+    {
+      "id": "SWG-0066",
+      "title": "TLS inspection (decrypt) of media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 747,
+      "manifest": "scenarios/SWG-0066.json"
+    },
+    {
+      "id": "SWG-0067",
+      "title": "TLS bypass (no decrypt) of media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 744,
+      "manifest": "scenarios/SWG-0067.json"
+    },
+    {
+      "id": "SWG-0068",
+      "title": "Decryption profile certVerification=skip",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 749,
+      "manifest": "scenarios/SWG-0068.json"
+    },
+    {
+      "id": "SWG-0069",
+      "title": "Decryption profile certVerification=permissive",
+      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP"
+      ],
+      "duration_ms": 699,
+      "manifest": "scenarios/SWG-0069.json"
+    },
+    {
+      "id": "SWG-0070",
+      "title": "Schedule-conditioned block (active-window)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 680,
+      "manifest": "scenarios/SWG-0070.json"
+    },
+    {
+      "id": "SWG-0071",
+      "title": "Schedule-conditioned block (inactive-day)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0071.json"
+    },
+    {
+      "id": "SWG-0072",
+      "title": "Compound condition (src+cat) \u2014 all predicates must hold",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1302,
+      "manifest": "scenarios/SWG-0072.json"
+    },
+    {
+      "id": "SWG-0073",
+      "title": "Compound condition (src+fqdn) \u2014 all predicates must hold",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1203,
+      "manifest": "scenarios/SWG-0073.json"
+    },
+    {
+      "id": "SWG-0074",
+      "title": "Block .exe downloads via file profile 'Executables' (under TLS inspection)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1063,
+      "manifest": "scenarios/SWG-0074.json"
+    },
+    {
+      "id": "SWG-0075",
+      "title": "Block .bat downloads via file profile 'Executables' (under TLS inspection)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1078,
+      "manifest": "scenarios/SWG-0075.json"
+    },
+    {
+      "id": "SWG-0076",
+      "title": "Redirect social.example.test to acceptable-use notice",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 684,
+      "manifest": "scenarios/SWG-0076.json"
+    },
+    {
+      "id": "SWG-0077",
+      "title": "Redirect news.example.test to acceptable-use notice",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0077.json"
+    },
+    {
+      "id": "SWG-0078",
+      "title": "Silently drop connections to media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 685,
+      "manifest": "scenarios/SWG-0078.json"
+    },
+    {
+      "id": "SWG-0079",
+      "title": "Silently drop connections to social.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 681,
+      "manifest": "scenarios/SWG-0079.json"
+    },
+    {
+      "id": "SWG-0080",
+      "title": "Disabled block rule for news.example.test must not enforce",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 681,
+      "manifest": "scenarios/SWG-0080.json"
+    },
+    {
+      "id": "SWG-0081",
+      "title": "Disabled block rule for media.corp.local must not enforce",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 686,
+      "manifest": "scenarios/SWG-0081.json"
+    },
+    {
+      "id": "SWG-0082",
+      "title": "Permitted traffic integrity: chunked",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0082.json"
+    },
+    {
+      "id": "SWG-0083",
+      "title": "Permitted traffic integrity: large-1mb",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 687,
+      "manifest": "scenarios/SWG-0083.json"
+    },
+    {
+      "id": "SWG-0084",
+      "title": "Permitted traffic integrity: many-redirect",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0084.json"
+    },
+    {
+      "id": "SWG-0085",
+      "title": "Matching boundary: wildcard-no-over-match",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 940,
+      "manifest": "scenarios/SWG-0085.json"
+    },
+    {
+      "id": "SWG-0086",
+      "title": "Matching boundary: subdomain-boundary",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0086.json"
+    },
+    {
+      "id": "SWG-0087",
+      "title": "Matching boundary: case-insensitive",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0087.json"
+    },
+    {
+      "id": "SWG-0088",
+      "title": "Threat blocklist pre-empts allow for news.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 946,
+      "manifest": "scenarios/SWG-0088.json"
+    },
+    {
+      "id": "SWG-0089",
+      "title": "Threat blocklist pre-empts allow for media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 951,
+      "manifest": "scenarios/SWG-0089.json"
+    },
+    {
+      "id": "SWG-0090",
+      "title": "Threat blocklist pre-empts allow for social.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 949,
+      "manifest": "scenarios/SWG-0090.json"
+    },
+    {
+      "id": "SWG-0091",
+      "title": "Destination block applies to HTTP POST",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 684,
+      "manifest": "scenarios/SWG-0091.json"
+    },
+    {
+      "id": "SWG-0092",
+      "title": "Destination block applies to HTTP PUT",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 684,
+      "manifest": "scenarios/SWG-0092.json"
+    },
+    {
+      "id": "SWG-0093",
+      "title": "Destination block applies to HTTP DELETE",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 679,
+      "manifest": "scenarios/SWG-0093.json"
+    },
+    {
+      "id": "SWG-0094",
+      "title": "Block HTTPS (CONNECT) to app.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 693,
+      "manifest": "scenarios/SWG-0094.json"
+    },
+    {
+      "id": "SWG-0095",
+      "title": "Block HTTPS (CONNECT) to intranet.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 688,
+      "manifest": "scenarios/SWG-0095.json"
+    },
+    {
+      "id": "SWG-0096",
+      "title": "Block HTTPS (CONNECT) to media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 688,
+      "manifest": "scenarios/SWG-0096.json"
+    },
+    {
+      "id": "SWG-0097",
+      "title": "Block HTTPS (CONNECT) to social.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 686,
+      "manifest": "scenarios/SWG-0097.json"
+    },
+    {
+      "id": "SWG-0098",
+      "title": "Block HTTPS (CONNECT) to news.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 689,
+      "manifest": "scenarios/SWG-0098.json"
+    },
+    {
+      "id": "SWG-0099",
+      "title": "Block HTTPS (CONNECT) to files.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 696,
+      "manifest": "scenarios/SWG-0099.json"
+    },
+    {
+      "id": "SWG-0100",
+      "title": "Block HTTPS (CONNECT) to partner.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 693,
+      "manifest": "scenarios/SWG-0100.json"
+    },
+    {
+      "id": "SWG-0101",
+      "title": "Default-deny with single-host exception for media.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1295,
+      "manifest": "scenarios/SWG-0101.json"
+    },
+    {
+      "id": "SWG-0102",
+      "title": "Default-deny with single-host exception for social.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1260,
+      "manifest": "scenarios/SWG-0102.json"
+    },
+    {
+      "id": "SWG-0103",
+      "title": "Default-deny with single-host exception for news.example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1263,
+      "manifest": "scenarios/SWG-0103.json"
+    },
+    {
+      "id": "SWG-0104",
+      "title": "Default-deny with single-host exception for partner.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1264,
+      "manifest": "scenarios/SWG-0104.json"
+    },
+    {
+      "id": "SWG-0105",
+      "title": "Default-deny with single-host exception for example.test",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1267,
+      "manifest": "scenarios/SWG-0105.json"
+    },
+    {
+      "id": "SWG-0106",
+      "title": "Default-deny with single-host exception for tenantb.corp.local",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1270,
+      "manifest": "scenarios/SWG-0106.json"
+    },
+    {
+      "id": "SWG-0107",
+      "title": "Block category 'social-media' for guest network only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 953,
+      "manifest": "scenarios/SWG-0107.json"
+    },
+    {
+      "id": "SWG-0108",
+      "title": "Block category 'news' for guest network only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 951,
+      "manifest": "scenarios/SWG-0108.json"
+    },
+    {
+      "id": "SWG-0109",
+      "title": "Block category 'streaming' for guest network only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 952,
+      "manifest": "scenarios/SWG-0109.json"
+    },
+    {
+      "id": "SWG-0110",
+      "title": "Block category 'webmail' for guest network only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 952,
+      "manifest": "scenarios/SWG-0110.json"
+    },
+    {
+      "id": "SWG-0111",
+      "title": "Decryption profile knob: mintls12",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 757,
+      "manifest": "scenarios/SWG-0111.json"
+    },
+    {
+      "id": "SWG-0112",
+      "title": "Decryption profile knob: http2native",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 756,
+      "manifest": "scenarios/SWG-0112.json"
+    },
+    {
+      "id": "SWG-0113",
+      "title": "Decryption profile knob: failopen",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 755,
+      "manifest": "scenarios/SWG-0113.json"
+    },
+    {
+      "id": "SWG-0114",
+      "title": "Decryption profile knob: failclose",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 750,
+      "manifest": "scenarios/SWG-0114.json"
+    },
+    {
+      "id": "SWG-0115",
+      "title": "Schedule policy: business-hours",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0115.json"
+    },
+    {
+      "id": "SWG-0116",
+      "title": "Schedule policy: weekend-only",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 685,
+      "manifest": "scenarios/SWG-0116.json"
+    },
+    {
+      "id": "SWG-0117",
+      "title": "Schedule policy: tz-newyork",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 682,
+      "manifest": "scenarios/SWG-0117.json"
+    },
+    {
+      "id": "SWG-0118",
+      "title": "Compound rule: cat+schedule",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1242,
+      "manifest": "scenarios/SWG-0118.json"
+    },
+    {
+      "id": "SWG-0119",
+      "title": "Compound rule: fqdn+corp",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 948,
+      "manifest": "scenarios/SWG-0119.json"
+    },
+    {
+      "id": "SWG-0120",
+      "title": "Compound rule: wild+guest",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 950,
+      "manifest": "scenarios/SWG-0120.json"
+    },
+    {
+      "id": "SWG-0121",
+      "title": "Per-tenant egress isolation by source network",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 4,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1478,
+      "manifest": "scenarios/SWG-0121.json"
+    },
+    {
+      "id": "SWG-0122",
+      "title": "Blocked request is attributable in stats/decision trace",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 681,
+      "manifest": "scenarios/SWG-0122.json"
+    },
+    {
+      "id": "SWG-0123",
+      "title": "Consistent enforcement under concurrent requests",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 6,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1998,
+      "manifest": "scenarios/SWG-0123.json"
+    },
+    {
+      "id": "SWG-0124",
+      "title": "Policy configuration persists AND enforces across a proxy restart",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1590,
+      "manifest": "scenarios/SWG-0124.json"
+    },
+    {
+      "id": "SWG-0125",
+      "title": "Permit business domain but carve out social-media exception",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 956,
+      "manifest": "scenarios/SWG-0125.json"
+    },
+    {
+      "id": "SWG-0126",
+      "title": "Permit business domain but carve out news exception",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 949,
+      "manifest": "scenarios/SWG-0126.json"
+    },
+    {
+      "id": "SWG-0127",
+      "title": "Permit business domain but carve out streaming exception",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 958,
+      "manifest": "scenarios/SWG-0127.json"
+    },
+    {
+      "id": "SWG-0128",
+      "title": "Permit business domain but carve out webmail exception",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 951,
+      "manifest": "scenarios/SWG-0128.json"
+    },
+    {
+      "id": "SWG-0129",
+      "title": "Inspect productivity destination app.corp.local for DLP",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 742,
+      "manifest": "scenarios/SWG-0129.json"
+    },
+    {
+      "id": "SWG-0130",
+      "title": "Inspect productivity destination intranet.corp.local for DLP",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 742,
+      "manifest": "scenarios/SWG-0130.json"
+    },
+    {
+      "id": "SWG-0131",
+      "title": "Inspect productivity destination files.corp.local for DLP",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 739,
+      "manifest": "scenarios/SWG-0131.json"
+    },
+    {
+      "id": "SWG-0132",
+      "title": "Inspect productivity destination media.corp.local for DLP",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 741,
+      "manifest": "scenarios/SWG-0132.json"
+    },
+    {
+      "id": "SWG-0133",
+      "title": "Inspect productivity destination example.test for DLP",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 762,
+      "manifest": "scenarios/SWG-0133.json"
+    },
+    {
+      "id": "SWG-0134",
+      "title": "Bare-domain block 'example.test' covers subdomains (social-media)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0134.json"
+    },
+    {
+      "id": "SWG-0135",
+      "title": "Bare-domain block 'corp.local' covers subdomains (streaming)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 956,
+      "manifest": "scenarios/SWG-0135.json"
+    },
+    {
+      "id": "SWG-0136",
+      "title": "Administrative block of line-of-business app (app.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0136.json"
+    },
+    {
+      "id": "SWG-0137",
+      "title": "Administrative block of intranet portal (intranet.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0137.json"
+    },
+    {
+      "id": "SWG-0138",
+      "title": "Administrative block of file server (files.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1231,
+      "manifest": "scenarios/SWG-0138.json"
+    },
+    {
+      "id": "SWG-0139",
+      "title": "Administrative block of streaming media (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 945,
+      "manifest": "scenarios/SWG-0139.json"
+    },
+    {
+      "id": "SWG-0140",
+      "title": "Administrative block of social media (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 945,
+      "manifest": "scenarios/SWG-0140.json"
+    },
+    {
+      "id": "SWG-0141",
+      "title": "Administrative block of news (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0141.json"
+    },
+    {
+      "id": "SWG-0142",
+      "title": "Administrative block of personal webmail (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0142.json"
+    },
+    {
+      "id": "SWG-0143",
+      "title": "Administrative block of partner extranet (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 940,
+      "manifest": "scenarios/SWG-0143.json"
+    },
+    {
+      "id": "SWG-0144",
+      "title": "Administrative block of tenant-B app (tenantb.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0144.json"
+    },
+    {
+      "id": "SWG-0145",
+      "title": "Corporate-only access to line-of-business app (app.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0145.json"
+    },
+    {
+      "id": "SWG-0146",
+      "title": "Corporate-only access to intranet portal (intranet.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0146.json"
+    },
+    {
+      "id": "SWG-0147",
+      "title": "Corporate-only access to file server (files.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 946,
+      "manifest": "scenarios/SWG-0147.json"
+    },
+    {
+      "id": "SWG-0148",
+      "title": "Corporate-only access to streaming media (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0148.json"
+    },
+    {
+      "id": "SWG-0149",
+      "title": "Corporate-only access to social media (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0149.json"
+    },
+    {
+      "id": "SWG-0150",
+      "title": "Corporate-only access to news (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 941,
+      "manifest": "scenarios/SWG-0150.json"
+    },
+    {
+      "id": "SWG-0151",
+      "title": "Corporate-only access to personal webmail (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 947,
+      "manifest": "scenarios/SWG-0151.json"
+    },
+    {
+      "id": "SWG-0152",
+      "title": "Corporate-only access to partner extranet (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 945,
+      "manifest": "scenarios/SWG-0152.json"
+    },
+    {
+      "id": "SWG-0153",
+      "title": "Corporate-only access to tenant-B app (tenantb.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 946,
+      "manifest": "scenarios/SWG-0153.json"
+    },
+    {
+      "id": "SWG-0154",
+      "title": "Decrypt line-of-business app (app.corp.local) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 739,
+      "manifest": "scenarios/SWG-0154.json"
+    },
+    {
+      "id": "SWG-0155",
+      "title": "Decrypt intranet portal (intranet.corp.local) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 744,
+      "manifest": "scenarios/SWG-0155.json"
+    },
+    {
+      "id": "SWG-0156",
+      "title": "Decrypt file server (files.corp.local) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 772,
+      "manifest": "scenarios/SWG-0156.json"
+    },
+    {
+      "id": "SWG-0157",
+      "title": "Decrypt streaming media (media.corp.local) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 743,
+      "manifest": "scenarios/SWG-0157.json"
+    },
+    {
+      "id": "SWG-0158",
+      "title": "Decrypt social media (social.example.test) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 744,
+      "manifest": "scenarios/SWG-0158.json"
+    },
+    {
+      "id": "SWG-0159",
+      "title": "Decrypt news (news.example.test) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 743,
+      "manifest": "scenarios/SWG-0159.json"
+    },
+    {
+      "id": "SWG-0160",
+      "title": "Do-not-decrypt personal webmail (example.test) for privacy",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 742,
+      "manifest": "scenarios/SWG-0160.json"
+    },
+    {
+      "id": "SWG-0161",
+      "title": "Do-not-decrypt partner extranet (partner.corp.local) for privacy",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 744,
+      "manifest": "scenarios/SWG-0161.json"
+    },
+    {
+      "id": "SWG-0162",
+      "title": "Decrypt tenant-B app (tenantb.corp.local) for inline inspection",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 739,
+      "manifest": "scenarios/SWG-0162.json"
+    },
+    {
+      "id": "SWG-0163",
+      "title": "Coaching redirect for streaming media (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 685,
+      "manifest": "scenarios/SWG-0163.json"
+    },
+    {
+      "id": "SWG-0164",
+      "title": "Coaching redirect for personal webmail (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 681,
+      "manifest": "scenarios/SWG-0164.json"
+    },
+    {
+      "id": "SWG-0165",
+      "title": "Coaching redirect for partner extranet (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 679,
+      "manifest": "scenarios/SWG-0165.json"
+    },
+    {
+      "id": "SWG-0166",
+      "title": "Allow-all-with-social-media-carveout (category exception above broad permit)",
+      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP",
+        "PASS"
+      ],
+      "duration_ms": 966,
+      "manifest": "scenarios/SWG-0166.json"
+    },
+    {
+      "id": "SWG-0167",
+      "title": "Allow-all-with-news-carveout (category exception above broad permit)",
+      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP",
+        "PASS"
+      ],
+      "duration_ms": 961,
+      "manifest": "scenarios/SWG-0167.json"
+    },
+    {
+      "id": "SWG-0168",
+      "title": "Allow-all-with-streaming-carveout (category exception above broad permit)",
+      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP",
+        "PASS"
+      ],
+      "duration_ms": 965,
+      "manifest": "scenarios/SWG-0168.json"
+    },
+    {
+      "id": "SWG-0169",
+      "title": "Allow-all-with-webmail-carveout (category exception above broad permit)",
+      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP",
+        "PASS"
+      ],
+      "duration_ms": 967,
+      "manifest": "scenarios/SWG-0169.json"
+    },
+    {
+      "id": "SWG-0170",
+      "title": "Domain-wide wildcard block covering line-of-business app (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 950,
+      "manifest": "scenarios/SWG-0170.json"
+    },
+    {
+      "id": "SWG-0171",
+      "title": "Domain-wide wildcard block covering intranet portal (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 945,
+      "manifest": "scenarios/SWG-0171.json"
+    },
+    {
+      "id": "SWG-0172",
+      "title": "Domain-wide wildcard block covering file server (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0172.json"
+    },
+    {
+      "id": "SWG-0173",
+      "title": "Domain-wide wildcard block covering streaming media (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 950,
+      "manifest": "scenarios/SWG-0173.json"
+    },
+    {
+      "id": "SWG-0174",
+      "title": "Domain-wide wildcard block covering social media (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 947,
+      "manifest": "scenarios/SWG-0174.json"
+    },
+    {
+      "id": "SWG-0175",
+      "title": "Domain-wide wildcard block covering news (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 952,
+      "manifest": "scenarios/SWG-0175.json"
+    },
+    {
+      "id": "SWG-0176",
+      "title": "Domain-wide wildcard block covering personal webmail (*.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 948,
+      "manifest": "scenarios/SWG-0176.json"
+    },
+    {
+      "id": "SWG-0177",
+      "title": "Domain-wide wildcard block covering partner extranet (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 950,
+      "manifest": "scenarios/SWG-0177.json"
+    },
+    {
+      "id": "SWG-0178",
+      "title": "Domain-wide wildcard block covering tenant-B app (*.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 994,
+      "manifest": "scenarios/SWG-0178.json"
+    },
+    {
+      "id": "SWG-0179",
+      "title": "Guest network blocked from line-of-business app (app.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 951,
+      "manifest": "scenarios/SWG-0179.json"
+    },
+    {
+      "id": "SWG-0180",
+      "title": "Guest network blocked from intranet portal (intranet.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 949,
+      "manifest": "scenarios/SWG-0180.json"
+    },
+    {
+      "id": "SWG-0181",
+      "title": "Guest network blocked from file server (files.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 954,
+      "manifest": "scenarios/SWG-0181.json"
+    },
+    {
+      "id": "SWG-0182",
+      "title": "Guest network blocked from streaming media (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 946,
+      "manifest": "scenarios/SWG-0182.json"
+    },
+    {
+      "id": "SWG-0183",
+      "title": "Guest network blocked from social media (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0183.json"
+    },
+    {
+      "id": "SWG-0184",
+      "title": "Guest network blocked from news (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 947,
+      "manifest": "scenarios/SWG-0184.json"
+    },
+    {
+      "id": "SWG-0185",
+      "title": "Guest network blocked from personal webmail (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0185.json"
+    },
+    {
+      "id": "SWG-0186",
+      "title": "Guest network blocked from partner extranet (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0186.json"
+    },
+    {
+      "id": "SWG-0187",
+      "title": "Guest network blocked from tenant-B app (tenantb.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 942,
+      "manifest": "scenarios/SWG-0187.json"
+    },
+    {
+      "id": "SWG-0188",
+      "title": "Category allow-list: permit only 'social-media' under default-deny",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1240,
+      "manifest": "scenarios/SWG-0188.json"
+    },
+    {
+      "id": "SWG-0189",
+      "title": "Category allow-list: permit only 'news' under default-deny",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1265,
+      "manifest": "scenarios/SWG-0189.json"
+    },
+    {
+      "id": "SWG-0190",
+      "title": "Category allow-list: permit only 'streaming' under default-deny",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1242,
+      "manifest": "scenarios/SWG-0190.json"
+    },
+    {
+      "id": "SWG-0191",
+      "title": "Category allow-list: permit only 'webmail' under default-deny",
+      "classification": "TEST_INFRA_FAILURE",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "TEST_INFRA_FAILURE",
+        "PASS"
+      ],
+      "duration_ms": 1233,
+      "manifest": "scenarios/SWG-0191.json"
+    },
+    {
+      "id": "SWG-0192",
+      "title": "Covert drop of social media (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 678,
+      "manifest": "scenarios/SWG-0192.json"
+    },
+    {
+      "id": "SWG-0193",
+      "title": "Covert drop of news (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 691,
+      "manifest": "scenarios/SWG-0193.json"
+    },
+    {
+      "id": "SWG-0194",
+      "title": "Covert drop of personal webmail (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 718,
+      "manifest": "scenarios/SWG-0194.json"
+    },
+    {
+      "id": "SWG-0195",
+      "title": "Covert drop of partner extranet (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 685,
+      "manifest": "scenarios/SWG-0195.json"
+    },
+    {
+      "id": "SWG-0196",
+      "title": "Zero-Trust: only line-of-business app permitted, and inspected (app.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1008,
+      "manifest": "scenarios/SWG-0196.json"
+    },
+    {
+      "id": "SWG-0197",
+      "title": "Zero-Trust: only intranet portal permitted, and inspected (intranet.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1042,
+      "manifest": "scenarios/SWG-0197.json"
+    },
+    {
+      "id": "SWG-0198",
+      "title": "Zero-Trust: only file server permitted, and inspected (files.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1003,
+      "manifest": "scenarios/SWG-0198.json"
+    },
+    {
+      "id": "SWG-0199",
+      "title": "Zero-Trust: only streaming media permitted, and inspected (media.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1001,
+      "manifest": "scenarios/SWG-0199.json"
+    },
+    {
+      "id": "SWG-0200",
+      "title": "Zero-Trust: only social media permitted, and inspected (social.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1007,
+      "manifest": "scenarios/SWG-0200.json"
+    },
+    {
+      "id": "SWG-0201",
+      "title": "Zero-Trust: only news permitted, and inspected (news.example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1003,
+      "manifest": "scenarios/SWG-0201.json"
+    },
+    {
+      "id": "SWG-0202",
+      "title": "Zero-Trust: only personal webmail permitted, and inspected (example.test)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1006,
+      "manifest": "scenarios/SWG-0202.json"
+    },
+    {
+      "id": "SWG-0203",
+      "title": "Zero-Trust: only partner extranet permitted, and inspected (partner.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1013,
+      "manifest": "scenarios/SWG-0203.json"
+    },
+    {
+      "id": "SWG-0204",
+      "title": "Zero-Trust: only tenant-B app permitted, and inspected (tenantb.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1010,
+      "manifest": "scenarios/SWG-0204.json"
+    },
+    {
+      "id": "SWG-0205",
+      "title": "[Coverage record] GeoIP / destination country",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.9,
+      "requires_auth": false,
+      "vector_count": 0,
+      "vector_verdicts": [],
+      "duration_ms": 0,
+      "manifest": "scenarios/SWG-0205.json"
+    },
+    {
+      "id": "SWG-0206",
+      "title": "[Coverage record] IPv6 support",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.9,
+      "requires_auth": false,
+      "vector_count": 0,
+      "vector_verdicts": [],
+      "duration_ms": 0,
+      "manifest": "scenarios/SWG-0206.json"
+    },
+    {
+      "id": "SWG-0207",
+      "title": "[Coverage record] DNS rebinding protection",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.9,
+      "requires_auth": false,
+      "vector_count": 0,
+      "vector_verdicts": [],
+      "duration_ms": 0,
+      "manifest": "scenarios/SWG-0207.json"
+    },
+    {
+      "id": "SWG-0208",
+      "title": "[Coverage record] WebSocket handling",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.9,
+      "requires_auth": false,
+      "vector_count": 0,
+      "vector_verdicts": [],
+      "duration_ms": 0,
+      "manifest": "scenarios/SWG-0208.json"
+    },
+    {
+      "id": "SWG-0209",
+      "title": "[Coverage record] Partial downloads",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.9,
+      "requires_auth": false,
+      "vector_count": 0,
+      "vector_verdicts": [],
+      "duration_ms": 0,
+      "manifest": "scenarios/SWG-0209.json"
+    },
+    {
+      "id": "SWG-0210",
+      "title": "Egress policy must apply to SOCKS5 clients (news.example.test)",
+      "classification": "SECURITY_BYPASS",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "SECURITY_BYPASS"
+      ],
+      "duration_ms": 943,
+      "manifest": "scenarios/SWG-0210.json"
+    },
+    {
+      "id": "SWG-0211",
+      "title": "Egress policy must apply to SOCKS5 clients (media.corp.local)",
+      "classification": "SECURITY_BYPASS",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "SECURITY_BYPASS"
+      ],
+      "duration_ms": 944,
+      "manifest": "scenarios/SWG-0211.json"
+    },
+    {
+      "id": "SWG-0212",
+      "title": "Client-supplied identity header must be scrubbed before upstream",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 743,
+      "manifest": "scenarios/SWG-0212.json"
+    },
+    {
+      "id": "SWG-0213",
+      "title": "Deleting a category referenced by a live rule (referential integrity)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "PASS"
+      ],
+      "duration_ms": 693,
+      "manifest": "scenarios/SWG-0213.json"
+    },
+    {
+      "id": "SWG-0214",
+      "title": "Conflicting same-priority rules resolve deterministically",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1202,
+      "manifest": "scenarios/SWG-0214.json"
+    },
+    {
+      "id": "SWG-0215",
+      "title": "Open-redirect safety on the redirect action",
+      "classification": "EXPECTED_LIMITATION",
+      "confidence": 0.85,
+      "requires_auth": false,
+      "vector_count": 1,
+      "vector_verdicts": [
+        "CONFIGURATION_CONTRACT_GAP"
+      ],
+      "duration_ms": 700,
+      "manifest": "scenarios/SWG-0215.json",
+      "refreshed_from": "CONFIGURATION_CONTRACT_GAP"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "campaign": "edge-case-validation",
+  "generated_at": "2026-07-12T22:43:51.938607+00:00",
+  "env": {
+    "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
+    "binary": "/home/user/Culvert/culvert",
+    "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+    "fixture_ip": "192.0.2.2",
+    "proxy": "http://127.0.0.1:18080",
+    "ui": "http://127.0.0.1:19090",
+    "captured_at": "2026-07-12T22:43:46.018523+00:00"
+  },
+  "counts": {
+    "PASS": 5,
+    "total": 5,
+    "pass_rate": 1.0
+  },
+  "confirmations": {},
+  "results": [
+    {
+      "id": "SWG-0002",
+      "title": "Block destination FQDN (wildcard: *.corp.local)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1188,
+      "manifest": "scenarios/SWG-0002.json"
+    },
+    {
+      "id": "SWG-0005",
+      "title": "Block a category GROUP (non-productive = social+news)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 4,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1471,
+      "manifest": "scenarios/SWG-0005.json"
+    },
+    {
+      "id": "SWG-0006",
+      "title": "Restrict intranet to the corporate subnet",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 934,
+      "manifest": "scenarios/SWG-0006.json"
+    },
+    {
+      "id": "SWG-0009",
+      "title": "Zero-Trust default deny with an explicit allow-list",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 3,
+      "vector_verdicts": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1196,
+      "manifest": "scenarios/SWG-0009.json"
+    },
+    {
+      "id": "SWG-0010",
+      "title": "Selective TLS inspection (inspect app, bypass partner)",
+      "classification": "PASS",
+      "confidence": 0.95,
+      "requires_auth": false,
+      "vector_count": 2,
+      "vector_verdicts": [
+        "PASS",
+        "PASS"
+      ],
+      "duration_ms": 1050,
+      "manifest": "scenarios/SWG-0010.json"
+    }
+  ]
+}
