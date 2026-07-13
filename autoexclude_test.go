@@ -274,7 +274,7 @@ func TestRecordAutoExcludeRescue_EmitsObservability(t *testing.T) {
 
 	// The counter must surface on /metrics.
 	rw := httptest.NewRecorder()
-	handleMetrics(rw, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handleMetrics(rw, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if !strings.Contains(rw.Body.String(), "culvert_decrypt_autoexclude_rescue_total") {
 		t.Fatal("/metrics missing culvert_decrypt_autoexclude_rescue_total")
 	}

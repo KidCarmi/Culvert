@@ -274,6 +274,7 @@ func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExclude
 	// DiD — same posture as recordAutoExclude).
 	safeHost := auditSafe(host)
 	safeScope := auditSafe(scopeName)
+	safeClient := auditSafe(id.ClientIP)
 	logger.Printf("SSL_AUTOEXCLUDE_RESCUE %s -> %q (scope=%q reason=%s) — current session bypassed on first signal (confirm-count-exempt)",
 		sanitizeLog(id.ClientIP), sanitizeLog(safeHost), sanitizeLog(safeScope), reason)
 	auditAdd(AuditEntry{
@@ -284,9 +285,14 @@ func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExclude
 		Object: safeScope + "/" + safeHost,
 		Detail: fmt.Sprintf("scope=%s reason=%s; live-rescue: this session bypassed SSL inspection (confirm-count-exempt; the persistent exclusion still requires the confirm-count)", safeScope, reason),
 	})
+	// Detail carries host AND client because alerts.Store.Dispatch suppresses
+	// duplicates for 30s keyed on event+Detail (internal/alerts/store.go): a
+	// per-profile-only Detail would collapse rescues to DIFFERENT hosts/clients in
+	// the same window into one alert — hiding the very repeated-evasion pattern this
+	// exposes. Including both makes each distinct (host, client) a distinct alert.
 	go fireAlert("decryption_autoexclude_rescue", AlertPayload{
 		Host:   safeHost,
-		Detail: fmt.Sprintf("SSL inspection live-bypassed for one session (profile=%s reason=%s)", safeScope, reason),
+		Detail: fmt.Sprintf("SSL inspection live-bypassed for one session (host=%s client=%s profile=%s reason=%s)", safeHost, safeClient, safeScope, reason),
 		Source: "proxy",
 	})
 }
