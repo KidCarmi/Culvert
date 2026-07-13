@@ -6,6 +6,7 @@ package main
 // fragile; the ULID is stable.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,7 +26,7 @@ func TestApiCategoryGroup_UpdateByID(t *testing.T) {
 	}
 
 	body := `{"name":"grp","categories":["ai","marketing"]}`
-	req := httptest.NewRequest(http.MethodPut, "/api/category-groups?id="+g.ID, strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/category-groups?id="+g.ID, strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:9999"
 	w := httptest.NewRecorder()
 	apiCategoryGroups(w, adminCtx(req))
@@ -44,7 +45,7 @@ func TestApiCategoryGroup_DeleteByID(t *testing.T) {
 	globalCategoryGroups.ReplaceAll(nil)
 	g, _ := globalCategoryGroups.Add("grp-del", []string{"ai"})
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/category-groups?id="+g.ID, http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodDelete, "/api/category-groups?id="+g.ID, http.NoBody)
 	req.RemoteAddr = "127.0.0.1:9999"
 	w := httptest.NewRecorder()
 	apiCategoryGroups(w, adminCtx(req))
@@ -62,7 +63,7 @@ func TestApiCategoryGroup_UpdateByID_NotFound(t *testing.T) {
 	globalCategoryGroups.ReplaceAll(nil)
 
 	body := `{"name":"x","categories":["ai"]}`
-	req := httptest.NewRequest(http.MethodPut, "/api/category-groups?id=deadbeef0000", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/api/category-groups?id=deadbeef0000", strings.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:9999"
 	w := httptest.NewRecorder()
 	apiCategoryGroups(w, adminCtx(req))
