@@ -28,6 +28,16 @@ Every learn event is **alerted** (to syslog/SIEM), **audited**, exposed as a
 **metric**, and listed in the **Decryption Exclusions** panel with its blast
 radius, where you can evict it.
 
+**Live rescues are observable too.** The confirm-count-exempt live rescue (step 2)
+does not wait for promotion, so it is surfaced independently: each rescue emits a
+`decryption.autoexclude.rescue` **audit** entry (actor = triggering client IP), a
+`decryption_autoexclude_rescue` **alert**, and increments the
+`culvert_decrypt_autoexclude_rescue_total` **metric**. This makes a client that
+repeatedly forces per-session bypasses (e.g. by routing through a cert-demanding
+origin under a fail-open rule) visible even before it ever reaches the
+confirm-count — watch the rescue counter's rate as an early poisoning/evasion
+signal.
+
 ## What it will and will NOT learn
 
 An origin controls its own TLS alerts, so the classifier trusts only **narrow,

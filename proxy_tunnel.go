@@ -587,7 +587,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		// handleTunnelBypass re-dials (its own inline isPrivateHost + ssrfControl
 		// guard) and relays. A cert-verify/other failure never learns or rescues.
 		if maybeFailOpenOrigin(hostOnly, match, id, err) {
-			logger.Printf("SSL_AUTOEXCLUDE_RESCUE %q: origin inspect failed (client-cert-required), failing open to bypass", sanitizeLog(targetHost))
+			// F1: the rescue ACT is now first-class observability (audit + alert +
+			// metric), not just a log line. rescue=true ⟺ client_cert_required
+			// (classifier invariant, TestClassifyOriginInspectFailure_TightenedTriggers).
+			recordAutoExcludeRescue(match, hostOnly, autoExReasonClientCert, id)
 			handleTunnelBypass(w, r, match, id)
 			return
 		}

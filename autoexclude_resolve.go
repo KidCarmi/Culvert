@@ -246,6 +246,57 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	})
 }
 
+// autoExcludeRescueCounter counts LIVE-RESCUE events: sessions transparently
+// bypassed on the FIRST client_cert_required origin signal (confirm-count-exempt),
+// BEFORE — and independently of — any persistent-cache promotion. This closes the
+// F1 observability gap: the promotion path fired audit+alert+metric, but the
+// rescue path (which actually stops inspecting the CURRENT session) emitted only a
+// log line. A single client colluding with a cert-demanding origin under a
+// fail-open rule can force per-session bypasses that never reach the confirm-count
+// and so were previously invisible to the audit ring, the SIEM alert stream, and
+// metrics. Exposed as culvert_decrypt_autoexclude_rescue_total (metrics.go).
+var autoExcludeRescueCounter int64
+
+// recordAutoExcludeRescue makes the live-rescue ACT first-class observability,
+// mirroring recordAutoExclude's promotion triple (metric + audit + alert) but
+// fired on the rescue itself rather than on confirm-count promotion. It does NOT
+// change the security decision (the caller has already decided to bypass); it only
+// makes that decision loud and attributable (actor = triggering client IP).
+//
+// The reason is always ReasonClientCertRequired: the origin classifier returns
+// rescue=true for that reason ONLY (pinned by TestClassifyOriginInspectFailure_
+// TightenedTriggers), so the caller passes it explicitly rather than threading it
+// back through maybeFailOpenOrigin's bool return.
+func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
+	atomic.AddInt64(&autoExcludeRescueCounter, 1)
+	_, scopeName := decryptionScope(match)
+	// Strip quotes AND newlines before the audit/alert/log fields (log-injection
+	// DiD — same posture as recordAutoExclude).
+	safeHost := auditSafe(host)
+	safeScope := auditSafe(scopeName)
+	safeClient := auditSafe(id.ClientIP)
+	logger.Printf("SSL_AUTOEXCLUDE_RESCUE %s -> %q (scope=%q reason=%s) — current session bypassed on first signal (confirm-count-exempt)",
+		sanitizeLog(id.ClientIP), sanitizeLog(safeHost), sanitizeLog(safeScope), reason)
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  strings.ReplaceAll(id.ClientIP, `"`, ""),
+		Action: "decryption.autoexclude.rescue",
+		Object: safeScope + "/" + safeHost,
+		Detail: fmt.Sprintf("scope=%s reason=%s; live-rescue: this session bypassed SSL inspection (confirm-count-exempt; the persistent exclusion still requires the confirm-count)", safeScope, reason),
+	})
+	// Detail carries host AND client because alerts.Store.Dispatch suppresses
+	// duplicates for 30s keyed on event+Detail (internal/alerts/store.go): a
+	// per-profile-only Detail would collapse rescues to DIFFERENT hosts/clients in
+	// the same window into one alert — hiding the very repeated-evasion pattern this
+	// exposes. Including both makes each distinct (host, client) a distinct alert.
+	go fireAlert("decryption_autoexclude_rescue", AlertPayload{
+		Host:   safeHost,
+		Detail: fmt.Sprintf("SSL inspection live-bypassed for one session (host=%s client=%s profile=%s reason=%s)", safeHost, safeClient, safeScope, reason),
+		Source: "proxy",
+	})
+}
+
 // maybeFailOpenOrigin handles an UPSTREAM (origin-leg) inspect-handshake failure
 // under a fail-open profile. It classifies the error, learns a qualifying host,
 // and reports whether the caller should RESCUE the current session as a

@@ -529,10 +529,14 @@ culvert_decrypt_autoexclude_active %d
 # HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
 # TYPE culvert_decrypt_autoexclude_pending gauge
 culvert_decrypt_autoexclude_pending %d
+# HELP culvert_decrypt_autoexclude_rescue_total Sessions live-bypassed on the first client_cert_required signal (confirm-count-exempt, before any persistent promotion)
+# TYPE culvert_decrypt_autoexclude_rescue_total counter
+culvert_decrypt_autoexclude_rescue_total %d
 `,
 		atomic.LoadInt64(&autoExcludeHitCounter),
 		aeStats.Active,
 		aeStats.Pending,
+		atomic.LoadInt64(&autoExcludeRescueCounter),
 	)
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
