@@ -2,6 +2,11 @@
 -- Owner: services/operation. The operation DB is the durable workflow/execution
 -- state and (with operation_events) the authoritative record independent of chat.
 -- Design-only; not applied.
+--
+-- STAGE-5 REVISION (qualification closure): added tenant_id (R7-F2 tenant isolation),
+-- approver_signature (R7-F3), and the separated-signing-key requirement (R7-F1: plans,
+-- approvals, and audit are each signed by a DISTINCT KMS/Ed25519 key — never one key).
+-- Composite scope (tenant,env,region) is the G0 target (R2-F5); staging-only shown here.
 
 BEGIN;
 
@@ -10,6 +15,7 @@ BEGIN;
 -- image, or registry — it passes a worker_id that must exist and be allowlisted.
 CREATE TABLE worker_registry (
     worker_id            text PRIMARY KEY,                 -- e.g. "tac-analysis-worker-1"
+    tenant_id            text NOT NULL,                    -- R7-F2: every resource is tenant-scoped
     environment          text NOT NULL CHECK (environment = 'staging'),  -- slice: staging only
     allowlisted          boolean NOT NULL DEFAULT false,
     approved_registry    text NOT NULL,                    -- e.g. "registry.tac.example/analysis-worker"
@@ -35,6 +41,7 @@ CREATE TABLE operations (
     id               text PRIMARY KEY,                     -- "OP-2026-000042"
     kind             text NOT NULL CHECK (kind IN ('restart','deploy')),
     level            text NOT NULL CHECK (level IN ('L2','L3')),
+    tenant_id        text NOT NULL,                         -- R7-F2: op is tenant-scoped; policy enforces match
     environment      text NOT NULL CHECK (environment = 'staging'),
     worker_id        text NOT NULL REFERENCES worker_registry(worker_id),
     intent           text NOT NULL,                        -- human-readable requested outcome
@@ -106,6 +113,7 @@ CREATE TABLE approvals (
     dual_required     boolean NOT NULL DEFAULT false,
     second_approver   text,                                -- non-null when dual_required
     decision          text NOT NULL CHECK (decision IN ('APPROVED','REJECTED')),
+    approver_signature text NOT NULL,                      -- R7-F3: approver's signature over {op_id,plan_id,plan_signature,decision} (distinct approval-key)
     created_at        timestamptz NOT NULL DEFAULT now(),
     expires_at        timestamptz NOT NULL,                -- inherits plan expiry
     single_use_consumed boolean NOT NULL DEFAULT false,

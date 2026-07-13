@@ -132,6 +132,38 @@ Entitlement is evaluated at the gateway and threaded through the workflow; there
 
 ---
 
+## 8.5 Case lifecycle & assignment (STAGE-5 additions — R4-F1, R5-F1/F2)
+
+The qualification board found `case_id` required everywhere but never *issued*, and no case-status surface. Closing that:
+
+- **Case creation:** a customer opens a case from the **customer console** or **in-product** ("Open support case"), which calls `POST /cases {tenant, severity, summary}` → returns a `case_id`. A bundle upload may also **auto-create** a case if none is supplied (the `case_id` becomes a return value, not a prerequisite the admin must find elsewhere). Target: an admin creates a case + uploads in **≤3 steps, no email**.
+- **Assignment/routing (no founder bottleneck):** an auto-triage + routing engine assigns each case to a queue by tenant/severity/entitlement and applies known-issue matching **before** any human — so the common path reaches a suggested diagnosis with **`founder_actions == 0`** (acceptance: `TestCommonPathNoFounderAction`). Human TAC ownership is a *routing outcome*, not a manual default.
+- **Case status:** `GET /cases/{case_id}` powers an in-product + console **case-status surface** (state, last TAC update, requested evidence, ETA) so "where is my case?" is answerable without email. A **TAC-request inbox** shows any "please send X" asks (which still gate on local consent, ADR-0014).
+- **Escalation:** SLA-driven; a second-approver pool (not the founder) satisfies dual-approval; escalation to engineering produces the package below.
+
+## 8.6 Engineering escalation package (STAGE-5 addition — R6-F1)
+
+When a case escalates to engineering, the cloud emits a **versioned escalation package** (not an ad-hoc GitHub comment):
+
+```jsonc
+{
+  "escalation_id": "ESC-…", "case_id": "…", "schema_version": 1,
+  "fault_hypothesis": "product_bug|config|environment|capacity|version_regression|cluster_convergence",
+  "product_version": "vX.Y.Z", "build": {…}, "runtime": "compose|k8s", "role": "…",
+  "timeline_ref": "findings://…/timeline",          // reference into the normalized findings plane, not raw
+  "health_findings": [ { "code":"…","severity":"…","cause_class":"…","locality":"…" } ],
+  "evidence_refs": [ { "section":"…","bundle_id":"…","sha256":"…" } ],   // pointers, not raw dumps
+  "reproduction": { "steps":[…], "synthetic_input_ref":"…" },
+  "rollback_info": { "known_good_version":"…", "available":true },
+  "release_linkage": { "suspected_regression_in":"vX.Y.Z" },
+  "redaction_tier": "engineering",                    // engineering-tier boundary; still no secrets/raw customer data
+  "github_issue": { "repo":"…","title":"…","labels":[…] }               // linkage, created on approval
+}
+```
+The package references the **normalized findings plane** (ADR-0016), carries an **engineering-tier redaction boundary** (more than customer-facing, but still no secrets/raw customer data), and is the artifact the escalation engineer consumes. Acceptance: a **golden escalation package** validates against the schema and reproduces a synthetic bug (`TestEscalationPackageReproduces`).
+
+---
+
 ## 9. End-to-end sequence — happy path
 
 ```

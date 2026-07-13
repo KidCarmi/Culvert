@@ -26,7 +26,12 @@ from datetime import datetime, timezone, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 EV = os.path.join(HERE, "evidence")
 DB = os.path.join(EV, "tac_proof.db")
-SIGN_KEY = b"local-demo-signing-key-STANDIN-for-Ed25519-KMS"
+# R7-F1 closure: separated keys per duty (stand-in for distinct Ed25519/KMS keys) —
+# no single key signs plans AND approvals AND audit (separation of duties / non-repudiation).
+SIGN_KEYS = {"plan":  b"STANDIN-plan-signer-key",
+             "approval": b"STANDIN-approval-signer-key",
+             "audit": b"STANDIN-audit-writer-key"}
+TENANT = "tenant-synthetic-1"                  # R7-F2 closure: explicit tenant scoping
 APPROVED_DIGEST_GOOD = "sha256:" + "a"*64      # known-good (currently running)
 APPROVED_DIGEST_NEW  = "sha256:" + "b"*64      # the new version we deploy
 UNAPPROVED_DIGEST    = "sha256:" + "c"*64      # not in allowlist
@@ -35,8 +40,27 @@ WORKER = "tac-analysis-worker-1"
 def now(): return datetime.now(timezone.utc)
 def iso(t=None): return (t or now()).isoformat()
 def canon(o): return json.dumps(o, sort_keys=True, separators=(",",":")).encode()
-def sign(b): return hmac.new(SIGN_KEY, b, hashlib.sha256).hexdigest()
+def sign(b, kind="audit"): return hmac.new(SIGN_KEYS[kind], b, hashlib.sha256).hexdigest()
 def sha_hex(b): return hashlib.sha256(b).hexdigest()
+
+# R9-F1 closure: FSM enforces LEGAL transitions, not only version-CAS.
+LEGAL = {
+ "CREATED":{"DISCOVERING","CANCELLED","EXPIRED"},
+ "DISCOVERING":{"PLANNING","CANCELLED","EXPIRED"},
+ "PLANNING":{"POLICY_REJECTED","REVIEW_PENDING","APPROVAL_PENDING","CANCELLED","EXPIRED"},
+ "REVIEW_PENDING":{"APPROVAL_PENDING","APPROVED","CANCELLED","EXPIRED"},
+ "APPROVAL_PENDING":{"APPROVED","EXECUTION_QUEUED","CANCELLED","EXPIRED"},  # L2 auto-approved skips APPROVED
+ "APPROVED":{"EXECUTION_QUEUED","APPROVAL_PENDING","CANCELLED","EXPIRED"},  # ->APPROVAL_PENDING = re-approval needed (stale/changed plan)
+ "EXECUTION_QUEUED":{"EXECUTING","CANCELLED","EXPIRED"},
+ "EXECUTING":{"VALIDATING","FAILED","CANCELLED"},   # (crash leaves it here until reconciled)
+ "VALIDATING":{"SUCCEEDED","FAILED"},
+ "FAILED":{"ROLLBACK_PENDING","MANUAL_INTERVENTION_REQUIRED"},
+ "ROLLBACK_PENDING":{"ROLLING_BACK","MANUAL_INTERVENTION_REQUIRED"},
+ "ROLLING_BACK":{"ROLLED_BACK","MANUAL_INTERVENTION_REQUIRED"},
+ "SUCCEEDED":set(),"ROLLED_BACK":set(),"CANCELLED":set(),"EXPIRED":set(),
+ "POLICY_REJECTED":set(),"MANUAL_INTERVENTION_REQUIRED":set(),
+}
+class IllegalTransition(Exception): pass
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 def db():
@@ -47,12 +71,12 @@ def db():
     return c
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS worker_registry(worker_id TEXT PRIMARY KEY, environment TEXT,
+CREATE TABLE IF NOT EXISTS worker_registry(worker_id TEXT PRIMARY KEY, tenant_id TEXT, environment TEXT,
   allowlisted INT, approved_registry TEXT, current_image_digest TEXT, known_good_digest TEXT,
   config TEXT, max_replicas INT);
 CREATE TABLE IF NOT EXISTS approved_digests(worker_id TEXT, image_digest TEXT, PRIMARY KEY(worker_id,image_digest));
 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, kind TEXT, level TEXT, environment TEXT,
-  worker_id TEXT, intent TEXT, state TEXT, current_plan_id TEXT, rollback_target TEXT,
+  tenant_id TEXT, worker_id TEXT, intent TEXT, state TEXT, current_plan_id TEXT, rollback_target TEXT,
   idempotency_key TEXT UNIQUE, initiating_user TEXT, session_meta TEXT, version INT,
   created_at TEXT, updated_at TEXT, expires_at TEXT);
 CREATE TABLE IF NOT EXISTS plans(plan_id TEXT PRIMARY KEY, op_id TEXT, kind TEXT, commit_sha TEXT,
@@ -61,7 +85,7 @@ CREATE TABLE IF NOT EXISTS plans(plan_id TEXT PRIMARY KEY, op_id TEXT, kind TEXT
   signature TEXT, signer_key_id TEXT, created_at TEXT, expires_at TEXT);
 CREATE TABLE IF NOT EXISTS approvals(approval_id TEXT PRIMARY KEY, op_id TEXT, plan_id TEXT,
   bound_plan_signature TEXT, approver TEXT, approver_is_author INT, decision TEXT,
-  created_at TEXT, expires_at TEXT, single_use_consumed INT);
+  created_at TEXT, expires_at TEXT, single_use_consumed INT, approver_signature TEXT);
 CREATE TABLE IF NOT EXISTS leases(resource_key TEXT PRIMARY KEY, holder_op_id TEXT, holder_exec TEXT,
   acquired_at TEXT, heartbeat_at TEXT, expires_at TEXT);
 CREATE TABLE IF NOT EXISTS operation_events(id INTEGER PRIMARY KEY AUTOINCREMENT, op_id TEXT, seq INT,
@@ -75,8 +99,8 @@ def init_db():
     os.makedirs(EV, exist_ok=True)
     if os.path.exists(DB): os.remove(DB)
     c = db(); c.executescript(SCHEMA)
-    c.execute("INSERT INTO worker_registry VALUES(?,?,?,?,?,?,?,?)",
-        (WORKER,"staging",1,"registry.tac.example/analysis-worker",APPROVED_DIGEST_GOOD,
+    c.execute("INSERT INTO worker_registry VALUES(?,?,?,?,?,?,?,?,?)",
+        (WORKER,TENANT,"staging",1,"registry.tac.example/analysis-worker",APPROVED_DIGEST_GOOD,
          APPROVED_DIGEST_GOOD, json.dumps({"QUEUE":"staging-analysis","LOG_LEVEL":"info"}),1))
     for d in (APPROVED_DIGEST_GOOD, APPROVED_DIGEST_NEW):
         c.execute("INSERT INTO approved_digests VALUES(?,?)",(WORKER,d))
@@ -92,11 +116,13 @@ def emit(c, op_id, actor, actor_kind, event_type, frm, to, detail):
     h = sha_hex(canon(ev)+prev.encode())
     c.execute("INSERT INTO operation_events(op_id,seq,ts,actor,actor_kind,event_type,from_state,to_state,detail,prev_hash,hash,signature)"
               " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-              (op_id,seq,ev["ts"],actor,actor_kind,event_type,frm,to,json.dumps(detail),prev,h,sign(h.encode())))
+              (op_id,seq,ev["ts"],actor,actor_kind,event_type,frm,to,json.dumps(detail),prev,h,sign(h.encode(),"audit")))
 
 def set_state(c, op_id, to, actor, actor_kind, event_type, detail=None):
     cur = c.execute("SELECT state,version FROM operations WHERE id=?",(op_id,)).fetchone()
     frm = cur["state"]
+    if to not in LEGAL.get(frm, set()):          # R9-F1: reject illegal transitions
+        raise IllegalTransition(f"{frm} -> {to} not permitted")
     # optimistic CAS
     c.execute("UPDATE operations SET state=?,version=version+1,updated_at=? WHERE id=? AND version=?",
               (to,iso(),op_id,cur["version"]))
@@ -146,6 +172,7 @@ def evaluate_policy(c, plan):
     w = c.execute("SELECT * FROM worker_registry WHERE worker_id=?",(plan["worker_id"],)).fetchone()
     approved = {row["image_digest"] for row in c.execute("SELECT image_digest FROM approved_digests WHERE worker_id=?",(plan["worker_id"],))}
     ec = plan["expected_changes"]
+    rule("P0_tenant", w is not None and plan.get("tenant_id")==w["tenant_id"], "tenant scope match")  # R7-F2
     rule("P1", plan["environment"]=="staging")
     rule("P2", w is not None and w["allowlisted"]==1)
     rule("P3", w is not None)  # registry implicit via digest allowlist
@@ -178,7 +205,8 @@ def make_plan(c, op, kind, target_digest=None):
                             "from":w["current_image_digest"],"to":target_digest}]}
     else:
         ec = {"create":0,"delete":0,"update":0,"action":"restart","version_invariant":True}
-    body = {"op_id":op["id"],"kind":kind,"environment":"staging","worker_id":op["worker_id"],
+    body = {"op_id":op["id"],"kind":kind,"environment":"staging","tenant_id":op["tenant_id"],
+            "worker_id":op["worker_id"],
             "commit_sha":("commit-"+target_digest[7:15]) if kind=="deploy" else None,
             "config_digest":"sha256:"+sha_hex(w["config"].encode())[:32],
             "provider_lock_digest":"sha256:lock-"+("v1"),
@@ -188,7 +216,7 @@ def make_plan(c, op, kind, target_digest=None):
     pol = evaluate_policy(c, body)
     body["policy_result"]=pol
     plan_id = "PLAN-"+sha_hex(canon(body))[:12]
-    sig = sign(canon(body))
+    sig = sign(canon(body),"plan")
     reviews = {"security":{"verdict":"OK"},"cost":{"delta_usd":0}}
     c.execute("INSERT INTO plans VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (plan_id,op["id"],kind,body["commit_sha"],body["config_digest"],body["provider_lock_digest"],
@@ -206,8 +234,8 @@ def new_op_id():
 def create_op(c, kind, level, intent, idem, user, session_meta):
     op_id = new_op_id()
     try:
-        c.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (op_id,kind,level,"staging",WORKER,intent,"CREATED",None,None,idem,user,
+        c.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (op_id,kind,level,"staging",TENANT,WORKER,intent,"CREATED",None,None,idem,user,
              json.dumps(session_meta),0,iso(),iso(),iso(now()+timedelta(minutes=30))))
     except sqlite3.IntegrityError:
         existing = c.execute("SELECT id FROM operations WHERE idempotency_key=?",(idem,)).fetchone()
@@ -234,8 +262,10 @@ def approve(c, op_id, plan_id, approver, is_author=False, expired=False):
     if is_author: return None,"REJECTED: approver is author"
     exp = iso(now()-timedelta(minutes=1)) if expired else plan["expires_at"]
     aid="APPROVAL-"+sha_hex(os.urandom(8))[:12]
-    c.execute("INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (aid,op_id,plan_id,plan["signature"],approver,0,"APPROVED",iso(),exp,0))
+    # R7-F3 closure: approval carries the APPROVER's signature over the exact plan binding
+    approver_sig = sign(canon({"op_id":op_id,"plan_id":plan_id,"plan_signature":plan["signature"],"decision":"APPROVED","approver":approver}),"approval")
+    c.execute("INSERT INTO approvals VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (aid,op_id,plan_id,plan["signature"],approver,0,"APPROVED",iso(),exp,0,approver_sig))
     set_state(c,op_id,"APPROVED","human:"+approver,"human","operation.approved",
         {"approval_id":aid,"plan_id":plan_id,"bound_plan_signature":plan["signature"][:16]+"…"})
     return aid,None
@@ -271,7 +301,12 @@ def execute(c, op_id, prov, approval_id=None):
         else:
             applied=prov.restart(); outcome="ok"
     except RuntimeError as e:
-        # crash / provider error
+        if "crash" in str(e):
+            # R8-F2 closure: UNGRACEFUL death — the executor process dies mid-transition.
+            # The op is LEFT in EXECUTING with the lease STILL HELD (no clean release).
+            # Only lease-expiry + the reconciler resolves it (exercised in failtest).
+            return "CRASHED:"+str(e)
+        # graceful provider error (e.g. provider unavailable) -> clean FAILED, lease released
         release_lease(c,op_id)
         set_state(c,op_id,"FAILED","executor:exec-1","service","execution.failed",{"error":str(e)})
         c.execute("INSERT INTO execution_results(op_id,attempt,phase,provider_response,applied_resources,outcome,created_at)"
@@ -293,6 +328,9 @@ def validate(c, op_id, prov):
         g("V2_digest", prov.running_digest()==plan["target_image_digest"], "running==target")
     else:
         g("V2_digest", True, "restart: version invariant")
+    er=c.execute("SELECT outcome FROM execution_results WHERE op_id=? ORDER BY id DESC LIMIT 1",(op_id,)).fetchone()
+    if er and er["outcome"]=="partial":
+        g("V2b_all_replicas", False, "partial apply: not all replicas on target digest")
     g("V3_synthetic_lease", prov.lease_synthetic_job())
     g("V4_synthetic_task", prov.complete_synthetic_task())
     if op["kind"]=="deploy":
@@ -332,11 +370,25 @@ def rollback(c, op_id, prov, previous_available=True):
     set_state(c,op_id,"MANUAL_INTERVENTION_REQUIRED","validator","service","operation.manual_required",
         {"reason":"rollback validation failed"}); release_lease(c,op_id); return "MANUAL"
 
+def lease_expired(c, op_id):
+    row=c.execute("SELECT * FROM leases WHERE holder_op_id=?",(op_id,)).fetchone()
+    return (row is None) or (datetime.fromisoformat(row["expires_at"])<now())
+
+def force_expire_lease(c, op_id):
+    """Simulate the lease TTL elapsing after an ungraceful executor death."""
+    c.execute("UPDATE leases SET expires_at=? WHERE holder_op_id=?",(iso(now()-timedelta(seconds=1)),op_id))
+
 def reconcile_after_crash(c, op_id, prov):
-    """Deterministic reconciler: op stuck in EXECUTING past lease TTL -> read provider truth."""
+    """Deterministic reconciler: only acts on an op stuck in EXECUTING with an EXPIRED lease.
+    Reads provider truth to resolve to VALIDATING (applied) or FAILED (no change). R8-F2/F4."""
     op=c.execute("SELECT * FROM operations WHERE id=?",(op_id,)).fetchone()
+    if op["state"]!="EXECUTING":
+        return "no-op (state="+op["state"]+")"
+    if not lease_expired(c,op_id):
+        return "lease still valid — executor may be alive; wait"
     plan=c.execute("SELECT * FROM plans WHERE plan_id=?",(op["current_plan_id"],)).fetchone()
     applied = (op["kind"]=="deploy" and prov.running_digest()==plan["target_image_digest"])
+    release_lease(c,op_id)
     if applied:
         set_state(c,op_id,"VALIDATING","reconciler","service","reconcile.applied",{"provider_truth":"applied"})
         return "resumed->VALIDATING"
@@ -358,7 +410,7 @@ def verify_audit_chain(c, op_id):
         ev={"op_id":r["op_id"],"seq":r["seq"],"ts":r["ts"],"actor":r["actor"],"actor_kind":r["actor_kind"],
             "event_type":r["event_type"],"from_state":r["from_state"],"to_state":r["to_state"],"detail":json.loads(r["detail"])}
         h=sha_hex(canon(ev)+prev.encode())
-        if h!=r["hash"] or sign(h.encode())!=r["signature"]: return False
+        if h!=r["hash"] or sign(h.encode(),"audit")!=r["signature"]: return False
         prev=r["hash"]
     return True
 
@@ -523,21 +575,27 @@ def failtest():
         return c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"],\
                "rejected rules="+",".join(r["id"] for r in pol["rules"] if not r["pass"])
     case(6,"policy rejection (unapproved digest)",f6)
-    # 7 executor crash before provider call
+    # 7 executor crash before provider call (UNGRACEFUL: op left EXECUTING, lease held)
     def f7(c,prov):
         op,pid,sig,pol=base_deploy(c,prov); set_state(c,op,"REVIEW_PENDING","s","service","policy.passed",{})
         aid,_=approve(c,op,pid,"bob"); prov.fault("crash_before_apply")
-        out=execute(c,op,prov,aid)
-        rec=reconcile_after_crash(c,op,prov) if "crash" in out else "n/a"
-        return c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"], "reconciler: "+rec
+        out=execute(c,op,prov,aid)   # -> CRASHED, op stuck EXECUTING, lease HELD
+        mid=c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"]
+        force_expire_lease(c,op); rec=reconcile_after_crash(c,op,prov)
+        st=c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"]
+        return st, f"crashed@EXECUTING(lease held) -> lease-expiry -> {rec}"
     case(7,"executor crash before provider call",f7)
-    # 8 executor crash after provider call
+    # 8 executor crash AFTER provider mutation -> reconciler resumes -> validate to terminal
     def f8(c,prov):
         op,pid,sig,pol=base_deploy(c,prov); set_state(c,op,"REVIEW_PENDING","s","service","policy.passed",{})
         aid,_=approve(c,op,pid,"bob"); prov.fault("crash_after_apply")
-        out=execute(c,op,prov,aid)
-        rec=reconcile_after_crash(c,op,prov)
-        return c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"], "reconciler read provider truth: "+rec
+        out=execute(c,op,prov,aid)   # provider mutated, then CRASHED; op stuck EXECUTING, lease held
+        force_expire_lease(c,op); rec=reconcile_after_crash(c,op,prov)
+        prov.fault()                 # provider healthy on the applied digest
+        if c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"]=="VALIDATING":
+            validate(c,op,prov)      # R8-F4: follow through to a terminal state
+        st=c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"]
+        return st, f"reconciler read provider truth ({rec}) -> validate -> terminal"
     case(8,"executor crash after provider call",f8)
     # 9 partial provider success
     def f9(c,prov):
@@ -567,6 +625,7 @@ def failtest():
         opA,pidA,sigA,_=base_deploy(c,prov); set_state(c,opA,"REVIEW_PENDING","s","service","policy.passed",{})
         aidA,_=approve(c,opA,pidA,"bob"); execute(c,opA,prov,aidA)  # holds lease (VALIDATING)
         opB,_=create_op(c,"restart","L2","r","idem-conc-B","human:alice",{"via":"ai"})
+        set_state(c,opB,"DISCOVERING","s","service","operation.discovering",{})
         set_state(c,opB,"PLANNING","s","service","operation.planning",{})
         make_plan(c,dict(c.execute("SELECT * FROM operations WHERE id=?",(opB,)).fetchone()),"restart")
         blocked = not acquire_lease(c,opB)
@@ -579,12 +638,12 @@ def failtest():
         # the only mutating path is a typed plan+approval; injection cannot create one autonomously at L3
         return "inert","no run_arbitrary_* tool; L3 needs human approval; worst case = a rejected/low-impact proposal, audited"
     case(13,"malicious log prompt injection",f13)
-    # 14 expired credentials mid-apply (modeled as provider error)
+    # 14 expired credentials mid-apply (creds lapse -> provider call fails BEFORE mutation)
     def f14(c,prov):
         op,pid,sig,pol=base_deploy(c,prov); set_state(c,op,"REVIEW_PENDING","s","service","policy.passed",{})
         aid,_=approve(c,op,pid,"bob"); prov.fault("provider_unavailable")  # creds lapse -> provider call fails
-        out=execute(c,op,prov,aid); rec=reconcile_after_crash(c,op,prov)
-        return c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"], "re-mint + safe re-apply; reconciler: "+rec
+        out=execute(c,op,prov,aid)  # graceful FAILED (no mutation), lease released
+        return c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"], "clean FAILED; re-mint short-lived creds + safe re-apply of same saved plan"
     case(14,"expired credentials mid-apply",f14)
     # 15 provider unavailable
     def f15(c,prov):
@@ -597,6 +656,7 @@ def failtest():
     def f16(c,prov):
         # entire flow driven without AI via CLI functions
         op,_=create_op(c,"restart","L2","r","idem-noai","human:cli",{"via":"cli"})
+        set_state(c,op,"DISCOVERING","s","service","operation.discovering",{})
         set_state(c,op,"PLANNING","s","service","operation.planning",{})
         make_plan(c,dict(c.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone()),"restart")
         set_state(c,op,"APPROVAL_PENDING","s","service","approval.not_required",{"level":"L2"})
@@ -623,7 +683,12 @@ def cmd_show(op_id):
 
 def cmd_cli_restart(idem):
     c=db(); prov=MockProvider()
-    op,_=create_op(c,"restart","L2","cli restart",idem,"human:cli",{"via":"cli"})
+    op,dup=create_op(c,"restart","L2","cli restart",idem,"human:cli",{"via":"cli"})
+    if dup:   # R9-F2 closure: idempotent duplicate — return existing, do NOT re-execute
+        st=c.execute("SELECT state FROM operations WHERE id=?",(op,)).fetchone()["state"]
+        print(f"tacctl(no-AI): {op} idempotent DUPLICATE (idem={idem}) — returning existing op state={st}; no re-execution")
+        c.commit(); c.close(); return
+    set_state(c,op,"DISCOVERING","s","service","operation.discovering",{})
     set_state(c,op,"PLANNING","s","service","operation.planning",{})
     make_plan(c,dict(c.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone()),"restart")
     set_state(c,op,"APPROVAL_PENDING","s","service","approval.not_required",{"level":"L2"})

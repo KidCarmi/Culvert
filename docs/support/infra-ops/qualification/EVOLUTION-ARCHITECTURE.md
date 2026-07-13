@@ -18,6 +18,8 @@
 
 **Necessary now:** the deterministic spine (op DB, FSM, policy, executor, validator, rollback, signed audit), source-side redaction, outbound-only upload, `tacctl`, plan-bound approval. **Dormant:** HA, multi-region, KMS, managed DB, telemetry, portal UX.
 
+> **STAGE-5 FinOps correction (R3).** "$0" applies to the appliance + deterministic spine (they run offline, proven by the harness). It does **NOT** include: (a) **AI inference** — the product's reasoning layer has a real per-token cost, so budget a small AI line from day one; (b) **a durable, backed-up control-plane DB** — the entire "durable/reconstructable/tamper-evident" guarantee rests on the op+audit store surviving, so a free-tier DB that autosuspends/loses data is unacceptable. **First paid investment = managed Postgres with point-in-time recovery (~$19–25/mo)** for the op+audit DB — before anything else. (c) **Stale free-tier premise:** do not assume any specific provider's "free worker" tier persists (e.g. Fly.io's free allowances changed); the worker is a small paid compute line in early production. Net: the honest pilot is "**~$0 spine + a few $ of AI + ~$20/mo DB when real data appears**," not literally $0 end-to-end.
+
 ---
 
 ## Phase B — First Paying Customers

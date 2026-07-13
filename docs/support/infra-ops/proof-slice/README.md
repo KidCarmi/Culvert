@@ -117,6 +117,8 @@ tac-infra/
 
 So the slice uses **both**: OpenTofu for the version deploy (desired-state), a typed action for the restart (no desired-state change). Neither path lets Claude pass raw tofu args, image refs, or provider config — the deploy's image digest is chosen from the `worker_registry` allowlist server-side (POLICY-IDENTITY §allowlists).
 
+> **STAGE-5 REVISION (R2-F1 — mandatory before a 2nd L2 action).** The L2 typed-action path must not become "direct API execution by the back door." **All L2 actions implement a single `ActionConnector` interface** — `{plan() → typed action descriptor, apply(descriptor) → recorded outcome, reconcile() → provider-truth resolution, reverse() or declares irreversible}` — typed, bounded, idempotent, audited, and reconcilable, exactly like the deploy path (just without a desired-state commit). The restart is the first `ActionConnector`; retry-job/recover-lease/clear-cache/pause-consumer/disable-uploads reuse it. No second L2 action ships without this interface. Acceptance: `TestActionConnectorContract` (each action is idempotent, reconcilable, and produces an audited outcome). **STAGE-5 REVISION (R2-F5):** scope keys are the composite `(tenant, env, region)`, not bare env — the lease key, policy input, and schema carry the triple (staging/one-tenant/one-region shown in the slice; the columns and key shape are the composite from day one to avoid a future rewrite).
+
 ---
 
 ## 4. Implementation sequence (order to build the slice)

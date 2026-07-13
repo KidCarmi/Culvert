@@ -27,7 +27,7 @@
     "case": 5,
     "scenario": "plan changes after approval",
     "persisted_state": "APPROVAL_PENDING",
-    "recovery": "execute REJECTED:approval/plan mismatch (pidA=PLAN-564358adf9a3 != pidB=PLAN-1b91f13080d5); re-approval required"
+    "recovery": "execute REJECTED:approval/plan mismatch (pidA=PLAN-0b94693d22ab != pidB=PLAN-5538c84cc05b); re-approval required"
   },
   {
     "case": 6,
@@ -39,13 +39,13 @@
     "case": 7,
     "scenario": "executor crash before provider call",
     "persisted_state": "FAILED",
-    "recovery": "reconciler: resolved->FAILED"
+    "recovery": "crashed@EXECUTING(lease held) -> lease-expiry -> resolved->FAILED"
   },
   {
     "case": 8,
     "scenario": "executor crash after provider call",
-    "persisted_state": "VALIDATING",
-    "recovery": "reconciler read provider truth: resumed->VALIDATING"
+    "persisted_state": "SUCCEEDED",
+    "recovery": "reconciler read provider truth (resumed->VALIDATING) -> validate -> terminal"
   },
   {
     "case": 9,
@@ -81,7 +81,7 @@
     "case": 14,
     "scenario": "expired credentials mid-apply",
     "persisted_state": "FAILED",
-    "recovery": "re-mint + safe re-apply; reconciler: resolved->FAILED"
+    "recovery": "clean FAILED; re-mint short-lived creds + safe re-apply of same saved plan"
   },
   {
     "case": 15,

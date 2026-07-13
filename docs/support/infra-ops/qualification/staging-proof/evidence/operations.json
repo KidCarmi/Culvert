@@ -1,261 +1,28 @@
 {
-  "OP-2026-2e2f22": {
+  "OP-2026-08201e": {
     "operation": {
-      "id": "OP-2026-2e2f22",
-      "kind": "deploy",
-      "level": "L3",
-      "environment": "staging",
-      "worker_id": "tac-analysis-worker-1",
-      "intent": "deploy bad digest",
-      "state": "ROLLED_BACK",
-      "current_plan_id": "PLAN-e9ea3f9fb71e",
-      "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
-      "idempotency_key": "idem-deploy-bad",
-      "initiating_user": "human:alice",
-      "session_meta": "{\"via\": \"ai\"}",
-      "version": 11,
-      "created_at": "2026-07-13T08:38:01.087743+00:00",
-      "updated_at": "2026-07-13T08:38:01.690018+00:00",
-      "expires_at": "2026-07-13T09:08:01.087752+00:00"
-    },
-    "events": [
-      {
-        "seq": 1,
-        "ts": "2026-07-13T08:38:01.087792+00:00",
-        "actor": "claude:planner",
-        "actor_kind": "model",
-        "event_type": "operation.created",
-        "from_state": null,
-        "to_state": "CREATED",
-        "detail": "{\"intent\": \"deploy bad digest\", \"idempotency_key\": \"idem-deploy-bad\", \"initiating_user\": \"human:alice\", \"session_meta\": {\"via\": \"ai\"}}"
-      },
-      {
-        "seq": 2,
-        "ts": "2026-07-13T08:38:01.087917+00:00",
-        "actor": "operation-svc",
-        "actor_kind": "service",
-        "event_type": "operation.discovering",
-        "from_state": "CREATED",
-        "to_state": "DISCOVERING",
-        "detail": "{}"
-      },
-      {
-        "seq": 3,
-        "ts": "2026-07-13T08:38:01.088000+00:00",
-        "actor": "planner",
-        "actor_kind": "service",
-        "event_type": "operation.planning",
-        "from_state": "DISCOVERING",
-        "to_state": "PLANNING",
-        "detail": "{}"
-      },
-      {
-        "seq": 4,
-        "ts": "2026-07-13T08:38:01.088443+00:00",
-        "actor": "policy",
-        "actor_kind": "service",
-        "event_type": "policy.passed",
-        "from_state": "PLANNING",
-        "to_state": "REVIEW_PENDING",
-        "detail": "{}"
-      },
-      {
-        "seq": 5,
-        "ts": "2026-07-13T08:38:01.088587+00:00",
-        "actor": "human:bob",
-        "actor_kind": "human",
-        "event_type": "operation.approved",
-        "from_state": "REVIEW_PENDING",
-        "to_state": "APPROVED",
-        "detail": "{\"approval_id\": \"APPROVAL-23d2e0d92a92\", \"plan_id\": \"PLAN-e9ea3f9fb71e\", \"bound_plan_signature\": \"7609b1da81897b42\\u2026\"}"
-      },
-      {
-        "seq": 6,
-        "ts": "2026-07-13T08:38:01.088772+00:00",
-        "actor": "operation-svc",
-        "actor_kind": "service",
-        "event_type": "operation.queued",
-        "from_state": "APPROVED",
-        "to_state": "EXECUTION_QUEUED",
-        "detail": "{}"
-      },
-      {
-        "seq": 7,
-        "ts": "2026-07-13T08:38:01.088833+00:00",
-        "actor": "executor:exec-1",
-        "actor_kind": "service",
-        "event_type": "execution.started",
-        "from_state": "EXECUTION_QUEUED",
-        "to_state": "EXECUTING",
-        "detail": "{\"plan_id\": \"PLAN-e9ea3f9fb71e\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
-      },
-      {
-        "seq": 8,
-        "ts": "2026-07-13T08:38:01.389229+00:00",
-        "actor": "executor:exec-1",
-        "actor_kind": "service",
-        "event_type": "execution.applied",
-        "from_state": "EXECUTING",
-        "to_state": "VALIDATING",
-        "detail": "{\"applied_resources\": [{\"address\": \"module.workers.tac_analysis_worker.machine\", \"action\": \"update\", \"outcome\": \"updated\"}], \"outcome\": \"ok\"}"
-      },
-      {
-        "seq": 9,
-        "ts": "2026-07-13T08:38:01.389441+00:00",
-        "actor": "validator",
-        "actor_kind": "service",
-        "event_type": "validation.failed",
-        "from_state": "VALIDATING",
-        "to_state": "FAILED",
-        "detail": "{\"gates\": [{\"name\": \"V1_health\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V2_digest\", \"pass\": true, \"detail\": \"running==target\"}, {\"name\": \"V3_synthetic_lease\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V4_synthetic_task\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V5_no_unexpected_change\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V6_no_iam_expand\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V7_quota_ok\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V9_rollback_restorable\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V8_audit_exists\", \"pass\": true, \"detail\": \"\"}]}"
-      },
-      {
-        "seq": 10,
-        "ts": "2026-07-13T08:38:01.389632+00:00",
-        "actor": "operation-svc",
-        "actor_kind": "service",
-        "event_type": "rollback.pending",
-        "from_state": "FAILED",
-        "to_state": "ROLLBACK_PENDING",
-        "detail": "{\"target\": {\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}}"
-      },
-      {
-        "seq": 11,
-        "ts": "2026-07-13T08:38:01.389690+00:00",
-        "actor": "executor:exec-1",
-        "actor_kind": "service",
-        "event_type": "rollback.started",
-        "from_state": "ROLLBACK_PENDING",
-        "to_state": "ROLLING_BACK",
-        "detail": "{\"target\": {\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}}"
-      },
-      {
-        "seq": 12,
-        "ts": "2026-07-13T08:38:01.690077+00:00",
-        "actor": "validator",
-        "actor_kind": "service",
-        "event_type": "operation.rolled_back",
-        "from_state": "ROLLING_BACK",
-        "to_state": "ROLLED_BACK",
-        "detail": "{\"restored_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
-      }
-    ]
-  },
-  "OP-2026-590fe4": {
-    "operation": {
-      "id": "OP-2026-590fe4",
+      "id": "OP-2026-08201e",
       "kind": "restart",
       "level": "L2",
       "environment": "staging",
-      "worker_id": "tac-analysis-worker-1",
-      "intent": "cli restart",
-      "state": "SUCCEEDED",
-      "current_plan_id": "PLAN-743fdd74fac5",
-      "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
-      "idempotency_key": "idem-restart-cli",
-      "initiating_user": "human:cli",
-      "session_meta": "{\"via\": \"cli\"}",
-      "version": 6,
-      "created_at": "2026-07-13T08:38:01.802554+00:00",
-      "updated_at": "2026-07-13T08:38:01.955208+00:00",
-      "expires_at": "2026-07-13T09:08:01.802583+00:00"
-    },
-    "events": [
-      {
-        "seq": 1,
-        "ts": "2026-07-13T08:38:01.803054+00:00",
-        "actor": "human:cli",
-        "actor_kind": "human",
-        "event_type": "operation.created",
-        "from_state": null,
-        "to_state": "CREATED",
-        "detail": "{\"intent\": \"cli restart\", \"idempotency_key\": \"idem-restart-cli\", \"initiating_user\": \"human:cli\", \"session_meta\": {\"via\": \"cli\"}}"
-      },
-      {
-        "seq": 2,
-        "ts": "2026-07-13T08:38:01.803287+00:00",
-        "actor": "s",
-        "actor_kind": "service",
-        "event_type": "operation.planning",
-        "from_state": "CREATED",
-        "to_state": "PLANNING",
-        "detail": "{}"
-      },
-      {
-        "seq": 3,
-        "ts": "2026-07-13T08:38:01.803758+00:00",
-        "actor": "s",
-        "actor_kind": "service",
-        "event_type": "approval.not_required",
-        "from_state": "PLANNING",
-        "to_state": "APPROVAL_PENDING",
-        "detail": "{\"level\": \"L2\"}"
-      },
-      {
-        "seq": 4,
-        "ts": "2026-07-13T08:38:01.804017+00:00",
-        "actor": "operation-svc",
-        "actor_kind": "service",
-        "event_type": "operation.queued",
-        "from_state": "APPROVAL_PENDING",
-        "to_state": "EXECUTION_QUEUED",
-        "detail": "{}"
-      },
-      {
-        "seq": 5,
-        "ts": "2026-07-13T08:38:01.804077+00:00",
-        "actor": "executor:exec-1",
-        "actor_kind": "service",
-        "event_type": "execution.started",
-        "from_state": "EXECUTION_QUEUED",
-        "to_state": "EXECUTING",
-        "detail": "{\"plan_id\": \"PLAN-743fdd74fac5\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
-      },
-      {
-        "seq": 6,
-        "ts": "2026-07-13T08:38:01.954880+00:00",
-        "actor": "executor:exec-1",
-        "actor_kind": "service",
-        "event_type": "execution.applied",
-        "from_state": "EXECUTING",
-        "to_state": "VALIDATING",
-        "detail": "{\"applied_resources\": [{\"address\": \"...machine\", \"action\": \"restart\", \"outcome\": \"restarted\"}], \"outcome\": \"ok\"}"
-      },
-      {
-        "seq": 7,
-        "ts": "2026-07-13T08:38:01.955229+00:00",
-        "actor": "validator",
-        "actor_kind": "service",
-        "event_type": "operation.succeeded",
-        "from_state": "VALIDATING",
-        "to_state": "SUCCEEDED",
-        "detail": "{\"gates\": [{\"name\": \"V1_health\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V2_digest\", \"pass\": true, \"detail\": \"restart: version invariant\"}, {\"name\": \"V3_synthetic_lease\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V4_synthetic_task\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V8_audit_exists\", \"pass\": true, \"detail\": \"\"}]}"
-      }
-    ]
-  },
-  "OP-2026-69bc14": {
-    "operation": {
-      "id": "OP-2026-69bc14",
-      "kind": "restart",
-      "level": "L2",
-      "environment": "staging",
+      "tenant_id": "tenant-synthetic-1",
       "worker_id": "tac-analysis-worker-1",
       "intent": "restart stuck-lease worker",
       "state": "SUCCEEDED",
-      "current_plan_id": "PLAN-6d4cfcb1f9bb",
+      "current_plan_id": "PLAN-825c7f230af9",
       "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
       "idempotency_key": "idem-restart-1",
       "initiating_user": "human:alice",
       "session_meta": "{\"via\": \"cli\"}",
       "version": 7,
-      "created_at": "2026-07-13T08:38:00.633525+00:00",
-      "updated_at": "2026-07-13T08:38:00.785514+00:00",
-      "expires_at": "2026-07-13T09:08:00.633558+00:00"
+      "created_at": "2026-07-13T08:52:14.044608+00:00",
+      "updated_at": "2026-07-13T08:52:14.197063+00:00",
+      "expires_at": "2026-07-13T09:22:14.044653+00:00"
     },
     "events": [
       {
         "seq": 1,
-        "ts": "2026-07-13T08:38:00.633689+00:00",
+        "ts": "2026-07-13T08:52:14.044840+00:00",
         "actor": "human:cli",
         "actor_kind": "human",
         "event_type": "operation.created",
@@ -265,7 +32,7 @@
       },
       {
         "seq": 2,
-        "ts": "2026-07-13T08:38:00.633972+00:00",
+        "ts": "2026-07-13T08:52:14.045117+00:00",
         "actor": "operation-svc",
         "actor_kind": "service",
         "event_type": "operation.discovering",
@@ -275,7 +42,7 @@
       },
       {
         "seq": 3,
-        "ts": "2026-07-13T08:38:00.634046+00:00",
+        "ts": "2026-07-13T08:52:14.045187+00:00",
         "actor": "planner",
         "actor_kind": "service",
         "event_type": "operation.planning",
@@ -285,7 +52,7 @@
       },
       {
         "seq": 4,
-        "ts": "2026-07-13T08:38:00.634513+00:00",
+        "ts": "2026-07-13T08:52:14.045730+00:00",
         "actor": "operation-svc",
         "actor_kind": "service",
         "event_type": "approval.not_required",
@@ -295,7 +62,7 @@
       },
       {
         "seq": 5,
-        "ts": "2026-07-13T08:38:00.634727+00:00",
+        "ts": "2026-07-13T08:52:14.046082+00:00",
         "actor": "operation-svc",
         "actor_kind": "service",
         "event_type": "operation.queued",
@@ -305,17 +72,17 @@
       },
       {
         "seq": 6,
-        "ts": "2026-07-13T08:38:00.634785+00:00",
+        "ts": "2026-07-13T08:52:14.046187+00:00",
         "actor": "executor:exec-1",
         "actor_kind": "service",
         "event_type": "execution.started",
         "from_state": "EXECUTION_QUEUED",
         "to_state": "EXECUTING",
-        "detail": "{\"plan_id\": \"PLAN-6d4cfcb1f9bb\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
+        "detail": "{\"plan_id\": \"PLAN-825c7f230af9\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
       },
       {
         "seq": 7,
-        "ts": "2026-07-13T08:38:00.785196+00:00",
+        "ts": "2026-07-13T08:52:14.196735+00:00",
         "actor": "executor:exec-1",
         "actor_kind": "service",
         "event_type": "execution.applied",
@@ -325,7 +92,7 @@
       },
       {
         "seq": 8,
-        "ts": "2026-07-13T08:38:00.785535+00:00",
+        "ts": "2026-07-13T08:52:14.197086+00:00",
         "actor": "validator",
         "actor_kind": "service",
         "event_type": "operation.succeeded",
@@ -335,29 +102,133 @@
       }
     ]
   },
-  "OP-2026-9097f8": {
+  "OP-2026-0ab08d": {
     "operation": {
-      "id": "OP-2026-9097f8",
+      "id": "OP-2026-0ab08d",
+      "kind": "restart",
+      "level": "L2",
+      "environment": "staging",
+      "tenant_id": "tenant-synthetic-1",
+      "worker_id": "tac-analysis-worker-1",
+      "intent": "cli restart",
+      "state": "SUCCEEDED",
+      "current_plan_id": "PLAN-38f45571607f",
+      "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
+      "idempotency_key": "idem-restart-cli",
+      "initiating_user": "human:cli",
+      "session_meta": "{\"via\": \"cli\"}",
+      "version": 7,
+      "created_at": "2026-07-13T08:52:15.199591+00:00",
+      "updated_at": "2026-07-13T08:52:15.352000+00:00",
+      "expires_at": "2026-07-13T09:22:15.199621+00:00"
+    },
+    "events": [
+      {
+        "seq": 1,
+        "ts": "2026-07-13T08:52:15.200002+00:00",
+        "actor": "human:cli",
+        "actor_kind": "human",
+        "event_type": "operation.created",
+        "from_state": null,
+        "to_state": "CREATED",
+        "detail": "{\"intent\": \"cli restart\", \"idempotency_key\": \"idem-restart-cli\", \"initiating_user\": \"human:cli\", \"session_meta\": {\"via\": \"cli\"}}"
+      },
+      {
+        "seq": 2,
+        "ts": "2026-07-13T08:52:15.200249+00:00",
+        "actor": "s",
+        "actor_kind": "service",
+        "event_type": "operation.discovering",
+        "from_state": "CREATED",
+        "to_state": "DISCOVERING",
+        "detail": "{}"
+      },
+      {
+        "seq": 3,
+        "ts": "2026-07-13T08:52:15.200317+00:00",
+        "actor": "s",
+        "actor_kind": "service",
+        "event_type": "operation.planning",
+        "from_state": "DISCOVERING",
+        "to_state": "PLANNING",
+        "detail": "{}"
+      },
+      {
+        "seq": 4,
+        "ts": "2026-07-13T08:52:15.200765+00:00",
+        "actor": "s",
+        "actor_kind": "service",
+        "event_type": "approval.not_required",
+        "from_state": "PLANNING",
+        "to_state": "APPROVAL_PENDING",
+        "detail": "{\"level\": \"L2\"}"
+      },
+      {
+        "seq": 5,
+        "ts": "2026-07-13T08:52:15.200954+00:00",
+        "actor": "operation-svc",
+        "actor_kind": "service",
+        "event_type": "operation.queued",
+        "from_state": "APPROVAL_PENDING",
+        "to_state": "EXECUTION_QUEUED",
+        "detail": "{}"
+      },
+      {
+        "seq": 6,
+        "ts": "2026-07-13T08:52:15.201008+00:00",
+        "actor": "executor:exec-1",
+        "actor_kind": "service",
+        "event_type": "execution.started",
+        "from_state": "EXECUTION_QUEUED",
+        "to_state": "EXECUTING",
+        "detail": "{\"plan_id\": \"PLAN-38f45571607f\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
+      },
+      {
+        "seq": 7,
+        "ts": "2026-07-13T08:52:15.351515+00:00",
+        "actor": "executor:exec-1",
+        "actor_kind": "service",
+        "event_type": "execution.applied",
+        "from_state": "EXECUTING",
+        "to_state": "VALIDATING",
+        "detail": "{\"applied_resources\": [{\"address\": \"...machine\", \"action\": \"restart\", \"outcome\": \"restarted\"}], \"outcome\": \"ok\"}"
+      },
+      {
+        "seq": 8,
+        "ts": "2026-07-13T08:52:15.352028+00:00",
+        "actor": "validator",
+        "actor_kind": "service",
+        "event_type": "operation.succeeded",
+        "from_state": "VALIDATING",
+        "to_state": "SUCCEEDED",
+        "detail": "{\"gates\": [{\"name\": \"V1_health\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V2_digest\", \"pass\": true, \"detail\": \"restart: version invariant\"}, {\"name\": \"V3_synthetic_lease\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V4_synthetic_task\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V8_audit_exists\", \"pass\": true, \"detail\": \"\"}]}"
+      }
+    ]
+  },
+  "OP-2026-a1198b": {
+    "operation": {
+      "id": "OP-2026-a1198b",
       "kind": "deploy",
       "level": "L3",
       "environment": "staging",
+      "tenant_id": "tenant-synthetic-1",
       "worker_id": "tac-analysis-worker-1",
       "intent": "deploy tac-analysis-worker-1 -> new digest",
       "state": "SUCCEEDED",
-      "current_plan_id": "PLAN-8e2261014fac",
+      "current_plan_id": "PLAN-311f850f3265",
       "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
       "idempotency_key": "idem-deploy-1",
       "initiating_user": "human:alice",
       "session_meta": "{\"via\": \"ai\", \"model\": \"claude\", \"session\": \"S1\"}",
       "version": 8,
-      "created_at": "2026-07-13T08:38:00.785669+00:00",
-      "updated_at": "2026-07-13T08:38:01.087530+00:00",
-      "expires_at": "2026-07-13T09:08:00.785675+00:00"
+      "created_at": "2026-07-13T08:52:14.197209+00:00",
+      "updated_at": "2026-07-13T08:52:14.498783+00:00",
+      "expires_at": "2026-07-13T09:22:14.197214+00:00"
     },
     "events": [
       {
         "seq": 1,
-        "ts": "2026-07-13T08:38:00.785704+00:00",
+        "ts": "2026-07-13T08:52:14.197244+00:00",
         "actor": "claude:planner",
         "actor_kind": "model",
         "event_type": "operation.created",
@@ -367,7 +238,7 @@
       },
       {
         "seq": 2,
-        "ts": "2026-07-13T08:38:00.785798+00:00",
+        "ts": "2026-07-13T08:52:14.197362+00:00",
         "actor": "operation-svc",
         "actor_kind": "service",
         "event_type": "operation.discovering",
@@ -377,7 +248,7 @@
       },
       {
         "seq": 3,
-        "ts": "2026-07-13T08:38:00.785847+00:00",
+        "ts": "2026-07-13T08:52:14.197407+00:00",
         "actor": "planner",
         "actor_kind": "service",
         "event_type": "operation.planning",
@@ -387,27 +258,27 @@
       },
       {
         "seq": 4,
-        "ts": "2026-07-13T08:38:00.786391+00:00",
+        "ts": "2026-07-13T08:52:14.197728+00:00",
         "actor": "policy",
         "actor_kind": "service",
         "event_type": "policy.passed",
         "from_state": "PLANNING",
         "to_state": "REVIEW_PENDING",
-        "detail": "{\"plan_id\": \"PLAN-8e2261014fac\"}"
+        "detail": "{\"plan_id\": \"PLAN-311f850f3265\"}"
       },
       {
         "seq": 5,
-        "ts": "2026-07-13T08:38:00.786577+00:00",
+        "ts": "2026-07-13T08:52:14.197874+00:00",
         "actor": "human:bob",
         "actor_kind": "human",
         "event_type": "operation.approved",
         "from_state": "REVIEW_PENDING",
         "to_state": "APPROVED",
-        "detail": "{\"approval_id\": \"APPROVAL-308b9777e3cb\", \"plan_id\": \"PLAN-8e2261014fac\", \"bound_plan_signature\": \"d8b4c2a278cc8034\\u2026\"}"
+        "detail": "{\"approval_id\": \"APPROVAL-de02948ea1ba\", \"plan_id\": \"PLAN-311f850f3265\", \"bound_plan_signature\": \"b8bc1eb28a015e84\\u2026\"}"
       },
       {
         "seq": 6,
-        "ts": "2026-07-13T08:38:00.786774+00:00",
+        "ts": "2026-07-13T08:52:14.198087+00:00",
         "actor": "operation-svc",
         "actor_kind": "service",
         "event_type": "operation.queued",
@@ -417,17 +288,17 @@
       },
       {
         "seq": 7,
-        "ts": "2026-07-13T08:38:00.786825+00:00",
+        "ts": "2026-07-13T08:52:14.198145+00:00",
         "actor": "executor:exec-1",
         "actor_kind": "service",
         "event_type": "execution.started",
         "from_state": "EXECUTION_QUEUED",
         "to_state": "EXECUTING",
-        "detail": "{\"plan_id\": \"PLAN-8e2261014fac\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
+        "detail": "{\"plan_id\": \"PLAN-311f850f3265\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
       },
       {
         "seq": 8,
-        "ts": "2026-07-13T08:38:01.087257+00:00",
+        "ts": "2026-07-13T08:52:14.498548+00:00",
         "actor": "executor:exec-1",
         "actor_kind": "service",
         "event_type": "execution.applied",
@@ -437,13 +308,156 @@
       },
       {
         "seq": 9,
-        "ts": "2026-07-13T08:38:01.087552+00:00",
+        "ts": "2026-07-13T08:52:14.498797+00:00",
         "actor": "validator",
         "actor_kind": "service",
         "event_type": "operation.succeeded",
         "from_state": "VALIDATING",
         "to_state": "SUCCEEDED",
         "detail": "{\"gates\": [{\"name\": \"V1_health\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V2_digest\", \"pass\": true, \"detail\": \"running==target\"}, {\"name\": \"V3_synthetic_lease\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V4_synthetic_task\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V5_no_unexpected_change\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V6_no_iam_expand\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V7_quota_ok\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V9_rollback_restorable\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V8_audit_exists\", \"pass\": true, \"detail\": \"\"}]}"
+      }
+    ]
+  },
+  "OP-2026-ffea91": {
+    "operation": {
+      "id": "OP-2026-ffea91",
+      "kind": "deploy",
+      "level": "L3",
+      "environment": "staging",
+      "tenant_id": "tenant-synthetic-1",
+      "worker_id": "tac-analysis-worker-1",
+      "intent": "deploy bad digest",
+      "state": "ROLLED_BACK",
+      "current_plan_id": "PLAN-d45fb4639843",
+      "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
+      "idempotency_key": "idem-deploy-bad",
+      "initiating_user": "human:alice",
+      "session_meta": "{\"via\": \"ai\"}",
+      "version": 11,
+      "created_at": "2026-07-13T08:52:14.498999+00:00",
+      "updated_at": "2026-07-13T08:52:15.101125+00:00",
+      "expires_at": "2026-07-13T09:22:14.499008+00:00"
+    },
+    "events": [
+      {
+        "seq": 1,
+        "ts": "2026-07-13T08:52:14.499045+00:00",
+        "actor": "claude:planner",
+        "actor_kind": "model",
+        "event_type": "operation.created",
+        "from_state": null,
+        "to_state": "CREATED",
+        "detail": "{\"intent\": \"deploy bad digest\", \"idempotency_key\": \"idem-deploy-bad\", \"initiating_user\": \"human:alice\", \"session_meta\": {\"via\": \"ai\"}}"
+      },
+      {
+        "seq": 2,
+        "ts": "2026-07-13T08:52:14.499119+00:00",
+        "actor": "operation-svc",
+        "actor_kind": "service",
+        "event_type": "operation.discovering",
+        "from_state": "CREATED",
+        "to_state": "DISCOVERING",
+        "detail": "{}"
+      },
+      {
+        "seq": 3,
+        "ts": "2026-07-13T08:52:14.499197+00:00",
+        "actor": "planner",
+        "actor_kind": "service",
+        "event_type": "operation.planning",
+        "from_state": "DISCOVERING",
+        "to_state": "PLANNING",
+        "detail": "{}"
+      },
+      {
+        "seq": 4,
+        "ts": "2026-07-13T08:52:14.499551+00:00",
+        "actor": "policy",
+        "actor_kind": "service",
+        "event_type": "policy.passed",
+        "from_state": "PLANNING",
+        "to_state": "REVIEW_PENDING",
+        "detail": "{}"
+      },
+      {
+        "seq": 5,
+        "ts": "2026-07-13T08:52:14.499643+00:00",
+        "actor": "human:bob",
+        "actor_kind": "human",
+        "event_type": "operation.approved",
+        "from_state": "REVIEW_PENDING",
+        "to_state": "APPROVED",
+        "detail": "{\"approval_id\": \"APPROVAL-8a18a268f8aa\", \"plan_id\": \"PLAN-d45fb4639843\", \"bound_plan_signature\": \"f3c6f2b30159f2fb\\u2026\"}"
+      },
+      {
+        "seq": 6,
+        "ts": "2026-07-13T08:52:14.499819+00:00",
+        "actor": "operation-svc",
+        "actor_kind": "service",
+        "event_type": "operation.queued",
+        "from_state": "APPROVED",
+        "to_state": "EXECUTION_QUEUED",
+        "detail": "{}"
+      },
+      {
+        "seq": 7,
+        "ts": "2026-07-13T08:52:14.499893+00:00",
+        "actor": "executor:exec-1",
+        "actor_kind": "service",
+        "event_type": "execution.started",
+        "from_state": "EXECUTION_QUEUED",
+        "to_state": "EXECUTING",
+        "detail": "{\"plan_id\": \"PLAN-d45fb4639843\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
+      },
+      {
+        "seq": 8,
+        "ts": "2026-07-13T08:52:14.800347+00:00",
+        "actor": "executor:exec-1",
+        "actor_kind": "service",
+        "event_type": "execution.applied",
+        "from_state": "EXECUTING",
+        "to_state": "VALIDATING",
+        "detail": "{\"applied_resources\": [{\"address\": \"module.workers.tac_analysis_worker.machine\", \"action\": \"update\", \"outcome\": \"updated\"}], \"outcome\": \"ok\"}"
+      },
+      {
+        "seq": 9,
+        "ts": "2026-07-13T08:52:14.800638+00:00",
+        "actor": "validator",
+        "actor_kind": "service",
+        "event_type": "validation.failed",
+        "from_state": "VALIDATING",
+        "to_state": "FAILED",
+        "detail": "{\"gates\": [{\"name\": \"V1_health\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V2_digest\", \"pass\": true, \"detail\": \"running==target\"}, {\"name\": \"V3_synthetic_lease\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V4_synthetic_task\", \"pass\": false, \"detail\": \"\"}, {\"name\": \"V5_no_unexpected_change\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V6_no_iam_expand\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V7_quota_ok\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V9_rollback_restorable\", \"pass\": true, \"detail\": \"\"}, {\"name\": \"V8_audit_exists\", \"pass\": true, \"detail\": \"\"}]}"
+      },
+      {
+        "seq": 10,
+        "ts": "2026-07-13T08:52:14.800773+00:00",
+        "actor": "operation-svc",
+        "actor_kind": "service",
+        "event_type": "rollback.pending",
+        "from_state": "FAILED",
+        "to_state": "ROLLBACK_PENDING",
+        "detail": "{\"target\": {\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}}"
+      },
+      {
+        "seq": 11,
+        "ts": "2026-07-13T08:52:14.800822+00:00",
+        "actor": "executor:exec-1",
+        "actor_kind": "service",
+        "event_type": "rollback.started",
+        "from_state": "ROLLBACK_PENDING",
+        "to_state": "ROLLING_BACK",
+        "detail": "{\"target\": {\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}}"
+      },
+      {
+        "seq": 12,
+        "ts": "2026-07-13T08:52:15.101220+00:00",
+        "actor": "validator",
+        "actor_kind": "service",
+        "event_type": "operation.rolled_back",
+        "from_state": "ROLLING_BACK",
+        "to_state": "ROLLED_BACK",
+        "detail": "{\"restored_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
       }
     ]
   }

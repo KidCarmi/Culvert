@@ -1,26 +1,27 @@
 {
   "operation": {
-    "id": "OP-2026-9097f8",
+    "id": "OP-2026-a1198b",
     "kind": "deploy",
     "level": "L3",
     "environment": "staging",
+    "tenant_id": "tenant-synthetic-1",
     "worker_id": "tac-analysis-worker-1",
     "intent": "deploy tac-analysis-worker-1 -> new digest",
     "state": "SUCCEEDED",
-    "current_plan_id": "PLAN-8e2261014fac",
+    "current_plan_id": "PLAN-311f850f3265",
     "rollback_target": "{\"image_digest\": \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"commit_sha\": \"prev-commit\"}",
     "idempotency_key": "idem-deploy-1",
     "initiating_user": "human:alice",
     "session_meta": "{\"via\": \"ai\", \"model\": \"claude\", \"session\": \"S1\"}",
     "version": 8,
-    "created_at": "2026-07-13T08:38:00.785669+00:00",
-    "updated_at": "2026-07-13T08:38:01.087530+00:00",
-    "expires_at": "2026-07-13T09:08:00.785675+00:00"
+    "created_at": "2026-07-13T08:52:14.197209+00:00",
+    "updated_at": "2026-07-13T08:52:14.498783+00:00",
+    "expires_at": "2026-07-13T09:22:14.197214+00:00"
   },
   "events": [
     {
       "seq": 1,
-      "ts": "2026-07-13T08:38:00.785704+00:00",
+      "ts": "2026-07-13T08:52:14.197244+00:00",
       "actor": "claude:planner",
       "actor_kind": "model",
       "event_type": "operation.created",
@@ -30,7 +31,7 @@
     },
     {
       "seq": 2,
-      "ts": "2026-07-13T08:38:00.785798+00:00",
+      "ts": "2026-07-13T08:52:14.197362+00:00",
       "actor": "operation-svc",
       "actor_kind": "service",
       "event_type": "operation.discovering",
@@ -40,7 +41,7 @@
     },
     {
       "seq": 3,
-      "ts": "2026-07-13T08:38:00.785847+00:00",
+      "ts": "2026-07-13T08:52:14.197407+00:00",
       "actor": "planner",
       "actor_kind": "service",
       "event_type": "operation.planning",
@@ -50,27 +51,27 @@
     },
     {
       "seq": 4,
-      "ts": "2026-07-13T08:38:00.786391+00:00",
+      "ts": "2026-07-13T08:52:14.197728+00:00",
       "actor": "policy",
       "actor_kind": "service",
       "event_type": "policy.passed",
       "from_state": "PLANNING",
       "to_state": "REVIEW_PENDING",
-      "detail": "{\"plan_id\": \"PLAN-8e2261014fac\"}"
+      "detail": "{\"plan_id\": \"PLAN-311f850f3265\"}"
     },
     {
       "seq": 5,
-      "ts": "2026-07-13T08:38:00.786577+00:00",
+      "ts": "2026-07-13T08:52:14.197874+00:00",
       "actor": "human:bob",
       "actor_kind": "human",
       "event_type": "operation.approved",
       "from_state": "REVIEW_PENDING",
       "to_state": "APPROVED",
-      "detail": "{\"approval_id\": \"APPROVAL-308b9777e3cb\", \"plan_id\": \"PLAN-8e2261014fac\", \"bound_plan_signature\": \"d8b4c2a278cc8034\\u2026\"}"
+      "detail": "{\"approval_id\": \"APPROVAL-de02948ea1ba\", \"plan_id\": \"PLAN-311f850f3265\", \"bound_plan_signature\": \"b8bc1eb28a015e84\\u2026\"}"
     },
     {
       "seq": 6,
-      "ts": "2026-07-13T08:38:00.786774+00:00",
+      "ts": "2026-07-13T08:52:14.198087+00:00",
       "actor": "operation-svc",
       "actor_kind": "service",
       "event_type": "operation.queued",
@@ -80,17 +81,17 @@
     },
     {
       "seq": 7,
-      "ts": "2026-07-13T08:38:00.786825+00:00",
+      "ts": "2026-07-13T08:52:14.198145+00:00",
       "actor": "executor:exec-1",
       "actor_kind": "service",
       "event_type": "execution.started",
       "from_state": "EXECUTION_QUEUED",
       "to_state": "EXECUTING",
-      "detail": "{\"plan_id\": \"PLAN-8e2261014fac\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
+      "detail": "{\"plan_id\": \"PLAN-311f850f3265\", \"minted_cred\": \"scoped ttl=15m (no value logged)\"}"
     },
     {
       "seq": 8,
-      "ts": "2026-07-13T08:38:01.087257+00:00",
+      "ts": "2026-07-13T08:52:14.498548+00:00",
       "actor": "executor:exec-1",
       "actor_kind": "service",
       "event_type": "execution.applied",
@@ -100,7 +101,7 @@
     },
     {
       "seq": 9,
-      "ts": "2026-07-13T08:38:01.087552+00:00",
+      "ts": "2026-07-13T08:52:14.498797+00:00",
       "actor": "validator",
       "actor_kind": "service",
       "event_type": "operation.succeeded",
