@@ -244,6 +244,10 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 		Detail: fmt.Sprintf("SSL inspection auto-disabled (profile=%s reason=%s)", safeScope, reason),
 		Source: "proxy",
 	})
+	// F4: feed the promotion-rate detector. A single abnormal-rate alert fires on
+	// a threshold crossing (poisoning-campaign signal) — the aggregate the
+	// per-host alert above cannot provide.
+	maybeFireAutoExcludeSurge(scopeName)
 }
 
 // autoExcludeRescueCounter counts LIVE-RESCUE events: sessions transparently
