@@ -63,9 +63,15 @@ Every file related to the extraction, classified. Counts from `git ls-files` at 
 blob SHAs ⇒ byte-identical content.)
 
 ## Recovery
-- Recovery tag **`pre-tac-extraction`** created on this branch **before** cleanup;
-  its tree still contains the full nested source directories. Restore with
-  `git reset --hard pre-tac-extraction`.
+- Recovery tag **`pre-tac-extraction`** was created on this branch **before**
+  cleanup (its tree still contains the full nested source directories). The
+  git proxy in the migration environment rejects tag pushes (HTTP 403 — it only
+  accepts pushes to the designated branch), so the tag is **local-only**.
+- **Durable recovery does not depend on the tag:** the pre-cleanup commit
+  **`2ca7400`** is the *parent* of the cleanup commit and is therefore present in
+  the **pushed** branch history. Restore the full nested tree with
+  `git checkout 2ca7400 -- tac-platform tac-infra docs/support/infra-ops`
+  (or `git reset --hard 2ca7400` to roll the whole branch back).
 - The extracted repositories are additive; deleting them has no effect on Culvert.
 - Culvert `main` was never touched; this branch was never force-pushed.
 
