@@ -137,6 +137,44 @@ func TestImport_UpsertPreservesPosition(t *testing.T) {
 	}
 }
 
+// TestImport_UpsertSurvivesPriorityCollision guards the reorder-idempotency
+// fix (adversarial Finding 1 / Codex P1): a matched upsert must succeed even
+// when the BACKUP's priority now collides with a different live rule, because
+// UpdateByID discards the payload priority and keeps the live position. Before
+// the fix the import validated the payload priority against the live set and
+// spuriously skipped the content update.
+func TestImport_UpsertSurvivesPriorityCollision(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "a", Priority: 1, Action: ActionAllow},
+		{Name: "b", Priority: 2, Action: ActionAllow},
+	})
+	a := findRuleByName(t, "a")
+	b := findRuleByName(t, "b")
+	if a.Priority == b.Priority {
+		t.Fatal("seed priorities collided; test needs distinct slots")
+	}
+
+	// Re-import rule "a" (matched by id) but with b's priority in the payload —
+	// a collision with a DIFFERENT live rule. The upsert must still apply.
+	importMergeRules(t, []map[string]any{
+		{"name": "a", "id": a.ID, "priority": b.Priority, "action": "Drop"},
+	})
+
+	g := policyStore.findByIDCopy(a.ID)
+	if g == nil || g.Action != ActionDrop {
+		t.Fatalf("upsert was skipped on payload-priority collision: %+v", g)
+	}
+	if g.Priority != a.Priority {
+		t.Errorf("upsert changed priority to %d; want live %d", g.Priority, a.Priority)
+	}
+	// b untouched, no duplicates.
+	if countRulesNamed(t, "a") != 1 || countRulesNamed(t, "b") != 1 {
+		t.Errorf("rule count drifted: a=%d b=%d", countRulesNamed(t, "a"), countRulesNamed(t, "b"))
+	}
+}
+
 // TestCountImportUpserts: the preview split helper reports updates vs adds.
 func TestCountImportUpserts(t *testing.T) {
 	snapshotPolicyStoreForTest(t)

@@ -796,6 +796,49 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 	})
 }
 
+// importPolicyRules applies the backup's policy rules under the given mode.
+// Replace mode swaps the whole set; merge mode UPSERTS by identity — match by
+// stable ULID first (idempotent re-import), then a one-time name fallback for
+// pre-ID / hand-authored backups, else create fresh — so a re-import does not
+// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1).
+func importPolicyRules(b *configBackup, replaceMode bool) {
+	if replaceMode && len(b.PolicyRules) > 0 {
+		policyStore.ReplaceAll(b.PolicyRules)
+		return
+	}
+	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
+	for i := range b.PolicyRules {
+		rule := b.PolicyRules[i]
+		existing := policyStore.matchForImport(rule)
+		editPriority := -1
+		if existing != nil {
+			// UpdateByID keeps the live rule's position and DISCARDS the payload
+			// priority — so validate against the priority it will actually apply,
+			// not the backup's. Otherwise a re-import after the rulebase was
+			// reordered (payload priority now owned by a different live rule)
+			// would spuriously fail the priority-uniqueness check and silently
+			// drop the content update, defeating idempotency.
+			rule.Priority = existing.Priority
+			editPriority = existing.Priority
+		}
+		if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
+			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
+			continue
+		}
+		if existing == nil {
+			policyStore.Add(rule)
+			continue
+		}
+		rule.ID = existing.ID // carry identity for the name-match upsert path
+		if !policyStore.UpdateByID(existing.ID, rule) {
+			// The matched rule vanished between match and update (concurrent
+			// delete / import of the same rule). Don't silently drop the
+			// incoming content — add it fresh rather than lose it.
+			policyStore.Add(rule)
+		}
+	}
+}
+
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
@@ -852,38 +895,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// groups reference categories by name).
 	importCategoryTaxonomy(&b, replaceMode)
 
-	// Policy rules — validate each before importing.
-	if replaceMode && len(b.PolicyRules) > 0 {
-		policyStore.ReplaceAll(b.PolicyRules)
-	} else {
-		// Merge mode UPSERTS by identity so an idempotent re-import does not
-		// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1): match by stable
-		// ULID first, then a one-time name fallback for pre-ID backups, else
-		// create fresh. matchForImport returns the existing rule (or nil for a
-		// new one); on a match we exclude that rule's slot from validation
-		// (editPriority) so re-importing the same rule never trips its own
-		// name/priority uniqueness check, and UpdateByID preserves the live
-		// rule's position + hit history.
-		// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
-		for i := range b.PolicyRules {
-			rule := b.PolicyRules[i]
-			existing := policyStore.matchForImport(rule)
-			editPriority := -1
-			if existing != nil {
-				editPriority = existing.Priority
-			}
-			if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
-				logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
-				continue
-			}
-			if existing != nil {
-				rule.ID = existing.ID // carry identity for the name-match upsert path
-				policyStore.UpdateByID(existing.ID, rule)
-			} else {
-				policyStore.Add(rule)
-			}
-		}
-	}
+	// Policy rules — replace or upsert-by-identity (extracted to keep the
+	// handler under the nestif complexity threshold).
+	importPolicyRules(&b, replaceMode)
 	policyStore.Save()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
