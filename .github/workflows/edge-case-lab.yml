@@ -37,12 +37,26 @@ on:
   pull_request:
     branches: [main]
     paths:
+      # The smoke suite guards first-match, default-deny, tenant isolation, TLS
+      # inspection, SSL-bypass, file-blocking-under-TLS, threat-intel, schedule,
+      # persistence, auth-boundary, decision-trace, category, and wildcard
+      # contracts — so the filter covers every module those scenarios exercise,
+      # not just the core proxy files. A gap here means a regression in one of
+      # these modules would ship with no red PR check.
       - "proxy*.go"
       - "policy.go"
       - "socks5.go"
       - "store.go"
       - "ui_policy.go"
+      - "auth.go"
+      - "authpolicy.go"
       - "internal/ssrf/**"
+      - "internal/sslbypass/**"
+      - "internal/fileblock/**"
+      - "internal/threatfeed/**"
+      - "internal/blocklist/**"
+      - "internal/urlcat/**"
+      - "internal/catdb/**"
       - "edge-case-lab/**"
       - ".github/workflows/edge-case-lab.yml"
   schedule:
