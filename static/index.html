@@ -5161,6 +5161,7 @@ function loadCatGroupDropdown() {
 
 // ── Decryption Profiles ───────────────────────────────────────────────────
 let _decProfiles = [];
+let _editingDecProfId = null; // stable ID of the profile being edited (rename-safe addressing); null for new/legacy
 
 async function fetchDecProfiles() {
   try {
@@ -5207,6 +5208,7 @@ function renderDecProfiles() {
 
 function decProfFormReset() {
   document.getElementById('dp-editing').value = '';
+  _editingDecProfId = null;
   document.getElementById('dp-name').value = '';
   document.getElementById('dp-name').disabled = false;
   ['dp-http2','dp-cert','dp-onunsup','dp-oninspecterr','dp-mintls','dp-maxtls'].forEach(id => document.getElementById(id).value = '');
@@ -5230,6 +5232,7 @@ function editDecProf(name) {
   const p = _decProfiles.find(x => x.name === name);
   if (!p) return;
   decProfFormReset();
+  _editingDecProfId = p.id || null; // after reset (reset clears it) — prefer id addressing on save
   document.getElementById('dp-editing').value = p.name;
   document.getElementById('dp-name').value = p.name;
   document.getElementById('dp-name').disabled = true; // name is the identity/reference
@@ -5263,8 +5266,10 @@ async function saveDecProf() {
   const stall = parseInt(document.getElementById('dp-stall').value, 10);
   if (!isNaN(stall) && stall > 0) body.stallTimeoutSecs = stall;
   const editing = document.getElementById('dp-editing').value !== '';
+  // On edit, address by stable ID (rename-safe) when the profile has one.
+  const q = (editing && _editingDecProfId) ? '?id=' + encodeURIComponent(_editingDecProfId) : '';
   try {
-    await api('/api/decryption-profiles', {
+    await api('/api/decryption-profiles' + q, {
       method: editing ? 'PUT' : 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body)
@@ -5277,8 +5282,11 @@ async function saveDecProf() {
 
 async function deleteDecProf(name) {
   if (!await confirmAction('Delete Decryption Profile', `Delete profile "${name}"? Rules referencing it fall back to their inline SSL settings.`)) return;
+  // Address by stable ID (rename-safe) when available; fall back to name.
+  const p = _decProfiles.find(x => x.name === name);
+  const addr = (p && p.id) ? 'id=' + encodeURIComponent(p.id) : 'name=' + encodeURIComponent(name);
   try {
-    await api('/api/decryption-profiles?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    await api('/api/decryption-profiles?' + addr, { method: 'DELETE' });
     toast('Profile deleted', 'success');
     fetchDecProfiles();
   } catch(e) { if (!handleDeleteError(e, 'decryption profile')) toast('Error: ' + e.message, 'error'); }

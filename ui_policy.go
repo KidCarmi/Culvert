@@ -619,6 +619,24 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		// Prefer stable-ID addressing (rename-safe) when ?id= is supplied; fall
+		// back to name for legacy clients. Mirrors the policy/category-group path.
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			before := globalDecryptionProfiles.GetByID(id)
+			if before == nil {
+				http.Error(w, "profile not found", http.StatusNotFound)
+				return
+			}
+			if err := globalDecryptionProfiles.UpdateByID(id, p); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			globalDecryptionProfiles.Save()
+			auditEventDiffID(r, "decryption-profile.update", before.Name, id, "", nil, nil)
+			saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
+			jsonOK(w, map[string]any{"ok": true})
+			return
+		}
 		if err := globalDecryptionProfiles.Update(p); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -630,6 +648,28 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// Stable-ID addressing (rename-safe); resolve to the current name for the
+		// reference-integrity check + audit, then delete by id.
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			before := globalDecryptionProfiles.GetByID(id)
+			if before == nil {
+				http.Error(w, "profile not found", http.StatusNotFound)
+				return
+			}
+			if deleteBlockedByReferences(w, r, "decryption-profile", before.Name, "decryption-profile.remove.blocked") {
+				return
+			}
+			name, err := globalDecryptionProfiles.DeleteByID(id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			globalDecryptionProfiles.Save()
+			auditEventDiffID(r, "decryption-profile.delete", name, id, "", nil, nil)
+			saveConfigVersion(sessionAdmin(r), "decryption-profile.delete")
+			jsonOK(w, map[string]any{"ok": true})
 			return
 		}
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
