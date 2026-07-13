@@ -5856,7 +5856,8 @@ async function loadConfigVersions() {
       const prev = i < versions.length - 1 ? versions[i + 1].version : null;
       const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" data-click="diffConfigVersions" data-arg="${prev}" data-arg2="${v.version}">Diff</button>` : '';
       const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" data-click="rollbackConfigVersion" data-arg="${v.version}">Rollback</button>`;
-      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${escHtml(v.action)}</td><td>${escHtml(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
+      const note = v.note ? `<div style="font-size:.72rem;color:var(--muted);margin-top:2px">&ldquo;${escHtml(v.note)}&rdquo;</div>` : '';
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${escHtml(v.action)}${note}</td><td>${escHtml(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
@@ -7696,8 +7697,16 @@ function renderDraftState(st) {
   if (st.active) {
     const n = st.pendingCount || 0;
     document.getElementById('pol-draft-count').textContent = n + (n === 1 ? ' change' : ' changes');
+    // Multi-admin awareness (S3): warn when the open draft belongs to someone
+    // else — committing/discarding would act on THEIR staged changes.
     const actor = document.getElementById('pol-draft-actor');
-    if (actor) actor.textContent = st.actor ? ('opened by ' + st.actor) : '';
+    if (actor) {
+      const other = st.actor && uiUsername && st.actor !== uiUsername;
+      actor.textContent = st.actor
+        ? (other ? '⚠ opened by ' + st.actor + ' — committing/discarding acts on their staged changes' : 'opened by you')
+        : '';
+      actor.style.color = other ? 'var(--warn)' : 'var(--muted)';
+    }
     bar.style.display = 'flex';
   } else {
     bar.style.display = 'none';
@@ -7745,9 +7754,17 @@ async function polCommitDraft() {
   try { st = await api('/api/policy/draft'); }
   catch (e) { toast('Could not load draft: ' + e.message, 'error'); return; }
   if (!st.active) { toast('No staged changes to commit', 'error'); await fetchDraftState(); return; }
+  // Advisory shadow warning (G4): rules the candidate order makes unreachable.
+  let shadowWarn = '';
+  if (Array.isArray(st.shadows) && st.shadows.length) {
+    const s = st.shadows;
+    shadowWarn = '⚠ ' + s.length + ' possibly-shadowed rule' + (s.length === 1 ? '' : 's') + ': ' +
+      s.map(x => x.rule + ' (by ' + x.shadowedBy + ')').join(', ') +
+      ' — may never match; verify with the tester.  ';
+  }
   const comment = await promptAction({
     title: 'Commit policy changes',
-    msg: polDraftDiffSummary(st.diff) + '  —  Committing activates these rules for live traffic. A comment is required (recorded in the audit log).',
+    msg: shadowWarn + polDraftDiffSummary(st.diff) + '  —  Committing activates these rules for live traffic. A comment is required (recorded in the audit log).',
     label: 'Commit comment',
     placeholder: 'Why these changes?',
     okLabel: 'Commit',

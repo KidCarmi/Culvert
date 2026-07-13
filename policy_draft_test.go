@@ -381,6 +381,70 @@ func TestDraft_Commit_VersionPrecondition(t *testing.T) {
 	}
 }
 
+// TestDetectShadowedRules covers the commit-time shadow advisory (G4).
+func TestDetectShadowedRules(t *testing.T) {
+	// A catch-all (all fields empty) shadows a later specific rule.
+	got := detectShadowedRules([]PolicyRule{
+		{Name: "catchall", Priority: 1, Action: ActionAllow},
+		{Name: "specific", Priority: 2, DestFQDN: "example.com", Action: ActionAllow},
+	})
+	if len(got) != 1 || got[0].Rule != "specific" || got[0].ShadowedBy != "catchall" {
+		t.Fatalf("want [specific by catchall], got %+v", got)
+	}
+	// Distinct FQDNs — no shadow.
+	if g := detectShadowedRules([]PolicyRule{
+		{Name: "a", Priority: 1, DestFQDN: "a.com", Action: ActionAllow},
+		{Name: "b", Priority: 2, DestFQDN: "b.com", Action: ActionAllow},
+	}); len(g) != 0 {
+		t.Errorf("distinct FQDNs must not shadow: %+v", g)
+	}
+	// A scheduled earlier rule is not always-active → cannot provably shadow.
+	if g := detectShadowedRules([]PolicyRule{
+		{Name: "sched", Priority: 1, Schedule: &PolicySchedule{}, Action: ActionAllow},
+		{Name: "any", Priority: 2, Action: ActionAllow},
+	}); len(g) != 0 {
+		t.Errorf("scheduled rule must not shadow: %+v", g)
+	}
+	// Wildcard FQDN covers a subdomain.
+	if g := detectShadowedRules([]PolicyRule{
+		{Name: "wild", Priority: 1, DestFQDN: "*.example.com", Action: ActionAllow},
+		{Name: "sub", Priority: 2, DestFQDN: "api.example.com", Action: ActionAllow},
+	}); len(g) != 1 || g[0].Rule != "sub" {
+		t.Errorf("wildcard should shadow subdomain: %+v", g)
+	}
+	// A disabled earlier rule cannot shadow.
+	no := false
+	if g := detectShadowedRules([]PolicyRule{
+		{Name: "off", Priority: 1, Enabled: &no, Action: ActionAllow},
+		{Name: "reachable", Priority: 2, DestFQDN: "x.com", Action: ActionAllow},
+	}); len(g) != 0 {
+		t.Errorf("disabled rule must not shadow: %+v", g)
+	}
+}
+
+// TestDraft_CommitPersistsCommentNote: the commit comment is recorded as the
+// config-version note (S3 "why this change" in the timeline).
+func TestDraft_CommitPersistsCommentNote(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	createRuleViaAPI(t, "r1", "")
+
+	w := httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit", map[string]any{"comment": "reason-xyz"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("commit = %d (%s)", w.Code, w.Body.String())
+	}
+	found := false
+	for _, v := range configVersions.List() {
+		if v.Action == "policy.commit" && v.Note == "reason-xyz" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("commit comment was not persisted as the config-version note")
+	}
+}
+
 // TestDraft_GetState surfaces the mode + pending count.
 func TestDraft_GetState(t *testing.T) {
 	draftTestSetup(t)

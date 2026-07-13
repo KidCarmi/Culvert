@@ -369,6 +369,94 @@ func afterPolicyWrite(r *http.Request, action string) {
 	saveConfigVersion(sessionAdmin(r), action)
 }
 
+// ── Commit-time shadow detection (G4, advisory) ──────────────────────────────
+
+// shadowFinding names an access rule an earlier always-active rule provably
+// eclipses (the earlier rule will always match first, so this one can never fire).
+type shadowFinding struct {
+	Rule       string `json:"rule"`       // the shadowed rule's name
+	ShadowedBy string `json:"shadowedBy"` // the earlier rule that covers it
+}
+
+// detectShadowedRules flags EXACTLY-decidable shadowing among Stage-2 access
+// rules (priority order): an earlier ENABLED, always-active (no schedule) rule A
+// shadows rule B when every request B could match provably also matches A. This
+// is the backend counterpart of the client-side polShadowHints advisory (M3 S5 /
+// G4), run on the candidate at commit time. Fields cover by identity or A-empty
+// (matches everything); FQDN globs only for the provable '*.suffix'-covers-
+// 'x.suffix' shape; countries by superset. CIDR containment, category-group
+// expansion, and schedule overlap are deliberately NOT attempted, so this never
+// claims completeness — it is advisory ("verify with the tester"), never blocking.
+// Auth (Stage-1) rules are excluded; they have their own diagnostics.
+func detectShadowedRules(rules []PolicyRule) []shadowFinding {
+	covers := func(a, b string) bool { return a == "" || a == b }
+	fqdnCovers := func(a, b string) bool {
+		if a == "" || a == b {
+			return true
+		}
+		if strings.HasPrefix(a, "*.") {
+			return b != "" && b != a[2:] && strings.HasSuffix(b, a[1:]) // a[1:] = ".suffix"
+		}
+		return false
+	}
+	countryCovers := func(a, b []string) bool {
+		if len(a) == 0 {
+			return true
+		}
+		if len(b) == 0 {
+			return false
+		}
+		for _, c := range b {
+			if !strSliceContains(a, c) {
+				return false
+			}
+		}
+		return true
+	}
+	// Access rules, enabled only, in the (priority-sorted) input order.
+	act := make([]PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) != ruleTypeAccess {
+			continue
+		}
+		if rules[i].Enabled != nil && !*rules[i].Enabled {
+			continue
+		}
+		act = append(act, rules[i])
+	}
+	var out []shadowFinding
+	for j := 1; j < len(act); j++ {
+		b := act[j]
+		for i := 0; i < j; i++ {
+			a := act[i]
+			if a.Schedule != nil {
+				continue // A must be always-active to provably cover B
+			}
+			if covers(a.SourceIP, b.SourceIP) &&
+				covers(a.SourceIdentity, b.SourceIdentity) &&
+				covers(a.SourceGroup, b.SourceGroup) &&
+				covers(a.AuthSource, b.AuthSource) &&
+				fqdnCovers(a.DestFQDN, b.DestFQDN) &&
+				covers(string(a.DestCategory), string(b.DestCategory)) &&
+				covers(a.DestCategoryGroup, b.DestCategoryGroup) &&
+				countryCovers(a.DestCountry, b.DestCountry) {
+				out = append(out, shadowFinding{Rule: b.Name, ShadowedBy: a.Name})
+				break
+			}
+		}
+	}
+	return out
+}
+
+func strSliceContains(s []string, v string) bool {
+	for i := range s {
+		if s[i] == v {
+			return true
+		}
+	}
+	return false
+}
+
 // ── HTTP handlers ──────────────────────────────────────────────────────────
 
 // apiPolicyDraft — GET the draft state + diff + mode; PUT sets RequireCommit.
@@ -394,6 +482,9 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 			resp["diff"] = d
 			resp["pendingCount"] = d.total()
 			resp["version"] = ver
+			// Advisory shadow warnings over the CANDIDATE (what will go live),
+			// so the operator sees them before committing (G4).
+			resp["shadows"] = detectShadowedRules(policyDraft.candidateList())
 		}
 		jsonOK(w, resp)
 
@@ -485,7 +576,9 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	actor := sessionAdmin(r)
 	detail := commitDetail(diff, comment)
 	auditEvent(r, "policy.commit", actor, detail)
-	saveConfigVersion(actor, "policy.commit")
+	// Persist the commit comment into the config-version timeline (S3): the
+	// version records WHY the rulebase changed, alongside the rollback snapshot.
+	saveConfigVersionNote(actor, "policy.commit", comment)
 	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
 	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
 }

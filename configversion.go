@@ -101,6 +101,14 @@ func captureConfigBackup() *configBackup {
 var saveConfigVersionMu sync.Mutex
 
 func saveConfigVersion(actor, action string) {
+	saveConfigVersionNote(actor, action, "")
+}
+
+// saveConfigVersionNote is saveConfigVersion with an optional free-text note
+// recorded in the version metadata — used by the policy-draft commit path to
+// persist the commit comment into the config-version timeline ("why this
+// change"), so it survives alongside the rollback snapshot.
+func saveConfigVersionNote(actor, action, note string) {
 	saveConfigVersionMu.Lock()
 	defer saveConfigVersionMu.Unlock()
 
@@ -110,7 +118,7 @@ func saveConfigVersion(actor, action string) {
 		logger.Printf("ConfigVersion: marshal error: %v", err)
 		return
 	}
-	if _, err := configVersions.Save(actor, action, snap.ExportedAt, raw); err != nil {
+	if _, err := configVersions.SaveWithNote(actor, action, snap.ExportedAt, note, raw); err != nil {
 		logger.Printf("ConfigVersion: write error: %v", err)
 	}
 }
