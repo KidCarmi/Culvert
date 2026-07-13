@@ -611,6 +611,51 @@ func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
 	return nil
 }
 
+// matchForImport resolves an incoming (imported) rule to an existing rule for
+// upsert-on-import (POLICY-ARCHITECTURE-FUTURE §1). Match order: (1) stable
+// ULID when the incoming rule carries one — idempotent re-import, the true
+// migration case; (2) a one-time name-match fallback for pre-ID or
+// hand-authored backups that never carried an id. Returns nil when the rule is
+// new (the caller Adds it, preserving its carried id or minting a fresh one).
+// Returns a COPY; callers address the live rule via UpdateByID(match.ID, …).
+// Names are unique across the whole store (validatePolicyRule enforces it over
+// both rule types), so the name fallback can never be ambiguous.
+func (ps *PolicyStore) matchForImport(r PolicyRule) *PolicyRule {
+	if m := ps.findByIDCopy(r.ID); m != nil {
+		return m
+	}
+	if r.Name == "" {
+		return nil
+	}
+	rules := ps.List()
+	for i := range rules {
+		if strings.EqualFold(rules[i].Name, r.Name) {
+			r2 := rules[i]
+			return &r2
+		}
+	}
+	return nil
+}
+
+// countImportUpserts reports how many of the incoming rules would UPDATE an
+// existing rule (matched by matchForImport) versus be ADDED fresh, under
+// merge-import upsert semantics. Read-only — used by the import preview to
+// report the real split instead of a misleading "add N" when some incoming
+// rules are re-imports. Computed against current store state: for a well-formed
+// export (unique ids and names — a store invariant at export time) this equals
+// the progressive apply exactly; only a hand-crafted backup with intra-file
+// duplicates could diverge, and then only in the displayed split.
+func (ps *PolicyStore) countImportUpserts(incoming []PolicyRule) (updates, adds int) {
+	for i := range incoming {
+		if ps.matchForImport(incoming[i]) != nil {
+			updates++
+		} else {
+			adds++
+		}
+	}
+	return updates, adds
+}
+
 // Reorder reassigns priorities according to the provided ordered list of old
 // priorities. The caller provides priorities in the desired new order (index 0
 // becomes priority 1, etc.). Returns false if lengths mismatch.
