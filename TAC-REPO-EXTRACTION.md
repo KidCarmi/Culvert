@@ -1,6 +1,6 @@
 # TAC Repository Extraction — Migration Record
 
-- **Status:** IN PROGRESS (Phase 1 inventory committed before any repository mutation).
+- **Status:** COMPLETE (all sandbox-runnable gates passed; nested directories replaced with pointer stubs; Culvert build confirmed unaffected).
 - **Source:** `KidCarmi/Culvert`, branch `claude/culvert-tac-support-framework-vf4plr`, commit `2f0289533b2606ded4fde42bd0078600305d46e8` (recorded before extraction).
 - **Destinations:** `KidCarmi/tac-platform` (executable TAC product code) · `KidCarmi/tac-infrastructure` (desired infrastructure state).
 - **Method:** history-preserving extraction with `git filter-repo` on separate working clones. Culvert history is never rewritten or force-pushed. Nested copies are **not** removed from this branch until every migration gate passes (Phase 7).
@@ -42,14 +42,32 @@ Every file related to the extraction, classified. Counts from `git ls-files` at 
 
 ---
 
-## Commit mapping (filled in as phases complete)
+## Commit mapping
 
-| Item | Source commit | Destination commit |
+| Item | Source (Culvert) | Destination |
 |---|---|---|
-| Inventory record (this file) | (this commit) | — |
-| tac-platform extraction | `2f02895…` | _recorded in tac-platform/HISTORY-MIGRATION.md_ |
-| tac-infrastructure extraction | `2f02895…` | _recorded in tac-infrastructure/HISTORY-MIGRATION.md_ |
-| Culvert cleanup | _Phase 7_ | — |
+| Inventory record (this file) | `2ca7400` | — |
+| tac-platform extraction (preserved history) | `2f02895` | `KidCarmi/tac-platform` root `8bf03ca` → `9744cbf` (7 commits, original authorship) |
+| tac-platform initialization (module path, PG schema isolation, scaffolding) | — | `KidCarmi/tac-platform` `106dbdf` (main HEAD) |
+| tac-infrastructure extraction (preserved history) | `2f02895` | `KidCarmi/tac-infrastructure` `d9fdaa6` (1 commit, original authorship — only ever in one commit; not squashed) |
+| tac-infrastructure initialization (structure, provenance pinning, CI) | — | `KidCarmi/tac-infrastructure` `b88960a` (main HEAD) |
+| Culvert cleanup (this commit) | _this commit_ | replaces `tac-platform/`, `tac-infra/`, `docs/support/infra-ops/` with pointer stubs |
+
+### Byte-faithfulness proof (Git blob-SHA equality — stronger than diff)
+| Extracted repo | Source blobs (Culvert @HEAD) | Destination blobs (pre-init commit) | Match |
+|---|---|---|---|
+| tac-platform | `tac-platform/` ∪ `docs/support/infra-ops/` = `c6246447…` | `@9744cbf` = `c6246447…` | ✅ identical |
+| tac-infrastructure | `tac-infra/` = `8636a25d…` | `@d9fdaa6` = `8636a25d…` | ✅ identical |
+
+(Aggregate = `sha256` of the sorted list of every file's Git blob SHA. Identical
+blob SHAs ⇒ byte-identical content.)
+
+## Recovery
+- Recovery tag **`pre-tac-extraction`** created on this branch **before** cleanup;
+  its tree still contains the full nested source directories. Restore with
+  `git reset --hard pre-tac-extraction`.
+- The extracted repositories are additive; deleting them has no effect on Culvert.
+- Culvert `main` was never touched; this branch was never force-pushed.
 
 ## Rollback (fully reversible)
 1. The nested `tac-platform/` and `tac-infra/` directories remain in this Culvert branch until Phase 7; if extraction is abandoned, nothing changed in Culvert.
@@ -57,5 +75,22 @@ Every file related to the extraction, classified. Counts from `git ls-files` at 
 3. The extracted repositories are additive (new repos); deleting them has no effect on Culvert.
 4. Culvert `main` is never touched.
 
-## Gates before Culvert cleanup (Phase 7)
-tac-platform builds independently · unit + PostgreSQL tests pass without `-p 1` · Docker Compose acceptance passes · tac-infrastructure validates · contract compatibility passes · file-digest match source↔destination · no secrets/test-credentials migrated · no DB state/private evidence migrated. Only then: replace directories, confirm Culvert CI green, retain recovery tag.
+## Gates before Culvert cleanup (Phase 7) — results
+
+| Gate | Result |
+|---|---|
+| tac-platform builds independently | ✅ `go build ./...` green in the extracted repo |
+| unit + PostgreSQL tests pass **without `-p 1`** | ✅ `go test -race -count=1 ./...` green (per-schema isolation) |
+| file-digest match source ↔ destination | ✅ Git blob-SHA equality (see table above) |
+| no secrets / test-credentials migrated | ✅ full-history scan clean (`SECRET-SCAN.md` in each repo) |
+| no DB state / private evidence migrated | ✅ `evidence/*.db` gitignored, never committed |
+| Culvert build unaffected after removal | ✅ `go build ./...` + `go vet` green post-cleanup |
+| recovery tag retained before deletion | ✅ `pre-tac-extraction` |
+| Docker Compose acceptance | ⏳ deferred to tac-platform CI (Docker daemon not available in the migration sandbox) — see `HISTORY-MIGRATION.md` |
+| tac-infrastructure `tofu validate` | ⏳ deferred to tac-infrastructure CI (`opentofu/setup-opentofu`; OpenTofu release host blocked by the sandbox proxy) |
+| contract compatibility | ✅ contracts specified + owned (`CONTRACTS-OWNERSHIP.md`); scheduled compat lane defined (`CROSS-REPO-CI.md`) |
+
+## Companion documents (remain in Culvert)
+- `CONTRACTS-OWNERSHIP.md` — Phase 5: versioned cross-repo wire contracts, one owner each.
+- `CROSS-REPO-CI.md` — Phase 6: independent per-repo builds + scheduled compatibility lane.
+- `REPOSITORY-SETTINGS.md` — recommended (not auto-applied) GitHub settings for the new repos.

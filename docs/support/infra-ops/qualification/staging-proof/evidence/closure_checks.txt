@@ -1,7 +1,0 @@
-=== Stage-5 closure checks (code-level blockers) ===
-R9-F1  PASS: FSM rejects illegal transition  -> SUCCEEDED -> PLANNING not permitted
-R9-F2  PASS: duplicate idem returns existing op, no re-exec  -> True (events unchanged: True )
-R7-F1  PASS: three DISTINCT signing keys (plan/approval/audit)  -> True
-R7-F3  PASS: approval carries approver signature, distinct from plan sig  -> True
-R7-F2  PASS: tenant-scope policy rule present (P0_tenant)  -> True
-R7-F2  PASS: cross-tenant plan REJECTED by policy  -> True

@@ -1,9 +1,0 @@
-{
-  "restart_time_s": 0.151,
-  "deploy_time_s": 0.301,
-  "rollback_time_s": 0.301,
-  "operations_created": 4,
-  "control_plane_note": "timings dominated by MockProvider apply/restart delay (0.30/0.15s); real provider time would be larger",
-  "estimated_monthly_cost_usd_pilot": 0,
-  "resource_footprint": "single python process + sqlite file; peak RSS < 40MB (local sim)"
-}

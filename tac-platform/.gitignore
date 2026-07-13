@@ -1,7 +1,0 @@
-# build output / local run artifacts (NOT the cmd/ source dirs, NOT committed evidence text)
-/bin/
-*.test
-*.out
-# built binaries only when produced at module root
-/tacctl
-/crash-executor

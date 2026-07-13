@@ -1,33 +1,15 @@
-# tac-infra — OpenTofu desired-state (repository boundary)
+# tac-infra — moved
 
-This tree holds **only** Infrastructure-as-Code desired state (OpenTofu modules +
-per-environment configuration). It deliberately contains **no application code** —
-the deterministic control plane (gateway, operation service, policy, executor,
-validator, reconciler, rollback, audit, `tacctl`) lives in **`tac-platform`**.
+The TAC desired infrastructure state (OpenTofu modules, environments, provider
+config, manifests, infra policy, monitoring, backup/DR) that formerly lived here
+has been **extracted, with history preserved, to its own repository**:
 
-## The three-repository boundary (as designed; here as sibling folders)
-| Repo | Owns | Rule |
-|---|---|---|
-| `culvert` | the on-prem appliance (Tier 1) | **no implementation changes in this slice** |
-| `tac-platform` | the control-plane services + `tacctl` | the only infra mutator; talks to providers via a signed, approved plan |
-| **`tac-infra`** | OpenTofu modules + environment desired state | Git is the source of truth for desired state |
+> **https://github.com/KidCarmi/tac-infrastructure**
 
-They are folders in this branch (repository creation was not authorized in the sandbox);
-splitting them into real repositories later requires no code change — the coupling is a
-single immutable image digest passed from `tac-platform`'s approved plan into
-`environments/staging/workers.tf`.
+This directory is intentionally a pointer stub. The infrastructure repo holds
+**only** desired state and consumes tac-platform's immutable artifacts **by
+digest** (never a mutable tag). Culvert does not depend on it.
 
-## What's here
-- `modules/analysis_worker/` — one stateless worker, provider-agnostic. The `$0` pilot
-  uses the `null` provider (no cloud, no cost) so digest pinning and the plan/apply flow
-  are exercised. A real provider (Fly.io Machines / Kubernetes) swaps in behind the same
-  variables/outputs — **no rewrite**.
-- `environments/staging/` — staging desired state; an L3 deploy changes only
-  `worker1_image_digest` (chosen server-side from the approved-digest allowlist).
-
-## How the platform uses this
-The controlled executor (`tac-platform/internal/executor`) applies a **signed, approved
-plan** — never a fresh one, never a raw tag. The deterministic policy engine enforces
-"exactly one worker image update, no create/delete/destroy, `$0` cost, staging only"
-before any apply. Rollback is an **explicit reverse-deploy** to the previous known-good
-digest, not a Terraform-atomic undo.
+## Migration record
+See [`/TAC-REPO-EXTRACTION.md`](../TAC-REPO-EXTRACTION.md) and the new repo's
+`HISTORY-MIGRATION.md`.
