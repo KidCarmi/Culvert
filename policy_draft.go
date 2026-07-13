@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -369,6 +370,100 @@ func afterPolicyWrite(r *http.Request, action string) {
 	saveConfigVersion(sessionAdmin(r), action)
 }
 
+// ── Commit-time shadow detection (G4, advisory) ──────────────────────────────
+
+// shadowFinding names an access rule an earlier always-active rule provably
+// eclipses (the earlier rule will always match first, so this one can never fire).
+type shadowFinding struct {
+	Rule       string `json:"rule"`       // the shadowed rule's name
+	ShadowedBy string `json:"shadowedBy"` // the earlier rule that covers it
+}
+
+// detectShadowedRules flags EXACTLY-decidable shadowing among Stage-2 access
+// rules (priority order): an earlier ENABLED, always-active (no schedule) rule A
+// shadows rule B when every request B could match provably also matches A. This
+// is the backend counterpart of the client-side polShadowHints advisory (M3 S5 /
+// G4), run on the candidate at commit time. Fields cover by identity or A-empty
+// (matches everything); FQDN globs only for the provable '*.suffix'-covers-
+// 'x.suffix' shape; countries by superset. CIDR containment, category-group
+// expansion, and schedule overlap are deliberately NOT attempted, so this never
+// claims completeness — it is advisory ("verify with the tester"), never blocking.
+// Auth (Stage-1) rules are excluded; they have their own diagnostics.
+func detectShadowedRules(rules []PolicyRule) []shadowFinding {
+	// Access rules, enabled only, in the (priority-sorted) input order. Index-based
+	// range + pointer slice: PolicyRule is a large struct (CLAUDE.md rangeValCopy)
+	// and this runs on every draft poll, so avoid copying rules by value.
+	act := make([]*PolicyRule, 0, len(rules))
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) != ruleTypeAccess {
+			continue
+		}
+		if rules[i].Enabled != nil && !*rules[i].Enabled {
+			continue
+		}
+		act = append(act, &rules[i])
+	}
+	var out []shadowFinding
+	for j := 1; j < len(act); j++ {
+		for i := 0; i < j; i++ {
+			if act[i].Schedule != nil {
+				continue // A must be always-active to provably cover B
+			}
+			if ruleProvablyCovers(act[i], act[j]) {
+				out = append(out, shadowFinding{Rule: act[j].Name, ShadowedBy: act[i].Name})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// ruleProvablyCovers reports whether always-active rule a matches every request
+// rule b could match, using only exactly-decidable field coverage.
+func ruleProvablyCovers(a, b *PolicyRule) bool {
+	return fieldCovers(a.SourceIP, b.SourceIP) &&
+		fieldCovers(a.SourceIdentity, b.SourceIdentity) &&
+		fieldCovers(a.SourceGroup, b.SourceGroup) &&
+		fieldCovers(a.AuthSource, b.AuthSource) &&
+		fqdnCovers(a.DestFQDN, b.DestFQDN) &&
+		fieldCovers(string(a.DestCategory), string(b.DestCategory)) &&
+		fieldCovers(a.DestCategoryGroup, b.DestCategoryGroup) &&
+		countryCovers(a.DestCountry, b.DestCountry)
+}
+
+// fieldCovers: a covers b when a is empty (matches anything) or equal to b.
+func fieldCovers(a, b string) bool { return a == "" || a == b }
+
+// fqdnCovers extends fieldCovers with the one provable glob shape: a "*.suffix"
+// pattern covers any strict subdomain "x.suffix".
+func fqdnCovers(a, b string) bool {
+	if a == "" || a == b {
+		return true
+	}
+	if strings.HasPrefix(a, "*.") {
+		bare := a[2:]   // "suffix" (a without the leading "*.")
+		dotted := a[1:] // ".suffix"
+		return b != "" && b != bare && strings.HasSuffix(b, dotted)
+	}
+	return false
+}
+
+// countryCovers: a covers b when a is empty (any country) or a ⊇ b.
+func countryCovers(a, b []string) bool {
+	if len(a) == 0 {
+		return true
+	}
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if !slices.Contains(a, c) {
+			return false
+		}
+	}
+	return true
+}
+
 // ── HTTP handlers ──────────────────────────────────────────────────────────
 
 // apiPolicyDraft — GET the draft state + diff + mode; PUT sets RequireCommit.
@@ -394,6 +489,9 @@ func apiPolicyDraft(w http.ResponseWriter, r *http.Request) {
 			resp["diff"] = d
 			resp["pendingCount"] = d.total()
 			resp["version"] = ver
+			// Advisory shadow warnings over the CANDIDATE (what will go live),
+			// so the operator sees them before committing (G4).
+			resp["shadows"] = detectShadowedRules(policyDraft.candidateList())
 		}
 		jsonOK(w, resp)
 
@@ -485,7 +583,9 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	actor := sessionAdmin(r)
 	detail := commitDetail(diff, comment)
 	auditEvent(r, "policy.commit", actor, detail)
-	saveConfigVersion(actor, "policy.commit")
+	// Persist the commit comment into the config-version timeline (S3): the
+	// version records WHY the rulebase changed, alongside the rollback snapshot.
+	saveConfigVersionNote(actor, "policy.commit", comment)
 	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
 	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
 }
