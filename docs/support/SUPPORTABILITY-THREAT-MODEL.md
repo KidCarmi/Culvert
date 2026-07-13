@@ -66,3 +66,22 @@
 - **No new shell, exec, or dynamic code path.** Commands and collectors are fixed in-binary registries.
 
 Each bullet is a CI-enforced invariant (route-count D0 test, sudoers-diff, `TestNoNewExternalDeps`, `TestNoShellInCommands`).
+
+---
+
+## 5. Cloud boundary threats (Tier 2/3 — cloud-first, ADR-0012/0014/0016/0018)
+
+The cloud-first model adds a tier boundary. The controlling invariant is **outbound-only**: the cloud can never initiate into Culvert, so a fully compromised cloud cannot reach, command, reconfigure, or exfiltrate from an appliance. Additional threats and controls:
+
+| # | Threat | Boundary | Control(s) | Validation test |
+|---|---|---|---|---|
+| **T-INBOUND** | Cloud (or attacker posing as it) initiates a connection/command into Culvert | B5 | No inbound listener/route for TAC; all connections outbound; "please send" is an appliance-polled policy gated by local consent | `TestNoInboundTACSurface`, D0 route-count wall |
+| **T-CLOUDDOWN** | Cloud outage degrades the product | B1 | Cloud is optional; enforcement/config/health run locally; bundle queues + retries; offline export | `TestOperationWithoutCloud`, `TestHealthWithoutCloud` |
+| **T-RAWSTORE** | Raw evidence exposed in the cloud | B4/B5 | Separate encrypted raw plane; per-case data key; sandbox-only reads; no standing access; short retention; audited break-glass (ADR-0016) | cloud contract: `TestRawPlaneNoStandingAccess` |
+| **T-SANDBOX** | Malicious bundle escapes the extract worker | B5 | Ephemeral, network-isolated, single-use sandbox; no customer-net route; bounded decompression (≤500 MB); traversal/symlink reject; AV on raw | `TestSandboxIsolated`, `TestExtractBounded` |
+| **T-PROMPT** | Prompt injection via bundle-derived text | B5 | AI gets **normalized findings + approved excerpts by default**, not raw (ADR-0018); untrusted-data delimiting; fixed system policy; TAC-approval gate; no appliance action path (outbound-only) | `TestAIInputNormalizedOnly` |
+| **T-EXCEPT** | Abuse of exceptional (break-glass) raw access | B5 | Dual-control, fully audited, time-bound; never via the AI path | `TestBreakGlassDualControlAudited` |
+| **T-XTENANT2** | Cross-tenant leakage in the cloud | B5/B6 | Case + tenant scoping end-to-end; per-case keys; entitlement at the gateway | `TestUploadTenantScoped`, cloud `TestFindingsTenantScoped` |
+| **T-POLICY-COERCE** | Cloud "send bundle" policy used to exfiltrate without consent | B2 | Poll-only; local consent/policy gates collection AND send; redaction still fail-closed | `TestCloudPolicyRequiresLocalConsent` |
+
+**Non-goal reinforced:** no code path lets the cloud read appliance keys/credentials, request arbitrary files, alter config, or bypass redaction — these are structurally impossible under outbound-only + source-side redaction, not merely policy-forbidden.

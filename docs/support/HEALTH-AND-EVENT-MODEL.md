@@ -4,6 +4,16 @@
 - **Depends on:** `diagnostics.go` `OperatorContract` (the seed), `SUPPORTABILITY-ARCHITECTURE.md`, `SUPPORT-BUNDLE-SPEC.md`.
 - **Covers:** explainable health (§1–3), event timeline & correlation (§4), incident-scoped collection (§5), debug escalation levels (§6), metrics-for-diagnostics (§7), HA/cluster diagnostics & local-vs-cluster isolation (§8).
 
+> **REVISION 2 (2026-07-13) — local/cloud split (cloud-first, ADR-0012).** This model spans both tiers. Read each section through the split below; the appliance **collects raw evidence**, the cloud **analyzes**:
+> - **§1–3 Health (CHR):** the *lightweight* verdict/severity/remediation stays **local** (extends the existing `OperatorContract`; must survive cloud loss). Deep cause inference across history is **cloud**. The appliance emits CHRs as evidence; the cloud enriches them.
+> - **§4 Timeline:** the appliance **emits raw operational event records** (config-version changes, failover, cert rotation, crash) into the bundle. The **correlated timeline is CONSTRUCTED IN THE CLOUD** (ADR-0012). The appliance does not build or persist a correlated timeline beyond a small local event log.
+> - **§5 Incident scopes:** the *collection scope* (which collectors/probes + time window) is a **local** selection. The *diagnosis* per incident is **cloud**.
+> - **§6 Debug levels:** **local** (bounded capture control) — unchanged.
+> - **§7 Metrics:** **local** capture of bounded snapshots/window into the bundle; historical correlation is **cloud**.
+> - **§8 Cluster:** the appliance does **collection** (its own posture; optionally fan-out gather of peer `/healthz`/status). The **local-vs-cluster discriminators and split-brain/drift/version-skew CORRELATION are computed IN THE CLOUD** across the case's node bundles. The three instrumentation additions (§8.1) are *local raw-fact emission*, not local analysis.
+>
+> Net: keep §1–3 (lightweight, local, cloud-independent) and the *collection* halves of §4/§5/§7/§8 on the appliance; the *analysis/correlation* halves are TAC Cloud responsibilities per `TAC-CLOUD-ARCHITECTURE.md`.
+
 ---
 
 ## 1. Component Health Record (CHR) — beyond green/red

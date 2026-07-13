@@ -1,8 +1,10 @@
 # Culvert Supportability Framework — Implementation Roadmap
 
 - **Status:** Proposed (design). Milestones M0–M7. First slices deliberately small enough to review safely.
-- **Depends on:** all `docs/support/*` specs + ADRs 0008–0011.
+- **Depends on:** all `docs/support/*` specs + ADRs 0008–0018.
 - **Sequencing principle:** ship the redaction wall and a minimal bundle before breadth. Never add a collector before its classification + tests exist. Each milestone is independently valuable and independently revertible.
+
+> **REVISION 2 (2026-07-13) — two tracks (cloud-first, ADR-0012).** The milestones below are now split across two independently-deliverable tracks. **Appliance track (Tier 1/2):** M0–M2, M4-appliance (encrypt + outbound upload + queue/retry + offline export), M5-appliance (emit richer cluster raw facts). **Cloud track (Tier 3):** the analysis previously drafted as appliance work — **timeline construction (was M3), incident correlation, cluster discriminators/split-brain/drift (was M5), known-issue matching, AI diagnosis, TAC workflow — is re-homed to the TAC Cloud** (`TAC-CLOUD-ARCHITECTURE.md`). The appliance keeps only: lightweight health (M1), collector execution + scope/window selection + debug-level *capture* control (M3-appliance), and the upload/export pipeline (M4/M6). Remote support stays deferred. The appliance track can ship end-to-end (produce → encrypt → export/upload) before the cloud track is built; a customer with only the appliance track gets redacted bundles they can hand to TAC manually.
 
 ---
 

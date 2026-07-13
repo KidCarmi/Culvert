@@ -1,98 +1,146 @@
-# Culvert Support — Secure Export, Upload & Remote-Support Architecture
+# Tier 2 — Optional Outbound Support Integration (Export, Upload, Consent, Trust)
 
-- **Status:** Proposed (design). Offline export is M4; online upload is M6; remote support is a deferred, interface-only design (§4).
-- **Depends on:** `SUPPORT-BUNDLE-SPEC.md`, `REDACTION-MODEL.md`, `internal/backupcrypt`, `internal/ssrf`.
-- **Absolute rules:** nothing uploads automatically (P4); local diagnostics never depend on the cloud (P10); telemetry consent is separate from support consent (P6).
+- **Status:** Proposed (design). Revised for the cloud-first model (`ANALYSIS-MODEL-DECISION.md`, ADR-0012). This is the **only** channel between the on-prem appliance (Tier 1) and the TAC Cloud (Tier 3).
+- **Depends on:** `SUPPORT-BUNDLE-SPEC.md`, `REDACTION-MODEL.md`, `TAC-CLOUD-ARCHITECTURE.md`, `internal/backupcrypt`, `internal/ssrf`.
+- **Mandatory invariants (ADR-0014/0015/0017):** every connection is **outbound from Culvert** over authenticated HTTPS; the cloud can never initiate into Culvert; if the cloud is down the appliance operates normally, health stays local, and the bundle queues/exports; nothing uploads automatically or without consent.
 
 ---
 
-## 1. Two workflows, one bundle
-
-A CSB is produced identically regardless of transport. Export is a *terminal* lifecycle step (`READY → EXPORTED | UPLOADED`), always operator-initiated, always after the mandatory redaction preview.
+## 1. The appliance pipeline (Tier 2 is the appliance's whole job)
 
 ```
-CSB (READY) ──┬── OFFLINE: download (optionally encrypted) → manual transfer → TAC
-              └── ONLINE : explicit, audited, resumable upload → TAC portal (M6)
+collect → classify → redact → PRIVACY PREVIEW → CUSTOMER CONSENT
+        → manifest + integrity hashes → ENCRYPT → outbound upload (or queue / offline export)
 ```
 
----
-
-## 2. Offline export (M4 — the default, always available)
-
-The offline path must work air-gapped and with the GUI down (recovery CLI).
-
-- **Download:** `GET /api/support/bundles/{id}/download` (admin) streams the `.csb.tgz`; the CLI `culvert support collect` writes it to a path. No network egress from the appliance.
-- **Encryption (optional but recommended for sensitive bundles):** two modes, both reusing audited primitives:
-  1. **Passphrase** — `internal/backupcrypt` (AES-256-GCM, PBKDF2-SHA256 600k iters, AAD-bound header, opaque error). Operator supplies a passphrase; TAC receives it out-of-band. Same envelope as backups, so `culvert support validate` verifies it.
-  2. **Recipient public key (age-style)** — encrypt-to-TAC's published age/X25519 public key so **only** TAC's private key decrypts, and the operator needs no shared secret. This is the missing "recipient model" the audit flagged; it is the correct default for vendor upload. The TAC public key(s) are baked/pinned like the release-catalog trust roots (public material only) and overridable for private/regional TAC.
-- **Integrity verification:** the recipient runs `culvert support validate` (or an offline verifier) to check `bundle_sha256` + per-section hashes + (if encrypted) the AEAD tag before opening. A tampered or truncated bundle fails closed.
-- **Manual transfer:** the operator moves the file by whatever channel policy allows (portal upload, secure file share, physical media for air-gap). The appliance is not involved.
-
-Encryption choice is recorded in the manifest (`encrypted: none|passphrase|recipient`, plus recipient key id) so provenance is clear.
+The appliance never analyzes. Its terminal state is "encrypted bundle uploaded, queued, or exported." Everything after that is Tier 3.
 
 ---
 
-## 3. Online upload (M6 — opt-in, explicit, never silent)
+## 2. Consent model (explicit, layered, separate from telemetry — ADR-0011/P6)
 
-Architected now so a future cloud TAC portal is a flag flip, not a redesign. **Not enabled in MVP.**
+Four independent switches, four audit trails; enabling one never enables another:
 
-### 3.1 Contract
-- **Explicit opt-in per upload.** `POST /api/support/uploads {bundle_id, case_id}` (admin). There is no setting that makes uploads automatic or background; each upload is one audited action (`support.upload`).
-- **Case binding.** An upload requires a `case_id`; the portal validates it. The bundle's manifest already carries `case_id`.
-- **Secure, authenticated transport.** TLS 1.3 to the portal; the appliance authenticates with a per-appliance credential (enrollment-style, rotatable). **Inline SSRF guard** (`url.Parse` + scheme + `isPrivateHost` at the call site, per CLAUDE.md) + `internal/ssrf.SafeDialContext` so the upload endpoint cannot be pointed at internal infra; private-IP origins rejected (mirrors the release-catalog SSRF posture).
-- **Encryption in transit and at rest.** The uploaded bundle is the **recipient-key-encrypted** artifact (§2), so it is end-to-end encrypted to TAC independent of TLS; the portal stores it encrypted-at-rest.
-- **Resumable.** Chunked/resumable upload (offset-based) so a large bundle survives a flaky link; the appliance retries with bounded exponential backoff and never blocks the proxy hot path (background op with a cancel).
-- **Tenant isolation.** The per-appliance credential scopes uploads to that customer's tenant; the portal enforces tenant boundaries; a bundle can never land in another tenant's case.
-- **Expiration & retention.** Uploaded bundles expire per portal policy; the appliance keeps only the local copy under its own retention (§SUPPORT-BUNDLE-SPEC §6). The upload does not extend local retention.
-- **Upload receipt.** On success the portal returns a signed receipt `{case_id, bundle_id, bundle_sha256, received_at}` which the appliance stores in the bundle history and audit — proof of what was sent, when, and that the hash matched (server-side validation of the hash before acceptance).
-- **Server-side validation.** The portal re-verifies format, size bounds, hash, and that the bundle decrypts to a valid manifest before accepting — rejecting malformed/oversized/tampered uploads (defense against a malicious appliance and against corruption).
-- **No silent background data transfer.** A scheduled/automatic upload capability is explicitly out of scope; if ever added it would require a separate ADR and a distinct, separately-consented switch.
-
-### 3.2 Why this generalizes to a cloud TAC portal
-The appliance side is a thin, generic "encrypt-to-recipient + authenticated resumable POST + receipt" client. The portal is an external service the appliance knows only by URL + trust root + tenant credential — exactly the shape of the existing release-catalog origin (baked default, operator-overridable, SSRF-guarded, trust-pinned). Adding the portal later reuses that whole pattern; no appliance framework change.
-
----
-
-## 4. Remote support (deferred — interface only, recommendation: NOT for current stage)
-
-**Recommendation: do not build remote interactive support in MVP.** Rationale: the appliance's entire value proposition is that the customer does not expose OS/shell access; a remote-session capability, however bounded, is the single highest-risk addition and is not needed while offline/online bundle exchange covers the diagnostic workflow. Most TAC cycles resolve from a good bundle + targeted diagnostics + a follow-up bundle at a raised debug level.
-
-**But design the seams so it can be added safely.** If/when justified, remote support must be:
-- **Explicit customer approval, per session** — an admin approves a specific, time-bound session; no standing access.
-- **Time-bound** — a hard TTL (like debug levels, P9) with an auto-revoke watchdog; the session cannot outlive its window.
-- **Per-command authorized** — every action is a `DiagCommand` from the fixed registry (DIAGNOSTIC-COMMAND-FRAMEWORK §5); **no general shell, ever**; the remote party can only invoke the same allowlisted, audited, typed diagnostic verbs an operator can.
-- **Mutually authenticated** — TAC engineer identity + appliance identity, both cert-pinned; no shared password.
-- **Fully recorded** — every command + output logged to an immutable session record (redacted), surfaced in the timeline (`category: support`) and downloadable by the customer.
-- **Immediately revocable** — the admin can kill the session instantly; revoke is fail-closed (loss of the control channel ends the session).
-- **Strong tenant isolation** — a session is scoped to one appliance/tenant; no lateral reach.
-- **Clearly separated from telemetry** — remote support is not telemetry and shares no consent, credential, or channel with it (P6).
-
-The command framework already reserves `culvert support remote {approve|status|revoke}` returning `not_enabled`, so the CLI/API shape is stable. Implementation would need a dedicated ADR and threat model.
-
----
-
-## 5. Consent model (support ≠ telemetry, P6)
-
-| Switch | Governs | Default | Consent granularity | Audit action |
+| Switch | Governs | Default | Granularity | Audit |
 |---|---|---|---|---|
-| Support bundle collection | producing a local CSB | available (RBAC-gated) | per-bundle | `support.bundle.*` |
-| Support upload | sending a CSB to TAC | **off** | per-upload, per-case | `support.upload` |
-| Remote support | interactive TAC session | **off/not-enabled** | per-session, time-bound | `support.remote.*` |
-| Telemetry (M7) | continuous opt-in metrics phone-home | **off** | global opt-in, separate | `telemetry.*` |
+| Bundle collection | producing a local bundle | available (RBAC-gated) | per-bundle | `support.bundle.*` |
+| **Upload** | sending a bundle to TAC Cloud | **off** | **per-bundle, per-case, explicit** | `support.upload` |
+| Remote support | interactive TAC session | **off / not-enabled** (deferred, §7) | per-session, time-bound | `support.remote.*` |
+| Telemetry | continuous opt-in metrics | **off** | global opt-in, separate | `telemetry.*` |
 
-These are four independent switches with four audit trails. Enabling one never implies another. Telemetry (M7) reuses the transport pattern but is a **strict subset** of bundle-eligible metrics (HEALTH-AND-EVENT §7), separately consented, and never carries bundle contents.
+**Consent is a hard gate in the state machine.** No bundle reaches `UPLOADED`/`EXPORTED` without:
+1. the operator viewing the **privacy preview** (`redaction-report.json`: counts by class, per-section `class_max`, profile + exclusions — never the redacted values), and
+2. an explicit consent action (GUI confirm / CLI `--yes`), audited with actor + case.
+
+A **cloud "please send a bundle for case X" policy** the appliance may poll for on its outbound schedule still requires this local consent/policy before anything is collected or sent — the cloud can request, never compel (ADR-0014).
 
 ---
 
-## 6. Test surface
+## 3. Encryption trust model (E2E to TAC — ADR-0016)
+
+- **Two at-rest/export modes** (both reuse audited primitives):
+  1. **Passphrase** — `internal/backupcrypt` (AES-256-GCM, PBKDF2-SHA256 600k iters, AAD-bound header, opaque error). For operator-controlled offline transfer; verifiable by `culvert support validate`.
+  2. **Recipient public key (default for upload)** — hybrid public-key encryption (HPKE / age-style X25519) to TAC's **published, pinned public key**, with a **per-case data key**. Only TAC's cloud-KMS-held private key decrypts; the appliance holds no decryption secret. This is the "encrypt-to-TAC without a shared secret" model.
+- **Trust roots** — TAC recipient public keys are **public material**, baked into the release + operator-overridable for private/regional/staging TAC, pinned exactly like the release-catalog trust roots. Rotation is additive (overlap window), key id recorded in the manifest.
+- **E2E independent of TLS** — the bundle is encrypted to TAC *before* the HTTPS POST, so even a MITM or a compromised transit hop cannot read it. TLS 1.3 is defense-in-depth for transport auth, not the confidentiality boundary.
+- **Never exported:** the per-bundle redaction salt, any appliance private key. `NEVER_EXPORT` material has no path into a bundle (ADR-0007/0009).
+
+---
+
+## 4. Upload protocol (outbound, authenticated, resumable)
+
+Chunked, resumable, offset-based HTTPS. Appliance-initiated only.
+
+```
+POST /v1/uploads:init      {case_id, bundle_id, bundle_sha256, size, key_id}
+   → 200 {upload_id, chunk_size, accepted}         (gateway: authn + entitlement + size/format gate)
+PUT  /v1/uploads/{id}/chunks/{offset}   <chunk bytes>   (idempotent per offset; resumable)
+   → 200 {received_offset}
+POST /v1/uploads/{id}:complete   {bundle_sha256}
+   → 200 signed RECEIPT {case_id, bundle_id, bundle_sha256, received_at, sig}
+GET  /v1/uploads/{id}                                  (poll status / resume point after a drop)
+```
+
+- **Authentication:** per-appliance credential (enrollment-style, rotatable) or mTLS; tenant-scoped so a bundle can only land in that customer's case.
+- **SSRF guard (CLAUDE.md convention):** inline `url.Parse` + scheme check + `isPrivateHost()` at the call site **plus** `internal/ssrf.SafeDialContext` — the upload origin cannot be pointed at internal infra; private-IP origins rejected (mirrors the release-catalog SSRF posture). Origin is operator-overridable (air-gap/regional) with a trust-safe opt-out.
+- **Server-side validation:** the gateway verifies the manifest is well-formed, within size bounds, non-duplicate (`bundle_id`+hash), and entitled **before** accepting chunks; `complete` re-checks the hash; a mismatch rejects the upload.
+- **Receipt:** signed `{case_id, bundle_id, bundle_sha256, received_at}` stored in the local immutable audit + bundle history — proof of what was sent, when, and that the hash matched.
+- **No auto-upload:** there is no timer or trigger that uploads without the per-bundle consent action (§2). `TestNoAutoUpload`.
+
+---
+
+## 5. Failure & retry semantics (cloud-independence — ADR-0015/0017)
+
+The appliance must degrade to *normal operation + queued bundle*, never to a stall.
+
+| Condition | Appliance behavior |
+|---|---|
+| Cloud unreachable (DNS/timeout/5xx) at `init` | bundle → **local queue** (`status: queued`); proxy/health unaffected |
+| Connection drops mid-upload | resume from `received_offset` on the next attempt (idempotent chunks) |
+| Retry policy | bounded exponential backoff (e.g. 2s→…→capped), jittered, on the appliance's **own outbound schedule**; capped attempt count then `deferred` (operator can re-arm or offline-export) |
+| Gateway rejects (entitlement/format/hash) | bundle → `rejected` with a redacted reason; no silent retry loop; surfaced to operator |
+| Disk pressure during queue | preflight + retention janitor apply; oldest queued bundle aged out with audit; new queue refused if headroom < budget |
+| Cloud down indefinitely | **offline export always available** — write the encrypted `.csb` to disk/media for manual transfer |
+| Appliance restart while queued | queue is persisted under `<dataDir>/support`; resumes after boot |
+
+Retries and queueing run in a bounded background op that **never blocks the proxy hot path** and never holds the single-flight collection lock.
+
+---
+
+## 6. Air-gapped workflow (first-class, not an afterthought)
+
+For customers with no outbound path:
+1. Appliance runs the full local pipeline: collect → redact → **privacy preview** → consent → manifest → encrypt (passphrase or TAC recipient key).
+2. **Offline export**: `culvert support collect … --export <path>` / GUI download writes the encrypted `.csb.age`/`.csb.enc`.
+3. A human courier transfers the file on approved media to a machine with portal access; the customer uploads it to the TAC portal.
+4. The cloud ingests it through the **same** pipeline and entitlement — air-gap is a transport difference, not a separate code path.
+5. Integrity is verifiable offline (`culvert support validate`) before and after transfer.
+
+Local health/OperatorContract and `diagnose` probes remain fully available offline throughout (they never need the cloud).
+
+---
+
+## 7. Remote support — deferred, interface-only (recommendation: NOT this stage)
+
+Unchanged from the prior design and reinforced by cloud-first: **do not build remote interactive support now.** The appliance's value is no-shell; offline/online bundle exchange + local probes cover the workflow. The CLI/API reserve `support remote {approve|status|revoke}` returning `not_enabled`. If ever built it must be per-session-approved, time-bound (auto-revoke watchdog), per-command allowlisted (same `DiagCommand` registry — **never a shell**), mutually authenticated, fully recorded, instantly revocable, tenant-isolated, **and still outbound-initiated** (the appliance opens the session; the cloud cannot dial in) — behind its own ADR + threat model.
+
+---
+
+## 8. Appliance resource budgets for bundle generation
+
+Bundle generation is a background, deprioritized activity that must not perturb the relay hot path (the decision matrix's decisive dimension).
+
+| Budget | Default | Enforcement |
+|---|---|---|
+| Wall-clock (whole bundle) | 60 s soft / 120 s hard | runner deadline; hard-kill → `FAILED` bundle, hot path untouched |
+| Per-collector timeout | 3–10 s (per `CollectorMeta`) | `ctx` deadline |
+| Peak transient memory | ≤ 256 MB | streamed section writes (no whole-bundle-in-RAM); byte budgets |
+| CPU | best-effort, below hot-path priority; single-flight per node | one bundle at a time; collectors bounded; no busy loops |
+| Output — uncompressed | ≤ 100 MB default (scope-tunable) | per-section + total byte budgets; `truncated` flag |
+| Output — compressed on disk | ≤ 25 MB default | gzip; retention janitor |
+| Disk headroom to start | refuse if free < 3× bundle budget | preflight (reuse `probeStorageWritability` + free-space read) |
+| Local retention | 7 days or 5 bundles (whichever first), configurable | janitor, oldest-first, audited |
+| Debug capture (L2–L4) | mandatory TTL, disk + duration auto-stop | watchdog (HEALTH-AND-EVENT §6) |
+| Upload bandwidth | bounded, backgrounded, never on the proxy connection pool | separate transport; no hot-path contention |
+
+These are hard ceilings; exceeding one truncates/fails the bundle rather than expanding it (T-DISK/T-CPU/T-BOMB).
+
+---
+
+## 9. Test surface
 
 | Test | Asserts |
 |---|---|
-| `TestNoAutoUpload` | no code path uploads without an explicit per-bundle admin action |
-| `TestOfflineBundleAirGapped` | download + validate works with no network (P10) |
-| `TestRecipientEncryptOnlyTACDecrypts` | recipient-mode bundle decrypts only with the TAC key |
-| `TestUploadSSRFGuarded` | upload origin rejects private-IP/internal targets |
-| `TestUploadRequiresCaseAndAdmin` | upload without case_id or below admin is refused |
+| `TestNoInboundTACSurface` | no listener/route exists for TAC to dial in |
+| `TestOperationWithoutCloud` | proxy/config/enforcement unaffected when cloud unreachable |
+| `TestHealthWithoutCloud` | local health/OperatorContract + `diagnose` probes answer offline |
+| `TestNoAutoUpload` | no path uploads without per-bundle consent |
+| `TestUploadResumable` | drop mid-upload resumes from last offset |
+| `TestUploadSSRFGuarded` | private-IP/internal origins rejected |
+| `TestUploadRequiresCaseConsentAdmin` | upload without case_id / consent / admin refused |
 | `TestUploadReceiptHashMatch` | receipt hash equals bundle hash; mismatch rejected |
-| `TestRemoteSupportNotEnabled` | remote verbs return `not_enabled` in MVP |
+| `TestRecipientEncryptOnlyTACDecrypts` | recipient-mode bundle decrypts only with the TAC key |
+| `TestOfflineExportAirGapped` | full pipeline + export works with no network |
+| `TestBundleQueuePersistsRestart` | queued bundle survives restart and resumes |
 | `TestConsentSeparation` | enabling support never enables telemetry/upload/remote |
+| `TestBundleBudgetsEnforced` | wall-clock/memory/output/disk ceilings hold; hot path unperturbed |

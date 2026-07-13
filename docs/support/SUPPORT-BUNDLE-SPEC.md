@@ -4,6 +4,8 @@
 - **Depends on:** `SUPPORTABILITY-ARCHITECTURE.md` (vocabulary), `COLLECTOR-CONTRACT.md` (section producers), `REDACTION-MODEL.md` (classification).
 - **Reuses:** `backup.go` tar/manifest/atomic-write machinery, `internal/backupcrypt` encryption, `backup.go`'s per-file SHA-256 discipline. **Does not reuse** `defaultBackupArtifacts` (that is a restore surface, not a diagnostic one).
 
+> **REVISION 2 (2026-07-13) — cloud-first.** The CSB is the **upload payload** between the appliance (Tier 2) and the TAC Cloud (Tier 3). Two clarifications under cloud-first: (1) the `events/timeline.jsonl` section carries **raw operational event records emitted by the appliance**, not a correlated timeline — **the correlated timeline is constructed in the cloud** (ADR-0012); the appliance may render a small local view for the operator but does not persist/analyze a full timeline. (2) When destined for upload, a CSB is **encrypted before it leaves the appliance** (recipient-key/HPKE by default; see `SECURE-UPLOAD-ARCHITECTURE.md §3`); the plaintext tar layout below is the *pre-encryption* structure the cloud sandbox extracts.
+
 ---
 
 ## 1. Container format

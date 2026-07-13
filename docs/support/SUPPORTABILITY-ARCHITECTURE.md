@@ -5,6 +5,20 @@
 - **Owner:** Principal Supportability Architect
 - **Depends on:** `CURRENT-STATE-GAP-ANALYSIS.md` (evidence base). This document is the top-level design; the companion specs (`SUPPORT-BUNDLE-SPEC`, `COLLECTOR-CONTRACT`, `REDACTION-MODEL`, `DIAGNOSTIC-COMMAND-FRAMEWORK`, `HEALTH-AND-EVENT-MODEL`, `SECURE-UPLOAD-ARCHITECTURE`, `SUPPORTABILITY-THREAT-MODEL`, `SUPPORTABILITY-TEST-STRATEGY`) refine each subsystem. ADRs 0008–0011 record the load-bearing decisions.
 
+> **REVISION 2 (2026-07-13) — cloud-first.** This document was revised after the analysis-location decision (`ANALYSIS-MODEL-DECISION.md`, ADR-0012). **The appliance collects, classifies, redacts, previews, obtains consent, builds the manifest, encrypts, and uploads — it does not analyze.** All analysis, timeline construction, correlation, known-issue matching, AI, and TAC workflow live in the cloud-hosted TAC platform (`TAC-CLOUD-ARCHITECTURE.md`). The orchestration-layer components below that perform *analysis* (timeline construction, incident correlation, cluster discriminators) are **re-homed to Tier 3 (cloud)**; the appliance retains only their *collection* half plus the existing lightweight local health (`OperatorContract`). Where §2/§7 below describe appliance-side timeline/correlation, read them as **cloud responsibilities fed by appliance-collected raw evidence** — the tier split in §0.5 governs.
+
+---
+
+## 0.5 The three tiers (authoritative — cloud-first, ADR-0012/0014/0015)
+
+| Tier | Runs where | Owns | Depends on cloud? |
+|---|---|---|---|
+| **1 — On-Prem Culvert Product** | customer environment | proxy enforcement, config, HA, admin UI, **lightweight local health/`OperatorContract`**, evidence probes | **No — never** |
+| **2 — Optional Outbound Support Integration** | appliance → cloud | collect → classify → redact → privacy preview → consent → manifest+integrity → encrypt → outbound upload / queue / offline export | optional |
+| **3 — Cloud-Hosted TAC Operating System** | vendor cloud | verify → sandbox extract → deterministic analysis → normalized findings → timeline → CP/DP+cluster correlation → known-issue/runbook → AI (normalized input) → TAC workflow → escalation | — |
+
+**Mandatory principles (ADR-0014/0015):** every connection is **outbound from Culvert** over authenticated HTTPS; the cloud can never initiate into Culvert, run commands, retrieve evidence without local consent/policy, modify config, affect enforcement, access keys/credentials, request arbitrary files, or bypass redaction. If the cloud is unavailable: the product operates normally, local health stays available, the bundle queues locally, upload retries later, and offline export remains. The appliance MUST NOT host a local analyzer framework, known-issue DB, runbook search, heavy correlation, or local AI (ADR-0013).
+
 ---
 
 ## 0. Canonical vocabulary (single source of truth for all support docs)
