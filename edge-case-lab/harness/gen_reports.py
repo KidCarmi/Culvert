@@ -67,6 +67,13 @@ def main():
     lines = []
     A = lines.append
     A("# Culvert Edge-Case Validation Lab — Results\n")
+    A("> **Corrected classifications (post adversarial review + hardening).** This supersedes any "
+      "earlier report that stated \"0 product bugs\". SOCKS5 is a **SECURITY_BYPASS** (advertised "
+      "interface bypasses the policy engine); the earlier \"policy lost on restart\" finding was a "
+      "**TEST_INFRA** artifact of the harness omitting the shipped `-policy` durable store and is now "
+      "a passing durable-restart scenario; external-redirect rejection is an **EXPECTED_LIMITATION** "
+      "(correct security control). The 215 scenarios represent **49 canonical behaviors** — the raw "
+      "count is not the coverage metric (see `EDGE-CASE-CANONICAL-BEHAVIORS.json`).\n")
     A(f"**Culvert commit:** `{env['culvert_commit']}`  ")
     A(f"**Binary built:** {env.get('binary_mtime')}  ")
     A(f"**Executed:** {res['generated_at']}  ")
@@ -87,7 +94,7 @@ def main():
     A("## Classification breakdown\n")
     A("| Classification | Count | % of executed |")
     A("|---|---|---|")
-    order = ["PASS", "PRODUCT_BUG", "MISSING_CAPABILITY", "CONFIGURATION_CONTRACT_GAP",
+    order = ["PASS", "SECURITY_BYPASS", "PRODUCT_BUG", "MISSING_CAPABILITY", "CONFIGURATION_CONTRACT_GAP",
              "UX_GAP", "OBSERVABILITY_GAP", "DOCUMENTATION_GAP", "EXPECTED_LIMITATION",
              "TEST_INFRA_FAILURE", "INVALID_SCENARIO"]
     for k in order:
@@ -199,9 +206,22 @@ def main():
     write("EDGE-CASE-BUG-CANDIDATES.md", L)
 
     # ---- MISSING CAPABILITIES ----
+    secbypass = [r for r in results if r["classification"] == "SECURITY_BYPASS"]
     miss = [r for r in results if r["classification"] == "MISSING_CAPABILITY"]
     lim = [r for r in results if r["classification"] == "EXPECTED_LIMITATION"]
-    L = ["# Culvert Edge-Case Lab — Missing Capabilities & Recorded Limitations\n"]
+    L = ["# Culvert Edge-Case Lab — Security Bypass, Missing Capabilities & Recorded Limitations\n"]
+    L.append("## SECURITY_BYPASS (advertised interface bypasses the enforcement boundary)\n")
+    if secbypass:
+        for r in secbypass:
+            m = manifests.get(r["id"], {})
+            tri = m.get("intent", {}).get("triage", {})
+            L.append(f"### {r['id']} — {r['title']}")
+            L.append(f"- **Requirement:** {m.get('administrator_requirement','')}")
+            L.append(f"- **Finding:** {tri.get('note','')}")
+            L.append(f"- **Evidence:** `representative_evidence/{r['id']}.json` — HTTP/CONNECT enforces the "
+                     "block; the SOCKS5 path allows the same host (policy engine bypassed).\n")
+    else:
+        L.append("_None in this run._\n")
     L.append("## Missing capabilities (valid enterprise requirement, not representable in Culvert)\n")
     if miss:
         for r in miss:

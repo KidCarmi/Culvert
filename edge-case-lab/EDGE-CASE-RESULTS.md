@@ -1,8 +1,10 @@
 # Culvert Edge-Case Validation Lab — Results
 
-**Culvert commit:** `2b9ade66340e652911472c7dbacea2151bf4c5fe`  
+> **Corrected classifications (post adversarial review + hardening).** This supersedes any earlier report that stated "0 product bugs". SOCKS5 is a **SECURITY_BYPASS** (advertised interface bypasses the policy engine); the earlier "policy lost on restart" finding was a **TEST_INFRA** artifact of the harness omitting the shipped `-policy` durable store and is now a passing durable-restart scenario; external-redirect rejection is an **EXPECTED_LIMITATION** (correct security control). The 215 scenarios represent **49 canonical behaviors** — the raw count is not the coverage metric (see `EDGE-CASE-CANONICAL-BEHAVIORS.json`).
+
+**Culvert commit:** `14a1cf6616475829ac4111e932687793c4d99539`  
 **Binary built:** 2026-07-12T22:19:19.133687+00:00  
-**Executed:** 2026-07-12T23:20:12.385955+00:00  
+**Executed:** 2026-07-13T07:19:48.877913+00:00  
 **Fixture:** local origin on 192.0.2.2 (HTTP 18091 / HTTPS 18453), TEST-NET-1, no public internet.
 
 ## Headline numbers
@@ -14,49 +16,41 @@
 | **Accepted scenarios** | **215** |
 | Unique semantic fingerprints | 215 |
 | **Executed** | **215** |
-| **PASS** | **200** |
-| **Pass rate** | **93.0%** |
+| **PASS** | **201** |
+| **Pass rate** | **93.5%** |
 | Duplicate/novelty rejection rate | 0.9% rejected (99.1% novel) |
 
 ## Classification breakdown
 
 | Classification | Count | % of executed |
 |---|---|---|
-| PASS | 200 | 93.0% |
-| MISSING_CAPABILITY | 2 | 0.9% |
-| CONFIGURATION_CONTRACT_GAP | 7 | 3.3% |
-| EXPECTED_LIMITATION | 5 | 2.3% |
+| PASS | 201 | 93.5% |
+| SECURITY_BYPASS | 2 | 0.9% |
+| CONFIGURATION_CONTRACT_GAP | 5 | 2.3% |
+| EXPECTED_LIMITATION | 6 | 2.8% |
 | TEST_INFRA_FAILURE | 1 | 0.5% |
 
 ## Product-bug confirmation pass
 
-| Scenario | Reproduced in clean env? |
-|---|---|
-| SWG-0084 | True |
-| SWG-0166 | True |
-| SWG-0167 | True |
-| SWG-0168 | True |
-| SWG-0169 | True |
-| SWG-0191 | True |
+No PRODUCT_BUG candidates survived automated triage (all divergences resolved to MISSING_CAPABILITY / CONFIGURATION_CONTRACT_GAP / EXPECTED_LIMITATION on review). See `EDGE-CASE-BUG-CANDIDATES.md` for the full triage narrative.
 
 ## Non-PASS scenarios
 
 | ID | Class | Conf | Title |
 |---|---|---|---|
 | SWG-0069 | CONFIGURATION_CONTRACT_GAP | 0.85 | Decryption profile certVerification=permissive |
-| SWG-0124 | CONFIGURATION_CONTRACT_GAP | 0.85 | Policy configuration persists across a proxy restart |
 | SWG-0166 | CONFIGURATION_CONTRACT_GAP | 0.85 | Allow-all-with-social-media-carveout (category exception above broad p |
 | SWG-0167 | CONFIGURATION_CONTRACT_GAP | 0.85 | Allow-all-with-news-carveout (category exception above broad permit) |
 | SWG-0168 | CONFIGURATION_CONTRACT_GAP | 0.85 | Allow-all-with-streaming-carveout (category exception above broad perm |
 | SWG-0169 | CONFIGURATION_CONTRACT_GAP | 0.85 | Allow-all-with-webmail-carveout (category exception above broad permit |
-| SWG-0215 | CONFIGURATION_CONTRACT_GAP | 0.85 | Open-redirect safety on the redirect action |
 | SWG-0205 | EXPECTED_LIMITATION | 0.90 | [Coverage record] GeoIP / destination country |
 | SWG-0206 | EXPECTED_LIMITATION | 0.90 | [Coverage record] IPv6 support |
 | SWG-0207 | EXPECTED_LIMITATION | 0.90 | [Coverage record] DNS rebinding protection |
 | SWG-0208 | EXPECTED_LIMITATION | 0.90 | [Coverage record] WebSocket handling |
 | SWG-0209 | EXPECTED_LIMITATION | 0.90 | [Coverage record] Partial downloads |
-| SWG-0210 | MISSING_CAPABILITY | 0.85 | Egress policy must apply to SOCKS5 clients (news.example.test) |
-| SWG-0211 | MISSING_CAPABILITY | 0.85 | Egress policy must apply to SOCKS5 clients (media.corp.local) |
+| SWG-0215 | EXPECTED_LIMITATION | 0.85 | Open-redirect safety on the redirect action |
+| SWG-0210 | SECURITY_BYPASS | 0.85 | Egress policy must apply to SOCKS5 clients (news.example.test) |
+| SWG-0211 | SECURITY_BYPASS | 0.85 | Egress policy must apply to SOCKS5 clients (media.corp.local) |
 | SWG-0191 | TEST_INFRA_FAILURE | 0.85 | Category allow-list: permit only 'webmail' under default-deny |
 
 ## Interpretation

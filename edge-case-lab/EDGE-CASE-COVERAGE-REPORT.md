@@ -6,8 +6,8 @@ Accepted scenarios: **215** · Executed: **215** · Unique fingerprints: **215**
 
 | Capability | Scenarios | PASS | Other classes |
 |---|---|---|---|
-| http | 158 | 151 | CONFIGURATION_CONTRACT_GAP:6, TEST_INFRA_FAILURE:1 |
-| rule_first_match | 111 | 104 | CONFIGURATION_CONTRACT_GAP:4, TEST_INFRA_FAILURE:1, MISSING_CAPABILITY:2 |
+| http | 158 | 152 | CONFIGURATION_CONTRACT_GAP:4, TEST_INFRA_FAILURE:1, EXPECTED_LIMITATION:1 |
+| rule_first_match | 111 | 104 | CONFIGURATION_CONTRACT_GAP:4, TEST_INFRA_FAILURE:1, SECURITY_BYPASS:2 |
 | https_connect | 90 | 89 | CONFIGURATION_CONTRACT_GAP:1 |
 | url_domain_objects | 62 | 62 | — |
 | default_deny | 46 | 45 | TEST_INFRA_FAILURE:1 |
@@ -17,7 +17,7 @@ Accepted scenarios: **215** · Executed: **215** · Unique fingerprints: **215**
 | rule_ordering | 10 | 6 | CONFIGURATION_CONTRACT_GAP:4 |
 | schedule_time | 10 | 10 | — |
 | manual_ssl_bypass | 8 | 8 | — |
-| redirect | 7 | 6 | CONFIGURATION_CONTRACT_GAP:1 |
+| redirect | 7 | 6 | EXPECTED_LIMITATION:1 |
 | drop | 7 | 7 | — |
 | upload_download | 6 | 6 | — |
 | decryption_profile | 6 | 5 | CONFIGURATION_CONTRACT_GAP:1 |
@@ -31,17 +31,17 @@ Accepted scenarios: **215** · Executed: **215** · Unique fingerprints: **215**
 | rule_lifecycle | 3 | 3 | — |
 | redirect_chains | 3 | 3 | — |
 | file_type_mime | 2 | 2 | — |
-| config_persistence | 2 | 1 | CONFIGURATION_CONTRACT_GAP:1 |
-| security | 2 | 0 | EXPECTED_LIMITATION:1, CONFIGURATION_CONTRACT_GAP:1 |
-| socks5 | 2 | 0 | MISSING_CAPABILITY:2 |
-| authorization_policy | 2 | 0 | MISSING_CAPABILITY:2 |
+| config_persistence | 2 | 2 | — |
+| security | 2 | 0 | EXPECTED_LIMITATION:2 |
+| socks5 | 2 | 0 | SECURITY_BYPASS:2 |
+| authorization_policy | 2 | 0 | SECURITY_BYPASS:2 |
 | auth_policy | 1 | 1 | — |
 | multi_tenant | 1 | 1 | — |
 | observability | 1 | 1 | — |
 | decision_trace | 1 | 1 | — |
 | logging | 1 | 1 | — |
 | concurrency | 1 | 1 | — |
-| data_plane_restart | 1 | 0 | CONFIGURATION_CONTRACT_GAP:1 |
+| data_plane_restart | 1 | 1 | — |
 | geoip_country | 1 | 0 | EXPECTED_LIMITATION:1 |
 | ipv6 | 1 | 0 | EXPECTED_LIMITATION:1 |
 | dns_rebinding | 1 | 0 | EXPECTED_LIMITATION:1 |

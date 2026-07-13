@@ -37,9 +37,9 @@ documented constraint), **▣ Recorded** (valid enterprise capability recorded a
 | 28 | Authentication timeout | ◐ Partial | (auth family) | 407 challenge covered; timeout-specific vectors deferred. |
 | 29 | IdP unavailability | ✗ Not covered | — | Needs IdP mock with induced downtime (recorded). |
 | 30 | Control-plane unavailability | ✗ Not covered | — | Single-node lab; CP/DP split not exercised (recorded). |
-| 31 | Data-plane restart | ✅ Covered | `data_plane_restart` (1) | Restart-without-wipe persistence check. |
+| 31 | Data-plane restart | ✅ Covered | `data_plane_restart` (1) | Restart-without-wipe; policy reloads from the durable store and re-enforces (trace-verified). |
 | 32 | Policy propagation | ✅ Covered | (every scenario) | Post-config settle + read-back; immediate-consistency confirmed (see §Observations). |
-| 33 | Configuration persistence | ✅ Covered | `config_persistence` (2) | Survives process restart? (finding — see results). |
+| 33 | Configuration persistence | ✅ Covered | `config_persistence` (1) | **Durable** via the shipped `-policy` store; SWG-0124 verifies post-restart **enforcement** (decision trace), and the persistence mutation (Save→no-op) is detected. |
 | 34 | Multi-tenant isolation | ✅ Covered | `multi_tenant` (1) | Source-scoped per-tenant egress, no cross-tenant leakage. |
 | 35 | Deleted and referenced objects | ✅ Covered | `object_lifecycle` (1) | Delete a category referenced by a live rule; referential integrity. |
 | 36 | Conflicting objects and policies | ✅ Covered | `policy_conflict` (1) | Same-priority opposite-action determinism. |
@@ -53,7 +53,7 @@ documented constraint), **▣ Recorded** (valid enterprise capability recorded a
 | 44 | Partial downloads | ▣ Recorded | `partial_content` (1) | Range assertions deferred (recorded). |
 | 45 | Concurrent users | ✅ Covered | `concurrency` (1) | Mixed permit/block under concurrent requests, consistent. |
 | 46 | Concurrent policy updates | ◐ Partial | (optimistic `?ifVersion=`) | API supports optimistic concurrency; a dedicated race family is future work. |
-| 47 | SOCKS5 (transport parity) | ✅ Covered | `socks5` (2) | **Finding:** SOCKS5 bypasses the policy engine (see Bug Candidates). |
+| 47 | SOCKS5 (transport parity) | ✅ Covered | `socks5` (2) | **SECURITY_BYPASS:** an advertised, opt-in interface that bypasses the PBAC policy engine (see Finding-Reclassification / Missing-Capabilities). |
 
 ## Capability-tag coverage (executed scenario counts)
 

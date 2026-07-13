@@ -48,3 +48,11 @@ coverage.out
 cover.out
 scratchpad/
 ux_decexcl_e2e_test.go
+
+# Edge-case lab: raw per-run evidence is NOT committed (R6). Regenerated each run;
+# published as CI artifacts. Keep schema, canonical manifests, summaries, and
+# representative_evidence/ (confirmed reproductions) in git.
+edge-case-lab/evidence/
+edge-case-lab/scenarios/
+edge-case-lab/reports/mutation-raw.jsonl
+/tmp/culvert.log

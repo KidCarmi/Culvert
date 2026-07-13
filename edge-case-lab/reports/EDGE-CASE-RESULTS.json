@@ -1,351 +1,25 @@
 {
   "campaign": "edge-case-validation",
-  "generated_at": "2026-07-12T23:20:12.385955+00:00",
+  "generated_at": "2026-07-13T07:19:48.877913+00:00",
   "env": {
-    "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
+    "culvert_commit": "14a1cf6616475829ac4111e932687793c4d99539",
     "binary": "/home/user/Culvert/culvert",
     "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
     "fixture_ip": "192.0.2.2",
     "proxy": "http://127.0.0.1:18080",
     "ui": "http://127.0.0.1:19090",
-    "captured_at": "2026-07-12T23:14:33.303507+00:00"
+    "captured_at": "2026-07-13T07:14:12.910679+00:00"
   },
   "counts": {
-    "PASS": 200,
-    "CONFIGURATION_CONTRACT_GAP": 7,
+    "PASS": 201,
+    "CONFIGURATION_CONTRACT_GAP": 5,
     "TEST_INFRA_FAILURE": 1,
-    "EXPECTED_LIMITATION": 5,
-    "MISSING_CAPABILITY": 2,
+    "EXPECTED_LIMITATION": 6,
+    "SECURITY_BYPASS": 2,
     "total": 215,
-    "pass_rate": 0.93
+    "pass_rate": 0.935
   },
-  "confirmations": {
-    "SWG-0084": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "s",
-            "scheme": "http",
-            "host": "files.corp.local",
-            "client_ip": "127.0.0.1",
-            "path": "/redirect?to=/&n=3"
-          },
-          "expected": {
-            "disposition": "allow",
-            "tls": null,
-            "matched_rule": "allow-files",
-            "http_status_family": "2xx",
-            "certainty": "deterministic",
-            "rationale": "Rule 'allow-files' action=Allow.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "redirect",
-            "tls": null,
-            "http_status": 302,
-            "curl_exit": 0,
-            "body_head": "redirecting\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:03 POLICY_ALLOW rule=\"allow-files\" pri=1 127.0.0.1 GET \"files.corp.local:18091\" [destFQDN=files.corp.local] {req_id=2cb4e5581c496575 identity= rule=allow-files action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'allow' (rule=allow-files) but actual 'redirect' (status=302, trace=['[Culvert] 2026/07/12 23:20:03 POLICY_ALLOW rule=\"allow-files\" pri=1 127.0.0.1 GET \"files.corp.local:18091\" [destFQDN=files.corp.local] {req_id=2cb4e5581c496575 identity= rule=allow-files action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:04.239686+00:00"
-      }
-    },
-    "SWG-0166": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "blocked",
-            "scheme": "http",
-            "host": "social.example.test",
-            "client_ip": "127.0.0.1"
-          },
-          "expected": {
-            "disposition": "block_page",
-            "tls": null,
-            "matched_rule": "block-social-media",
-            "http_status_family": "403",
-            "certainty": "deterministic",
-            "rationale": "Rule 'block-social-media' action=Block_Page.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "allow",
-            "tls": null,
-            "http_status": 200,
-            "curl_exit": 0,
-            "body_head": "origin:social.example.test\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:05 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"social.example.test:18091\" [destFQDN=*] {req_id=cad7733a29e0c43c identity= rule=permit-corp action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'block_page' (rule=block-social-media) but actual 'allow' (status=200, trace=['[Culvert] 2026/07/12 23:20:05 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"social.example.test:18091\" [destFQDN=*] {req_id=cad7733a29e0c43c identity= rule=permit-corp action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:05.808822+00:00"
-      }
-    },
-    "SWG-0167": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "blocked",
-            "scheme": "http",
-            "host": "news.example.test",
-            "client_ip": "127.0.0.1"
-          },
-          "expected": {
-            "disposition": "block_page",
-            "tls": null,
-            "matched_rule": "block-news",
-            "http_status_family": "403",
-            "certainty": "deterministic",
-            "rationale": "Rule 'block-news' action=Block_Page.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "allow",
-            "tls": null,
-            "http_status": 200,
-            "curl_exit": 0,
-            "body_head": "origin:news.example.test\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:06 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"news.example.test:18091\" [destFQDN=*] {req_id=3ca3e4eca1d9119e identity= rule=permit-corp action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'block_page' (rule=block-news) but actual 'allow' (status=200, trace=['[Culvert] 2026/07/12 23:20:06 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"news.example.test:18091\" [destFQDN=*] {req_id=3ca3e4eca1d9119e identity= rule=permit-corp action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:07.380187+00:00"
-      }
-    },
-    "SWG-0168": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "blocked",
-            "scheme": "http",
-            "host": "media.corp.local",
-            "client_ip": "127.0.0.1"
-          },
-          "expected": {
-            "disposition": "block_page",
-            "tls": null,
-            "matched_rule": "block-streaming",
-            "http_status_family": "403",
-            "certainty": "deterministic",
-            "rationale": "Rule 'block-streaming' action=Block_Page.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "allow",
-            "tls": null,
-            "http_status": 200,
-            "curl_exit": 0,
-            "body_head": "origin:media.corp.local\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:08 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"media.corp.local:18091\" [destFQDN=*] {req_id=b686c738c619c768 identity= rule=permit-corp action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'block_page' (rule=block-streaming) but actual 'allow' (status=200, trace=['[Culvert] 2026/07/12 23:20:08 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"media.corp.local:18091\" [destFQDN=*] {req_id=b686c738c619c768 identity= rule=permit-corp action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:08.951931+00:00"
-      }
-    },
-    "SWG-0169": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "blocked",
-            "scheme": "http",
-            "host": "example.test",
-            "client_ip": "127.0.0.1"
-          },
-          "expected": {
-            "disposition": "block_page",
-            "tls": null,
-            "matched_rule": "block-webmail",
-            "http_status_family": "403",
-            "certainty": "deterministic",
-            "rationale": "Rule 'block-webmail' action=Block_Page.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "allow",
-            "tls": null,
-            "http_status": 200,
-            "curl_exit": 0,
-            "body_head": "origin:example.test\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:10 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"example.test:18091\" [destFQDN=*] {req_id=e4708a8686fccddd identity= rule=permit-corp action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'block_page' (rule=block-webmail) but actual 'allow' (status=200, trace=['[Culvert] 2026/07/12 23:20:10 POLICY_ALLOW rule=\"permit-corp\" pri=1 127.0.0.1 GET \"example.test:18091\" [destFQDN=*] {req_id=e4708a8686fccddd identity= rule=permit-corp action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:10.524159+00:00"
-      }
-    },
-    "SWG-0191": {
-      "reproduced": true,
-      "confirmations": [
-        {
-          "vector": {
-            "id": "deny",
-            "scheme": "http",
-            "host": "social.example.test",
-            "client_ip": "127.0.0.1"
-          },
-          "expected": {
-            "disposition": "block_page",
-            "tls": null,
-            "matched_rule": null,
-            "http_status_family": "403",
-            "certainty": "deterministic",
-            "rationale": "No access rule matched and Stage-2 default is deny (Zero Trust): proxy serves POLICY_DEFAULT_DENY block page.",
-            "notes": []
-          },
-          "actual": {
-            "disposition": "allow",
-            "tls": null,
-            "http_status": 200,
-            "curl_exit": 0,
-            "body_head": "origin:social.example.test\n",
-            "is_block_page": false,
-            "decision_trace": [
-              "[Culvert] 2026/07/12 23:20:11 POLICY_ALLOW rule=\"permit-webmail\" pri=10 127.0.0.1 GET \"social.example.test:18091\" [destCat=webmail] {req_id=95fd5893a0b3ca74 identity= rule=permit-webmail action=allow}"
-            ],
-            "stats_delta": {
-              "total": 1,
-              "blocked": 0,
-              "allowed": 1
-            },
-            "probes": {}
-          },
-          "verdict": {
-            "verdict": "PRODUCT_BUG",
-            "primary": "PRODUCT_BUG",
-            "confidence": 0.7,
-            "reason": "deterministic expected 'block_page' (rule=None) but actual 'allow' (status=200, trace=['[Culvert] 2026/07/12 23:20:11 POLICY_ALLOW rule=\"permit-webmail\" pri=10 127.0.0.1 GET \"social.example.test:18091\" [destCat=webmail] {req_id=95fd5893a0b3ca74 identity= rule=permit-webmail action=allow}'])"
-          }
-        }
-      ],
-      "clean_env": {
-        "culvert_commit": "2b9ade66340e652911472c7dbacea2151bf4c5fe",
-        "binary": "/home/user/Culvert/culvert",
-        "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
-        "fixture_ip": "192.0.2.2",
-        "proxy": "http://127.0.0.1:18080",
-        "ui": "http://127.0.0.1:19090",
-        "captured_at": "2026-07-12T23:20:12.370471+00:00"
-      }
-    }
-  },
+  "confirmations": {},
   "results": [
     {
       "id": "SWG-0001",
@@ -359,7 +33,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1192,
+      "duration_ms": 2034,
       "manifest": "scenarios/SWG-0001.json"
     },
     {
@@ -374,7 +48,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1202,
       "manifest": "scenarios/SWG-0002.json"
     },
     {
@@ -389,7 +63,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1191,
+      "duration_ms": 1200,
       "manifest": "scenarios/SWG-0003.json"
     },
     {
@@ -404,7 +78,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1201,
+      "duration_ms": 1234,
       "manifest": "scenarios/SWG-0004.json"
     },
     {
@@ -420,7 +94,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1478,
+      "duration_ms": 1515,
       "manifest": "scenarios/SWG-0005.json"
     },
     {
@@ -434,7 +108,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 936,
+      "duration_ms": 970,
       "manifest": "scenarios/SWG-0006.json"
     },
     {
@@ -448,7 +122,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 956,
       "manifest": "scenarios/SWG-0007.json"
     },
     {
@@ -462,7 +136,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 937,
+      "duration_ms": 958,
       "manifest": "scenarios/SWG-0008.json"
     },
     {
@@ -477,7 +151,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1208,
       "manifest": "scenarios/SWG-0009.json"
     },
     {
@@ -491,7 +165,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1048,
+      "duration_ms": 1073,
       "manifest": "scenarios/SWG-0010.json"
     },
     {
@@ -505,7 +179,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1051,
+      "duration_ms": 1071,
       "manifest": "scenarios/SWG-0011.json"
     },
     {
@@ -518,7 +192,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 767,
+      "duration_ms": 695,
       "manifest": "scenarios/SWG-0012.json"
     },
     {
@@ -532,7 +206,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 933,
+      "duration_ms": 989,
       "manifest": "scenarios/SWG-0013.json"
     },
     {
@@ -545,7 +219,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 670,
+      "duration_ms": 682,
       "manifest": "scenarios/SWG-0014.json"
     },
     {
@@ -558,7 +232,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 681,
       "manifest": "scenarios/SWG-0015.json"
     },
     {
@@ -571,7 +245,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 682,
       "manifest": "scenarios/SWG-0016.json"
     },
     {
@@ -586,7 +260,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1195,
+      "duration_ms": 1212,
       "manifest": "scenarios/SWG-0017.json"
     },
     {
@@ -600,7 +274,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 939,
       "manifest": "scenarios/SWG-0018.json"
     },
     {
@@ -613,7 +287,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 688,
       "manifest": "scenarios/SWG-0019.json"
     },
     {
@@ -626,7 +300,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 682,
       "manifest": "scenarios/SWG-0020.json"
     },
     {
@@ -641,7 +315,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1200,
+      "duration_ms": 1211,
       "manifest": "scenarios/SWG-0021.json"
     },
     {
@@ -655,7 +329,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 945,
       "manifest": "scenarios/SWG-0022.json"
     },
     {
@@ -668,7 +342,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1154,
       "manifest": "scenarios/SWG-0023.json"
     },
     {
@@ -683,7 +357,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1216,
       "manifest": "scenarios/SWG-0024.json"
     },
     {
@@ -698,7 +372,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1199,
+      "duration_ms": 1209,
       "manifest": "scenarios/SWG-0025.json"
     },
     {
@@ -713,7 +387,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1195,
+      "duration_ms": 1210,
       "manifest": "scenarios/SWG-0026.json"
     },
     {
@@ -728,7 +402,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1207,
       "manifest": "scenarios/SWG-0027.json"
     },
     {
@@ -743,7 +417,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1198,
+      "duration_ms": 1231,
       "manifest": "scenarios/SWG-0028.json"
     },
     {
@@ -758,7 +432,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1196,
+      "duration_ms": 1216,
       "manifest": "scenarios/SWG-0029.json"
     },
     {
@@ -773,7 +447,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1194,
+      "duration_ms": 1219,
       "manifest": "scenarios/SWG-0030.json"
     },
     {
@@ -788,7 +462,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1193,
+      "duration_ms": 1207,
       "manifest": "scenarios/SWG-0031.json"
     },
     {
@@ -803,7 +477,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1192,
+      "duration_ms": 1206,
       "manifest": "scenarios/SWG-0032.json"
     },
     {
@@ -818,7 +492,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1193,
+      "duration_ms": 1207,
       "manifest": "scenarios/SWG-0033.json"
     },
     {
@@ -833,7 +507,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1194,
+      "duration_ms": 1213,
       "manifest": "scenarios/SWG-0034.json"
     },
     {
@@ -848,7 +522,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1192,
+      "duration_ms": 1207,
       "manifest": "scenarios/SWG-0035.json"
     },
     {
@@ -863,7 +537,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1244,
+      "duration_ms": 1264,
       "manifest": "scenarios/SWG-0036.json"
     },
     {
@@ -878,7 +552,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1249,
+      "duration_ms": 1257,
       "manifest": "scenarios/SWG-0037.json"
     },
     {
@@ -893,7 +567,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1246,
+      "duration_ms": 1259,
       "manifest": "scenarios/SWG-0038.json"
     },
     {
@@ -908,7 +582,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1245,
+      "duration_ms": 1263,
       "manifest": "scenarios/SWG-0039.json"
     },
     {
@@ -923,7 +597,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1243,
+      "duration_ms": 1258,
       "manifest": "scenarios/SWG-0040.json"
     },
     {
@@ -938,7 +612,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1252,
+      "duration_ms": 1263,
       "manifest": "scenarios/SWG-0041.json"
     },
     {
@@ -953,7 +627,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1198,
+      "duration_ms": 1213,
       "manifest": "scenarios/SWG-0042.json"
     },
     {
@@ -968,7 +642,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1198,
+      "duration_ms": 1215,
       "manifest": "scenarios/SWG-0043.json"
     },
     {
@@ -983,7 +657,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1195,
+      "duration_ms": 1211,
       "manifest": "scenarios/SWG-0044.json"
     },
     {
@@ -998,7 +672,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1198,
+      "duration_ms": 1213,
       "manifest": "scenarios/SWG-0045.json"
     },
     {
@@ -1013,7 +687,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1217,
+      "duration_ms": 1244,
       "manifest": "scenarios/SWG-0046.json"
     },
     {
@@ -1028,7 +702,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1214,
+      "duration_ms": 1251,
       "manifest": "scenarios/SWG-0047.json"
     },
     {
@@ -1043,7 +717,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1213,
+      "duration_ms": 1243,
       "manifest": "scenarios/SWG-0048.json"
     },
     {
@@ -1057,7 +731,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0049.json"
     },
     {
@@ -1071,7 +745,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0050.json"
     },
     {
@@ -1085,7 +759,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0051.json"
     },
     {
@@ -1099,7 +773,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0052.json"
     },
     {
@@ -1113,7 +787,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 932,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0053.json"
     },
     {
@@ -1127,7 +801,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 940,
       "manifest": "scenarios/SWG-0054.json"
     },
     {
@@ -1141,7 +815,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0055.json"
     },
     {
@@ -1155,7 +829,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 928,
+      "duration_ms": 952,
       "manifest": "scenarios/SWG-0056.json"
     },
     {
@@ -1169,7 +843,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 961,
       "manifest": "scenarios/SWG-0057.json"
     },
     {
@@ -1183,7 +857,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 953,
       "manifest": "scenarios/SWG-0058.json"
     },
     {
@@ -1199,7 +873,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1457,
+      "duration_ms": 1486,
       "manifest": "scenarios/SWG-0059.json"
     },
     {
@@ -1212,7 +886,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 728,
+      "duration_ms": 740,
       "manifest": "scenarios/SWG-0060.json"
     },
     {
@@ -1225,7 +899,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 726,
+      "duration_ms": 793,
       "manifest": "scenarios/SWG-0061.json"
     },
     {
@@ -1238,7 +912,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 729,
+      "duration_ms": 741,
       "manifest": "scenarios/SWG-0062.json"
     },
     {
@@ -1251,7 +925,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 727,
+      "duration_ms": 738,
       "manifest": "scenarios/SWG-0063.json"
     },
     {
@@ -1264,7 +938,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 733,
+      "duration_ms": 748,
       "manifest": "scenarios/SWG-0064.json"
     },
     {
@@ -1277,7 +951,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 726,
+      "duration_ms": 745,
       "manifest": "scenarios/SWG-0065.json"
     },
     {
@@ -1290,7 +964,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 739,
+      "duration_ms": 747,
       "manifest": "scenarios/SWG-0066.json"
     },
     {
@@ -1303,7 +977,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 735,
+      "duration_ms": 744,
       "manifest": "scenarios/SWG-0067.json"
     },
     {
@@ -1316,7 +990,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 732,
+      "duration_ms": 749,
       "manifest": "scenarios/SWG-0068.json"
     },
     {
@@ -1329,7 +1003,7 @@
       "vector_verdicts": [
         "CONFIGURATION_CONTRACT_GAP"
       ],
-      "duration_ms": 686,
+      "duration_ms": 699,
       "manifest": "scenarios/SWG-0069.json"
     },
     {
@@ -1342,7 +1016,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 673,
+      "duration_ms": 680,
       "manifest": "scenarios/SWG-0070.json"
     },
     {
@@ -1355,7 +1029,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 670,
+      "duration_ms": 683,
       "manifest": "scenarios/SWG-0071.json"
     },
     {
@@ -1370,7 +1044,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1197,
+      "duration_ms": 1302,
       "manifest": "scenarios/SWG-0072.json"
     },
     {
@@ -1385,7 +1059,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1191,
+      "duration_ms": 1203,
       "manifest": "scenarios/SWG-0073.json"
     },
     {
@@ -1399,7 +1073,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1043,
+      "duration_ms": 1063,
       "manifest": "scenarios/SWG-0074.json"
     },
     {
@@ -1413,7 +1087,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1043,
+      "duration_ms": 1078,
       "manifest": "scenarios/SWG-0075.json"
     },
     {
@@ -1426,7 +1100,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 670,
+      "duration_ms": 684,
       "manifest": "scenarios/SWG-0076.json"
     },
     {
@@ -1439,7 +1113,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 673,
+      "duration_ms": 683,
       "manifest": "scenarios/SWG-0077.json"
     },
     {
@@ -1452,7 +1126,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 669,
+      "duration_ms": 685,
       "manifest": "scenarios/SWG-0078.json"
     },
     {
@@ -1465,7 +1139,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 681,
       "manifest": "scenarios/SWG-0079.json"
     },
     {
@@ -1478,7 +1152,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 673,
+      "duration_ms": 681,
       "manifest": "scenarios/SWG-0080.json"
     },
     {
@@ -1491,7 +1165,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 673,
+      "duration_ms": 686,
       "manifest": "scenarios/SWG-0081.json"
     },
     {
@@ -1504,7 +1178,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 683,
       "manifest": "scenarios/SWG-0082.json"
     },
     {
@@ -1517,7 +1191,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 675,
+      "duration_ms": 687,
       "manifest": "scenarios/SWG-0083.json"
     },
     {
@@ -1528,12 +1202,10 @@
       "requires_auth": false,
       "vector_count": 1,
       "vector_verdicts": [
-        "PRODUCT_BUG"
+        "PASS"
       ],
-      "duration_ms": 677,
-      "manifest": "scenarios/SWG-0084.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 683,
+      "manifest": "scenarios/SWG-0084.json"
     },
     {
       "id": "SWG-0085",
@@ -1546,7 +1218,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 940,
       "manifest": "scenarios/SWG-0085.json"
     },
     {
@@ -1560,7 +1232,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0086.json"
     },
     {
@@ -1574,7 +1246,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 932,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0087.json"
     },
     {
@@ -1588,7 +1260,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 939,
+      "duration_ms": 946,
       "manifest": "scenarios/SWG-0088.json"
     },
     {
@@ -1602,7 +1274,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 935,
+      "duration_ms": 951,
       "manifest": "scenarios/SWG-0089.json"
     },
     {
@@ -1616,7 +1288,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 936,
+      "duration_ms": 949,
       "manifest": "scenarios/SWG-0090.json"
     },
     {
@@ -1629,7 +1301,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 684,
       "manifest": "scenarios/SWG-0091.json"
     },
     {
@@ -1642,7 +1314,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 670,
+      "duration_ms": 684,
       "manifest": "scenarios/SWG-0092.json"
     },
     {
@@ -1655,7 +1327,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 679,
       "manifest": "scenarios/SWG-0093.json"
     },
     {
@@ -1668,7 +1340,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 677,
+      "duration_ms": 693,
       "manifest": "scenarios/SWG-0094.json"
     },
     {
@@ -1681,7 +1353,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 677,
+      "duration_ms": 688,
       "manifest": "scenarios/SWG-0095.json"
     },
     {
@@ -1694,7 +1366,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 678,
+      "duration_ms": 688,
       "manifest": "scenarios/SWG-0096.json"
     },
     {
@@ -1707,7 +1379,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 676,
+      "duration_ms": 686,
       "manifest": "scenarios/SWG-0097.json"
     },
     {
@@ -1720,7 +1392,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 677,
+      "duration_ms": 689,
       "manifest": "scenarios/SWG-0098.json"
     },
     {
@@ -1733,7 +1405,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 677,
+      "duration_ms": 696,
       "manifest": "scenarios/SWG-0099.json"
     },
     {
@@ -1746,7 +1418,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 678,
+      "duration_ms": 693,
       "manifest": "scenarios/SWG-0100.json"
     },
     {
@@ -1761,7 +1433,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1246,
+      "duration_ms": 1295,
       "manifest": "scenarios/SWG-0101.json"
     },
     {
@@ -1776,7 +1448,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1249,
+      "duration_ms": 1260,
       "manifest": "scenarios/SWG-0102.json"
     },
     {
@@ -1791,7 +1463,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1246,
+      "duration_ms": 1263,
       "manifest": "scenarios/SWG-0103.json"
     },
     {
@@ -1806,7 +1478,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1243,
+      "duration_ms": 1264,
       "manifest": "scenarios/SWG-0104.json"
     },
     {
@@ -1821,7 +1493,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1246,
+      "duration_ms": 1267,
       "manifest": "scenarios/SWG-0105.json"
     },
     {
@@ -1836,7 +1508,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1246,
+      "duration_ms": 1270,
       "manifest": "scenarios/SWG-0106.json"
     },
     {
@@ -1850,7 +1522,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 935,
+      "duration_ms": 953,
       "manifest": "scenarios/SWG-0107.json"
     },
     {
@@ -1864,7 +1536,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 937,
+      "duration_ms": 951,
       "manifest": "scenarios/SWG-0108.json"
     },
     {
@@ -1878,7 +1550,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 937,
+      "duration_ms": 952,
       "manifest": "scenarios/SWG-0109.json"
     },
     {
@@ -1892,7 +1564,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 952,
       "manifest": "scenarios/SWG-0110.json"
     },
     {
@@ -1905,7 +1577,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 735,
+      "duration_ms": 757,
       "manifest": "scenarios/SWG-0111.json"
     },
     {
@@ -1918,7 +1590,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 736,
+      "duration_ms": 756,
       "manifest": "scenarios/SWG-0112.json"
     },
     {
@@ -1931,7 +1603,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 734,
+      "duration_ms": 755,
       "manifest": "scenarios/SWG-0113.json"
     },
     {
@@ -1944,7 +1616,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 736,
+      "duration_ms": 750,
       "manifest": "scenarios/SWG-0114.json"
     },
     {
@@ -1957,7 +1629,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 674,
+      "duration_ms": 683,
       "manifest": "scenarios/SWG-0115.json"
     },
     {
@@ -1970,7 +1642,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 673,
+      "duration_ms": 685,
       "manifest": "scenarios/SWG-0116.json"
     },
     {
@@ -1983,7 +1655,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 682,
       "manifest": "scenarios/SWG-0117.json"
     },
     {
@@ -1997,7 +1669,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 939,
+      "duration_ms": 1242,
       "manifest": "scenarios/SWG-0118.json"
     },
     {
@@ -2011,7 +1683,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 948,
       "manifest": "scenarios/SWG-0119.json"
     },
     {
@@ -2025,7 +1697,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 928,
+      "duration_ms": 950,
       "manifest": "scenarios/SWG-0120.json"
     },
     {
@@ -2041,7 +1713,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1454,
+      "duration_ms": 1478,
       "manifest": "scenarios/SWG-0121.json"
     },
     {
@@ -2054,7 +1726,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 681,
       "manifest": "scenarios/SWG-0122.json"
     },
     {
@@ -2072,21 +1744,21 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1971,
+      "duration_ms": 1998,
       "manifest": "scenarios/SWG-0123.json"
     },
     {
       "id": "SWG-0124",
-      "title": "Policy configuration persists across a proxy restart",
-      "classification": "CONFIGURATION_CONTRACT_GAP",
-      "confidence": 0.85,
+      "title": "Policy configuration persists AND enforces across a proxy restart",
+      "classification": "PASS",
+      "confidence": 0.95,
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
-        "CONFIGURATION_CONTRACT_GAP",
+        "PASS",
         "PASS"
       ],
-      "duration_ms": 1550,
+      "duration_ms": 1590,
       "manifest": "scenarios/SWG-0124.json"
     },
     {
@@ -2100,7 +1772,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 935,
+      "duration_ms": 956,
       "manifest": "scenarios/SWG-0125.json"
     },
     {
@@ -2114,7 +1786,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 949,
       "manifest": "scenarios/SWG-0126.json"
     },
     {
@@ -2128,7 +1800,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 933,
+      "duration_ms": 958,
       "manifest": "scenarios/SWG-0127.json"
     },
     {
@@ -2142,7 +1814,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 935,
+      "duration_ms": 951,
       "manifest": "scenarios/SWG-0128.json"
     },
     {
@@ -2155,7 +1827,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 727,
+      "duration_ms": 742,
       "manifest": "scenarios/SWG-0129.json"
     },
     {
@@ -2168,7 +1840,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 731,
+      "duration_ms": 742,
       "manifest": "scenarios/SWG-0130.json"
     },
     {
@@ -2181,7 +1853,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 731,
+      "duration_ms": 739,
       "manifest": "scenarios/SWG-0131.json"
     },
     {
@@ -2194,7 +1866,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 740,
+      "duration_ms": 741,
       "manifest": "scenarios/SWG-0132.json"
     },
     {
@@ -2207,7 +1879,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 760,
+      "duration_ms": 762,
       "manifest": "scenarios/SWG-0133.json"
     },
     {
@@ -2221,7 +1893,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0134.json"
     },
     {
@@ -2235,7 +1907,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 956,
       "manifest": "scenarios/SWG-0135.json"
     },
     {
@@ -2249,7 +1921,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0136.json"
     },
     {
@@ -2263,7 +1935,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0137.json"
     },
     {
@@ -2277,7 +1949,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 1231,
       "manifest": "scenarios/SWG-0138.json"
     },
     {
@@ -2291,7 +1963,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 945,
       "manifest": "scenarios/SWG-0139.json"
     },
     {
@@ -2305,7 +1977,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 933,
+      "duration_ms": 945,
       "manifest": "scenarios/SWG-0140.json"
     },
     {
@@ -2319,7 +1991,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0141.json"
     },
     {
@@ -2333,7 +2005,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0142.json"
     },
     {
@@ -2347,7 +2019,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 929,
+      "duration_ms": 940,
       "manifest": "scenarios/SWG-0143.json"
     },
     {
@@ -2361,7 +2033,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 928,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0144.json"
     },
     {
@@ -2375,7 +2047,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0145.json"
     },
     {
@@ -2389,7 +2061,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0146.json"
     },
     {
@@ -2403,7 +2075,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 946,
       "manifest": "scenarios/SWG-0147.json"
     },
     {
@@ -2417,7 +2089,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0148.json"
     },
     {
@@ -2431,7 +2103,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0149.json"
     },
     {
@@ -2445,7 +2117,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 932,
+      "duration_ms": 941,
       "manifest": "scenarios/SWG-0150.json"
     },
     {
@@ -2459,7 +2131,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 947,
       "manifest": "scenarios/SWG-0151.json"
     },
     {
@@ -2473,7 +2145,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 932,
+      "duration_ms": 945,
       "manifest": "scenarios/SWG-0152.json"
     },
     {
@@ -2487,7 +2159,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 946,
       "manifest": "scenarios/SWG-0153.json"
     },
     {
@@ -2500,7 +2172,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 732,
+      "duration_ms": 739,
       "manifest": "scenarios/SWG-0154.json"
     },
     {
@@ -2513,7 +2185,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 734,
+      "duration_ms": 744,
       "manifest": "scenarios/SWG-0155.json"
     },
     {
@@ -2526,7 +2198,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 727,
+      "duration_ms": 772,
       "manifest": "scenarios/SWG-0156.json"
     },
     {
@@ -2539,7 +2211,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 731,
+      "duration_ms": 743,
       "manifest": "scenarios/SWG-0157.json"
     },
     {
@@ -2552,7 +2224,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 734,
+      "duration_ms": 744,
       "manifest": "scenarios/SWG-0158.json"
     },
     {
@@ -2565,7 +2237,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 727,
+      "duration_ms": 743,
       "manifest": "scenarios/SWG-0159.json"
     },
     {
@@ -2578,7 +2250,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 732,
+      "duration_ms": 742,
       "manifest": "scenarios/SWG-0160.json"
     },
     {
@@ -2591,7 +2263,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 727,
+      "duration_ms": 744,
       "manifest": "scenarios/SWG-0161.json"
     },
     {
@@ -2604,7 +2276,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 729,
+      "duration_ms": 739,
       "manifest": "scenarios/SWG-0162.json"
     },
     {
@@ -2617,7 +2289,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 685,
       "manifest": "scenarios/SWG-0163.json"
     },
     {
@@ -2630,7 +2302,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 669,
+      "duration_ms": 681,
       "manifest": "scenarios/SWG-0164.json"
     },
     {
@@ -2643,7 +2315,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 669,
+      "duration_ms": 679,
       "manifest": "scenarios/SWG-0165.json"
     },
     {
@@ -2654,13 +2326,11 @@
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
-        "PRODUCT_BUG",
+        "CONFIGURATION_CONTRACT_GAP",
         "PASS"
       ],
-      "duration_ms": 939,
-      "manifest": "scenarios/SWG-0166.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 966,
+      "manifest": "scenarios/SWG-0166.json"
     },
     {
       "id": "SWG-0167",
@@ -2670,13 +2340,11 @@
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
-        "PRODUCT_BUG",
+        "CONFIGURATION_CONTRACT_GAP",
         "PASS"
       ],
-      "duration_ms": 943,
-      "manifest": "scenarios/SWG-0167.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 961,
+      "manifest": "scenarios/SWG-0167.json"
     },
     {
       "id": "SWG-0168",
@@ -2686,13 +2354,11 @@
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
-        "PRODUCT_BUG",
+        "CONFIGURATION_CONTRACT_GAP",
         "PASS"
       ],
-      "duration_ms": 943,
-      "manifest": "scenarios/SWG-0168.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 965,
+      "manifest": "scenarios/SWG-0168.json"
     },
     {
       "id": "SWG-0169",
@@ -2702,13 +2368,11 @@
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
-        "PRODUCT_BUG",
+        "CONFIGURATION_CONTRACT_GAP",
         "PASS"
       ],
-      "duration_ms": 943,
-      "manifest": "scenarios/SWG-0169.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 967,
+      "manifest": "scenarios/SWG-0169.json"
     },
     {
       "id": "SWG-0170",
@@ -2721,7 +2385,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 947,
+      "duration_ms": 950,
       "manifest": "scenarios/SWG-0170.json"
     },
     {
@@ -2735,7 +2399,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 938,
+      "duration_ms": 945,
       "manifest": "scenarios/SWG-0171.json"
     },
     {
@@ -2749,7 +2413,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 939,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0172.json"
     },
     {
@@ -2763,7 +2427,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 936,
+      "duration_ms": 950,
       "manifest": "scenarios/SWG-0173.json"
     },
     {
@@ -2777,7 +2441,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 936,
+      "duration_ms": 947,
       "manifest": "scenarios/SWG-0174.json"
     },
     {
@@ -2791,7 +2455,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 952,
       "manifest": "scenarios/SWG-0175.json"
     },
     {
@@ -2805,7 +2469,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 937,
+      "duration_ms": 948,
       "manifest": "scenarios/SWG-0176.json"
     },
     {
@@ -2819,7 +2483,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 938,
+      "duration_ms": 950,
       "manifest": "scenarios/SWG-0177.json"
     },
     {
@@ -2833,7 +2497,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 939,
+      "duration_ms": 994,
       "manifest": "scenarios/SWG-0178.json"
     },
     {
@@ -2847,7 +2511,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 951,
       "manifest": "scenarios/SWG-0179.json"
     },
     {
@@ -2861,7 +2525,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 932,
+      "duration_ms": 949,
       "manifest": "scenarios/SWG-0180.json"
     },
     {
@@ -2875,7 +2539,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 933,
+      "duration_ms": 954,
       "manifest": "scenarios/SWG-0181.json"
     },
     {
@@ -2889,7 +2553,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 946,
       "manifest": "scenarios/SWG-0182.json"
     },
     {
@@ -2903,7 +2567,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 938,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0183.json"
     },
     {
@@ -2917,7 +2581,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 947,
       "manifest": "scenarios/SWG-0184.json"
     },
     {
@@ -2931,7 +2595,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 930,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0185.json"
     },
     {
@@ -2945,7 +2609,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0186.json"
     },
     {
@@ -2959,7 +2623,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 942,
       "manifest": "scenarios/SWG-0187.json"
     },
     {
@@ -2974,7 +2638,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1221,
+      "duration_ms": 1240,
       "manifest": "scenarios/SWG-0188.json"
     },
     {
@@ -2989,7 +2653,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1218,
+      "duration_ms": 1265,
       "manifest": "scenarios/SWG-0189.json"
     },
     {
@@ -3004,7 +2668,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1221,
+      "duration_ms": 1242,
       "manifest": "scenarios/SWG-0190.json"
     },
     {
@@ -3016,13 +2680,11 @@
       "vector_count": 3,
       "vector_verdicts": [
         "PASS",
-        "PRODUCT_BUG",
+        "TEST_INFRA_FAILURE",
         "PASS"
       ],
-      "duration_ms": 1223,
-      "manifest": "scenarios/SWG-0191.json",
-      "automated_classification": "PRODUCT_BUG",
-      "retriaged": true
+      "duration_ms": 1233,
+      "manifest": "scenarios/SWG-0191.json"
     },
     {
       "id": "SWG-0192",
@@ -3034,7 +2696,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 678,
       "manifest": "scenarios/SWG-0192.json"
     },
     {
@@ -3047,7 +2709,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 672,
+      "duration_ms": 691,
       "manifest": "scenarios/SWG-0193.json"
     },
     {
@@ -3060,7 +2722,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 674,
+      "duration_ms": 718,
       "manifest": "scenarios/SWG-0194.json"
     },
     {
@@ -3073,7 +2735,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 671,
+      "duration_ms": 685,
       "manifest": "scenarios/SWG-0195.json"
     },
     {
@@ -3087,7 +2749,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 994,
+      "duration_ms": 1008,
       "manifest": "scenarios/SWG-0196.json"
     },
     {
@@ -3101,7 +2763,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 990,
+      "duration_ms": 1042,
       "manifest": "scenarios/SWG-0197.json"
     },
     {
@@ -3115,7 +2777,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 989,
+      "duration_ms": 1003,
       "manifest": "scenarios/SWG-0198.json"
     },
     {
@@ -3129,7 +2791,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 988,
+      "duration_ms": 1001,
       "manifest": "scenarios/SWG-0199.json"
     },
     {
@@ -3143,7 +2805,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 991,
+      "duration_ms": 1007,
       "manifest": "scenarios/SWG-0200.json"
     },
     {
@@ -3157,7 +2819,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 988,
+      "duration_ms": 1003,
       "manifest": "scenarios/SWG-0201.json"
     },
     {
@@ -3171,7 +2833,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 990,
+      "duration_ms": 1006,
       "manifest": "scenarios/SWG-0202.json"
     },
     {
@@ -3185,7 +2847,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 990,
+      "duration_ms": 1013,
       "manifest": "scenarios/SWG-0203.json"
     },
     {
@@ -3199,7 +2861,7 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 990,
+      "duration_ms": 1010,
       "manifest": "scenarios/SWG-0204.json"
     },
     {
@@ -3260,29 +2922,29 @@
     {
       "id": "SWG-0210",
       "title": "Egress policy must apply to SOCKS5 clients (news.example.test)",
-      "classification": "MISSING_CAPABILITY",
+      "classification": "SECURITY_BYPASS",
       "confidence": 0.85,
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
         "PASS",
-        "MISSING_CAPABILITY"
+        "SECURITY_BYPASS"
       ],
-      "duration_ms": 931,
+      "duration_ms": 943,
       "manifest": "scenarios/SWG-0210.json"
     },
     {
       "id": "SWG-0211",
       "title": "Egress policy must apply to SOCKS5 clients (media.corp.local)",
-      "classification": "MISSING_CAPABILITY",
+      "classification": "SECURITY_BYPASS",
       "confidence": 0.85,
       "requires_auth": false,
       "vector_count": 2,
       "vector_verdicts": [
         "PASS",
-        "MISSING_CAPABILITY"
+        "SECURITY_BYPASS"
       ],
-      "duration_ms": 934,
+      "duration_ms": 944,
       "manifest": "scenarios/SWG-0211.json"
     },
     {
@@ -3295,7 +2957,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 732,
+      "duration_ms": 743,
       "manifest": "scenarios/SWG-0212.json"
     },
     {
@@ -3308,7 +2970,7 @@
       "vector_verdicts": [
         "PASS"
       ],
-      "duration_ms": 682,
+      "duration_ms": 693,
       "manifest": "scenarios/SWG-0213.json"
     },
     {
@@ -3323,39 +2985,22 @@
         "PASS",
         "PASS"
       ],
-      "duration_ms": 1191,
+      "duration_ms": 1202,
       "manifest": "scenarios/SWG-0214.json"
     },
     {
       "id": "SWG-0215",
       "title": "Open-redirect safety on the redirect action",
-      "classification": "CONFIGURATION_CONTRACT_GAP",
+      "classification": "EXPECTED_LIMITATION",
       "confidence": 0.85,
       "requires_auth": false,
       "vector_count": 1,
       "vector_verdicts": [
         "CONFIGURATION_CONTRACT_GAP"
       ],
-      "duration_ms": 675,
-      "manifest": "scenarios/SWG-0215.json"
+      "duration_ms": 700,
+      "manifest": "scenarios/SWG-0215.json",
+      "refreshed_from": "CONFIGURATION_CONTRACT_GAP"
     }
-  ],
-  "retriage": {
-    "reviewed": [
-      "SWG-0084",
-      "SWG-0166",
-      "SWG-0167",
-      "SWG-0168",
-      "SWG-0169",
-      "SWG-0191"
-    ],
-    "final": {
-      "SWG-0084": "PASS",
-      "SWG-0166": "CONFIGURATION_CONTRACT_GAP",
-      "SWG-0167": "CONFIGURATION_CONTRACT_GAP",
-      "SWG-0168": "CONFIGURATION_CONTRACT_GAP",
-      "SWG-0169": "CONFIGURATION_CONTRACT_GAP",
-      "SWG-0191": "TEST_INFRA_FAILURE"
-    }
-  }
+  ]
 }

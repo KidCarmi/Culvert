@@ -58,8 +58,11 @@ class FullGen(Gen):
                 intent = {"default_action": "deny", "default_auth": "Exempt",
                           "rules": [{"name": f"permit-{style}", "priority": 10, "kind": "access",
                                      "match": {"fqdn": pat}, "action": "allow"}]}
+                # R4: the negative vector must target a host OUTSIDE the permit's scope.
+                # example.test is neither app.corp.local (exact) nor *.corp.local (wildcard),
+                # so it genuinely exercises default-deny for BOTH pattern styles.
                 vectors = [_v("permit", "http", host), _v("permit-c", "https", host),
-                           _v("deny-other", "http", H_MEDIA)]
+                           _v("deny-other", "http", H_EXAMPLE)]
                 self.add(
                     f"Default-deny egress with {style} allow-list for {host}",
                     f"Under Zero-Trust default-deny, permit only '{pat}'; every other destination is denied.",
@@ -382,7 +385,7 @@ class FullGen(Gen):
             intent = {"default_action": "allow", "default_auth": "Exempt",
                       "rules": [{"name": "block", "priority": 1, "kind": "access",
                                  "match": {"fqdn": host}, "action": "block_page"}],
-                      "triage": {"class": "MISSING_CAPABILITY",
+                      "triage": {"class": "SECURITY_BYPASS",
                                  "note": "Culvert SOCKS5 handler does not run the PBAC policy engine "
                                          "(only the legacy blocklist); destination policy cannot be "
                                          "represented for SOCKS5 clients. Documented architecture, but a "
@@ -452,7 +455,7 @@ class FullGen(Gen):
                   "rules": [{"name": "bad-redirect", "priority": 10, "kind": "access",
                              "match": {"fqdn": H_SOCIAL}, "action": "redirect",
                              "redirect_url": "http://attacker.evil.test/phish"}],
-                  "triage": {"class": "CONFIGURATION_CONTRACT_GAP",
+                  "triage": {"class": "EXPECTED_LIMITATION",
                              "note": "Culvert refuses to redirect to an unvalidated external host "
                                      "(isSafeRedirectURL -> 403 instead of an open 302). This is a DEFENSIBLE "
                                      "safety posture (no open-redirect), but it also means an admin cannot "
@@ -623,26 +626,26 @@ class FullGen(Gen):
             intent, vectors, _fp("Q-conc", "mixed"))
 
     def m_persistence(self):
+        # R1: the harness now runs Culvert with the shipped durable-store contract
+        # (-policy /data/policy.json). This scenario creates policy via the Admin API,
+        # restarts the proxy WITHOUT wiping /data, and asserts the rule is both
+        # PRESENT (config persistence) and ENFORCED (runtime, via decision trace) after
+        # restart. It PASSES on a correct build and FLIPS (a Save()-disabling mutation
+        # is detected) when persistence is broken.
         intent = {"default_action": "deny", "default_auth": "Exempt",
                   "rules": [{"name": "permit-app", "priority": 10, "kind": "access",
                              "match": {"fqdn": H_APP}, "action": "allow"}],
-                  "persistence_check": True,
-                  "triage": {"class": "CONFIGURATION_CONTRACT_GAP",
-                             "note": "Policy created through the supported admin API is NOT durable across a "
-                                     "data-plane restart unless the operator started Culvert with a -policy "
-                                     "persistence file (startup logs 'Policy: in-memory only'). The API/GUI "
-                                     "accept and enforce the rule live but give no indication it is ephemeral, "
-                                     "so an admin who configures policy via the GUI and later restarts the "
-                                     "proxy silently loses all of it. Durable-by-default persistence (or an "
-                                     "explicit ephemeral warning) is the enterprise expectation."}}
+                  "persistence_check": True}
         self.add(
-            "Policy configuration persists across a proxy restart",
-            "Policy created through the admin API must survive a data-plane process restart (durable "
-            "configuration), so enforcement is not silently lost on reboot.",
-            "Configuration durability across restarts is a fundamental enterprise expectation.",
+            "Policy configuration persists AND enforces across a proxy restart",
+            "Policy created through the admin API (with the shipped -policy durable store) must survive "
+            "a data-plane restart and remain ENFORCEABLE — the permitted host is still allowed and an "
+            "unmatched host is still default-denied after restart, confirmed by the post-restart decision "
+            "trace, not just a config read-back.",
+            "Configuration durability + post-restart enforcement is a fundamental enterprise expectation.",
             "Configuration persistence", ["config_persistence", "data_plane_restart", "http"],
             intent, [_v("app", "http", H_APP), _v("deny", "http", H_MEDIA)], _fp("P-persist", "restart"),
-            notes="Runner restarts the process WITHOUT wiping /data, then re-evaluates the vectors.")
+            notes="Runner restarts WITHOUT wiping /data; asserts post-restart readback + enforcement trace.")
 
     def m_limitations(self):
         """Honest capability-coverage records for dimensions the local fixture lab cannot
@@ -684,13 +687,15 @@ class FullGen(Gen):
         """Additional distinct, realistic destination/category permutations to broaden coverage."""
         # per-restricted-host: redirect + drop under default-deny business context
         for host, cat in RESTRICTED.items():
+            # R4: the carve-out exception MUST be higher priority (lower number) than
+            # the broad permit, otherwise a restricted host that is ALSO inside the
+            # *.corp.local permit (e.g. media.corp.local) is shadowed by the permit and
+            # the exception never fires. except=1 (top), permit-biz=2.
             intent = {"default_action": "deny", "default_auth": "Exempt",
-                      "rules": [{"name": "permit-biz", "priority": 1, "kind": "access",
-                                 "match": {"fqdn": "*.corp.local"}, "action": "allow"},
-                                {"name": f"except-{cat}", "priority": 2, "kind": "access",
-                                 "match": {"fqdn": host}, "action": "block_page"}]}
-            # note: host may be corp.local or example.test; permit covers only corp.local
-            in_corp = host.endswith("corp.local")
+                      "rules": [{"name": f"except-{cat}", "priority": 1, "kind": "access",
+                                 "match": {"fqdn": host}, "action": "block_page"},
+                                {"name": "permit-biz", "priority": 2, "kind": "access",
+                                 "match": {"fqdn": "*.corp.local"}, "action": "allow"}]}
             vectors = [_v("biz", "http", H_APP), _v("restricted", "http", host)]
             self.add(
                 f"Permit business domain but carve out {cat} exception",

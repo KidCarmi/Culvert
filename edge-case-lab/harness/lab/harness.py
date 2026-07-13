@@ -41,6 +41,10 @@ PROXY = f"http://127.0.0.1:{PROXY_PORT}"
 UI = f"http://127.0.0.1:{UI_PORT}"
 CULVERT_LOG = "/tmp/culvert.log"
 CA_PASSPHRASE = "labtest123"
+# R1: durable policy store — mirrors the shipped docker-compose contract
+# (`-policy /data/policy.json`). Every admin-API mutation calls policyStore.Save(),
+# which persists here; on restart-without-wipe the store is reloaded.
+POLICY_STORE = os.path.join(DATA_DIR, "policy.json")
 FIXTURE_IP = "192.0.2.2"
 FIXTURE_HTTP = 18091
 FIXTURE_HTTPS = 18453
@@ -84,11 +88,63 @@ def _http(method: str, url: str, body: Optional[dict] = None, timeout=10) -> tup
 # =============================================================================
 # Culvert lifecycle
 # =============================================================================
+class OwnershipError(RuntimeError):
+    """R2: raised when the harness cannot prove exclusive ownership of the ports."""
+
+
+def _port_in_use(port: int) -> bool:
+    import socket
+    # (1) connect probe — detects an ACCEPTING listener (e.g. a live culvert).
+    c = socket.socket()
+    c.settimeout(0.3)
+    try:
+        if c.connect_ex(("127.0.0.1", port)) == 0:
+            return True
+    finally:
+        c.close()
+    # (2) bind probe — detects a socket BOUND to the port even if it is not
+    # accepting (backlog full / no accept loop). Use SO_REUSEADDR to MATCH culvert's
+    # own bind semantics: this fails on an ACTIVE listener (real occupancy) but
+    # succeeds over TIME_WAIT connections (which culvert would also bind over), so a
+    # just-killed stray's lingering connections are not mistaken for occupancy.
+    b = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    b.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        b.bind(("0.0.0.0", port))
+        return False
+    except OSError:
+        return True
+    finally:
+        b.close()
+
+
+def _ports_in_use() -> list[int]:
+    return [p for p in (PROXY_PORT, UI_PORT, SOCKS5_PORT) if _port_in_use(p)]
+
+
 class Culvert:
     def __init__(self):
         self.proc: Optional[subprocess.Popen] = None
         self.commit = _git_commit()
         self.dirty = False  # True once configured (admin created); needs fresh restart to reopen
+        self.pid: Optional[int] = None
+        self.pgid: Optional[int] = None
+        self.start_time: Optional[float] = None
+        self.config_path = POLICY_STORE
+
+    def info(self) -> dict:
+        """R2: ownership/provenance record for evidence."""
+        return {
+            "pid": self.pid,
+            "pgid": self.pgid,
+            "start_time": self.start_time,
+            "start_time_iso": (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.start_time))
+                               if self.start_time else None),
+            "commit": self.commit,
+            "config_path": self.config_path,
+            "binary": CULVERT_BIN,
+            "policy_store_present": os.path.isfile(self.config_path),
+        }
 
     def wipe_data(self):
         for name in os.listdir(DATA_DIR):
@@ -110,11 +166,17 @@ class Culvert:
         return code
 
     def start(self, fresh=True):
-        # ALWAYS stop any existing/stray process first (a proper restart), so
-        # fresh=False (persistence "restart-without-wipe") cannot spawn a second
-        # process that zombies onto the ports. Only fresh=True wipes /data.
+        # R2: deterministic ownership. ALWAYS stop our own process, reap strays,
+        # and PROVE the ports are released before starting. Refuse to start when an
+        # UNMANAGED instance still owns the ports (fail-closed, no second instance).
         self.stop()
         _kill_stray_on_ports()
+        self._await_ports_released(timeout=8)
+        still = _ports_in_use()
+        if still:
+            raise OwnershipError(
+                f"refusing to start: ports {still} owned by an unmanaged process "
+                f"(harness could not prove exclusive ownership)")
         if fresh:
             self.wipe_data()
             STATE["auth"] = None  # fresh instance starts in open mode
@@ -124,12 +186,18 @@ class Culvert:
         self.proc = subprocess.Popen(
             [CULVERT_BIN, "-port", str(PROXY_PORT), "-ui-port", str(UI_PORT),
              "-ui-no-tls", "-ca-path", os.path.join(DATA_DIR, "ca.bundle"),
+             "-policy", POLICY_STORE,                     # R1: durable policy store
              "-socks5-port", str(SOCKS5_PORT)],
             stdout=logf, stderr=subprocess.STDOUT, env=env,
             preexec_fn=os.setsid)
+        self.pid = self.proc.pid
+        try:
+            self.pgid = os.getpgid(self.pid)
+        except Exception:
+            self.pgid = None
+        self.start_time = time.time()
         self._await_ready()
         # cache the MITM CA for inspection probes
-        code, _ = _http("GET", f"{UI}/api/ca-cert")
         try:
             with urllib.request.urlopen(f"{UI}/api/ca-cert", timeout=5) as r:
                 open(CULVERT_CA, "w").write(r.read().decode())
@@ -139,13 +207,25 @@ class Culvert:
     def _await_ready(self, timeout=25):
         t0 = time.time()
         while time.time() - t0 < timeout:
+            if self.proc and self.proc.poll() is not None:
+                raise RuntimeError(f"culvert exited during startup (rc={self.proc.returncode}); "
+                                   f"see {CULVERT_LOG}")
             code, _ = _http("GET", f"{UI}/api/setup/status", timeout=2)
             if code == 200:
                 return
             time.sleep(0.3)
         raise RuntimeError("culvert did not become ready")
 
+    def _await_ports_released(self, timeout=8):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if not _ports_in_use():
+                return True
+            time.sleep(0.25)
+        return False
+
     def stop(self):
+        # R2: terminate + REAP the whole process group, then prove ports released.
         if self.proc and self.proc.poll() is None:
             try:
                 os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
@@ -153,9 +233,17 @@ class Culvert:
             except Exception:
                 try:
                     os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                    self.proc.wait(timeout=5)
                 except Exception:
                     pass
+        if self.proc:
+            try:
+                self.proc.wait(timeout=1)  # reap
+            except Exception:
+                pass
         self.proc = None
+        self.pid = None
+        self.pgid = None
 
     def log_offset(self) -> int:
         try:
@@ -379,21 +467,50 @@ class Operator:
 # =============================================================================
 # Traffic Executor — drive real traffic, capture rich evidence
 # =============================================================================
+# R3: fine-grained enforcement attribution vocabulary. The coarse `disposition`
+# (allow/block_page/drop/redirect/auth_challenge/conn_fail) is what the Oracle
+# compares against; `attribution` is the AUTHORITATIVE root cause used for evidence
+# and to guarantee a BLOCK is never inferred from a status code alone.
+ATTR_ALLOW = "allow"
+ATTR_POLICY_BLOCK = "policy_block"          # POLICY_BLOCK trace
+ATTR_DEFAULT_DENY = "default_deny"          # POLICY_DEFAULT_DENY trace
+ATTR_POLICY_DROP = "policy_drop"            # POLICY_DROP trace (silent RST)
+ATTR_POLICY_REDIRECT = "policy_redirect"    # POLICY_REDIRECT trace
+ATTR_FILE_BLOCK = "file_block"              # FILE_BLOCKED trace
+ATTR_THREAT_BLOCK = "threat_block"          # THREAT_BLOCKED / blocklist trace
+ATTR_AUTH_CHALLENGE = "auth_challenge"      # CRED_REQUIRED/AUTH_FAIL/407
+ATTR_TLS_VALIDATION_FAIL = "tls_validation_fail"  # SSL_INSPECT cert/handshake error on upstream
+ATTR_UPSTREAM_FAIL = "upstream_fail"        # proxy allowed, origin unreachable (502/504/reset)
+ATTR_DNS_FAIL = "dns_fail"                  # curl 6
+ATTR_FIXTURE_FAIL = "fixture_fail"          # origin down, no proxy decision / 502 w/o allow trace
+ATTR_CLIENT_TRUST_FAIL = "client_trust_fail"  # curl 60 (client didn't trust presented cert)
+ATTR_TLS_HANDSHAKE = "tls_handshake_fail"   # curl 35
+ATTR_TIMEOUT = "timeout"                    # curl 28
+ATTR_CONN_RESET = "conn_reset"              # curl 7/56
+ATTR_UNATTRIBUTED_BLOCKISH = "unattributed_blockish"  # 4xx/blockpage with NO Culvert marker
+ATTR_UNKNOWN = "unknown"
+
+# Which attributions are AUTHORITATIVE Culvert enforcement decisions (evidence-backed).
+BLOCK_ATTRS = {ATTR_POLICY_BLOCK, ATTR_DEFAULT_DENY, ATTR_FILE_BLOCK, ATTR_THREAT_BLOCK}
+
+
 @dataclass
 class ActualResult:
     disposition: str
     tls: Optional[str] = None
     http_status: int = 0
     curl_exit: int = 0
+    curl_err: str = ""
     body_head: str = ""
     is_block_page: bool = False
+    attribution: str = ""          # R3: authoritative root cause
+    evidence: str = ""             # the specific trace line / signal that decided it
     decision_trace: list = field(default_factory=list)
     stats_delta: dict = field(default_factory=dict)
     probes: dict = field(default_factory=dict)
 
     def to_dict(self):
-        d = asdict(self)
-        return d
+        return asdict(self)
 
 
 class Executor:
@@ -432,23 +549,101 @@ class Executor:
         res.decision_trace = [ln for ln in self.cv.log_since(off)
                               if any(t in ln for t in ("POLICY_", "SSL_", "AUTH_", "THREAT_",
                                                         "FILE_", "CRED_", "SSO_", "BLOCK", "DENY", "DROP"))]
-        # A policy DROP (silent TCP RST) is observed at the client as a connection
-        # reset; disambiguate a real policy drop from an infra failure via the trace.
-        if res.disposition == oracle.CONN_FAIL and any("POLICY_DROP" in ln for ln in res.decision_trace):
-            res.disposition = oracle.DROP
-        # A 3xx from an ALLOWED request is an ORIGIN-issued redirect passed through, not a
-        # proxy policy redirect. Only a POLICY_REDIRECT trace is a real policy redirect.
-        if res.disposition == oracle.REDIRECT and \
-                any("POLICY_ALLOW" in ln for ln in res.decision_trace) and \
-                not any("POLICY_REDIRECT" in ln for ln in res.decision_trace):
-            res.disposition = oracle.ALLOW
-        # If the proxy ALLOWED the request but the client still failed, the upstream
-        # fixture was unreachable (502/504/reset) — infrastructure, not a policy block.
-        if res.disposition == oracle.CONN_FAIL and any(
-                t in ln for ln in res.decision_trace
-                for t in ("POLICY_ALLOW", "AUTH_DEFAULT_EXEMPT", "default-allow")):
-            res.probes["upstream_fail"] = True
+        # R3: authoritative attribution — sets disposition + attribution + evidence.
+        self._attribute(res)
         return res
+
+    def _attribute(self, res: ActualResult):
+        """R3: derive the disposition from AUTHORITATIVE Culvert evidence first.
+        A BLOCK/DROP/REDIRECT disposition REQUIRES a Culvert decision-trace marker; a
+        bare status code (e.g. an origin 403 or a 502) can NEVER by itself be scored as
+        a policy block. Failure modes are differentiated for the evidence record."""
+        trace = res.decision_trace
+        st, rc, err = res.http_status, res.curl_exit, (res.curl_err or "")
+
+        def first(marker):
+            for ln in trace:
+                if marker in ln:
+                    return ln[-160:]
+            return ""
+
+        def has(*ms):
+            return any(m in ln for m in ms for ln in trace)
+
+        proxy_allowed = has("POLICY_ALLOW", "AUTH_DEFAULT_EXEMPT", "default-allow", "SSL_INNER")
+
+        # 1) Authoritative Culvert enforcement decisions (trace-backed).
+        if has("POLICY_DROP"):
+            res.disposition, res.attribution, res.evidence = oracle.DROP, ATTR_POLICY_DROP, first("POLICY_DROP")
+        elif has("POLICY_DEFAULT_DENY"):
+            res.disposition, res.attribution, res.evidence = oracle.BLOCK_PAGE, ATTR_DEFAULT_DENY, first("POLICY_DEFAULT_DENY")
+        elif has("POLICY_BLOCK"):
+            res.disposition, res.attribution, res.evidence = oracle.BLOCK_PAGE, ATTR_POLICY_BLOCK, first("POLICY_BLOCK")
+        elif has("FILE_BLOCKED"):
+            res.disposition, res.attribution, res.evidence = oracle.BLOCK_PAGE, ATTR_FILE_BLOCK, first("FILE_BLOCKED")
+        elif has("THREAT_BLOCKED"):
+            res.disposition, res.attribution, res.evidence = oracle.BLOCK_PAGE, ATTR_THREAT_BLOCK, first("THREAT_BLOCKED")
+        elif has("SOCKS5 BLOCKED") or (has("BLOCKED") and not proxy_allowed and not has("POLICY_")):
+            res.disposition, res.attribution, res.evidence = oracle.BLOCK_PAGE, ATTR_THREAT_BLOCK, first("BLOCKED")
+        elif has("POLICY_REDIRECT"):
+            res.disposition, res.attribution, res.evidence = oracle.REDIRECT, ATTR_POLICY_REDIRECT, first("POLICY_REDIRECT")
+        elif has("CRED_REQUIRED", "AUTH_FAIL", "SSO_") or st == 407:
+            res.disposition, res.attribution, res.evidence = oracle.AUTH_CHALLENGE, ATTR_AUTH_CHALLENGE, (first("CRED_REQUIRED") or first("AUTH_FAIL") or "407")
+        # 2) Proxy ALLOWED the request — the CLIENT outcome decides allow vs failure.
+        elif proxy_allowed:
+            tls_upstream_err = has("SSL_INSPECT") and ("handshake error" in " ".join(trace) or "certificate" in " ".join(trace).lower())
+            if res.tls == oracle.TLS_INTERCEPTED or res.tls == oracle.TLS_PASSTHROUGH:
+                if st and 200 <= st < 400:
+                    res.disposition, res.attribution = oracle.ALLOW, ATTR_ALLOW
+                else:
+                    res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_UPSTREAM_FAIL
+            elif st in (502, 504):
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_UPSTREAM_FAIL
+            elif rc in (7, 56):
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_CONN_RESET
+            elif rc == 28:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_TIMEOUT
+            elif st and 200 <= st < 300:
+                res.disposition, res.attribution = oracle.ALLOW, ATTR_ALLOW
+            elif st in (301, 302, 303, 307, 308):
+                # origin-issued redirect passed through an ALLOW — not a policy redirect
+                res.disposition, res.attribution = oracle.ALLOW, ATTR_ALLOW
+            elif st == 0 and (tls_upstream_err or "bad record MAC" not in err):
+                # allowed CONNECT but the tunnel never carried an HTTP response and no
+                # client probe completed → upstream/inspect-leg failure, not a block.
+                res.disposition, res.attribution = oracle.CONN_FAIL, (
+                    ATTR_TLS_VALIDATION_FAIL if tls_upstream_err else ATTR_UPSTREAM_FAIL)
+            else:
+                res.disposition, res.attribution = oracle.ALLOW, ATTR_ALLOW
+            res.evidence = first("POLICY_ALLOW") or first("AUTH_DEFAULT_EXEMPT") or "proxy-allowed"
+            if res.attribution == ATTR_UPSTREAM_FAIL:
+                res.probes["upstream_fail"] = True
+        # 3) NO authoritative Culvert marker — cannot be a confirmed policy decision.
+        else:
+            if rc == 6:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_DNS_FAIL
+            elif rc == 28:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_TIMEOUT
+            elif rc in (35, 51, 53):
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_TLS_HANDSHAKE
+            elif rc == 60:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_CLIENT_TRUST_FAIL
+            elif st in (502, 504):
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_FIXTURE_FAIL
+                res.probes["upstream_fail"] = True
+            elif st == 403 and res.is_block_page:
+                # a block-looking page WITHOUT any Culvert marker: do NOT trust it as a
+                # policy block — flag as unattributed for triage.
+                res.disposition, res.attribution = oracle.BLOCK_PAGE, ATTR_UNATTRIBUTED_BLOCKISH
+            elif st == 407:
+                res.disposition, res.attribution = oracle.AUTH_CHALLENGE, ATTR_AUTH_CHALLENGE
+            elif st == 0:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_FIXTURE_FAIL
+            elif 200 <= st < 400:
+                res.disposition, res.attribution = oracle.ALLOW, ATTR_ALLOW
+            else:
+                res.disposition, res.attribution = oracle.CONN_FAIL, ATTR_UNKNOWN
+            res.evidence = f"no-culvert-marker; status={st} rc={rc}"
 
     def _src_iface(self, vec) -> list[str]:
         src = vec.get("client_ip")
@@ -473,9 +668,8 @@ class Executor:
         body = _read_head("/tmp/body.out")
         status = int(out) if out.strip().isdigit() else 0
         blockpage = _looks_like_block_page(body)
-        disp = self._classify_http(status, rc, blockpage, body)
-        res = ActualResult(disposition=disp, http_status=status, curl_exit=rc,
-                           body_head=body[:300], is_block_page=blockpage)
+        res = ActualResult(disposition=oracle.ALLOW, http_status=status, curl_exit=rc,
+                           curl_err=err[-160:], body_head=body[:300], is_block_page=blockpage)
         self._check_header_assertions(vec, body, res)
         return res
 
@@ -502,39 +696,10 @@ class Executor:
         body = _read_head("/tmp/body.out")
         status = int(out) if out.strip().isdigit() else 0
         blockpage = _looks_like_block_page(body)
-        if rc != 0 and status == 0:
-            disp = oracle.CONN_FAIL
-        elif blockpage or status == 403:
-            disp = oracle.BLOCK_PAGE
-        elif 200 <= status < 400:
-            disp = oracle.ALLOW
-        else:
-            disp = oracle.CONN_FAIL
-        return ActualResult(disposition=disp, http_status=status, curl_exit=rc,
-                            body_head=body[:200], is_block_page=blockpage,
-                            probes={"transport": "socks5", "stderr": err[-120:]})
-
-    def _classify_http(self, status, rc, blockpage, body) -> str:
-        if rc in (7, 28, 52, 56) and status == 0:
-            return oracle.CONN_FAIL
-        # 502/504 = proxy accepted the request but the UPSTREAM (fixture) was
-        # unreachable/timed out. This is an infrastructure failure, NOT a policy
-        # block — a flaky origin must never be mistaken for a Culvert block. The
-        # run() wrapper cross-checks the decision trace (POLICY_ALLOW) and marks
-        # these TEST_INFRA at review time.
-        if status in (502, 504) and not blockpage:
-            return oracle.CONN_FAIL
-        if status in (301, 302, 303, 307, 308):
-            return oracle.REDIRECT
-        if blockpage or status == 403:
-            return oracle.BLOCK_PAGE
-        if status == 407:
-            return oracle.AUTH_CHALLENGE
-        if 200 <= status < 300 and body.startswith("origin:") or (200 <= status < 300 and not blockpage):
-            return oracle.ALLOW
-        if status == 0:
-            return oracle.CONN_FAIL
-        return oracle.ALLOW if 200 <= status < 400 else oracle.BLOCK_PAGE
+        res = ActualResult(disposition=oracle.ALLOW, http_status=status, curl_exit=rc,
+                           curl_err=err[-160:], body_head=body[:200], is_block_page=blockpage,
+                           probes={"transport": "socks5"})
+        return res
 
     def _run_https(self, vec: dict) -> ActualResult:
         host = vec["host"]; port = vec.get("port", FIXTURE_HTTPS); path = vec.get("path", "/")
@@ -567,27 +732,12 @@ class Executor:
             # neither completed: blocked CONNECT or conn fail
             status, body = (st_c or st_f), (body_c or body_f)
         blockpage = _looks_like_block_page(body)
-        if tls is None:
-            # No TLS completed. Distinguish block vs conn fail via CONNECT status / errors.
-            if status == 403 or blockpage or "403" in err_c or "403" in err_f:
-                disp = oracle.BLOCK_PAGE
-            elif status == 407 or "407" in err_c:
-                disp = oracle.AUTH_CHALLENGE
-            else:
-                disp = oracle.CONN_FAIL
-        else:
-            if blockpage or status == 403:
-                disp = oracle.BLOCK_PAGE
-            elif status == 407:
-                disp = oracle.AUTH_CHALLENGE
-            elif 200 <= status < 300:
-                disp = oracle.ALLOW
-            elif status in (301, 302, 303, 307, 308):
-                disp = oracle.REDIRECT
-            else:
-                disp = oracle.CONN_FAIL
+        # Provisional disposition; _attribute() finalizes from the decision trace.
+        disp = oracle.ALLOW if tls else oracle.CONN_FAIL
+        curl_exit = 0 if (c_ok or f_ok) else (rc_c or rc_f)
+        curl_err = (err_c if not c_ok else "") + " " + (err_f if not f_ok else "")
         return ActualResult(disposition=disp, tls=tls, http_status=status,
-                            curl_exit=min(rc_c, rc_f), body_head=body[:300],
+                            curl_exit=curl_exit, curl_err=curl_err[-200:], body_head=body[:300],
                             is_block_page=blockpage, probes=probes)
 
 

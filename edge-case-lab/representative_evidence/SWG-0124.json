@@ -1,0 +1,252 @@
+{
+  "schema_version": "1.0.0",
+  "id": "SWG-0124",
+  "title": "Policy configuration persists AND enforces across a proxy restart",
+  "administrator_requirement": "Policy created through the admin API (with the shipped -policy durable store) must survive a data-plane restart and remain ENFORCEABLE \u2014 the permitted host is still allowed and an unmatched host is still default-denied after restart, confirmed by the post-restart decision trace, not just a config read-back.",
+  "enterprise_validity_rationale": "Configuration durability + post-restart enforcement is a fundamental enterprise expectation.",
+  "comparable_product_capability": "Configuration persistence",
+  "capabilities": [
+    "config_persistence",
+    "data_plane_restart",
+    "http"
+  ],
+  "semantic_fingerprint": "bf27edf3c3e4894f",
+  "notes": "Runner restarts WITHOUT wiping /data; asserts post-restart readback + enforcement trace.",
+  "preconditions": {
+    "baseline": "fresh /data + open-mode",
+    "fixtures": "local origin_server on 192.0.2.2 (HTTP 18091 / HTTPS 18453), /etc/hosts routing",
+    "network_topology": "single-node Culvert; TEST-NET-1 fixture; two client sources (192.0.2.2 corp / 127.0.0.1 guest)",
+    "requires_auth": false
+  },
+  "intent": {
+    "default_action": "deny",
+    "default_auth": "Exempt",
+    "rules": [
+      {
+        "name": "permit-app",
+        "priority": 10,
+        "kind": "access",
+        "match": {
+          "fqdn": "app.corp.local"
+        },
+        "action": "allow"
+      }
+    ],
+    "persistence_check": true
+  },
+  "expected_culvert_objects": {
+    "categories": [],
+    "category_groups": [],
+    "decryption_profiles": [],
+    "blocklist": [],
+    "ssl_bypass": [],
+    "access_rules": [
+      "permit-app"
+    ],
+    "default_action": "deny",
+    "default_auth": "Exempt"
+  },
+  "configuration_steps": [
+    {
+      "method": "POST",
+      "path": "/api/default-action",
+      "req": {
+        "action": "deny"
+      },
+      "status": 200,
+      "resp_head": "{\"defaultAction\":\"deny\"}\n"
+    },
+    {
+      "method": "POST",
+      "path": "/api/policy",
+      "req": {
+        "name": "permit-app",
+        "priority": 10,
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "app.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "action": "Allow",
+        "sslAction": ""
+      },
+      "status": 200,
+      "resp_head": "{\"priority\":10,\"name\":\"permit-app\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXD5D7BC8DJZNAEAJPS3D66F\",\"hitCount\":0,\"createdAt\":\"2026-0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"permit-app\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXD5D7BC8DJZNAEAJPS3D66F\",\"hitCount\":0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/config/export",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"version\":1,\"exportedAt\":\"2026-07-13T07:17:34Z\",\"blocklistMode\":\"block\",\"blocklist\":[],\"policyRules\":[{\"priority\":10,\"name\":\"permit-app\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Al"
+    },
+    {
+      "method": "GET",
+      "path": "/api/policy",
+      "req": null,
+      "status": 200,
+      "resp_head": "{\"count\":1,\"rules\":[{\"priority\":10,\"name\":\"permit-app\",\"sourceIP\":\"\",\"sourceIdentity\":\"\",\"sourceGroup\":\"\",\"authSource\":\"\",\"destFQDN\":\"app.corp.local\",\"destCategory\":\"\",\"destCategoryGroup\":\"\",\"destCountry\":null,\"sslAction\":\"\",\"fileFiltering\":false,\"fileProfile\":\"\",\"logFullUri\":false,\"tlsSkipVerify\":false,\"action\":\"Allow\",\"redirectURL\":\"\",\"enabled\":true,\"id\":\"01KXD5D7BC8DJZNAEAJPS3D66F\",\"hitCount\":0"
+    }
+  ],
+  "apply_report": {
+    "errors": [],
+    "warnings": [],
+    "created": [],
+    "post_apply": [],
+    "readback": {
+      "persisted_rules": 1,
+      "expected_rules": 1,
+      "mismatches": []
+    },
+    "persistence_after_restart": {
+      "persisted_rules": 1,
+      "expected_rules": 1,
+      "mismatches": []
+    }
+  },
+  "effective_config_excerpt": {
+    "defaultAction": "deny",
+    "policyRules": [
+      {
+        "priority": 10,
+        "name": "permit-app",
+        "sourceIP": "",
+        "sourceIdentity": "",
+        "sourceGroup": "",
+        "authSource": "",
+        "destFQDN": "app.corp.local",
+        "destCategory": "",
+        "destCategoryGroup": "",
+        "destCountry": null,
+        "sslAction": "",
+        "fileFiltering": false,
+        "fileProfile": "",
+        "logFullUri": false,
+        "tlsSkipVerify": false,
+        "action": "Allow",
+        "redirectURL": "",
+        "enabled": true,
+        "id": "01KXD5D7BC8DJZNAEAJPS3D66F",
+        "hitCount": 0,
+        "createdAt": "2026-07-13T07:17:33Z",
+        "modifiedAt": "2026-07-13T07:17:33Z",
+        "modifiedBy": "unknown"
+      }
+    ],
+    "blocklist": [],
+    "sslBypass": []
+  },
+  "test_vectors": [
+    {
+      "vector": {
+        "id": "app",
+        "scheme": "http",
+        "host": "app.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "allow",
+        "tls": null,
+        "matched_rule": "permit-app",
+        "http_status_family": "2xx",
+        "certainty": "deterministic",
+        "rationale": "Rule 'permit-app' action=Allow.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "allow",
+        "tls": null,
+        "http_status": 200,
+        "curl_exit": 0,
+        "curl_err": "",
+        "body_head": "origin:app.corp.local\n",
+        "is_block_page": false,
+        "attribution": "allow",
+        "evidence": "Y_ALLOW rule=\"permit-app\" pri=10 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=app.corp.local] {req_id=73b4320f076b5589 identity= rule=permit-app action=allow}",
+        "decision_trace": [
+          "[Culvert] 2026/07/13 07:17:34 POLICY_ALLOW rule=\"permit-app\" pri=10 127.0.0.1 GET \"app.corp.local:18091\" [destFQDN=app.corp.local] {req_id=73b4320f076b5589 identity= rule=permit-app action=allow}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 0,
+          "allowed": 1
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'allow' matches expected 'allow'"
+      }
+    },
+    {
+      "vector": {
+        "id": "deny",
+        "scheme": "http",
+        "host": "media.corp.local",
+        "client_ip": "127.0.0.1"
+      },
+      "expected": {
+        "disposition": "block_page",
+        "tls": null,
+        "matched_rule": null,
+        "http_status_family": "403",
+        "certainty": "deterministic",
+        "rationale": "No access rule matched and Stage-2 default is deny (Zero Trust): proxy serves POLICY_DEFAULT_DENY block page.",
+        "notes": []
+      },
+      "actual": {
+        "disposition": "block_page",
+        "tls": null,
+        "http_status": 403,
+        "curl_exit": 0,
+        "curl_err": "",
+        "body_head": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>Access Denied \u2014 Culvert</title>\n<style>\n*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}\nbody{font-family:'Segoe UI',system-ui,-apple-system,sans",
+        "is_block_page": true,
+        "attribution": "default_deny",
+        "evidence": "[Culvert] 2026/07/13 07:17:35 POLICY_DEFAULT_DENY 127.0.0.1 GET \"media.corp.local:18091\" {req_id=38db9bacd04b8102 identity= action=deny}",
+        "decision_trace": [
+          "[Culvert] 2026/07/13 07:17:35 POLICY_DEFAULT_DENY 127.0.0.1 GET \"media.corp.local:18091\" {req_id=38db9bacd04b8102 identity= action=deny}"
+        ],
+        "stats_delta": {
+          "total": 1,
+          "blocked": 1,
+          "allowed": 0
+        },
+        "probes": {}
+      },
+      "verdict": {
+        "verdict": "PASS",
+        "primary": "PASS",
+        "confidence": 0.95,
+        "reason": "actual 'block_page' matches expected 'block_page'"
+      }
+    }
+  ],
+  "result_classification": "PASS",
+  "confidence_score": 0.95,
+  "cleanup_procedure": "API reset_config (delete rules, default-action allow) or fresh /data wipe + process restart between scenarios; fresh restart for bug confirmation.",
+  "reproduction": {
+    "env": {
+      "culvert_commit": "14a1cf6616475829ac4111e932687793c4d99539",
+      "binary": "/home/user/Culvert/culvert",
+      "binary_mtime": "2026-07-12T22:19:19.133687+00:00",
+      "fixture_ip": "192.0.2.2",
+      "proxy": "http://127.0.0.1:18080",
+      "ui": "http://127.0.0.1:19090",
+      "captured_at": "2026-07-13T07:14:12.910679+00:00"
+    },
+    "how": "python3 edge-case-lab/harness/repro_one.py SWG-0124"
+  },
+  "executed_at": "2026-07-13T07:17:35.259495+00:00"
+}
