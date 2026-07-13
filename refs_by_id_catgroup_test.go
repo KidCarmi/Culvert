@@ -129,6 +129,43 @@ func TestObjectReferences_CategoryGroupIDFirst(t *testing.T) {
 	}
 }
 
+// TestObjectReferences_CategoryGroupStaleNameNoFalsePositive pins the Codex P2
+// fix: an ID-bearing rule whose STALE denormalized name equals a DIFFERENT
+// group's current name must NOT be reported as referencing that other group
+// (the ID is authoritative), so deleting the other group is not wrongly blocked.
+func TestObjectReferences_CategoryGroupStaleNameNoFalsePositive(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	gA, err := globalCategoryGroups.Add("A", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gB, err := globalCategoryGroups.Add("B", []string{"ads"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rule references group A by ID, but its cached name is stale and equals B's
+	// current name (e.g. A was once named "B" before a swap). Evaluation follows A.
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "followsA", DestCategoryGroup: "B", DestCategoryGroupID: gA.ID, Action: ActionAllow},
+	})
+	// Querying references to B must find NONE — the rule follows A by ID.
+	found, refs := objectReferences("category-group", "B")
+	if !found {
+		t.Fatal("objectReferences(B) not found")
+	}
+	if len(refs) != 0 {
+		t.Errorf("stale name must not false-positive as a reference to B: %+v", refs)
+	}
+	// Querying references to A must find the rule (by ID).
+	_, refsA := objectReferences("category-group", "A")
+	if len(refsA) != 1 || refsA[0].Name != "followsA" {
+		t.Errorf("ID-authoritative walk did not attribute the rule to A: %+v", refsA)
+	}
+	_ = gB
+}
+
 func TestApiCategoryGroup_RenameCascades(t *testing.T) {
 	snapshotGlobalCategoryGroups(t)
 	snapshotPolicyStoreForTest(t)

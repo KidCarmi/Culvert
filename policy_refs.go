@@ -127,12 +127,18 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			return "destCategory"
 		}
 	case "category-group":
-		if strings.EqualFold(r.DestCategoryGroup, name) {
-			return "destCategoryGroup"
+		// ID is AUTHORITATIVE (references-by-id S2): an ID-bearing rule references
+		// this group IFF its ID matches objID. The denormalized name is advisory and
+		// may be momentarily stale — or, worse, equal to a DIFFERENT group's current
+		// name, which the name path would false-positive on and over-block that other
+		// group's deletion. Only un-migrated rules (no ID) match by name.
+		if r.DestCategoryGroupID != "" {
+			if r.DestCategoryGroupID == objID {
+				return "destCategoryGroup"
+			}
+			return ""
 		}
-		// ID-first (references-by-id S2): match a rule that links by the group's
-		// stable ID even if its denormalized name is momentarily stale.
-		if objID != "" && r.DestCategoryGroupID == objID {
+		if strings.EqualFold(r.DestCategoryGroup, name) {
 			return "destCategoryGroup"
 		}
 	case "file-profile":
@@ -140,12 +146,18 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			return "fileProfile"
 		}
 	case "decryption-profile":
-		if strings.EqualFold(r.DecryptionProfile, name) {
-			return "decryptionProfile"
+		// ID is AUTHORITATIVE (references-by-id): an ID-bearing rule references this
+		// profile IFF its ID matches objID — the denormalized name is advisory and,
+		// if stale and equal to a DIFFERENT profile's current name, the name path
+		// would over-block that other profile's deletion. Un-migrated rules (no ID)
+		// match by name. (Symmetric with the category-group case above.)
+		if r.DecryptionProfileID != "" {
+			if r.DecryptionProfileID == objID {
+				return "decryptionProfile"
+			}
+			return ""
 		}
-		// ID-first (references-by-id): match a rule that links by the profile's
-		// stable ID even if its denormalized name is momentarily stale.
-		if objID != "" && r.DecryptionProfileID == objID {
+		if strings.EqualFold(r.DecryptionProfile, name) {
 			return "decryptionProfile"
 		}
 	}
