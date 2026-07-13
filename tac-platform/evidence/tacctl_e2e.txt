@@ -1,0 +1,17 @@
+=== tacctl end-to-end (NO AI) ===
+initialized: schema applied, worker tac-analysis-worker-1 seeded (allowlisted)
+restart op=OP-2026-2c417d state=SUCCEEDED
+op=OP-2026-e254bf plan=PLAN-2350d11f4078 policy_passed=true state=REVIEW_PENDING target=sha256:bbbbbbbbbbb…
+approved op=OP-2026-e254bf plan=PLAN-2350d11f4078 approval=APPROVAL-f53da625b57843a1
+execute op=OP-2026-e254bf state=VALIDATING
+validate op=OP-2026-e254bf passed=true gates=5
+OP OP-2026-e254bf kind=deploy level=L3 state=SUCCEEDED worker=tac-analysis-worker-1 audit_ok=true
+  #1 09:30:36 human:alice      created                ->CREATED
+  #2 09:30:36 operation-svc    discovering            CREATED->DISCOVERING
+  #3 09:30:36 planner          planning               DISCOVERING->PLANNING
+  #4 09:30:36 policy           policy.passed          PLANNING->REVIEW_PENDING
+  #5 09:30:36 human:bob        approved               REVIEW_PENDING->APPROVED
+  #6 09:30:37 operation-svc    queued                 APPROVED->EXECUTION_QUEUED
+  #7 09:30:37 executor:exec-cli execution.started      EXECUTION_QUEUED->EXECUTING
+  #8 09:30:37 executor:exec-cli execution.applied      EXECUTING->VALIDATING
+  #9 09:30:37 validator        succeeded              VALIDATING->SUCCEEDED
