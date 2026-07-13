@@ -389,30 +389,6 @@ type shadowFinding struct {
 // claims completeness — it is advisory ("verify with the tester"), never blocking.
 // Auth (Stage-1) rules are excluded; they have their own diagnostics.
 func detectShadowedRules(rules []PolicyRule) []shadowFinding {
-	covers := func(a, b string) bool { return a == "" || a == b }
-	fqdnCovers := func(a, b string) bool {
-		if a == "" || a == b {
-			return true
-		}
-		if strings.HasPrefix(a, "*.") {
-			return b != "" && b != a[2:] && strings.HasSuffix(b, a[1:]) // a[1:] = ".suffix"
-		}
-		return false
-	}
-	countryCovers := func(a, b []string) bool {
-		if len(a) == 0 {
-			return true
-		}
-		if len(b) == 0 {
-			return false
-		}
-		for _, c := range b {
-			if !strSliceContains(a, c) {
-				return false
-			}
-		}
-		return true
-	}
 	// Access rules, enabled only, in the (priority-sorted) input order.
 	act := make([]PolicyRule, 0, len(rules))
 	for i := range rules {
@@ -426,26 +402,63 @@ func detectShadowedRules(rules []PolicyRule) []shadowFinding {
 	}
 	var out []shadowFinding
 	for j := 1; j < len(act); j++ {
-		b := act[j]
 		for i := 0; i < j; i++ {
-			a := act[i]
-			if a.Schedule != nil {
+			if act[i].Schedule != nil {
 				continue // A must be always-active to provably cover B
 			}
-			if covers(a.SourceIP, b.SourceIP) &&
-				covers(a.SourceIdentity, b.SourceIdentity) &&
-				covers(a.SourceGroup, b.SourceGroup) &&
-				covers(a.AuthSource, b.AuthSource) &&
-				fqdnCovers(a.DestFQDN, b.DestFQDN) &&
-				covers(string(a.DestCategory), string(b.DestCategory)) &&
-				covers(a.DestCategoryGroup, b.DestCategoryGroup) &&
-				countryCovers(a.DestCountry, b.DestCountry) {
-				out = append(out, shadowFinding{Rule: b.Name, ShadowedBy: a.Name})
+			if ruleProvablyCovers(act[i], act[j]) {
+				out = append(out, shadowFinding{Rule: act[j].Name, ShadowedBy: act[i].Name})
 				break
 			}
 		}
 	}
 	return out
+}
+
+// ruleProvablyCovers reports whether always-active rule a matches every request
+// rule b could match, using only exactly-decidable field coverage.
+func ruleProvablyCovers(a, b PolicyRule) bool {
+	return fieldCovers(a.SourceIP, b.SourceIP) &&
+		fieldCovers(a.SourceIdentity, b.SourceIdentity) &&
+		fieldCovers(a.SourceGroup, b.SourceGroup) &&
+		fieldCovers(a.AuthSource, b.AuthSource) &&
+		fqdnCovers(a.DestFQDN, b.DestFQDN) &&
+		fieldCovers(string(a.DestCategory), string(b.DestCategory)) &&
+		fieldCovers(a.DestCategoryGroup, b.DestCategoryGroup) &&
+		countryCovers(a.DestCountry, b.DestCountry)
+}
+
+// fieldCovers: a covers b when a is empty (matches anything) or equal to b.
+func fieldCovers(a, b string) bool { return a == "" || a == b }
+
+// fqdnCovers extends fieldCovers with the one provable glob shape: a "*.suffix"
+// pattern covers any strict subdomain "x.suffix".
+func fqdnCovers(a, b string) bool {
+	if a == "" || a == b {
+		return true
+	}
+	if strings.HasPrefix(a, "*.") {
+		bare := a[2:]   // "suffix" (a without the leading "*.")
+		dotted := a[1:] // ".suffix"
+		return b != "" && b != bare && strings.HasSuffix(b, dotted)
+	}
+	return false
+}
+
+// countryCovers: a covers b when a is empty (any country) or a ⊇ b.
+func countryCovers(a, b []string) bool {
+	if len(a) == 0 {
+		return true
+	}
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		if !strSliceContains(a, c) {
+			return false
+		}
+	}
+	return true
 }
 
 func strSliceContains(s []string, v string) bool {
