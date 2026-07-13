@@ -4,6 +4,7 @@ fixtures/certs/*.crt
 # Regenerable / large fixture payloads
 fixtures/files/*.bin
 fixtures/files/*.exe
+fixtures/files/*.bat
 # Python caches
 harness/**/__pycache__/
 **/*.pyc
