@@ -497,6 +497,24 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		// Prefer stable-ID addressing (rename-safe) when ?id= is supplied; fall
+		// back to name for legacy clients. Mirrors the policy ?id= path (#695).
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			before := globalCategoryGroups.GetByID(id)
+			if before == nil {
+				http.Error(w, "group not found", http.StatusNotFound)
+				return
+			}
+			if err := globalCategoryGroups.UpdateByID(id, body.Categories); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			globalCategoryGroups.Save()
+			auditEventDiffID(r, "category-group.update", before.Name, id, fmt.Sprintf("%d categories", len(body.Categories)), nil, nil)
+			saveConfigVersion(sessionAdmin(r), "category-group.update")
+			jsonOK(w, map[string]any{"ok": true})
+			return
+		}
 		if err := globalCategoryGroups.Update(body.Name, body.Categories); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -508,6 +526,28 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// Stable-ID addressing (rename-safe); resolve to the current name for the
+		// reference-integrity check + audit, then delete by id.
+		if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+			before := globalCategoryGroups.GetByID(id)
+			if before == nil {
+				http.Error(w, "group not found", http.StatusNotFound)
+				return
+			}
+			if deleteBlockedByReferences(w, r, "category-group", before.Name, "category-group.remove.blocked") {
+				return
+			}
+			name, err := globalCategoryGroups.DeleteByID(id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			globalCategoryGroups.Save()
+			auditEventDiffID(r, "category-group.delete", name, id, "", nil, nil)
+			saveConfigVersion(sessionAdmin(r), "category-group.delete")
+			jsonOK(w, map[string]any{"ok": true})
 			return
 		}
 		name := strings.TrimSpace(r.URL.Query().Get("name"))
