@@ -289,7 +289,7 @@ func TestAPIClusterHA_GET_StandbySyncHealth(t *testing.T) {
 	globalHA.lastSyncOK = time.Now().Add(-30 * time.Second)
 	globalHA.mu.Unlock()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
 	w := httptest.NewRecorder()
 	apiClusterHA(w, req)
@@ -325,7 +325,7 @@ func TestAPIClusterHA_GET_LeaderOmitsStandbySyncFields(t *testing.T) {
 	globalHA.since = time.Now()
 	globalHA.mu.Unlock()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
 	w := httptest.NewRecorder()
 	apiClusterHA(w, req)
