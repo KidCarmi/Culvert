@@ -37,10 +37,10 @@ files of per-run churn from the branch.
 
 Runs before any commit of representative evidence and before any CI artifact upload. Fails the step
 (exit 1) if it finds, outside allow-listed empty/redacted forms:
-- `Authorization: Basic|Bearer …` headers and inline Basic credential blobs
+- `Authorization: Basic|Bearer …` headers and inline base64 credential blobs
 - `Cookie` / `Set-Cookie` / `ps_ui_session` / `SessionHMAC` session material
 - `-----BEGIN … PRIVATE KEY-----`
-- the lab's own credentials/passphrases (`LabPass123!`, `labtest123`)
+- the lab's own throwaway test credentials/passphrases (the admin login and CA passphrase constants)
 - generic `"password"/"secret"/"token"/"api_key": "<value>"` pairs
 
 Verified: `sanitize_check.py edge-case-lab/scenarios edge-case-lab/evidence` → **OK, no secrets**
