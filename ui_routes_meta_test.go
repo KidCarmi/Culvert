@@ -47,8 +47,10 @@ import (
 //   - 137 — Decryption Profiles added /api/decryption-profiles.
 //   - 138 — Adaptive decryption exclusion added /api/decryption-exclusions
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
+//   - 141 — policy-draft (G2) added /api/policy/draft (+commit +revert):
+//     candidate/commit for the rulebase.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 138
+	const want = 141
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
