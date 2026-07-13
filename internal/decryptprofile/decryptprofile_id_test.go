@@ -96,3 +96,42 @@ func TestGetByID_EmptyNil(t *testing.T) {
 		t.Error("GetByID(\"\") must be nil")
 	}
 }
+
+// TestLoad_DoesNotPersistWhenEntriesSkipped guards the data-loss fix: if the
+// file has a valid legacy profile (no id) AND an invalid one that replace()
+// skips, the backfill must NOT rewrite the file — doing so would permanently
+// drop the skipped entry, which Load's contract preserves on disk.
+func TestLoad_DoesNotPersistWhenEntriesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profiles.json")
+	// "Valid" is loadable (no id → would be backfilled); "bad!!" fails Validate.
+	orig := `[{"name":"Valid"},{"name":"bad!!"}]`
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New()
+	if err := s.Load(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// In-memory: the valid profile got a backfilled ID this session.
+	if g := s.GetByName("Valid"); g == nil || g.ID == "" {
+		t.Errorf("valid profile should be loaded with an in-memory ID: %+v", g)
+	}
+	// On disk: UNCHANGED — the skipped "bad!!" entry must NOT have been deleted.
+	data, _ := os.ReadFile(path)
+	if string(data) != orig {
+		t.Errorf("file was rewritten during backfill, dropping skipped entries.\n got: %s\nwant: %s", data, orig)
+	}
+}
+
+func TestUpdateByID_BumpsUpdatedAt(t *testing.T) {
+	s := New()
+	p, _ := s.Add(Profile{Name: "Prof"})
+	if err := s.UpdateByID(p.ID, Profile{Name: "Prof", CertVerification: "skip"}); err != nil {
+		t.Fatalf("UpdateByID: %v", err)
+	}
+	if got := s.GetByID(p.ID); got == nil || got.UpdatedAt == "" {
+		t.Errorf("UpdateByID must bump UpdatedAt, got %+v", got)
+	}
+}
