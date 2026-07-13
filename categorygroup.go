@@ -22,12 +22,24 @@ type CategoryGroupStore = catgroup.Store
 
 var globalCategoryGroups = catgroup.New()
 
-// categoryGroupMatchesHost reports whether host belongs to any category in
-// the named group — the hot-path function called during policy evaluation
-// (matchDestNorm). Host → category goes through the two-tier fusion; the
-// group membership check is the engine's O(1) catSet lookup. Unknown group
-// or uncategorized host = no match (fail-closed).
-func categoryGroupMatchesHost(groupName, host string) bool {
+// categoryGroupMatchesHostRule reports whether host belongs to the category
+// group the rule references — the hot-path function called during policy
+// evaluation (matchDestNorm). Host → category goes through the two-tier fusion
+// (lookupHostCategory); the group membership check is the engine's O(1) catSet
+// lookup. Unknown group or uncategorized host = no match (fail-closed).
+//
+// References-by-id (S2): it resolves the group by the rule's AUTHORITATIVE ID
+// first (rename-safe), falling back to the denormalized name only when the id
+// resolves to no group (un-migrated / dangling). A resolved group's membership
+// result is final — the stale name is never consulted, so a rename can't make a
+// rule match a different group. Byte-identical to the name path for rules with
+// no DestCategoryGroupID.
+func categoryGroupMatchesHostRule(rule *PolicyRule, host string) bool {
 	hostCat, _, _ := lookupHostCategory(host)
-	return globalCategoryGroups.MatchesCategory(groupName, hostCat)
+	if id := rule.DestCategoryGroupID; id != "" {
+		if matched, resolved := globalCategoryGroups.MatchesCategoryByID(id, hostCat); resolved {
+			return matched
+		}
+	}
+	return globalCategoryGroups.MatchesCategory(rule.DestCategoryGroup, hostCat)
 }

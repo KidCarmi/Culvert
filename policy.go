@@ -89,25 +89,31 @@ var fileProfileExts = map[FileProfileName][]string{
 
 // PolicyRule is a single PBAC rule evaluated in priority order.
 type PolicyRule struct {
-	Priority          int             `json:"priority"`
-	Name              string          `json:"name"`
-	SourceIP          string          `json:"sourceIP"`                    // single IP or CIDR; empty = any
-	SourceIdentity    string          `json:"sourceIdentity"`              // authenticated username; empty = any
-	SourceGroup       string          `json:"sourceGroup"`                 // IdP group/role membership; empty = any
-	AuthSource        string          `json:"authSource"`                  // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
-	DestFQDN          string          `json:"destFQDN"`                    // exact or wildcard FQDN; empty = any
-	DestCategory      URLCategory     `json:"destCategory"`                // URL category; empty = any
-	DestCategoryGroup string          `json:"destCategoryGroup"`           // category group name; empty = any
-	DestCountry       []string        `json:"destCountry"`                 // ISO 3166-1 alpha-2 country codes; empty = any
-	Schedule          *PolicySchedule `json:"schedule,omitempty"`          // nil = always active
-	SSLAction         SSLAction       `json:"sslAction"`                   // Inspect | Bypass
-	FileFiltering     bool            `json:"fileFiltering"`               // enable file-type scanning
-	FileProfile       FileProfileName `json:"fileProfile"`                 // named file-extension block profile
-	LogFullURI        bool            `json:"logFullUri"`                  // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
-	LogTraffic        *bool           `json:"logTraffic,omitempty"`        // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
-	TLSSkipVerify     bool            `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
-	StripALPN         *bool           `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
-	DecryptionProfile string          `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
+	Priority          int         `json:"priority"`
+	Name              string      `json:"name"`
+	SourceIP          string      `json:"sourceIP"`          // single IP or CIDR; empty = any
+	SourceIdentity    string      `json:"sourceIdentity"`    // authenticated username; empty = any
+	SourceGroup       string      `json:"sourceGroup"`       // IdP group/role membership; empty = any
+	AuthSource        string      `json:"authSource"`        // IdP name ("okta","adfs","ldap","local") or "unauth"; empty = any
+	DestFQDN          string      `json:"destFQDN"`          // exact or wildcard FQDN; empty = any
+	DestCategory      URLCategory `json:"destCategory"`      // URL category; empty = any
+	DestCategoryGroup string      `json:"destCategoryGroup"` // category group name; empty = any (denormalized display cache; DestCategoryGroupID is authoritative)
+	// DestCategoryGroupID is the AUTHORITATIVE, rename-safe link to the category
+	// group (references-by-id S2, OBJECT-REFERENCES-BY-ID.md). Resolution prefers
+	// the ID and falls back to the name for un-migrated/dangling rules; the name
+	// above is a denormalized display cache kept honest by the rename cascade.
+	// Stamped name→id on write; omitempty so pre-migration rules are byte-unchanged.
+	DestCategoryGroupID string          `json:"destCategoryGroupId,omitempty"`
+	DestCountry         []string        `json:"destCountry"`                 // ISO 3166-1 alpha-2 country codes; empty = any
+	Schedule            *PolicySchedule `json:"schedule,omitempty"`          // nil = always active
+	SSLAction           SSLAction       `json:"sslAction"`                   // Inspect | Bypass
+	FileFiltering       bool            `json:"fileFiltering"`               // enable file-type scanning
+	FileProfile         FileProfileName `json:"fileProfile"`                 // named file-extension block profile
+	LogFullURI          bool            `json:"logFullUri"`                  // log the full request URL (path, no query) for traffic matching this rule; HTTPS requires SSLAction=Inspect
+	LogTraffic          *bool           `json:"logTraffic,omitempty"`        // log allowed traffic matching this rule (nil/true = log; false = count stats only, no feed entry). Blocks/threats are always logged.
+	TLSSkipVerify       bool            `json:"tlsSkipVerify"`               // skip upstream cert verification (use with caution)
+	StripALPN           *bool           `json:"stripAlpn,omitempty"`         // SSL-inspect only: nil (absent, pre-feature) or true => downgrade the inspected tunnel to HTTP/1.1 (today's behavior); false => native HTTP/2 inspection. Ignored when SSLAction==Bypass. Presence-aware so an upgrade never silently switches existing rules to H2 (resolveStripALPN). Superseded by DecryptionProfile.InspectHTTP2 when a profile is bound.
+	DecryptionProfile   string          `json:"decryptionProfile,omitempty"` // SSL-inspect only: name of a DecryptionProfile that governs HOW this tunnel is decrypted (InspectHTTP2, cert-verification, TLS floor/cap, stall). Empty = none. A dangling ref falls back to the inline StripALPN/TLSSkipVerify (fail-safe at eval).
 	// DecryptionProfileID is the AUTHORITATIVE, rename-safe link to the profile
 	// (references-by-id, OBJECT-REFERENCES-BY-ID.md). Resolution prefers the ID
 	// and falls back to the name for un-migrated/dangling rules; the name above is
@@ -606,6 +612,42 @@ func (ps *PolicyStore) CascadeDecryptionProfileRename(id, oldName, newName strin
 		nr.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix)
 		nr.DecryptionProfile = newName
 		nr.DecryptionProfileID = id // stamp/keep the authoritative link
+		ps.rules[i] = &nr
+		n++
+	}
+	if n > 0 {
+		ps.bumpVersion()
+	}
+	return n
+}
+
+// CascadeDestCategoryGroupRename refreshes the denormalized DestCategoryGroup
+// name on every rule that references the renamed group — by its stable ID
+// (migrated rules) or, for un-migrated name-only rules, by its OLD name (which
+// also stamps the ID, migrating them). References-by-id S2: the match path
+// resolves by ID, so matching survives the rename regardless; this keeps the
+// human-readable denormalized copy honest for display/export/DP-sync. Returns
+// the number of rules touched; the caller persists via Save(). Race-safe by
+// pointer swap (like CascadeDecryptionProfileRename) — never in-place field
+// mutation, which would race Evaluate's lock-free field reads.
+func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName string) int {
+	if id == "" {
+		return 0
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	n := 0
+	for i, rule := range ps.rules {
+		byID := rule.DestCategoryGroupID == id && rule.DestCategoryGroup != newName
+		byName := rule.DestCategoryGroupID == "" && strings.EqualFold(rule.DestCategoryGroup, oldName)
+		if !byID && !byName {
+			continue
+		}
+		nr := *rule
+		nr.HitCount = atomic.LoadInt64(&rule.HitCount)
+		nr.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix)
+		nr.DestCategoryGroup = newName
+		nr.DestCategoryGroupID = id // stamp/keep the authoritative link
 		ps.rules[i] = &nr
 		n++
 	}
@@ -1160,7 +1202,7 @@ func matchDestNorm(rule *PolicyRule, host, normHost string) bool {
 	}
 	// Category group check — host must be in ANY category within the group.
 	// O(1): lookupHostCategory(host) → group.catSet[result].
-	if catGroupSet && !categoryGroupMatchesHost(rule.DestCategoryGroup, host) {
+	if catGroupSet && !categoryGroupMatchesHostRule(rule, host) {
 		return false
 	}
 	// Geo-IP country check — cache-only to avoid blocking the request goroutine.

@@ -505,12 +505,50 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "group not found", http.StatusNotFound)
 				return
 			}
+			// Rename (references-by-id S2): UpdateByID keeps the current name, so a
+			// name change must be applied explicitly via Rename (re-keys the store)
+			// and cascaded onto referencing rules. Rules link by the group ID, so
+			// matching survives regardless; the cascade keeps the denormalized name
+			// honest for display/export/DP-sync.
+			newName := strings.TrimSpace(body.Name)
+			renamed := newName != "" && !strings.EqualFold(newName, before.Name)
+			if renamed {
+				// Pre-check the collision before mutating anything so a taken name
+				// fails cleanly (Rename re-checks under its own lock).
+				if g := globalCategoryGroups.GetByName(newName); g != nil && g.ID != id {
+					http.Error(w, "a group named "+newName+" already exists", http.StatusConflict)
+					return
+				}
+			}
+			// Apply the category update FIRST so a bad body returns before any
+			// rename is applied (no half-applied name change).
 			if err := globalCategoryGroups.UpdateByID(id, body.Categories); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if renamed {
+				if _, err := globalCategoryGroups.Rename(id, newName); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
 			globalCategoryGroups.Save()
-			auditEventDiffID(r, "category-group.update", before.Name, id, fmt.Sprintf("%d categories", len(body.Categories)), nil, nil)
+			detail := fmt.Sprintf("%d categories", len(body.Categories))
+			if renamed {
+				// Refresh referencing rules on running AND the open draft candidate,
+				// then persist the policy store BEFORE versioning (the cascade is a
+				// real policy mutation that must survive a restart).
+				if n := policyStore.CascadeDestCategoryGroupRename(id, before.Name, newName); n > 0 {
+					policyStore.Save()
+				}
+				policyDraft.cascadeDestCategoryGroupRename(id, before.Name, newName)
+				detail += ", renamed from " + sanitizeLog(before.Name)
+			}
+			auditName := before.Name
+			if renamed {
+				auditName = newName
+			}
+			auditEventDiffID(r, "category-group.update", auditName, id, detail, nil, nil)
 			saveConfigVersion(sessionAdmin(r), "category-group.update")
 			jsonOK(w, map[string]any{"ok": true})
 			return
@@ -1198,12 +1236,18 @@ func stampRuleMetadataForWrite(rule *PolicyRule, before *PolicyRule, actor strin
 // OBJECT-REFERENCES-BY-ID.md). Resolved SERVER-SIDE ONLY — any client-supplied
 // ID is discarded and re-derived, so a rule can never point at an object the
 // operator did not pick. An unknown or empty name leaves the ID empty
-// (fail-safe: the match path falls back to the name). S2 adds DestCategoryGroupID.
+// (fail-safe: the match path falls back to the name).
 func stampObjectRefIDs(rule *PolicyRule) {
 	rule.DecryptionProfileID = ""
 	if rule.DecryptionProfile != "" {
 		if p := globalDecryptionProfiles.GetByName(rule.DecryptionProfile); p != nil {
 			rule.DecryptionProfileID = p.ID
+		}
+	}
+	rule.DestCategoryGroupID = ""
+	if rule.DestCategoryGroup != "" {
+		if g := globalCategoryGroups.GetByName(rule.DestCategoryGroup); g != nil {
+			rule.DestCategoryGroupID = g.ID
 		}
 	}
 }

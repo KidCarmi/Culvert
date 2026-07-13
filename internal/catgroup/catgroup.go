@@ -323,6 +323,83 @@ func (s *Store) DeleteByID(id string) (string, error) {
 	return "", fmt.Errorf("group id %q not found", id)
 }
 
+// Rename changes the display name of the group with the given stable ID,
+// re-keying the name map and the order slice (references-by-id S2: rules link by
+// ID, so the rename is safe — the caller cascades the denormalized name onto
+// referencing rules). Validates the new name is non-empty and not already taken
+// by a DIFFERENT group. Returns the OLD name (for audit + the caller's cascade).
+// A case-only change updates the display name in place without a collision check.
+func (s *Store) Rename(id, newName string) (oldName string, err error) {
+	newName = strings.TrimSpace(newName)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	if newName == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var curKey string
+	var cur *Group
+	for key, g := range s.groups {
+		if g.ID == id {
+			curKey, cur = key, g
+			break
+		}
+	}
+	if cur == nil {
+		return "", fmt.Errorf("group id %q not found", id)
+	}
+	oldName = cur.Name
+	newKey := strings.ToLower(newName)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if newKey == curKey {
+		// Same key (no change or case-only) — update the display name in place.
+		cur.Name = newName
+		cur.UpdatedAt = now
+		return oldName, nil
+	}
+	if _, taken := s.groups[newKey]; taken {
+		return "", fmt.Errorf("a group named %q already exists", newName)
+	}
+	cur.Name = newName
+	cur.UpdatedAt = now
+	delete(s.groups, curKey)
+	s.groups[newKey] = cur
+	for i, k := range s.order {
+		if k == curKey {
+			s.order[i] = newKey
+			break
+		}
+	}
+	return oldName, nil
+}
+
+// MatchesCategoryByID is MatchesCategory keyed by the group's stable ID
+// (references-by-id S2 hot-path match). resolved=true iff a group with that id
+// EXISTS; matched is whether that group contains the (already-resolved) category.
+// The ID is AUTHORITATIVE: a resolved group returns its own membership result so
+// the caller does NOT fall back to a possibly-stale denormalized name (which
+// could match a DIFFERENT group). No-copy fast path (one RLock + a catSet probe);
+// O(groups), a small admin set. Empty id / not found ⇒ resolved=false so the
+// caller may fall back to the name.
+func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool) {
+	if id == "" {
+		return false, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.groups {
+		if g.ID == id {
+			if category == "" {
+				return false, true
+			}
+			return g.catSet[strings.ToLower(category)], true
+		}
+	}
+	return false, false
+}
+
 // ReplaceAll atomically replaces all groups (used by cluster config sync).
 // Builds catSets outside the lock for zero contention.
 func (s *Store) ReplaceAll(groups []Group) {

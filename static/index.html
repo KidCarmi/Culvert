@@ -5086,7 +5086,10 @@ function editCatGroup(name) {
   _editingCatGroup = name;
   _editingCatGroupId = g.id || null;
   document.getElementById('cg-name').value = g.name;
-  document.getElementById('cg-name').disabled = true;
+  // Rename is enabled for ID-bearing groups (references-by-id S2): the rule→group
+  // link is by stable ID, so referencing rules follow the rename automatically.
+  // Legacy groups without an ID stay name-locked (no rename-safe addressing).
+  document.getElementById('cg-name').disabled = !_editingCatGroupId;
   _cgSelectedCats = [...g.categories];
   renderCgChips();
   loadCgCatOptions();

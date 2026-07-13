@@ -107,7 +107,11 @@ func resolveObjectID(objType, name string) string {
 			return p.ID
 		}
 	}
-	// category-group joins here in S2.
+	if objType == "category-group" {
+		if g := globalCategoryGroups.GetByName(name); g != nil {
+			return g.ID
+		}
+	}
 	return ""
 }
 
@@ -124,6 +128,11 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 		}
 	case "category-group":
 		if strings.EqualFold(r.DestCategoryGroup, name) {
+			return "destCategoryGroup"
+		}
+		// ID-first (references-by-id S2): match a rule that links by the group's
+		// stable ID even if its denormalized name is momentarily stale.
+		if objID != "" && r.DestCategoryGroupID == objID {
 			return "destCategoryGroup"
 		}
 	case "file-profile":

@@ -1,0 +1,230 @@
+package main
+
+// refs_by_id_catgroup_test.go — rule→category-group references-by-id + rename
+// (S2, OBJECT-REFERENCES-BY-ID.md): ID-authoritative match with name fallback,
+// write-path stamp, rename cascade (hit-preserving, running + draft), ID-first
+// delete-block, and the handler rename flow (atomic ordering + collision 409).
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// seedHostCategory points a host at a category via the admin catStore, so
+// categoryGroupMatchesHostRule's lookupHostCategory resolves it.
+func seedHostCategory(t *testing.T, category, host string) {
+	t.Helper()
+	if err := catStore.Set(category, []string{host}, false); err != nil {
+		t.Fatalf("seed catStore %q: %v", category, err)
+	}
+}
+
+func TestCategoryGroupMatchesHostRule_IDFirstWithFallback(t *testing.T) {
+	snapshotCatStore(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	seedHostCategory(t, "news", "example.com")
+	g, err := globalCategoryGroups.Add("grp", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rule links by ID but its denormalized name is STALE — the ID resolves, so
+	// the group's real membership is used (matches), NOT the stale name.
+	rule := &PolicyRule{DestCategoryGroup: "STALE", DestCategoryGroupID: g.ID}
+	if !categoryGroupMatchesHostRule(rule, "example.com") {
+		t.Error("ID-first match failed: stale name should be ignored when the ID resolves")
+	}
+	// A rule whose ID points at a group that does NOT contain the host's category
+	// must NOT match — even if its stale name happens to name a matching group.
+	// (Authoritative-ID: a resolved group's result is final.)
+	g2, _ := globalCategoryGroups.Add("other", []string{"gambling"})
+	rule2 := &PolicyRule{DestCategoryGroup: "grp", DestCategoryGroupID: g2.ID}
+	if categoryGroupMatchesHostRule(rule2, "example.com") {
+		t.Error("authoritative ID violated: a resolved non-member group must not fall back to the name")
+	}
+	// Un-migrated rule (no ID) falls back to the name.
+	rule3 := &PolicyRule{DestCategoryGroup: "grp"}
+	if !categoryGroupMatchesHostRule(rule3, "example.com") {
+		t.Error("name-fallback match failed for an un-migrated rule")
+	}
+	// Dangling ID (no such group) falls back to the name.
+	rule4 := &PolicyRule{DestCategoryGroup: "grp", DestCategoryGroupID: "deadbeef0000"}
+	if !categoryGroupMatchesHostRule(rule4, "example.com") {
+		t.Error("dangling ID must fall back to the denormalized name")
+	}
+}
+
+func TestStampObjectRefIDs_CategoryGroup(t *testing.T) {
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("grp", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A client-supplied ID is discarded and re-derived server-side from the name.
+	rule := &PolicyRule{DestCategoryGroup: "grp", DestCategoryGroupID: "client-lies"}
+	stampObjectRefIDs(rule)
+	if rule.DestCategoryGroupID != g.ID {
+		t.Errorf("stamp did not re-derive the ID from the name: got %q, want %q", rule.DestCategoryGroupID, g.ID)
+	}
+	// Unknown name leaves the ID empty (fail-safe: match falls back to name).
+	rule2 := &PolicyRule{DestCategoryGroup: "ghost", DestCategoryGroupID: "x"}
+	stampObjectRefIDs(rule2)
+	if rule2.DestCategoryGroupID != "" {
+		t.Errorf("unknown name must leave ID empty, got %q", rule2.DestCategoryGroupID)
+	}
+}
+
+func TestCascadeDestCategoryGroupRename(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, _ := globalCategoryGroups.Add("old", []string{"news"})
+	// One migrated rule (by ID, stale name) + one un-migrated (by old name).
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "byID", DestCategoryGroup: "STALE", DestCategoryGroupID: g.ID, Action: ActionAllow},
+		{Name: "byName", DestCategoryGroup: "old", Action: ActionAllow},
+		{Name: "unrelated", DestCategoryGroup: "keep", Action: ActionAllow},
+	})
+	n := policyStore.CascadeDestCategoryGroupRename(g.ID, "old", "new")
+	if n != 2 {
+		t.Fatalf("cascade touched %d rules, want 2", n)
+	}
+	rules := policyStore.List()
+	byName := map[string]PolicyRule{}
+	for _, r := range rules {
+		byName[r.Name] = r
+	}
+	if byName["byID"].DestCategoryGroup != "new" {
+		t.Errorf("byID rule name = %q, want new", byName["byID"].DestCategoryGroup)
+	}
+	// The un-migrated rule got both the new name AND the stamped ID (migrated).
+	if byName["byName"].DestCategoryGroup != "new" || byName["byName"].DestCategoryGroupID != g.ID {
+		t.Errorf("byName rule not migrated: %+v", byName["byName"])
+	}
+	if byName["unrelated"].DestCategoryGroup != "keep" {
+		t.Error("unrelated rule must not be touched")
+	}
+}
+
+func TestObjectReferences_CategoryGroupIDFirst(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("grp", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rule links by ID with a STALE denormalized name (partial-cascade case).
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "r1", DestCategoryGroup: "STALE", DestCategoryGroupID: g.ID, Action: ActionAllow},
+	})
+	found, refs := objectReferences("category-group", "grp")
+	if !found || len(refs) != 1 || refs[0].Name != "r1" {
+		t.Fatalf("ID-first delete-block did not find the stale-named referencing rule: %+v", refs)
+	}
+}
+
+func TestApiCategoryGroup_RenameCascades(t *testing.T) {
+	snapshotGlobalCategoryGroups(t)
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("old", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "r1", DestCategoryGroup: "old", DestCategoryGroupID: g.ID, Action: ActionAllow},
+	})
+
+	body := `{"name":"new","categories":["news","saas"]}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut,
+		"/api/category-groups?id="+g.ID, strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiCategoryGroups(w, adminCtx(req))
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename PUT = %d (%s)", w.Code, w.Body.String())
+	}
+	if globalCategoryGroups.GetByName("new") == nil {
+		t.Error("group was not renamed to 'new'")
+	}
+	if globalCategoryGroups.GetByName("old") != nil {
+		t.Error("old group name still resolves")
+	}
+	// Categories were updated in the SAME request.
+	if got := globalCategoryGroups.GetByID(g.ID); got == nil || len(got.Categories) != 2 {
+		t.Errorf("categories not updated alongside rename: %+v", got)
+	}
+	// The referencing rule's denormalized name followed the rename.
+	rules := policyStore.List()
+	if len(rules) != 1 || rules[0].DestCategoryGroup != "new" {
+		t.Errorf("referencing rule's name not cascaded: %+v", rules)
+	}
+}
+
+// TestApiCategoryGroup_RenameCascadesDraft pins the draft-cascade (mirrors the
+// S1 Finding-2 fix): a group rename during an ACTIVE draft must refresh the
+// candidate's denormalized names too.
+func TestApiCategoryGroup_RenameCascadesDraft(t *testing.T) {
+	draftTestSetup(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("old", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRequireCommit(true)
+	cand := policyDraft.stageTarget("admin@test")
+	cand.Add(PolicyRule{Name: "cr", DestCategoryGroup: "old", DestCategoryGroupID: g.ID, Action: ActionAllow})
+
+	body := `{"name":"new","categories":["news"]}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut,
+		"/api/category-groups?id="+g.ID, strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiCategoryGroups(w, adminCtx(req))
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename PUT = %d (%s)", w.Code, w.Body.String())
+	}
+	crules := policyDraft.candidateList()
+	if len(crules) != 1 || crules[0].DestCategoryGroup != "new" {
+		t.Errorf("draft candidate's denormalized name not cascaded: %+v", crules)
+	}
+}
+
+// TestApiCategoryGroup_RenameCollision409 pins the atomic-rename pre-check: a
+// rename onto a name owned by a DIFFERENT group is rejected with 409 and mutates
+// nothing (neither categories nor name).
+func TestApiCategoryGroup_RenameCollision409(t *testing.T) {
+	snapshotGlobalCategoryGroups(t)
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("a", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := globalCategoryGroups.Add("b", []string{"ads"}); err != nil {
+		t.Fatal(err)
+	}
+	// Try to rename "a" → "b" while ALSO changing categories.
+	body := `{"name":"b","categories":["news","saas"]}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut,
+		"/api/category-groups?id="+g.ID, strings.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:9999"
+	w := httptest.NewRecorder()
+	apiCategoryGroups(w, adminCtx(req))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("collision rename = %d (%s), want 409", w.Code, w.Body.String())
+	}
+	// Nothing changed: "a" keeps its name AND its original single category.
+	if got := globalCategoryGroups.GetByID(g.ID); got == nil || got.Name != "a" || len(got.Categories) != 1 {
+		t.Errorf("collision must not mutate the group: %+v", got)
+	}
+}
