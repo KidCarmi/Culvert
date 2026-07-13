@@ -23,7 +23,7 @@
 | RISK-005 | MEDIUM | ✅ CLOSED | Interrupted restore can leave `/data` absent | boot guard `checkInterruptedRestore` (`restore.go`) + runbook §8b |
 | RISK-008 | MEDIUM | ✅ CLOSED | Username timing oracle enables user enumeration | fixed `store.go` (2026-06-28) |
 | RISK-009 | MEDIUM | ✅ CLOSED | `InsecureSkipVerify` admin toggle silent on auth hot path | `auth_oidc.go:96`, `auth_oidc_flow.go:301`, `auth_ldap.go:90` |
-| RISK-010 | MEDIUM | OPEN | Self-update has no in-binary image signature/digest check | `update.go:496-608` |
+| RISK-010 | MEDIUM | ✅ CLOSED | Self-update has no in-binary image signature/digest check | legacy `update.go` removed 2026-07-11 (DEBT-008); successor (maintenance agent) is digest-pinned + Sigstore-verified |
 | RISK-011 | MEDIUM | ⚠ STALE→RE-POINTED | ~~Cluster rolling-update auto-rollback unverified~~ cited code REMOVED; concern resolved in successor, new residual = RISK-022 | `update_cluster.go` deleted; successor `inline_rollback.go` verifies revert+health (2026-07-11 audit) |
 | RISK-021 | HIGH | OPEN | Fresh/unconfigured proxy runs default-allow + no-auth (silent, advisory-log only) | `rewrite_default_action_startup.go:23-25`, `store.go:470` (HV 2026-07-11) |
 | RISK-022 | HIGH | OPEN | Maintenance agent death mid-apply is unrecoverable (no op journal; `MarkAllInterrupted` no-op) | `cmd/culvert-maint/internal/ops/ops.go:468` (HV 2026-07-11) |
@@ -297,19 +297,21 @@
   path. Validated: build OK, lint clean on touched lines, `go test -race -run 'OIDC|LDAP|Auth|IdP'`
   green. **Complexity XS — closed as recommended.**
 
-## RISK-010 — Self-update has no in-binary image verification · MEDIUM · OPEN
-- **Current state:** `apiUpdateApply` (`update.go:496-608`) delegates pull/restart to the external
-  updater sidecar; the proxy never verifies the pulled image's signature or digest. The Sigstore
-  machinery verifies *catalogs*, not the image the updater pulls.
-- **Impact:** A compromised/misconfigured updater can run an arbitrary image with no proxy-side defense.
-- **Resolution path (clarified 2026-07-05):** this gap is **inherent to the legacy tag-based updater
-  sidecar**, and its correct fix is *migration, not a patch* — the replacement path already has what
-  this asks for (the catalog + maintenance-agent flow pins by digest, `docker pull …@sha256:`, and
-  verifies keyless Sigstore signatures with catalog↔image identity parity, P2b-2b). Bolting a
-  verifier onto `apiUpdateApply` would harden code scheduled for deletion under **DEBT-008**
-  (active removal). So RISK-010 closes when the updater is retired (same move that closes
-  RISK-ACC-1), NOT by editing `update.go`. Stays OPEN until the production catalog cutover completes.
-  **Complexity M (as migration, tracked under DEBT-008).**
+## RISK-010 — Self-update has no in-binary image verification · MEDIUM · ✅ CLOSED 2026-07-11
+- **Was:** `apiUpdateApply` (`update.go:496-608`) delegated pull/restart to the external updater
+  sidecar; the proxy never verified the pulled image's signature or digest. The Sigstore machinery
+  verified *catalogs*, not the image the updater pulled.
+- **Impact:** A compromised/misconfigured updater could run an arbitrary image with no proxy-side defense.
+- **Resolution path (clarified 2026-07-05):** this gap was **inherent to the legacy tag-based updater
+  sidecar**, and its correct fix was *migration, not a patch* — the replacement path already had what
+  this asked for (the catalog + maintenance-agent flow pins by digest, `docker pull …@sha256:`, and
+  verifies keyless Sigstore signatures with catalog↔image identity parity, P2b-2b).
+- **Update (2026-07-11):** the legacy updater sidecar and `update.go` were fully removed under
+  **DEBT-008** — `apiUpdateApply` no longer exists. The maintenance agent (Release Management →
+  agent `/v1/upgrades/apply`) is now the sole day-2 update path, and it *is* the digest-pinned,
+  Sigstore-verified flow described above. RISK-010 closes by removal, the same move that closed
+  RISK-ACC-1; no residual verification gap remains on this surface (see RISK-022 for the *new*
+  agent-death-mid-apply residual on the successor).
 
 ## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · ⚠ STALE→RE-POINTED 2026-07-11
 - **Was:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushed the previous tag but never
