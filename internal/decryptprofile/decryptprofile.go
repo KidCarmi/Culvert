@@ -172,8 +172,14 @@ func (s *Store) Load(path string) error {
 		obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
 		return err
 	}
-	s.replace(profiles, true)
+	migrated := s.replace(profiles, true)
 	obs.Printf("DecryptionProfiles: loaded %d profile(s) from %s", len(profiles), path)
+	// Persist backfilled IDs so ?id= addressing is stable across restart
+	// (idempotent: a second load finds all IDs present and writes nothing).
+	if migrated > 0 {
+		s.Save()
+		obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+	}
 	return nil
 }
 
@@ -318,9 +324,12 @@ func (s *Store) ReplaceAll(profiles []Profile) { s.replace(profiles, false) }
 
 // replace is the shared install path. skipInvalidLog controls whether skipped
 // entries are logged (Load logs; ReplaceAll stays quiet on the hot sync path).
-func (s *Store) replace(profiles []Profile, logSkips bool) {
+// Returns the number of profiles that had a stable ID backfilled (Load persists
+// when > 0 so ?id= addressing survives restart).
+func (s *Store) replace(profiles []Profile, logSkips bool) int {
 	built := make(map[string]*Profile, len(profiles))
 	order := make([]string, 0, len(profiles))
+	migrated := 0
 	for i := range profiles {
 		p := profiles[i]
 		p.Name = strings.TrimSpace(p.Name)
@@ -336,6 +345,7 @@ func (s *Store) replace(profiles []Profile, logSkips bool) {
 		}
 		if p.ID == "" {
 			p.ID = uuid.NewString()[:12]
+			migrated++
 		}
 		np := p
 		built[key] = &np
@@ -345,6 +355,74 @@ func (s *Store) replace(profiles []Profile, logSkips bool) {
 	s.profiles = built
 	s.order = order
 	s.mu.Unlock()
+	return migrated
+}
+
+// GetByID returns a copy of the profile with the given stable ID, or nil.
+func (s *Store) GetByID(id string) *Profile {
+	if id == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.profiles {
+		if p.ID == id {
+			cp := copyOut(p)
+			return &cp
+		}
+	}
+	return nil
+}
+
+// UpdateByID replaces the content of the profile with the given stable ID
+// (rename-safe addressing). Like the name-keyed Update, it edits content and
+// keeps the profile's current name + CreatedAt + ID — position/identity are not
+// changed by an edit. Returns error if no profile carries the id.
+func (s *Store) UpdateByID(id string, p Profile) error {
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, cur := range s.profiles {
+		if cur.ID != id {
+			continue
+		}
+		p.ID = id
+		p.Name = cur.Name // edits address by id and keep the name (mirrors Update)
+		p.CreatedAt = cur.CreatedAt
+		if err := Validate(&p); err != nil {
+			return err
+		}
+		np := p
+		s.profiles[key] = &np
+		return nil
+	}
+	return fmt.Errorf("profile id %q not found", id)
+}
+
+// DeleteByID removes the profile with the given stable ID. Returns the removed
+// profile's name (for audit) or an error if not found.
+func (s *Store) DeleteByID(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, p := range s.profiles {
+		if p.ID == id {
+			name := p.Name
+			delete(s.profiles, key)
+			for i, k := range s.order {
+				if k == key {
+					s.order = append(s.order[:i], s.order[i+1:]...)
+					break
+				}
+			}
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("profile id %q not found", id)
 }
 
 // Names returns all profile names (for UI dropdowns), in insertion order.
