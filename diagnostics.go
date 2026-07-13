@@ -935,14 +935,11 @@ func hasCredentialCapableProvider() bool {
 			return true
 		}
 	}
-	if idpRegistry != nil {
-		for _, p := range idpRegistry.All() {
-			if p != nil && p.Enabled && p.Type == IdPTypeOIDC {
-				return true
-			}
-		}
-	}
-	return false
+	// HasEnabledOIDC reads the profiles in place. This probe runs on EVERY
+	// proxied request (resolveRequestAuth's credCapable), and the previous
+	// idpRegistry.All() loop deep-cloned every profile per call just to
+	// answer this boolean — pure per-request allocation on the hot path.
+	return idpRegistry != nil && idpRegistry.HasEnabledOIDC()
 }
 
 // exemptRiskBuckets collects offending exempt-rule names per risk category.
