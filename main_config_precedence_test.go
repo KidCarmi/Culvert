@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,7 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 		configPath:   &cfgPath,
 		proxyPort:    &zero,
 		uiPortFlag:   &zero,
+		socks5Port:   &zero,
 		logFilePath:  &empty,
 		blockFile:    &empty,
 		logMaxMB:     &zero, // flag not passed on the CLI -> unset sentinel
@@ -89,5 +91,104 @@ func TestLoadFileConfigAndFlags_LogMaxMB_YAMLHonoredWhenFlagUnset(t *testing.T) 
 
 	if s.lMaxMB != 5 {
 		t.Errorf("s.lMaxMB = %d, want 5 (from config.yaml proxy.log_max_mb); the CLI flag's built-in default must not outrank an explicit config.yaml value", s.lMaxMB)
+	}
+}
+
+// ── Port-collision validation (validatePortCollisions) ──────────────────────
+//
+// validatePortCollisions runs on the RESOLVED listener ports — after CLI
+// overrides and firstNonZero defaults are applied in loadFileConfigAndFlags —
+// not on the raw config.yaml fields. An earlier version of this check lived
+// in FileConfig.validate() (config.go) and compared the raw fields directly;
+// PR review (#729) correctly flagged that as the wrong layer: it would
+// reject a config.yaml collision a CLI override later resolves, AND miss a
+// collision created when an omitted field silently takes its default value.
+// These tests cover both of those cases directly at the resolved-value
+// layer, plus the pure collision-detection logic in isolation.
+
+func TestValidatePortCollisions_AllDistinct(t *testing.T) {
+	if err := validatePortCollisions(8080, 9090, 1080); err != nil {
+		t.Errorf("expected no error for distinct ports, got: %v", err)
+	}
+}
+
+func TestValidatePortCollisions_ProxyAndUICollide(t *testing.T) {
+	err := validatePortCollisions(8080, 8080, 0)
+	if err == nil {
+		t.Fatal("expected an error when the proxy and UI ports collide, got nil")
+	}
+	if !strings.Contains(err.Error(), "proxy port") || !strings.Contains(err.Error(), "UI port") {
+		t.Errorf("expected an error naming both the proxy port and UI port, got: %v", err)
+	}
+}
+
+func TestValidatePortCollisions_ProxyAndSOCKS5Collide(t *testing.T) {
+	err := validatePortCollisions(8080, 9090, 8080)
+	if err == nil {
+		t.Fatal("expected an error when the proxy and SOCKS5 ports collide, got nil")
+	}
+	if !strings.Contains(err.Error(), "proxy port") || !strings.Contains(err.Error(), "SOCKS5 port") {
+		t.Errorf("expected an error naming both the proxy port and SOCKS5 port, got: %v", err)
+	}
+}
+
+func TestValidatePortCollisions_UIAndSOCKS5Collide(t *testing.T) {
+	err := validatePortCollisions(8080, 9090, 9090)
+	if err == nil {
+		t.Fatal("expected an error when the UI and SOCKS5 ports collide, got nil")
+	}
+	if !strings.Contains(err.Error(), "UI port") || !strings.Contains(err.Error(), "SOCKS5 port") {
+		t.Errorf("expected an error naming both the UI port and SOCKS5 port, got: %v", err)
+	}
+}
+
+// TestValidatePortCollisions_DisabledSOCKS5Ignored proves SOCKS5's
+// documented "disabled" sentinel (0) is never treated as a collision, even
+// when the proxy/UI ports are also 0 (both unset in this direct call).
+func TestValidatePortCollisions_DisabledSOCKS5Ignored(t *testing.T) {
+	if err := validatePortCollisions(8080, 9090, 0); err != nil {
+		t.Errorf("expected no error with SOCKS5 port disabled (0), got: %v", err)
+	}
+}
+
+// TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride proves the
+// false-positive the raw-field check would have produced: config.yaml sets
+// proxy.port and proxy.ui_port to the SAME value, but a CLI -ui-port flag
+// overrides the UI port to something distinct before the collision check
+// runs. Because validatePortCollisions checks the RESOLVED values, this
+// must succeed (no fatal exit) with the CLI override's value winning.
+func TestLoadFileConfigAndFlags_PortCollision_ResolvedByCLIOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlBody := "proxy:\n  port: 8080\n  ui_port: 8080\n"
+	if err := os.WriteFile(cfgPath, []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	zero := 0
+	empty := ""
+	overriddenUIPort := 9090
+	s := &startupState{
+		configPath:   &cfgPath,
+		proxyPort:    &zero,
+		uiPortFlag:   &overriddenUIPort, // -ui-port 9090 on the CLI
+		socks5Port:   &zero,
+		logFilePath:  &empty,
+		blockFile:    &empty,
+		logMaxMB:     &zero,
+		user:         &empty,
+		pass:         &empty,
+		tlsCert:      &empty,
+		tlsKey:       &empty,
+		rateLimitRPM: &zero,
+		ipMode:       &empty,
+	}
+
+	// Must not call log.Fatalf (would os.Exit the test binary) — the
+	// resolved ports (8080, 9090) do not collide.
+	loadFileConfigAndFlags(s)
+
+	if s.pPort != 8080 || s.uPort != 9090 {
+		t.Errorf("s.pPort=%d s.uPort=%d, want 8080/9090 (CLI -ui-port override resolving the config.yaml collision)", s.pPort, s.uPort)
 	}
 }

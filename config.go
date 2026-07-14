@@ -368,6 +368,15 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 		errs = append(errs, fmt.Sprintf("proxy.socks5_port: must be 1–65535, got %d", p))
 	}
 
+	// NOTE: port-collision checking deliberately does NOT live here. This
+	// validate() runs on the raw FileConfig fields BEFORE CLI-flag overrides
+	// and firstNonZero defaults are resolved (loadFileConfigAndFlags, in
+	// main.go), so a raw-field check would both reject configs a CLI
+	// override later makes non-colliding, and miss collisions created by an
+	// unset field silently taking its default (e.g. ui_port explicitly 8080
+	// with port omitted, which defaults to 8080 too). See
+	// validatePortCollisions in main.go, which runs on the resolved values.
+
 	// max_conns_per_ip
 	if n := fc.Security.MaxConnsPerIP; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.max_conns_per_ip: must be >= 0, got %d", n))
