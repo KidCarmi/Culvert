@@ -165,22 +165,100 @@ func TestClassifyClientInspectFailure(t *testing.T) {
 }
 
 // TestClientEvidence pins B4: authenticated identity preferred, IPv6 collapses to
-// /64, IPv4 stays raw.
+// /64, IPv4 stays raw. Uses an origin-observed reason (client_cert_required) so the
+// ADR-0008 identity-gate does not apply — these are the non-spoofable classes.
 func TestClientEvidence(t *testing.T) {
-	if got := clientEvidence("alice@corp", "9.9.9.9"); got != "id:alice@corp" {
+	const r = autoExReasonClientCert
+	if got := clientEvidence(r, "alice@corp", "9.9.9.9"); got != "id:alice@corp" {
 		t.Fatalf("identity should win: %q", got)
 	}
-	if got := clientEvidence("", "203.0.113.5"); got != "ip:203.0.113.5" {
+	if got := clientEvidence(r, "", "203.0.113.5"); got != "ip:203.0.113.5" {
 		t.Fatalf("IPv4 must be raw (no /24 collapse): %q", got)
 	}
-	a := clientEvidence("", "2001:db8:a:b::1")
-	b := clientEvidence("", "2001:db8:a:b::99")
+	a := clientEvidence(r, "", "2001:db8:a:b::1")
+	b := clientEvidence(r, "", "2001:db8:a:b::99")
 	if a != b {
 		t.Fatalf("same IPv6 /64 must collapse: %q vs %q", a, b)
 	}
-	c := clientEvidence("", "2001:db8:a:c::1")
+	c := clientEvidence(r, "", "2001:db8:a:c::1")
 	if a == c {
 		t.Fatalf("different IPv6 /64 must differ: %q vs %q", a, c)
+	}
+}
+
+// TestClientEvidence_ADR0008_IdentityGatesClientPinned pins ADR-0008: for the
+// spoofable client_pinned class, IP-only (unauthenticated) evidence yields an EMPTY
+// token (discarded by the engine → cannot promote), while an authenticated identity
+// still produces a real token. The origin-observed reasons are NOT gated: IP
+// evidence stays acceptable for them.
+func TestClientEvidence_ADR0008_IdentityGatesClientPinned(t *testing.T) {
+	// client_pinned + unauthenticated (IPv4 and IPv6) ⇒ empty token, both discarded.
+	if got := clientEvidence(autoExReasonClientPinned, "", "203.0.113.5"); got != "" {
+		t.Fatalf("client_pinned IPv4 must yield NO evidence token (spoofable class), got %q", got)
+	}
+	if got := clientEvidence(autoExReasonClientPinned, "", "2001:db8:a:b::1"); got != "" {
+		t.Fatalf("client_pinned IPv6 must yield NO evidence token, got %q", got)
+	}
+	// client_pinned + AUTHENTICATED ⇒ a real identity token (auth restores evidence).
+	if got := clientEvidence(autoExReasonClientPinned, "bob@corp", "203.0.113.5"); got != "id:bob@corp" {
+		t.Fatalf("authenticated client_pinned must produce an identity token, got %q", got)
+	}
+	// Origin-observed classes are UNCHANGED: IP evidence still counts.
+	for _, r := range []AutoExcludeReason{autoExReasonClientCert, autoExReasonUnsupported} {
+		if got := clientEvidence(r, "", "203.0.113.5"); got != "ip:203.0.113.5" {
+			t.Fatalf("origin-observed reason %q must keep IP evidence, got %q", r, got)
+		}
+	}
+}
+
+// TestADR0008_ClientPinnedRequiresAuthenticatedIdentity is the end-to-end
+// regression that pins ADR-0008 through recordAutoExclude → Observe → promotion:
+// unauthenticated client_pinned NEVER promotes no matter how many distinct IPs
+// observe it, while two distinct authenticated identities do; and the origin-observed
+// classes are unchanged (two distinct IPs still promote). It is the permanent CI wall
+// against a regression that would re-open the cheap two-IP poisoning vector.
+func TestADR0008_ClientPinnedRequiresAuthenticatedIdentity(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 2})
+	swapProfiles(t)
+	fo, scope := bindFailOpenProfile(t, "adr8", "fail-open")
+
+	// 1. client_pinned from MANY distinct unauthenticated IPs — must NOT promote
+	//    (each IP-only observation yields an empty, discarded evidence token).
+	for _, ip := range []string{"203.0.113.1", "203.0.113.2", "198.51.100.7", "2001:db8:1::1", "2001:db8:2::1"} {
+		recordAutoExclude(fo, "pinned-unauth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
+	}
+	if _, ok := autoExclude.Contains(scope, "pinned-unauth.example"); ok {
+		t.Fatal("client_pinned promoted on IP-only evidence — ADR-0008 identity-gate is not holding")
+	}
+
+	// 2. A single authenticated identity is not enough (confirm-count still 2)...
+	recordAutoExclude(fo, "pinned-auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.9", Identity: "alice"})
+	if _, ok := autoExclude.Contains(scope, "pinned-auth.example"); ok {
+		t.Fatal("client_pinned promoted on ONE authenticated identity (confirm-count bypassed)")
+	}
+	// ...but TWO distinct authenticated identities DO promote it.
+	recordAutoExclude(fo, "pinned-auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.9", Identity: "bob"})
+	if _, ok := autoExclude.Contains(scope, "pinned-auth.example"); !ok {
+		t.Fatal("client_pinned did NOT promote on two distinct authenticated identities")
+	}
+
+	// 3. Mixed: one authenticated identity + many unauthenticated IPs on the SAME host
+	//    must still NOT promote — the IP-only observations contribute nothing, leaving
+	//    a single real token below the confirm-count.
+	recordAutoExclude(fo, "pinned-mixed.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.20", Identity: "carol"})
+	for _, ip := range []string{"203.0.113.21", "203.0.113.22", "203.0.113.23"} {
+		recordAutoExclude(fo, "pinned-mixed.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
+	}
+	if _, ok := autoExclude.Contains(scope, "pinned-mixed.example"); ok {
+		t.Fatal("client_pinned promoted from 1 identity + IP-only noise — unauthenticated evidence must not count")
+	}
+
+	// 4. Origin-observed class is UNCHANGED: two distinct unauthenticated IPs promote
+	//    unsupported_params (the origin, not the client, controls that signal).
+	recordAutoExclude(fo, "unsup.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "203.0.113.30"})
+	recordAutoExclude(fo, "unsup.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "203.0.113.31"})
+	if _, ok := autoExclude.Contains(scope, "unsup.example"); !ok {
+		t.Fatal("unsupported_params must still promote on two distinct IPs — ADR-0008 must not weaken origin-observed reasons")
 	}
 }
 

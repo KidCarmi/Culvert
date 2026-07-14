@@ -48,7 +48,7 @@ incompatibility and never triggers a bypass.
 |---|---|---|
 | Origin requires a client certificate (`certificate_required` alert) | ⚠️ not today — see note | ⚠️ not today — see note |
 | TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
-| Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
+| Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded — **authenticated identity only**, ADR-0008) | ❌ learn-only; spoofable → identity-gated confirm-count + shorter TTL |
 | Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
 | Origin cert untrusted / expired / hostname mismatch | ❌ | ❌ a **block** decision — auto-bypassing a bad cert is an exfil channel |
 | Connection reset / timeout / wrapped / unknown error | ❌ | ❌ fail-closed default |
@@ -127,6 +127,20 @@ churn; IPv4 kept raw). **NAT/DHCP limitation:** unauthenticated devices sharing
 one egress IP count as one client, so a host that breaks only for such a fleet
 needs failures from two distinct egress IPs (or two authenticated users) before
 it is excluded. Authenticating clients gives the best device-independence signal.
+
+> **Client-pinning requires authenticated identity (ADR-0008).** The
+> `client_pinned` reason is the **spoofable class** — the client fully controls the
+> TLS alert it sends against Culvert's forged leaf, so a deliberate attacker on a
+> broad, *unauthenticated* fail-open scope could poison a host into a bypass just by
+> rejecting the leaf from two egress IPs. To close that, `client_pinned` counts
+> **only authenticated identities** toward its confirm-count: an unauthenticated
+> pinned rejection contributes **no** evidence and can never promote, no matter how
+> many source IPs send it. A pinned app that breaks inspection only for
+> **unauthenticated** traffic therefore will **not** auto-learn — add it to the
+> manual **SSL Bypass** list (the deliberate control for known pinned apps). The
+> origin-observed reasons (client-certificate-required, TLS-parameter mismatch) are
+> **not** the spoofable class — the origin, not the client, controls those signals —
+> so they keep IP evidence and are unchanged.
 
 ### Downgrade / rollback
 
