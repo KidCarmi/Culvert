@@ -32,7 +32,7 @@ identified the resulting residual risk:
 
 The blast radius is bounded by the existing controls — the per-profile fail-open **opt-in**, **scope
 isolation** (only same-profile victims), the shorter **1h pinned TTL**, and the loud per-promotion
-**audit + alert + metric**. (An *aggregate* burst/rate signal is a separate proposed finding, **F4**,
+**audit + alert + metric**. (An *aggregate* surge signal is a separate proposed finding, **F4**,
 not part of this decision and not assumed present here.) But the *code-level* barrier for the
 spoofable class is effectively the two-IP confirm-count, which is not a barrier against an adversary.
 The confirm-count today protects against *accidental* single-endpoint self-poison, not against a
@@ -85,7 +85,7 @@ The other two evidence classes stay as-is (raw IPv4 for the NAT-fleet reason; `/
    over-collapses a legitimate enterprise NAT fleet into one token, defeating the confirm-count for
    the common case — the exact reason IPv4 is raw today.
 3. **Status quo + operator discipline.** Keep the two-IP confirm-count and rely on narrow fail-open
-   scopes + the loud per-promotion alerting (plus the proposed F4 burst signal) to detect poisoning
+   scopes + the loud per-promotion alerting (plus the proposed F4 surge signal) to detect poisoning
    after the fact. *Rejected as
    sufficient on its own* because it leaves the code-level barrier at "two IPs" and makes safety
    contingent on operator configuration and alert triage rather than on the design. (The alerting is
