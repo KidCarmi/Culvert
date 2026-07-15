@@ -52,7 +52,7 @@ func mockIDP(t *testing.T, resp introspectionResponse) (*httptest.Server, *OIDCA
 	allowLoopbackSSRF(t) // NewOIDCAuth now installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck // test response writer
 	}))
 	a, err := NewOIDCAuth(OIDCConfig{
 		IntrospectionURL: srv.URL,
@@ -101,7 +101,7 @@ func TestOIDCAuth_Verify_EmptyToken(t *testing.T) {
 func TestOIDCAuth_Verify_RequiredScopePresent(t *testing.T) {
 	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Scope: "openid proxy:access email"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Sub: "alice", Scope: "openid proxy:access email"}) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -118,7 +118,7 @@ func TestOIDCAuth_Verify_RequiredScopePresent(t *testing.T) {
 func TestOIDCAuth_Verify_RequiredScopeMissing(t *testing.T) {
 	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Scope: "openid email"}) //nolint:errcheck
+		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Scope: "openid email"}) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -138,9 +138,9 @@ func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return audience as a plain string.
-		raw := `{"active":true,"aud":"culvert"}`
+		raw := `{"active":true,"sub":"alice","aud":"culvert"}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(raw)) //nolint:errcheck
+		w.Write([]byte(raw)) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -157,9 +157,9 @@ func TestOIDCAuth_Verify_AudienceStringMatch(t *testing.T) {
 func TestOIDCAuth_Verify_AudienceArrayMatch(t *testing.T) {
 	allowLoopbackSSRF(t) // NewOIDCAuth installs the SSRF dial guard (RISK-002); permit the loopback test IdP
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := `{"active":true,"aud":["other","culvert"]}`
+		raw := `{"active":true,"sub":"alice","aud":["other","culvert"]}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(raw)) //nolint:errcheck
+		w.Write([]byte(raw)) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -178,7 +178,7 @@ func TestOIDCAuth_Verify_AudienceMismatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := `{"active":true,"aud":"other-service"}`
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(raw)) //nolint:errcheck
+		w.Write([]byte(raw)) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -224,7 +224,7 @@ func TestOIDCAuth_Cache_HitAvoidsDial(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		json.NewEncoder(w).Encode(introspectionResponse{Active: true}) //nolint:errcheck
+		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Sub: "alice"}) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -242,7 +242,7 @@ func TestOIDCAuth_Cache_Expiry(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		json.NewEncoder(w).Encode(introspectionResponse{Active: true}) //nolint:errcheck
+		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Sub: "alice"}) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
@@ -290,7 +290,7 @@ func TestOIDCAuth_Verify_SendsBasicAuth(t *testing.T) {
 	var gotUser, gotPass string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUser, gotPass, _ = r.BasicAuth()
-		json.NewEncoder(w).Encode(introspectionResponse{Active: true}) //nolint:errcheck
+		json.NewEncoder(w).Encode(introspectionResponse{Active: true, Sub: "alice"}) //nolint:errcheck // test response writer
 	}))
 	defer srv.Close()
 
