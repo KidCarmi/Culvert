@@ -127,9 +127,14 @@ type PolicyRule struct {
 	RuleType            string        `json:"ruleType,omitempty"`     // "" or "access" = Stage-2 access rule; "auth" = Stage-1 (reserved)
 	SubjectMatch        *SubjectMatch `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
 	Auth                *AuthRuleSpec `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
-	HitCount            int64         `json:"hitCount"`               // match counter (atomic); persisted by rule NAME via ruleMet (metrics.go)
-	lastHitUnix         int64         // atomic unix-seconds of the last match (0 = never); persisted by name via ruleMet. Adjacent to HitCount (both amd64/arm64-aligned int64s).
-	LastHit             string        `json:"lastHit,omitempty"` // computed in List() from lastHitUnix (RFC3339 UTC); "" = never matched. Never stored on the live rule.
+	HitCount            int64         `json:"hitCount"`               // match counter; persisted by rule NAME via ruleMet (metrics.go)
+	lastHitUnix         int64         // unix-seconds of the last match (0 = never); persisted by name via ruleMet
+	LastHit             string        `json:"lastHit,omitempty"` // computed in List() from the counters cell (RFC3339 UTC); never stored on the live rule
+	// counters is the only mutable cell shared by immutable published revisions
+	// of the same rule. Definition edits, reorders, and rename cascades preserve
+	// this pointer, so an Evaluate on the prior revision cannot lose its hit when
+	// a writer publishes the next revision.
+	counters *policyRuleCounters
 
 	// Tier-A rule metadata (policy-metadata P1; authority
 	// docs/design/POLICY-ARCHITECTURE-FUTURE.md §2). CreatedAt/ModifiedAt/
@@ -182,6 +187,12 @@ type PolicyRule struct {
 	matchedConds string
 }
 
+type policyRuleCounters struct {
+	hitCount         int64
+	restoredHitCount int64
+	lastHitUnix      int64
+}
+
 // ruleIsEnabled returns whether a rule is active. A nil Enabled pointer
 // (the zero value for existing rules loaded from JSON without the field)
 // is treated as true so that all pre-existing rules remain active.
@@ -208,8 +219,12 @@ type PolicySchedule struct {
 }
 
 // PolicyStore holds an ordered list of policy rules with thread-safe access.
+// Every successful mutation publishes a fresh slice containing fresh rule
+// definitions. Published revisions are immutable except for each rule's shared
+// atomic hit-accounting cell.
 type PolicyStore struct {
 	mu        sync.RWMutex
+	saveMu    sync.Mutex // serializes snapshot-through-policy-and-meta publication
 	rules     []*PolicyRule
 	path      string
 	version   int64  // incremented on every mutation
@@ -268,8 +283,19 @@ func (ps *PolicyStore) Load(path string) error {
 	}
 	rules = kept
 	ps.mu.Lock()
+	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
+	for _, current := range ps.rules {
+		if validRuleID(current.ID) && current.counters != nil {
+			previousCounters[current.ID] = current.counters
+		}
+	}
 	ps.rules = rules
 	migrated := ps.backfillIDsLocked()
+	for _, loaded := range ps.rules {
+		if counters := previousCounters[loaded.ID]; counters != nil {
+			loaded.counters = counters
+		}
+	}
 	ps.sortLocked()
 	ps.mu.Unlock()
 	// Restore persisted version from sidecar .meta file.
@@ -280,22 +306,40 @@ func (ps *PolicyStore) Load(path string) error {
 	// finds all IDs present and writes nothing.
 	if migrated > 0 {
 		ps.Save()
-		logger.Printf("Policy: assigned stable ULID IDs to %d rule(s) missing them (one-time migration)", migrated)
+		logger.Printf("Policy: assigned stable ULID IDs to %d rule(s) with missing, malformed, or duplicate identity", migrated)
 	}
 	return nil
 }
 
-// backfillIDsLocked assigns a stable ULID to every rule missing an ID and
-// returns the number assigned. Must be called with ps.mu held.
+// backfillIDsLocked replaces every missing, malformed, or duplicate ID with a
+// fresh stable ULID and returns the number assigned. Must be called with ps.mu held.
 func (ps *PolicyStore) backfillIDsLocked() int {
+	next := append([]*PolicyRule(nil), ps.rules...)
+	seen := make(map[string]struct{}, len(ps.rules))
 	n := 0
-	for _, r := range ps.rules {
-		if r.ID == "" {
-			r.ID = newRuleID()
+	for i, r := range ps.rules {
+		_, duplicate := seen[r.ID]
+		if !validRuleID(r.ID) || duplicate {
+			nr := clonePolicyRuleForPublication(r)
+			nr.ID = freshRuleID(seen)
+			next[i] = nr
 			n++
 		}
+		seen[next[i].ID] = struct{}{}
+	}
+	if n > 0 {
+		ps.rules = next
 	}
 	return n
+}
+
+func freshRuleID(seen map[string]struct{}) string {
+	for {
+		id := newRuleID()
+		if _, exists := seen[id]; !exists {
+			return id
+		}
+	}
 }
 
 // policyMeta is persisted alongside the policy file so version survives restart.
@@ -328,30 +372,36 @@ func (ps *PolicyStore) saveMeta() {
 	if ps.path == "" {
 		return
 	}
+	ps.saveMu.Lock()
+	defer ps.saveMu.Unlock()
 	ps.mu.RLock()
 	m := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
 	ps.mu.RUnlock()
+	ps.saveMetaSnapshot(m)
+}
+
+func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
 	data, _ := json.Marshal(m)
 	_ = atomicWriteFile(ps.path+".meta", data, 0o600)
 }
 
-// Per-rule hit counters + lastHit are PERSISTED by the metrics-layer
-// hit-counter system (metrics.go: ruleMet / saveHitCounters / loadHitCounters
-// / RestoreHitCounts, keyed by rule name — reorder-safe since reorder preserves
-// names). PolicyRule.HitCount and lastHitUnix are the LIVE values (incremented
-// in Evaluate, restored at startup by RestoreHitCounts). The store deliberately
-// does NOT carry a second persistence path.
+// Per-rule hit counters + lastHit are persisted by the metrics-layer system
+// (metrics.go). policyRuleCounters holds the live atomic values shared across
+// immutable revisions; saveHitCounters snapshots them under each current rule
+// name, and RestoreHitCounts restores them at startup. The store deliberately
+// does not carry a second persistence path.
 
 // Save persists the current rules to disk (skips HitCount — runtime only).
 func (ps *PolicyStore) Save() {
 	if ps.path == "" {
 		return
 	}
-	// EXCLUSIVE Lock (not RLock): like List(), the snapshot plain-reads
-	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
-	// shared RLock — only the exclusive Lock serializes this copy against those
-	// writes. Save is config-plane, so the brief exclusion is acceptable.
-	ps.mu.Lock()
+	// Mutations may proceed while persistence runs, but saves themselves must be
+	// ordered end-to-end. Otherwise an older snapshot can rename after a newer
+	// save and regress durable policy state.
+	ps.saveMu.Lock()
+	defer ps.saveMu.Unlock()
+	ps.mu.RLock()
 	// Snapshot without hit counts for persistence.
 	snapshot := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
@@ -359,7 +409,8 @@ func (ps *PolicyStore) Save() {
 		snapshot[i].HitCount = 0
 		snapshot[i].LastHit = "" // computed display field — never persist it into the rules file
 	}
-	ps.mu.Unlock()
+	meta := policyMeta{Version: ps.version, UpdatedAt: ps.updatedAt}
+	ps.mu.RUnlock()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -371,32 +422,34 @@ func (ps *PolicyStore) Save() {
 	if err := atomicWriteFile(ps.path, data, 0o600); err != nil {
 		return
 	}
-	ps.saveMeta()
+	ps.saveMetaSnapshot(meta)
 }
 
 // List returns a copy of all rules (including live HitCount).
 func (ps *PolicyStore) List() []PolicyRule {
-	// EXCLUSIVE Lock (not RLock): the whole-struct copy below plain-reads
-	// HitCount/lastHitUnix, which Evaluate bumps via lock-free atomics under a
-	// shared RLock. Only the exclusive Lock serializes this snapshot against
-	// those atomic writes (RLock would not — it is shared with Evaluate's RLock).
-	// List is a config-plane call (not on the request hot path), so excluding
-	// Evaluate for the brief copy is acceptable.
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
-		out[i] = *r
-		out[i].HitCount = atomic.LoadInt64(&r.HitCount) // atomic read of the concurrently-written counter (belt-and-suspenders under Lock)
+		out[i] = *clonePolicyRuleForPublication(r)
+		if r.counters != nil {
+			out[i].HitCount = atomic.LoadInt64(&r.counters.hitCount)
+		} else {
+			out[i].HitCount = atomic.LoadInt64(&r.HitCount)
+		}
 		// LastHit is a COMPUTED display field — always derive it from the atomic
-		// timestamp, never from a copied string. A rule whose LastHit leaked in
-		// via a List-derived snapshot + ReplaceAll (which resets lastHitUnix but
-		// not the string) would otherwise report a stale time on a never-hit node.
-		if u := atomic.LoadInt64(&r.lastHitUnix); u > 0 {
+		// timestamp, never from a copied string.
+		u := atomic.LoadInt64(&r.lastHitUnix)
+		if r.counters != nil {
+			u = atomic.LoadInt64(&r.counters.lastHitUnix)
+		}
+		out[i].lastHitUnix = u
+		if u > 0 {
 			out[i].LastHit = time.Unix(u, 0).UTC().Format(time.RFC3339)
 		} else {
 			out[i].LastHit = ""
 		}
+		out[i].counters = nil
 	}
 	return out
 }
@@ -417,6 +470,7 @@ func (ps *PolicyStore) List() []PolicyRule {
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.mu.Lock()
 	out := make([]*PolicyRule, 0, len(rules))
+	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {
 		r := rules[i]
 		// Fail-closed: drop invalid auth rules and SubjectMatch-bearing access rules.
@@ -426,17 +480,19 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 		}
 		r.HitCount = 0
 		r.lastHitUnix = 0
+		r.counters = nil
 		r.LastHit = "" // strip any computed display string that rode in via a List-derived snapshot
 		// Auto-enable FileFiltering when a profile is selected.
 		if r.FileProfile != "" && r.FileProfile != FileProfileNone {
 			r.FileFiltering = true
 		}
-		// Backfill a stable ID if missing. Cross-node ID consistency (CP/DP
-		// agreeing on the same ID) is deferred to Phase 3, when ConfigSnapshot
-		// carries rule IDs; until then nodes assign IDs independently.
-		if r.ID == "" {
-			r.ID = newRuleID()
+		// Preserve only canonical, unique imported IDs. Invalid or duplicate IDs
+		// cannot safely address a rule or correlate its audit history.
+		_, duplicate := seenIDs[r.ID]
+		if !validRuleID(r.ID) || duplicate {
+			r.ID = freshRuleID(seenIDs)
 		}
+		seenIDs[r.ID] = struct{}{}
 		out = append(out, &r)
 	}
 	ps.rules = out
@@ -451,7 +507,8 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	nr := r
 	nr.HitCount = 0
 	nr.lastHitUnix = 0 // a new rule has never matched
-	nr.LastHit = ""    // computed display field is never stored on the live rule
+	nr.counters = nil
+	nr.LastHit = "" // computed display field is never stored on the live rule
 	// Auto-enable FileFiltering when a profile is selected (defense-in-depth).
 	if nr.FileProfile != "" && nr.FileProfile != FileProfileNone {
 		nr.FileFiltering = true
@@ -460,43 +517,20 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 		t := true
 		nr.Enabled = &t
 	}
-	if nr.ID == "" {
-		nr.ID = newRuleID()
+	seenIDs := make(map[string]struct{}, len(ps.rules))
+	for _, existing := range ps.rules {
+		seenIDs[existing.ID] = struct{}{}
 	}
-	if nr.Priority <= 0 {
-		// Auto-assign priority: one higher than the current max.
-		maxPri := 0
-		for _, existing := range ps.rules {
-			if existing.Priority > maxPri {
-				maxPri = existing.Priority
-			}
-		}
-		nr.Priority = maxPri + 1
-	} else {
-		// Defense-in-depth: recheck priority uniqueness under the lock.
-		// validatePolicyRule catches the common non-concurrent case; this guard
-		// closes the TOCTOU window for concurrent adds that both pass validation
-		// against the same pre-lock snapshot.
-		collision := false
-		for _, existing := range ps.rules {
-			if existing.Priority == nr.Priority {
-				collision = true
-				break
-			}
-		}
-		if collision {
-			maxPri := 0
-			for _, existing := range ps.rules {
-				if existing.Priority > maxPri {
-					maxPri = existing.Priority
-				}
-			}
-			logWarnf("Policy: Add: priority %d collision (concurrent request?) — reassigning to %d",
-				nr.Priority, maxPri+1)
-			nr.Priority = maxPri + 1
-		}
+	if !validRuleID(nr.ID) {
+		nr.ID = freshRuleID(seenIDs)
+	} else if _, duplicate := seenIDs[nr.ID]; duplicate {
+		nr.ID = freshRuleID(seenIDs)
 	}
-	ps.rules = append(ps.rules, &nr)
+	nr.Priority = ps.availablePriorityLocked(nr.Priority)
+	next := make([]*PolicyRule, len(ps.rules), len(ps.rules)+1)
+	copy(next, ps.rules)
+	next = append(next, &nr)
+	ps.rules = next
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
@@ -506,6 +540,29 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 		logWarnf("Policy: %s", sanitizeLog(w))
 	}
 	return nr
+}
+
+// availablePriorityLocked preserves a unique requested priority and otherwise
+// selects one above the current maximum. The caller holds ps.mu.
+func (ps *PolicyStore) availablePriorityLocked(requested int) int {
+	maxPriority := 0
+	collision := requested <= 0
+	for _, existing := range ps.rules {
+		if existing.Priority > maxPriority {
+			maxPriority = existing.Priority
+		}
+		if existing.Priority == requested {
+			collision = true
+		}
+	}
+	if !collision {
+		return requested
+	}
+	if requested > 0 {
+		logWarnf("Policy: Add: priority %d collision (concurrent request?) — reassigning to %d",
+			requested, maxPriority+1)
+	}
+	return maxPriority + 1
 }
 
 // Update replaces the rule with the given priority. Returns false if not found.
@@ -520,15 +577,13 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 		if rule.Priority != priority {
 			continue
 		}
-		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // B7: atomic read of concurrently-written counter
-		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // an edit preserves the rule's traffic counters (same rule)
-		// Preserve the existing stable ID when the incoming body omits it
-		// (PUT bodies from older clients carry no "id"). Never let an edit
-		// wipe a rule's durable identifier.
-		if r.ID == "" {
-			r.ID = rule.ID
-		}
-		ps.rules[i] = &r
+		// Identity belongs to the stored rule, never to an update body. Older
+		// clients omit it and newer/malicious callers must not rewrite it.
+		r.ID = rule.ID
+		r.counters = rule.counters
+		next := append([]*PolicyRule(nil), ps.rules...)
+		next[i] = &r
+		ps.rules = next
 		ps.sortLocked()
 		ps.bumpVersion()
 		return true
@@ -542,7 +597,7 @@ func (ps *PolicyStore) Delete(priority int) bool {
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
 		if rule.Priority == priority {
-			ps.rules = append(ps.rules[:i], ps.rules[i+1:]...)
+			ps.rules = append(append(make([]*PolicyRule, 0, len(ps.rules)-1), ps.rules[:i]...), ps.rules[i+1:]...)
 			ps.bumpVersion()
 			return true
 		}
@@ -556,7 +611,7 @@ func (ps *PolicyStore) Delete(priority int) bool {
 // the edit always lands on the rule the client loaded (§1 identity seam).
 // Returns false if no rule carries the id.
 func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
-	if id == "" {
+	if !validRuleID(id) {
 		return false
 	}
 	// Auto-enable FileFiltering when a profile is selected (parity with Update).
@@ -569,15 +624,16 @@ func (ps *PolicyStore) UpdateByID(id string, r PolicyRule) bool {
 		if rule.ID != id {
 			continue
 		}
-		r.HitCount = atomic.LoadInt64(&rule.HitCount)       // preserve concurrently-written counters
-		r.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix) // (same rule — an edit keeps its traffic history)
-		r.ID = id                                           // identity is immutable across an edit
+		r.ID = id // identity is immutable across an edit
 		// Position is managed by reorder/move, NOT by content edits. Preserve
 		// the matched rule's CURRENT priority so an id-addressed edit made against
 		// a stale-priority body (a concurrent reorder moved the rule after the
 		// client loaded it) can never write a duplicate priority slot.
 		r.Priority = rule.Priority
-		ps.rules[i] = &r
+		r.counters = rule.counters
+		next := append([]*PolicyRule(nil), ps.rules...)
+		next[i] = &r
+		ps.rules = next
 		ps.sortLocked()
 		ps.bumpVersion()
 		return true
@@ -600,22 +656,23 @@ func (ps *PolicyStore) CascadeDecryptionProfileRename(id, oldName, newName strin
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	next := append([]*PolicyRule(nil), ps.rules...)
 	n := 0
-	for i, rule := range ps.rules {
+	for i, rule := range next {
 		byID := rule.DecryptionProfileID == id && rule.DecryptionProfile != newName
 		byName := rule.DecryptionProfileID == "" && strings.EqualFold(rule.DecryptionProfile, oldName)
 		if !byID && !byName {
 			continue
 		}
 		nr := *rule
-		nr.HitCount = atomic.LoadInt64(&rule.HitCount)
-		nr.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix)
 		nr.DecryptionProfile = newName
 		nr.DecryptionProfileID = id // stamp/keep the authoritative link
-		ps.rules[i] = &nr
+		next[i] = &nr
 		n++
 	}
 	if n > 0 {
+		ps.rules = next
+		ps.sortLocked()
 		ps.bumpVersion()
 	}
 	return n
@@ -636,22 +693,23 @@ func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName strin
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	next := append([]*PolicyRule(nil), ps.rules...)
 	n := 0
-	for i, rule := range ps.rules {
+	for i, rule := range next {
 		byID := rule.DestCategoryGroupID == id && rule.DestCategoryGroup != newName
 		byName := rule.DestCategoryGroupID == "" && strings.EqualFold(rule.DestCategoryGroup, oldName)
 		if !byID && !byName {
 			continue
 		}
 		nr := *rule
-		nr.HitCount = atomic.LoadInt64(&rule.HitCount)
-		nr.lastHitUnix = atomic.LoadInt64(&rule.lastHitUnix)
 		nr.DestCategoryGroup = newName
 		nr.DestCategoryGroupID = id // stamp/keep the authoritative link
-		ps.rules[i] = &nr
+		next[i] = &nr
 		n++
 	}
 	if n > 0 {
+		ps.rules = next
+		ps.sortLocked()
 		ps.bumpVersion()
 	}
 	return n
@@ -660,14 +718,14 @@ func (ps *PolicyStore) CascadeDestCategoryGroupRename(id, oldName, newName strin
 // DeleteByID removes the rule with the given stable ULID. Rename/reorder-safe
 // counterpart to Delete. Returns false if not found.
 func (ps *PolicyStore) DeleteByID(id string) bool {
-	if id == "" {
+	if !validRuleID(id) {
 		return false
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	for i, rule := range ps.rules {
 		if rule.ID == id {
-			ps.rules = append(ps.rules[:i], ps.rules[i+1:]...)
+			ps.rules = append(append(make([]*PolicyRule, 0, len(ps.rules)-1), ps.rules[:i]...), ps.rules[i+1:]...)
 			ps.bumpVersion()
 			return true
 		}
@@ -677,10 +735,8 @@ func (ps *PolicyStore) DeleteByID(id string) bool {
 
 // findByIDCopy returns a copy of the rule with the given ULID, or nil. Used by
 // the ID-addressed API handlers to resolve the before-state for audit/validation
-// without holding the store lock across the handler. Goes through List() so the
-// HitCount/lastHitUnix counters are read with atomic loads — Evaluate stamps
-// them lock-free, so a raw struct copy would race under -race (mirrors
-// findRuleByPriorityCopy).
+// without holding the store lock across the handler. Goes through List() for a
+// detached definition and an atomic snapshot of the shared accounting cell.
 func (ps *PolicyStore) findByIDCopy(id string) *PolicyRule {
 	if id == "" {
 		return nil
@@ -749,9 +805,12 @@ func (ps *PolicyStore) Reorder(orderedPriorities []int) bool {
 	if len(orderedPriorities) != len(ps.rules) {
 		return false
 	}
+	next := make([]*PolicyRule, len(ps.rules))
 	byOldPri := make(map[int]*PolicyRule, len(ps.rules))
-	for _, r := range ps.rules {
-		byOldPri[r.Priority] = r
+	for i, rule := range ps.rules {
+		nr := *rule
+		next[i] = &nr
+		byOldPri[nr.Priority] = &nr
 	}
 	for newIdx, oldPri := range orderedPriorities {
 		r, ok := byOldPri[oldPri]
@@ -760,6 +819,7 @@ func (ps *PolicyStore) Reorder(orderedPriorities []int) bool {
 		}
 		r.Priority = newIdx + 1
 	}
+	ps.rules = next
 	ps.sortLocked()
 	ps.bumpVersion()
 	return true
@@ -786,8 +846,12 @@ func (ps *PolicyStore) PermutePriorities(orderedPriorities []int) bool {
 		}
 		seen[p] = true
 	}
+	next := make([]*PolicyRule, len(ps.rules))
 	byOldPri := make(map[int]*PolicyRule, len(orderedPriorities))
-	for _, r := range ps.rules {
+	for i, rule := range ps.rules {
+		nr := *rule
+		next[i] = &nr
+		r := &nr
 		if seen[r.Priority] {
 			if _, already := byOldPri[r.Priority]; already {
 				return false // ambiguous: two store rules share a listed priority
@@ -804,6 +868,7 @@ func (ps *PolicyStore) PermutePriorities(orderedPriorities []int) bool {
 	for i, oldPri := range orderedPriorities {
 		byOldPri[oldPri].Priority = slots[i]
 	}
+	ps.rules = next
 	ps.sortLocked()
 	ps.bumpVersion()
 	return true
@@ -857,15 +922,20 @@ func rulesOverlap(a, b *PolicyRule) bool {
 }
 
 func (ps *PolicyStore) sortLocked() {
-	sort.Slice(ps.rules, func(i, j int) bool {
-		return ps.rules[i].Priority < ps.rules[j].Priority
+	// Clone the slice and every definition before sorting/precomputing. A reader
+	// that captured the prior slice can finish against exactly that revision while
+	// this writer prepares and publishes the next one.
+	next := make([]*PolicyRule, len(ps.rules))
+	for i, rule := range ps.rules {
+		next[i] = clonePolicyRuleForPublication(rule)
+	}
+	sort.Slice(next, func(i, j int) bool {
+		return next[i].Priority < next[j].Priority
 	})
 	// Precompute the request-independent per-rule state once per mutation so
-	// Evaluate never re-derives it on the per-request hot path: the normalized
-	// FQDN, the parsed CIDR (when SourceIP is a CIDR), and the matched-conditions
-	// summary. Index-based range avoids copying the rule pointer's target.
-	for i := range ps.rules {
-		r := ps.rules[i]
+	// Evaluate never re-derives it on the per-request hot path.
+	for i := range next {
+		r := next[i]
 		if r.DestFQDN != "" {
 			r.normFQDN = normalizeHost(r.DestFQDN)
 		} else {
@@ -879,6 +949,86 @@ func (ps *PolicyStore) sortLocked() {
 		}
 		r.matchedConds = buildMatchedConditions(r)
 	}
+	ps.rules = next
+}
+
+// copyPolicyRuleForPublication detaches every mutable nested value that the
+// evaluator can read. The counters cell is deliberately shared so accounting
+// follows the stable rule across immutable definition revisions.
+func copyPolicyRuleForPublication(nr, rule *PolicyRule) {
+	*nr = *rule
+	if rule.counters == nil {
+		hits := atomic.LoadInt64(&rule.HitCount)
+		nr.counters = &policyRuleCounters{
+			hitCount:         hits,
+			restoredHitCount: hits,
+			lastHitUnix:      atomic.LoadInt64(&rule.lastHitUnix),
+		}
+	}
+	nr.DestCountry = append([]string(nil), rule.DestCountry...)
+	if rule.Schedule != nil {
+		schedule := *rule.Schedule
+		schedule.Days = append([]string(nil), rule.Schedule.Days...)
+		nr.Schedule = &schedule
+	}
+	if rule.LogTraffic != nil {
+		v := *rule.LogTraffic
+		nr.LogTraffic = &v
+	}
+	if rule.StripALPN != nil {
+		v := *rule.StripALPN
+		nr.StripALPN = &v
+	}
+	if rule.Enabled != nil {
+		v := *rule.Enabled
+		nr.Enabled = &v
+	}
+	if rule.SubjectMatch != nil {
+		sm := *rule.SubjectMatch
+		sm.All = append([]SubjectPredicate(nil), rule.SubjectMatch.All...)
+		for i := range sm.All {
+			sm.All[i].Values = append([]string(nil), sm.All[i].Values...)
+		}
+		nr.SubjectMatch = &sm
+	}
+	if rule.Auth != nil {
+		auth := *rule.Auth
+		auth.ProviderRefs = append([]string(nil), rule.Auth.ProviderRefs...)
+		nr.Auth = &auth
+	}
+	nr.srcIPNet = nil
+	nr.normFQDN = ""
+	nr.matchedConds = ""
+}
+
+func clonePolicyRuleForPublication(rule *PolicyRule) *PolicyRule {
+	if rule == nil {
+		return nil
+	}
+	nr := new(PolicyRule)
+	copyPolicyRuleForPublication(nr, rule)
+	return nr
+}
+
+// copyPolicyRuleForMatch writes a detached decision snapshot. PolicyMatch is
+// consumed outside the store lock, so it must not expose a published definition
+// that a caller could mutate. Accounting is materialized after the current hit
+// and the private shared cell is not exposed through the result.
+func copyPolicyRuleForMatch(nr, rule *PolicyRule) {
+	copyPolicyRuleForPublication(nr, rule)
+	hits := atomic.LoadInt64(&rule.HitCount)
+	lastHit := atomic.LoadInt64(&rule.lastHitUnix)
+	if rule.counters != nil {
+		hits = atomic.LoadInt64(&rule.counters.hitCount)
+		lastHit = atomic.LoadInt64(&rule.counters.lastHitUnix)
+	}
+	nr.HitCount = hits
+	nr.lastHitUnix = lastHit
+	nr.counters = nil
+	// LastHit remains the computed List-only display field. The private atomic
+	// timestamp is materialized for compatibility without formatting on the hot
+	// path.
+	nr.LastHit = ""
 }
 
 // PolicyMatch is returned when a rule is matched against a request.
@@ -891,6 +1041,38 @@ type PolicyMatch struct {
 	// were satisfied (e.g. "srcIP=10.0.0.0/8 destFQDN=*.example.com").
 	// Populated by Evaluate for policy audit trail logging.
 	MatchedConditions string
+	ruleSnapshot      PolicyRule
+}
+
+func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
+	ps.mu.RLock()
+	rules := ps.rules
+	needsPublication := false
+	for _, rule := range rules {
+		if rule.counters == nil {
+			needsPublication = true
+			break
+		}
+	}
+	ps.mu.RUnlock()
+	if !needsPublication {
+		return rules
+	}
+
+	// Production mutators publish initialized cells. This compatibility path is
+	// for internal callers/tests that install ps.rules directly: normalize them
+	// under the writer lock before any evaluator can mutate accounting fields on
+	// a published definition.
+	ps.mu.Lock()
+	for _, rule := range ps.rules {
+		if rule.counters == nil {
+			ps.sortLocked()
+			break
+		}
+	}
+	rules = ps.rules
+	ps.mu.Unlock()
+	return rules
 }
 
 // Evaluate iterates rules in priority order and returns the first match.
@@ -904,9 +1086,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// DestCountry host; category lookups hit the community DB), so the lock must
 	// NOT be held across it — otherwise a config-plane List()/Save() (exclusive
 	// Lock) waiting on a DNS-blocked scan would stall all policy evaluation.
-	ps.mu.RLock()
-	rules := ps.rules
-	ps.mu.RUnlock()
+	rules := ps.evaluationSnapshot()
 
 	// Normalize the destination host ONCE for the whole scan; every rule's FQDN
 	// check reuses it (the host is identical across rules). This, plus each
@@ -938,31 +1118,26 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 		if !matchDestNorm(rule, host, normHost) {
 			continue
 		}
-		// Bump the match counters under RLock — NOT to protect the atomics from
-		// each other (concurrent Evaluates share RLock and the ops are atomic),
-		// but so the EXCLUSIVE Lock taken by List()/Save() serializes their
-		// plain-read struct snapshot against these writes (closing the
-		// read/atomic-write data race). This holds the lock only across two
-		// nanosecond atomic ops — never across the (DNS-capable) scan above — so
-		// it adds no blocking coupling. time.Now().Unix() does not allocate, so
-		// the perf/benchgate contract holds.
-		ps.mu.RLock()
-		atomic.AddInt64(&rule.HitCount, 1)
-		atomic.StoreInt64(&rule.lastHitUnix, time.Now().Unix())
-		ps.mu.RUnlock()
+		// Every published definition has a stable accounting cell. Revisions of
+		// the same rule share it, so a reader finishing on an older definition
+		// cannot lose its hit when a writer publishes the next revision.
+		atomic.AddInt64(&rule.counters.hitCount, 1)
+		atomicStoreMax(&rule.counters.lastHitUnix, time.Now().Unix())
 		// Precomputed by sortLocked (never "" there — empty conditions render
 		// as "any"); fall back for rules that bypassed the mutators.
 		conds := rule.matchedConds
 		if conds == "" {
 			conds = buildMatchedConditions(rule)
 		}
-		return &PolicyMatch{
-			Rule:              rule,
+		match := &PolicyMatch{
 			Action:            rule.Action,
 			SSLAction:         rule.SSLAction,
 			TLSSkipVerify:     rule.TLSSkipVerify,
 			MatchedConditions: conds,
 		}
+		copyPolicyRuleForMatch(&match.ruleSnapshot, rule)
+		match.Rule = &match.ruleSnapshot
+		return match
 	}
 	return nil
 }
