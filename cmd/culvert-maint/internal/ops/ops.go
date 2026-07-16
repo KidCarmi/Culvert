@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -204,6 +205,18 @@ type idempEntry struct {
 // operator wants treated as new work).
 const DefaultIdempCacheTTL = 24 * time.Hour
 
+// DefaultActiveRetention is how long a TERMINAL op stays in the active map
+// after it finishes, so GET /v1/operations/{id} can still answer while the CP
+// polls for the outcome. After this window the op is reaped. Running ops are
+// never reaped by age.
+const DefaultActiveRetention = 1 * time.Hour
+
+// DefaultMaxActive is the hard cap on the active map — a backstop against a
+// burst of ops within the retention window. Beyond it, the oldest-finished
+// TERMINAL ops are evicted early (running ops are never evicted). Bounds memory
+// for a long-lived agent regardless of throughput.
+const DefaultMaxActive = 1000
+
 // Manager owns the in-memory active-op map and the global maintenance
 // lock. Goroutine-safe.
 type Manager struct {
@@ -217,7 +230,13 @@ type Manager struct {
 	// were marked interrupted, so a resubmit must produce a fresh op).
 	idempCache    map[string]idempEntry
 	idempCacheTTL time.Duration
-	now           func() time.Time
+	// activeRetention / maxActive bound the active map: without them terminal
+	// ops accumulate for the whole process lifetime (a slow leak proportional to
+	// total ops run — flagged by the resilience break-review). Reaped
+	// opportunistically on admission, mirroring purgeIdempCacheLocked.
+	activeRetention time.Duration
+	maxActive       int
+	now             func() time.Time
 }
 
 // NewManager returns a fresh Manager. clock may be nil (defaults to
@@ -237,10 +256,12 @@ func NewManagerWithTTL(clock func() time.Time, idempTTL time.Duration) *Manager 
 		idempTTL = DefaultIdempCacheTTL
 	}
 	return &Manager{
-		active:        map[string]*Op{},
-		idempCache:    map[string]idempEntry{},
-		idempCacheTTL: idempTTL,
-		now:           clock,
+		active:          map[string]*Op{},
+		idempCache:      map[string]idempEntry{},
+		idempCacheTTL:   idempTTL,
+		activeRetention: DefaultActiveRetention,
+		maxActive:       DefaultMaxActive,
+		now:             clock,
 	}
 }
 
@@ -257,6 +278,7 @@ func (m *Manager) Begin(kind, actor, idempotencyKey string, params map[string]in
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.purgeActiveLocked() // bound the active map on every admission
 
 	stateChanging := IsStateChanging(kind)
 	if stateChanging && m.holder != nil {
@@ -313,6 +335,7 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 	// also self-throttling: as the cache shrinks past the TTL
 	// boundary, subsequent walks find less work to do.
 	m.purgeIdempCacheLocked()
+	m.purgeActiveLocked() // bound the active map on every admission
 
 	if idempotencyKey != "" {
 		cacheKey := idempCacheKey(actor, kind, idempotencyKey)
@@ -391,6 +414,52 @@ func (m *Manager) IdempCacheSize() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.idempCache)
+}
+
+// ActiveSize returns the current count of ops resident in the active map
+// (running + not-yet-reaped terminal). For tests asserting reap behavior.
+func (m *Manager) ActiveSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active)
+}
+
+// purgeActiveLocked bounds the active map so terminal ops don't accumulate for
+// the whole process lifetime. It drops TERMINAL ops finished before the
+// retention cutoff and — if still over maxActive — evicts the oldest-finished
+// terminal ops down to the cap. Running ops (including the lock holder) are
+// NEVER reaped. Caller holds m.mu. Mirrors purgeIdempCacheLocked: O(N) over the
+// map, run opportunistically on admission, self-throttling.
+func (m *Manager) purgeActiveLocked() {
+	if len(m.active) == 0 {
+		return
+	}
+	cutoff := m.now().Add(-m.activeRetention)
+	for id, op := range m.active {
+		if op.State.IsTerminal() && op.Finished != nil && op.Finished.Before(cutoff) {
+			delete(m.active, id)
+		}
+	}
+	if m.maxActive <= 0 || len(m.active) <= m.maxActive {
+		return
+	}
+	// Still over the hard cap: evict oldest-finished terminal ops first. Running
+	// ops cannot be evicted, so the cap is best-effort if the overflow is all
+	// live work (admission control bounds concurrent read-only ops separately).
+	terminal := make([]*Op, 0, len(m.active))
+	for _, op := range m.active {
+		if op.State.IsTerminal() && op.Finished != nil {
+			terminal = append(terminal, op)
+		}
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].Finished.Before(*terminal[j].Finished)
+	})
+	excess := len(m.active) - m.maxActive
+	for i := 0; i < len(terminal) && excess > 0; i++ {
+		delete(m.active, terminal[i].ID)
+		excess--
+	}
 }
 
 // Finish transitions opID to terminal state. If reason is non-empty it
@@ -490,14 +559,39 @@ func (m *Manager) cloneLocked(op *Op) *Op {
 	if op.Params != nil {
 		cp.Params = make(map[string]interface{}, len(op.Params))
 		for k, v := range op.Params {
-			cp.Params[k] = v
+			cp.Params[k] = deepCopyValue(v)
 		}
 	}
 	if op.Result != nil {
 		cp.Result = make(map[string]interface{}, len(op.Result))
 		for k, v := range op.Result {
-			cp.Result[k] = v
+			cp.Result[k] = deepCopyValue(v)
 		}
 	}
 	return &cp
+}
+
+// deepCopyValue recursively copies the JSON-shaped values that appear in a
+// Params/Result map (nested maps and slices), so a snapshot handed to a status
+// handler shares no mutable structure with the live op. Scalars (string, bool,
+// numbers, nil) are immutable and returned as-is. Without this, cloneLocked's
+// fresh TOP-LEVEL map still aliased nested maps/slices — a latent race against a
+// concurrent JSON-encode of the "snapshot".
+func deepCopyValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(t))
+		for k, vv := range t {
+			m[k] = deepCopyValue(vv)
+		}
+		return m
+	case []interface{}:
+		s := make([]interface{}, len(t))
+		for i, vv := range t {
+			s[i] = deepCopyValue(vv)
+		}
+		return s
+	default:
+		return v
+	}
 }
