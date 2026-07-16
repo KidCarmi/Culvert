@@ -91,10 +91,17 @@ type Journal struct {
 }
 
 // New creates the reconcile directory (0750) and returns a Journal rooted there.
+// It fsyncs the PARENT (stateDir) so the newly-created reconcile/ directory entry
+// is durable: otherwise a crash after the first record write on a fresh install
+// (which fsyncs reconcile/ and the file, but not stateDir) could lose the whole
+// reconcile/ directory, reopening the first-operation recovery gap.
 func New(stateDir string) (*Journal, error) {
 	dir := filepath.Join(stateDir, "reconcile")
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("journal: mkdir %s: %w", dir, err)
+	}
+	if err := fsyncDir(filepath.Dir(dir)); err != nil {
+		return nil, err
 	}
 	return &Journal{dir: dir}, nil
 }
@@ -149,6 +156,13 @@ func (j *Journal) Read(opID string) (rec *Record, found bool, err error) {
 	var r Record
 	if uerr := json.Unmarshal(data, &r); uerr != nil {
 		return nil, true, fmt.Errorf("%w %s: %v", ErrCorruptRecord, filepath.Base(path), uerr)
+	}
+	// A record that parses but carries an unknown phase is SEMANTICALLY corrupt
+	// (or forward-incompatible): Write refuses such a phase, so Read must too. The
+	// reconciler's safe-boundary vs danger-window decision keys on Phase, so an
+	// unrecognized value must fail closed, not be treated as a valid record.
+	if _, ok := validPhases[r.Phase]; !ok {
+		return nil, true, fmt.Errorf("%w %s: unknown phase %q", ErrCorruptRecord, filepath.Base(path), r.Phase)
 	}
 	return &r, true, nil
 }

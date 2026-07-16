@@ -115,6 +115,24 @@ func TestReadCorruptRecord(t *testing.T) {
 	}
 }
 
+// TestReadRejectsUnknownPhase pins the Codex fix: a record that is valid JSON
+// but carries an unrecognized phase must fail closed (ErrCorruptRecord), matching
+// Write's phase validation — the reconciler's decision depends on Phase.
+func TestReadRejectsUnknownPhase(t *testing.T) {
+	j := newTestJournal(t)
+	// Valid JSON, valid op_id filename, but a phase Write would never accept.
+	body := `{"op_id":"` + ulidA + `","kind":"upgrades.apply","phase":"teleported","started_at":"2026-07-01T12:00:00Z","updated_at":"2026-07-01T12:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(j.Dir(), ulidA+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := j.Read(ulidA); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("unknown-phase record must be ErrCorruptRecord, got %v", err)
+	}
+	if _, err := j.List(); !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("List must fail closed on an unknown-phase record, got %v", err)
+	}
+}
+
 func TestRemoveThenAbsent(t *testing.T) {
 	j := newTestJournal(t)
 	if err := j.Write(sampleRecord()); err != nil {
