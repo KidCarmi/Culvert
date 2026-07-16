@@ -30,9 +30,9 @@ func benchSetProfiles() func() {
 }
 
 func benchSetCache(cfg autoexclude.Config) func() {
-	prev := autoExclude
-	autoExclude = autoexclude.New(cfg)
-	return func() { autoExclude = prev }
+	prev := autoExclude()
+	setAutoExclude(autoexclude.New(cfg))
+	return func() { setAutoExclude(prev) }
 }
 
 // benchMatch builds a match referencing a profile with the given fail-open mode
@@ -93,7 +93,7 @@ func BenchmarkResolveSSLAction_FailOpenMiss(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1})()
 	m, scope := benchMatch(b, "fail-open")
 	for i := 0; i < 1000; i++ {
-		autoExclude.Observe(scope, "bench", fmt.Sprintf("other-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
+		autoExclude().Observe(scope, "bench", fmt.Sprintf("other-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -109,7 +109,7 @@ func BenchmarkResolveSSLAction_FailOpenHit(b *testing.B) {
 	defer benchSetProfiles()()
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1})()
 	m, scope := benchMatch(b, "fail-open")
-	autoExclude.Observe(scope, "bench", "hit.example", autoexclude.ReasonClientPinned, "id:x")
+	autoExclude().Observe(scope, "bench", "hit.example", autoexclude.ReasonClientPinned, "id:x")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -123,7 +123,7 @@ func BenchmarkResolveSSLAction_MaxActive(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1, MaxEntries: 4096})()
 	m, scope := benchMatch(b, "fail-open")
 	for i := 0; i < 4096; i++ {
-		autoExclude.Observe(scope, "bench", fmt.Sprintf("full-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
+		autoExclude().Observe(scope, "bench", fmt.Sprintf("full-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -139,7 +139,7 @@ func BenchmarkResolveSSLAction_MaxPending(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 5, MaxEntries: 4096})()
 	m, scope := benchMatch(b, "fail-open")
 	for i := 0; i < 4096; i++ {
-		autoExclude.Observe(scope, "bench", fmt.Sprintf("pend-%d.example", i), autoexclude.ReasonClientPinned, "id:x") // never promotes
+		autoExclude().Observe(scope, "bench", fmt.Sprintf("pend-%d.example", i), autoexclude.ReasonClientPinned, "id:x") // never promotes
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -162,12 +162,12 @@ func benchSilenceLogger() func() {
 // design. Run with -cpu=1,10,100 and -mutexprofile to quantify contention.
 func BenchmarkAutoExcludeContainsHit(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1})()
-	autoExclude.Observe("s", "bench", "hot.example", autoexclude.ReasonClientPinned, "id:x")
+	autoExclude().Observe("s", "bench", "hot.example", autoexclude.ReasonClientPinned, "id:x")
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			autoExclude.Contains("s", "hot.example")
+			autoExclude().Contains("s", "hot.example")
 		}
 	})
 }
@@ -177,13 +177,13 @@ func BenchmarkAutoExcludeContainsHit(b *testing.B) {
 func BenchmarkAutoExcludeContainsMiss(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1, MaxEntries: 4096})()
 	for i := 0; i < 4096; i++ {
-		autoExclude.Observe("s", "bench", fmt.Sprintf("h-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
+		autoExclude().Observe("s", "bench", fmt.Sprintf("h-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			autoExclude.Contains("s", "absent.example")
+			autoExclude().Contains("s", "absent.example")
 		}
 	})
 }
@@ -194,7 +194,7 @@ func BenchmarkAutoExcludeContainsMiss(b *testing.B) {
 func BenchmarkAutoExcludePollWhileTraffic(b *testing.B) {
 	defer benchSetCache(autoexclude.Config{ConfirmN: 1, MaxEntries: 4096})()
 	for i := 0; i < 512; i++ {
-		autoExclude.Observe("s", "bench", fmt.Sprintf("h-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
+		autoExclude().Observe("s", "bench", fmt.Sprintf("h-%d.example", i), autoexclude.ReasonClientPinned, "id:x")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -203,9 +203,9 @@ func BenchmarkAutoExcludePollWhileTraffic(b *testing.B) {
 		for pb.Next() {
 			n++
 			if n%64 == 0 { // ~1.5% poll
-				_ = autoExclude.List()
+				_ = autoExclude().List()
 			} else {
-				autoExclude.Contains("s", "h-1.example")
+				autoExclude().Contains("s", "h-1.example")
 			}
 		}
 	})

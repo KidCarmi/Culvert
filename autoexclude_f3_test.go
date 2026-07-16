@@ -24,20 +24,20 @@ func TestMaybeFailOpenClient_LearnOnlyPinningUnderFailOpen(t *testing.T) {
 
 	// (1) Pinning rejection under fail-open → learns (confirmN=1 promotes at once).
 	maybeFailOpenClient("pinned.example", fo, id, errors.New("remote error: tls: bad certificate"))
-	if _, ok := autoExclude.Contains(scope, "pinned.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "pinned.example"); !ok {
 		t.Fatal("client pinning rejection under fail-open must learn (learn-only)")
 	}
 
 	// (2) A non-pinning client error must NOT learn.
 	maybeFailOpenClient("noise.example", fo, id, errors.New("read tcp: connection reset by peer"))
-	if _, ok := autoExclude.Contains(scope, "noise.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "noise.example"); ok {
 		t.Fatal("non-pinning client error must not populate the cache")
 	}
 
 	// (3) A fail-close rule never learns even on a genuine pinning alert.
 	fc, fcScope := bindFailOpenProfile(t, "fc", "fail-close")
 	maybeFailOpenClient("pinned.example", fc, id, errors.New("remote error: tls: bad certificate"))
-	if _, ok := autoExclude.Contains(fcScope, "pinned.example"); ok {
+	if _, ok := autoExclude().Contains(fcScope, "pinned.example"); ok {
 		t.Fatal("fail-close rule must never learn a pinning rejection (never-consult control)")
 	}
 }

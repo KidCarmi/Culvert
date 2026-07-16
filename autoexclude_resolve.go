@@ -244,7 +244,7 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
 		return
 	}
-	if !autoExclude.Observe(scopeID, scopeName, host, reason, client) {
+	if !autoExclude().Observe(scopeID, scopeName, host, reason, client) {
 		return // still gathering confirmation, or already excluded
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.

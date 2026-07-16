@@ -636,7 +636,7 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 	// allocation-free here.
 	if sslAction == SSLInspect && match != nil && match.Rule != nil {
 		if scopeID, ok := failOpenScopeForRule(match.Rule); ok {
-			if reason, hit := autoExclude.Contains(scopeID, host); hit {
+			if reason, hit := autoExclude().Contains(scopeID, host); hit {
 				sslAction = SSLBypass
 				recordAutoExcludeHit()
 				logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%s reason=%s)",

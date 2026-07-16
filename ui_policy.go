@@ -797,7 +797,7 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		// into fail-open and how many rules reference them. 0/0 ⇒ nothing can ever
 		// auto-disable inspection (an empty cache alone does not prove this).
 		foProfiles, foRules := failOpenFootprint()
-		exclusions := autoExclude.List()
+		exclusions := autoExclude().List()
 		// Resolve each scope's CURRENT profile name + rule-count blast radius by ID
 		// (a rename keeps the profile ID; the entry's cached ScopeName may be stale).
 		// Both maps are keyed by scope ID; the UI prefers the current name.
@@ -827,7 +827,7 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, map[string]any{
 			"exclusions":         exclusions,
-			"stats":              autoExclude.Stats(),
+			"stats":              autoExclude().Stats(),
 			"fail_open_profiles": foProfiles,
 			"fail_open_rules":    foRules,
 			"scope_rule_counts":  scopeRules, // keyed by scope_id
@@ -842,12 +842,12 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 		scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 		if host != "" {
 			// Evict one (scope, host). scope is the owning decryption-profile ID.
-			removed := autoExclude.Remove(scope, host)
+			removed := autoExclude().Remove(scope, host)
 			auditEvent(r, "decryption.autoexclude.evict", scope+"/"+host, "manual eviction of a learned exclusion")
 			jsonOK(w, map[string]any{"ok": true, "removed": removed})
 			return
 		}
-		n := autoExclude.Clear()
+		n := autoExclude().Clear()
 		auditEvent(r, "decryption.autoexclude.clear", "*", fmt.Sprintf("cleared %d learned exclusion(s)", n))
 		jsonOK(w, map[string]any{"ok": true, "cleared": n})
 

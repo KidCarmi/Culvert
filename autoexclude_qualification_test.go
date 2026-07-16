@@ -34,9 +34,9 @@ func (c *qualClock) add(d time.Duration) {
 //nolint:gocognit // a linear 9-step rollout rehearsal; splitting it would obscure the sequence
 func TestRolloutRehearsal(t *testing.T) {
 	clk := &qualClock{t: time.Unix(1_700_000_000, 0)}
-	prevCache := autoExclude
-	autoExclude = autoexclude.New(autoexclude.Config{ConfirmN: 2, Now: clk.now})
-	t.Cleanup(func() { autoExclude = prevCache })
+	prevCache := autoExclude()
+	setAutoExclude(autoexclude.New(autoexclude.Config{ConfirmN: 2, Now: clk.now}))
+	t.Cleanup(func() { setAutoExclude(prevCache) })
 	swapProfiles(t)
 
 	// 1. Zero fail-open profiles → provable-OFF.
@@ -61,11 +61,11 @@ func TestRolloutRehearsal(t *testing.T) {
 	baseline := time.Now().UnixMilli()
 	for i, reason := range reasons {
 		recordAutoExclude(fo, hosts[i], reason, ProxyIdentity{ClientIP: "10.0.0.1", Identity: "alice"})
-		if _, ok := autoExclude.Contains(scope, hosts[i]); ok {
+		if _, ok := autoExclude().Contains(scope, hosts[i]); ok {
 			t.Fatalf("step3: %s promoted on ONE identity (confirm-count bypassed)", reason)
 		}
 		recordAutoExclude(fo, hosts[i], reason, ProxyIdentity{ClientIP: "10.0.0.2", Identity: "bob"})
-		if _, ok := autoExclude.Contains(scope, hosts[i]); !ok {
+		if _, ok := autoExclude().Contains(scope, hosts[i]); !ok {
 			t.Fatalf("step3: %s not excluded after 2 distinct identities", reason)
 		}
 	}
@@ -102,10 +102,10 @@ func TestRolloutRehearsal(t *testing.T) {
 	}
 	// Expiry: advance past the pinned TTL (1h) — pin.example expires, cc/unsup stay (12h).
 	clk.add(90 * time.Minute)
-	if _, ok := autoExclude.Contains(scope, "pin.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "pin.example"); ok {
 		t.Fatal("step4: client_pinned entry should expire after 1h")
 	}
-	if _, ok := autoExclude.Contains(scope, "cc.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "cc.example"); !ok {
 		t.Fatal("step4: server-observed entry should survive to 12h")
 	}
 
@@ -122,15 +122,15 @@ func TestRolloutRehearsal(t *testing.T) {
 	if maybeFailOpenOrigin("new.example", fc, ProxyIdentity{ClientIP: "10.0.0.3", Identity: "carol"}, errTLS("certificate required")) {
 		t.Fatal("step6: disabled profile must not learn or rescue")
 	}
-	if _, ok := autoExclude.Contains(scope, "new.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "new.example"); ok {
 		t.Fatal("step6: no new learn after disable")
 	}
 
 	// 7. Evict + clear → inspection resumes.
 	rw = httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions", nil))
-	if autoExclude.Len() != 0 {
-		t.Fatalf("step7: clear-all left %d entries", autoExclude.Len())
+	if autoExclude().Len() != 0 {
+		t.Fatalf("step7: clear-all left %d entries", autoExclude().Len())
 	}
 
 	// 8. Restart → the cache is VOLATILE: no promotion survives a process restart.
@@ -143,14 +143,14 @@ func TestRolloutRehearsal(t *testing.T) {
 	fo2, scope2 := bindFailOpenProfile(t, "byod2", "fail-open")
 	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.1", Identity: "alice"})
 	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.2", Identity: "bob"})
-	if _, ok := autoExclude.Contains(scope2, "persist-check.example"); !ok {
+	if _, ok := autoExclude().Contains(scope2, "persist-check.example"); !ok {
 		t.Fatal("step8: precondition — host should be excluded before the restart")
 	}
-	autoExclude = autoexclude.New(autoexclude.Config{}) // == the boot wiring; no on-disk load exists
-	if _, ok := autoExclude.Contains(scope2, "persist-check.example"); ok {
+	setAutoExclude(autoexclude.New(autoexclude.Config{})) // == the boot wiring; no on-disk load exists
+	if _, ok := autoExclude().Contains(scope2, "persist-check.example"); ok {
 		t.Fatal("step8: an exclusion survived a restart — the cache is no longer volatile (a persistence load crept into the boot path)")
 	}
-	if autoExclude.Len() != 0 {
+	if autoExclude().Len() != 0 {
 		t.Fatal("step8: restarted cache must be empty")
 	}
 

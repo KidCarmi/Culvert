@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,9 +22,53 @@ import (
 // class of bug).
 func swapAutoExclude(t *testing.T, cfg autoexclude.Config) {
 	t.Helper()
-	prev := autoExclude
-	autoExclude = autoexclude.New(cfg)
-	t.Cleanup(func() { autoExclude = prev })
+	prev := autoExclude()
+	setAutoExclude(autoexclude.New(cfg))
+	t.Cleanup(func() { setAutoExclude(prev) })
+}
+
+// TestAutoExcludeSingleton_ConcurrentSwapIsRaceFree pins F9a: the singleton is an
+// atomic.Pointer, so a runtime swap (setAutoExclude — the seam a future per-profile
+// tunable reload will use) cannot race the lockless hot-path reads (autoExclude()
+// → Observe/Contains). Under -race a plain package var would flag a data race here;
+// the atomic Load/Store must not. The test asserts no panic/race and that the
+// singleton is left pointing at a live cache.
+func TestAutoExcludeSingleton_ConcurrentSwapIsRaceFree(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+
+	// Readers hammer the hot path (the exact calls proxy.go / recordAutoExclude make).
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for !stop.Load() {
+				_, _ = autoExclude().Contains("scope", "host.example")
+				autoExclude().Observe("scope", "scope", "host.example", autoexclude.ReasonUnsupportedParams, "id:u")
+			}
+		}()
+	}
+	// A writer swaps the singleton under the readers (the F10-reload seam).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; !stop.Load() && i < 2000; i++ {
+			setAutoExclude(autoexclude.New(autoexclude.Config{ConfirmN: 1}))
+		}
+	}()
+
+	// Let them interleave briefly, then stop.
+	for i := 0; i < 100000; i++ {
+		_, _ = autoExclude().Contains("scope", "host.example")
+	}
+	stop.Store(true)
+	wg.Wait()
+
+	if autoExclude() == nil {
+		t.Fatal("singleton is nil after concurrent swaps — setAutoExclude/atomic Load broken")
+	}
 }
 
 // bindFailOpenProfile installs a decryption-profile store with a single named
@@ -72,8 +117,8 @@ func TestResolveSSLAction_FailCloseNeverConsults(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
 	swapProfiles(t)
 	fo, foScope := bindFailOpenProfile(t, "fo", "fail-open")
-	autoExclude.Observe(foScope, "fo", "locked.example", autoexclude.ReasonUnsupportedParams, "id:probe")
-	if _, ok := autoExclude.Contains(foScope, "locked.example"); !ok {
+	autoExclude().Observe(foScope, "fo", "locked.example", autoexclude.ReasonUnsupportedParams, "id:probe")
+	if _, ok := autoExclude().Contains(foScope, "locked.example"); !ok {
 		t.Fatal("precondition: host should be excluded under fo scope")
 	}
 	// fail-close profile → resolveFailOpen false → cache NOT consulted → Inspect.
@@ -95,7 +140,7 @@ func TestResolveSSLAction_CrossScopeContamination(t *testing.T) {
 	swapProfiles(t)
 	foA, scopeA := bindFailOpenProfile(t, "profA", "fail-open")
 	foB, _ := bindFailOpenProfile(t, "profB", "fail-open")
-	autoExclude.Observe(scopeA, "profA", "shared.example", autoexclude.ReasonClientCertRequired, "id:u1")
+	autoExclude().Observe(scopeA, "profA", "shared.example", autoexclude.ReasonClientCertRequired, "id:u1")
 	if a, _ := resolveSSLAction(foA, "shared.example", "1.2.3.4"); a != SSLBypass {
 		t.Fatalf("profA (owner) should bypass: got %q", a)
 	}
@@ -227,18 +272,18 @@ func TestADR0008_ClientPinnedRequiresAuthenticatedIdentity(t *testing.T) {
 	for _, ip := range []string{"203.0.113.1", "203.0.113.2", "198.51.100.7", "2001:db8:1::1", "2001:db8:2::1"} {
 		recordAutoExclude(fo, "pinned-unauth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
 	}
-	if _, ok := autoExclude.Contains(scope, "pinned-unauth.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "pinned-unauth.example"); ok {
 		t.Fatal("client_pinned promoted on IP-only evidence — ADR-0008 identity-gate is not holding")
 	}
 
 	// 2. A single authenticated identity is not enough (confirm-count still 2)...
 	recordAutoExclude(fo, "pinned-auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.9", Identity: "alice"})
-	if _, ok := autoExclude.Contains(scope, "pinned-auth.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "pinned-auth.example"); ok {
 		t.Fatal("client_pinned promoted on ONE authenticated identity (confirm-count bypassed)")
 	}
 	// ...but TWO distinct authenticated identities DO promote it.
 	recordAutoExclude(fo, "pinned-auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.9", Identity: "bob"})
-	if _, ok := autoExclude.Contains(scope, "pinned-auth.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "pinned-auth.example"); !ok {
 		t.Fatal("client_pinned did NOT promote on two distinct authenticated identities")
 	}
 
@@ -249,7 +294,7 @@ func TestADR0008_ClientPinnedRequiresAuthenticatedIdentity(t *testing.T) {
 	for _, ip := range []string{"203.0.113.21", "203.0.113.22", "203.0.113.23"} {
 		recordAutoExclude(fo, "pinned-mixed.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
 	}
-	if _, ok := autoExclude.Contains(scope, "pinned-mixed.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "pinned-mixed.example"); ok {
 		t.Fatal("client_pinned promoted from 1 identity + IP-only noise — unauthenticated evidence must not count")
 	}
 
@@ -257,7 +302,7 @@ func TestADR0008_ClientPinnedRequiresAuthenticatedIdentity(t *testing.T) {
 	//    unsupported_params (the origin, not the client, controls that signal).
 	recordAutoExclude(fo, "unsup.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "203.0.113.30"})
 	recordAutoExclude(fo, "unsup.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "203.0.113.31"})
-	if _, ok := autoExclude.Contains(scope, "unsup.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "unsup.example"); !ok {
 		t.Fatal("unsupported_params must still promote on two distinct IPs — ADR-0008 must not weaken origin-observed reasons")
 	}
 }
@@ -282,13 +327,13 @@ func TestADR0008_IPOnlyNoiseCreatesNoPendingState(t *testing.T) {
 	for _, ip := range []string{"203.0.113.41", "203.0.113.42", "203.0.113.43", "2001:db8:9::1"} {
 		recordAutoExclude(fo, "noise.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
 	}
-	if n := autoExclude.PendingLen(); n != 0 {
+	if n := autoExclude().PendingLen(); n != 0 {
 		t.Fatalf("IP-only client_pinned noise created %d pending entries — empty evidence must never reach Observe", n)
 	}
 
 	// One AUTHENTICATED identity creates exactly one pending entry...
 	recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.50", Identity: "alice"})
-	if n := autoExclude.PendingLen(); n != 1 {
+	if n := autoExclude().PendingLen(); n != 1 {
 		t.Fatalf("one authenticated client_pinned observation should create 1 pending entry, got %d", n)
 	}
 	// ...and an IP-only noise burst on the SAME host neither promotes nor disturbs it,
@@ -296,11 +341,11 @@ func TestADR0008_IPOnlyNoiseCreatesNoPendingState(t *testing.T) {
 	for _, ip := range []string{"203.0.113.51", "203.0.113.52"} {
 		recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
 	}
-	if _, ok := autoExclude.Contains(scope, "auth.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "auth.example"); ok {
 		t.Fatal("IP-only noise must not promote client_pinned")
 	}
 	recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.53", Identity: "bob"})
-	if _, ok := autoExclude.Contains(scope, "auth.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "auth.example"); !ok {
 		t.Fatal("two authenticated identities did not promote — IP-only noise disturbed the accumulated token")
 	}
 }
@@ -320,7 +365,7 @@ func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {
 	}
 	// ...but it DID learn (confirmN=1) — next session self-heals.
 	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
-	if _, ok := autoExclude.Contains(scope, "unsup.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "unsup.example"); !ok {
 		t.Fatal("unsupported-params should have entered the cache (learn-only)")
 	}
 	// A fail-close rule never learns/rescues.
@@ -339,7 +384,7 @@ func TestRecordAutoExclude_PromotesAndAudits(t *testing.T) {
 	baseline := time.Now().UnixMilli()
 	recordAutoExclude(fo, "learn-audit.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "198.51.100.7", Identity: "u1"})
 	recordAutoExclude(fo, "learn-audit.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "198.51.100.8", Identity: "u2"})
-	if _, ok := autoExclude.Contains(scope, "learn-audit.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "learn-audit.example"); !ok {
 		t.Fatal("host not excluded after confirm-count reached")
 	}
 	found := false
@@ -378,7 +423,7 @@ func TestRecordAutoExcludeRescue_EmitsObservability(t *testing.T) {
 	// The rescue must NOT have created a persistent exclusion (it is confirm-count-
 	// exempt for the live session only; the cache still requires the confirm-count).
 	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
-	if _, ok := autoExclude.Contains(scope, "rescue-obs.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "rescue-obs.example"); ok {
 		t.Fatal("live rescue must not itself promote a persistent exclusion")
 	}
 	found := false
@@ -406,8 +451,8 @@ func TestApiDecryptionExclusions_ListEvictClear(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
 	swapProfiles(t)
 	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
-	autoExclude.Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
-	autoExclude.Observe(scope, "fo", "b.example", autoexclude.ReasonClientPinned, "id:u1")
+	autoExclude().Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
+	autoExclude().Observe(scope, "fo", "b.example", autoexclude.ReasonClientPinned, "id:u1")
 
 	rw := httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodGet, "/api/decryption-exclusions", nil))
@@ -424,14 +469,14 @@ func TestApiDecryptionExclusions_ListEvictClear(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Fatalf("DELETE one status = %d, want 200", rw.Code)
 	}
-	if _, ok := autoExclude.Contains(scope, "a.example"); ok {
+	if _, ok := autoExclude().Contains(scope, "a.example"); ok {
 		t.Fatal("evicted host still present")
 	}
 
 	rw = httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleOperator, http.MethodDelete, "/api/decryption-exclusions", nil))
-	if rw.Code != http.StatusOK || autoExclude.Len() != 0 {
-		t.Fatalf("clear failed: status=%d len=%d", rw.Code, autoExclude.Len())
+	if rw.Code != http.StatusOK || autoExclude().Len() != 0 {
+		t.Fatalf("clear failed: status=%d len=%d", rw.Code, autoExclude().Len())
 	}
 }
 
@@ -440,13 +485,13 @@ func TestApiDecryptionExclusions_ViewerCannotDelete(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1})
 	swapProfiles(t)
 	_, scope := bindFailOpenProfile(t, "fo", "fail-open")
-	autoExclude.Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
+	autoExclude().Observe(scope, "fo", "a.example", autoexclude.ReasonUnsupportedParams, "id:u1")
 	rw := httptest.NewRecorder()
 	apiDecryptionExclusions(rw, roleReq(RoleViewer, http.MethodDelete, "/api/decryption-exclusions?scope="+scope+"&host=a.example", nil))
 	if rw.Code == http.StatusOK {
 		t.Fatal("viewer was allowed to DELETE (operator-only)")
 	}
-	if _, ok := autoExclude.Contains(scope, "a.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, "a.example"); !ok {
 		t.Fatal("viewer DELETE mutated the cache")
 	}
 }
