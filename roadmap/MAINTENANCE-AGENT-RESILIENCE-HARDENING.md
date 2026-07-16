@@ -150,9 +150,14 @@ audit) instead of a bare mark-only.
    `docker` child can't be orphaned to race a rollback. Tests: stage/`resultFn` panic contained +
    op failed + lock released; group kill reaps a grandchild. Small, self-contained, no journal
    dependency.
-2. **PR-B (Tier 2 bounds) — stop the leaks.** T2.1 active-map reap + T2.2 retention/rotation/tail
-   reads + T2.3 admission control + T2.4 SIGTERM drain. Independent of the journal; disarms the
-   disk-full that the journal must survive.
+2. **PR-B..PR-B4 (Tier 2 bounds) — stop the leaks.** Split into focused, independently-reviewable
+   slices (all independent of the journal; disarm the disk-full the journal must survive):
+   - **PR-B (T2.1) — ✅ SHIPPED.** Bound `Manager.active`: opportunistic reap of terminal ops on
+     admission (retention TTL + hard-cap oldest-first eviction; running ops never reaped) +
+     deep-copy nested `Params`/`Result` in `cloneLocked`.
+   - **PR-B2 (T2.4)** — SIGTERM drain (WaitGroup + shutdown-linked ctx).
+   - **PR-B3 (T2.2)** — `LogRetentionDays` enforcement + audit rotation + tail-bound `audit.Recent`.
+   - **PR-B4 (T2.3)** — admission control (read-only-op semaphore + UDS `LimitListener`).
 3. **PR-C (Tier 1 infra) — journal package + structural digest.** The `internal/journal` package
    (fail-closed writer, corrupt-record refuse-to-serve) + T1.2 structural digest selection +
    the `image inspect` tag-target runner method. No behavior change beyond digest-selection fix.
