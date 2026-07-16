@@ -218,11 +218,15 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		return nil, false, augmentErrorWithOp(herr, op.ID)
 	}
 	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
-	go func() {
+	// Tracked via goOp so shutdown drains it (T2.4). The op ctx stays detached
+	// from the request/shutdown ctx and bounded only by OperationTimeout: a
+	// state-changing op must NOT be cancelled mid-flight on SIGTERM (that is the
+	// stack-corruption risk) — the drain WAITS for it instead.
+	s.goOp(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
 		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages, cfg.resultFn)
-	}()
+	})
 	return op, false, nil
 }
 
