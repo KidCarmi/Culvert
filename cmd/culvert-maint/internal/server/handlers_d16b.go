@@ -247,10 +247,19 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// leave a destructive op unrecoverable). Non-journaled kinds / nil journal skip.
 	if ops.IsJournaled(kind) && s.opts.Journal != nil {
 		now := time.Now().UTC()
+		// Persist the rollback mode: it is the ONLY durable signal of which
+		// rollback was interrupted, and image vs data need different recovery
+		// (image is Docker-reconcilable; data must NOT be auto-reconciled). "" for
+		// upgrades.apply (no mode).
+		mode, _ := paramsForAudit["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
 		if jerr := s.opts.Journal.Write(journal.Record{
-			OpID: op.ID, Kind: kind, Phase: journal.PhaseAdmitted,
+			OpID: op.ID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
 			Actor: peer.String(), StartedAt: now, UpdatedAt: now,
 		}); jerr != nil {
+			// The orchestrator never takes ownership of oplog on this fail-closed
+			// path, so close it here to avoid leaking the descriptor across repeated
+			// admission attempts on a broken journal (ENOSPC/permissions).
+			_ = oplog.Close()
 			s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "journal_write_failed: "+jerr.Error())
 			return nil, false, augmentErrorWithOp(&opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "journal_write_failed"}}, op.ID)
 		}

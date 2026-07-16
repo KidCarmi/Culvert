@@ -77,6 +77,31 @@ func TestJournal_AdmitWritesAndTerminalRemoves(t *testing.T) {
 	}
 }
 
+// TestJournal_PersistsRollbackMode: a rollbacks.create record must carry the
+// mode (image vs data) — the reconciler needs it (image is Docker-reconcilable;
+// data must not be auto-reconciled), and it's the only durable signal of which
+// rollback was interrupted.
+func TestJournal_PersistsRollbackMode(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	peer := auth.PeerInfo{UID: 1000, Username: "cp"}
+	release := make(chan struct{})
+
+	params := map[string]interface{}{"mode": "data"}
+	op, _, e := srv.startAsyncOp(nil, peer, ops.KindRollbackCreate, "", params, blockingStages(release))
+	if e != nil {
+		t.Fatalf("admit: %+v", e)
+	}
+	rec, found, err := jnl.Read(op.ID)
+	if err != nil || !found {
+		t.Fatalf("expected journal record: found=%v err=%v", found, err)
+	}
+	if rec.Mode != "data" {
+		t.Errorf("record mode = %q, want data", rec.Mode)
+	}
+	close(release)
+	srv.opWG.Wait()
+}
+
 // TestJournal_NonJournaledKindWritesNothing: a non-journaled kind (read-only
 // upgrades.check / backup.list) never touches the journal.
 func TestJournal_NonJournaledKindWritesNothing(t *testing.T) {
