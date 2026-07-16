@@ -284,25 +284,41 @@ func (s *Server) Serve(ctx context.Context) error {
 	// build a fresh background context with a short bound. The
 	// goroutine has the ctx parameter in scope only to await
 	// cancellation; the Shutdown call itself uses its own context.
+	// shutdownDone closes once Shutdown has RETURNED (all in-flight handlers
+	// finished), which the drain below waits on.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	err = httpSrv.Serve(ln)
-	// HTTP has stopped accepting (graceful shutdown or listener error), so no new
-	// ops can be admitted. Drain in-flight orchestrator goroutines within the
-	// bound before returning — this blocks main's exit, so a state-changing op is
-	// given a chance to finish (or reach a safe point) instead of vanishing with
-	// the stack half-mutated. Instant when nothing is in flight.
-	if !s.drainOps() {
-		log.Printf("culvert-maint: shutdown drain deadline (%s) elapsed with ops still running; leaving for restart recovery", s.opDrainTimeout)
+	drain := func() {
+		if !s.drainOps() {
+			log.Printf("culvert-maint: shutdown drain deadline (%s) elapsed with ops still running; leaving for restart recovery", s.opDrainTimeout)
+		}
 	}
+
+	err = httpSrv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) {
+		// Graceful shutdown. net/http returns ErrServerClosed from Serve as soon as
+		// Shutdown is CALLED — before active handlers finish. A POST handler
+		// admitting a state-changing op could still be running and call goOp after
+		// a premature drain snapshotted an empty WaitGroup. Shutdown only returns
+		// once those handlers have finished, so wait for shutdownDone first: by then
+		// every admitted op is tracked and drainOps sees the full set. (The 5s
+		// Shutdown bound is ample — admission handlers return 202 promptly; the work
+		// runs in the orchestrator goroutine drainOps waits on.)
+		<-shutdownDone
+		drain()
 		return nil
 	}
+	// Abnormal listener error (ctx not cancelled): the shutdown goroutine is still
+	// blocked on ctx.Done(), so do NOT wait on shutdownDone (would deadlock).
+	// Best-effort drain and surface the error.
+	drain()
 	return err
 }
 
