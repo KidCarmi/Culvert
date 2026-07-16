@@ -234,6 +234,16 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 		return // no fail-open profile to scope to (gated caller, defensive)
 	}
 	client := clientEvidence(reason, id.Identity, id.ClientIP)
+	if client == "" {
+		// ADR-0008: an unauthenticated client_pinned observation carries no
+		// acceptable evidence. Return BEFORE Observe — not just relying on Observe to
+		// skip an empty token — because Observe creates/resets the pending
+		// (scope,host,reason) window before it skips the token, so passing "" here
+		// could reset an in-flight window and drop already-accumulated AUTHENTICATED
+		// tokens (letting IP-only noise indefinitely block the two-identity promotion
+		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
+		return
+	}
 	if !autoExclude.Observe(scopeID, scopeName, host, reason, client) {
 		return // still gathering confirmation, or already excluded
 	}

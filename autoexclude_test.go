@@ -262,6 +262,49 @@ func TestADR0008_ClientPinnedRequiresAuthenticatedIdentity(t *testing.T) {
 	}
 }
 
+// TestADR0008_IPOnlyNoiseCreatesNoPendingState pins the fix for the review finding
+// that empty evidence must not merely be skipped INSIDE Observe but must never reach
+// it: Observe creates (or, past the window, resets) the pending (scope,host,reason)
+// record BEFORE it skips an empty token, so passing "" mutates pending state — it can
+// reset an in-flight window and drop an already-accumulated authenticated token, and
+// it consumes bounded pending slots. recordAutoExclude now returns before Observe for
+// empty evidence, so unauthenticated client_pinned noise is a true no-op: it creates
+// ZERO pending state (pre-fix, each noise observation created a pending entry). An
+// authenticated observation, by contrast, DOES create exactly one, and IP-only noise
+// afterward leaves it untouched so the second authenticated identity still promotes.
+func TestADR0008_IPOnlyNoiseCreatesNoPendingState(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 2})
+	swapProfiles(t)
+	fo, scope := bindFailOpenProfile(t, "adr8noise", "fail-open")
+
+	// A burst of DISTINCT unauthenticated client_pinned observations must create no
+	// pending state at all (each yields an empty token that never reaches Observe).
+	for _, ip := range []string{"203.0.113.41", "203.0.113.42", "203.0.113.43", "2001:db8:9::1"} {
+		recordAutoExclude(fo, "noise.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
+	}
+	if n := autoExclude.PendingLen(); n != 0 {
+		t.Fatalf("IP-only client_pinned noise created %d pending entries — empty evidence must never reach Observe", n)
+	}
+
+	// One AUTHENTICATED identity creates exactly one pending entry...
+	recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.50", Identity: "alice"})
+	if n := autoExclude.PendingLen(); n != 1 {
+		t.Fatalf("one authenticated client_pinned observation should create 1 pending entry, got %d", n)
+	}
+	// ...and an IP-only noise burst on the SAME host neither promotes nor disturbs it,
+	// so the second authenticated identity still reaches the confirm-count.
+	for _, ip := range []string{"203.0.113.51", "203.0.113.52"} {
+		recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: ip})
+	}
+	if _, ok := autoExclude.Contains(scope, "auth.example"); ok {
+		t.Fatal("IP-only noise must not promote client_pinned")
+	}
+	recordAutoExclude(fo, "auth.example", autoExReasonClientPinned, ProxyIdentity{ClientIP: "203.0.113.53", Identity: "bob"})
+	if _, ok := autoExclude.Contains(scope, "auth.example"); !ok {
+		t.Fatal("two authenticated identities did not promote — IP-only noise disturbed the accumulated token")
+	}
+}
+
 // TestMaybeFailOpenOrigin_RescueOnlyClientCert pins B3: only client-cert-required
 // rescues the triggering session; unsupported-params learns but does not rescue.
 func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {

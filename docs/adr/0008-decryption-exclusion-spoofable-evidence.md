@@ -47,10 +47,15 @@ auto-heal.
 For the **`ReasonClientPinned`** reason only, require **authenticated-identity** evidence: count only
 `id:`-prefixed tokens toward its confirm-count, and do not accept IP-only tokens as evidence for that
 reason. Concretely, `clientEvidence(reason, identity, clientIP)` (now reason-aware) emits an **empty**
-token for an IP-only (unauthenticated) session under `ReasonClientPinned`; the engine already discards
-`client == ""` (`autoexclude.go` `Observe`, line 242, while still bounding the pending map), so such a
-session contributes nothing toward promotion. Implemented in `autoexclude_resolve.go`; the origin-side
-reasons are passed through unchanged.
+token for an IP-only (unauthenticated) session under `ReasonClientPinned`, and `recordAutoExclude`
+**returns before calling `Observe`** when the token is empty. Skipping the call (rather than relying on
+`Observe` to skip the empty token) matters: `Observe` creates or, past the window, *resets* the pending
+`(scope,host,reason)` record **before** it skips an empty token, so passing `""` in would still mutate
+pending state — it could reset an in-flight window and drop an already-accumulated authenticated token,
+letting IP-only noise indefinitely block the two-identity promotion path, and it would consume bounded
+pending slots. Returning early makes an unauthenticated `client_pinned` observation a **true no-op**
+(zero pending state). Implemented in `autoexclude_resolve.go`; the origin-side reasons are passed
+through unchanged.
 
 Consequences of the rule:
 
@@ -120,6 +125,10 @@ The gate lives in `clientEvidence` (reason-aware) and is exercised through the r
 5. **IPv4-raw / IPv6-/64 evidence semantics preserved for the non-gated classes.** No
    change to the NAT-fleet (raw IPv4) or IPv6 (/64) bucketing.
    *(TestClientEvidence)*
+6. **Empty evidence creates no pending state.** An unauthenticated `client_pinned`
+   observation never reaches `Observe`, so IP-only noise creates zero pending entries
+   and cannot reset an in-flight window or drop an accumulated authenticated token.
+   *(TestADR0008_IPOnlyNoiseCreatesNoPendingState)*
 
 ## Related
 
