@@ -608,8 +608,10 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "read-only support subsystem inventory: engine/redaction versions + registered collectors"}}},
 	{Path: "/api/support/bundles", Handler: "apiSupportBundles", Domain: "support", Public: false,
-		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
-			Note: "create a redacted csb/1 support bundle over the registered collectors; admin (a standard bundle may contain INTERNAL sections)"}}},
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "list persisted bundles (id/created/sections/size)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "create a redacted csb/1 support bundle over the registered collectors; admin (a standard bundle may contain INTERNAL sections)"}}},
 	{Path: "/api/support/bundles/{id}", Handler: "apiSupportBundleItem", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleOperator,
 			Note: "download a created bundle by id; operator+ (bundle may contain INTERNAL sections)"}}},

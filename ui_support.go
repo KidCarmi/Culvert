@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/support"
@@ -80,25 +81,78 @@ var supportBundleIDRe = regexp.MustCompile(`^csb_[a-z2-7]{26}$`)
 
 func supportBundlesDir() string { return filepath.Join(dataDir, "support", "bundles") }
 
-// apiSupportBundles creates a bundle. Requesting a bundle is admin-gated: a
-// standard bundle can contain INTERNAL sections (COLLECTOR-CONTRACT §4).
+// supportBundleSummary is the read-only list view of a persisted bundle.
+type supportBundleSummary struct {
+	BundleID        string `json:"bundle_id"`
+	CreatedAt       string `json:"created_at"`
+	Format          string `json:"format"`
+	TotalCollectors int    `json:"total_collectors"`
+	OK              int    `json:"ok"`
+	Failed          int    `json:"failed"`
+	SizeBytes       int64  `json:"size_bytes"`
+}
+
+// apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
+// Creating is admin-gated: a standard bundle can contain INTERNAL sections
+// (COLLECTOR-CONTRACT §4).
 func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, listSupportBundles())
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		res, err := createSupportBundle(r.Context())
+		if err != nil {
+			logger.Printf("support: bundle build failed: %v", err)
+			http.Error(w, "bundle build failed", http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "support.bundle.create", res.BundleID, support.BundleFormat)
+		jsonOK(w, res.Manifest)
+	default:
+		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	if !requireRole(w, r, RoleAdmin) {
-		return
-	}
-	res, err := createSupportBundle(r.Context())
+}
+
+// listSupportBundles reads persisted bundle manifests newest-first. Malformed or
+// partial bundle dirs are skipped (never fatal).
+func listSupportBundles() []supportBundleSummary {
+	entries, err := os.ReadDir(supportBundlesDir())
 	if err != nil {
-		logger.Printf("support: bundle build failed: %v", err)
-		http.Error(w, "bundle build failed", http.StatusInternalServerError)
-		return
+		return []supportBundleSummary{} // dir absent (no bundle yet) → empty, not an error
 	}
-	auditEvent(r, "support.bundle.create", res.BundleID, support.BundleFormat)
-	jsonOK(w, res.Manifest)
+	out := make([]supportBundleSummary, 0, len(entries))
+	for _, e := range entries {
+		id := e.Name()
+		if !e.IsDir() || !supportBundleIDRe.MatchString(id) {
+			continue
+		}
+		manifestBytes, err := os.ReadFile(filepath.Join(supportBundlesDir(), id, "manifest.json"))
+		if err != nil {
+			continue
+		}
+		var man support.SupportBundleManifest
+		if json.Unmarshal(manifestBytes, &man) != nil {
+			continue
+		}
+		var size int64
+		if fi, err := os.Stat(filepath.Join(supportBundlesDir(), id, "bundle.csb.tgz")); err == nil {
+			size = fi.Size()
+		}
+		out = append(out, supportBundleSummary{
+			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
+			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
+			Failed: man.Collection.Failed, SizeBytes: size,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out
 }
 
 // apiSupportBundleItem downloads a created bundle by id (operator+).
