@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	"culvert-maint/internal/audit"
@@ -110,6 +111,81 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 	}
 	defer func() { _ = deps.OpLog.Close() }()
 
+	// Terminal outcome, resolved by the stage loop (or overridden by the panic
+	// recover below). Declared here so the deferred terminate() closure sees the
+	// final values regardless of how Run exits.
+	var (
+		firstErr      error
+		firstErrStage string
+		firstReason   FailureReason
+		curStage      string // stage currently executing — names the culprit on panic
+		finalState    = StateSucceeded
+		finalReason   FailureReason
+		result        map[string]interface{}
+		timedOut      bool
+		// promotedReason is set by the FIRST stage flagged
+		// PromoteReasonOnFailure that returns an error; it overrides
+		// firstReason for the terminal failure_reason (narrow override).
+		promotedReason FailureReason
+	)
+
+	// terminate performs the ONE terminal transition — Manager.Finish (which
+	// releases the maintenance lock) + the terminal audit event + the final op-log
+	// note. It is invoked from the deferred panic barrier below, so it runs on
+	// EVERY exit path, including a panicking stage / resultFn: a panicking op
+	// becomes a failed op with the lock released, never a dead daemon with a
+	// permanently stuck lock. Idempotent (guarded by `finished`).
+	finished := false
+	terminate := func() {
+		if finished {
+			return
+		}
+		finished = true
+		_ = deps.Manager.Finish(opID, finalState, finalReason, result)
+
+		now := time.Now().UTC()
+		endEvent := audit.Event{
+			Actor:          actor,
+			OpID:           opID,
+			Kind:           kind,
+			Params:         params,
+			Outcome:        audit.OutcomeSucceeded,
+			OutcomeAt:      &now,
+			IdempotencyKey: idempotencyKey,
+		}
+		if finalState == StateFailed {
+			endEvent.Outcome = audit.OutcomeFailed
+			endEvent.FailureReason = string(finalReason)
+		}
+		if err := deps.Audit.Write(endEvent); err != nil {
+			_ = deps.OpLog.Note("agent", "warn: terminal audit emit failed: "+err.Error())
+		}
+		if finalState == StateFailed {
+			_ = deps.OpLog.Note("agent", fmt.Sprintf("op finished failed at stage=%s reason=%s err=%v", firstErrStage, finalReason, firstErr))
+		} else {
+			_ = deps.OpLog.Note("agent", "op finished succeeded")
+		}
+	}
+
+	// Panic barrier: convert any stage/resultFn/dependency panic into a failed op
+	// (ReasonAgentPanic) with the lock released, then terminate. Without this a
+	// single panic in a bare goroutine would kill the entire agent process.
+	defer func() {
+		if p := recover(); p != nil {
+			_ = deps.OpLog.Note("agent", fmt.Sprintf("PANIC recovered in stage=%q: %v\n%s", curStage, p, debug.Stack()))
+			finalState = StateFailed
+			finalReason = ReasonAgentPanic
+			if firstErrStage == "" {
+				firstErrStage = curStage
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("panic: %v", p)
+			}
+			result = map[string]interface{}{"panic": fmt.Sprintf("%v", p), "panic_stage": curStage}
+		}
+		terminate()
+	}()
+
 	// Started audit event. Params are passed through verbatim — the
 	// caller is responsible for stripping secrets (passphrase_ref,
 	// not the value).
@@ -125,17 +201,6 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		_ = deps.OpLog.Note("agent", "warn: started audit emit failed: "+err.Error())
 	}
 	_ = deps.OpLog.Note("agent", fmt.Sprintf("op_id=%s kind=%s actor=%s — started", opID, kind, actor))
-
-	// Stage loop.
-	var (
-		firstErr      error
-		firstErrStage string
-		firstReason   FailureReason
-		// promotedReason is set by the FIRST stage flagged
-		// PromoteReasonOnFailure that returns an error; it overrides
-		// firstReason for the terminal failure_reason (narrow override).
-		promotedReason FailureReason
-	)
 	// recordFailure folds a stage error into the first-failure and the
 	// (narrow) promoted-reason tracking. Extracted so the stage loop stays
 	// flat.
@@ -178,6 +243,7 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 			_ = deps.OpLog.Note(s.Name, fmt.Sprintf("recovery: running after earlier failure at stage=%s", firstErrStage))
 		}
 		_ = deps.OpLog.StageStart(s.Name)
+		curStage = s.Name // so the panic barrier can name the culprit stage
 
 		stdout, stderr, runErr := s.Run(ctx)
 		if len(stdout) > 0 {
@@ -202,30 +268,24 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		}
 	}
 
-	// Terminal transition + audit.
-	finalState := StateSucceeded
+	// Resolve the terminal outcome into the shared vars. The deferred terminate()
+	// (invoked by the panic barrier) performs the actual Manager.Finish + audit +
+	// note — here we only COMPUTE the values, so the happy path and the panic path
+	// share one terminal transition and the maintenance lock is released exactly
+	// once on every exit.
 	if firstErr != nil {
 		finalState = StateFailed
-	}
-
-	finalReason := FailureReason("")
-	timedOut := false
-	if finalState == StateFailed {
 		finalReason = firstReason
 		// Narrow override: a promoted recovery-stage reason (rollback_failed)
-		// wins over the original first reason. Timeout still wins over this
-		// (handled below).
+		// wins over the original first reason. Timeout still wins over this.
 		if promotedReason != "" {
 			finalReason = promotedReason
 		}
-		// Operation-level timeout overrides any stage-level
-		// failure reason. cfg.OperationTimeout is enforced by the
-		// caller via context.WithTimeout(ctx, cfg.OperationTimeout);
-		// when the deadline fires, every in-flight stage's
-		// runner-level ctx is also cancelled. We promote that to
-		// ReasonTimeout here so the audit trail makes the cause
-		// unambiguous (rather than blaming whichever stage's
-		// runner.Run happened to return DeadlineExceeded first).
+		// Operation-level timeout overrides any stage-level failure reason.
+		// cfg.OperationTimeout is enforced by the caller via
+		// context.WithTimeout(ctx, cfg.OperationTimeout); when the deadline
+		// fires, every in-flight stage's runner-level ctx is also cancelled. We
+		// promote that to ReasonTimeout so the audit trail is unambiguous.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			finalReason = ReasonTimeout
 			timedOut = true
@@ -233,11 +293,11 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		}
 	}
 
-	// Result map: the per-flow ResultFn (if any) computes the structured
-	// payload from the final state/reason, and timeout metadata is
-	// overlaid on top so an operator inspecting `/v1/operations/{id}`
-	// sees the timeout flag without cross-referencing the audit trail.
-	var result map[string]interface{}
+	// Result map: the per-flow ResultFn (if any) computes the structured payload
+	// from the final state/reason, and timeout metadata is overlaid on top so an
+	// operator inspecting /v1/operations/{id} sees the timeout flag without
+	// cross-referencing the audit trail. (resultFn runs inside the panic barrier,
+	// so a panicking resultFn also becomes a failed op, not a dead daemon.)
 	if resultFn != nil {
 		result = resultFn(finalState, finalReason)
 	}
@@ -249,29 +309,5 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		result["timed_out_at_stage"] = firstErrStage
 		result["original_failure_reason"] = string(firstReason)
 	}
-
-	_ = deps.Manager.Finish(opID, finalState, finalReason, result)
-
-	now := time.Now().UTC()
-	endEvent := audit.Event{
-		Actor:          actor,
-		OpID:           opID,
-		Kind:           kind,
-		Params:         params,
-		Outcome:        audit.OutcomeSucceeded,
-		OutcomeAt:      &now,
-		IdempotencyKey: idempotencyKey,
-	}
-	if finalState == StateFailed {
-		endEvent.Outcome = audit.OutcomeFailed
-		endEvent.FailureReason = string(finalReason)
-	}
-	if err := deps.Audit.Write(endEvent); err != nil {
-		_ = deps.OpLog.Note("agent", "warn: terminal audit emit failed: "+err.Error())
-	}
-	if finalState == StateFailed {
-		_ = deps.OpLog.Note("agent", fmt.Sprintf("op finished failed at stage=%s reason=%s err=%v", firstErrStage, finalReason, firstErr))
-	} else {
-		_ = deps.OpLog.Note("agent", "op finished succeeded")
-	}
+	// terminate() runs in the deferred panic barrier — do not call Finish here.
 }

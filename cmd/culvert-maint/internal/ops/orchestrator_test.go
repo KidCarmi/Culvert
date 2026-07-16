@@ -244,6 +244,75 @@ func TestRun_ReleasesLockOnTerminal(t *testing.T) {
 	}
 }
 
+// panicStage builds a stage whose Run panics — the "never crash" case.
+func panicStage(name, msg string) FlowStage {
+	return FlowStage{
+		Name: name,
+		Run: func(_ context.Context) ([]byte, []byte, error) {
+			panic(msg)
+		},
+	}
+}
+
+// TestRun_PanicInStageIsContained is the core never-crash guarantee: a stage
+// panic must NOT propagate out of ops.Run (which would kill the whole agent
+// process, since Run executes on a bare goroutine). Instead the op is marked
+// failed(agent_panic) and the maintenance lock is released.
+func TestRun_PanicInStageIsContained(t *testing.T) {
+	rig := newOrchTestRig(t)
+	if rig.mgr.Holder() == nil {
+		t.Fatal("setup: state-changing op should be holding the lock")
+	}
+	// If the panic barrier is missing, this call re-panics and crashes the test
+	// binary — which IS the failure mode we are guarding against. A recover here
+	// would mask a regression, so we deliberately do NOT wrap the call: a green
+	// test proves ops.Run swallowed the panic itself.
+	Run(context.Background(), rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
+		[]FlowStage{okStage("first", "ok"), panicStage("boom", "kaboom"), okStage("never", "")},
+		nil,
+	)
+
+	op := rig.mgr.Get(rig.opID)
+	if op == nil {
+		t.Fatal("op missing after panic")
+	}
+	if op.State != StateFailed {
+		t.Errorf("panicking op state = %q, want failed", op.State)
+	}
+	if op.FailureReason != string(ReasonAgentPanic) {
+		t.Errorf("panicking op reason = %q, want %q", op.FailureReason, ReasonAgentPanic)
+	}
+	if rig.mgr.Holder() != nil {
+		t.Errorf("maintenance lock must be released after a panic; holder=%+v", rig.mgr.Holder())
+	}
+	// The op-log records the panic + the culprit stage for forensics.
+	body := rig.opLogContent(t)
+	if !strings.Contains(body, "PANIC recovered") || !strings.Contains(body, "boom") {
+		t.Errorf("op-log missing panic forensics:\n%s", body)
+	}
+	// A terminal failed audit event was still emitted.
+	if a := rig.auditContent(t); !strings.Contains(a, `"failure_reason":"agent_panic"`) {
+		t.Errorf("audit missing terminal agent_panic event:\n%s", a)
+	}
+}
+
+// TestRun_PanicInResultFnIsContained proves the barrier also covers the
+// resultFn (which runs after the stage loop, still inside Run's goroutine).
+func TestRun_PanicInResultFnIsContained(t *testing.T) {
+	rig := newOrchTestRig(t)
+	Run(context.Background(), rig.deps, rig.opID, KindBackupCreate, "uid=1", nil, "",
+		[]FlowStage{okStage("a", "ok")},
+		func(_ State, _ FailureReason) map[string]interface{} { panic("resultFn boom") },
+	)
+	op := rig.mgr.Get(rig.opID)
+	if op == nil || op.State != StateFailed || op.FailureReason != string(ReasonAgentPanic) {
+		t.Errorf("resultFn panic not contained: %+v", op)
+	}
+	if rig.mgr.Holder() != nil {
+		t.Error("lock must be released after a resultFn panic")
+	}
+}
+
 // Idempotency_key in the started audit event flows through.
 func TestRun_PropagatesIdempotencyKeyToAudit(t *testing.T) {
 	rig := newOrchTestRig(t)

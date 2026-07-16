@@ -142,6 +142,11 @@ const (
 	ReasonCommandError            FailureReason = "command_error"
 	ReasonConcurrencyConflict     FailureReason = "concurrency_conflict"
 	ReasonAgentRestartInterrupted FailureReason = "agent_restart_interrupted"
+	// ReasonAgentPanic marks an op whose orchestrator goroutine panicked and was
+	// recovered by ops.Run's panic barrier. The op is failed and the maintenance
+	// lock released, so one malformed op can never take down the whole agent or
+	// strand the lock. Distinct from cli_error so the audit trail names the class.
+	ReasonAgentPanic FailureReason = "agent_panic"
 	// ReasonRollbackFailed marks an op that failed AND whose recovery
 	// (inline auto-)rollback also failed to restore service. It is
 	// surfaced via the narrow final-reason override (a recovery stage
