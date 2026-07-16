@@ -124,6 +124,12 @@ type Options struct {
 	// Zero ⇒ DefaultOpDrainTimeout. Tests set a short value.
 	OpDrainTimeout time.Duration
 
+	// MaxConcurrentReadOnlyOps caps concurrently-executing READ-ONLY ops
+	// (upgrades.check), which are not serialized by the maintenance lock. Beyond
+	// it, admission returns 429 so a flood cannot spawn unbounded root docker
+	// subprocesses. Zero ⇒ DefaultMaxConcurrentReadOnlyOps.
+	MaxConcurrentReadOnlyOps int
+
 	// Runner is the command runner used by D1.6b handlers. May be
 	// nil only in unit tests that exercise non-D1.6b paths; the
 	// production constructor in main wires a real *runner.Runner.
@@ -140,6 +146,11 @@ type Options struct {
 // SIGKILL; an op that exceeds it is left for journal-based recovery on restart.
 const DefaultOpDrainTimeout = 30 * time.Second
 
+// DefaultMaxConcurrentReadOnlyOps caps concurrent read-only ops when
+// Options.MaxConcurrentReadOnlyOps is unset. 8 leaves ample headroom for normal
+// CP polling while bounding a hostile flood to a handful of docker subprocesses.
+const DefaultMaxConcurrentReadOnlyOps = 8
+
 // Server is the agent's HTTP server. Construct with New, run with
 // Serve.
 type Server struct {
@@ -149,6 +160,12 @@ type Server struct {
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
 	opWG           sync.WaitGroup
 	opDrainTimeout time.Duration
+
+	// opSem bounds concurrently-executing READ-ONLY ops (T2.3). Buffered to
+	// MaxConcurrentReadOnlyOps; a non-blocking send at admission returns 429 when
+	// full. State-changing ops bypass it (the maintenance lock already caps them
+	// at one).
+	opSem chan struct{}
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -183,7 +200,25 @@ func New(opts Options) (*Server, error) {
 	if drain <= 0 {
 		drain = DefaultOpDrainTimeout
 	}
-	return &Server{opts: opts, opDrainTimeout: drain}, nil
+	maxRO := opts.MaxConcurrentReadOnlyOps
+	if maxRO <= 0 {
+		maxRO = DefaultMaxConcurrentReadOnlyOps
+	}
+	return &Server{opts: opts, opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
+}
+
+// acquireReadOnlySlot reserves an execution slot for a read-only op without
+// blocking. Returns a release func and true when a slot was granted, or false
+// when the agent is at capacity (caller returns 429). State-changing ops must
+// not call this — they are serialized by the maintenance lock.
+func (s *Server) acquireReadOnlySlot() (release func(), ok bool) {
+	select {
+	case s.opSem <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-s.opSem }) }, true
+	default:
+		return nil, false
+	}
 }
 
 // goOp launches an orchestrator goroutine tracked by opWG, so shutdown can
