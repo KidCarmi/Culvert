@@ -18,6 +18,7 @@ type Result struct {
 	ClassMax DataClass // highest class present AFTER redaction (<= ShareableCeiling)
 	Masked   int       // count of SENSITIVE fields masked
 	Dropped  int       // count of SECRET/NEVER_EXPORT fields dropped
+	Scrubbed int       // count of free-form secret-shapes redacted in KEPT strings
 }
 
 // Redactor redacts collected values structurally by DataClass. Field classes are
@@ -33,7 +34,8 @@ type Redactor interface {
 }
 
 type redactor struct {
-	salt []byte // per-bundle; masked tokens correlate within a bundle, not across
+	salt     []byte    // per-bundle; masked tokens correlate within a bundle, not across
+	scrubber *Scrubber // free-form secret backstop for KEPT strings; nil = no-op
 }
 
 // New builds a Redactor with a fresh random per-bundle salt. The salt is
@@ -42,13 +44,13 @@ type redactor struct {
 func New() Redactor {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
-	return &redactor{salt: b}
+	return &redactor{salt: b, scrubber: defaultScrubber}
 }
 
 // NewWithSalt is the deterministic constructor for tests (fixed salt → fixed
 // masked tokens), mirroring the injected-clock discipline of the engine tests.
 func NewWithSalt(salt []byte) Redactor {
-	return &redactor{salt: append([]byte(nil), salt...)}
+	return &redactor{salt: append([]byte(nil), salt...), scrubber: defaultScrubber}
 }
 
 func (r *redactor) Struct(v any) any { return r.Classify(v).Value }
@@ -83,6 +85,12 @@ func (r *redactor) walk(rv reflect.Value, ctx DataClass, acc *Result) any {
 		if rv.Kind() == reflect.Slice && rv.IsNil() {
 			return nil
 		}
+		// A KEPT []byte is credential-shaped raw data, not a list of numbers:
+		// render it as a scrubbed string rather than exploding it into per-byte
+		// ints (which would slip a secret past the scrubber).
+		if rv.Type().Elem().Kind() == reflect.Uint8 && ctx < ClassSensitive {
+			return r.scrubString(bytesOf(rv), ctx, acc)
+		}
 		out := make([]any, 0, rv.Len())
 		for i := 0; i < rv.Len(); i++ {
 			out = append(out, r.walk(rv.Index(i), ctx, acc))
@@ -95,7 +103,28 @@ func (r *redactor) walk(rv reflect.Value, ctx DataClass, acc *Result) any {
 			return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
 		})
 		for _, k := range keys {
-			out[fmt.Sprint(k.Interface())] = r.walk(rv.MapIndex(k), ctx, acc)
+			key := fmt.Sprint(k.Interface())
+			// A map KEY is a kept string too; scrub it so a secret can't hide in
+			// a key. Value is walked with the field's ctx as usual.
+			if ctx < ClassSensitive && r.scrubber != nil {
+				var n int
+				key, n = r.scrubber.Scrub(key)
+				acc.Scrubbed += n
+			}
+			// Two distinct keys can scrub to the same token; disambiguate with a
+			// secret-free "#N" suffix so no entry is silently overwritten. Keys
+			// are iterated in sorted order, so the suffix assignment is stable.
+			if _, dup := out[key]; dup {
+				base := key
+				for i := 2; ; i++ {
+					cand := fmt.Sprintf("%s#%d", base, i)
+					if _, taken := out[cand]; !taken {
+						key = cand
+						break
+					}
+				}
+			}
+			out[key] = r.walk(rv.MapIndex(k), ctx, acc)
 		}
 		return out
 	default:
@@ -142,7 +171,37 @@ func (r *redactor) leaf(rv reflect.Value, ctx DataClass, acc *Result) any {
 	if !rv.CanInterface() {
 		return nil
 	}
+	// KEPT (PUBLIC/INTERNAL) string leaf: run the free-form scrubber so a secret
+	// embedded in otherwise-shareable text is redacted. rv.String() handles named
+	// string types (type Host string). Scrubbing never raises ClassMax — a
+	// scrubbed value is a value-less token, still INTERNAL-safe.
+	if rv.Kind() == reflect.String {
+		return r.scrubString(rv.String(), ctx, acc)
+	}
 	return rv.Interface()
+}
+
+// scrubString applies the free-form scrubber to a kept string, accumulating the
+// redaction count. A nil scrubber (legacy construction) is a no-op passthrough.
+func (r *redactor) scrubString(s string, _ DataClass, acc *Result) any {
+	if r.scrubber == nil {
+		return s
+	}
+	out, n := r.scrubber.Scrub(s)
+	acc.Scrubbed += n
+	return out
+}
+
+// bytesOf extracts the byte slice from a reflect.Value of []byte or [N]byte kind.
+func bytesOf(rv reflect.Value) string {
+	if rv.Kind() == reflect.Slice {
+		return string(rv.Bytes())
+	}
+	b := make([]byte, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		b[i] = byte(rv.Index(i).Uint())
+	}
+	return string(b)
 }
 
 func (r *redactor) maskValue(rv reflect.Value) any {
