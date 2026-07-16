@@ -88,6 +88,7 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerObservabilityRoutes(mux) // diagnostics.go    —  2 routes (incl. /healthz)
 	registerGovernanceRoutes(mux)    // ui_governance.go  —  1 route  (C3, admin-only)
 	registerReleaseRoutes(mux)       // release_api.go    —  5 routes (P1.6d-0, no GUI)
+	registerSupportRoutes(mux)       // ui_support.go     —  2 routes (M1 Slice 1)
 
 	return uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux))))
 }

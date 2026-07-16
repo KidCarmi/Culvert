@@ -47,8 +47,10 @@ import (
 //   - 137 — Decryption Profiles added /api/decryption-profiles.
 //   - 138 — Adaptive decryption exclusion added /api/decryption-exclusions
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
+//   - 140 — Supportability M1 Slice 1 added /api/support/bundles (POST create)
+//     + /api/support/bundles/{id} (GET download).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 138
+	const want = 140
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -154,6 +156,7 @@ var helperSourceFiles = []string{
 	"diagnostics.go",
 	"ui_governance.go",
 	"release_api.go",
+	"ui_support.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a

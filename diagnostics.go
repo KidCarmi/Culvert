@@ -29,9 +29,9 @@ import (
 // to the Checks slice. Field names are stable JSON keys so the SPA and
 // downstream tooling can rely on them.
 type OperatorContract struct {
-	Verdict     string                  `json:"verdict"` // "ok" | "warn" | "fail"
-	GeneratedAt string                  `json:"generated_at"`
-	Checks      []OperatorContractCheck `json:"checks"`
+	Verdict     string                  `json:"verdict" redact:"internal"` // "ok" | "warn" | "fail"
+	GeneratedAt string                  `json:"generated_at" redact:"public"`
+	Checks      []OperatorContractCheck `json:"checks" redact:"internal"`
 }
 
 // OperatorContractCheck is one row in the diagnostics report.
@@ -41,10 +41,10 @@ type OperatorContract struct {
 // OperatorAction tells the operator what (if anything) to do — required when
 // Status is "warn" or "fail" so the GUI can render an actionable hint.
 type OperatorContractCheck struct {
-	Code           string `json:"code"`
-	Status         string `json:"status"`
-	Message        string `json:"message"`
-	OperatorAction string `json:"operator_action,omitempty"`
+	Code           string `json:"code" redact:"public"`
+	Status         string `json:"status" redact:"public"`
+	Message        string `json:"message" redact:"internal"`
+	OperatorAction string `json:"operator_action,omitempty" redact:"internal"`
 }
 
 const (

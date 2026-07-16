@@ -47,6 +47,7 @@ func d0WireMux(t *testing.T) *http.ServeMux {
 	registerObservabilityRoutes(mux)
 	registerGovernanceRoutes(mux)
 	registerReleaseRoutes(mux)
+	registerSupportRoutes(mux)
 	return mux
 }
 
@@ -161,7 +162,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 138
+	const want = 140 // +2: /api/support/bundles (POST) + /api/support/bundles/{id} (GET), M1 Slice 1
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
