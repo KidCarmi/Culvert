@@ -202,20 +202,22 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 				// Try IdP registry providers first (OIDC introspection).
 				authed := false
 				for _, prov := range idpRegistry.EnabledProviders() {
-					if id, resolved := prov.ResolveIdentity(u, p); resolved && id != nil {
-						authenticatedIdentity = id.Sub
-						if authenticatedIdentity == "" {
-							authenticatedIdentity = u
-						}
-						authenticatedGroups = id.Groups
-						authenticatedSource = identityAuthSource(id, prov.Name())
-						authed = true
-						break
+					id, resolved := prov.ResolveIdentity(u, p)
+					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
+						continue
 					}
+					authenticatedIdentity = id.Sub
+					authenticatedGroups = id.Groups
+					authenticatedSource = identityAuthSource(id, prov.Name())
+					authed = true
+					break
 				}
-				// Fall back to legacy single provider or local bcrypt.
+				// Fall back to the legacy single provider or local bcrypt. Identity-
+				// capable legacy providers must supply the canonical authorization
+				// subject; the Basic username is never substituted for them.
 				if !authed {
-					if !cfg.VerifyAuth(u, p) {
+					id, resolved := cfg.resolveAuthIdentity(u, p)
+					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
 						atomic.AddInt64(&statAuthFail, 1)
 						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
@@ -223,8 +225,9 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
 						return authOutcome{}, false
 					}
-					authenticatedIdentity = u
-					authenticatedSource = "local"
+					authenticatedIdentity = id.Sub
+					authenticatedGroups = id.Groups
+					authenticatedSource = identityAuthSource(id, "local")
 				}
 			} else {
 				// ── 3. No credentials — resolve the Stage-1 outcome and dispatch.

@@ -176,23 +176,16 @@ func TestCACert_GetPEM(t *testing.T) {
 
 // ─── oidcCacheSetWithExp past token expiry ────────────────────────────────────
 
-func TestOIDCCacheSetWithExp_PastExpiry(t *testing.T) {
+func TestOIDCCacheSetWithExp_PastExpiryFailsClosed(t *testing.T) {
 	a := &OIDCAuth{
 		cache: make(map[string]*oidcCacheEntry),
 		ttl:   1 * time.Hour,
 	}
-	// Past expiry should use ttl instead
 	pastExp := time.Now().Add(-1 * time.Minute).Unix()
-	a.oidcCacheSetWithExp("past-expiry-test", true, pastExp)
-	a.mu.Lock()
-	e := a.cache["past-expiry-test"]
-	a.mu.Unlock()
-	if e == nil {
-		t.Fatal("cache entry should exist")
-	}
-	// Expiry should be roughly 1 hour (ttl), not past
-	if e.expiry.Before(time.Now()) {
-		t.Error("oidcCacheSetWithExp with past tokenExp should use ttl")
+	a.oidcCacheSetIdentityWithExp("past-expiry-test", &Identity{Sub: "test"}, true, &pastExp)
+	id, ok, hit := a.oidcIdentityCacheGet("past-expiry-test")
+	if !hit || ok || id != nil {
+		t.Fatalf("expired positive cache result = (%+v, %v, %v), want cached failure", id, ok, hit)
 	}
 }
 

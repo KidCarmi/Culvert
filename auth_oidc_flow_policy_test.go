@@ -2,16 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
-func newTestOIDCFlowProvider(t *testing.T, body map[string]any, cfg *OIDCProfileConfig) (*httptest.Server, *OIDCFlowProvider) {
+func newRawTestOIDCFlowProvider(t *testing.T, status int, body string, cfg *OIDCProfileConfig) (*httptest.Server, *OIDCFlowProvider) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(body)
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	if cfg == nil {
 		cfg = &OIDCProfileConfig{ClientID: "culvert-client", ClientSecret: "secret"}
@@ -23,6 +27,15 @@ func newTestOIDCFlowProvider(t *testing.T, body map[string]any, cfg *OIDCProfile
 		client:  srv.Client(),
 	}
 	return srv, prov
+}
+
+func newTestOIDCFlowProvider(t *testing.T, body any, cfg *OIDCProfileConfig) (*httptest.Server, *OIDCFlowProvider) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal introspection response: %v", err)
+	}
+	return newRawTestOIDCFlowProvider(t, http.StatusOK, string(raw), cfg)
 }
 
 func TestOIDCFlowIntrospection_RequiredAudience(t *testing.T) {
@@ -100,5 +113,95 @@ func TestOIDCFlowIntrospection_ConfiguredGroupsClaim(t *testing.T) {
 	}
 	if len(id.Groups) != 1 || id.Groups[0] != "admin" {
 		t.Fatalf("groups = %v, want [admin]", id.Groups)
+	}
+}
+
+func TestOIDCFlowIntrospectionRejectsMissingCanonicalIdentity(t *testing.T) {
+	srv, prov := newTestOIDCFlowProvider(t, map[string]any{"active": true}, nil)
+	defer srv.Close()
+	if id, ok := prov.ResolveIdentity("caller-controlled", "access-token"); ok || id != nil {
+		t.Fatalf("ResolveIdentity = (%+v, %v), want fail-closed rejection without token identity", id, ok)
+	}
+}
+
+func TestOIDCFlowIntrospectionRejectsExpiredActiveToken(t *testing.T) {
+	srv, prov := newTestOIDCFlowProvider(t, map[string]any{
+		"active": true,
+		"sub":    "expired-subject",
+		"exp":    time.Now().Add(-time.Minute).Unix(),
+	}, nil)
+	defer srv.Close()
+	if id, ok := prov.ResolveIdentity("caller-controlled", "expired-token"); ok || id != nil {
+		t.Fatalf("ResolveIdentity = (%+v, %v), want rejection of active token past exp", id, ok)
+	}
+}
+
+func TestOIDCFlowIntrospectionRejectsPresentInvalidExpiry(t *testing.T) {
+	for name, exp := range map[string]any{
+		"null":     nil,
+		"string":   "123",
+		"fraction": float64(time.Now().Add(time.Hour).Unix()) + 0.5,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, prov := newTestOIDCFlowProvider(t, map[string]any{
+				"active": true,
+				"sub":    "invalid-exp-subject",
+				"exp":    exp,
+			}, nil)
+			defer srv.Close()
+			if id, ok := prov.ResolveIdentity("caller-controlled", "invalid-exp-token"); ok || id != nil {
+				t.Fatalf("ResolveIdentity = (%+v, %v), want rejection of present exp=%v", id, ok, exp)
+			}
+		})
+	}
+}
+
+func TestOIDCFlowIntrospectionRejectsSubFloatPrecisionExpiry(t *testing.T) {
+	for _, rawExp := range []string{"4102444800.0000001", "4102444800.0000000001"} {
+		t.Run(rawExp, func(t *testing.T) {
+			body := json.RawMessage(`{"active":true,"sub":"fractional-subject","exp":` + rawExp + `}`)
+			srv, prov := newTestOIDCFlowProvider(t, body, nil)
+			defer srv.Close()
+			if id, ok := prov.ResolveIdentity("caller-controlled", "fractional-token"); ok || id != nil {
+				t.Fatalf("ResolveIdentity = (%+v, %v), want rejection of exact fractional exp=%s", id, ok, rawExp)
+			}
+		})
+	}
+}
+
+func TestOIDCFlowIntrospectionRejectsInvalidResponseEnvelope(t *testing.T) {
+	active := `{"active":true,"sub":"envelope-subject"}`
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+	}{
+		"non-200":           {status: http.StatusUnauthorized, body: active},
+		"concatenated-json": {status: http.StatusOK, body: active + `{}`},
+		"trailing-garbage":  {status: http.StatusOK, body: active + `garbage`},
+		"oversized":         {status: http.StatusOK, body: active + strings.Repeat(" ", (64<<10)+1)},
+		"duplicate-active":  {status: http.StatusOK, body: `{"active":false,"active":true,"sub":"duplicate"}`},
+		"duplicate-sub":     {status: http.StatusOK, body: `{"active":true,"sub":"first","sub":"second"}`},
+		"duplicate-nested":  {status: http.StatusOK, body: `{"active":true,"sub":"duplicate","extra":{"claim":1,"claim":2}}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, prov := newRawTestOIDCFlowProvider(t, tc.status, tc.body, nil)
+			defer srv.Close()
+			if id, ok := prov.ResolveIdentity("caller-controlled", "envelope-token"); ok || id != nil {
+				t.Fatalf("ResolveIdentity = (%+v, %v), want response-envelope rejection", id, ok)
+			}
+		})
+	}
+}
+
+func TestOIDCFlowIntrospectionCanonicalIdentityFallback(t *testing.T) {
+	srv, prov := newTestOIDCFlowProvider(t, map[string]any{
+		"active":   true,
+		"sub":      "  ",
+		"username": " token-user ",
+	}, nil)
+	defer srv.Close()
+	id, ok := prov.ResolveIdentity("caller-controlled", "access-token")
+	if !ok || id == nil || id.Sub != " token-user " {
+		t.Fatalf("ResolveIdentity = (%+v, %v), want exact nonblank token username", id, ok)
 	}
 }
