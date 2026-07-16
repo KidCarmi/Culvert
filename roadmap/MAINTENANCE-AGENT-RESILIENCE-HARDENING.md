@@ -166,7 +166,12 @@ audit) instead of a bare mark-only.
      `ops.SweepOpLogs`; running-op logs are too fresh to sweep).
    - **PR-B3b (T2.2b)** — audit.jsonl size-based rotation (deferred: the riskier piece; the
      tail-read already removes the OOM-on-read, so rotation is disk-bound-only and separable).
-   - **PR-B4 (T2.3)** — admission control (read-only-op semaphore + UDS `LimitListener`).
+   - **PR-B4 (T2.3) — ✅ SHIPPED (semaphore half).** Admission control: a bounded semaphore caps
+     concurrently-executing READ-ONLY ops (`DefaultMaxConcurrentReadOnlyOps` = 8) with **429**
+     backpressure at capacity, so a flood can't spawn unbounded root docker subprocesses;
+     state-changing ops bypass it (the maintenance lock already caps them at one). The slot is
+     acquired at admission and released when the op flow finishes (or on any early-return path).
+     UDS `LimitListener` (connection-count bound) is a small follow-up.
 3. **PR-C (Tier 1 infra) — journal package + structural digest.** The `internal/journal` package
    (fail-closed writer, corrupt-record refuse-to-serve) + T1.2 structural digest selection +
    the `image inspect` tag-target runner method. No behavior change beyond digest-selection fix.
