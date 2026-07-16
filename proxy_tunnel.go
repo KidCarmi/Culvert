@@ -308,7 +308,7 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, t
 	if sslAction == SSLInspect && certMgr.Ready() {
 		handleTunnelInspect(w, r, tlsSkipVerify, match, id)
 	} else {
-		handleTunnelBypass(w, r, match, id)
+		handleTunnelBypass(w, r, match, id, "")
 	}
 }
 
@@ -336,7 +336,12 @@ func applyUpstreamProxy() {
 // handleTunnelBypass is the original transparent TCP tunnel (Bypass mode).
 // match/id carry the policy decision and authenticated identity for the
 // close accounting entry.
-func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
+// handleTunnelBypass relays a CONNECT as a raw bypass tunnel (no inspection). It
+// re-runs its own SSRF guard (isPrivateHost + the ssrfControl connect-time gate)
+// so a rescue caller cannot use it to reach an internal host. bypassReason, when
+// non-empty, is written to the TUNNEL_CLOSED feed entry's ActionTaken field
+// (e.g. an ADR-0009 client-cert rescue); "" for an ordinary policy bypass.
+func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity, bypassReason string) {
 	if err := isPrivateHost(r.Host); err != nil {
 		logger.Printf("CONNECT SSRF block %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
@@ -405,8 +410,9 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 	toDest += dOut
 	toClient += cOut
 
-	// Per-connection accounting entry (bytes + lifetime).
-	recordTunnelCloseGated(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass")
+	// Per-connection accounting entry (bytes + lifetime). bypassReason (when set)
+	// tags the feed entry so a rescue is queryable, not just an unattributed bypass.
+	recordTunnelCloseGatedReason(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason)
 }
 
 // upstreamVerifyRoots returns the process-wide root pool used to verify
@@ -575,26 +581,54 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// cert validation for internal/self-signed hosts and is logged as a warning
 	// so it is auditable.
 	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
+	// ADR-0009: structurally detect an origin CertificateRequest (a Go client's
+	// HandshakeContext never surfaces "certificate required" — TLS 1.3 returns nil,
+	// TLS 1.2 a generic handshake_failure — so the error string is not reliable). The
+	// callback is a SIGNAL PRODUCER ONLY: it records that the origin asked for a
+	// client cert and presents NONE; it makes no policy decision and never bypasses.
+	// It is attached ONLY for fail-open rules, so fail-close and feature-off
+	// inspection is byte-identical (the callback never runs).
+	var originRequestedClientCert atomic.Bool
+	failOpen := resolveFailOpen(match)
+	if failOpen {
+		upstreamTLSCfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			originRequestedClientCert.Store(true)
+			return &tls.Certificate{}, nil // never provide or synthesize a client certificate
+		}
+	}
 	upstreamTLS := tls.Client(rawUpstream, upstreamTLSCfg)
-	if err := upstreamTLS.HandshakeContext(r.Context()); err != nil {
+	herr := upstreamTLS.HandshakeContext(r.Context())
+
+	// ADR-0009 client-cert live-rescue (strip path only). The DECISION lives here,
+	// gated by clientCertRescueDecision. It fires ONLY when the origin asked for a
+	// client cert AND the handshake actually FAILED (herr != nil) under a fail-open
+	// rule and it was not a cert-verify failure. A SUCCESSFUL handshake is left to
+	// inspection — that is the required-vs-optional-mTLS distinction: an origin that
+	// merely REQUESTS a client cert (tls.RequestClientCert / VerifyClientCertIfGiven)
+	// completes the handshake and is perfectly inspectable, so it must not be
+	// bypassed. The 200 has not been sent yet, so a failed-handshake rescue can
+	// re-dial as a bypass. recordAutoExclude LEARNS (confirm-count → next-session
+	// self-heal); recordAutoExcludeRescue fires audit+alert+metric independent of
+	// promotion; handleTunnelBypass re-dials through its own isPrivateHost +
+	// ssrfControl guard and tags the feed entry.
+	if clientCertRescueDecision(failOpen, originRequestedClientCert.Load(), herr) {
+		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup before the bypass re-dial
+		recordAutoExclude(match, hostOnly, autoExReasonClientCert, id)
+		recordAutoExcludeRescue(match, hostOnly, autoExReasonClientCert, id)
+		logger.Printf("SSL_AUTOEXCLUDE_RESCUE %q: origin requires a client certificate (handshake failed) — failing open to bypass", sanitizeLog(targetHost))
+		handleTunnelBypass(w, r, match, id, feedReasonClientCertRescue)
+		return
+	}
+
+	if herr != nil {
 		upstreamTLS.Close()              //nolint:errcheck // best-effort cleanup; closes both TLS and underlying TCP conn
 		recordProfileMintlsReject(match) // attribute the drop if a profile set a min-TLS floor
-		// Adaptive fail-open: a fail-open rule learns a qualifying host, and RESCUES
-		// this session as a transparent bypass ONLY for the narrow client-cert-
-		// required signal (maybeFailOpenOrigin returns true just for that reason;
-		// unsupported-params learns but returns false → keeps today's 502 and
-		// self-heals next session). We have not written to w yet, so
-		// handleTunnelBypass re-dials (its own inline isPrivateHost + ssrfControl
-		// guard) and relays. A cert-verify/other failure never learns or rescues.
-		if maybeFailOpenOrigin(hostOnly, match, id, err) {
-			// F1: the rescue ACT is now first-class observability (audit + alert +
-			// metric), not just a log line. rescue=true ⟺ client_cert_required
-			// (classifier invariant, TestClassifyOriginInspectFailure_TightenedTriggers).
-			recordAutoExcludeRescue(match, hostOnly, autoExReasonClientCert, id)
-			handleTunnelBypass(w, r, match, id)
-			return
-		}
-		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), err, mintlsHint(match))
+		// Non-client-cert learn paths: unsupported-params LEARNS (learn-only — the
+		// next session self-heals) and returns false; cert-verify and generic/origin-
+		// emitted alerts never learn. No rescue here (client-cert is handled above,
+		// structurally, before this branch).
+		maybeFailOpenOrigin(hostOnly, match, id, herr)
+		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), herr, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
