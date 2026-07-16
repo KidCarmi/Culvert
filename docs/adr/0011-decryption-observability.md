@@ -50,12 +50,29 @@ computed on the decision path** — `resolveSSLAction`'s decision, the matched `
 the resolved decryption profile (id/name), the completed handshake's `tls.ConnectionState`, and the
 autoexclude classifier's reason — so it adds no new probing.
 
-Its **serialization is the `Entry` `dec_*` block** (mirrors `auth_*`): additive, all `omitempty`,
-categorical/bounded, identity-safe. Because `Entry` is the shared wire type, adding the block flows
-automatically to the ring, JSONL, SSE feed, store, and SIEM — **one schema, all surfaces.**
+Its **serialization is a nested, optional `dec` object on `Entry`** — `Dec *DecryptionBlock
+json:"dec,omitempty"`. This deliberately diverges from the *flat* `auth_*` precedent for one reason: the
+decryption block carries **booleans whose `false` is meaningful** (`cache_consulted`, `cache_hit`,
+`rescued`, …). A flat `omitempty` bool cannot serialize an explicit `false`, so SIEM/API consumers could
+not distinguish "cache not consulted" from "field absent / old record / path forgot to populate it" — and
+it would contradict the §8 test that asserts `dec.cache_consulted == false` is observable on a fail-close
+session. The nested-pointer shape resolves both concerns:
 
-Fields (record shape; JSON tags shown; all `omitempty` and gated on a decryption decision having
-occurred, so a non-CONNECT / no-decision request stays byte-identical on the wire):
+- **Block-level `omitempty`** — when no decryption decision occurred (plain non-CONNECT, feature-off), the
+  whole `dec` key is **absent**, so the wire stays byte-identical (the perf budget in §4).
+- **Field-level: booleans and required enums are NOT `omitempty`** — once the block is present, every
+  boolean serializes its explicit `true`/`false` and every required enum serializes its value (including
+  `none`), so negative outcomes are queryable. Only genuinely-optional strings inside the block (`sni`,
+  `cipher`, `cert_fingerprint`) keep `omitempty`.
+
+Because `Entry` is still the single shared wire type, the block flows automatically to the ring, JSONL, SSE
+feed, store, and SIEM — **one schema, all surfaces.**
+
+Fields (inner shape of the `dec` object). The `dec_*` identifiers in the JSON column below name the
+fields for readability; the **actual JSON keys are relative to the block** (e.g. `dec.outcome`,
+`dec.cache_consulted`). Serialization rule per the shape above: **booleans and required enums are
+non-`omitempty`** (explicit `false`/`none` always present when the block is); **optional strings**
+(`sni`, `cipher`, `cert_fingerprint`, `host` when redacted) keep `omitempty`.
 
 | Field | JSON | Type | Notes |
 |---|---|---|---|
@@ -134,7 +151,13 @@ drift-guard discipline as `allReasons` / `uiRoutes`). Adding a value is a delibe
 - **API** — a read-only `GET /api/decryption/health` (viewer) returning the aggregate counters + top-N
   (failure reasons, excluded hosts, profiles-by-bypass) computed server-side, plus the existing
   `/api/decryption-exclusions` (list + Stats + blast radius). Session drill-down reuses the existing
-  request-feed API filtered by the `dec_*` fields.
+  request-feed API — **but that requires extending it**: `buildLogFilterPredicate` (`ui_config.go:258`)
+  today reads only `filter`/`status`/`level`/`method`/`identity`, so the implementation MUST add
+  structured `dec.*` filter params (at least `dec_outcome`, `dec_decision_source`, `dec_fail_category`,
+  `dec_profile_id`) to `buildLogFilterPredicate` **and** the history-store query path (the predicate is
+  shared by the in-memory ring and the store, so both stay consistent). Without this, drill-down links
+  would be silently ignored and return unfiltered sessions — so this extension is an explicit
+  deliverable of Phase 3, not an assumed capability.
 - **GUI** — one new **Decryption Health** SPA panel (§3), reusing existing components; drill-down links
   into the existing request-feed view with a `dec_outcome`/`dec_fail_category` filter.
 - **SIEM export** — automatic: the `dec_*` block ships in the JSONL + syslog `Entry`, already wired.
@@ -170,9 +193,10 @@ question — **no decorative charts**:
 7. **Affected rules & profile blast radius** — reuse the existing where-used/`objectReferences` behavior to
    show, for a selected profile, exactly which rules would be affected. *Question: if I evict/retighten,
    what does it touch?*
-8. **Drill-down** — every row links to the request-feed filtered on the matching `dec_*` fields (the
+8. **Drill-down** — every row links to the request-feed filtered on the matching `dec.*` fields (the
    structured session records), so an operator goes dashboard → reason → sessions in two clicks (PAN's
-   ACC → Decryption Log → drill-down loop).
+   ACC → Decryption Log → drill-down loop). This depends on the request-log API gaining `dec.*` filter
+   params (see §2.3) — a Phase-3 deliverable, without which the links would return unfiltered results.
 
 RBAC: viewer reads the dashboard/API; operator evicts (existing `/api/decryption-exclusions` DELETE);
 admin only for any future tunables (ADR-0010). All via `requireRole` + `uiRoutes` metadata (C2).
@@ -187,8 +211,9 @@ admin only for any future tunables (ADR-0010). All via `requireRole` + `uiRoutes
   path beyond the atomic reads already present (F9a). Serialization to JSON happens at the close/log point,
   off the latency-critical decision, on the same path that already builds the `TUNNEL_CLOSED` entry.
 - **Allocation budget / feature-off parity** — when a request makes no decryption decision (plain non-CONNECT,
-  or feature-off), the block is unset and `omitempty` keeps the wire **byte-identical**; benchgate pins
-  zero added allocs on that path.
+  or feature-off), the `Dec` pointer stays `nil` and the block-level `omitempty` drops the whole `dec` key,
+  keeping the wire **byte-identical** (no `dec.*` fields, including no explicit-`false` booleans, appear);
+  benchgate pins zero added allocs on that path.
 - **Event-buffer bounds** — **no new buffer.** Reuse the existing bounded `reqlog` ring (cap ~20k, decays)
   and JSONL rotation. The dashboard aggregates are computed from Prometheus counters + the exclusions
   Stats, not from an unbounded event log.
@@ -278,7 +303,8 @@ behavior does not change until this ADR and design are reviewed and a subsequent
 - **Client pinning** — `FailCategory=client_pinned`, identity-gating (ADR-0008) reflected in
   `dec_cache_learned`.
 - **Unsupported parameters** — `FailCategory=version|cipher` as classified; learn-only (no rescue).
-- **Fail-open and fail-close** — fail-close ⇒ `dec_cache_consulted=false` and no exclusion fields;
+- **Fail-open and fail-close** — fail-close ⇒ `dec.cache_consulted == false` **explicitly serialized**
+  (proving the non-`omitempty` boolean shape from §2.1) and no exclusion fields;
   byte-identical wire when feature-off.
 - **Cross-profile isolation** — a host learned under profile A yields `dec_cache_hit=false` for a profile-B
   session (mirrors `TestResolveSSLAction_CrossScopeContamination`).
@@ -303,7 +329,8 @@ additive telemetry.
    byte-identical.)*
 2. **Phase 2 — Metrics & API.** `culvert_decrypt_sessions_total` + `_failures_total` (+ `{scope}` on
    hit/active, closing F6), the read-only `GET /api/decryption/health` aggregate, cardinality test.
-3. **Phase 3 — GUI dashboard.** The Decryption Health SPA panel + drill-down into the filtered request feed;
+3. **Phase 3 — GUI dashboard.** The Decryption Health SPA panel + **the `dec.*` filter extension to
+   `buildLogFilterPredicate` + `apiLogs` + the history-store query path** (required for drill-down, §2.3) +
    GUI/API schema-parity test.
 4. **Phase 4 — Alerting.** Fold the coverage-erosion + failure-spike signals into the existing alert events
    (reuse `_surge`; add a coverage-drop alert), each fired once per threshold crossing.
