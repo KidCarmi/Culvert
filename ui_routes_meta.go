@@ -613,6 +613,9 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 				Note: "create a redacted csb/1 support bundle over the registered collectors; admin (a standard bundle may contain INTERNAL sections)"}}},
 	{Path: "/api/support/bundles/{id}", Handler: "apiSupportBundleItem", Domain: "support", Public: false,
-		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleOperator,
-			Note: "download a created bundle by id; operator+ (bundle may contain INTERNAL sections)"}}},
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleOperator, AuditExpected: true,
+				Note: "download a created bundle by id; operator+ (bundle may contain INTERNAL sections); audited as support.bundle.download (the exfil event)"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+				Note: "delete a persisted bundle by id; operator+; in-product reclaim path; audited as support.bundle.delete"}}},
 }

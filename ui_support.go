@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,10 +14,25 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/support"
 )
+
+// Support-bundle disk-safety bounds (roadmap cross-milestone invariant #4: every
+// new persisted state under <dataDir>/support carries preflight + retention). The
+// full crash-safe lifecycle FSM + age-based janitor is M4; these are the minimal
+// M1 bounds so a bundle build can never fill the /data volume nor accumulate
+// without limit.
+const (
+	supportMinFreeBytes  = 256 << 20 // refuse a new bundle build below this free headroom
+	supportRetentionKeep = 10        // keep the newest N persisted bundles, evict oldest-first
+)
+
+// errSupportLowDisk is the fail-closed preflight sentinel: the POST handler maps
+// it to 507 Insufficient Storage so the operator sees a clear, distinct cause.
+var errSupportLowDisk = errors.New("insufficient disk headroom for support bundle")
 
 // Support-bundle admin API (M1 Slice 1). Two routes, registered with plain paths
 // and method-dispatched in-handler (repo convention):
@@ -108,6 +124,11 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := createSupportBundle(r.Context())
 		if err != nil {
+			if errors.Is(err, errSupportLowDisk) {
+				logger.Printf("support: bundle build refused — insufficient disk headroom")
+				http.Error(w, "insufficient disk headroom for bundle", http.StatusInsufficientStorage)
+				return
+			}
 			logger.Printf("support: bundle build failed: %v", err)
 			http.Error(w, "bundle build failed", http.StatusInternalServerError)
 			return
@@ -155,30 +176,54 @@ func listSupportBundles() []supportBundleSummary {
 	return out
 }
 
-// apiSupportBundleItem downloads a created bundle by id (operator+).
+// apiSupportBundleItem downloads (GET, operator+) or deletes (DELETE, operator+)
+// a created bundle by id. Download is the exfil event for a bundle that may carry
+// INTERNAL sections, so it is audited like create is; DELETE is the in-product
+// reclaim path (no host FS access required).
 func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !requireRole(w, r, RoleOperator) {
-		return
-	}
 	id := r.PathValue("id")
 	if !supportBundleIDRe.MatchString(id) {
 		http.Error(w, "invalid bundle id", http.StatusBadRequest)
 		return
 	}
-	f, err := os.Open(filepath.Join(supportBundlesDir(), id, "bundle.csb.tgz"))
-	if err != nil {
-		http.Error(w, "bundle not found", http.StatusNotFound)
-		return
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		f, err := os.Open(filepath.Join(supportBundlesDir(), id, "bundle.csb.tgz"))
+		if err != nil {
+			http.Error(w, "bundle not found", http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		// Audit at grant time (access authorized), before streaming: the download
+		// is the actual exfiltration event, so it must leave a trace even if the
+		// copy is interrupted mid-stream.
+		auditEvent(r, "support.bundle.download", id, support.BundleFormat)
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", id+".csb.tgz"))
+		_, _ = io.Copy(w, f)
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		dir := filepath.Join(supportBundlesDir(), id)
+		if _, err := os.Stat(dir); err != nil {
+			http.Error(w, "bundle not found", http.StatusNotFound)
+			return
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			logger.Printf("support: bundle delete failed: %v", err)
+			http.Error(w, "bundle delete failed", http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "support.bundle.delete", id, "")
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.Header().Set("Allow", "GET, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", id+".csb.tgz"))
-	_, _ = io.Copy(w, f)
 }
 
 // buildSupportBundle runs the engine over the registered collectors at the given
@@ -203,8 +248,16 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel) (*support
 }
 
 // createSupportBundle builds a standard (L1) bundle and persists it under
-// <dataDir>/support/bundles/<id>/.
-func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
+// <dataDir>/support/bundles/<id>/. It is fail-closed on low disk (preflight),
+// crash-safe on the error path (a failed persist never strands a partial dir),
+// and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
+func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr error) {
+	// Disk-headroom preflight: never begin a build that could fill /data. A
+	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
+	// the write itself still errors and cleans up), a low reading is fail-closed.
+	if _, free, _, err := diskUsage(dataDir); err == nil && free < supportMinFreeBytes {
+		return nil, errSupportLowDisk
+	}
 	res, err := buildSupportBundle(ctx, support.L1)
 	if err != nil {
 		return nil, err
@@ -213,6 +266,14 @@ func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir bundle dir: %w", err)
 	}
+	// Any failure past this point must not strand a partial bundle dir (SPEC §6
+	// P5 no-partial-write): a manifest-less dir is invisible to listSupportBundles
+	// yet still occupies disk, so remove the whole dir on any error return.
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	if err := os.WriteFile(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {
 		return nil, fmt.Errorf("write bundle: %w", err)
 	}
@@ -220,10 +281,46 @@ func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal manifest: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), manifestJSON, 0o600); err != nil {
+	// manifest.json is the list/commit marker (listSupportBundles keys on it), so
+	// write it atomically via tmp+rename — a torn write can never present a
+	// half-manifest as a listable bundle.
+	tmp := filepath.Join(dir, "manifest.json.tmp")
+	if err := os.WriteFile(tmp, manifestJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("write manifest: %w", err)
 	}
+	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
+		return nil, fmt.Errorf("commit manifest: %w", err)
+	}
+	pruneSupportBundles(supportRetentionKeep)
 	return res, nil
+}
+
+// pruneSupportBundles enforces an oldest-first retention cap so persisted bundles
+// cannot grow without bound. The full age-based, crash-safe lifecycle janitor is
+// M4; this is the minimal M1 disk-safety bound. Each eviction is audited as
+// support.bundle.expire (system actor). Best-effort: an eviction failure is
+// logged and skipped, never fatal to the build that triggered it.
+func pruneSupportBundles(keep int) {
+	if keep < 1 {
+		return
+	}
+	sums := listSupportBundles() // newest-first
+	if len(sums) <= keep {
+		return
+	}
+	for _, s := range sums[keep:] {
+		// Defense-in-depth: BundleID here comes from manifest content, so re-guard
+		// against the path-traversal shape before any os.RemoveAll.
+		if !supportBundleIDRe.MatchString(s.BundleID) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
+			logger.Printf("support: retention evict failed for %q: %v",
+				strings.ReplaceAll(s.BundleID, "\n", ""), err)
+			continue
+		}
+		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+	}
 }
 
 // runSupportBundleCommand is the `culvert --support-bundle <path>` recovery

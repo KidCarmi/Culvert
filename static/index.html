@@ -580,7 +580,7 @@ tr.dragging  { opacity: .4; }
       <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Diagnostics
     </div>
     <div class="nav-item" data-view="support" role="button" tabindex="0">
-      <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Support
+      <svg class="ico" aria-hidden="true"><use href="#i-package"/></svg> Support
     </div>
     <div class="nav-item" data-view="settings" data-min-role="admin" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg> Settings
@@ -3992,12 +3992,12 @@ Firefox (all platforms):
 
           <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
-            <div id="support-status"><p class="hint">Loading…</p></div>
+            <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
           <div>
             <div style="font-weight:600;margin-bottom:6px">Bundles</div>
-            <div id="support-bundles"><p class="hint">Loading…</p></div>
+            <div id="support-bundles" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
         </div>
       </div>
@@ -4371,6 +4371,7 @@ document.addEventListener('click', e => {
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
+    case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -11695,19 +11696,20 @@ const _supportLevelName = ['L0', 'L1', 'L2', 'L3', 'L4'];
 async function loadSupport() {
   const statusEl = document.getElementById('support-status');
   const bundlesEl = document.getElementById('support-bundles');
-  if (statusEl) statusEl.innerHTML = '<p class="hint">Loading…</p>';
-  if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Loading…</p>';
-  try {
-    renderSupportStatus(await api('/api/support/status'));
-  } catch (err) {
-    if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(err.message) + '</p>';
-  }
-  try {
-    _supportBundles = (await api('/api/support/bundles')) || [];
-    renderSupportBundles(_supportBundles);
-  } catch (err) {
-    if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(err.message) + '</p>';
-  }
+  if (statusEl) { statusEl.innerHTML = '<p class="hint">Loading…</p>'; statusEl.setAttribute('aria-busy', 'true'); }
+  if (bundlesEl) { bundlesEl.innerHTML = '<p class="hint">Loading…</p>'; bundlesEl.setAttribute('aria-busy', 'true'); }
+  // Status and bundles are independent reads — fetch concurrently, render each as
+  // it resolves, and surface per-panel errors without letting one fail the other.
+  const [statusR, bundlesR] = await Promise.allSettled([
+    api('/api/support/status'),
+    api('/api/support/bundles'),
+  ]);
+  if (statusR.status === 'fulfilled') renderSupportStatus(statusR.value);
+  else if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(statusR.reason.message) + '</p>';
+  if (bundlesR.status === 'fulfilled') { _supportBundles = bundlesR.value || []; renderSupportBundles(_supportBundles); }
+  else if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(bundlesR.reason.message) + '</p>';
+  if (statusEl) statusEl.removeAttribute('aria-busy');
+  if (bundlesEl) bundlesEl.removeAttribute('aria-busy');
 }
 
 function renderSupportStatus(s) {
@@ -11737,33 +11739,40 @@ function renderSupportBundles(list) {
     el.innerHTML = '<p class="hint">No bundles yet' + (uiRole === 'admin' ? ' — click “Create bundle” to collect one.' : '.') + '</p>';
     return;
   }
-  // Download requires operator+. data-min-role only re-applies at login, so gate
-  // dynamically-rendered links imperatively (server enforces regardless).
-  const canDownload = (uiRole === 'operator' || uiRole === 'admin');
+  // Download + Delete require operator+. data-min-role only re-applies at login,
+  // so gate dynamically-rendered controls imperatively (server enforces regardless).
+  const canWrite = (uiRole === 'operator' || uiRole === 'admin');
   el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Bundle</th><th>Created</th><th>Sections</th><th>Size</th><th></th></tr></thead><tbody>' +
+    '<th>Bundle</th><th>Created</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
     list.map(b => {
       const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
         (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
       const href = '/api/support/bundles/' + encodeURIComponent(String(b.bundle_id));
-      const dl = canDownload
-        ? '<a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>'
-        : '';
+      const actions = canWrite
+        ? '<a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a> ' +
+          '<button class="btn ghost sm" data-click="supportDeleteBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Delete</button>'
+        : '<span class="hint" title="Operator role required to download or delete">operator+</span>';
       return '<tr>' +
         '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
-        '<td>' + escHtml(String(b.created_at)) + '</td>' +
+        '<td title="' + escHtml(String(b.created_at)) + '">' + escHtml(fmtProvTime(b.created_at)) + '</td>' +
         '<td>' + sections + '</td>' +
         '<td>' + escHtml(fmtBytes(b.size_bytes)) + '</td>' +
-        '<td>' + dl + '</td>' +
+        '<td>' + actions + '</td>' +
       '</tr>';
     }).join('') + '</tbody></table></div>';
 }
 
 async function supportCreateBundle() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const ok = await confirmAction(
+    'Create support bundle?',
+    'A redacted diagnostic bundle (config, policy, health, logs, audit — internal, non-secret) will be collected and written to disk.',
+    'Create bundle',
+    { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
+  if (!ok) return;
   const btn = document.querySelector('[data-click="supportCreateBundle"]');
   const prev = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Collecting…'; }
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
     const man = await api('/api/support/bundles', { method: 'POST' });
     toast('Bundle created: ' + String((man && man.bundle_id) || ''), 'success');
@@ -11771,7 +11780,24 @@ async function supportCreateBundle() {
   } catch (err) {
     toast('Bundle create failed: ' + err.message, 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = prev; }
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+async function supportDeleteBundle(id) {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  if (!id) return;
+  const ok = await confirmAction(
+    'Delete support bundle?',
+    'Bundle ' + String(id) + ' will be permanently removed from disk.',
+    'Delete');
+  if (!ok) return;
+  try {
+    await api('/api/support/bundles/' + encodeURIComponent(String(id)), { method: 'DELETE' });
+    toast('Bundle deleted', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Bundle delete failed: ' + err.message, 'error');
   }
 }
 
