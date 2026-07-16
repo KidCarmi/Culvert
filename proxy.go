@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
 // defaultPolicyAction controls what happens when no PBAC rule matches a request.
@@ -680,21 +682,36 @@ func failOpenScopeForRule(rule *PolicyRule) (scope string, ok bool) {
 // the proxy is already stressed.
 var geoTrackSem = make(chan struct{}, 256)
 
+// geoTrackEnabled is the GeoIP-enabled probe consulted before spawning a
+// tracker goroutine. A var (not a direct call) so tests can force the enabled
+// path without loading a .mmdb; production never reassigns it.
+var geoTrackEnabled = geoip.Enabled
+
 // trackDestinationCountry records the destination country for the live
-// dashboard. Runs in its own goroutine (fire-and-forget); extracted from
-// handleRequest (DEBT-002). Dashboard stats are best-effort: when the tracker
-// pool is saturated the sample is dropped rather than queued.
+// dashboard. Fire-and-forget: the caller invokes it synchronously (it never
+// blocks) and it spawns the lookup goroutine itself — the lookup can sit in
+// DNS resolution, so it must stay off the request goroutine. Both cheap gates
+// run BEFORE the spawn: with GeoIP disabled (no .mmdb loaded) every allowed
+// request previously paid a goroutine spawn just to discover there is no
+// database, and with the tracker pool saturated the spawn happened only to
+// drop the sample inside the new goroutine. Dashboard stats are best-effort:
+// when the pool is saturated the sample is dropped rather than queued.
 func trackDestinationCountry(host string) {
+	if !geoTrackEnabled() {
+		return
+	}
 	select {
 	case geoTrackSem <- struct{}{}:
 	default:
 		return
 	}
-	defer func() { <-geoTrackSem }()
-	code, name := geo.LookupFull(host)
-	if code != "" {
-		countryTraffic.Record(code, name)
-	}
+	go func() {
+		defer func() { <-geoTrackSem }()
+		code, name := geo.LookupFull(host)
+		if code != "" {
+			countryTraffic.Record(code, name)
+		}
+	}()
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -786,7 +803,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// ── Geo-IP tracking (async) ──────────────────────────────────────────────
 	// Record destination country for the live dashboard without blocking.
-	go trackDestinationCountry(host)
+	// Synchronous call — trackDestinationCountry never blocks; it gates
+	// (GeoIP enabled, tracker slot free) before spawning its own goroutine.
+	trackDestinationCountry(host)
 
 	sslAction, tlsSkipVerify := resolveSSLAction(match, host, clientIP)
 

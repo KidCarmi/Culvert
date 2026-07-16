@@ -186,6 +186,60 @@ func TestBenchGate_AuthCapabilityProbeAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_GeoTrackGateAllocs locks in the pre-spawn gating contract on
+// the destination-country tracker. trackDestinationCountry runs once per
+// ALLOWED request from handleRequest; before the gate reorder it spawned a
+// goroutine unconditionally (GeoIP disabled or tracker pool saturated — the
+// no-op discovery happened INSIDE the new goroutine, ~1 goroutine per request
+// of pure scheduler/GC pressure on disabled deployments). Both no-op paths
+// are now synchronous early returns and must stay allocation-free: any
+// reintroduction of an unconditional spawn (a closure/spawn allocates) fails
+// this gate.
+func TestBenchGate_GeoTrackGateAllocs(t *testing.T) {
+	const maxAllocs int64 = 0
+
+	// Disabled path: the real probe (no .mmdb loaded in tests) short-circuits
+	// before the semaphore.
+	resDisabled := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			trackDestinationCountry("benchgate-geotrack.example.invalid")
+		}
+	})
+	if allocs := resDisabled.AllocsPerOp(); allocs > maxAllocs {
+		t.Errorf("REGRESSION: trackDestinationCountry (GeoIP disabled) allocates %d/op, exceeds bound %d — "+
+			"per-request goroutine spawn has returned to the allowed-request hot path", allocs, maxAllocs)
+	}
+	t.Logf("trackDestinationCountry disabled: %d allocs/op (bound %d), %d ns/op",
+		resDisabled.AllocsPerOp(), maxAllocs, resDisabled.NsPerOp())
+
+	// Saturated path: force the enabled gate open and fill the tracker pool so
+	// the drop happens at the semaphore select — still before any spawn.
+	oldProbe := geoTrackEnabled
+	geoTrackEnabled = func() bool { return true }
+	defer func() { geoTrackEnabled = oldProbe }()
+	for i := 0; i < cap(geoTrackSem); i++ {
+		geoTrackSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(geoTrackSem); i++ {
+			<-geoTrackSem
+		}
+	}()
+	resSaturated := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			trackDestinationCountry("benchgate-geotrack.example.invalid")
+		}
+	})
+	if allocs := resSaturated.AllocsPerOp(); allocs > maxAllocs {
+		t.Errorf("REGRESSION: trackDestinationCountry (pool saturated) allocates %d/op, exceeds bound %d — "+
+			"the saturation drop has moved back inside a spawned goroutine", allocs, maxAllocs)
+	}
+	t.Logf("trackDestinationCountry saturated: %d allocs/op (bound %d), %d ns/op",
+		resSaturated.AllocsPerOp(), maxAllocs, resSaturated.NsPerOp())
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13
