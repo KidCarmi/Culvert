@@ -33,6 +33,17 @@ reconfigured at runtime without racing the lockless proxy hot path. **This ADR's
 on that seam and MUST NOT be merged before #740** — otherwise the runtime `Reconfigure` would either not
 compile against the plain var or reintroduce the exact race F9a removes.
 
+> **Erratum (accepted, 2026-07 — implementation).** The paragraph above overstates the
+> dependency. F9a's `atomic.Pointer` is **not** required to make in-place `Reconfigure`
+> race-free: `Reconfigure` mutates the five fields under the cache's own `sync.Mutex`, and
+> every hot-path reader (`Contains`/`Observe`/`Remove`) takes that same lock, so the mutex
+> alone provides the correctness. F9a's atomic pointer is only needed for the *pointer swap*
+> path (`setAutoExclude(New(cfg))`) — a wholesale replacement — not for the in-place apply
+> that Option A actually ships. F9a and Option A are therefore **orthogonal**: F9a landed
+> first for its own reasons (PR #740) and the F10 series builds on the tree that includes it,
+> but the Option-A apply path would be race-free on the plain-var tree too. History is left
+> intact above; this note is the correction of record. (Raised by the F10 readiness review.)
+
 ## Decision (proposed)
 
 Expose the five parameters as a **single, global, runtime-editable tunable set** — **Option A** — surfaced
@@ -128,7 +139,8 @@ A partial `PUT` (only some fields) merges onto the current set; an omitted field
    only future promotions see the new confirmN/window.
 4. **Persistence round-trips.** A `PUT` survives restart via `admin_settings.json`; the value is OFF
    export/import and OFF rollback (pinned by the `config_surfaces_test.go` parity suite).
-5. **Race-free apply.** Reconfigure under concurrent hot-path reads is race-free (rides F9a; `-race`).
+5. **Race-free apply.** Reconfigure under concurrent hot-path reads is race-free via the cache's own
+   `sync.Mutex` (see Erratum above — the mutex, not F9a's atomic pointer, provides this); verified `-race`.
 6. **RBAC + audit.** Read = viewer, write = admin; every write emits an `auditEvent`. NO
    `saveConfigVersion` (consistent with the off-rollback placement — a snapshot rollback can't restore is
    misleading); the `config_surfaces_test.go` parity suite pins the tunables OFF the rollback surface.
