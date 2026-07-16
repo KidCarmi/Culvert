@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -117,6 +118,12 @@ type Options struct {
 	StateDir  string // for /v1/operations/{id}/logs
 	AuditPath string // for GET /v1/audit
 
+	// OpDrainTimeout bounds how long Serve waits, on shutdown, for in-flight
+	// orchestrator goroutines (state-changing ops) to finish before returning —
+	// so an interrupted restore/upgrade is not abandoned with the stack down.
+	// Zero ⇒ DefaultOpDrainTimeout. Tests set a short value.
+	OpDrainTimeout time.Duration
+
 	// Runner is the command runner used by D1.6b handlers. May be
 	// nil only in unit tests that exercise non-D1.6b paths; the
 	// production constructor in main wires a real *runner.Runner.
@@ -127,10 +134,21 @@ type Options struct {
 	HealthProbeFactory func() health.Probe
 }
 
+// DefaultOpDrainTimeout is the shutdown drain window for in-flight orchestrator
+// goroutines when Options.OpDrainTimeout is unset. Chosen to fit comfortably
+// inside a typical systemd TimeoutStopSec (90s) so the drain completes before
+// SIGKILL; an op that exceeds it is left for journal-based recovery on restart.
+const DefaultOpDrainTimeout = 30 * time.Second
+
 // Server is the agent's HTTP server. Construct with New, run with
 // Serve.
 type Server struct {
 	opts Options
+
+	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
+	// (T2.4) instead of abandoning a state-changing op mid-flight.
+	opWG           sync.WaitGroup
+	opDrainTimeout time.Duration
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -161,7 +179,41 @@ func New(opts Options) (*Server, error) {
 	if opts.AuditPath == "" {
 		return nil, errors.New("server: AuditPath required")
 	}
-	return &Server{opts: opts}, nil
+	drain := opts.OpDrainTimeout
+	if drain <= 0 {
+		drain = DefaultOpDrainTimeout
+	}
+	return &Server{opts: opts, opDrainTimeout: drain}, nil
+}
+
+// goOp launches an orchestrator goroutine tracked by opWG, so shutdown can
+// drain it. All async op flows MUST spawn through this rather than a bare `go`,
+// or drainOps cannot see them. run is the flow body (typically ops.Run under an
+// OperationTimeout context).
+func (s *Server) goOp(run func()) {
+	s.opWG.Add(1)
+	go func() {
+		defer s.opWG.Done()
+		run()
+	}()
+}
+
+// drainOps waits for tracked orchestrator goroutines to finish, bounded by
+// opDrainTimeout. Returns true if all drained, false if the deadline elapsed
+// with ops still running (they are left for journal-based recovery on the next
+// start). Instant when nothing is in flight.
+func (s *Server) drainOps() bool {
+	done := make(chan struct{})
+	go func() {
+		s.opWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(s.opDrainTimeout):
+		return false
+	}
 }
 
 // listen creates the UDS listener with mode 0660. Removes a stale
@@ -240,6 +292,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	}()
 
 	err = httpSrv.Serve(ln)
+	// HTTP has stopped accepting (graceful shutdown or listener error), so no new
+	// ops can be admitted. Drain in-flight orchestrator goroutines within the
+	// bound before returning — this blocks main's exit, so a state-changing op is
+	// given a chance to finish (or reach a safe point) instead of vanishing with
+	// the stack half-mutated. Instant when nothing is in flight.
+	if !s.drainOps() {
+		log.Printf("culvert-maint: shutdown drain deadline (%s) elapsed with ops still running; leaving for restart recovery", s.opDrainTimeout)
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

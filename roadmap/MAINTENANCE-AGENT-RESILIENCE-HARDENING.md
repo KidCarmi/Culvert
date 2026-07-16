@@ -155,7 +155,11 @@ audit) instead of a bare mark-only.
    - **PR-B (T2.1) — ✅ SHIPPED.** Bound `Manager.active`: opportunistic reap of terminal ops on
      admission (retention TTL + hard-cap oldest-first eviction; running ops never reaped) +
      deep-copy nested `Params`/`Result` in `cloneLocked`.
-   - **PR-B2 (T2.4)** — SIGTERM drain (WaitGroup + shutdown-linked ctx).
+   - **PR-B2 (T2.4) — ✅ SHIPPED.** SIGTERM drain: orchestrator goroutines are tracked via a
+     `sync.WaitGroup` (`Server.goOp`); on shutdown `Serve` waits for them within a bounded
+     `OpDrainTimeout` (default 30s) before returning, so an in-flight state-changing op is drained
+     (or reaches a safe point) rather than abandoned with the stack half-mutated. State-changing
+     ops are NOT cancelled mid-flight (that is the corruption risk) — the drain waits.
    - **PR-B3 (T2.2)** — `LogRetentionDays` enforcement + audit rotation + tail-bound `audit.Recent`.
    - **PR-B4 (T2.3)** — admission control (read-only-op semaphore + UDS `LimitListener`).
 3. **PR-C (Tier 1 infra) — journal package + structural digest.** The `internal/journal` package
