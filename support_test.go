@@ -60,10 +60,18 @@ func TestSupportBundle_MandatorySectionsPresent(t *testing.T) {
 	for _, s := range res.Manifest.Sections {
 		ids[s.ID] = s
 	}
-	for _, want := range []string{"product", "diagnostics"} {
+	for _, want := range []string{"product", "health", "readiness", "diagnostics"} {
 		if _, ok := ids[want]; !ok {
 			t.Fatalf("manifest missing mandatory section %q", want)
 		}
+	}
+	// readiness is declared PUBLIC; health is INTERNAL. Confirm the engine
+	// records the actual post-redaction class per section.
+	if c := ids["readiness"].ClassMax; c != "PUBLIC" {
+		t.Fatalf("readiness class_max=%q want PUBLIC", c)
+	}
+	if c := ids["health"].ClassMax; c != "INTERNAL" {
+		t.Fatalf("health class_max=%q want INTERNAL", c)
 	}
 	files := extractTarGz(t, res.TarGz)
 	if _, ok := files[support.ManifestName]; !ok {

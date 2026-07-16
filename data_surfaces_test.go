@@ -18,6 +18,9 @@ var collectedStructs = []any{
 	productSection{},
 	OperatorContract{},
 	OperatorContractCheck{},
+	healthReport{},
+	readinessReport{},
+	readinessCheck{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

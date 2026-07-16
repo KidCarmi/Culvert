@@ -23,8 +23,55 @@ import (
 //	POST /api/support/bundles       — create a redacted csb/1 bundle (admin)
 //	GET  /api/support/bundles/{id}   — download a created bundle (operator)
 func registerSupportRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/support/status", apiSupportStatus)
 	mux.HandleFunc("/api/support/bundles", apiSupportBundles)
 	mux.HandleFunc("/api/support/bundles/{id}", apiSupportBundleItem)
+}
+
+// supportCollectorInfo is the read-only view of one registered collector.
+type supportCollectorInfo struct {
+	ID            string `json:"id"`
+	Path          string `json:"path"`
+	Owner         string `json:"owner"`
+	Mandatory     bool   `json:"mandatory"`
+	MinLevel      int    `json:"min_level"`
+	MaxClass      string `json:"max_class"`
+	SchemaVersion int    `json:"schema_version"`
+}
+
+type supportStatus struct {
+	BundleFormat          string                 `json:"bundle_format"`
+	CollectorEngineVer    int                    `json:"collector_engine_version"`
+	RedactionModelVersion int                    `json:"redaction_model_version"`
+	Collectors            []supportCollectorInfo `json:"collectors"`
+}
+
+// apiSupportStatus reports the support subsystem's static contract: engine +
+// redaction versions and the registered collector inventory (viewer, read-only).
+func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	cols := support.Collectors()
+	info := make([]supportCollectorInfo, 0, len(cols))
+	for _, c := range cols {
+		m := c.Meta()
+		info = append(info, supportCollectorInfo{
+			ID: m.ID, Path: m.Path, Owner: m.Owner, Mandatory: m.Mandatory,
+			MinLevel: int(m.MinLevel), MaxClass: m.MaxClass.String(), SchemaVersion: m.SchemaVersion,
+		})
+	}
+	jsonOK(w, supportStatus{
+		BundleFormat:          support.BundleFormat,
+		CollectorEngineVer:    support.CollectorEngineVer,
+		RedactionModelVersion: support.RedactionModelVer,
+		Collectors:            info,
+	})
 }
 
 // supportBundleIDRe pins the deterministic bundle-id shape so a path segment can

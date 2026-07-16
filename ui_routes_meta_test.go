@@ -50,7 +50,7 @@ import (
 //   - 140 — Supportability M1 Slice 1 added /api/support/bundles (POST create)
 //     + /api/support/bundles/{id} (GET download).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 140
+	const want = 141
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

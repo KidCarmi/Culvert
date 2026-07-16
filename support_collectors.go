@@ -74,7 +74,48 @@ func (diagnosticsCollector) Collect(_ context.Context, in support.CollectInput, 
 	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
 }
 
+type healthCollector struct{}
+
+func (healthCollector) Meta() support.CollectorMeta {
+	return support.CollectorMeta{
+		ID: "health", Path: "sections/health.json", Owner: "observability", SchemaVersion: 1,
+		Description: "Liveness + subsystem posture snapshot", Timeout: 2 * time.Second,
+		ByteBudget: 32 << 10, Mandatory: true, MinLevel: support.L0,
+		MaxClass: redaction.ClassInternal, Sensitivity: redaction.ClassInternal,
+	}
+}
+
+func (healthCollector) Collect(_ context.Context, in support.CollectInput, sink support.SectionSink) support.Result {
+	res := in.Redactor.Classify(computeHealth())
+	if err := sink.WriteJSON(res.Value); err != nil {
+		return support.Result{Status: support.StatusFailed, Note: "write"}
+	}
+	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+}
+
+type readinessCollector struct{}
+
+func (readinessCollector) Meta() support.CollectorMeta {
+	return support.CollectorMeta{
+		ID: "readiness", Path: "sections/readiness.json", Owner: "observability", SchemaVersion: 1,
+		Description: "Readiness probe snapshot", Timeout: 2 * time.Second,
+		ByteBudget: 32 << 10, Mandatory: true, MinLevel: support.L0,
+		MaxClass: redaction.ClassPublic, Sensitivity: redaction.ClassPublic,
+	}
+}
+
+func (readinessCollector) Collect(_ context.Context, in support.CollectInput, sink support.SectionSink) support.Result {
+	rep, _ := computeReadiness() // the HTTP status code is not part of the section
+	res := in.Redactor.Classify(rep)
+	if err := sink.WriteJSON(res.Value); err != nil {
+		return support.Result{Status: support.StatusFailed, Note: "write"}
+	}
+	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+}
+
 func init() {
 	support.Register(productCollector{})
 	support.Register(diagnosticsCollector{})
+	support.Register(healthCollector{})
+	support.Register(readinessCollector{})
 }

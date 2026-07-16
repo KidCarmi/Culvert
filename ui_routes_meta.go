@@ -603,7 +603,10 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "re-fetch the catalog from the configured origin + reload; verification unchanged; audited via auditEvent"}}},
 
-	// Supportability framework (M1 Slice 1) — redacted csb/1 diagnostic bundles.
+	// Supportability framework (M1) — redacted csb/1 diagnostic bundles.
+	{Path: "/api/support/status", Handler: "apiSupportStatus", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "read-only support subsystem inventory: engine/redaction versions + registered collectors"}}},
 	{Path: "/api/support/bundles", Handler: "apiSupportBundles", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "create a redacted csb/1 support bundle over the registered collectors; admin (a standard bundle may contain INTERNAL sections)"}}},
