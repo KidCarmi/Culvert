@@ -289,69 +289,37 @@ func restoreBlocklistFromBackup(b *configBackup) {
 func applyConfigBackup(b *configBackup) error {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
-	restoreBlocklistFromBackup(b)
-
-	// URLCategories MUST be applied before CategoryGroups (which may
-	// reference categories by name) and before PolicyRules (which may
-	// reference groups that reference categories). The full dependency
-	// chain is PolicyRules → CategoryGroups → catStore; apply order
-	// is the reverse — leaf dependencies first. See
-	// roadmap/URL-CATEGORIES-ROLLBACK-EXTENSION-SPEC.md §4.4-§4.5.
-	//
-	// Layer 2 (communityDB) is intentionally NOT touched — rollback
-	// restores admin-managed catStore only. communityDB lookups
-	// continue across the apply window.
-	//
-	// Nil-skip vs explicit-empty (per spec §4.7):
-	//   - b.URLCategories == nil → old snapshot (pre-extension) or
-	//     explicit JSON null; leave live catStore untouched.
-	//   - b.URLCategories == [] → new snapshot recorded with zero
-	//     categories; ReplaceAll wipes the live store.
-	//   - populated → wholesale replace.
-	if b.URLCategories != nil {
-		catStore.ReplaceAll(b.URLCategories)
-		catStore.Save()
-	}
-
-	// CategoryGroups MUST be applied before PolicyRules. Policy rules
-	// reference category groups by name (PolicyRule.DestCategoryGroup,
-	// matched at runtime via globalCategoryGroups.MatchesHost which
-	// fails closed for unknown groups). Restoring groups first ensures
-	// the post-apply state has every restored rule sees its referenced
-	// groups in their v2 form, not the pre-rollback form. See
-	// roadmap/CATEGORYGROUPS-ROLLBACK-EXTENSION-SPEC.md §3.3-§3.4.
-	//
-	// Nil-skip vs explicit-empty (per spec §6.4):
-	//   - b.CategoryGroups == nil → old snapshot (pre-extension) or
-	//     explicit JSON null; leave live state untouched.
-	//   - b.CategoryGroups == [] → new snapshot recorded with zero
-	//     groups; ReplaceAll wipes the live store.
-	//   - populated → wholesale replace.
-	if b.CategoryGroups != nil {
-		globalCategoryGroups.ReplaceAll(b.CategoryGroups)
-		globalCategoryGroups.Save()
-	}
-
-	// DecryptionProfiles MUST be applied before PolicyRules (same reason as
-	// CategoryGroups: rules reference profiles by name, fail-safe-to-strip at eval
-	// on a dangling ref). nil → skip; [] → wipe; populated → replace.
-	if b.DecryptionProfiles != nil {
-		globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
-		globalDecryptionProfiles.Save()
-	}
-
-	// Policy rules: bulk replace.
+	// Policy persistence is the only fail-returning apply step. Commit it before
+	// mutating sibling stores so a disk failure leaves no mixed rollback state.
 	var validRules []PolicyRule
 	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
-			continue
+		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err == nil {
+			validRules = append(validRules, b.PolicyRules[i])
 		}
-		validRules = append(validRules, b.PolicyRules[i])
 	}
-	policyStore.ReplaceAll(validRules)
-	if err := policyStore.Save(); err != nil {
+	// Persist the candidate first, then apply leaf dependencies while policy
+	// readers are blocked; publish the policy only after dependencies are live.
+	if err := policyStore.ReplaceAllAndSaveWithBeforePublish(validRules, func() {
+		if b.URLCategories != nil {
+			catStore.ReplaceAll(b.URLCategories)
+			catStore.Save()
+		}
+		if b.CategoryGroups != nil {
+			globalCategoryGroups.ReplaceAll(b.CategoryGroups)
+			globalCategoryGroups.Save()
+		}
+		if b.DecryptionProfiles != nil {
+			globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
+			globalDecryptionProfiles.Save()
+		}
+	}); err != nil {
 		return err
 	}
+	restoreBlocklistFromBackup(b)
+
+	// Categories, groups, and decryption profiles were applied leaf-first inside
+	// the policy publication boundary above.
+
 	setDefaultPolicyAction(b.DefaultAction)
 
 	// Rewrite rules: replace all.

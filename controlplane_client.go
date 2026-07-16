@@ -237,18 +237,33 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return // nothing changed
 	}
 	snapForDisk := snap
+	// Compile IdP providers against the candidate public origin before any
+	// policy/traffic publication. Restore external-auth settings on rejection.
+	oldBaseURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
 	applyExternalAuthSnapshotSettings(snap)
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
-		return
+	var preparedIdP *idpReplacement
+	if snap.IdPProfiles != nil {
+		preparedIdP, err = prepareIdPReplacement(snap.IdPProfiles)
+		if err != nil {
+			SetProxyBaseURL(oldBaseURL)
+			trustForwardedHeaders = oldTrust
+			dpControlPlanePollFailing.Store(true)
+			logger.Printf("DataPlane: config snapshot v%d IdP preparation failed: %v", snap.Version, err)
+			return
+		}
 	}
-	snap.IdPProfiles = nil
-	if err := applyConfigSnapshot(snap); err != nil {
+	if err := applyConfigSnapshotWithIdP(snap, preparedIdP); err != nil {
+		SetProxyBaseURL(oldBaseURL)
+		trustForwardedHeaders = oldTrust
 		dpControlPlanePollFailing.Store(true)
 		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
 		return
 	}
-	persistDPLastGoodConfigSnapshot(snapForDisk)
+	if err := persistDPLastGoodConfigSnapshot(snapForDisk); err != nil {
+		dpControlPlanePollFailing.Store(true)
+		logger.Printf("DataPlane: config snapshot v%d last-good persist failed: %v", snap.Version, err)
+		return
+	}
 	dpControlPlanePollFailing.Store(false)
 	c.lastVersion = snap.Version
 }

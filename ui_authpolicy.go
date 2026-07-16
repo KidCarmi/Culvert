@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -136,9 +137,12 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
-	added := policyStore.Add(rule)
-	if err := policyStore.Save(); err != nil {
-		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+	var added PolicyRule
+	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		added = store.Add(rule)
+		return nil
+	}); err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
@@ -185,12 +189,18 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stampRuleMetadataForWrite(&rule, before, sessionAdmin(r))
-	if !policyStore.Update(priority, rule) {
+	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		if !store.Update(priority, rule) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	if err := policyStore.Save(); err != nil {
-		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: auth rule updated priority=%s name=%q",
@@ -215,12 +225,18 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
 		return
 	}
-	if !policyStore.Delete(priority) {
+	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		if !store.Delete(priority) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	if err := policyStore.Save(); err != nil {
-		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: auth rule deleted priority=%s",
@@ -281,12 +297,18 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !policyStore.PermutePriorities(body.Priorities) {
+	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		if !store.PermutePriorities(body.Priorities) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "reorder failed (duplicate or stale priority list)", http.StatusBadRequest)
 		return
 	}
-	if err := policyStore.Save(); err != nil {
-		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: auth rules reordered (%d rule(s))", len(body.Priorities))

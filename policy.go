@@ -3,14 +3,17 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
@@ -253,6 +256,9 @@ var policyStore = &PolicyStore{}
 func (ps *PolicyStore) Load(path string) error {
 	ps.saveMu.Lock()
 	defer ps.saveMu.Unlock()
+	if err := recoverPolicySave(path); err != nil {
+		return err
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -314,37 +320,51 @@ func (ps *PolicyStore) Load(path string) error {
 		}
 		hasMeta = true
 	}
-	ps.mu.Lock()
+	// Build and, when needed, migrate a detached candidate. A failed ID-migration
+	// save must not retarget or publish this store.
+	ps.mu.RLock()
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
 			previousCounters[current.ID] = current.counters
 		}
 	}
-	ps.rules = rules
-	migrated := ps.backfillIDsLocked()
-	for _, loaded := range ps.rules {
+	candidate := &PolicyStore{
+		rules:     rules,
+		path:      path,
+		version:   ps.version,
+		updatedAt: ps.updatedAt,
+	}
+	ps.mu.RUnlock()
+	candidate.mu.Lock()
+	migrated := candidate.backfillIDsLocked()
+	for _, loaded := range candidate.rules {
 		if counters := previousCounters[loaded.ID]; counters != nil {
 			loaded.counters = counters
 		}
 	}
-	ps.sortLocked()
-	ps.path = path
-	if hasMeta && (meta.Version > ps.version || (meta.Version == ps.version && ps.updatedAt == "")) {
-		ps.version = meta.Version
+	candidate.sortLocked()
+	if hasMeta && (meta.Version > candidate.version || (meta.Version == candidate.version && candidate.updatedAt == "")) {
+		candidate.version = meta.Version
 		if meta.UpdatedAt != "" {
-			ps.updatedAt = meta.UpdatedAt
+			candidate.updatedAt = meta.UpdatedAt
 		}
 	}
-	ps.mu.Unlock()
-	// One-time idempotent ID migration: persist newly-assigned stable IDs so
-	// they survive restarts. This is a data migration, NOT a semantic policy
-	// change — it deliberately does not bump the policy version. A second load
-	// finds all IDs present and writes nothing.
+	candidate.mu.Unlock()
+	// One-time idempotent ID migration: persist newly-assigned stable IDs before
+	// publication. This is a data migration, not a semantic version bump.
 	if migrated > 0 {
-		if err := ps.saveLocked(); err != nil {
+		if err := candidate.saveLocked(); err != nil {
 			return err
 		}
+	}
+	ps.mu.Lock()
+	ps.rules = candidate.rules
+	ps.path = candidate.path
+	ps.version = candidate.version
+	ps.updatedAt = candidate.updatedAt
+	ps.mu.Unlock()
+	if migrated > 0 {
 		logger.Printf("Policy: assigned stable ULID IDs to %d rule(s) with missing, malformed, or duplicate identity", migrated)
 	}
 	return nil
@@ -387,6 +407,152 @@ type policyMeta struct {
 	Version      int64  `json:"version"`
 	UpdatedAt    string `json:"updated_at"`
 	PolicySHA256 string `json:"policy_sha256,omitempty"`
+}
+
+// policySaveTxn is the recovery record for the two-file policy publication.
+// An uncommitted record restores the previous pair; a committed record is
+// cleanup-only because both new files reached durable storage.
+type policySaveTxn struct {
+	Committed    bool   `json:"committed"`
+	PolicyExists bool   `json:"policy_exists"`
+	Policy       []byte `json:"policy,omitempty"`
+	MetaExists   bool   `json:"meta_exists"`
+	Meta         []byte `json:"meta,omitempty"`
+}
+
+func readOptionalFile(path string) (data []byte, exists bool, err error) {
+	data, err = os.ReadFile(path)
+	if err == nil {
+		return data, true, nil
+	}
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
+func restorePolicyFile(path string, data []byte, exists bool) error {
+	if exists {
+		return atomicWriteFile(path, data, 0o600)
+	}
+	return durableRemove(path)
+}
+
+func durableRemove(path string) error {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil && !errors.Is(syncErr, syscall.EINVAL) && !errors.Is(syncErr, syscall.ENOTSUP) && !errors.Is(syncErr, syscall.EOPNOTSUPP) {
+		return syncErr
+	}
+	if closeErr != nil && syncErr == nil {
+		return closeErr
+	}
+	return nil
+}
+
+func recoverPolicySave(path string) error {
+	if path == "" {
+		return nil
+	}
+	txnPath := path + ".txn"
+	data, err := os.ReadFile(txnPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read policy transaction: %w", err)
+	}
+	var txn policySaveTxn
+	if err := json.Unmarshal(data, &txn); err != nil {
+		return fmt.Errorf("decode policy transaction: %w", err)
+	}
+	if !txn.Committed {
+		if err := restorePolicyFile(path, txn.Policy, txn.PolicyExists); err != nil {
+			return fmt.Errorf("restore policy transaction rules: %w", err)
+		}
+		if err := restorePolicyFile(path+".meta", txn.Meta, txn.MetaExists); err != nil {
+			return fmt.Errorf("restore policy transaction metadata: %w", err)
+		}
+	}
+	if err := durableRemove(txnPath); err != nil {
+		return fmt.Errorf("remove policy transaction: %w", err)
+	}
+	return nil
+}
+
+func beginPolicySave(path string) (policySaveTxn, error) {
+	if err := recoverPolicySave(path); err != nil {
+		return policySaveTxn{}, err
+	}
+	policy, policyExists, err := readOptionalFile(path)
+	if err != nil {
+		return policySaveTxn{}, fmt.Errorf("snapshot policy rules: %w", err)
+	}
+	meta, metaExists, err := readOptionalFile(path + ".meta")
+	if err != nil {
+		return policySaveTxn{}, fmt.Errorf("snapshot policy metadata: %w", err)
+	}
+	txn := policySaveTxn{PolicyExists: policyExists, Policy: policy, MetaExists: metaExists, Meta: meta}
+	data, err := json.Marshal(txn)
+	if err != nil {
+		return policySaveTxn{}, fmt.Errorf("marshal policy transaction: %w", err)
+	}
+	if err := atomicWriteFile(path+".txn", data, 0o600); err != nil {
+		return policySaveTxn{}, fmt.Errorf("persist policy transaction: %w", err)
+	}
+	return txn, nil
+}
+
+func rollbackPolicySave(path string, txn policySaveTxn) error {
+	if err := restorePolicyFile(path, txn.Policy, txn.PolicyExists); err != nil {
+		return fmt.Errorf("restore policy rules: %w", err)
+	}
+	if err := restorePolicyFile(path+".meta", txn.Meta, txn.MetaExists); err != nil {
+		return fmt.Errorf("restore policy metadata: %w", err)
+	}
+	return nil
+}
+
+func commitPolicySave(path string, txn policySaveTxn) error {
+	txn.Committed = true
+	data, err := json.Marshal(txn)
+	if err != nil {
+		return fmt.Errorf("marshal committed policy transaction: %w", err)
+	}
+	if err := atomicWriteFile(path+".txn", data, 0o600); err != nil {
+		return fmt.Errorf("commit policy transaction: %w", err)
+	}
+	return nil
+}
+
+func finishPolicySave(path string, txn policySaveTxn, commit bool) error {
+	var err error
+	if commit {
+		err = commitPolicySave(path, txn)
+	} else {
+		err = rollbackPolicySave(path, txn)
+	}
+	if err != nil {
+		return err
+	}
+	if err := durableRemove(path + ".txn"); err != nil {
+		if commit {
+			logWarnf("PolicyStore: committed transaction cleanup deferred: %v", err)
+			return nil
+		}
+		return fmt.Errorf("remove policy transaction: %w", err)
+	}
+	return nil
 }
 
 func policySHA256(data []byte) string {
@@ -522,18 +688,39 @@ func (ps *PolicyStore) saveLocked() error {
 		return fmt.Errorf("marshal policy rules: %w", err)
 	}
 	meta.PolicySHA256 = policySHA256(data)
+	txn, err := beginPolicySave(path)
+	if err != nil {
+		return err
+	}
 	// Atomic + durable write — temp file, fsync, rename, parent-dir fsync.
 	// Skip metadata on failure so the sidecar cannot describe a newer policy.
 	if err := atomicWriteFile(path, data, 0o600); err != nil {
+		_ = finishPolicySave(path, txn, false)
 		return fmt.Errorf("persist policy rules: %w", err)
 	}
-	return ps.saveMetaSnapshot(path, meta)
+	if err := ps.saveMetaSnapshot(path, meta); err != nil {
+		if restoreErr := finishPolicySave(path, txn, false); restoreErr != nil {
+			return fmt.Errorf("%w (rollback failed: %v)", err, restoreErr)
+		}
+		return err
+	}
+	return finishPolicySave(path, txn, true)
 }
 
 // List returns a copy of all rules (including live HitCount).
 func (ps *PolicyStore) List() []PolicyRule {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
+	return ps.listLocked()
+}
+
+func (ps *PolicyStore) snapshotWithVersion() (rules []PolicyRule, version int64) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return ps.listLocked(), ps.version
+}
+
+func (ps *PolicyStore) listLocked() []PolicyRule {
 	out := make([]PolicyRule, len(ps.rules))
 	for i, r := range ps.rules {
 		out[i] = *clonePolicyRuleForPublication(r)
@@ -615,14 +802,23 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.mu.Unlock()
 }
 
-// ReplaceAllAndSave durably stages a complete replacement before publishing it.
-// It is used by draft commit, where a persistence failure must leave both the
-// running generation and the retained candidate retryable.
-func (ps *PolicyStore) ReplaceAllAndSave(rules []PolicyRule) error {
+var errPolicyVersionConflict = errors.New("policy generation changed")
+
+// mutateAndSave applies edit to a detached candidate, durably commits it, then
+// publishes it. expected, when non-nil, is checked under the same lock as the
+// replacement to close optimistic-concurrency TOCTOU windows.
+func (ps *PolicyStore) mutateAndSave(expected *int64, edit func(*PolicyStore) error) error {
+	return ps.mutateAndSaveBeforePublish(expected, edit, nil)
+}
+
+func (ps *PolicyStore) mutateAndSaveBeforePublish(expected *int64, edit func(*PolicyStore) error, beforePublish func()) error {
 	ps.saveMu.Lock()
 	defer ps.saveMu.Unlock()
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	if expected != nil && ps.version != *expected {
+		return errPolicyVersionConflict
+	}
 
 	candidate := &PolicyStore{
 		rules:     ps.rules,
@@ -630,17 +826,51 @@ func (ps *PolicyStore) ReplaceAllAndSave(rules []PolicyRule) error {
 		version:   ps.version,
 		updatedAt: ps.updatedAt,
 	}
-	candidate.ReplaceAll(rules)
+	if err := edit(candidate); err != nil {
+		return err
+	}
 	if err := candidate.saveLocked(); err != nil {
 		if logger != nil {
-			logger.Printf("PolicyStore: transactional replace failed: %v", err)
+			logger.Printf("PolicyStore: transactional mutation failed: %v", err)
 		}
 		return err
+	}
+	if beforePublish != nil {
+		beforePublish()
 	}
 	ps.rules = candidate.rules
 	ps.version = candidate.version
 	ps.updatedAt = candidate.updatedAt
 	return nil
+}
+
+// MutateAndSave durably commits one policy mutation before publishing it.
+func (ps *PolicyStore) MutateAndSave(edit func(*PolicyStore) error) error {
+	return ps.MutateAndSaveAtVersion(nil, edit)
+}
+
+func (ps *PolicyStore) MutateAndSaveAtVersion(expected *int64, edit func(*PolicyStore) error) error {
+	return ps.mutateAndSave(expected, edit)
+}
+
+// ReplaceAllAndSave durably stages a complete replacement before publishing it.
+func (ps *PolicyStore) ReplaceAllAndSave(rules []PolicyRule) error {
+	return ps.ReplaceAllAndSaveWithBeforePublish(rules, nil)
+}
+
+func (ps *PolicyStore) ReplaceAllAndSaveWithBeforePublish(rules []PolicyRule, beforePublish func()) error {
+	return ps.mutateAndSaveBeforePublish(nil, func(candidate *PolicyStore) error {
+		candidate.ReplaceAll(rules)
+		return nil
+	}, beforePublish)
+}
+
+// ReplaceAllAndSaveAtVersion additionally rejects a stale running generation.
+func (ps *PolicyStore) ReplaceAllAndSaveAtVersion(rules []PolicyRule, expected int64) error {
+	return ps.mutateAndSave(&expected, func(candidate *PolicyStore) error {
+		candidate.ReplaceAll(rules)
+		return nil
+	})
 }
 
 // Add inserts a new rule and re-sorts by priority.

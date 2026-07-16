@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -538,13 +539,17 @@ func apiCategoryGroups(w http.ResponseWriter, r *http.Request) {
 				// Refresh referencing rules on running AND the open draft candidate,
 				// then persist the policy store BEFORE versioning (the cascade is a
 				// real policy mutation that must survive a restart).
-				if n := policyStore.CascadeDestCategoryGroupRename(id, before.Name, newName); n > 0 {
-					if err := policyStore.Save(); err != nil {
-						http.Error(w, "policy rename cascade changed in memory but durable save failed", http.StatusInternalServerError)
-						return
-					}
+				if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+					store.CascadeDestCategoryGroupRename(id, before.Name, newName)
+					return nil
+				}); err != nil {
+					http.Error(w, "policy rename cascade changed in memory but durable save failed", http.StatusInternalServerError)
+					return
 				}
-				policyDraft.cascadeDestCategoryGroupRename(id, before.Name, newName)
+				if err := policyDraft.cascadeDestCategoryGroupRename(id, before.Name, newName); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				detail += ", renamed from " + sanitizeLog(before.Name)
 			}
 			auditName := before.Name
@@ -706,13 +711,17 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 				// restart before the next policy edit must not reload stale names —
 				// the cascade is a real policy mutation). The draft cascade keeps a
 				// staged candidate from re-writing stale names back at commit time.
-				if n := policyStore.CascadeDecryptionProfileRename(id, before.Name, newName); n > 0 {
-					if err := policyStore.Save(); err != nil {
-						http.Error(w, "policy rename cascade changed in memory but durable save failed", http.StatusInternalServerError)
-						return
-					}
+				if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+					store.CascadeDecryptionProfileRename(id, before.Name, newName)
+					return nil
+				}); err != nil {
+					http.Error(w, "policy rename cascade changed in memory but durable save failed", http.StatusInternalServerError)
+					return
 				}
-				policyDraft.cascadeDecryptionProfileRename(id, before.Name, newName)
+				if err := policyDraft.cascadeDecryptionProfileRename(id, before.Name, newName); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				detail = "renamed from " + sanitizeLog(before.Name)
 			}
 			auditName := before.Name
@@ -1266,12 +1275,21 @@ func stampObjectRefIDs(rule *PolicyRule) {
 // a silent last-write-wins overwrite. Absent/blank param = no check, so
 // non-version-aware clients (curl, tests, older UIs) keep working unchanged.
 //
-// This is handler-level (HTTP If-Match semantics): it catches the real
-// multi-admin case — two admins load v5, one commits (→v6), the other's v5
-// write is rejected. It does NOT close the microsecond window where two writes
-// both read v5 before either commits; the store still serializes those two
-// mutations (no corruption), same as today. Truly-atomic check-and-write would
-// thread the expected version into the store mutators — a recorded follow-up.
+// The parsed generation is also threaded into the serialized store/draft
+// mutation, closing the check/write window between this early HTTP response
+// check and durable publication.
+func expectedPolicyVersion(r *http.Request) *int64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
+	if raw == "" {
+		return nil
+	}
+	version, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil // policyVersionConflict already rejected malformed input
+	}
+	return &version
+}
+
 func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
 	if raw == "" {
@@ -1383,16 +1401,26 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
-	added := policyWriteStore(sessionAdmin(r)).Add(rule)
+	var added PolicyRule
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		added = store.Add(rule)
+		return nil
+	})
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+		return
+	}
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
-	if !afterPolicyWrite(w, r, "policy.add") {
-		return
-	}
 	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
 	auditEventDiffID(r, "policy.add", added.Name, added.ID,
 		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
+	finishPolicyWrite(r, "policy.add", staged)
 	jsonOK(w, added)
 }
 
@@ -1436,18 +1464,29 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	if !policyWriteStore(sessionAdmin(r)).Update(priority, rule) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.Update(priority, rule) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
-	if !afterPolicyWrite(w, r, "policy.update") {
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
 		return
 	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+		return
+	}
+	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, ruleAuditID(beforeRule),
 		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
+	finishPolicyWrite(r, "policy.update", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1480,9 +1519,22 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if !policyWriteStore(sessionAdmin(r)).Delete(priority) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.Delete(priority) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	name := fmt.Sprintf("priority=%d", priority)
@@ -1490,11 +1542,9 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		name = beforeRule.Name
 	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
-	if !afterPolicyWrite(w, r, "policy.remove") {
-		return
-	}
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
 	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
+	finishPolicyWrite(r, "policy.remove", staged)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1538,17 +1588,28 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	if !policyWriteStore(sessionAdmin(r)).UpdateByID(id, rule) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.UpdateByID(id, rule) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	if !afterPolicyWrite(w, r, "policy.update") {
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, id,
 		fmt.Sprintf("priority=%d action=%s", rule.Priority, rule.Action), beforeRule, rule)
+	finishPolicyWrite(r, "policy.update", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1563,16 +1624,27 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if !policyWriteStore(sessionAdmin(r)).DeleteByID(id) {
-		policyDraft.reconcile() // a failed mutation may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.DeleteByID(id) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	if !afterPolicyWrite(w, r, "policy.remove") {
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
 	auditEventDiffID(r, "policy.remove", beforeRule.Name, id, "", beforeRule, nil)
+	finishPolicyWrite(r, "policy.remove", staged)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1605,18 +1677,26 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ws := policyWriteStore(sessionAdmin(r))
 	deleted := 0
-	for _, p := range body.Priorities {
-		if ws.Delete(p) {
-			deleted++
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		for _, p := range body.Priorities {
+			if store.Delete(p) {
+				deleted++
+			}
 		}
+		return nil
+	})
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
 	}
-	if !afterPolicyWrite(w, r, "policy.bulk_remove") {
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
 	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
+	finishPolicyWrite(r, "policy.bulk_remove", staged)
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 
@@ -1679,16 +1759,27 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(body.Priorities) {
-		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.PermutePriorities(body.Priorities) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "priority list length mismatch or unknown priority", http.StatusBadRequest)
 		return
 	}
-	if !afterPolicyWrite(w, r, "policy.reorder") {
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
+	finishPolicyWrite(r, "policy.reorder", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1795,18 +1886,29 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !policyWriteStore(sessionAdmin(r)).PermutePriorities(priorities) {
-		policyDraft.reconcile() // a failed permute may have opened a now-clean draft
+	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+		if !store.PermutePriorities(priorities) {
+			return errPolicyRuleNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, errPolicyRuleNotFound) {
 		http.Error(w, "reorder failed (concurrent modification?)", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, errPolicyVersionConflict) {
+		policyVersionConflict(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
 	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
 	safePos := sanitizeLog(body.Position)
-	if !afterPolicyWrite(w, r, "policy.move") {
-		return
-	}
 	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
 	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
+	finishPolicyWrite(r, "policy.move", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 

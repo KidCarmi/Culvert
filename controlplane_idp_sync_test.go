@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func withIdPSyncGlobals(t *testing.T) {
 	t.Helper()
@@ -85,6 +88,25 @@ func TestApplyConfigSnapshot_BadIdPProfileDoesNotReplaceWorkingRegistry(t *testi
 	}
 	if idpRegistry.Get("working") == nil {
 		t.Fatal("working IdP profile was lost after rejected snapshot")
+	}
+}
+
+func TestApplyConfigSnapshot_BadIdPProfileDoesNotPublishPolicy(t *testing.T) {
+	withIdPSyncGlobals(t)
+	snapshotPolicyStoreForTest(t)
+	policyStore.path = filepath.Join(t.TempDir(), "policy.json")
+	policyStore.ReplaceAll([]PolicyRule{{Name: "old-policy", Action: ActionAllow}})
+	before := policyStore.List()
+	err := applyConfigSnapshot(ConfigSnapshot{
+		Version:     2,
+		PolicyRules: []PolicyRule{{Name: "must-not-publish", Action: ActionAllow}},
+		IdPProfiles: []*IdPProfile{{ID: "bad-enabled-saml", Name: "Bad", Type: IdPTypeSAML, Enabled: true}},
+	})
+	if err == nil {
+		t.Fatal("accepted invalid IdP snapshot")
+	}
+	if after := policyStore.List(); !sameRuleSet(before, after) {
+		t.Fatalf("invalid IdP snapshot published policy: before=%v after=%v", before, after)
 	}
 }
 

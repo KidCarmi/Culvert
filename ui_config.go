@@ -813,15 +813,15 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 // stable ULID first (idempotent re-import), then a one-time name fallback for
 // pre-ID / hand-authored backups, else create fresh — so a re-import does not
 // accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1).
-func importPolicyRules(b *configBackup, replaceMode bool) {
+func importPolicyRules(store *PolicyStore, b *configBackup, replaceMode bool) {
 	if replaceMode && len(b.PolicyRules) > 0 {
-		policyStore.ReplaceAll(b.PolicyRules)
+		store.ReplaceAll(b.PolicyRules)
 		return
 	}
 	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
 	for i := range b.PolicyRules {
 		rule := b.PolicyRules[i]
-		existing := policyStore.matchForImport(rule)
+		existing := store.matchForImport(rule)
 		editPriority := -1
 		if existing != nil {
 			// UpdateByID keeps the live rule's position and DISCARDS the payload
@@ -833,20 +833,20 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 			rule.Priority = existing.Priority
 			editPriority = existing.Priority
 		}
-		if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
+		if err := validatePolicyRule(rule, store.List(), editPriority); err != nil {
 			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
 			continue
 		}
 		if existing == nil {
-			policyStore.Add(rule)
+			store.Add(rule)
 			continue
 		}
 		rule.ID = existing.ID // carry identity for the name-match upsert path
-		if !policyStore.UpdateByID(existing.ID, rule) {
+		if !store.UpdateByID(existing.ID, rule) {
 			// The matched rule vanished between match and update (concurrent
 			// delete / import of the same rule). Don't silently drop the
 			// incoming content — add it fresh rather than lose it.
-			policyStore.Add(rule)
+			store.Add(rule)
 		}
 	}
 }
@@ -885,6 +885,17 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		writeImportPreview(w, r, &b, replaceMode)
 		return
 	}
+	// Persist the candidate first, apply taxonomy dependencies while policy
+	// readers are blocked, then publish the policy.
+	if err := policyStore.mutateAndSaveBeforePublish(nil, func(store *PolicyStore) error {
+		importPolicyRules(store, &b, replaceMode)
+		return nil
+	}, func() {
+		importCategoryTaxonomy(&b, replaceMode)
+	}); err != nil {
+		http.Error(w, "durable policy import failed", http.StatusInternalServerError)
+		return
+	}
 
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
@@ -902,18 +913,8 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		bl.SetMode(b.BlocklistMode)
 	}
 
-	// URL categories + category groups — BEFORE policy rules, matching
-	// applyConfigBackup's leaf-first dependency order (rules reference groups,
-	// groups reference categories by name).
-	importCategoryTaxonomy(&b, replaceMode)
+	// Taxonomy dependencies were applied inside the policy publication boundary.
 
-	// Policy rules — replace or upsert-by-identity (extracted to keep the
-	// handler under the nestif complexity threshold).
-	importPolicyRules(&b, replaceMode)
-	if err := policyStore.Save(); err != nil {
-		http.Error(w, "configuration changed in memory but policy save failed", http.StatusInternalServerError)
-		return
-	}
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
 	}

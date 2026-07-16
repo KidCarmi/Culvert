@@ -356,3 +356,94 @@ func TestPolicyStoreConcurrentLoadSaveKeepsPathAndMetadataRaceFree(t *testing.T)
 		}
 	}
 }
+
+func TestPolicyLoadRecoversInterruptedSaveOverLegacyMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	seed := &PolicyStore{path: path}
+	seed.Add(PolicyRule{Name: "old", Action: ActionAllow})
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	oldPolicy, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyMeta, err := json.Marshal(policyMeta{Version: 7, UpdatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(path+".meta", legacyMeta, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginPolicySave(path); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := json.MarshalIndent([]PolicyRule{{Name: "failed-candidate", Action: ActionDrop}}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(path, candidate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(path+".meta", []byte(`{"version":8}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash before the transaction commit marker is written.
+	loaded := &PolicyStore{}
+	if err := loaded.Load(path); err != nil {
+		t.Fatalf("recover interrupted save: %v", err)
+	}
+	rules := loaded.List()
+	if len(rules) != 1 || rules[0].Name != "old" {
+		t.Fatalf("recovered rules = %#v, want old policy", rules)
+	}
+	recovered, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recovered, oldPolicy) {
+		t.Fatal("interrupted save did not restore previous policy bytes")
+	}
+	if _, err := os.Stat(path + ".txn"); !os.IsNotExist(err) {
+		t.Fatalf("transaction record not cleaned up: %v", err)
+	}
+}
+
+func TestPolicyLoadIDMigrationFailureDoesNotPublishCandidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.json")
+	data, err := json.MarshalIndent([]PolicyRule{{Name: "legacy", Action: ActionAllow}}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := policyMeta{Version: 7, UpdatedAt: time.Now().UTC().Format(time.RFC3339), PolicySHA256: policySHA256(data)}
+	metaData, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".meta", metaData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".txn", 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{Name: "old-live", Action: ActionAllow}})
+	before, beforeVersion := ps.snapshotWithVersion()
+	if err := ps.Load(path); err == nil {
+		t.Fatal("expected ID migration persistence failure")
+	}
+	after, afterVersion := ps.snapshotWithVersion()
+	if !sameRuleSet(before, after) || afterVersion != beforeVersion {
+		t.Fatalf("failed Load published candidate: before=%v/v%d after=%v/v%d", before, beforeVersion, after, afterVersion)
+	}
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	if ps.path != "" {
+		t.Fatalf("failed Load retargeted store path to %q", ps.path)
+	}
+}

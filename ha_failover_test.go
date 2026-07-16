@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/halease"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // freshStandby builds a lease-mode standby whose last sync just succeeded.
@@ -34,6 +36,24 @@ func resyncCtx(t *testing.T) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return ctx
+}
+
+func TestReachableLeaderLocalSyncFailureCannotAutoPromote(t *testing.T) {
+	h := &HAState{role: "standby", autoFailover: true}
+	s := &standbyLoopState{
+		h:         h,
+		ctx:       context.Background(),
+		failCount: haStandbyMaxFail - 1,
+	}
+	if s.handleSyncResult(false, true) {
+		t.Fatal("local sync rejection exited the standby loop")
+	}
+	if s.failCount != 0 {
+		t.Fatalf("local sync rejection counted as leader failure: %d", s.failCount)
+	}
+	if h.IsLeader() {
+		t.Fatal("reachable leader plus local sync rejection promoted standby")
+	}
 }
 
 func TestLeaseAutoPromote_PromotesWhenLeaseFree(t *testing.T) {
@@ -266,5 +286,16 @@ func TestResumeDenied_NoTarget_KeepsS2Stance(t *testing.T) {
 	}
 	if h.WriteAllowed() {
 		t.Fatal("unfenced resume must have no write authority (S2 stance)")
+	}
+}
+
+func TestHARPCApplicationErrorsProveLeaderReachability(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition} {
+		if !haRPCErrorProvesReachability(status.Error(code, "rejected")) {
+			t.Fatalf("%s response was classified as leader-unreachable", code)
+		}
+	}
+	if haRPCErrorProvesReachability(status.Error(codes.Unavailable, "transport down")) {
+		t.Fatal("Unavailable was classified as reachable")
 	}
 }

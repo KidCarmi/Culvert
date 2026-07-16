@@ -351,6 +351,26 @@ var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) error {
+	if snap.IdPProfiles == nil {
+		return applyConfigSnapshotWithIdP(snap, nil)
+	}
+	oldBaseURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
+	applyExternalAuthSnapshotSettings(snap)
+	prepared, err := prepareIdPReplacement(snap.IdPProfiles)
+	if err != nil {
+		SetProxyBaseURL(oldBaseURL)
+		trustForwardedHeaders = oldTrust
+		return fmt.Errorf("idp profile sync: %w", err)
+	}
+	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
+		SetProxyBaseURL(oldBaseURL)
+		trustForwardedHeaders = oldTrust
+		return err
+	}
+	return nil
+}
+
+func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement) error {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
@@ -368,19 +388,26 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
 		return err
 	}
+	if prepared == nil && snap.IdPProfiles != nil {
+		var err error
+		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
+		if err != nil {
+			return fmt.Errorf("idp profile sync: %w", err)
+		}
+	}
 
 	if err := applySnapshotPolicyAndTraffic(snap); err != nil {
 		return err
 	}
 	applySnapshotClusterRuntime(snap)
 
-	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
-	// the live registry, so a bad CP-side IdP update does not break the DP's
-	// currently working SAML/OIDC providers. A rejection ABORTS the remaining
-	// (extended) state below — pre-existing ordering, preserved by the split.
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-		return err
+	// IdP profiles were compiled before any state mutation.
+	if prepared != nil {
+		if err := idpRegistry.applyReplacement(prepared); err != nil {
+			logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
+			return err
+		}
+		logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
 	}
 
 	applySnapshotExtendedState(snap)
@@ -394,6 +421,11 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 // slices of a snapshot (split from applyConfigSnapshot for gocognit; order
 // preserved verbatim).
 func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
+	// Policy persistence is the only fail-returning step in this slice. Commit it
+	// first so a local disk failure cannot expose a mixed snapshot generation.
+	if err := applySnapshotPolicyRules(snap.PolicyRules); err != nil {
+		return err
+	}
 	// Blocklist — in-place feed-entry replacement preserves the
 	// package-global bl's path / mode / manual / exceptions (the
 	// DP-local state that isn't in the cluster snapshot). The
@@ -434,11 +466,6 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
 	// Default policy action.
 	if snap.DefaultAction != "" {
 		setDefaultPolicyAction(snap.DefaultAction)
-	}
-
-	// Policy rules.
-	if err := applySnapshotPolicyRules(snap.PolicyRules); err != nil {
-		return err
 	}
 
 	// SSL bypass patterns.
@@ -492,8 +519,7 @@ func applySnapshotPolicyRules(rules []PolicyRule) error {
 	if rules == nil {
 		return nil
 	}
-	policyStore.ReplaceAll(rules)
-	if err := policyStore.Save(); err != nil {
+	if err := policyStore.ReplaceAllAndSave(rules); err != nil {
 		return fmt.Errorf("persist policy snapshot: %w", err)
 	}
 	return nil
@@ -675,12 +701,14 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		return ConfigSnapshot{}, err
 	}
 	applyExternalAuthSnapshotSettings(snap)
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		return ConfigSnapshot{}, err
+	var prepared *idpReplacement
+	if snap.IdPProfiles != nil {
+		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
+		if err != nil {
+			return ConfigSnapshot{}, err
+		}
 	}
-	snapForApply := snap
-	snapForApply.IdPProfiles = nil
-	if err := applyConfigSnapshot(snapForApply); err != nil {
+	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
 		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config snapshot: %w", err)
 	}
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
@@ -701,25 +729,26 @@ func mergeCPAddresses(primary string, peers []string) string {
 	return strings.Join(addrs, ",")
 }
 
-func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
+func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) error {
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
 		logger.Printf("DataPlane: last-known-good config marshal failed: %v", err)
-		return
+		return err
 	}
 	path := dpLastGoodConfigSnapshotPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
 		logger.Printf("DataPlane: last-known-good config mkdir failed: %v", err)
-		return
+		return err
 	}
 	if err := atomicWriteFile(path, data, 0o600); err != nil {
 		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
 		logger.Printf("DataPlane: last-known-good config persist failed: %v", err)
-		return
+		return err
 	}
 	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	return nil
 }
 
 func setDPLastGoodConfigSnapshotSaveError(version int64, err error) {

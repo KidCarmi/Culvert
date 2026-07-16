@@ -187,6 +187,10 @@ func TestApplyHABundlePolicySaveFailureDoesNotReportSuccess(t *testing.T) {
 	origStore := globalClusterStore
 	t.Cleanup(func() { globalClusterStore = origStore })
 	globalClusterStore = newTestClusterStore(t)
+	beforeCluster, err := globalClusterStore.ExportState()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	path := filepath.Join(t.TempDir(), "policy.json")
 	policyStore.path = path
@@ -202,6 +206,16 @@ func TestApplyHABundlePolicySaveFailureDoesNotReportSuccess(t *testing.T) {
 
 	if applyHABundle(bundle, "token") {
 		t.Fatal("HA bundle reported success after policy metadata publication failed")
+	}
+	if len(policyStore.List()) != 0 {
+		t.Fatal("HA policy persistence failure published replicated policy in memory")
+	}
+	afterCluster, err := globalClusterStore.ExportState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeCluster, afterCluster) {
+		t.Fatal("HA policy persistence failure partially applied cluster state")
 	}
 }
 

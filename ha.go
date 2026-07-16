@@ -17,6 +17,8 @@ import (
 	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/halease"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ── Control Plane High Availability ─────────────────────────────────────────
@@ -489,12 +491,37 @@ func (s *standbyLoopState) syncOnce() {
 		s.setFail(s.failCount + 1)
 		return
 	}
-	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
+	ok, leaderReachable := s.h.syncFromLeader(s.ctx, s.client, s.token)
+	switch {
+	case ok:
 		s.setFail(0)
 		s.manualWarned = false
-	} else {
+	case leaderReachable:
+		s.setFail(0)
+	default:
 		s.setFail(s.failCount + 1)
 	}
+}
+
+// handleSyncResult classifies an attempted sync. A valid RPC response proves the
+// leader is reachable even when local validation or persistence rejects it.
+func (s *standbyLoopState) handleSyncResult(ok, leaderReachable bool) bool {
+	if ok {
+		s.setFail(0)
+		s.manualWarned = false // leader recovered — re-arm the warning
+		return false
+	}
+	if leaderReachable {
+		s.setFail(0)
+		logger.Printf("HA: leader reachable but state sync was rejected locally")
+		return false
+	}
+	if s.ctx.Err() != nil {
+		return true
+	}
+	s.setFail(s.failCount + 1)
+	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
+	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
 }
 
 // tick runs one loop iteration: reconnect if needed, then sync. Returns true
@@ -509,21 +536,8 @@ func (s *standbyLoopState) tick() bool {
 		}
 		s.client = c
 	}
-	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
-		s.setFail(0)
-		s.manualWarned = false // leader recovered — re-arm the warning
-		return false
-	}
-	if s.ctx.Err() != nil {
-		// The loop is being stopped (stopCh watcher cancelled the context) —
-		// the aborted RPC is shutdown, NOT evidence of a dead leader. Counting
-		// it could manufacture the third failure and trip onMaxFail into a
-		// promotion (role flip + lease grab) on a node that is going away.
-		return true
-	}
-	s.setFail(s.failCount + 1)
-	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
-	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+	ok, leaderReachable := s.h.syncFromLeader(s.ctx, s.client, s.token)
+	return s.handleSyncResult(ok, leaderReachable)
 }
 
 // warnManualFailoverRequired logs and alerts that the leader is unreachable
@@ -543,28 +557,30 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 }
 
 // syncFromLeader calls HASync on the leader and applies the state bundle.
-func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) bool {
+// leaderReachable distinguishes a local rejection from transport failure so
+// local disk/config faults cannot trigger automatic promotion.
+func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (ok, leaderReachable bool) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
 	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
 	raw, err := client.call(ctx, methodHASync, json.RawMessage(reqBytes))
 	if err != nil {
 		logger.Printf("HA: HASync RPC error: %v", err)
-		return false
+		return false, haRPCErrorProvesReachability(err)
 	}
 
 	var bundle HAStateBundle
 	if err := json.Unmarshal(raw, &bundle); err != nil {
 		logger.Printf("HA: parse state bundle error: %v", err)
-		return false
+		return false, true
 	}
 	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
 	// epoch against our own lease backend BEFORE any import. A zombie
 	// leader serving stale state must not reach ImportFullState.
 	if !h.verifyBundleEpoch(bundle.Epoch) {
-		return false
+		return false, true
 	}
-	ok := applyHABundle(&bundle, token)
+	ok = applyHABundle(&bundle, token)
 	if ok {
 		h.markSyncOK() // ADR-0005 S4: freshness-gate input
 		// Seed the standby's epoch from the leader's term (ADR-0004 Slice 1c/1e,
@@ -584,7 +600,18 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
 		h.promote("planned handoff requested by leader")
 	}
-	return ok
+	return ok, true
+}
+
+func haRPCErrorProvesReachability(err error) bool {
+	switch status.Code(err) {
+	case codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument,
+		codes.FailedPrecondition, codes.AlreadyExists, codes.NotFound,
+		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted:
+		return true
+	default:
+		return false
+	}
 }
 
 // seedTermFromLeader raises this standby's epoch to the leader's term (never
@@ -618,6 +645,18 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// if a downstream apply step below fails — a higher floor never harms DPs.
 	noteReplicatedLeaderVersion(bundle.Version)
 
+	// Validate cluster bytes before any replicated state mutates. ImportFullState
+	// has no remaining failure path after this parse succeeds.
+	if len(bundle.ClusterState) == 0 {
+		logger.Printf("HA: cluster state missing from bundle")
+		return false
+	}
+	var probe ClusterState
+	if err := json.Unmarshal(bundle.ClusterState, &probe); err != nil {
+		logger.Printf("HA: validate cluster state failed: %v", err)
+		return false
+	}
+
 	if bundle.CACertPEM != "" {
 		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
 			logger.Printf("HA: apply replicated CA failed (no state imported): %v", err)
@@ -625,16 +664,18 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 		}
 	}
 
-	// Apply cluster state (only after the CA has been validated + applied).
-	if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
-		logger.Printf("HA: import cluster state error: %v", err)
-		return false
-	}
-
-	// Apply config snapshot.
+	// Apply config before cluster state. Policy persistence is the only new
+	// fail-returning path in this slice; a failure must leave cluster state old.
 	if err := applyConfigSnapshot(bundle.Config); err != nil {
 		logger.Printf("HA: apply config snapshot error: %v", err)
 		return false
+	}
+
+	if len(bundle.ClusterState) > 0 {
+		if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
+			logger.Printf("HA: import prevalidated cluster state error: %v", err)
+			return false
+		}
 	}
 
 	return true

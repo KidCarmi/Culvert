@@ -12,12 +12,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // draftTestSetup isolates the running store, the config-version dir, the
@@ -66,9 +69,6 @@ func countConfigVersions(action string) int {
 // immediately, writes a per-edit config version, and opens no draft.
 func TestDraft_OffMode_LiveWrite(t *testing.T) {
 	draftTestSetup(t)
-	if policyWriteStore("actor") != policyStore {
-		t.Fatal("off-mode policyWriteStore must be the running store")
-	}
 	before := countConfigVersions("policy.add")
 	if w := createRuleViaAPI(t, "live-rule", ""); w.Code != http.StatusOK {
 		t.Fatalf("create = %d (%s)", w.Code, w.Body.String())
@@ -102,10 +102,76 @@ func TestDraft_OffMode_SaveFailureReturns500WithoutConfigVersion(t *testing.T) {
 	if countConfigVersions("policy.add") != before {
 		t.Fatal("failed durable policy save wrote a policy.add config version")
 	}
+	if len(policyStore.List()) != 0 {
+		t.Fatal("failed durable policy save published the rule in memory")
+	}
 	for _, entry := range auditGet() {
 		if entry.Action == "policy.add" && entry.Object == "not-durable" {
 			t.Fatal("failed durable policy save emitted a success-shaped policy.add audit")
 		}
+	}
+}
+
+func TestDraft_StagePersistenceFailureDoesNotPublishOrAudit(t *testing.T) {
+	draftTestSetup(t)
+	resetAuditLog()
+	t.Cleanup(resetAuditLog)
+	setRequireCommit(true)
+	policyDraft.mu.Lock()
+	policyDraft.path = t.TempDir() // AtomicWrite cannot replace a directory.
+	policyDraft.mu.Unlock()
+
+	w := createRuleViaAPI(t, "not-staged", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("stage with failed persistence = %d, want 500", w.Code)
+	}
+	if policyDraft.active() || len(policyDraft.candidateList()) != 0 {
+		t.Fatal("failed staged write remained active in memory")
+	}
+	for _, entry := range auditGet() {
+		if entry.Action == "policy.add" && entry.Object == "not-staged" {
+			t.Fatal("failed staged write emitted success audit")
+		}
+	}
+}
+
+func TestDraft_CommitSerializesWithStagedMutation(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		_, err := mutatePolicy("editor", func(store *PolicyStore) error {
+			close(entered)
+			<-release
+			store.Add(PolicyRule{Name: "concurrent", Action: ActionAllow})
+			return nil
+		})
+		mutationDone <- err
+	}()
+	<-entered
+
+	commitDone := make(chan error, 1)
+	go func() {
+		_, err := policyDraft.commit(nil)
+		commitDone <- err
+	}()
+	select {
+	case err := <-commitDone:
+		t.Fatalf("commit bypassed in-flight staged mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-mutationDone; err != nil {
+		t.Fatalf("staged mutation: %v", err)
+	}
+	if err := <-commitDone; err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	rules := policyStore.List()
+	if len(rules) != 1 || rules[0].Name != "concurrent" {
+		t.Fatalf("committed rules = %#v", rules)
 	}
 }
 
@@ -522,6 +588,94 @@ func TestDraft_GetState(t *testing.T) {
 	}
 	if pc, _ := resp["pendingCount"].(float64); pc != 1 {
 		t.Errorf("pendingCount = %v, want 1", resp["pendingCount"])
+	}
+}
+
+func TestPolicyMutateExpectedVersionIsAtomic(t *testing.T) {
+	ps := &PolicyStore{path: filepath.Join(t.TempDir(), "policy.json")}
+	if err := ps.ReplaceAllAndSave([]PolicyRule{{Name: "base", Action: ActionAllow}}); err != nil {
+		t.Fatal(err)
+	}
+	_, version := ps.snapshotWithVersion()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			<-start
+			results <- ps.MutateAndSaveAtVersion(&version, func(candidate *PolicyStore) error {
+				candidate.Add(PolicyRule{Name: fmt.Sprintf("writer-%d", i), Action: ActionAllow})
+				return nil
+			})
+		}()
+	}
+	close(start)
+	successes, conflicts := 0, 0
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, errPolicyVersionConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected mutation error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want one each", successes, conflicts)
+	}
+}
+
+func TestDraftRevertSerializesWithStagedMutation(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		mutationDone <- policyDraft.mutateAndPersist("editor", nil, func(candidate *PolicyStore) error {
+			close(entered)
+			<-release
+			candidate.Add(PolicyRule{Name: "staged", Action: ActionAllow})
+			return nil
+		})
+	}()
+	<-entered
+	revertDone := make(chan error, 1)
+	go func() {
+		_, err := policyDraft.revert()
+		revertDone <- err
+	}()
+	select {
+	case err := <-revertDone:
+		t.Fatalf("revert interleaved with staged mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-mutationDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-revertDone; err != nil {
+		t.Fatal(err)
+	}
+	if policyDraft.active() {
+		t.Fatal("serialized revert left draft active")
+	}
+}
+
+func TestDraftRevertTombstoneFailureRetainsDraft(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	createRuleViaAPI(t, "pending", "")
+	policyDraft.mu.Lock()
+	policyDraft.path = filepath.Join(t.TempDir(), "missing", "policy_draft.json")
+	policyDraft.mu.Unlock()
+	if _, err := policyDraft.revert(); err == nil {
+		t.Fatal("expected durable tombstone failure")
+	}
+	if !policyDraft.active() {
+		t.Fatal("failed revert cleared in-memory draft")
 	}
 }
 

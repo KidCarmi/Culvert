@@ -348,31 +348,56 @@ func (r *IdPRegistry) All() []*IdPProfile {
 	return cloneIdPProfiles(r.profiles)
 }
 
-// ReplaceAll atomically swaps the registry to match profiles. Enabled
-// providers are compiled before the swap so callers never observe a
-// half-applied IdP snapshot.
-func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
+type idpReplacement struct {
+	profiles []*IdPProfile
+	live     map[string]IdentityProvider
+}
+
+func prepareIdPReplacement(profiles []*IdPProfile) (*idpReplacement, error) {
 	nextProfiles := cloneIdPProfiles(profiles)
 	nextLive := make(map[string]IdentityProvider)
 	for _, p := range nextProfiles {
 		if err := validateIdPProfile(p); err != nil {
-			return err
+			return nil, err
 		}
 		if !p.Enabled {
 			continue
 		}
 		prov, err := compileIdPProfile(p)
 		if err != nil {
-			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
+			return nil, fmt.Errorf("idp %q compile error: %w", p.ID, err)
 		}
 		nextLive[p.ID] = prov
 	}
+	return &idpReplacement{profiles: nextProfiles, live: nextLive}, nil
+}
 
+func (r *IdPRegistry) applyReplacement(next *idpReplacement) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.profiles = nextProfiles
-	r.live = nextLive
-	return r.save()
+	if r.path == "" {
+		logger.Printf("IdP: WARNING — profile change is in-memory only and will be LOST on restart; set -idp-profiles-file (or proxy.idp_profiles_file) to persist")
+	} else {
+		data, err := json.MarshalIndent(next.profiles, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := atomicWriteFile(r.path, data, 0o600); err != nil {
+			return err
+		}
+	}
+	r.profiles = next.profiles
+	r.live = next.live
+	return nil
+}
+
+// ReplaceAll compiles and persists a complete replacement before the live swap.
+func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
+	next, err := prepareIdPReplacement(profiles)
+	if err != nil {
+		return err
+	}
+	return r.applyReplacement(next)
 }
 
 // validateReservedIdPNaming rejects IdP profile IDs and names that collide with

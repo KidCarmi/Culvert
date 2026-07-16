@@ -79,8 +79,20 @@ func TestDPConfigPolicySaveFailureDoesNotAdvanceVersionOrLastGood(t *testing.T) 
 	if err := os.Mkdir(policyPath+".meta", 0o700); err != nil {
 		t.Fatal(err)
 	}
+	beforeConfig := globalConfigStore.Get()
+	beforeBaseURL := cfg.ProxyBaseURL()
+	beforeTrust := trustForwardedHeaders
+	t.Cleanup(func() {
+		SetProxyBaseURL(beforeBaseURL)
+		trustForwardedHeaders = beforeTrust
+	})
+	SetProxyBaseURL("https://old-proxy.example")
+	trustForwardedHeaders = false
+	bl.Add("old-state.example")
 	snap := ConfigSnapshot{
-		Version: 2,
+		Version:      2,
+		ProxyBaseURL: "https://must-not-apply.example",
+		BlockedHosts: []string{"must-not-apply.example"},
 		PolicyRules: []PolicyRule{{
 			Priority: 1,
 			Name:     "not-durable",
@@ -108,6 +120,43 @@ func TestDPConfigPolicySaveFailureDoesNotAdvanceVersionOrLastGood(t *testing.T) 
 	}
 	if _, err := os.Stat(dpLastGoodConfigSnapshotPath()); !os.IsNotExist(err) {
 		t.Fatalf("failed policy save persisted a last-known-good snapshot: %v", err)
+	}
+	if got := globalConfigStore.Get(); got.ProxyBaseURL != beforeConfig.ProxyBaseURL {
+		t.Fatalf("failed policy save partially applied config store: %q", got.ProxyBaseURL)
+	}
+	if !bl.IsBlocked("old-state.example") || bl.IsBlocked("must-not-apply.example") {
+		t.Fatal("policy persistence failure partially applied blocklist state")
+	}
+	if got := cfg.ProxyBaseURL(); got != "https://old-proxy.example" || trustForwardedHeaders {
+		t.Fatalf("policy persistence failure partially applied external auth: base=%q trust=%v", got, trustForwardedHeaders)
+	}
+}
+
+func TestDPLastGoodPersistFailureDoesNotAdvanceVersionOrHealth(t *testing.T) {
+	setupProxyTest(t)
+	withDPLastGoodConfigTestGlobals(t)
+	restoreEpoch := resetDPLastSeenEpochForTest()
+	defer restoreEpoch()
+	origPollFailing := dpControlPlanePollFailing.Load()
+	dpControlPlanePollFailing.Store(false)
+	defer dpControlPlanePollFailing.Store(origPollFailing)
+	if err := os.Mkdir(dpLastGoodConfigSnapshotPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snap := ConfigSnapshot{Version: 2, BlockedHosts: []string{"applied-but-not-last-good.example"}}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &DataPlaneClient{lastVersion: 1, callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		return raw, nil
+	}}
+	client.fetchAndApply(t.Context())
+	if client.lastVersion != 1 {
+		t.Fatalf("lastVersion=%d, want retryable version 1", client.lastVersion)
+	}
+	if !dpControlPlanePollFailing.Load() {
+		t.Fatal("last-good persistence failure reported healthy polling")
 	}
 }
 
