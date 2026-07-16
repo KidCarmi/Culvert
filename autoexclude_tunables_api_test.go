@@ -6,6 +6,7 @@ package main
 // rollback, no runtime/disk divergence).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
 )
@@ -210,6 +212,33 @@ func TestTunablesAPI_PUT_PersistFailurePreservesEntries(t *testing.T) {
 	if got := c.Len(); got != seeded {
 		t.Fatalf("persist failure evicted %d learned entries (active=%d, want %d) — persist-before-apply must not touch the cache",
 			seeded-got, got, seeded)
+	}
+}
+
+// TestTunablesAPI_PUT_RecordsAuditEntry pins that a successful admin PUT emits the
+// "decryption.autoexclude.tunables" audit entry with the old→new diff — the route
+// metadata declares AuditExpected=true, and an admin control that mutates a
+// security-relevant parameter must be attributable. Saturation-tolerant content scan
+// (unique TEST-NET-2 actor + baseline TS), not a len() delta — see
+// security_feedsync_audit_test.go and the CLAUDE.md audit-ring pitfall.
+func TestTunablesAPI_PUT_RecordsAuditEntry(t *testing.T) {
+	swapAutoExclude(t, autoexclude.Config{}) // defaults ⇒ customTunables is a real change (non-empty diff)
+	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "admin_settings.json"))
+
+	baselineTS := time.Now().UnixMilli()
+
+	b, _ := json.Marshal(customTunables)
+	req := httptest.NewRequestWithContext(
+		context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin),
+		http.MethodPut, "/api/decryption-exclusions/tunables", bytes.NewReader(b))
+	req.RemoteAddr = "198.51.100.60:0" // unique TEST-NET-2 actor IP
+	rec := httptest.NewRecorder()
+	apiDecryptionExclusionTunables(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT: got %d, want 200 (%s)", rec.Code, rec.Body)
+	}
+	if !hasMatchingAuditEntry(auditGet(), "198.51.100.60", "decryption.autoexclude.tunables", "tunables", baselineTS) {
+		t.Fatalf("no audit entry recorded (Actor=198.51.100.60 Action=decryption.autoexclude.tunables Object=tunables TS>=%d)", baselineTS)
 	}
 }
 

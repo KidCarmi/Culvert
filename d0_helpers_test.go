@@ -17,7 +17,7 @@ import (
 // docs/UI_REFACTOR_AUDIT.md §6 (Phase D).
 //
 // Invariants covered:
-//   D0a (this file)              — route inventory locked at 133
+//   D0a (this file)              — route inventory locked (see `const want`)
 //   d0_auth_safety_test.go        — public stays public; non-public → 401
 //   d0_rbac_safety_test.go        — admin-only handlers reject viewer+operator
 //   d0_mutation_safety_test.go    — CSRF, body limit, rate limit on mutations
@@ -119,7 +119,9 @@ var d0KnownRoutes = func() []string {
 // admin-UI route surface. After Phase C1 it enforces two invariants
 // against d0KnownRoutes (now derived from uiRoutes):
 //
-//  1. d0KnownRoutes contains exactly 141 entries (count locked).
+//  1. d0KnownRoutes contains exactly 142 entries (count locked; see `want` below
+//     and the Count history — the function name is a stable identifier kept across
+//     count bumps, the `const want` is the live lock).
 //  2. Every entry resolves through the wired mux to a non-empty pattern.
 //
 // Count history:

@@ -223,6 +223,11 @@ rollback, or Control-Plane→Data-Plane sync.
 - Changing a value applies immediately and does **not** wipe the current entries;
   new values take effect for **future** promotions (already-active exclusions keep
   their current expiry).
+- **Exception — lowering `max_entries` below the current active count.** This is the
+  one change that *does* drop entries: the cache immediately evicts the
+  least-recently-learned exclusions down to the new cap. Those hosts are re-inspected
+  again (a visible inspection-coverage change) and may re-learn if still incompatible.
+  Lowering the cap is safe; just expect a one-time coverage bump for the evicted hosts.
 - **Applying vs. persisting.** A change is written to durable storage *first*, then
   applied to the live cache. If the durable write fails, the live cache is left
   untouched (no entries are evicted) and the change is rejected with `500` — runtime
@@ -232,13 +237,51 @@ rollback, or Control-Plane→Data-Plane sync.
   read endpoint below returns only the defaults and bounds (to populate the form),
   never the live values.
 
+**How to change a value (admin):**
+
+1. Open the **Decryption Exclusions** panel → the **Cache Tuning** section. It is
+   **admin-only** — viewers and operators do not see it (the server also rejects a
+   non-admin write, so the hidden UI is convenience, not the security boundary).
+2. Each field's effect and range are in the table above; the inputs are pre-filled
+   with the **current effective values** (read from the status line — the single
+   source of truth) and show each field's range and default.
+3. Edit the field(s) and click **Save**. The change **applies immediately** and does
+   **not** wipe the learned entries; new values take effect for future promotions.
+4. Tunables are **per node** — repeat on each node. They are not synced Control
+   Plane → Data Plane.
+5. **Reset to defaults** restores all five parameters to their built-in defaults in
+   one action.
+
+**When to tune (use cases):**
+
+- **Hostile / untrusted / broad unauthenticated client population** → **raise
+  `confirm_n`** (e.g. 3–4) and/or **shorten `window_secs`**. Harder for a few clients
+  to poison a host into a bypass. Trade-off: a genuine fleet-wide incompatibility
+  promotes more slowly (more first-session failures before it self-heals).
+- **Flaky / short-lived origin incompatibility** → **shorten `ttl_secs`** (and
+  `pinned_ttl_secs`). The host is re-inspected sooner once the origin is fixed.
+  Trade-off: more re-learn churn and transient failures while it is still broken.
+- **High-assurance / inspection-mandatory posture** → **lower `ttl_secs`** so
+  re-inspection happens sooner, shrinking the window an exclusion keeps inspection
+  dark. Trade-off: more frequent re-learning load. (Truly inspection-mandatory hosts
+  belong on a **fail-close** rule — which never learns — not on a tuned fail-open one.)
+- **Memory pressure / very large fleet of learned hosts** → **adjust `max_entries`**
+  to bound worst-case memory. Trade-off: lowering it below the current active count
+  immediately evicts the oldest entries (see the coverage note above).
+- **Large legitimate BYOD / pinned-app population that learns slowly** → **lengthen
+  `window_secs`** so distinct-client evidence has more time to accumulate (fewer
+  missed promotions). Trade-off: a slow-drip poisoning attempt has longer to reach
+  the confirm-count.
+
 **API:**
 
 - `GET /api/decryption-exclusions/tunables` (viewer) — defaults + bounds + schema.
 - `PUT /api/decryption-exclusions/tunables` (admin) — a full replacement of the five
   fields; an omitted or zero field resets to its default. The server validates the
   merged effective set (bounds + `pinned_ttl_secs ≤ ttl_secs`) and rejects an
-  out-of-range set with `400`. **Reset to defaults** is a `PUT` of an empty body.
+  out-of-range set with `400`. **Reset to defaults** is a `PUT` of `{}` (an empty
+  JSON object — every field then resets to its default; a zero-length body is not
+  valid JSON and is rejected).
 
 ### Metrics
 
