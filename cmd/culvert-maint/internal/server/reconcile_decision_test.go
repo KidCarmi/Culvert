@@ -184,6 +184,24 @@ func TestReconcileDecision_TagAdvancedWhileOnPrior(t *testing.T) {
 	}
 }
 
+// TestSameImage_ConfigDigestPrefixRobust: the record may store a config digest
+// in the sha256: form while a live capture is compared with or without it —
+// sameImage must match either way (so storage format never breaks the ==).
+func TestSameImage_ConfigDigestPrefixRobust(t *testing.T) {
+	if !sameImage("sha256:"+imgTarget, imgTarget, nil, nil) {
+		t.Error("prefixed vs stripped config digest should match")
+	}
+	if !sameImage("sha256:"+imgTarget, "sha256:"+imgTarget, nil, nil) {
+		t.Error("prefixed vs prefixed config digest should match")
+	}
+	if sameImage("sha256:"+imgTarget, "sha256:"+imgPrior, nil, nil) {
+		t.Error("different config digests must not match")
+	}
+	if sameImage("", "", nil, nil) {
+		t.Error("two empty images must not match (no basis)")
+	}
+}
+
 func TestReconcileDecision_SafeBoundary(t *testing.T) {
 	// Genuine safe boundary: target not live, tag not on target → noop.
 	in := base()

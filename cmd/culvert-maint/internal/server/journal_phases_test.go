@@ -33,12 +33,14 @@ func TestAdvanceJournalPhase_FoldsIdentifiers(t *testing.T) {
 	seedAdmitted(t, jnl, started)
 
 	acc := &upgradeApplyAccumulator{
-		opID:         testOpULID,
-		actor:        "cp",
-		priorRef:     repo + "@sha256:" + digOld,
-		priorDigests: []string{"sha256:" + digOld},
-		pinnedRef:    repo + "@sha256:" + digNew,
-		pinnedDigest: "sha256:" + digNew,
+		opID:           testOpULID,
+		actor:          "cp",
+		priorRef:       repo + "@sha256:" + digOld,
+		priorDigests:   []string{"sha256:" + digOld},
+		pinnedRef:      repo + "@sha256:" + digNew,
+		pinnedDigest:   "sha256:" + digNew,
+		priorImageID:   "sha256:" + cfgOld,
+		runningAfterID: "sha256:" + cfgNew,
 	}
 	found, err := srv.advanceJournalPhase(acc, journal.PhaseResolved)
 	if err != nil {
@@ -59,6 +61,10 @@ func TestAdvanceJournalPhase_FoldsIdentifiers(t *testing.T) {
 	}
 	if rec.PriorRef != acc.priorRef || rec.PriorDigest != digOld {
 		t.Errorf("prior ref=%q digest=%q, want %q / %s", rec.PriorRef, rec.PriorDigest, acc.priorRef, digOld)
+	}
+	// Class-invariant config digests are folded (stored in the sha256: form).
+	if rec.PriorImageID != "sha256:"+cfgOld || rec.TargetImageID != "sha256:"+cfgNew {
+		t.Errorf("config digests prior=%q target=%q, want sha256:%s / sha256:%s", rec.PriorImageID, rec.TargetImageID, cfgOld, cfgNew)
 	}
 	// Immutable admission fields preserved; UpdatedAt advanced.
 	if !rec.StartedAt.Equal(started) {

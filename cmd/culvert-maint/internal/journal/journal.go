@@ -56,21 +56,32 @@ var validPhases = map[Phase]struct{}{
 }
 
 // Record is the durable per-op journal entry. One file per live op at
-// <reconcileDir>/<op_id>.json. Digests are bare sha256 hex; refs are
+// <reconcileDir>/<op_id>.json. Manifest digests are bare sha256 hex; refs are
 // repo@sha256:<digest>. All fields are plain data — no secrets (params never
 // reach the journal).
+//
+// TargetImageID/PriorImageID are the image CONFIG digests (the `sha256:…` form
+// `docker inspect .Image` reports). They are the class-INVARIANT identity of an
+// image — identical whether the image was pulled by tag (manifest-LIST digest)
+// or by per-platform digest — so PR-E reconcile keys "is the target/prior live?"
+// on them, avoiding the false-rollback that a manifest-digest-only comparison
+// suffers across the seed/tag-pull vs digest-pull lineage (design §0 P0-A/B).
+// They MUST be captured at apply time (a crashed op's prior config digest cannot
+// be reconstructed afterward), which is why they live in the record.
 type Record struct {
-	OpID         string    `json:"op_id"`
-	Kind         string    `json:"kind"`                    // "upgrades.apply" | "rollbacks.create"
-	Mode         string    `json:"mode,omitempty"`          // "" | "image" | "data" (rollbacks.create)
-	Phase        Phase     `json:"phase"`                   // write-ahead state
-	TargetRef    string    `json:"target_ref,omitempty"`    // repo@sha256:<digest> we move TO
-	TargetDigest string    `json:"target_digest,omitempty"` // bare sha256
-	PriorRef     string    `json:"prior_ref,omitempty"`     // repo@sha256:<digest> rollback target
-	PriorDigest  string    `json:"prior_digest,omitempty"`  // bare sha256
-	Actor        string    `json:"actor,omitempty"`
-	StartedAt    time.Time `json:"started_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	OpID          string    `json:"op_id"`
+	Kind          string    `json:"kind"`                      // "upgrades.apply" | "rollbacks.create"
+	Mode          string    `json:"mode,omitempty"`            // "" | "image" | "data" (rollbacks.create)
+	Phase         Phase     `json:"phase"`                     // write-ahead state
+	TargetRef     string    `json:"target_ref,omitempty"`      // repo@sha256:<digest> we move TO
+	TargetDigest  string    `json:"target_digest,omitempty"`   // bare sha256 (manifest)
+	TargetImageID string    `json:"target_image_id,omitempty"` // sha256:<hex> image config digest (class-invariant)
+	PriorRef      string    `json:"prior_ref,omitempty"`       // repo@sha256:<digest> rollback target
+	PriorDigest   string    `json:"prior_digest,omitempty"`    // bare sha256 (manifest)
+	PriorImageID  string    `json:"prior_image_id,omitempty"`  // sha256:<hex> image config digest (class-invariant)
+	Actor         string    `json:"actor,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 const (

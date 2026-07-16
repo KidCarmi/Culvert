@@ -42,6 +42,16 @@ func foldIdentifiers(rec *journal.Record, acc *upgradeApplyAccumulator) {
 			rec.PriorDigest = strings.TrimPrefix(acc.priorDigests[0], "sha256:")
 		}
 	}
+	// Class-invariant image config digests (design §0 P0-A/B). Captured
+	// incrementally: priorImageID at capture_before, the target's config digest
+	// (runningAfterID) only after the post-restart verify. Stored in the `sha256:`
+	// form docker reports so it compares directly to a live capture.
+	if acc.priorImageID != "" {
+		rec.PriorImageID = acc.priorImageID
+	}
+	if acc.runningAfterID != "" {
+		rec.TargetImageID = acc.runningAfterID
+	}
 }
 
 // advanceJournalPhase read-modify-writes the in-flight op's record to `phase`,
