@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -60,12 +62,16 @@ func TestKillProcGroup_ReapsGrandchild(t *testing.T) {
 	}
 	_ = cmd.Wait()
 
-	// The grandchild must be gone (ESRCH) within a short grace period.
+	// The grandchild must be gone within a short grace period. NOTE: after the
+	// group kill the grandchild's parent (the sh leader) is dead too, so the
+	// grandchild is reparented and becomes a ZOMBIE until PID 1 reaps it — and
+	// kill(pid,0) succeeds for a zombie. In container CI the test is not the
+	// reaper, so we must treat zombie state as gone, not just ESRCH.
 	gone := false
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(gcPID, 0); err != nil {
-			gone = true // ESRCH — no such process
+		if procGone(gcPID) {
+			gone = true
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -84,6 +90,35 @@ func TestSetProcGroup_SetsPgid(t *testing.T) {
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
 		t.Fatal("setProcGroup must set SysProcAttr.Setpgid=true on linux")
 	}
+}
+
+// procGone reports whether pid is no longer a live process. It is gone if the
+// PID is unknown (ESRCH) OR it is a reaped-but-unwaited ZOMBIE — kill(pid,0)
+// keeps succeeding for a zombie until PID 1 reaps it, which does not happen
+// promptly when the test is not the reaper (container CI), so the /proc state
+// is the authoritative signal.
+func procGone(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil {
+		return true // ESRCH — no such process
+	}
+	return procIsZombie(pid)
+}
+
+// procIsZombie parses /proc/<pid>/stat and reports whether the process state is
+// Z (zombie). A missing /proc entry means it was already reaped → gone.
+func procIsZombie(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat") //nolint:gosec // test-controlled pid
+	if err != nil {
+		return true // /proc entry gone → reaped
+	}
+	// Format: "pid (comm) STATE ...". comm may contain spaces/parens, so the
+	// state is the first field after the LAST ')'.
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return false
+	}
+	return s[i+2] == 'Z'
 }
 
 // fmtSscanPID parses a decimal PID (avoids importing fmt just for Sscan in the
