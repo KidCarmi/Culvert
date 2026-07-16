@@ -542,3 +542,47 @@ func TestCloneLocked_DeepCopiesNested(t *testing.T) {
 		t.Errorf("nested slice aliased: live list[0]=%v, want a", got)
 	}
 }
+
+// TestPurgeActive_RetainsKeyedThroughIdempTTL pins the Codex P1 fix: a keyed
+// terminal op must survive past activeRetention as long as its idempotency entry
+// is live (up to idempCacheTTL), so a retry within the dedupe window returns the
+// completed op instead of re-running a destructive operation.
+func TestPurgeActive_RetainsKeyedThroughIdempTTL(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	// Short activeRetention (30m), long idempotency TTL (24h default).
+	m := NewManager(func() time.Time { return now })
+	m.activeRetention = 30 * time.Minute
+
+	op, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "retry-key", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Finish(op.ID, StateSucceeded, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Past activeRetention but well within the 24h idempotency TTL.
+	now = now.Add(2 * time.Hour)
+	// A retry with the SAME key must dedupe to the original completed op, NOT
+	// admit a fresh one (the purge triggered by this call must not have reaped it).
+	got, deduped, err := m.BeginIdempotent(KindBackupList, "uid=1", "retry-key", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deduped {
+		t.Fatal("keyed retry within idempotency TTL must dedupe, not re-admit")
+	}
+	if got.ID != op.ID {
+		t.Errorf("dedupe returned a different op: got %s, want %s", got.ID, op.ID)
+	}
+	if got.State != StateSucceeded {
+		t.Errorf("deduped op state = %q, want succeeded (the completed result)", got.State)
+	}
+	// Once the idempotency entry ages out (>24h), the op becomes reapable.
+	now = now.Add(25 * time.Hour)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "other-key", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Get(op.ID) != nil {
+		t.Error("op should be reaped once its idempotency entry has expired")
+	}
+}

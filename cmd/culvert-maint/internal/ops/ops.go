@@ -434,20 +434,51 @@ func (m *Manager) purgeActiveLocked() {
 	if len(m.active) == 0 {
 		return
 	}
+	// Ops still referenced by a LIVE idempotency entry must be retained for the
+	// full idempotency-cache TTL, NOT just activeRetention. Otherwise a keyed
+	// retry arriving after activeRetention (1h) but before idempCacheTTL (24h)
+	// would find its cache entry pointing at a reaped op, treat it as dangling,
+	// and re-admit a FRESH op — re-running a destructive restore/upgrade/rollback
+	// the CP expected to be deduped within the 24h window. In BeginIdempotent the
+	// caller purges expired idemp entries first, so `referenced` holds only ops
+	// inside their dedupe window; the op is reaped on a later pass once its entry
+	// ages out. Unkeyed ops are never in the cache → reaped at activeRetention.
+	referenced := m.idempReferencedLocked()
 	cutoff := m.now().Add(-m.activeRetention)
 	for id, op := range m.active {
+		if _, keep := referenced[id]; keep {
+			continue
+		}
 		if op.State.IsTerminal() && op.Finished != nil && op.Finished.Before(cutoff) {
 			delete(m.active, id)
 		}
 	}
-	if m.maxActive <= 0 || len(m.active) <= m.maxActive {
-		return
+	if m.maxActive > 0 && len(m.active) > m.maxActive {
+		m.evictOverCapLocked(referenced)
 	}
-	// Still over the hard cap: evict oldest-finished terminal ops first. Running
-	// ops cannot be evicted, so the cap is best-effort if the overflow is all
-	// live work (admission control bounds concurrent read-only ops separately).
+}
+
+// idempReferencedLocked returns the set of op IDs currently pointed at by a live
+// idempotency-cache entry — the ops purgeActiveLocked must retain for the dedupe
+// window. Caller holds m.mu.
+func (m *Manager) idempReferencedLocked() map[string]struct{} {
+	referenced := make(map[string]struct{}, len(m.idempCache))
+	for _, e := range m.idempCache {
+		referenced[e.OpID] = struct{}{}
+	}
+	return referenced
+}
+
+// evictOverCapLocked evicts oldest-finished terminal ops that are NOT
+// idempotency-referenced, down to maxActive (dedupe correctness wins over the
+// soft cap; the idempCache is itself TTL-bounded, so referenced ops can't grow
+// without bound). Running ops are never evicted. Caller holds m.mu.
+func (m *Manager) evictOverCapLocked(referenced map[string]struct{}) {
 	terminal := make([]*Op, 0, len(m.active))
-	for _, op := range m.active {
+	for id, op := range m.active {
+		if _, keep := referenced[id]; keep {
+			continue
+		}
 		if op.State.IsTerminal() && op.Finished != nil {
 			terminal = append(terminal, op)
 		}
