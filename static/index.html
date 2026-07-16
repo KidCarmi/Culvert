@@ -579,6 +579,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="diagnostics" data-min-role="admin" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Diagnostics
     </div>
+    <div class="nav-item" data-view="support" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Support
+    </div>
     <div class="nav-item" data-view="settings" data-min-role="admin" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg> Settings
     </div>
@@ -3974,6 +3977,32 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-releases -->
 
+    <!-- ═══ SUPPORT (M1 supportability framework) ═════════════════════════ -->
+    <div class="view" id="view-support">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Support</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
+            <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px;display:grid;gap:16px">
+          <p class="hint">Diagnostic support bundles are <strong>redacted at source</strong> — secrets are dropped and identifiers masked before anything is written. Creating a bundle is admin-only; a standard bundle may contain internal (non-secret) operational detail.</p>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Collectors</div>
+            <div id="support-status"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Bundles</div>
+            <div id="support-bundles"><p class="hint">Loading…</p></div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-support -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -4340,6 +4369,8 @@ document.addEventListener('click', e => {
 
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
+    case 'loadSupport':            loadSupport(); break;
+    case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -4592,6 +4623,7 @@ const viewMeta = {
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
   governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
+  support:        { title: 'Support',         meta: 'Collect redacted diagnostic bundles and review the collector inventory' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -4667,6 +4699,7 @@ function switchView(name) {
   if (name === 'diagnostics')    loadDiagnostics();
   if (name === 'governance')     loadGovernance();
   if (name === 'releases')       loadReleases();
+  if (name === 'support')        loadSupport();
   if (name !== 'releases')       releaseStopStatusPoll(); // stop polling when leaving the panel
 }
 
@@ -11654,6 +11687,93 @@ function releaseCurrentAgent() {
 }
 function releaseAgentChange() { loadReleaseCurrent(); loadReleaseStatus(); }
 function releaseStopStatusPoll() { if (releaseStatusTimer) { clearTimeout(releaseStatusTimer); releaseStatusTimer = null; } }
+
+// ── Support (M1 supportability framework) ────────────────────────────────────
+let _supportBundles = [];
+const _supportLevelName = ['L0', 'L1', 'L2', 'L3', 'L4'];
+
+async function loadSupport() {
+  const statusEl = document.getElementById('support-status');
+  const bundlesEl = document.getElementById('support-bundles');
+  if (statusEl) statusEl.innerHTML = '<p class="hint">Loading…</p>';
+  if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Loading…</p>';
+  try {
+    renderSupportStatus(await api('/api/support/status'));
+  } catch (err) {
+    if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(err.message) + '</p>';
+  }
+  try {
+    _supportBundles = (await api('/api/support/bundles')) || [];
+    renderSupportBundles(_supportBundles);
+  } catch (err) {
+    if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderSupportStatus(s) {
+  const el = document.getElementById('support-status');
+  if (!el) return;
+  s = s || {};
+  const cols = s.collectors || [];
+  const hdr = '<p class="hint">Format <code>' + escHtml(String(s.bundle_format || '')) +
+    '</code> · engine v' + escHtml(String(s.collector_engine_version || '')) +
+    ' · redaction model v' + escHtml(String(s.redaction_model_version || '')) + '</p>';
+  if (!cols.length) { el.innerHTML = hdr + '<p class="hint">No collectors registered.</p>'; return; }
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Collector</th><th>Owner</th><th>Level</th><th>Max class</th><th>Mandatory</th></tr></thead><tbody>' +
+    cols.map(c => '<tr>' +
+      '<td style="font-family:monospace">' + escHtml(String(c.id)) + '</td>' +
+      '<td>' + escHtml(String(c.owner)) + '</td>' +
+      '<td>' + escHtml(_supportLevelName[c.min_level] || ('L' + c.min_level)) + '</td>' +
+      '<td>' + escHtml(String(c.max_class)) + '</td>' +
+      '<td>' + (c.mandatory ? 'yes' : 'no') + '</td>' +
+    '</tr>').join('') + '</tbody></table></div>';
+}
+
+function renderSupportBundles(list) {
+  const el = document.getElementById('support-bundles');
+  if (!el) return;
+  if (!list || !list.length) {
+    el.innerHTML = '<p class="hint">No bundles yet' + (uiRole === 'admin' ? ' — click “Create bundle” to collect one.' : '.') + '</p>';
+    return;
+  }
+  // Download requires operator+. data-min-role only re-applies at login, so gate
+  // dynamically-rendered links imperatively (server enforces regardless).
+  const canDownload = (uiRole === 'operator' || uiRole === 'admin');
+  el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Bundle</th><th>Created</th><th>Sections</th><th>Size</th><th></th></tr></thead><tbody>' +
+    list.map(b => {
+      const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
+        (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
+      const href = '/api/support/bundles/' + encodeURIComponent(String(b.bundle_id));
+      const dl = canDownload
+        ? '<a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>'
+        : '';
+      return '<tr>' +
+        '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
+        '<td>' + escHtml(String(b.created_at)) + '</td>' +
+        '<td>' + sections + '</td>' +
+        '<td>' + escHtml(fmtBytes(b.size_bytes)) + '</td>' +
+        '<td>' + dl + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+async function supportCreateBundle() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const btn = document.querySelector('[data-click="supportCreateBundle"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Collecting…'; }
+  try {
+    const man = await api('/api/support/bundles', { method: 'POST' });
+    toast('Bundle created: ' + String((man && man.bundle_id) || ''), 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Bundle create failed: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = prev; }
+  }
+}
 
 async function loadReleases() {
   await loadReleaseCatalog();
