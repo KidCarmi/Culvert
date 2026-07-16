@@ -241,16 +241,21 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedRef = requestedRef
 					acc.pinnedDigest = d
 				} else {
-					// Tag ref — resolve to a digest and build the pin.
-					// (Multi-arch caveat: manifest inspect --verbose reports
-					// per-platform descriptors, so this resolves to one of
-					// them; CP/GUI will send list digests — see D1.6c plan.)
-					if len(acc.targetDigests) == 0 {
-						return []byte("resolve_target: no digest resolved for tag " + requestedRef), res.Stderr,
-							errors.New("resolve_target: could not resolve a digest for tag " + requestedRef)
+					// Tag ref — resolve to a single, host-correct manifest
+					// descriptor digest STRUCTURALLY. We must NOT pick
+					// targetDigests[0]: extractDigests scrapes every sha256
+					// token from the verbose JSON (including layer/config
+					// blob digests inside the embedded manifest bodies), and
+					// a multi-arch image offers one descriptor per platform.
+					// resolveTargetManifestDigest reads Descriptor.digest and
+					// disambiguates by host platform, failing closed on any
+					// ambiguity rather than pinning an arbitrary digest.
+					pd, derr := resolveTargetManifestDigest(res.Stdout)
+					if derr != nil {
+						return []byte("resolve_target: " + derr.Error() + " for tag " + requestedRef), res.Stderr,
+							fmt.Errorf("resolve_target: %w", derr)
 					}
-					// targetDigests already carry the `sha256:` prefix.
-					acc.pinnedDigest = acc.targetDigests[0]
+					acc.pinnedDigest = pd
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
 				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
