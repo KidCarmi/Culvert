@@ -1,8 +1,8 @@
 # ADR-0008: Identity-gate the spoofable client-pinned decryption-exclusion evidence
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-07-13 — ratified: identity-gate the spoofable class) — implemented
 - **Date:** 2026-07-13
-- **Deciders:** Engineering Advisor (proposed); project maintainer (to ratify — this changes customer-facing behavior)
+- **Deciders:** Engineering Advisor (proposed); project maintainer (ratified the identity-gate direction)
 
 ## Context
 
@@ -42,13 +42,20 @@ This is a **behavior/customer-experience** decision, not a pure hardening fix, w
 ADR rather than a code change in the F1–F5 hardening sprint: any tightening changes which pinned apps
 auto-heal.
 
-## Decision (proposed)
+## Decision
 
 For the **`ReasonClientPinned`** reason only, require **authenticated-identity** evidence: count only
 `id:`-prefixed tokens toward its confirm-count, and do not accept IP-only tokens as evidence for that
-reason. Concretely, `recordAutoExclude`/`clientEvidence` emit an **empty** token for an IP-only
-(unauthenticated) session under `ReasonClientPinned`; the engine already discards `client == ""`
-(`autoexclude.go` `Observe`), so such a session contributes nothing toward promotion.
+reason. Concretely, `clientEvidence(reason, identity, clientIP)` (now reason-aware) emits an **empty**
+token for an IP-only (unauthenticated) session under `ReasonClientPinned`, and `recordAutoExclude`
+**returns before calling `Observe`** when the token is empty. Skipping the call (rather than relying on
+`Observe` to skip the empty token) matters: `Observe` creates or, past the window, *resets* the pending
+`(scope,host,reason)` record **before** it skips an empty token, so passing `""` in would still mutate
+pending state — it could reset an in-flight window and drop an already-accumulated authenticated token,
+letting IP-only noise indefinitely block the two-identity promotion path, and it would consume bounded
+pending slots. Returning early makes an unauthenticated `client_pinned` observation a **true no-op**
+(zero pending state). Implemented in `autoexclude_resolve.go`; the origin-side reasons are passed
+through unchanged.
 
 Consequences of the rule:
 
@@ -94,6 +101,34 @@ The other two evidence classes stay as-is (raw IPv4 for the NAT-fleet reason; `/
    decryption profile). The most flexible, but it is a larger config-surface + GUI-parity change
    (tracked separately as qualification finding **F10**). This ADR can be superseded by that work; the
    identity-gate here is a safe default in the meantime.
+
+## Invariants (enforced by tests)
+
+The gate lives in `clientEvidence` (reason-aware) and is exercised through the real
+`recordAutoExclude` → `Observe` promotion path. Each invariant is pinned by a test:
+
+1. **IP-only client_pinned never promotes.** Any number of distinct unauthenticated IPs
+   (IPv4 or IPv6) observing a `client_pinned` failure yields empty tokens and cannot
+   reach the confirm-count.
+   *(TestADR0008_ClientPinnedRequiresAuthenticatedIdentity step 1; TestClientEvidence_ADR0008_IdentityGatesClientPinned)*
+2. **Two distinct authenticated identities DO promote client_pinned.** Authentication
+   restores real evidence, so the intended auto-heal still works for attributable traffic.
+   *(…step 2)*
+3. **Mixed evidence does not launder IP-only observations.** One authenticated identity
+   plus any number of IP-only observations of the same host stays below the confirm-count
+   (the IP-only ones contribute nothing).
+   *(…step 3)*
+4. **Origin-observed reasons are unchanged.** `ReasonClientCertRequired` and
+   `ReasonUnsupportedParams` keep IP evidence and promote on two distinct IPs — the
+   gate must not weaken the non-spoofable classes.
+   *(…step 4; TestClientEvidence_ADR0008_IdentityGatesClientPinned; TestClientEvidence)*
+5. **IPv4-raw / IPv6-/64 evidence semantics preserved for the non-gated classes.** No
+   change to the NAT-fleet (raw IPv4) or IPv6 (/64) bucketing.
+   *(TestClientEvidence)*
+6. **Empty evidence creates no pending state.** An unauthenticated `client_pinned`
+   observation never reaches `Observe`, so IP-only noise creates zero pending entries
+   and cannot reset an in-flight window or drop an accumulated authenticated token.
+   *(TestADR0008_IPOnlyNoiseCreatesNoPendingState)*
 
 ## Related
 

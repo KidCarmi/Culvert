@@ -196,9 +196,24 @@ func decryptionScope(match *PolicyMatch) (id, name string) {
 // Documented NAT/DHCP limitation: unauthenticated devices sharing one egress IP
 // count as one client, so a host broken only for such a fleet needs failures from
 // two distinct egress IPs (or two authenticated users) before it is excluded.
-func clientEvidence(identity, clientIP string) string {
+//
+// ADR-0008: the reason gates whether IP-only evidence is ACCEPTABLE. For
+// client_pinned — "the spoofable class", where the client fully controls the TLS
+// alert it sends against our forged leaf — the raw-IPv4 confirm-count is near-zero
+// protection against a deliberate poisoner (two egress IPs trivially meet
+// confirmN=2). So an UNAUTHENTICATED client_pinned observation yields an EMPTY
+// token, which the engine's Observe discards (it can never contribute toward
+// promotion). Only two distinct AUTHENTICATED identities can promote a client_pinned
+// exclusion; the operator remedy for unauthenticated pinned apps is the manual SSL
+// Bypass list. The origin-observed reasons (client_cert_required, unsupported_params)
+// are NOT the spoofable class (the origin, not the client, controls those signals),
+// so they keep IP evidence and are unchanged.
+func clientEvidence(reason AutoExcludeReason, identity, clientIP string) string {
 	if identity != "" {
 		return "id:" + identity
+	}
+	if reason == autoExReasonClientPinned {
+		return "" // ADR-0008: IP-only evidence is not accepted for the spoofable class
 	}
 	if ip := net.ParseIP(clientIP); ip != nil && ip.To4() == nil {
 		return "net6:" + ip.Mask(net.CIDRMask(64, 128)).String()
@@ -218,7 +233,17 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	if scopeID == "" {
 		return // no fail-open profile to scope to (gated caller, defensive)
 	}
-	client := clientEvidence(id.Identity, id.ClientIP)
+	client := clientEvidence(reason, id.Identity, id.ClientIP)
+	if client == "" {
+		// ADR-0008: an unauthenticated client_pinned observation carries no
+		// acceptable evidence. Return BEFORE Observe — not just relying on Observe to
+		// skip an empty token — because Observe creates/resets the pending
+		// (scope,host,reason) window before it skips the token, so passing "" here
+		// could reset an in-flight window and drop already-accumulated AUTHENTICATED
+		// tokens (letting IP-only noise indefinitely block the two-identity promotion
+		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
+		return
+	}
 	if !autoExclude.Observe(scopeID, scopeName, host, reason, client) {
 		return // still gathering confirmation, or already excluded
 	}
