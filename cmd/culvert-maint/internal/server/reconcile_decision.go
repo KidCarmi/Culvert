@@ -149,15 +149,21 @@ func reconcileDecision(in reconcileInputs) reconcileVerdict {
 		}
 		return reconcileVerdict{actVerifyAdoptElseRollback, "live_target"}
 	}
-	// Already back on prior (tag never advanced, or a partial rollback landed).
-	if liveIsPrior {
-		return reconcileVerdict{actNoop, "already_on_prior"}
-	}
 	// Tag advanced to target but the container is NOT running it — crash between
-	// the tag move and `up`. Converge with `up`; do not roll back a healthy
-	// pending upgrade.
+	// the tag move and `up`. This MUST be checked BEFORE the already-on-prior
+	// no-op: with the pinned tag advanced to the ungated target, `running` is
+	// still `prior`, so a naive "already_on_prior → noop" would remove the record
+	// while leaving the tag dangling at the un-health-gated target — a later
+	// container restart would then silently start it (the RISK-022 hole).
+	// Converge with `up` (the caller health-gates it); never roll back a pending
+	// upgrade whose tag is already advanced.
 	if tagIsTarget {
 		return reconcileVerdict{actReup, "tag_advanced_container_stale"}
+	}
+	// Genuinely back on prior: running is prior AND the tag is not on target
+	// (tag never advanced, or a partial rollback landed the tag on prior too).
+	if liveIsPrior {
+		return reconcileVerdict{actNoop, "already_on_prior"}
 	}
 
 	// Neither target nor prior is live and the tag isn't on target.

@@ -166,6 +166,24 @@ func TestReconcileDecision_DangerWindowTable(t *testing.T) {
 	}
 }
 
+// TestReconcileDecision_TagAdvancedWhileOnPrior is the Codex P1 regression:
+// crash after the tag moved to target but before `up`, so running==prior AND
+// tag==target. The tag-advanced (reup) branch MUST win over already-on-prior —
+// otherwise the record is retired with the pinned tag dangling at the ungated
+// target, which a later restart would silently start un-health-gated.
+func TestReconcileDecision_TagAdvancedWhileOnPrior(t *testing.T) {
+	in := base()
+	in.Phase = journal.PhaseRestarting
+	in.RunningDigests = []string{"sha256:" + manPrior} // container still on prior
+	in.PriorDigests = []string{"sha256:" + manPrior}   // prior IS a match…
+	in.TargetDigests = []string{"sha256:" + manTarget}
+	in.TagDigests = []string{"sha256:" + manTarget} // …but the tag already advanced
+	v := reconcileDecision(in)
+	if v.Action != actReup || v.Reason != "tag_advanced_container_stale" {
+		t.Errorf("tag advanced while on prior → %s/%s, want reup/tag_advanced_container_stale (must NOT noop with a dangling tag)", v.Action, v.Reason)
+	}
+}
+
 func TestReconcileDecision_SafeBoundary(t *testing.T) {
 	// Genuine safe boundary: target not live, tag not on target → noop.
 	in := base()
