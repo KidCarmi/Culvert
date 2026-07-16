@@ -186,6 +186,35 @@ func TestBenchGate_AuthCapabilityProbeAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_GeoTrackDispatchDisabledAllocs locks in the goroutine-free,
+// allocation-free destination-country dispatch when no GeoIP DB is loaded —
+// the default deployment. Before the maybeTrackDestinationCountry gate,
+// handleRequest ran `go trackDestinationCountry(host)` per allowed request:
+// a heap-allocated closure wrapper (Go 1.17+ `go f(arg)` lowering), a
+// goroutine spawn/schedule round, and two semaphore channel ops, all to
+// discover geoip.Enabled() == false inside geo.LookupFull. The gated path is
+// a single RLock probe; the bound is ZERO — any reintroduction of the
+// pre-gate spawn (or an allocating probe) fails this gate.
+func TestBenchGate_GeoTrackDispatchDisabledAllocs(t *testing.T) {
+	if geoTrackEnabledFn() {
+		t.Fatal("GeoIP DB unexpectedly loaded; the disabled-path gate requires no DB (no .mmdb fixture exists in the tree)")
+	}
+	const maxAllocs int64 = 0
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			maybeTrackDestinationCountry("target.example.com")
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("maybeTrackDestinationCountry disabled: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: disabled geo-track dispatch allocates %d/op, exceeds bound %d — "+
+			"a per-request tracker spawn has returned to handleRequest for non-GeoIP deployments "+
+			"(geoip.Enabled() probe hoisted out of maybeTrackDestinationCountry?)", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13
