@@ -71,6 +71,7 @@ import (
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -240,7 +241,24 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		herr = &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "open_op_log_failed"}}
 		return nil, false, augmentErrorWithOp(herr, op.ID)
 	}
+	// Crash-recovery journal (RISK-022): record the admission of a destructive,
+	// reconcilable op BEFORE it runs. Fail-closed — if we cannot durably journal
+	// it, we refuse to run it (a broken journal, e.g. disk-full, must not silently
+	// leave a destructive op unrecoverable). Non-journaled kinds / nil journal skip.
+	if ops.IsJournaled(kind) && s.opts.Journal != nil {
+		now := time.Now().UTC()
+		if jerr := s.opts.Journal.Write(journal.Record{
+			OpID: op.ID, Kind: kind, Phase: journal.PhaseAdmitted,
+			Actor: peer.String(), StartedAt: now, UpdatedAt: now,
+		}); jerr != nil {
+			s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "journal_write_failed: "+jerr.Error())
+			return nil, false, augmentErrorWithOp(&opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "journal_write_failed"}}, op.ID)
+		}
+	}
 	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
+	if s.opts.Journal != nil {
+		deps.Journal = s.opts.Journal // retired on terminal by the orchestrator
+	}
 	// Tracked via goOp so shutdown drains it (T2.4). The op ctx stays detached
 	// from the request/shutdown ctx and bounded only by OperationTimeout: a
 	// state-changing op must NOT be cancelled mid-flight on SIGTERM (that is the

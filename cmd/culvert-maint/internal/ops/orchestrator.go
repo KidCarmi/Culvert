@@ -57,12 +57,23 @@ type FlowStage struct {
 // via Manager.Finish (timeout metadata, if any, is overlaid on top).
 type ResultFn func(finalState State, finalReason FailureReason) map[string]interface{}
 
+// JournalRemover retires an op's crash-recovery journal record at terminal time
+// (RISK-022). Satisfied by *journal.Journal; kept as an interface so the ops
+// package does not depend on the journal package. Optional — nil means the flow
+// is not journaled. Remove is idempotent (removing an absent record is a no-op),
+// so terminate can call it unconditionally.
+type JournalRemover interface {
+	Remove(opID string) error
+}
+
 // OrchestratorDeps bundles the dependencies the orchestrator goroutine
-// needs to run a flow to completion. All fields are required.
+// needs to run a flow to completion. Manager/Audit/OpLog are required; Journal
+// is optional (nil for non-journaled flows and most tests).
 type OrchestratorDeps struct {
 	Manager *Manager
 	Audit   *audit.Logger
-	OpLog   *OpLog // owned by the orchestrator; closed on completion
+	OpLog   *OpLog         // owned by the orchestrator; closed on completion
+	Journal JournalRemover // optional; record removed on terminal (RISK-022)
 }
 
 // Validate ensures every dependency is present. Called by Run before
@@ -142,6 +153,15 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		}
 		finished = true
 		_ = deps.Manager.Finish(opID, finalState, finalReason, result)
+		// Retire the crash-recovery journal record (RISK-022) now that the op has
+		// reached a terminal state — after this point there is nothing to reconcile.
+		// Idempotent + best-effort; a non-journaled flow (nil) or absent record is a
+		// no-op. (Atomic Finish+Remove hardening is a reconciler-slice concern.)
+		if deps.Journal != nil {
+			if err := deps.Journal.Remove(opID); err != nil {
+				_ = deps.OpLog.Note("agent", "warn: journal remove failed: "+err.Error())
+			}
+		}
 
 		now := time.Now().UTC()
 		endEvent := audit.Event{

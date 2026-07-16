@@ -178,8 +178,13 @@ audit) instead of a bare mark-only.
    fail-closed (`List`/`Read` surface `ErrCorruptRecord`, never silently skip). Pure infra, no
    wiring. T1.2 structural digest selection + the `image inspect` tag-target runner method are a
    separate follow-up slice.
-4. **PR-D (Tier 1 write+mark) — wire journal + MarkAllInterrupted.** Journal write points
-   (incl. the fail-closed barrier), atomic Finish+Remove, mark orphans queryable.
+4. **PR-D (Tier 1 write+mark) — ✅ SHIPPED (lifecycle half).** Journal wired into the op
+   lifecycle: `PhaseAdmitted` written (fail-closed) at admission for `upgrades.apply` /
+   `rollbacks.create`, record retired at terminal via `OrchestratorDeps.Journal`, and
+   `MarkAllInterrupted(orphans)` marks orphaned ops `failed(agent_restart_interrupted)` so they're
+   queryable post-restart. Startup reads the journal fail-closed (corrupt ⇒ refuse to serve).
+   Non-destructive. Follow-up: the intermediate phase progression (`captured`→`verified` + digests)
+   and the `PhaseRestarting` write-ahead barrier inside `tagAndUp` land with the reconciler slices.
 5. **PR-E (Tier 1 reconcile) — ReconcileOnStartup.** Docker-truth decision (digest-set
    intersection + bounded health retry), local-first rollback (T1.1), cross-process guard (T1.5),
    startup reorder. **Closes the T3 acceptance test.**
