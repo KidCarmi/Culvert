@@ -914,13 +914,23 @@ fi
 # path, and the direct fix for the -idp-profiles-file crash loop.)
 
 # compose_command_flags — culvert flags from the proxy service's `command:` array.
-# Scoped to the "command: [ ... ]" block so healthcheck test tokens (wget -qO-,
-# clamav --ping) and other services' args are never misread as culvert flags.
-# Comment lines are dropped so a commented-out "-flag" example never counts.
+# Scoped to the `proxy:` service block (top-level 2-space-indented key) so a
+# flow-style "command: [ ... ]" array on any OTHER service (e.g. `cli`, whose
+# flags are normally passed at `docker compose run --rm cli <flags>` time but
+# which the compose file's own comments show operators DO hand-edit) is never
+# misread as a culvert proxy flag — that previously made
+# preflight_compose_image_compat() falsely conclude the compose/image were
+# incompatible and silently overwrite an operator's hand-edited
+# docker-compose.yml. Healthcheck test tokens (wget -qO-, clamav --ping) are
+# also excluded, being outside the proxy service's command array. Comment
+# lines are dropped so a commented-out "-flag" example never counts.
 compose_command_flags() {
   # `|| true`: grep -o exits 1 on a (hypothetical) flagless command block; under
   # `set -o pipefail` that would surface as a function failure — degrade to empty.
-  { awk '/command:[ \t]*\[/{inblk=1} inblk{print} inblk && /\]/{inblk=0}' \
+  # Single-line awk program (no embedded "}"-only lines) so a simple
+  # line-based function extractor (used by this repo's install_script_*_test.go
+  # suite) can still find this function's own closing brace unambiguously.
+  { awk '/^  [a-zA-Z0-9_-]+:[[:space:]]*(#.*)?$/{inproxy=($0 ~ /^  proxy:/)?1:0} inproxy && /command:[ \t]*\[/{inblk=1} inproxy && inblk{print} inproxy && inblk && /\]/{inblk=0}' \
       "$INSTALL_DIR/docker-compose.yml" 2>/dev/null \
     | grep -vE '^[[:space:]]*#' \
     | grep -oE '"-[a-zA-Z0-9-]+"' | tr -d '"' | sort -u; } || true
