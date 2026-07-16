@@ -1,13 +1,21 @@
 package server
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"culvert-maint/internal/audit"
+	"culvert-maint/internal/auth"
+	"culvert-maint/internal/config"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
+	"culvert-maint/internal/runner"
 )
 
 // a canonical, strictly-valid ULID (journal paths reject non-ULID op_ids).
@@ -210,5 +218,99 @@ func TestApply_JournalRetiredAtTerminal(t *testing.T) {
 	// The happy path crossed the danger window: tag + up ran.
 	if !rig.sawCommand("tag") {
 		t.Error("expected `docker tag` to run (write-ahead barrier must not block the happy path)")
+	}
+}
+
+// TestRestartWithBarrier_CapturesTargetImageID is the Codex P1 regression: a
+// crash after `up` but before the verify stage must still leave the record with
+// the class-invariant TargetImageID — restartWithBarrier captures the running
+// (=target) config digest right after `up`, so PhaseRestarted carries it even
+// though verifyRunningImage has not run.
+func TestRestartWithBarrier_CapturesTargetImageID(t *testing.T) {
+	tmp := t.TempDir()
+	auditPath := filepath.Join(tmp, "audit.jsonl")
+	al, err := audit.New(auditPath)
+	if err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	pol, err := auth.NewPolicy([]string{strconv.Itoa(os.Geteuid())})
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	jnl, err := journal.New(tmp)
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	rn, err := runner.New(runner.Options{
+		ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", StageTimeout: 5 * time.Second,
+		ProxyRepo: repo, DockerBinary: "/usr/bin/docker",
+		EnvAllow: []string{runner.EnvCulvertBackupPassphrase}, EnvOverlayOnly: []string{runner.EnvCulvertBackupPassphrase},
+	})
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	// Canned exec: `ps` finds the container, container inspect reports the target
+	// config digest; tag/up succeed silently.
+	has := func(args []string, tok string) bool {
+		for _, a := range args {
+			if a == tok {
+				return true
+			}
+		}
+		return false
+	}
+	contains := func(args []string, sub string) bool {
+		for _, a := range args {
+			if strings.Contains(a, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	rn.SetExecHooksForTest(
+		func(cmd *exec.Cmd) error {
+			switch {
+			case has(cmd.Args, "ps"):
+				_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
+			case contains(cmd.Args, "{{json .Image}}"):
+				_, _ = cmd.Stdout.Write([]byte(`"sha256:` + cfgNew + `"`))
+			case has(cmd.Args, "image") && has(cmd.Args, "inspect"):
+				_, _ = cmd.Stdout.Write([]byte(`[{"RepoDigests":["` + repo + `@sha256:` + digNew + `"]}]`))
+			}
+			return nil
+		},
+		func(*exec.Cmd) error { return nil },
+	)
+	srv, err := New(Options{
+		Cfg:       &config.Config{ComposeProjectDir: tmp, ComposeFile: "docker-compose.yml", SocketPath: filepath.Join(tmp, "s.sock"), StateDir: tmp, PrivilegeMode: config.PrivilegeSudoers, OperationTimeout: 30 * time.Second},
+		Auth:      pol,
+		Audit:     al,
+		Ops:       ops.NewManager(nil),
+		Status:    &fakeStatus{},
+		StateDir:  tmp,
+		AuditPath: auditPath,
+		Journal:   jnl,
+		Runner:    rn,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	seedAdmitted(t, jnl, time.Now().UTC().Add(-time.Minute))
+	acc := &upgradeApplyAccumulator{opID: testOpULID, actor: "cp", pinnedRef: repo + "@sha256:" + digNew, pinnedDigest: "sha256:" + digNew}
+
+	if _, _, err := srv.restartWithBarrier(acc)(context.Background()); err != nil {
+		t.Fatalf("restartWithBarrier: %v", err)
+	}
+	rec, found, err := jnl.Read(testOpULID)
+	if err != nil || !found {
+		t.Fatalf("read: found=%v err=%v", found, err)
+	}
+	if rec.Phase != journal.PhaseRestarted {
+		t.Errorf("phase = %q, want restarted", rec.Phase)
+	}
+	if rec.TargetImageID != "sha256:"+cfgNew {
+		t.Errorf("TargetImageID = %q, want sha256:%s (must be captured before verify)", rec.TargetImageID, cfgNew)
 	}
 }

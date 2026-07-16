@@ -138,6 +138,15 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 		}
 		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart)
 		if uerr == nil {
+			// Capture the target's config digest NOW (best-effort) — the container
+			// is running the target after `up`. Without this, a crash between here
+			// and the verify stage would leave PhaseRestarted with an empty
+			// TargetImageID, forcing reconcile onto the false-rollback-prone
+			// manifest comparison for exactly the multi-arch case the config digest
+			// protects (Codex P1). verifyRunningImage re-captures + hard-verifies.
+			if ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx); cerr == nil {
+				acc.runningAfterID = ri.RunningImageID
+			}
 			s.advanceJournalPhaseBestEffort(acc, journal.PhaseRestarted)
 		}
 		return out, errOut, uerr
