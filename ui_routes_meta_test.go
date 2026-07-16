@@ -50,7 +50,7 @@ import (
 //   - 141 — policy-draft (G2) added /api/policy/draft (+commit +revert):
 //     candidate/commit for the rulebase.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 141
+	const want = 142
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

@@ -856,6 +856,79 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiDecryptionExclusionTunables is the F10 admin surface for the auto-exclusion
+// cache PARAMETERS (confirmN / TTL / pinnedTTL / window / maxEntries). It is the
+// FIRST reachable-by-product entry point of the F10 feature.
+//
+//   - GET (viewer): returns DEFAULTS + BOUNDS + a small schema only. The CURRENT
+//     effective values are NOT duplicated here — they remain the single source of
+//     truth on /api/decryption-exclusions (the Stats block). This avoids two
+//     surfaces disagreeing about the live values.
+//   - PUT (admin): a full effective-set replacement. Each omitted/zero field resets
+//     to its default (so "Reset to Defaults" is a PUT of all-zeros); a NEGATIVE is
+//     rejected. The RESOLVED set is validated against the bounds contract
+//     (confirm_n>=2, max_entries<=262144, pinned_ttl<=ttl, …) — 400 on any violation.
+//
+// Consistency model (the transaction order): VALIDATE → APPLY-runtime → PERSIST →
+// (on persist failure) ROLL BACK runtime. Reconfigure is infallible and must run
+// first so SaveAdminSettings snapshots the NEW live values; if the durable write
+// then fails, the runtime is rolled back to the pre-request tunables and a 500 is
+// returned, so runtime and disk agree (both the old value — the atomic write left
+// the old file intact). A failed request never leaves runtime and disk silently
+// divergent. NO saveConfigVersion (the tunables are OFF the rollback surface);
+// auditEventDiff records old→new so the change is attributable.
+func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, map[string]any{
+			"defaults": defaultAutoExcludeTunables(),
+			"bounds": map[string]map[string]int{
+				"confirm_n":       {"min": autoExcludeConfirmNMin, "max": autoExcludeConfirmNMax},
+				"ttl_secs":        {"min": autoExcludeTTLSecsMin, "max": autoExcludeTTLSecsMax},
+				"pinned_ttl_secs": {"min": autoExcludePinnedSecsMin, "max": autoExcludeTTLSecsMax}, // upper bound is ttl_secs (cross-field)
+				"window_secs":     {"min": autoExcludeWindowSecsMin, "max": autoExcludeWindowSecsMax},
+				"max_entries":     {"min": autoExcludeMaxEntriesMin, "max": autoExcludeMaxEntriesMax},
+			},
+			// Where to read the CURRENT effective values (single source of truth).
+			"current_values_source": "/api/decryption-exclusions (stats)",
+			"note":                  "PUT is a full replacement; an omitted/zero field resets to its default. pinned_ttl_secs must not exceed ttl_secs.",
+		})
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var patch autoExcludeTunables
+		if err := decodeJSON(r, &patch); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		resolved := resolveAutoExcludeTunables(patch)
+		if err := validateAutoExcludeTunables(resolved); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// VALIDATE (done) → APPLY runtime → PERSIST → rollback on persist failure.
+		old := currentAutoExcludeTunables()
+		autoExclude().Reconfigure(resolved.engineConfig())
+		if err := SaveAdminSettings(); err != nil {
+			autoExclude().Reconfigure(old.engineConfig()) // roll back: no silent runtime/disk divergence
+			logger.Printf("decryption tunables: persist failed, rolled back runtime: %v", err)
+			http.Error(w, "failed to persist tunables", http.StatusInternalServerError)
+			return
+		}
+		auditEventDiff(r, "decryption.autoexclude.tunables", "tunables",
+			"updated adaptive decryption-exclusion tunables", old, resolved)
+		jsonOK(w, resolved)
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
@@ -2078,12 +2151,13 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/blocklist/exceptions", apiBlocklistExceptions) // GET/POST/DELETE
 
 	// URL Categories (dynamic host-list management).
-	mux.HandleFunc("/api/category-groups", apiCategoryGroups)             // GET/POST/PUT/DELETE category groups
-	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)     // GET/POST/PUT/DELETE decryption profiles
-	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions) // GET list learned exclusions / DELETE evict one (?host=) or clear all
-	mux.HandleFunc("/api/urlcat", apiURLCat)                              // GET/POST/PUT/DELETE categories
-	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                     // POST/DELETE individual hosts
-	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                 // GET — resolve a domain to its category
+	mux.HandleFunc("/api/category-groups", apiCategoryGroups)                             // GET/POST/PUT/DELETE category groups
+	mux.HandleFunc("/api/decryption-profiles", apiDecryptionProfiles)                     // GET/POST/PUT/DELETE decryption profiles
+	mux.HandleFunc("/api/decryption-exclusions", apiDecryptionExclusions)                 // GET list learned exclusions / DELETE evict one (?host=) or clear all
+	mux.HandleFunc("/api/decryption-exclusions/tunables", apiDecryptionExclusionTunables) // GET defaults+bounds / PUT admin runtime tunables (F10)
+	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
+	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                                     // POST/DELETE individual hosts
+	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                                 // GET — resolve a domain to its category
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

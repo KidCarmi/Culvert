@@ -280,6 +280,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer, Note: "read-only list of the volatile auto-exclusion cache + posture"},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "evict one (?host=) or clear all; volatile cache, no config-version"},
 		}},
+	{Path: "/api/decryption-exclusions/tunables", Handler: "apiDecryptionExclusionTunables", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F10: defaults + bounds + schema (current values live on /api/decryption-exclusions)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F10: set auto-exclusion tunables; validate→apply→persist→rollback; no config-version (off rollback surface)"},
+		}},
 	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
