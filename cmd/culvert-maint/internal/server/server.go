@@ -31,6 +31,7 @@ import (
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -129,6 +130,12 @@ type Options struct {
 	// it, admission returns 429 so a flood cannot spawn unbounded root docker
 	// subprocesses. Zero ⇒ DefaultMaxConcurrentReadOnlyOps.
 	MaxConcurrentReadOnlyOps int
+
+	// Journal is the crash-recovery op journal (RISK-022). May be nil in tests
+	// that don't exercise journaling; the production constructor wires a real one.
+	// When set, journaled ops (upgrades.apply / rollbacks.create) record their
+	// admission and have their record retired at terminal time.
+	Journal *journal.Journal
 
 	// Runner is the command runner used by D1.6b handlers. May be
 	// nil only in unit tests that exercise non-D1.6b paths; the

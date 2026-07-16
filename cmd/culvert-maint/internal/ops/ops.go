@@ -595,16 +595,62 @@ func (m *Manager) Holder() *Op {
 	return m.cloneLocked(m.holder)
 }
 
-// MarkAllInterrupted is called at startup to scan persisted state and
-// transition any pending/running ops to failed with
-// ReasonAgentRestartInterrupted. The agent never guesses success after
-// restart (§ 5.4).
-//
-// D1.6a in-memory model has no persistence to scan; the function is a
-// no-op for D1.6a but ships now so the contract is in place. D1.6b/c
-// wire it to the on-disk index.
-func (m *Manager) MarkAllInterrupted() int {
-	return 0
+// journaledKinds are the state-changing kinds whose in-flight state is recorded
+// in the crash-recovery journal (RISK-022): the destructive day-2 Docker
+// operations whose interruption needs post-restart reconciliation. Other
+// state-changing kinds (backup/restore/cleanup) have their own recovery paths.
+var journaledKinds = map[string]struct{}{
+	KindUpgradeApply:   {},
+	KindRollbackCreate: {},
+}
+
+// IsJournaled reports whether kind's in-flight state is recorded in the
+// crash-recovery journal. Callers gate journal writes on this.
+func IsJournaled(kind string) bool {
+	_, ok := journaledKinds[kind]
+	return ok
+}
+
+// InterruptedOp is the minimal descriptor of an op that was in-flight when the
+// agent last stopped, reconstructed from the crash-recovery journal at startup.
+type InterruptedOp struct {
+	OpID  string
+	Kind  string
+	Actor string
+}
+
+// MarkAllInterrupted registers each orphaned op (recovered from the on-disk
+// journal at startup) into the active map as failed(agent_restart_interrupted),
+// so GET /v1/operations/{id} answers post-restart and the operator/CP can see
+// that the op did not complete. The agent NEVER guesses success after a restart
+// (§ 5.4). Returns the count marked. Ops already present in the map are skipped
+// (the map starts empty on a fresh process, so this is defensive).
+func (m *Manager) MarkAllInterrupted(orphans []InterruptedOp) int {
+	if len(orphans) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	n := 0
+	for _, o := range orphans {
+		if _, exists := m.active[o.OpID]; exists {
+			continue
+		}
+		finished := now
+		m.active[o.OpID] = &Op{
+			ID:            o.OpID,
+			Kind:          o.Kind,
+			Actor:         o.Actor,
+			State:         StateFailed,
+			FailureReason: string(ReasonAgentRestartInterrupted),
+			Started:       now,
+			Finished:      &finished,
+			Progress:      []Stage{},
+		}
+		n++
+	}
+	return n
 }
 
 // cloneLocked returns a defensive copy. Caller must hold m.mu.

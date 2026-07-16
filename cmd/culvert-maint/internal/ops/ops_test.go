@@ -244,10 +244,51 @@ func TestManager_GetUnknownReturnsNil(t *testing.T) {
 	}
 }
 
-func TestManager_MarkAllInterruptedReturnsZeroForD16a(t *testing.T) {
+func TestManager_MarkAllInterruptedEmpty(t *testing.T) {
 	m := NewManager(nil)
-	if n := m.MarkAllInterrupted(); n != 0 {
-		t.Errorf("D1.6a in-memory model has nothing to scan, got %d", n)
+	if n := m.MarkAllInterrupted(nil); n != 0 {
+		t.Errorf("no orphans → 0, got %d", n)
+	}
+}
+
+func TestManager_MarkAllInterruptedMarksQueryable(t *testing.T) {
+	m := NewManager(nil)
+	orphans := []InterruptedOp{
+		{OpID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: KindUpgradeApply, Actor: "uid=1000"},
+		{OpID: "01BX5ZZKBKACTAV9WEVGEMMVRZ", Kind: KindRollbackCreate, Actor: "uid=1000"},
+	}
+	if n := m.MarkAllInterrupted(orphans); n != 2 {
+		t.Fatalf("marked %d, want 2", n)
+	}
+	// Each orphan is now queryable as failed(agent_restart_interrupted).
+	for _, o := range orphans {
+		op := m.Get(o.OpID)
+		if op == nil {
+			t.Fatalf("orphan %s not queryable after MarkAllInterrupted", o.OpID)
+		}
+		if op.State != StateFailed || op.FailureReason != string(ReasonAgentRestartInterrupted) {
+			t.Errorf("orphan %s: state=%q reason=%q, want failed/agent_restart_interrupted", o.OpID, op.State, op.FailureReason)
+		}
+		if op.Finished == nil {
+			t.Errorf("orphan %s: Finished must be set", o.OpID)
+		}
+	}
+	// Idempotent-ish: re-marking the same orphans doesn't double-count (already present).
+	if n := m.MarkAllInterrupted(orphans); n != 0 {
+		t.Errorf("re-marking present orphans should mark 0, got %d", n)
+	}
+}
+
+func TestIsJournaled(t *testing.T) {
+	for _, k := range []string{KindUpgradeApply, KindRollbackCreate} {
+		if !IsJournaled(k) {
+			t.Errorf("%s must be journaled", k)
+		}
+	}
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeCheck, KindBackupList} {
+		if IsJournaled(k) {
+			t.Errorf("%s must NOT be journaled", k)
+		}
 	}
 }
 
