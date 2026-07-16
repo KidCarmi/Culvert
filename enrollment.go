@@ -505,6 +505,27 @@ func (cs *ClusterStore) RevokeNode(nodeID, revokedBy, reason string) error {
 	return nil
 }
 
+// RevokeSerial appends a certificate serial to the CRL WITHOUT changing the
+// owning node's status — for certs superseded while the node stays
+// registered (expired-node re-enrollment). RevokeNode remains the operator
+// path that retires the node itself.
+func (cs *ClusterStore) RevokeSerial(certSerial, nodeID, revokedBy, reason string) error {
+	cs.mu.Lock()
+	cs.st.Revoked = append(cs.st.Revoked, RevokedCert{
+		CertSerial: certSerial,
+		NodeID:     nodeID,
+		RevokedAt:  time.Now(),
+		RevokedBy:  revokedBy,
+		Reason:     reason,
+	})
+	cs.mu.Unlock()
+
+	if err := cs.Save(); err != nil {
+		return fmt.Errorf("persist revocation: %w", err)
+	}
+	return nil
+}
+
 // IsRevoked checks if a certificate serial number is in the CRL.
 func (cs *ClusterStore) IsRevoked(certSerial string) bool {
 	cs.mu.RLock()

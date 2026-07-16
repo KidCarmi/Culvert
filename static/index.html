@@ -13624,6 +13624,11 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude"> Decryption exclusion learned</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude_rescue"> Decryption live-rescue</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude_surge"> Decryption exclusion surge</label>
+        <!-- Chaos-hardening events (same exact-name filter class as above):
+             state_file_corrupt = CHAOS-05/07 quarantine, cluster_node_reenrolled
+             = expired-node re-enrollment (CHAOS-12 recovery path). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
       </div>
     </div>
     <div class="form-group">
