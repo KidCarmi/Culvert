@@ -144,8 +144,12 @@ audit) instead of a bare mark-only.
 
 ## Proposed sequencing (small, reviewable PRs)
 
-1. **PR-A (Tier 0) — never-crash core.** T0.1 panic barrier + deferred Finish; T0.2 process-group
-   kill. Small, self-contained, no journal dependency, immediate resilience win. **Ship first.**
+1. **PR-A (Tier 0) — never-crash core. ✅ SHIPPED.** T0.1 panic barrier in `ops.Run` (recover →
+   `ReasonAgentPanic` → deferred `Finish` releases the lock); T0.2 process-group kill
+   (`Setpgid` + group SIGTERM/SIGKILL, platform-gated `procgroup_{linux,other}.go`) so a wedged
+   `docker` child can't be orphaned to race a rollback. Tests: stage/`resultFn` panic contained +
+   op failed + lock released; group kill reaps a grandchild. Small, self-contained, no journal
+   dependency.
 2. **PR-B (Tier 2 bounds) — stop the leaks.** T2.1 active-map reap + T2.2 retention/rotation/tail
    reads + T2.3 admission control + T2.4 SIGTERM drain. Independent of the journal; disarms the
    disk-full that the journal must survive.
