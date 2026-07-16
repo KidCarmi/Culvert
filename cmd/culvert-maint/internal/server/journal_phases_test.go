@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"culvert-maint/internal/journal"
+	"culvert-maint/internal/ops"
 )
 
 // a canonical, strictly-valid ULID (journal paths reject non-ULID op_ids).
@@ -39,8 +40,12 @@ func TestAdvanceJournalPhase_FoldsIdentifiers(t *testing.T) {
 		pinnedRef:    repo + "@sha256:" + digNew,
 		pinnedDigest: "sha256:" + digNew,
 	}
-	if err := srv.advanceJournalPhase(acc, journal.PhaseResolved); err != nil {
+	found, err := srv.advanceJournalPhase(acc, journal.PhaseResolved)
+	if err != nil {
 		t.Fatalf("advance: %v", err)
+	}
+	if !found {
+		t.Fatal("expected the seeded record to be found")
 	}
 	rec, found, err := jnl.Read(testOpULID)
 	if err != nil || !found {
@@ -73,18 +78,18 @@ func TestAdvanceJournalPhase_FoldsIdentifiers(t *testing.T) {
 func TestAdvanceJournalPhase_NoOps(t *testing.T) {
 	// nil journal
 	srvNil := &Server{}
-	if err := srvNil.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhasePulled); err != nil {
-		t.Errorf("nil journal should no-op, got %v", err)
+	if found, err := srvNil.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhasePulled); err != nil || found {
+		t.Errorf("nil journal should no-op, got found=%v err=%v", found, err)
 	}
 
 	srv, _ := newJournalTestServer(t)
 	// empty opID
-	if err := srv.advanceJournalPhase(&upgradeApplyAccumulator{}, journal.PhasePulled); err != nil {
-		t.Errorf("empty opID should no-op, got %v", err)
+	if found, err := srv.advanceJournalPhase(&upgradeApplyAccumulator{}, journal.PhasePulled); err != nil || found {
+		t.Errorf("empty opID should no-op, got found=%v err=%v", found, err)
 	}
-	// absent record (valid ULID, nothing seeded)
-	if err := srv.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhasePulled); err != nil {
-		t.Errorf("absent record should no-op, got %v", err)
+	// absent record (valid ULID, nothing seeded) → found=false, no error.
+	if found, err := srv.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhasePulled); err != nil || found {
+		t.Errorf("absent record should no-op, got found=%v err=%v", found, err)
 	}
 }
 
@@ -99,8 +104,80 @@ func TestAdvanceJournalPhase_FailClosedOnCorrupt(t *testing.T) {
 	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
 		t.Fatalf("seed corrupt: %v", err)
 	}
-	if err := srv.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhaseRestarting); err == nil {
+	if _, err := srv.advanceJournalPhase(&upgradeApplyAccumulator{opID: testOpULID}, journal.PhaseRestarting); err == nil {
 		t.Fatal("expected fail-closed error advancing over a corrupt record")
+	}
+}
+
+// TestWriteBarrier_UpdatesExisting: with an admission record present, the
+// barrier advances it to PhaseRestarting in place, preserving admission fields.
+func TestWriteBarrier_UpdatesExisting(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	started := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	seedAdmitted(t, jnl, started)
+
+	acc := &upgradeApplyAccumulator{opID: testOpULID, actor: "cp", pinnedRef: repo + "@sha256:" + digNew, pinnedDigest: "sha256:" + digNew}
+	if err := srv.writeBarrier(acc); err != nil {
+		t.Fatalf("writeBarrier: %v", err)
+	}
+	rec, found, err := jnl.Read(testOpULID)
+	if err != nil || !found {
+		t.Fatalf("read: found=%v err=%v", found, err)
+	}
+	if rec.Phase != journal.PhaseRestarting || rec.TargetDigest != digNew {
+		t.Errorf("record = %+v, want restarting + target %s", *rec, digNew)
+	}
+	if !rec.StartedAt.Equal(started) {
+		t.Errorf("StartedAt mutated: got %v want %v", rec.StartedAt, started)
+	}
+}
+
+// TestWriteBarrier_RecreatesWhenMissing is the Codex P2 fix: a MISSING record
+// right before the danger window must NOT silently proceed — the barrier
+// re-establishes a durable PhaseRestarting record so a crash after the tag
+// advance is still reconcilable.
+func TestWriteBarrier_RecreatesWhenMissing(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	// Nothing seeded — the admission record is absent.
+	acc := &upgradeApplyAccumulator{
+		opID: testOpULID, actor: "cp",
+		pinnedRef: repo + "@sha256:" + digNew, pinnedDigest: "sha256:" + digNew,
+		priorRef: repo + "@sha256:" + digOld, priorDigests: []string{"sha256:" + digOld},
+	}
+	if err := srv.writeBarrier(acc); err != nil {
+		t.Fatalf("writeBarrier: %v", err)
+	}
+	rec, found, err := jnl.Read(testOpULID)
+	if err != nil || !found {
+		t.Fatalf("barrier must have re-created the record: found=%v err=%v", found, err)
+	}
+	if rec.Phase != journal.PhaseRestarting {
+		t.Errorf("phase = %q, want restarting", rec.Phase)
+	}
+	if rec.Kind != ops.KindUpgradeApply || rec.TargetDigest != digNew || rec.PriorDigest != digOld {
+		t.Errorf("re-created record incomplete: %+v", *rec)
+	}
+}
+
+// TestWriteBarrier_FailClosedOnCorrupt: a corrupt record makes the barrier
+// return an error (the restart stage then refuses to advance the tag).
+func TestWriteBarrier_FailClosedOnCorrupt(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	corrupt := filepath.Join(jnl.Dir(), testOpULID+".json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+	if err := srv.writeBarrier(&upgradeApplyAccumulator{opID: testOpULID}); err == nil {
+		t.Fatal("expected fail-closed error from the barrier over a corrupt record")
+	}
+}
+
+// TestWriteBarrier_NilJournalNoOp: a non-journaled build's barrier is a no-op
+// (returns nil so the upgrade proceeds normally).
+func TestWriteBarrier_NilJournalNoOp(t *testing.T) {
+	srvNil := &Server{}
+	if err := srvNil.writeBarrier(&upgradeApplyAccumulator{opID: testOpULID}); err != nil {
+		t.Errorf("nil-journal barrier should no-op, got %v", err)
 	}
 }
 
