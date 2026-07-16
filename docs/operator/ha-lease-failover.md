@@ -111,6 +111,17 @@ The TTL is the **failover-latency ↔ tolerance trade**:
 - **Admin UI → Cluster → High Availability**: a "Fencing Lease" card shows
   `held (epoch N)` / `not held`. Endpoints are startup config, so the panel is
   status-only.
+- **Standby sync health** — `GET /api/cluster/ha` adds, standby-side only:
+  - `sync_fail_count` — consecutive `HASync` failures since the last success
+    (resets to 0 on every successful sync),
+  - `sync_max_fail` — the threshold (3) at which the standby stops waiting and
+    either self-promotes (lease/auto-failover) or, with automatic failover
+    off, stays read-only until an operator promotes it manually,
+  - `last_sync_ok` — RFC3339 timestamp of the last successful sync apply.
+
+  The HA panel mirrors this as a "Sync to Leader" stat card (green at 0,
+  amber below the threshold, red at/above it) — the early warning before a
+  standby silently hits `haStandbyMaxFail` and fails over.
 - **Alerts**: `ha_self_fenced` fires when a leader demotes itself;
   `ha_resume_unfenced` fires when a restarted leader could not re-acquire the
   lease and has no standby to resync from.
