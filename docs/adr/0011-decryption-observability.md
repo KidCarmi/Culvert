@@ -1,8 +1,11 @@
 # ADR-0011: Decryption Observability — a canonical decryption-outcome model
 
-- **Status:** Proposed (design only — **no runtime behavior changes until reviewed**)
+- **Status:** Accepted (ratified 2026-07-16) — implementing in phases (§9). Each phase is
+  additive telemetry; feature-off stays byte-identical. **Phase 1 is landing as small
+  reviewable slices** — Slice 1 (the `internal/decryptobs` bounded-enum vocabulary) is in,
+  dark/unwired; the `DecryptionOutcome` struct + `Entry.dec` block + record wiring follow.
 - **Date:** 2026-07-16
-- **Deciders:** Engineering Advisor (proposed); project maintainer (to ratify)
+- **Deciders:** Engineering Advisor (proposed); project maintainer (ratified)
 - **Depends on:** nothing blocking (observability is additive); relates to F9a (#740) / F10 (#741) which
   tune the same subsystem. Closes qualification findings **F6** and **F7**.
 
