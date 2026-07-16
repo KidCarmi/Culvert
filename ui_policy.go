@@ -869,14 +869,17 @@ func apiDecryptionExclusions(w http.ResponseWriter, r *http.Request) {
 //     rejected. The RESOLVED set is validated against the bounds contract
 //     (confirm_n>=2, max_entries<=262144, pinned_ttl<=ttl, …) — 400 on any violation.
 //
-// Consistency model (the transaction order): VALIDATE → APPLY-runtime → PERSIST →
-// (on persist failure) ROLL BACK runtime. Reconfigure is infallible and must run
-// first so SaveAdminSettings snapshots the NEW live values; if the durable write
-// then fails, the runtime is rolled back to the pre-request tunables and a 500 is
-// returned, so runtime and disk agree (both the old value — the atomic write left
-// the old file intact). A failed request never leaves runtime and disk silently
-// divergent. NO saveConfigVersion (the tunables are OFF the rollback surface);
-// auditEventDiff records old→new so the change is attributable.
+// Consistency model (the transaction order): VALIDATE → PERSIST target → APPLY
+// runtime. The durable write is the only fallible step, so it goes FIRST: on a
+// persist failure the live cache is never touched, a 500 is returned, and runtime +
+// disk still agree on the OLD value. Only after a successful persist is the target
+// applied via Reconfigure, which is infallible (always yields a valid state) — so a
+// committed durable value is always reflected in the runtime. There is no rollback
+// branch and, critically, no eviction-then-strand window: an operator who lowers
+// max_entries below the current active count keeps every learned exclusion if the
+// write fails (persist-before-apply — see Codex review on PR #752). NO
+// saveConfigVersion (the tunables are OFF the rollback surface); auditEventDiff
+// records old→new so the change is attributable.
 func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -911,15 +914,15 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// VALIDATE (done) → APPLY runtime → PERSIST → rollback on persist failure.
+		// VALIDATE (done) → PERSIST target → APPLY runtime. Persist first: a write
+		// failure must not have already evicted learned entries (persist-before-apply).
 		old := currentAutoExcludeTunables()
-		autoExclude().Reconfigure(resolved.engineConfig())
-		if err := SaveAdminSettings(); err != nil {
-			autoExclude().Reconfigure(old.engineConfig()) // roll back: no silent runtime/disk divergence
-			logger.Printf("decryption tunables: persist failed, rolled back runtime: %v", err)
+		if err := saveAdminSettingsWithAutoExclude(&resolved); err != nil {
+			logger.Printf("decryption tunables: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist tunables", http.StatusInternalServerError)
 			return
 		}
+		autoExclude().Reconfigure(resolved.engineConfig()) // infallible; disk already committed
 		auditEventDiff(r, "decryption.autoexclude.tunables", "tunables",
 			"updated adaptive decryption-exclusion tunables", old, resolved)
 		jsonOK(w, resolved)

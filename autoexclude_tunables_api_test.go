@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -161,10 +162,10 @@ func TestTunablesAPI_PUT_ResetToDefault(t *testing.T) {
 	}
 }
 
-// TestTunablesAPI_PUT_PersistFailureRollsBack — the consistency model: if the
-// durable write fails after the runtime was applied, the runtime is rolled back so
-// runtime and disk agree (both the OLD value). A 500 is returned; nothing diverges.
-func TestTunablesAPI_PUT_PersistFailureRollsBack(t *testing.T) {
+// TestTunablesAPI_PUT_PersistFailureLeavesRuntimeUnchanged — the consistency model:
+// the durable write goes FIRST, so if it fails the runtime is never touched and
+// runtime + disk still agree on the OLD value. A 500 is returned; nothing diverges.
+func TestTunablesAPI_PUT_PersistFailureLeavesRuntimeUnchanged(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{}) // engine at defaults
 	before := currentAutoExcludeTunables()
 	// Point persistence at a path whose parent does not exist ⇒ AtomicWrite fails.
@@ -175,7 +176,40 @@ func TestTunablesAPI_PUT_PersistFailureRollsBack(t *testing.T) {
 		t.Fatalf("persist failure: got %d, want 500", w.Code)
 	}
 	if got := currentAutoExcludeTunables(); got != before {
-		t.Fatalf("runtime not rolled back after persist failure: got %+v, want %+v (no runtime/disk divergence)", got, before)
+		t.Fatalf("runtime changed despite persist failure: got %+v, want %+v (persist-before-apply: no divergence)", got, before)
+	}
+}
+
+// TestTunablesAPI_PUT_PersistFailurePreservesEntries pins the persist-before-apply
+// guarantee against the exact Codex-review (#752) scenario: a PUT that lowers
+// max_entries BELOW the current active count would, if applied first, evict the
+// excess learned exclusions — and a config-only rollback could not bring them back.
+// Persisting first means a failed write never reaches Reconfigure, so every learned
+// entry survives the 500.
+func TestTunablesAPI_PUT_PersistFailurePreservesEntries(t *testing.T) {
+	const seeded = autoExcludeMaxEntriesMin + 8 // must exceed the target cap (the min) to force eviction on apply
+	swapAutoExclude(t, autoexclude.Config{ConfirmN: 1, MaxEntries: seeded * 2})
+	c := autoExclude()
+	for i := 0; i < seeded; i++ {
+		// confirmN=1 ⇒ a single distinct-client observation promotes to an active exclusion.
+		c.Observe("scope-a", "profile A", fmt.Sprintf("host%d.example", i), autoexclude.ReasonClientCertRequired, "203.0.113.7")
+	}
+	if got := c.Len(); got != seeded {
+		t.Fatalf("seed: active=%d, want %d", got, seeded)
+	}
+	// Broken persistence path ⇒ SaveAdminSettings fails.
+	swapAdminSettingsPath(t, filepath.Join(t.TempDir(), "missing-dir", "admin_settings.json"))
+
+	// Lower max_entries to its minimum (< seeded): applying this WOULD evict down to it.
+	w := callTunables(RoleAdmin, http.MethodPut, autoExcludeTunables{
+		ConfirmN: 2, TTLSecs: 3600, PinnedTTLSecs: 600, WindowSecs: 300, MaxEntries: autoExcludeMaxEntriesMin,
+	})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("persist failure: got %d, want 500", w.Code)
+	}
+	if got := c.Len(); got != seeded {
+		t.Fatalf("persist failure evicted %d learned entries (active=%d, want %d) — persist-before-apply must not touch the cache",
+			seeded-got, got, seeded)
 	}
 }
 
