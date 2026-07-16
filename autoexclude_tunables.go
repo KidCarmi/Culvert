@@ -63,28 +63,30 @@ func defaultAutoExcludeTunables() autoExcludeTunables {
 	}
 }
 
-// resolveAutoExcludeTunables fills every zero/omitted field with its engine default
-// and returns the fully-resolved effective set (no zeros). "Zero ⇒ default" is the
-// single, consistent rule: it is how a settings file predating this feature (all
-// fields absent) lands on defaults, AND how "reset to default" is expressed (write a
-// zero). It does NOT validate — callers validate the resolved set. It never reads
-// hidden state, so it is pure and order-independent.
+// resolveAutoExcludeTunables fills every field that is EXACTLY zero (which is also
+// what an absent JSON field unmarshals to) with its engine default, and returns the
+// resolved set. "Zero ⇒ default" is the single rule: it is how a settings file
+// predating this feature (all fields absent) lands on defaults, AND how "reset to
+// default" is expressed (write a zero). A NEGATIVE value is deliberately NOT treated
+// as omitted — it is left as-is so validateAutoExcludeTunables rejects it and the
+// whole malformed set is refused (fail-closed); only a literal 0 resets. It does NOT
+// validate; it never reads hidden state (pure, order-independent).
 func resolveAutoExcludeTunables(t autoExcludeTunables) autoExcludeTunables {
 	d := defaultAutoExcludeTunables()
 	out := t
-	if out.ConfirmN <= 0 {
+	if out.ConfirmN == 0 {
 		out.ConfirmN = d.ConfirmN
 	}
-	if out.TTLSecs <= 0 {
+	if out.TTLSecs == 0 {
 		out.TTLSecs = d.TTLSecs
 	}
-	if out.PinnedTTLSecs <= 0 {
+	if out.PinnedTTLSecs == 0 {
 		out.PinnedTTLSecs = d.PinnedTTLSecs
 	}
-	if out.WindowSecs <= 0 {
+	if out.WindowSecs == 0 {
 		out.WindowSecs = d.WindowSecs
 	}
-	if out.MaxEntries <= 0 {
+	if out.MaxEntries == 0 {
 		out.MaxEntries = d.MaxEntries
 	}
 	return out

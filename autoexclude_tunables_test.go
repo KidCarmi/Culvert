@@ -39,6 +39,19 @@ func TestResolveAutoExcludeTunables_ZeroMeansDefault(t *testing.T) {
 	}
 }
 
+// TestResolveAutoExcludeTunables_NegativeNotDefaulted — only a LITERAL zero resets
+// to default; a negative is preserved so the validator rejects it (fail-closed),
+// rather than being silently treated as omitted.
+func TestResolveAutoExcludeTunables_NegativeNotDefaulted(t *testing.T) {
+	got := resolveAutoExcludeTunables(autoExcludeTunables{TTLSecs: -1})
+	if got.TTLSecs != -1 {
+		t.Fatalf("negative must be preserved (not defaulted), got %d", got.TTLSecs)
+	}
+	if err := validateAutoExcludeTunables(got); err == nil {
+		t.Fatal("a resolved set carrying a negative must FAIL validation (fail-closed)")
+	}
+}
+
 // ── Validator (bounds contract) ──────────────────────────────────────────
 
 func TestValidateAutoExcludeTunables(t *testing.T) {
@@ -153,12 +166,20 @@ func TestAutoExcludeTunables_InvalidPersistedIgnored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin_settings.json")
 	swapAdminSettingsPath(t, path)
 
-	if err := os.WriteFile(path, []byte(`{"autoexclude_tunables_saved":true,"autoexclude_confirm_n":1,"autoexclude_max_entries":500}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	LoadAdminSettings(path)
-	if got := currentAutoExcludeTunables(); got != defaultAutoExcludeTunables() {
-		t.Fatalf("invalid persisted tunables were applied: %+v, want defaults (fail-closed)", got)
+	// Two malformed files: an out-of-bounds positive (confirmN=1) and a NEGATIVE
+	// (ttl=-1). Both must be refused wholesale, leaving engine defaults.
+	for _, body := range []string{
+		`{"autoexclude_tunables_saved":true,"autoexclude_confirm_n":1,"autoexclude_max_entries":500}`,
+		`{"autoexclude_tunables_saved":true,"autoexclude_ttl_secs":-1,"autoexclude_confirm_n":4}`,
+	} {
+		setAutoExclude(autoexclude.New(autoexclude.Config{})) // reset to defaults per case
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		LoadAdminSettings(path)
+		if got := currentAutoExcludeTunables(); got != defaultAutoExcludeTunables() {
+			t.Fatalf("invalid persisted tunables were applied (%s): %+v, want defaults (fail-closed)", body, got)
+		}
 	}
 }
 
