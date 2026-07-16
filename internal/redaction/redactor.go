@@ -182,8 +182,13 @@ func (r *redactor) leaf(rv reflect.Value, ctx DataClass, acc *Result) any {
 }
 
 // scrubString applies the free-form scrubber to a kept string, accumulating the
-// redaction count. A nil scrubber (legacy construction) is a no-op passthrough.
-func (r *redactor) scrubString(s string, _ DataClass, acc *Result) any {
+// redaction count. It also raises ClassMax to ctx: the []byte walk path calls
+// this DIRECTLY (bypassing leaf()'s own ClassMax bump), so without this a kept
+// []byte leaf would report PUBLIC and slip past a collector's class ceiling.
+// A nil scrubber (legacy construction) still updates ClassMax, only the scrub
+// is a no-op passthrough.
+func (r *redactor) scrubString(s string, ctx DataClass, acc *Result) any {
+	acc.ClassMax = maxClass(acc.ClassMax, ctx)
 	if r.scrubber == nil {
 		return s
 	}

@@ -146,6 +146,12 @@ func (sc *Scrubber) Scrub(s string) (string, int) {
 	if s == "" {
 		return "", 0
 	}
+	// Enforce the scan cap FIRST so it is truly fail-closed: an over-cap leaf is
+	// replaced whole regardless of whether the (precision-first) patterns happen
+	// to match, and the resource bound holds before any full scan of a huge leaf.
+	if len(s) > maxScanBytes {
+		return "[redacted:oversized]", 1
+	}
 	zw := strings.IndexFunc(s, isFormatRune) >= 0
 	if !zw && !sc.detect.MatchString(s) {
 		return s, 0 // clean path: format-rune check + one detector scan, no build
@@ -157,9 +163,9 @@ func (sc *Scrubber) Scrub(s string) (string, int) {
 			}
 			return r
 		}, s)
-	}
-	if len(s) > maxScanBytes {
-		return "[redacted:oversized]", 1 // fail-closed: a secret could hide past the replacement cap
+		if len(s) > maxScanBytes { // re-check: stripping only shrinks, but be explicit
+			return "[redacted:oversized]", 1
+		}
 	}
 	count := 0
 	s = sc.applyTokenPass(s, &count)

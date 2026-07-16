@@ -110,6 +110,12 @@ func TestScrub_Bounds(t *testing.T) {
 	if out, n := sc.Scrub(big); out != "[redacted:oversized]" || n != 1 {
 		t.Fatalf("oversized: out=%q n=%d", out[:min(40, len(out))], n)
 	}
+	// clean-but-oversized: a >cap leaf with NO secret is STILL replaced whole
+	// (the cap is enforced before the clean-path return — fail-closed contract).
+	cleanBig := strings.Repeat("a", maxScanBytes+1)
+	if out, n := sc.Scrub(cleanBig); out != "[redacted:oversized]" || n != 1 {
+		t.Fatalf("clean oversized: out=%q n=%d", out[:min(40, len(out))], n)
+	}
 	// overflow: more matches than the cap → replaced whole.
 	many := strings.Repeat("AKIAIOSFODNN7EXAMPLE ", maxReplacements+5)
 	if out, n := sc.Scrub(many); out != "[redacted:overflow]" || n != 1 {
@@ -172,6 +178,22 @@ func TestScrub_IntegrationViaRedactor(t *testing.T) {
 	// class_max must not exceed INTERNAL — a scrubbed value never raises class.
 	if res.ClassMax > ClassInternal {
 		t.Fatalf("scrubbing raised class_max to %v", res.ClassMax)
+	}
+}
+
+// TestScrub_ByteSliceRaisesClassMax proves a kept []byte leaf raises ClassMax to
+// its context (the []byte walk path calls scrubString directly, bypassing leaf's
+// own bump) — so a PUBLIC-ceiling collector emitting byte content is still caught.
+func TestScrub_ByteSliceRaisesClassMax(t *testing.T) {
+	rd := NewWithSalt([]byte("s"))
+	// A top-level []byte is walked with the default INTERNAL context; ClassMax
+	// must reflect INTERNAL, not fall through to PUBLIC.
+	if res := rd.Classify([]byte("plain byte content")); res.ClassMax != ClassInternal {
+		t.Fatalf("top-level []byte class_max=%v want INTERNAL", res.ClassMax)
+	}
+	// A []byte value inside a kept map likewise.
+	if res := rd.Classify(map[string][]byte{"k": []byte("v")}); res.ClassMax != ClassInternal {
+		t.Fatalf("map []byte class_max=%v want INTERNAL", res.ClassMax)
 	}
 }
 
