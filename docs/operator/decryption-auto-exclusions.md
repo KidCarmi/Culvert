@@ -201,6 +201,45 @@ The cache is **volatile**: it is in-memory only, per-node (never synced between
 Control Plane and Data Plane nodes), and **not** part of config export, import, or
 version rollback. It is cleared on restart and re-learns cheaply.
 
+### Tuning the cache (durable, per-node)
+
+The five parameters that govern the learn cache are adjustable at runtime from the
+**Cache Tuning** section of the Decryption Exclusions panel (**admin only**) or via
+the admin API. Unlike the learned entries, the *parameters* are **durable** — they
+persist across restart in admin settings — but they remain **node-local**: set them
+on each node. They are deliberately **not** part of config export, versioned
+rollback, or Control-Plane→Data-Plane sync.
+
+| Parameter | API field | Meaning | Bounds | Default |
+|---|---|---|---|---|
+| Confirm-count | `confirm_n` | Distinct clients that must independently hit an incompatible host before it is excluded (anti-poisoning) | 2–10 | 2 |
+| Entry TTL | `ttl_secs` | Lifetime of a learned exclusion before it expires and the host is re-inspected | 60 s – 7 d | 12 h |
+| Pinned-class TTL | `pinned_ttl_secs` | Shorter TTL for the `client_pinned` reason class; must not exceed the entry TTL | 60 s – 7 d (≤ `ttl_secs`) | 1 h |
+| Confirm window | `window_secs` | Window within which the confirm-count of distinct clients must accumulate | 10 s – 24 h | 10 m |
+| Max entries | `max_entries` | Hard cap on active exclusions per node (memory bound); lowering it evicts the least-recently-learned entries immediately | 256 – 262 144 | 4096 |
+
+- `confirm_n` cannot be set to 1: a single client can no longer create a bypass, by
+  design — a one-client threshold defeats the anti-poisoning guarantee.
+- Changing a value applies immediately and does **not** wipe the current entries;
+  new values take effect for **future** promotions (already-active exclusions keep
+  their current expiry).
+- **Applying vs. persisting.** A change is written to durable storage *first*, then
+  applied to the live cache. If the durable write fails, the live cache is left
+  untouched (no entries are evicted) and the change is rejected with `500` — runtime
+  and disk never disagree.
+- The **current effective values** are shown in the panel's status line and in the
+  `/api/decryption-exclusions` Stats block — that is the single source of truth. The
+  read endpoint below returns only the defaults and bounds (to populate the form),
+  never the live values.
+
+**API:**
+
+- `GET /api/decryption-exclusions/tunables` (viewer) — defaults + bounds + schema.
+- `PUT /api/decryption-exclusions/tunables` (admin) — a full replacement of the five
+  fields; an omitted or zero field resets to its default. The server validates the
+  merged effective set (bounds + `pinned_ttl_secs ≤ ttl_secs`) and rejects an
+  out-of-range set with `400`. **Reset to defaults** is a `PUT` of an empty body.
+
 ### Metrics
 
 - `culvert_decrypt_autoexclude_total{reason,scope}` — learn events by reason and
@@ -252,5 +291,7 @@ list is a planned enhancement.
 - Native-HTTP/2-path live rescue (currently learn-only there).
 - A curated predefined exclusion list of well-known pinned apps.
 - A `learn-review` posture (record + alert, bypass only after operator approval).
-- Operator-tunable confirm-count / TTL (currently fixed PAN-OS-aligned defaults;
-  the posture is surfaced read-only).
+
+Shipped since: **operator-tunable confirm-count / TTL / window / cap** (F10) — see
+[Tuning the cache](#tuning-the-cache-durable-per-node) above; the defaults remain the
+PAN-OS-aligned values, now adjustable per node.
