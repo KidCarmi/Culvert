@@ -110,8 +110,8 @@ func TestTunablesAPI_PUT_MalformedAndOutOfBounds(t *testing.T) {
 
 	// Malformed JSON body ⇒ 400.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPut, "/api/decryption-exclusions/tunables", strings.NewReader("{bad json"))
-	r = r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin))
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, RoleAdmin)
+	r := httptest.NewRequestWithContext(ctx, http.MethodPut, "/api/decryption-exclusions/tunables", strings.NewReader("{bad json"))
 	apiDecryptionExclusionTunables(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("malformed JSON: got %d, want 400", w.Code)
