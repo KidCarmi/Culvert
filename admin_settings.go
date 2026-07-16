@@ -119,6 +119,20 @@ type AdminSettings struct {
 	YARAOnTimeout     string `json:"yara_on_timeout,omitempty"`
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
+
+	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
+	// sentinel (like YARASettingsSaved): when false the values below are not applied
+	// on load, so a zero-value field can't override the engine defaults on settings
+	// files predating this feature. Durations persist as integer SECONDS to match the
+	// autoexclude.Stats() contract. The learned cache itself stays VOLATILE and
+	// node-local — only these five PARAMETERS are durable, and they are deliberately
+	// OFF export/import, version-rollback, and CP→DP propagation.
+	AutoExcludeTunablesSaved bool `json:"autoexclude_tunables_saved"`
+	AutoExcludeConfirmN      int  `json:"autoexclude_confirm_n,omitempty"`
+	AutoExcludeTTLSecs       int  `json:"autoexclude_ttl_secs,omitempty"`
+	AutoExcludePinnedTTLSecs int  `json:"autoexclude_pinned_ttl_secs,omitempty"`
+	AutoExcludeWindowSecs    int  `json:"autoexclude_window_secs,omitempty"`
+	AutoExcludeMaxEntries    int  `json:"autoexclude_max_entries,omitempty"`
 }
 
 var (
@@ -148,6 +162,7 @@ func LoadAdminSettings(path string) {
 	applyAdminServices(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminAutoExcludeTunables(&s)
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -323,6 +338,46 @@ func applyAdminYARA(s *AdminSettings) {
 	yaraSetAlertDegraded(s.YARAAlertDegraded)
 }
 
+// applyAdminAutoExcludeTunables restores the adaptive decryption-exclusion tunables
+// saved via the admin GUI (F10). Only applied when the sentinel is set, so a
+// settings file predating this feature (fields absent ⇒ zero, sentinel false) leaves
+// the engine defaults intact — feature-off is byte-identical. The persisted set is
+// resolved (zero ⇒ default) and VALIDATED; an out-of-range value (e.g. a hand-edited
+// file) is refused and the engine keeps its defaults (fail-closed), rather than
+// letting an out-of-bounds value through the engine's weaker last-resort clamp.
+func applyAdminAutoExcludeTunables(s *AdminSettings) {
+	if !s.AutoExcludeTunablesSaved {
+		return
+	}
+	resolved := resolveAutoExcludeTunables(autoExcludeTunables{
+		ConfirmN:      s.AutoExcludeConfirmN,
+		TTLSecs:       s.AutoExcludeTTLSecs,
+		PinnedTTLSecs: s.AutoExcludePinnedTTLSecs,
+		WindowSecs:    s.AutoExcludeWindowSecs,
+		MaxEntries:    s.AutoExcludeMaxEntries,
+	})
+	if err := validateAutoExcludeTunables(resolved); err != nil {
+		logger.Printf("AdminSettings: ignoring invalid persisted auto-exclusion tunables (%v) — keeping engine defaults", err)
+		return
+	}
+	autoExclude().Reconfigure(resolved.engineConfig())
+}
+
+// snapshotAutoExcludeTunables copies the live effective tunables from Stats (never
+// zero) into s, so the durable file always reflects what is applied; on load they
+// resolve to themselves and Reconfigure is a no-op when unchanged. The learned cache
+// contents are NOT persisted (volatile). Extracted to keep SaveAdminSettings under
+// the funlen cap (mirrors snapshotBlocklistFeeds).
+func snapshotAutoExcludeTunables(s *AdminSettings) {
+	t := currentAutoExcludeTunables()
+	s.AutoExcludeTunablesSaved = true
+	s.AutoExcludeConfirmN = t.ConfirmN
+	s.AutoExcludeTTLSecs = t.TTLSecs
+	s.AutoExcludePinnedTTLSecs = t.PinnedTTLSecs
+	s.AutoExcludeWindowSecs = t.WindowSecs
+	s.AutoExcludeMaxEntries = t.MaxEntries
+}
+
 // snapshotBlocklistFeeds copies the live feed set into s. blFeedSyncer is
 // nil until main() runs loadBlocklist, and SaveAdminSettings can run from a
 // detached goroutine (adminSettingsSave) that outlives the caller — so guard
@@ -423,6 +478,8 @@ func SaveAdminSettings() {
 	s.YARAOnTimeout = yaraGetOnTimeout()
 	s.YARAOnSaturation = yaraGetOnSaturation()
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
+
+	snapshotAutoExcludeTunables(&s)
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
