@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -119,6 +122,39 @@ func TestNoSecretInBundle(t *testing.T) {
 			// shareable
 		default:
 			t.Fatalf("section %s has class_max %q (must be <= INTERNAL for a shareable bundle)", s.ID, s.ClassMax)
+		}
+	}
+}
+
+// TestSupportBundle_RecoveryOneShot exercises `culvert --support-bundle <path>`:
+// a headless L0 bundle written to disk with no server running.
+func TestSupportBundle_RecoveryOneShot(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "recovery.csb.tgz")
+	if err := runSupportBundleCommand(out); err != nil {
+		t.Fatalf("runSupportBundleCommand: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read bundle: %v", err)
+	}
+	files := extractTarGz(t, data)
+	if _, ok := files[support.ManifestName]; !ok {
+		t.Fatal("recovery bundle missing manifest.json")
+	}
+	if _, ok := files["sections/product.json"]; !ok {
+		t.Fatal("recovery bundle missing sections/product.json")
+	}
+	var man support.SupportBundleManifest
+	if err := json.Unmarshal(files[support.ManifestName], &man); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if man.Format != support.BundleFormat {
+		t.Fatalf("format=%s", man.Format)
+	}
+	// At L0 the diagnostics collector (MinLevel L1) must be gated out, not run.
+	for _, s := range man.Sections {
+		if s.ID == "diagnostics" && s.Status != support.StatusSkipped {
+			t.Fatalf("diagnostics must be skipped at L0, got %s", s.Status)
 		}
 	}
 }

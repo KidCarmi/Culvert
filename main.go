@@ -114,6 +114,7 @@ type startupState struct {
 	uiSANsFlag              *string
 	trustFwdHeaders         *bool
 	resetPwUser             *string
+	supportBundleOut        *string
 	backupOut               *string
 	backupEncrypt           *bool
 	restoreIn               *string
@@ -283,6 +284,7 @@ func parseFlags(s *startupState) {
 	s.uiSANsFlag = flag.String("ui-san", "", "Additional TLS SANs for self-signed cert (comma-separated IPs/hostnames)")
 	s.trustFwdHeaders = flag.Bool("trust-forwarded-headers", false, "Trust X-Forwarded-* headers (enable when behind reverse proxy)")
 	s.resetPwUser = flag.String("reset-password", "", "Reset admin password and exit (format: username:newpassword)")
+	s.supportBundleOut = flag.String("support-bundle", "", "Write a redacted csb/1 support bundle to the given path and exit; runs headless (no server) over the minimal L0 collector set (M1 recovery one-shot)")
 	s.backupOut = flag.String("backup", "", "Pack /data into a tar.gz at the given path and exit (D1.3a)")
 	s.backupEncrypt = flag.Bool("encrypt", false, "Encrypt the --backup tarball with AES-256-GCM (D1.4); requires "+backupPassphraseEnv+" env var. Lose the passphrase, lose the backup.")
 	s.restoreIn = flag.String("restore", "", "Validate a backup tarball and print restore plan (dry-run; D1.3b.1)")
@@ -317,6 +319,14 @@ func parseFlags(s *startupState) {
 //
 //nolint:cyclop,gocognit // Flat one-shot dispatch table: each branch has
 func handleOneShotCommands(s *startupState) {
+	// ── One-shot: recovery support bundle (M1) — headless, no server ──────
+	if *s.supportBundleOut != "" {
+		if err := runSupportBundleCommand(*s.supportBundleOut); err != nil {
+			fmt.Fprintf(os.Stderr, "Support bundle error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	// ── One-shot: backup/export (D1.3a unencrypted; D1.4 encrypted) ───────
 	if *s.backupOut != "" {
 		if err := runBackupCommand(s); err != nil {

@@ -127,27 +127,31 @@ func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f)
 }
 
-// createSupportBundle runs the engine over the registered collectors and persists
-// the bundle under <dataDir>/support/bundles/<id>/. No model or network is in the
-// path; the bundle is redacted at source by the engine.
-func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
+// buildSupportBundle runs the engine over the registered collectors at the given
+// level. No model or network is in the path; the bundle is redacted at source.
+func buildSupportBundle(ctx context.Context, level support.DebugLevel) (*support.BuildResult, error) {
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("nonce: %w", err)
 	}
-	opts := support.BuildOptions{
+	return support.NewRunner().Build(ctx, support.BuildOptions{
 		Version:   version,
 		GoVersion: runtime.Version(),
 		Runtime: support.RuntimeInfo{
 			NodeID: clusterRole.nodeID, Role: clusterRole.role, Runtime: "unknown",
 		},
-		Level:         support.L1,
+		Level:         level,
 		Profile:       "default",
 		IncidentScope: "standard",
 		Nonce:         hex.EncodeToString(nonce),
 		Clock:         time.Now,
-	}
-	res, err := support.NewRunner().Build(ctx, opts)
+	})
+}
+
+// createSupportBundle builds a standard (L1) bundle and persists it under
+// <dataDir>/support/bundles/<id>/.
+func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
+	res, err := buildSupportBundle(ctx, support.L1)
 	if err != nil {
 		return nil, err
 	}
@@ -166,4 +170,22 @@ func createSupportBundle(ctx context.Context) (*support.BuildResult, error) {
 		return nil, fmt.Errorf("write manifest: %w", err)
 	}
 	return res, nil
+}
+
+// runSupportBundleCommand is the `culvert --support-bundle <path>` recovery
+// one-shot: it builds a minimal (L0) bundle headless — no server, no admin UI —
+// and writes it to outPath. This is the "GUI is down" escape hatch (the endorsed
+// GAP-MON-01 recovery path). Prints a short summary to stdout.
+func runSupportBundleCommand(outPath string) error {
+	res, err := buildSupportBundle(context.Background(), support.L0)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(outPath, res.TarGz, 0o600); err != nil {
+		return fmt.Errorf("write bundle: %w", err)
+	}
+	fmt.Printf("support bundle written: %s\n  bundle_id: %s\n  sections:  %d ok, %d failed, %d skipped\n  sha256:    %s\n",
+		outPath, res.BundleID, res.Manifest.Collection.OK,
+		res.Manifest.Collection.Failed, res.Manifest.Collection.Skipped, res.BundleSHA256)
+	return nil
 }
