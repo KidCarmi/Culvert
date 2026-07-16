@@ -35,6 +35,12 @@ const (
 )
 
 // AllOutcomes is the closed set of Outcome values, in canonical order.
+//
+// READ-ONLY: exported so callers can range it (e.g. to pre-register bounded metric
+// labels). Do NOT mutate or reassign it — Valid() does NOT consult it (Valid is a
+// compile-time switch, immune to slice mutation), and decryptobs_parity_test.go pins
+// this slice against the declared consts, but a mutation would still corrupt any
+// consumer that ranges it. Treat every All<Type> var as an immutable literal.
 var AllOutcomes = []Outcome{
 	OutcomeInspected, OutcomeBypassManual, OutcomeBypassLearned,
 	OutcomeRescued, OutcomeFailed, OutcomeNotDecrypted,
@@ -42,8 +48,18 @@ var AllOutcomes = []Outcome{
 
 func (o Outcome) String() string { return string(o) }
 
-// Valid reports whether o is a member of the closed set.
-func (o Outcome) Valid() bool { return validMember(o, AllOutcomes) }
+// Valid reports whether o is a member of the closed set. It is a compile-time switch
+// over the constants, NOT a scan of AllOutcomes — so membership cannot be changed at
+// runtime by mutating or reassigning the exported slice (defence-in-depth for the
+// bounded-label contract; PR #758 review).
+func (o Outcome) Valid() bool {
+	switch o {
+	case OutcomeInspected, OutcomeBypassManual, OutcomeBypassLearned,
+		OutcomeRescued, OutcomeFailed, OutcomeNotDecrypted:
+		return true
+	}
+	return false
+}
 
 // DecisionSource is which part of the pipeline made the decryption decision
 // (ADR-0011 §2.2, 7 values).
@@ -65,19 +81,33 @@ const (
 	DecisionCertVerifyBlock DecisionSource = "cert_verify_block"
 	// DecisionNonTLSFallback — the CONNECT target was not TLS; the non-TLS relay fallback ran.
 	DecisionNonTLSFallback DecisionSource = "non_tls_fallback"
+	// DecisionInspectUnavailable — a rule selected inspection but the MITM CA was not
+	// ready (no root CA / passphrase), so handleTunnel silently degraded to bypass
+	// (proxy_tunnel.go). A distinct source so this MISCONFIGURATION is visible on the
+	// coverage view rather than hiding inside manual bypass (PR #758 red-team, model gap).
+	DecisionInspectUnavailable DecisionSource = "inspect_unavailable"
 )
 
 // AllDecisionSources is the closed set of DecisionSource values, in canonical order.
+// READ-ONLY — see the AllOutcomes note.
 var AllDecisionSources = []DecisionSource{
 	DecisionPolicyInspect, DecisionManualSSLBypass, DecisionAutoexcludeCache,
 	DecisionAutoexcludeRescue, DecisionNoFailOpen502, DecisionCertVerifyBlock,
-	DecisionNonTLSFallback,
+	DecisionNonTLSFallback, DecisionInspectUnavailable,
 }
 
 func (d DecisionSource) String() string { return string(d) }
 
-// Valid reports whether d is a member of the closed set.
-func (d DecisionSource) Valid() bool { return validMember(d, AllDecisionSources) }
+// Valid reports whether d is a member of the closed set (compile-time switch — see Outcome.Valid).
+func (d DecisionSource) Valid() bool {
+	switch d {
+	case DecisionPolicyInspect, DecisionManualSSLBypass, DecisionAutoexcludeCache,
+		DecisionAutoexcludeRescue, DecisionNoFailOpen502, DecisionCertVerifyBlock,
+		DecisionNonTLSFallback, DecisionInspectUnavailable:
+		return true
+	}
+	return false
+}
 
 // FailStage is where in the connection lifecycle a failure occurred (ADR-0011 §2.2,
 // 7 values). `none` = no failure (a successful/decisioned session).
@@ -109,8 +139,16 @@ var AllFailStages = []FailStage{
 
 func (f FailStage) String() string { return string(f) }
 
-// Valid reports whether f is a member of the closed set.
-func (f FailStage) Valid() bool { return validMember(f, AllFailStages) }
+// Valid reports whether f is a member of the closed set (compile-time switch — see Outcome.Valid).
+func (f FailStage) Valid() bool {
+	switch f {
+	case FailStageNone, FailStageTCPConnect, FailStageClientHello,
+		FailStageUpstreamHandshake, FailStageCertVerify, FailStageClientLeafReject,
+		FailStageRelay:
+		return true
+	}
+	return false
+}
 
 // FailCategory is the normalized failure class (ADR-0011 §2.2, 10 values). It mirrors
 // the PAN-OS Decryption Error-Index classes. `none` = no failure.
@@ -149,8 +187,17 @@ var AllFailCategories = []FailCategory{
 
 func (f FailCategory) String() string { return string(f) }
 
-// Valid reports whether f is a member of the closed set.
-func (f FailCategory) Valid() bool { return validMember(f, AllFailCategories) }
+// Valid reports whether f is a member of the closed set (compile-time switch — see Outcome.Valid).
+func (f FailCategory) Valid() bool {
+	switch f {
+	case FailCategoryNone, FailCategoryCertificate, FailCategoryProtocol,
+		FailCategoryVersion, FailCategoryCipher, FailCategoryClientCertRequired,
+		FailCategoryClientPinned, FailCategoryResource, FailCategoryTimeout,
+		FailCategoryOther:
+		return true
+	}
+	return false
+}
 
 // CertVerify is the origin-certificate verification status (ADR-0011 §2.2, 7 values).
 // It is the *status* enum — raw cert subject/issuer strings are never stored here.
@@ -182,8 +229,16 @@ var AllCertVerify = []CertVerify{
 
 func (c CertVerify) String() string { return string(c) }
 
-// Valid reports whether c is a member of the closed set.
-func (c CertVerify) Valid() bool { return validMember(c, AllCertVerify) }
+// Valid reports whether c is a member of the closed set (compile-time switch — see Outcome.Valid).
+func (c CertVerify) Valid() bool {
+	switch c {
+	case CertVerifyNotChecked, CertVerifyVerified, CertVerifySkipped,
+		CertVerifyUntrustedIssuer, CertVerifyExpired, CertVerifyHostnameMismatch,
+		CertVerifyUnknown:
+		return true
+	}
+	return false
+}
 
 // TLSVersion is the negotiated TLS version, bounded to the versions Culvert inspects
 // plus `unknown` (ADR-0011 §2.2, 3 values).
@@ -203,8 +258,14 @@ var AllTLSVersions = []TLSVersion{TLSVersion12, TLSVersion13, TLSVersionUnknown}
 
 func (v TLSVersion) String() string { return string(v) }
 
-// Valid reports whether v is a member of the closed set.
-func (v TLSVersion) Valid() bool { return validMember(v, AllTLSVersions) }
+// Valid reports whether v is a member of the closed set (compile-time switch — see Outcome.Valid).
+func (v TLSVersion) Valid() bool {
+	switch v {
+	case TLSVersion12, TLSVersion13, TLSVersionUnknown:
+		return true
+	}
+	return false
+}
 
 // ALPN is the negotiated application protocol, bounded to the two Culvert relays plus
 // the empty value (ADR-0011 §2.2). The empty string is a VALID member — it means "no
@@ -225,17 +286,12 @@ var AllALPN = []ALPN{ALPNNone, ALPNH2, ALPNHTTP11}
 
 func (a ALPN) String() string { return string(a) }
 
-// Valid reports whether a is a member of the closed set (including the empty member).
-func (a ALPN) Valid() bool { return validMember(a, AllALPN) }
-
-// validMember reports whether v appears in set. Generic over the string-enum types so
-// each Valid method is a one-liner; the closed sets are tiny (≤10), so linear scan is
-// the right choice (no map allocation, no init ordering concern).
-func validMember[T ~string](v T, set []T) bool {
-	for _, s := range set {
-		if s == v {
-			return true
-		}
+// Valid reports whether a is a member of the closed set, INCLUDING the empty member
+// (compile-time switch — see Outcome.Valid).
+func (a ALPN) Valid() bool {
+	switch a {
+	case ALPNNone, ALPNH2, ALPNHTTP11:
+		return true
 	}
 	return false
 }
