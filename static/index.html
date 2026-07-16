@@ -3991,6 +3991,11 @@ Firefox (all platforms):
           <p class="hint">Diagnostic support bundles are <strong>redacted at source</strong> — secrets are dropped and identifiers masked before anything is written. Creating a bundle is admin-only; a standard bundle may contain internal (non-secret) operational detail.</p>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">Health verdict</div>
+            <div id="support-health" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
@@ -11694,22 +11699,51 @@ let _supportBundles = [];
 const _supportLevelName = ['L0', 'L1', 'L2', 'L3', 'L4'];
 
 async function loadSupport() {
+  const healthEl = document.getElementById('support-health');
   const statusEl = document.getElementById('support-status');
   const bundlesEl = document.getElementById('support-bundles');
-  if (statusEl) { statusEl.innerHTML = '<p class="hint">Loading…</p>'; statusEl.setAttribute('aria-busy', 'true'); }
-  if (bundlesEl) { bundlesEl.innerHTML = '<p class="hint">Loading…</p>'; bundlesEl.setAttribute('aria-busy', 'true'); }
-  // Status and bundles are independent reads — fetch concurrently, render each as
-  // it resolves, and surface per-panel errors without letting one fail the other.
-  const [statusR, bundlesR] = await Promise.allSettled([
+  [healthEl, statusEl, bundlesEl].forEach(el => {
+    if (el) { el.innerHTML = '<p class="hint">Loading…</p>'; el.setAttribute('aria-busy', 'true'); }
+  });
+  // The three reads are independent — fetch concurrently, render each as it
+  // resolves, and surface per-panel errors without letting one fail the others.
+  const [healthR, statusR, bundlesR] = await Promise.allSettled([
+    api('/api/health/explain'),
     api('/api/support/status'),
     api('/api/support/bundles'),
   ]);
+  if (healthR.status === 'fulfilled') renderSupportHealth(healthR.value);
+  else if (healthEl) healthEl.innerHTML = '<p class="hint">Failed to load health: ' + escHtml(healthR.reason.message) + '</p>';
   if (statusR.status === 'fulfilled') renderSupportStatus(statusR.value);
   else if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(statusR.reason.message) + '</p>';
   if (bundlesR.status === 'fulfilled') { _supportBundles = bundlesR.value || []; renderSupportBundles(_supportBundles); }
   else if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(bundlesR.reason.message) + '</p>';
-  if (statusEl) statusEl.removeAttribute('aria-busy');
-  if (bundlesEl) bundlesEl.removeAttribute('aria-busy');
+  [healthEl, statusEl, bundlesEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+}
+
+function renderSupportHealth(oc) {
+  const el = document.getElementById('support-health');
+  if (!el) return;
+  oc = oc || {};
+  const verdict = String(oc.verdict || 'unknown');
+  const color = verdict === 'ok' ? 'var(--green)' : verdict === 'warn' ? 'var(--orange)' : 'var(--red)';
+  const checks = oc.checks || [];
+  const hdr = '<p class="hint">Verdict <strong style="color:' + color + '">' + escHtml(verdict.toUpperCase()) +
+    '</strong>' + (oc.generated_at ? ' · ' + escHtml(fmtProvTime(oc.generated_at)) : '') + '</p>';
+  if (!checks.length) { el.innerHTML = hdr + '<p class="hint">No checks reported.</p>'; return; }
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>' +
+    checks.map(c => {
+      const st = String(c.status || '');
+      const sc = st === 'ok' ? 'var(--green)' : st === 'warn' ? 'var(--orange)' : 'var(--red)';
+      const detail = escHtml(String(c.message || '')) +
+        (c.operator_action ? ' <span class="hint">→ ' + escHtml(String(c.operator_action)) + '</span>' : '');
+      return '<tr>' +
+        '<td style="font-family:monospace">' + escHtml(String(c.code)) + '</td>' +
+        '<td style="color:' + sc + ';font-weight:600">' + escHtml(st) + '</td>' +
+        '<td>' + detail + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
 }
 
 function renderSupportStatus(s) {

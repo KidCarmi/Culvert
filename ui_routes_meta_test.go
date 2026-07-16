@@ -48,9 +48,11 @@ import (
 //   - 138 — Adaptive decryption exclusion added /api/decryption-exclusions
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
 //   - 140 — Supportability M1 Slice 1 added /api/support/bundles (POST create)
-//     + /api/support/bundles/{id} (GET download).
+//   - /api/support/bundles/{id} (GET download).
+//   - 142 — Supportability M1 added /api/support/status + /api/health/explain
+//     (the explained operator-contract health verdict).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 141
+	const want = 142
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

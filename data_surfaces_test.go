@@ -22,6 +22,14 @@ var collectedStructs = []any{
 	readinessReport{},
 	readinessCheck{},
 	crashRecord{},
+	configSection{},
+	policySection{},
+	policyRuleSummary{},
+	auditSection{},
+	auditEntrySummary{},
+	metricsSection{},
+	logsSection{},
+	logEntrySummary{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

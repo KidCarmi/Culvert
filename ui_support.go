@@ -43,6 +43,23 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/status", apiSupportStatus)
 	mux.HandleFunc("/api/support/bundles", apiSupportBundles)
 	mux.HandleFunc("/api/support/bundles/{id}", apiSupportBundleItem)
+	mux.HandleFunc("/api/health/explain", apiHealthExplain)
+}
+
+// apiHealthExplain returns the explained operator-contract health verdict —
+// per-check status + a plain-language operator_action for each — so an admin can
+// read "what is wrong and what to do" from the GUI, not just a liveness bit
+// (viewer, read-only; the endorsed GAP-MON-01 explained-health surface).
+func apiHealthExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	jsonOK(w, buildOperatorContract())
 }
 
 // supportCollectorInfo is the read-only view of one registered collector.

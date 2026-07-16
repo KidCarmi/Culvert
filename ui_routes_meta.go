@@ -607,6 +607,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/status", Handler: "apiSupportStatus", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "read-only support subsystem inventory: engine/redaction versions + registered collectors"}}},
+	{Path: "/api/health/explain", Handler: "apiHealthExplain", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "explained operator-contract health verdict: per-check status + operator_action"}}},
 	{Path: "/api/support/bundles", Handler: "apiSupportBundles", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "list persisted bundles (id/created/sections/size)"},

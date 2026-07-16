@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/redaction"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
@@ -123,6 +124,81 @@ func TestNoSecretInBundle(t *testing.T) {
 		default:
 			t.Fatalf("section %s has class_max %q (must be <= INTERNAL for a shareable bundle)", s.ID, s.ClassMax)
 		}
+	}
+}
+
+// TestReusedCollectors_SectionsPresent locks the M1 reused-accessor collectors
+// into a standard (L1) bundle.
+func TestReusedCollectors_SectionsPresent(t *testing.T) {
+	res := buildRealBundle(t)
+	ids := map[string]bool{}
+	for _, s := range res.Manifest.Sections {
+		ids[s.ID] = true
+	}
+	for _, want := range []string{"config", "policy", "audit", "metrics", "logs"} {
+		if !ids[want] {
+			t.Errorf("standard bundle missing reused-accessor section %q", want)
+		}
+	}
+}
+
+// TestReusedSections_IdentifiersMasked proves the SENSITIVE-classified live
+// identifiers (client IP, identity, destination host, full URI, audit actor/detail)
+// are masked to salted tokens, never emitted raw — the fail-closed M1 posture.
+func TestReusedSections_IdentifiersMasked(t *testing.T) {
+	rd := redaction.NewWithSalt([]byte("fixed-salt"))
+	le := logEntrySummary{
+		IP: "203.0.113.9", Identity: "alice@corp.example", Host: "secret-host.internal",
+		URI: "https://secret-host.internal/private", Method: "GET", Status: "OK",
+	}
+	out, _ := json.Marshal(rd.Struct(le))
+	for _, raw := range []string{"203.0.113.9", "alice@corp.example", "secret-host.internal"} {
+		if strings.Contains(string(out), raw) {
+			t.Fatalf("log identifier %q leaked unmasked: %s", raw, out)
+		}
+	}
+	if !strings.Contains(string(out), "mask_") {
+		t.Fatalf("log identifiers were not masked: %s", out)
+	}
+	ae := auditEntrySummary{Time: "t", Actor: "10.9.8.7", Action: "x.y", Detail: "raw-detail-blob"}
+	aout, _ := json.Marshal(rd.Struct(ae))
+	for _, raw := range []string{"10.9.8.7", "raw-detail-blob"} {
+		if strings.Contains(string(aout), raw) {
+			t.Fatalf("audit field %q leaked unmasked: %s", raw, aout)
+		}
+	}
+}
+
+// TestBundlePermissions0600 is the M1 security gate: a persisted bundle must live
+// in a 0700 dir with 0600 files — the bundle carries INTERNAL sections and must
+// not be world/group-readable on the appliance FS.
+func TestBundlePermissions0600(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	res, err := createSupportBundle(context.Background())
+	if err != nil {
+		t.Fatalf("createSupportBundle: %v", err)
+	}
+	dir := filepath.Join(supportBundlesDir(), res.BundleID)
+	if fi, err := os.Stat(dir); err != nil {
+		t.Fatalf("stat bundle dir: %v", err)
+	} else if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("bundle dir perm=%o want 0700", perm)
+	}
+	for _, name := range []string{"bundle.csb.tgz", "manifest.json"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s perm=%o want 0600", name, perm)
+		}
+	}
+	// No temp/partial artifact should survive a successful persist.
+	if _, err := os.Stat(filepath.Join(dir, "manifest.json.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("manifest.json.tmp should not survive a committed bundle (err=%v)", err)
 	}
 }
 
