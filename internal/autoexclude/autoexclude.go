@@ -442,6 +442,12 @@ func (c *Cache) Reconfigure(cfg Config) {
 		maxEntries = DefaultMaxEntries
 	}
 
+	// Snapshot the clock BEFORE locking. c.now may be caller-injected (tests /
+	// future instrumentation); calling it under c.mu could deadlock a wrapper that
+	// re-enters the cache (Len/Stats). This mirrors Observe/Contains, which both
+	// read now := c.now() before taking the lock.
+	now := c.now()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ttl = ttl
@@ -452,7 +458,7 @@ func (c *Cache) Reconfigure(cfg Config) {
 	c.maxPending = maxEntries // maintain the New invariant (pending shares the entry cap)
 	// Enforce the (possibly lowered) caps immediately and deterministically. Existing
 	// entries within the caps are preserved (Model A); only the excess is dropped.
-	c.evictToExactLocked(maxEntries, c.now())
+	c.evictToExactLocked(maxEntries, now)
 }
 
 // evictToExactLocked deterministically trims the active map to AT MOST `target`

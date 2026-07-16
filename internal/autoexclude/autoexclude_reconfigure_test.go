@@ -315,6 +315,34 @@ func TestReconfigure_Concurrent(t *testing.T) {
 	}
 }
 
+// TestReconfigure_ReentrantClockNoDeadlock pins that Reconfigure snapshots the
+// (caller-injectable) clock BEFORE taking the write lock. The injected clock here
+// re-enters the cache via PendingLen (which takes RLock and, unlike Len/Stats, does
+// NOT call now() — so no recursion). If Reconfigure invoked c.now() while holding
+// c.mu, this RLock would block forever; with the clock read before the lock, it
+// completes. A deadlock manifests as the select timeout.
+func TestReconfigure_ReentrantClockNoDeadlock(t *testing.T) {
+	var c *Cache
+	c = New(Config{ConfirmN: 1, MaxEntries: 4, Now: func() time.Time {
+		if c != nil {
+			_ = c.PendingLen() // re-enters under RLock; deadlocks iff now() runs under the write lock
+		}
+		return time.Unix(1_700_000_000, 0)
+	}})
+	c.Observe("s", "s", "h.example", ReasonUnsupportedParams, "id:x")
+
+	done := make(chan struct{})
+	go func() {
+		c.Reconfigure(Config{ConfirmN: 1, MaxEntries: 2})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Reconfigure deadlocked — c.now() must be snapshotted before taking c.mu")
+	}
+}
+
 // TestReconfigure_NoReadPathAllocRegression — PR1 must not add allocations to the
 // hot read path. Contains' per-call allocation count is identical before and after a
 // Reconfigure (Reconfigure only mutates config scalars + trims maps; it touches
