@@ -2998,6 +2998,33 @@ Firefox (all platforms):
           <div id="decexcl-list"></div>
         </div>
       </div>
+
+      <!-- Cache tuning: durable, per-node parameters for the volatile learn cache.
+           Admin-only (server enforces admin on PUT; data-min-role hides it for lower
+           roles). Current values come from the status line above (the Stats source of
+           truth); defaults + bounds come from GET /api/decryption-exclusions/tunables. -->
+      <div class="panel" id="dectun-panel" data-min-role="admin" style="margin-top:16px">
+        <div class="panel-header">
+          <span class="panel-title">Cache Tuning</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn sm ghost" data-min-role="admin" data-click="resetDecTunables" title="Restore all five parameters to their built-in defaults">Reset to defaults</button>
+            <button class="btn sm" data-min-role="admin" data-click="saveDecTunables">Save</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            These five parameters govern how the fail-open learn cache behaves on <strong>this node</strong>.
+            Unlike the learned entries above (which are volatile and node-local), the parameters are
+            <strong>durable</strong> — they survive restart. Changing a value applies immediately and does
+            <em>not</em> wipe the current entries; new values take effect for future promotions. Tunables are
+            node-local — set them on each node — and are deliberately not part of config export, versioned
+            rollback, or cluster sync. The <strong>current effective values</strong> are the status line above
+            (the single source of truth); the fields below are pre-filled from it.
+          </p>
+          <div id="dectun-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;max-width:820px"></div>
+          <div id="dectun-error" class="hint" style="color:var(--red);margin-top:10px;display:none"></div>
+        </div>
+      </div>
     </div>
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
@@ -4275,6 +4302,8 @@ document.addEventListener('click', e => {
     case 'editDecProf':       editDecProf(arg); break;
     case 'deleteDecProf':     deleteDecProf(arg); break;
     case 'fetchDecExclusions': fetchDecExclusions(); break;
+    case 'saveDecTunables':   saveDecTunables(); break;
+    case 'resetDecTunables':  resetDecTunables(); break;
     case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
     case 'clearDecExclusions': clearDecExclusions(); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
@@ -5370,6 +5399,9 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
       `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients (identity, else IP) · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
       `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`);
   }
+  // Pre-fill the admin Cache Tuning form from the same Stats snapshot (single
+  // source of truth for the CURRENT values); defaults/bounds load lazily.
+  renderDecTunables(stats);
   const el = document.getElementById('decexcl-list');
   if (!el) return;
   if (!_decExclusions.length) {
@@ -5432,6 +5464,119 @@ async function clearDecExclusions() {
     toast('All exclusions cleared', 'success');
     fetchDecExclusions();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Cache tuning (F10): durable, per-node parameters for the volatile learn cache.
+// GET /api/decryption-exclusions/tunables returns defaults + bounds ONLY; the CURRENT
+// values are read from the Stats block (single source of truth) and passed in here.
+let _decTunablesMeta = null; // {defaults, bounds} — loaded once, lazily.
+
+const DECTUN_FIELDS = [
+  { key: 'confirm_n',       label: 'Confirm-count',    unit: 'distinct clients' },
+  { key: 'ttl_secs',        label: 'Entry TTL',        unit: 'seconds', time: true },
+  { key: 'pinned_ttl_secs', label: 'Pinned-class TTL', unit: 'seconds', time: true },
+  { key: 'window_secs',     label: 'Confirm window',   unit: 'seconds', time: true },
+  { key: 'max_entries',     label: 'Max entries',      unit: 'hosts' },
+];
+
+// dectunDur renders a seconds count as a compact human duration for the field hint.
+function dectunDur(secs) {
+  secs = Number(secs) || 0;
+  if (secs > 0 && secs % 3600 === 0) return (secs / 3600) + 'h';
+  if (secs > 0 && secs % 60 === 0) return (secs / 60) + 'm';
+  return secs + 's';
+}
+
+async function loadDecTunablesMeta() {
+  if (_decTunablesMeta) return _decTunablesMeta;
+  _decTunablesMeta = await api('/api/decryption-exclusions/tunables'); // {defaults, bounds, ...}
+  return _decTunablesMeta;
+}
+
+// renderDecTunables fills the admin form. Current values come from `stats` (the Stats
+// source of truth); min/max/default come from the tunables meta endpoint. The panel
+// is admin-gated in markup, so lower roles never see it — but the server PUT is the
+// real backstop.
+async function renderDecTunables(stats) {
+  const host = document.getElementById('dectun-form');
+  if (!host) return;
+  let meta;
+  try { meta = await loadDecTunablesMeta(); }
+  catch(e) {
+    host.innerHTML = '<p class="hint" style="color:var(--red)">Could not load tuning schema: ' +
+      escHtml(e.message || 'request failed') + '</p>';
+    return;
+  }
+  const bounds = meta.bounds || {}, defs = meta.defaults || {};
+  host.innerHTML = DECTUN_FIELDS.map(f => {
+    const bd = bounds[f.key] || {};
+    const cur = (stats && stats[f.key] != null) ? stats[f.key] : (defs[f.key] ?? '');
+    const timeHint = (f.time && cur !== '') ? ' · = ' + dectunDur(cur) : '';
+    return `<div>
+      <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px">${escHtml(f.label)} <span style="opacity:.7">(${escHtml(f.unit)})</span></label>
+      <input type="number" id="dectun-${f.key}" class="input" value="${escHtml(String(cur))}" min="${escHtml(String(bd.min ?? ''))}" max="${escHtml(String(bd.max ?? ''))}" step="1" style="width:100%">
+      <div class="hint" style="font-size:.7rem;margin-top:3px">range ${escHtml(String(bd.min ?? '?'))}–${escHtml(String(bd.max ?? '?'))} · default ${escHtml(String(defs[f.key] ?? '?'))}${timeHint}</div>
+    </div>`;
+  }).join('');
+}
+
+// dectunGather reads + client-validates the form. Returns {body} on success or
+// {problems:[...]} on failure. The server re-validates (the authoritative check);
+// this is just fail-fast UX so a bad value never leaves the browser.
+function dectunGather() {
+  const bounds = (_decTunablesMeta && _decTunablesMeta.bounds) || {};
+  const body = {}, problems = [];
+  for (const f of DECTUN_FIELDS) {
+    const inp = document.getElementById('dectun-' + f.key);
+    const v = parseInt(inp && inp.value, 10);
+    if (isNaN(v)) { problems.push(f.label + ' must be a whole number'); continue; }
+    const bd = bounds[f.key] || {};
+    if (bd.min != null && v < bd.min) problems.push(`${f.label} is below the minimum (${bd.min})`);
+    if (bd.max != null && v > bd.max) problems.push(`${f.label} is above the maximum (${bd.max})`);
+    body[f.key] = v;
+  }
+  if (body.pinned_ttl_secs != null && body.ttl_secs != null && body.pinned_ttl_secs > body.ttl_secs) {
+    problems.push('Pinned-class TTL must not exceed Entry TTL');
+  }
+  return problems.length ? { problems } : { body };
+}
+
+function dectunShowError(msg) {
+  const err = document.getElementById('dectun-error');
+  if (!err) return;
+  if (msg) { err.style.display = 'block'; err.textContent = msg; }
+  else { err.style.display = 'none'; err.textContent = ''; }
+}
+
+async function saveDecTunables() {
+  const g = dectunGather();
+  if (g.problems) { dectunShowError(g.problems.join('; ')); return; }
+  dectunShowError('');
+  try {
+    // Full-set PUT (zero ⇒ default); the server validates the merged effective set.
+    await api('/api/decryption-exclusions/tunables', { method: 'PUT', body: g.body });
+    toast('Decryption-exclusion tunables saved', 'success');
+    fetchDecExclusions(); // re-reads Stats so the status line + form reflect the applied values
+  } catch(e) {
+    dectunShowError(e.message || 'request failed');
+    toast('Error: ' + (e.message || 'request failed'), 'error');
+  }
+}
+
+async function resetDecTunables() {
+  if (!await confirmAction('Reset cache tuning',
+      'Restore all five decryption-exclusion parameters to their built-in defaults? This applies immediately on this node.',
+      'Reset')) return;
+  dectunShowError('');
+  try {
+    // An all-empty PUT resets every field to its default (zero ⇒ default).
+    await api('/api/decryption-exclusions/tunables', { method: 'PUT', body: {} });
+    toast('Tunables reset to defaults', 'success');
+    fetchDecExclusions();
+  } catch(e) {
+    dectunShowError(e.message || 'request failed');
+    toast('Error: ' + (e.message || 'request failed'), 'error');
+  }
 }
 
 // loadDecryptionProfileDropdown populates the policy-editor profile <select>.
