@@ -99,6 +99,9 @@ func seedUIRoster(t *testing.T, adminUser, viewerUser, pass string) {
 	t.Helper()
 
 	// Isolate the UI-user store to a temp file so we don't touch real state.
+	cfg.mu.RLock()
+	previousUIUsersFile := cfg.uiUsersFile
+	cfg.mu.RUnlock()
 	tmp := filepath.Join(t.TempDir(), "ui_users.json")
 	cfg.SetUIUsersFile(tmp)
 
@@ -124,6 +127,7 @@ func seedUIRoster(t *testing.T, adminUser, viewerUser, pass string) {
 		_ = cfg.DeleteUIUser(viewerUser)
 		_ = cfg.DeleteUIUser(adminUser)
 		_ = cfg.SetAuth("", "")
+		cfg.SetUIUsersFile(previousUIUsersFile)
 	})
 }
 

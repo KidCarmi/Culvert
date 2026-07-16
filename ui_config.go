@@ -910,7 +910,10 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
 	// handler under the nestif complexity threshold).
 	importPolicyRules(&b, replaceMode)
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "configuration changed in memory but policy save failed", http.StatusInternalServerError)
+		return
+	}
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
 	}

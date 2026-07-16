@@ -84,6 +84,31 @@ func TestDraft_OffMode_LiveWrite(t *testing.T) {
 	}
 }
 
+func TestDraft_OffMode_SaveFailureReturns500WithoutConfigVersion(t *testing.T) {
+	draftTestSetup(t)
+	resetAuditLog()
+	t.Cleanup(resetAuditLog)
+	path := filepath.Join(t.TempDir(), "policy.json")
+	policyStore.path = path
+	if err := os.Mkdir(path+".meta", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := countConfigVersions("policy.add")
+
+	w := createRuleViaAPI(t, "not-durable", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("create with failed policy metadata save = %d, want 500 (body=%s)", w.Code, w.Body.String())
+	}
+	if countConfigVersions("policy.add") != before {
+		t.Fatal("failed durable policy save wrote a policy.add config version")
+	}
+	for _, entry := range auditGet() {
+		if entry.Action == "policy.add" && entry.Object == "not-durable" {
+			t.Fatal("failed durable policy save emitted a success-shaped policy.add audit")
+		}
+	}
+}
+
 // TestDraft_StageIsolation: with RequireCommit on, a create stages into the
 // candidate — running and Evaluate are untouched and NO per-edit config version
 // is written.
@@ -134,6 +159,38 @@ func TestDraft_Commit(t *testing.T) {
 	}
 	if countConfigVersions("policy.commit") != beforeCommits+1 {
 		t.Error("commit did not write exactly one policy.commit config version")
+	}
+}
+
+func TestDraft_CommitSaveFailureReturns500AndRetainsDraft(t *testing.T) {
+	draftTestSetup(t)
+	setRequireCommit(true)
+	if w := createRuleViaAPI(t, "staged", ""); w.Code != http.StatusOK {
+		t.Fatalf("stage = %d (%s)", w.Code, w.Body.String())
+	}
+	path := filepath.Join(t.TempDir(), "policy.json")
+	policyStore.path = path
+	if err := os.Mkdir(path+".meta", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := countConfigVersions("policy.commit")
+
+	w := httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit", map[string]any{"comment": "must persist"}))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("commit with failed policy metadata save = %d, want 500 (body=%s)", w.Code, w.Body.String())
+	}
+	if !policyDraft.active() {
+		t.Fatal("failed durable policy save cleared the draft")
+	}
+	if len(policyStore.List()) != 0 {
+		t.Fatal("failed durable policy save activated the draft in running memory")
+	}
+	if policyDraft.baseGenerationStale() {
+		t.Fatal("failed durable policy save made the retained draft stale")
+	}
+	if countConfigVersions("policy.commit") != before {
+		t.Fatal("failed durable policy save wrote a policy.commit config version")
 	}
 }
 

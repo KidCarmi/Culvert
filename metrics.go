@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,18 +28,20 @@ import (
 const maxRuleMetrics = 200
 
 type ruleMetrics struct {
-	mu    sync.RWMutex
-	hits  map[string]*int64 // rule name → hit count
-	last  map[string]*int64 // rule name → unix-seconds of last hit (policy-metadata P1)
-	order []string          // insertion order for cap enforcement
+	mu            sync.RWMutex
+	hits          map[string]*int64               // rule name → hit count
+	last          map[string]*int64               // rule name → unix-seconds of last hit (policy-metadata P1)
+	byID          map[string]persistedRuleCounter // stable rule ID → persisted accounting
+	loadedByName  map[string]persistedRuleCounter // immutable legacy persistence baseline
+	appliedByName map[string]int64                // greatest persisted hit baseline merged into telemetry
+	order         []string                        // insertion order for cap enforcement
 }
 
-var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64)}
+var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64), byID: make(map[string]persistedRuleCounter), loadedByName: make(map[string]persistedRuleCounter), appliedByName: make(map[string]int64)}
 
-// RecordHit increments the hit counter for the given policy rule name and
-// stamps its last-hit time. Both are the persisted source of truth (the live
-// PolicyRule.HitCount/lastHitUnix are incremented separately in Evaluate);
-// RestoreHitCounts copies these back onto the rules at startup.
+// RecordHit increments the telemetry counter for the given policy rule name and
+// stamps its last-hit time. Live policy accounting is maintained by Evaluate;
+// saveHitCounters overlays that rename-safe accounting before persistence.
 func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ruleName == "" {
 		return
@@ -48,7 +54,7 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ok {
 		atomic.AddInt64(ctr, 1)
 		if lastPtr != nil {
-			atomic.StoreInt64(lastPtr, now)
+			atomicStoreMax(lastPtr, now)
 		}
 		return
 	}
@@ -61,7 +67,7 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ctr, ok = rm.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
 		if lp := rm.last[ruleName]; lp != nil {
-			atomic.StoreInt64(lp, now)
+			atomicStoreMax(lp, now)
 		}
 		return
 	}
@@ -79,25 +85,74 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 // (policy-metadata P1: lastHit joined the long-standing hit count). LastHit is
 // omitempty so a never-matched rule and the legacy loader stay compatible.
 type persistedRuleCounter struct {
-	Hits    int64 `json:"hits"`
-	LastHit int64 `json:"lastHit,omitempty"` // unix seconds; 0 = never
+	Name    string `json:"name,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Hits    int64  `json:"hits"`
+	LastHit int64  `json:"lastHit,omitempty"` // unix seconds; 0 = never
 }
+
+type persistedRuleCounterWire struct {
+	Name    string `json:"name,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Hits    *int64 `json:"hits"`
+	LastHit int64  `json:"lastHit,omitempty"`
+}
+
+const hitCounterFormatVersion = 2
+
+type persistedRuleCounterFile struct {
+	Version int                    `json:"version"`
+	Rules   []persistedRuleCounter `json:"rules"`
+}
+
+type hitCounterLoadStatus uint8
+
+const (
+	hitCounterLoadMissing hitCounterLoadStatus = iota
+	hitCounterLoadOK
+	hitCounterLoadInvalid
+)
 
 // saveHitCounters marshals the current hit counters + lastHit to JSON and
 // writes them to path using a temp-file-then-rename pattern for crash safety.
 func saveHitCounters(path string) {
-	ruleMet.mu.RLock()
-	data := make(map[string]persistedRuleCounter, len(ruleMet.hits))
-	for name, ptr := range ruleMet.hits {
-		rec := persistedRuleCounter{Hits: atomic.LoadInt64(ptr)}
-		if lp := ruleMet.last[name]; lp != nil {
-			rec.LastHit = atomic.LoadInt64(lp)
+	// Current policy definitions are authoritative for persisted accounting.
+	// Version 2 is an array so duplicate rule names cannot collapse stable IDs.
+	records := make([]persistedRuleCounter, 0, maxRuleMetrics)
+	rules := policyStore.List()
+	for i := range rules {
+		rule := &rules[i]
+		if rule.Name == "" || (rule.HitCount == 0 && rule.lastHitUnix == 0) || len(records) >= maxRuleMetrics {
+			continue
 		}
-		data[name] = rec
+		records = append(records, persistedRuleCounter{
+			Name: rule.Name, ID: rule.ID, Hits: rule.HitCount, LastHit: rule.lastHitUnix,
+		})
 	}
-	ruleMet.mu.RUnlock()
 
-	b, err := json.MarshalIndent(data, "", "  ")
+	// An empty policy store remains compatible with callers/tests that use
+	// ruleMet before policy initialization. Sort names for deterministic output.
+	if len(rules) == 0 {
+		ruleMet.mu.RLock()
+		names := make([]string, 0, len(ruleMet.hits))
+		for name := range ruleMet.hits {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if len(records) >= maxRuleMetrics {
+				break
+			}
+			rec := persistedRuleCounter{Name: name, Hits: atomic.LoadInt64(ruleMet.hits[name])}
+			if lp := ruleMet.last[name]; lp != nil {
+				rec.LastHit = atomic.LoadInt64(lp)
+			}
+			records = append(records, rec)
+		}
+		ruleMet.mu.RUnlock()
+	}
+
+	b, err := json.MarshalIndent(persistedRuleCounterFile{Version: hitCounterFormatVersion, Rules: records}, "", "  ")
 	if err != nil {
 		logger.Printf("HitCounters: marshal error: %v", err)
 		return
@@ -107,76 +162,352 @@ func saveHitCounters(path string) {
 	}
 }
 
-// loadHitCounters reads a JSON file of persisted hit counters and restores them
-// into ruleMet. Accepts BOTH the current object format ({"r":{"hits","lastHit"}})
-// and the legacy bare-count format ({"r":5}), so upgrading in place never drops
-// counts.
-func loadHitCounters(path string) {
+// loadHitCounters reads persisted counters and classifies the result so startup
+// never overwrites unreadable or malformed evidence. It accepts version 2 plus
+// both historical name-keyed formats.
+func loadHitCounters(path string) hitCounterLoadStatus {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return // file may not exist on first run; silently skip
+		if errors.Is(err, os.ErrNotExist) {
+			return hitCounterLoadMissing
+		}
+		logger.Printf("HitCounters: read error from %s: %v", path, err)
+		return hitCounterLoadInvalid
 	}
-	// Current format first.
-	var recs map[string]persistedRuleCounter
-	if json.Unmarshal(data, &recs) == nil {
-		ruleMet.restoreRecords(recs)
-		logger.Printf("HitCounters: restored %d counter(s) from %s", len(recs), path)
-		return
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		logger.Printf("HitCounters: ambiguous JSON from %s: %v — preserving file", path, err)
+		return hitCounterLoadInvalid
 	}
-	// Legacy fallback: bare name→count (no lastHit).
+	current, versioned, err := decodeVersionedRuleCounterFile(data)
+	if versioned {
+		if err != nil {
+			logger.Printf("HitCounters: invalid versioned data from %s: %v — preserving file", path, err)
+			return hitCounterLoadInvalid
+		}
+		if err := validatePersistedCounterRecords(current.Rules, true); err != nil {
+			logger.Printf("HitCounters: invalid version %d data from %s: %v — preserving file", current.Version, path, err)
+			return hitCounterLoadInvalid
+		}
+		ruleMet.restoreCounterRecords(current.Rules)
+		logger.Printf("HitCounters: restored %d counter(s) from %s", len(current.Rules), path)
+		return hitCounterLoadOK
+	}
+	records, structured, err := decodeHistoricalRuleCounters(data)
+	if structured {
+		if err != nil {
+			logger.Printf("HitCounters: invalid historical data from %s: %v — preserving file", path, err)
+			return hitCounterLoadInvalid
+		}
+		if err := validatePersistedCounterRecords(records, false); err != nil {
+			logger.Printf("HitCounters: invalid historical data from %s: %v — preserving file", path, err)
+			return hitCounterLoadInvalid
+		}
+		ruleMet.restoreCounterRecords(records)
+		logger.Printf("HitCounters: restored %d counter(s) from %s", len(records), path)
+		return hitCounterLoadOK
+	}
 	var counts map[string]int64
-	if json.Unmarshal(data, &counts) != nil {
-		logger.Printf("HitCounters: unmarshal error from %s — starting fresh", path)
-		return
+	if json.Unmarshal(data, &counts) != nil || counts == nil {
+		logger.Printf("HitCounters: unmarshal error from %s — preserving file", path)
+		return hitCounterLoadInvalid
 	}
 	legacy := make(map[string]persistedRuleCounter, len(counts))
 	for name, c := range counts {
 		legacy[name] = persistedRuleCounter{Hits: c}
 	}
-	ruleMet.restoreRecords(legacy)
+	records = persistedCounterRecordsFromMap(legacy)
+	if err := validatePersistedCounterRecords(records, false); err != nil {
+		logger.Printf("HitCounters: invalid legacy data from %s: %v — preserving file", path, err)
+		return hitCounterLoadInvalid
+	}
+	ruleMet.restoreCounterRecords(records)
 	logger.Printf("HitCounters: restored %d counter(s) from %s (legacy format)", len(counts), path)
+	return hitCounterLoadOK
 }
 
-// restoreRecords inserts persisted counters into ruleMet, honoring the
-// cardinality cap for new names and overwriting existing ones in place.
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := consumeUniqueJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("non-string object key")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeUniqueJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func decodeVersionedRuleCounterFile(data []byte) (persistedRuleCounterFile, bool, error) {
+	var topLevel map[string]json.RawMessage
+	if json.Unmarshal(data, &topLevel) != nil {
+		return persistedRuleCounterFile{}, false, nil
+	}
+	if _, present := topLevel["version"]; !present {
+		return persistedRuleCounterFile{}, false, nil
+	}
+	file, err := decodePersistedRuleCounterFile(data)
+	return file, true, err
+}
+
+func decodePersistedRuleCounterFile(data []byte) (persistedRuleCounterFile, error) {
+	var wire struct {
+		Version int                         `json:"version"`
+		Rules   []*persistedRuleCounterWire `json:"rules"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return persistedRuleCounterFile{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return persistedRuleCounterFile{}, errors.New("multiple JSON values")
+		}
+		return persistedRuleCounterFile{}, err
+	}
+	file := persistedRuleCounterFile{Version: wire.Version}
+	if wire.Version != hitCounterFormatVersion {
+		return file, fmt.Errorf("unsupported version %d", wire.Version)
+	}
+	if wire.Rules == nil {
+		return file, errors.New("missing or null rules array")
+	}
+	file.Rules = make([]persistedRuleCounter, len(wire.Rules))
+	for i, rec := range wire.Rules {
+		if rec == nil {
+			return file, fmt.Errorf("record %d is null", i)
+		}
+		if rec.Hits == nil {
+			return file, fmt.Errorf("record %d is missing hits", i)
+		}
+		file.Rules[i] = persistedRuleCounter{Name: rec.Name, ID: rec.ID, Hits: *rec.Hits, LastHit: rec.LastHit}
+	}
+	return file, nil
+}
+
+func decodeHistoricalRuleCounters(data []byte) ([]persistedRuleCounter, bool, error) {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, false, nil
+	}
+	if decoded == nil {
+		return nil, true, errors.New("null historical counter map")
+	}
+	recs := make(map[string]persistedRuleCounter, len(decoded))
+	for name, raw := range decoded {
+		trimmed := bytes.TrimSpace(raw)
+		if bytes.Equal(trimmed, []byte("null")) {
+			return nil, true, fmt.Errorf("null historical record %q", name)
+		}
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return nil, false, nil
+		}
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.DisallowUnknownFields()
+		var wire persistedRuleCounterWire
+		if err := decoder.Decode(&wire); err != nil {
+			return nil, true, fmt.Errorf("historical record %q: %w", name, err)
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			return nil, true, fmt.Errorf("historical record %q has trailing data", name)
+		}
+		if wire.Hits == nil {
+			return nil, true, fmt.Errorf("historical record %q is missing hits", name)
+		}
+		recs[name] = persistedRuleCounter{Name: wire.Name, ID: wire.ID, Hits: *wire.Hits, LastHit: wire.LastHit}
+	}
+	return persistedCounterRecordsFromMap(recs), true, nil
+}
+
+func persistedCounterRecordsFromMap(recs map[string]persistedRuleCounter) []persistedRuleCounter {
+	records := make([]persistedRuleCounter, 0, len(recs))
+	for name, rec := range recs {
+		rec.Name = name
+		records = append(records, rec)
+	}
+	return records
+}
+
+func validatePersistedCounterRecords(records []persistedRuleCounter, strictIDs bool) error {
+	if len(records) > maxRuleMetrics {
+		return fmt.Errorf("record count %d exceeds limit %d", len(records), maxRuleMetrics)
+	}
+	seenIDs := make(map[string]struct{}, len(records))
+	seenNames := make(map[string]bool, len(records)) // value reports a prior name-only record
+	for i, rec := range records {
+		if rec.Name == "" {
+			return fmt.Errorf("record %d has empty name", i)
+		}
+		if rec.Hits < 0 || rec.LastHit < 0 {
+			return fmt.Errorf("record %q has negative telemetry", rec.Name)
+		}
+		priorNameOnly, nameSeen := seenNames[rec.Name]
+		if rec.ID == "" {
+			if nameSeen {
+				return fmt.Errorf("name-only record %q is ambiguous", rec.Name)
+			}
+			seenNames[rec.Name] = true
+			continue
+		}
+		if priorNameOnly {
+			return fmt.Errorf("name-only record %q is ambiguous", rec.Name)
+		}
+		seenNames[rec.Name] = false
+		if !validRuleID(rec.ID) {
+			if strictIDs {
+				return fmt.Errorf("record %q has malformed stable ID", rec.Name)
+			}
+			continue
+		}
+		if _, duplicate := seenIDs[rec.ID]; duplicate {
+			return fmt.Errorf("stable ID %q appears more than once", rec.ID)
+		}
+		seenIDs[rec.ID] = struct{}{}
+	}
+	return nil
+}
+
+// restoreRecords converts historical name-keyed snapshots into records.
 func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
+	rm.restoreCounterRecords(persistedCounterRecordsFromMap(recs))
+}
+
+// restoreCounterRecords indexes stable identities independently of names; the
+// name-keyed metrics remain a compatibility/Prometheus projection.
+func (rm *ruleMetrics) restoreCounterRecords(records []persistedRuleCounter) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	if rm.last == nil {
 		rm.last = make(map[string]*int64)
 	}
-	for name, rec := range recs {
-		if ptr, ok := rm.hits[name]; ok {
-			atomic.StoreInt64(ptr, rec.Hits)
-			if lp := rm.last[name]; lp != nil {
-				atomic.StoreInt64(lp, rec.LastHit)
-			} else {
-				l := rec.LastHit
-				rm.last[name] = &l
-			}
-			continue
+	if rm.appliedByName == nil {
+		rm.appliedByName = make(map[string]int64, min(len(records), maxRuleMetrics))
+	}
+	rm.byID = make(map[string]persistedRuleCounter, min(len(records), maxRuleMetrics))
+	rm.loadedByName = make(map[string]persistedRuleCounter, min(len(records), maxRuleMetrics))
+	for _, rec := range records {
+		if rec.Name != "" && rm.restoreRecordLocked(rec.Name, rec) && !validRuleID(rec.ID) {
+			rm.loadedByName[rec.Name] = rec
 		}
-		if len(rm.hits) >= maxRuleMetrics {
-			continue
+		if _, exists := rm.byID[rec.ID]; exists || len(rm.byID) < maxRuleMetrics {
+			mergePersistedCounterByID(rm.byID, rec)
 		}
-		h := rec.Hits
-		rm.hits[name] = &h
-		l := rec.LastHit
-		rm.last[name] = &l
-		rm.order = append(rm.order, name)
 	}
 }
 
-// startHitCounterPersistence loads persisted counters from path, then starts
-// a background goroutine that saves them every 5 minutes. It also performs
-// a final save when the context is cancelled (graceful shutdown).
+func (rm *ruleMetrics) restoreRecordLocked(name string, rec persistedRuleCounter) bool {
+	ptr := rm.hits[name]
+	if ptr == nil {
+		if len(rm.hits) >= maxRuleMetrics {
+			return false
+		}
+		h := rec.Hits
+		rm.hits[name] = &h
+		rm.appliedByName[name] = rec.Hits
+		l := rec.LastHit
+		rm.last[name] = &l
+		rm.order = append(rm.order, name)
+		return true
+	}
+
+	// Add only growth in the immutable persisted baseline. Live RecordHit
+	// increments may proceed through an already-obtained pointer while this lock
+	// is held and must never be overwritten by a repeated runtime load.
+	if delta := rec.Hits - rm.appliedByName[name]; delta > 0 {
+		atomic.AddInt64(ptr, delta)
+		rm.appliedByName[name] = rec.Hits
+	}
+	if lp := rm.last[name]; lp != nil {
+		atomicStoreMax(lp, rec.LastHit)
+		return true
+	}
+	l := rec.LastHit
+	rm.last[name] = &l
+	return true
+}
+
+func mergePersistedCounterByID(byID map[string]persistedRuleCounter, rec persistedRuleCounter) {
+	if !validRuleID(rec.ID) {
+		return
+	}
+	if prior, exists := byID[rec.ID]; exists {
+		if prior.Hits > rec.Hits {
+			rec.Hits = prior.Hits
+		}
+		if prior.LastHit > rec.LastHit {
+			rec.LastHit = prior.LastHit
+		}
+	}
+	byID[rec.ID] = rec
+}
+
+// startHitCounterPersistence restores persisted counters before publishing any
+// saver. This ordering prevents an already-cancelled startup context from
+// overwriting loaded telemetry with zero-valued policy cells.
 func startHitCounterPersistence(ctx context.Context, path string) {
 	// Ensure the directory exists.
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		os.MkdirAll(dir, 0o750) //nolint:errcheck // best-effort
 	}
 
-	loadHitCounters(path)
+	loadStatus := loadHitCounters(path)
+	if loadStatus == hitCounterLoadInvalid {
+		logger.Printf("HitCounters: persistence disabled to preserve unreadable or malformed evidence at %s", path)
+		return
+	}
+	RestoreHitCounts()
+	// Rewrite legacy name-only records immediately with stable rule IDs before
+	// either periodic or shutdown persistence can observe the store.
+	saveHitCounters(path)
+	if ctx.Err() != nil {
+		return
+	}
 
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
@@ -203,12 +534,48 @@ func RestoreHitCounts() {
 	defer ruleMet.mu.RUnlock()
 	policyStore.mu.Lock()
 	defer policyStore.mu.Unlock()
+	next := make([]*PolicyRule, len(policyStore.rules))
+	nameCounts := make(map[string]int, len(policyStore.rules))
 	for _, rule := range policyStore.rules {
-		if ctr, ok := ruleMet.hits[rule.Name]; ok {
-			atomic.StoreInt64(&rule.HitCount, atomic.LoadInt64(ctr))
+		nameCounts[rule.Name]++
+	}
+	for i, rule := range policyStore.rules {
+		// Restore can run safely even if an evaluator still holds the current
+		// revision. Never fill a nil cell on a published definition in place.
+		next[i] = clonePolicyRuleForPublication(rule)
+		counters := next[i].counters
+		if rec, ok := ruleMet.byID[rule.ID]; ok {
+			restorePolicyHitCount(counters, rec.Hits)
+			atomicStoreMax(&counters.lastHitUnix, rec.LastHit)
+			continue
 		}
-		if lp, ok := ruleMet.last[rule.Name]; ok {
-			atomic.StoreInt64(&rule.lastHitUnix, atomic.LoadInt64(lp))
+		// Backward-compatible fallback uses the immutable loaded snapshot, not
+		// live telemetry that RecordHit continues to increment after startup.
+		if rec, ok := ruleMet.loadedByName[rule.Name]; ok && nameCounts[rule.Name] == 1 {
+			restorePolicyHitCount(counters, rec.Hits)
+			atomicStoreMax(&counters.lastHitUnix, rec.LastHit)
+		}
+	}
+	policyStore.rules = next
+	policyStore.sortLocked()
+}
+
+// restorePolicyHitCount adds only the not-yet-restored persisted baseline. The
+// caller serializes restorations under policyStore.mu; Evaluate can increment the
+// total concurrently without being overwritten.
+func restorePolicyHitCount(counters *policyRuleCounters, persisted int64) {
+	restored := atomic.LoadInt64(&counters.restoredHitCount)
+	if persisted <= restored {
+		return
+	}
+	atomic.AddInt64(&counters.hitCount, persisted-restored)
+	atomic.StoreInt64(&counters.restoredHitCount, persisted)
+}
+
+func atomicStoreMax(dst *int64, value int64) {
+	for current := atomic.LoadInt64(dst); value > current; current = atomic.LoadInt64(dst) {
+		if atomic.CompareAndSwapInt64(dst, current, value) {
+			return
 		}
 	}
 }

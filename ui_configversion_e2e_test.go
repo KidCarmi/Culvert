@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,56 @@ func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 	// The rollback POST is async; applyConfigBackup restores deny + no rules.
 	if !pollProxyStatus(t, proxyURL, backend.URL, http.StatusForbidden, 20) {
 		t.Fatalf("after UI rolled back to the deny baseline, proxy never returned 403 — rollback did not revert the data plane")
+	}
+}
+
+func TestUIE2E_ConfigVersionsDiscardStaleResponses(t *testing.T) {
+	const adminUser, viewerUser, pass = "admin-cfgver-race", "viewer-cfgver-race", "Cfgver-race-pass-1!" // #nosec G101 -- test fixture
+	seedUIRoster(t, adminUser, viewerUser, pass)
+	uiSrv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(uiSrv.Close)
+	browser := uiE2EBrowser(t)
+	_, page := newAuthedUIPage(t, browser, uiSrv.URL, adminUser, RoleAdmin)
+
+	if _, err := page.Evaluate(`() => {
+		window.__cfgCalls = [];
+		window.api = () => new Promise((resolve, reject) => window.__cfgCalls.push({resolve, reject}));
+		window.__cfgOld = loadConfigVersions();
+		window.__cfgNew = loadConfigVersions();
+	}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := page.Evaluate(`async () => {
+		window.__cfgCalls[1].resolve([{version:2, created_at:'2026-01-01T00:00:00Z', action:'new-success', actor:'test'}]);
+		await window.__cfgNew;
+		window.__cfgCalls[0].reject(new Error('stale failure'));
+		await window.__cfgOld;
+	}`); err != nil {
+		t.Fatal(err)
+	}
+	text, err := page.Locator("#config-versions-list").InnerText()
+	if err != nil || !strings.Contains(text, "new-success") || strings.Contains(text, "stale failure") {
+		t.Fatalf("stale failure replaced current versions: text=%q err=%v", text, err)
+	}
+
+	if _, err := page.Evaluate(`() => {
+		window.__cfgCalls = [];
+		window.__cfgOld = loadConfigVersions();
+		window.__cfgNew = loadConfigVersions();
+	}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := page.Evaluate(`async () => {
+		window.__cfgCalls[1].resolve([{version:4, created_at:'2026-01-01T00:00:00Z', action:'newest', actor:'test'}]);
+		await window.__cfgNew;
+		window.__cfgCalls[0].resolve([{version:3, created_at:'2026-01-01T00:00:00Z', action:'stale-success', actor:'test'}]);
+		await window.__cfgOld;
+	}`); err != nil {
+		t.Fatal(err)
+	}
+	text, err = page.Locator("#config-versions-list").InnerText()
+	if err != nil || !strings.Contains(text, "newest") || strings.Contains(text, "stale-success") {
+		t.Fatalf("stale success replaced current versions: text=%q err=%v", text, err)
 	}
 }
 

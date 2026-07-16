@@ -25,7 +25,7 @@ import "context"
 //     through a provider closure on each 10s tick, so it picks up the loaded
 //     webhooks without an ordering dependency.
 //  5. hit-counter persistence goroutine (parented to ctx) + RestoreHitCounts,
-//     which copies persisted counters back into PolicyRule.HitCount and must
+//     which restores persisted values into stable per-rule counter cells and must
 //     run AFTER the policy store is loaded (initPolicy precedes this slice in
 //     main()).
 //  6. LoadAdminSettings — it restores GUI-saved state (e.g. re-enables
@@ -41,7 +41,6 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	globalBandwidth = NewBandwidthManager(cfg.BandwidthPath)
 	globalAlertStore.Init(cfg.AlertWebhooksPath)
 	startHitCounterPersistence(ctx, cfg.HitCountersPath)
-	RestoreHitCounts()
 	LoadAdminSettings(cfg.AdminSettingsPath)
 	flushStartupAlerts()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -60,6 +61,79 @@ func TestDPLastGoodConfigSnapshot_RoundTripPreservesIdPProfiles(t *testing.T) {
 	}
 	if loaded.Version != 42 || loaded.ProxyBaseURL != snap.ProxyBaseURL {
 		t.Fatalf("loaded snapshot = %+v, want version/base URL from persisted snapshot", loaded)
+	}
+}
+
+func TestDPConfigPolicySaveFailureDoesNotAdvanceVersionOrLastGood(t *testing.T) {
+	setupProxyTest(t)
+	withDPLastGoodConfigTestGlobals(t)
+	snapshotPolicyStoreForTest(t)
+	restoreEpoch := resetDPLastSeenEpochForTest()
+	t.Cleanup(restoreEpoch)
+	origPollFailing := dpControlPlanePollFailing.Load()
+	dpControlPlanePollFailing.Store(false)
+	t.Cleanup(func() { dpControlPlanePollFailing.Store(origPollFailing) })
+
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	policyStore.path = policyPath
+	if err := os.Mkdir(policyPath+".meta", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snap := ConfigSnapshot{
+		Version: 2,
+		PolicyRules: []PolicyRule{{
+			Priority: 1,
+			Name:     "not-durable",
+			Action:   ActionAllow,
+		}},
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &DataPlaneClient{
+		lastVersion: 1,
+		callForTest: func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+			return raw, nil
+		},
+	}
+
+	client.fetchAndApply(t.Context())
+
+	if client.lastVersion != 1 {
+		t.Fatalf("lastVersion = %d, want 1 after failed policy save", client.lastVersion)
+	}
+	if !dpControlPlanePollFailing.Load() {
+		t.Fatal("failed policy save reported the control-plane poll healthy")
+	}
+	if _, err := os.Stat(dpLastGoodConfigSnapshotPath()); !os.IsNotExist(err) {
+		t.Fatalf("failed policy save persisted a last-known-good snapshot: %v", err)
+	}
+}
+
+func TestApplyDPLastGoodPolicySaveFailureReturnsError(t *testing.T) {
+	setupProxyTest(t)
+	withDPLastGoodConfigTestGlobals(t)
+	snapshotPolicyStoreForTest(t)
+	restoreEpoch := resetDPLastSeenEpochForTest()
+	t.Cleanup(restoreEpoch)
+
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	policyStore.path = policyPath
+	if err := os.Mkdir(policyPath+".meta", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	persistDPLastGoodConfigSnapshot(ConfigSnapshot{
+		Version: 3,
+		PolicyRules: []PolicyRule{{
+			Priority: 1,
+			Name:     "not-durable-lkg",
+			Action:   ActionAllow,
+		}},
+	})
+
+	if _, err := applyDPLastGoodConfigSnapshot(); err == nil {
+		t.Fatal("last-known-good apply succeeded despite failed policy persistence")
 	}
 }
 

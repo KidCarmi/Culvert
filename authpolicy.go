@@ -144,6 +144,11 @@ func newRuleID() string {
 	return ulid.MustNew(ulid.Now(), rand.Reader).String()
 }
 
+func validRuleID(id string) bool {
+	_, err := ulid.ParseStrict(id)
+	return err == nil
+}
+
 // ─── Unified PDP seam (§1.1 / §1.4) ─────────────────────────────────────────
 
 // RequestContext is the protocol-neutral input to the unified Policy Decision

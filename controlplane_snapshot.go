@@ -350,7 +350,7 @@ var lastSeenCAFingerprint atomic.Value // string
 var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
-func applyConfigSnapshot(snap ConfigSnapshot) {
+func applyConfigSnapshot(snap ConfigSnapshot) error {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
@@ -358,7 +358,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// check EARLIER — before its external-auth/IdP application, last-good
 	// persist, and version advance — this one covers the other callers.
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
-		return
+		return nil
 	}
 	// H5: reject the entire snapshot if any per-slice cap is exceeded.
 	// Logged at info; the next CP poll cycle will retry with a fresh
@@ -366,10 +366,12 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// state mutation occurs on rejection.
 	if err := validateConfigSnapshot(snap); err != nil {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
-		return
+		return err
 	}
 
-	applySnapshotPolicyAndTraffic(snap)
+	if err := applySnapshotPolicyAndTraffic(snap); err != nil {
+		return err
+	}
 	applySnapshotClusterRuntime(snap)
 
 	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
@@ -378,19 +380,20 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// (extended) state below — pre-existing ordering, preserved by the split.
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
 		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-		return
+		return err
 	}
 
 	applySnapshotExtendedState(snap)
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
+	return nil
 }
 
 // applySnapshotPolicyAndTraffic applies the traffic-control and policy
 // slices of a snapshot (split from applyConfigSnapshot for gocognit; order
 // preserved verbatim).
-func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
+func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
 	// Blocklist — in-place feed-entry replacement preserves the
 	// package-global bl's path / mode / manual / exceptions (the
 	// DP-local state that isn't in the cluster snapshot). The
@@ -434,9 +437,8 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
 	}
 
 	// Policy rules.
-	if snap.PolicyRules != nil {
-		policyStore.ReplaceAll(snap.PolicyRules)
-		policyStore.Save()
+	if err := applySnapshotPolicyRules(snap.PolicyRules); err != nil {
+		return err
 	}
 
 	// SSL bypass patterns.
@@ -483,6 +485,18 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
 	if snap.MaxConnsPerIP > 0 {
 		connLimiter.Enable(snap.MaxConnsPerIP)
 	}
+	return nil
+}
+
+func applySnapshotPolicyRules(rules []PolicyRule) error {
+	if rules == nil {
+		return nil
+	}
+	policyStore.ReplaceAll(rules)
+	if err := policyStore.Save(); err != nil {
+		return fmt.Errorf("persist policy snapshot: %w", err)
+	}
+	return nil
 }
 
 // applySnapshotClusterRuntime applies the cluster-runtime slices of a
@@ -666,7 +680,9 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 	}
 	snapForApply := snap
 	snapForApply.IdPProfiles = nil
-	applyConfigSnapshot(snapForApply)
+	if err := applyConfigSnapshot(snapForApply); err != nil {
+		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config snapshot: %w", err)
+	}
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
 	return snap, nil
 }

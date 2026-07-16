@@ -181,6 +181,30 @@ func TestHA_PR5_PartialApply_CAFailureDoesNotImportState(t *testing.T) {
 	}
 }
 
+func TestApplyHABundlePolicySaveFailureDoesNotReportSuccess(t *testing.T) {
+	setupProxyTest(t)
+	snapshotPolicyStoreForTest(t)
+	origStore := globalClusterStore
+	t.Cleanup(func() { globalClusterStore = origStore })
+	globalClusterStore = newTestClusterStore(t)
+
+	path := filepath.Join(t.TempDir(), "policy.json")
+	policyStore.path = path
+	if err := os.Mkdir(path+".meta", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bundle := &HAStateBundle{
+		ClusterState: buildHANonEmptyClusterState(t),
+		Config: ConfigSnapshot{PolicyRules: []PolicyRule{{
+			Name: "must-persist", Action: ActionAllow,
+		}}},
+	}
+
+	if applyHABundle(bundle, "token") {
+		t.Fatal("HA bundle reported success after policy metadata publication failed")
+	}
+}
+
 // TestHA_PR5_PersistFailureLeavesLiveCAUnchanged: if persistReplicatedKey fails,
 // applyReplicatedCA must NOT have mutated the live globalClusterCA in memory.
 func TestHA_PR5_PersistFailureLeavesLiveCAUnchanged(t *testing.T) {

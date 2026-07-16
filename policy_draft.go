@@ -393,18 +393,22 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 // Draft mode persists the candidate and SKIPS config-versioning — the version
 // is captured once at commit, so per-edit snapshots of the unchanged running
 // config would be misleading no-ops.
-func afterPolicyWrite(r *http.Request, action string) {
+func afterPolicyWrite(w http.ResponseWriter, r *http.Request, action string) bool {
 	if policyDraft.active() {
 		// A no-op edit (candidate == running) auto-discards the draft rather
 		// than leaving a zero-diff pending draft; otherwise persist the change.
 		if policyDraft.reconcile() {
-			return
+			return true
 		}
 		policyDraft.persist()
-		return
+		return true
 	}
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+		return false
+	}
 	saveConfigVersion(sessionAdmin(r), action)
+	return true
 }
 
 // ── Commit-time shadow detection (G4, advisory) ──────────────────────────────
@@ -612,9 +616,13 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	diff := policyDraft.diffVsRunning()
 
-	// Activate: running := candidate, persist, clear the draft.
-	policyStore.ReplaceAll(cand)
-	policyStore.Save()
+	// Persist and publish the candidate as one fail-closed transition. A failed
+	// write leaves the running generation untouched so the retained draft can be
+	// retried after the persistence fault is repaired.
+	if err := policyStore.ReplaceAllAndSave(cand); err != nil {
+		http.Error(w, "durable policy save failed; running policy unchanged and draft retained", http.StatusInternalServerError)
+		return
+	}
 	policyDraft.clear()
 
 	actor := sessionAdmin(r)

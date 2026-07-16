@@ -296,7 +296,9 @@ func TestPolicyStore_LoadSave(t *testing.T) {
 	}
 	ps.Add(PolicyRule{Priority: 1, Name: "first", Action: ActionAllow})
 	ps.Add(PolicyRule{Priority: 2, Name: "second", Action: ActionDrop})
-	ps.Save()
+	if err := ps.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
 	// Load into a fresh store and verify round-trip.
 	ps2 := newTestPolicyStore()
@@ -331,11 +333,13 @@ func TestPolicyStore_LoadInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestPolicyStore_SaveWithoutPath(_ *testing.T) {
+func TestPolicyStore_SaveWithoutPath(t *testing.T) {
 	ps := newTestPolicyStore()
 	ps.Add(PolicyRule{Priority: 1, Name: "test"})
 	// Should not panic when path is empty.
-	ps.Save()
+	if err := ps.Save(); err != nil {
+		t.Fatalf("Save without path: %v", err)
+	}
 }
 
 // ─── PolicyStore.Evaluate ─────────────────────────────────────────────────────
@@ -537,7 +541,9 @@ func TestPolicyStore_SaveNoHitCount(t *testing.T) {
 	ps.Evaluate("", "", "", "any.com", nil)
 	ps.Evaluate("", "", "", "any.com", nil)
 
-	ps.Save()
+	if err := ps.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
 	// Reload and check HitCount is zero.
 	data, _ := os.ReadFile(path)
@@ -834,7 +840,9 @@ func TestPolicyStore_SaveMeta_NoTmpLeak(t *testing.T) {
 	ps := newTestPolicyStore()
 	ps.path = filepath.Join(dir, "policy.json")
 	ps.Add(PolicyRule{Priority: 10, Name: "tmpleak-test", Action: ActionAllow})
-	ps.Save()
+	if err := ps.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	assertNoTmpLeak(t, dir)
 }
 
@@ -847,7 +855,9 @@ func TestPolicyStore_Save_MainFileNoTmpLeak(t *testing.T) {
 	ps := newTestPolicyStore()
 	ps.path = filepath.Join(dir, "policy.json")
 	ps.Add(PolicyRule{Priority: 1, Name: "main-tmpleak-test", Action: ActionAllow})
-	ps.Save()
+	if err := ps.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	assertNoTmpLeak(t, dir)
 }
 
@@ -862,7 +872,9 @@ func TestPolicyStore_Save_MetaSkippedOnMainWriteFailure(t *testing.T) {
 	// at os.CreateTemp because the parent dir is missing.
 	ps.path = filepath.Join(dir, "missing", "policy.json")
 	ps.Add(PolicyRule{Priority: 1, Name: "main-write-fails", Action: ActionAllow})
-	ps.Save()
+	if err := ps.Save(); err == nil {
+		t.Fatal("Save unexpectedly succeeded with a missing parent directory")
+	}
 	if _, err := os.Stat(ps.path + ".meta"); !os.IsNotExist(err) {
 		t.Fatalf(".meta sidecar must not exist when main write fails (stat err=%v)", err)
 	}

@@ -137,7 +137,10 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	added := policyStore.Add(rule)
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+		return
+	}
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
 		strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_"), sanitizeLog(added.Name), sanitizeLog(added.Auth.Owner))
 	auditEventDiff(r, "authpolicy.add", added.Name,
@@ -186,7 +189,10 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+		return
+	}
 	logger.Printf("UI: auth rule updated priority=%s name=%q",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"), sanitizeLog(rule.Name))
 	auditEventDiff(r, "authpolicy.update", rule.Name,
@@ -213,7 +219,10 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return
 	}
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+		return
+	}
 	logger.Printf("UI: auth rule deleted priority=%s",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
 	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
@@ -276,7 +285,10 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reorder failed (duplicate or stale priority list)", http.StatusBadRequest)
 		return
 	}
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		http.Error(w, "policy changed in memory but durable save failed", http.StatusInternalServerError)
+		return
+	}
 	logger.Printf("UI: auth rules reordered (%d rule(s))", len(body.Priorities))
 	auditEvent(r, "authpolicy.reorder", fmt.Sprintf("%d rule(s)", len(body.Priorities)), "")
 	saveConfigVersion(sessionAdmin(r), "authpolicy.reorder")

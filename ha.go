@@ -632,7 +632,10 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 	}
 
 	// Apply config snapshot.
-	applyConfigSnapshot(bundle.Config)
+	if err := applyConfigSnapshot(bundle.Config); err != nil {
+		logger.Printf("HA: apply config snapshot error: %v", err)
+		return false
+	}
 
 	return true
 }

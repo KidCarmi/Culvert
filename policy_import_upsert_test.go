@@ -44,7 +44,8 @@ func TestImport_IdempotentByID(t *testing.T) {
 	snapshotConfigVersionsDir(t)
 	policyStore.ReplaceAll(nil)
 
-	rule := map[string]any{"name": "dedupe-me", "action": "Allow", "id": "rule000000ab"}
+	id := newRuleID()
+	rule := map[string]any{"name": "dedupe-me", "action": "Allow", "id": id}
 	importMergeRules(t, []map[string]any{rule})
 	if got := countRulesNamed(t, "dedupe-me"); got != 1 {
 		t.Fatalf("after first import: %d rules named dedupe-me, want 1", got)
@@ -56,7 +57,7 @@ func TestImport_IdempotentByID(t *testing.T) {
 	if got := countRulesNamed(t, "dedupe-me"); got != 1 {
 		t.Fatalf("after re-import: %d rules named dedupe-me, want 1 (duplicate accumulated)", got)
 	}
-	if g := policyStore.findByIDCopy("rule000000ab"); g == nil || g.Action != ActionBlockPage {
+	if g := policyStore.findByIDCopy(id); g == nil || g.Action != ActionBlockPage {
 		t.Errorf("re-import did not update content: %+v", g)
 	}
 }

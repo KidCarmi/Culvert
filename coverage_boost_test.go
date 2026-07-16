@@ -302,6 +302,7 @@ func cleanupRuleMet(names ...string) {
 // ── Hit counter persistence (metrics.go) ────────────────────────────────────
 
 func TestSaveAndLoadHitCounters(t *testing.T) {
+	withEmptyPolicyStore(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hit_counters.json")
 
@@ -313,14 +314,7 @@ func TestSaveAndLoadHitCounters(t *testing.T) {
 
 	saveHitCounters(path)
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var counts map[string]persistedRuleCounter
-	if err := json.Unmarshal(data, &counts); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
+	counts := persistedRuleCountersByName(readPersistedRuleCounterFile(t, path))
 	if counts["test-save-alpha"].Hits < 2 {
 		t.Errorf("test-save-alpha count = %d, want >= 2", counts["test-save-alpha"].Hits)
 	}
@@ -358,6 +352,7 @@ func TestLoadHitCounters_InvalidJSON(t *testing.T) {
 }
 
 func TestStartHitCounterPersistence_SaveOnShutdown(t *testing.T) {
+	withEmptyPolicyStore(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "counters.json")
 
@@ -368,14 +363,7 @@ func TestStartHitCounterPersistence_SaveOnShutdown(t *testing.T) {
 	// saveHitCounters is what startHitCounterPersistence calls on shutdown.
 	saveHitCounters(path)
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var counts map[string]persistedRuleCounter
-	if err := json.Unmarshal(data, &counts); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
+	counts := persistedRuleCountersByName(readPersistedRuleCounterFile(t, path))
 	if counts["test-shutdown-save"].Hits < 1 {
 		t.Error("test-shutdown-save not saved")
 	}

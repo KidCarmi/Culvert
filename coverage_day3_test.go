@@ -291,7 +291,9 @@ func TestPolicyMeta_SaveAndLoad(t *testing.T) {
 	ps.version = 42
 	ps.updatedAt = "2026-01-01T00:00:00Z"
 	ps.mu.Unlock()
-	ps.saveMeta()
+	if err := ps.saveMeta(); err != nil {
+		t.Fatalf("saveMeta: %v", err)
+	}
 
 	// Reload and verify version survived.
 	ps2 := &PolicyStore{}

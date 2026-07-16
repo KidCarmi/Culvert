@@ -13,17 +13,17 @@ package main
 //   - the ?id= handler path validates, guards auth rules, and mutates.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// findByIDCopy reuses List() (which atomic-loads the lock-free
-// HitCount/lastHitUnix counters), so its concurrency posture is identical to
-// the established findRuleByPriorityCopy path — see the Codex-review note on
-// the residual List() plain-copy race, which is pre-existing and shared with
-// the priority path, out of scope for this slice.
+// findByIDCopy reuses List(), which returns a fully detached definition with
+// materialized accounting.
 
 func snapshotPolicyForIDTest(t *testing.T) {
 	t.Helper()
@@ -224,4 +224,69 @@ func TestApiPolicyDelete_ByID(t *testing.T) {
 			t.Fatal("rule still present after id-addressed delete")
 		}
 	}
+}
+
+func assertCanonicalUniqueRuleIDs(t *testing.T, rules []PolicyRule) {
+	t.Helper()
+	seen := make(map[string]struct{}, len(rules))
+	for i := range rules {
+		rule := &rules[i]
+		if !validRuleID(rule.ID) {
+			t.Fatalf("rule %q has malformed ID %q", rule.Name, rule.ID)
+		}
+		if _, duplicate := seen[rule.ID]; duplicate {
+			t.Fatalf("rules contain duplicate ID %q", rule.ID)
+		}
+		seen[rule.ID] = struct{}{}
+	}
+}
+
+func TestPolicyStoreAddEnforcesCanonicalUniqueIdentity(t *testing.T) {
+	ps := &PolicyStore{}
+	importedID := newRuleID()
+	first := ps.Add(PolicyRule{ID: importedID, Name: "imported", Action: ActionAllow})
+	duplicate := ps.Add(PolicyRule{ID: importedID, Name: "duplicate", Action: ActionAllow})
+	malformed := ps.Add(PolicyRule{ID: "not-a-ulid", Name: "malformed", Action: ActionAllow})
+	if first.ID != importedID {
+		t.Fatalf("Add changed canonical unique import ID %q to %q", importedID, first.ID)
+	}
+	assertCanonicalUniqueRuleIDs(t, []PolicyRule{first, duplicate, malformed})
+}
+
+func TestPolicyStoreReplaceAllNormalizesMalformedAndDuplicateIDs(t *testing.T) {
+	ps := &PolicyStore{}
+	preserved := newRuleID()
+	ps.ReplaceAll([]PolicyRule{
+		{ID: preserved, Priority: 1, Name: "preserved", Action: ActionAllow},
+		{ID: preserved, Priority: 2, Name: "duplicate", Action: ActionAllow},
+		{ID: "not-a-ulid", Priority: 3, Name: "malformed", Action: ActionAllow},
+	})
+	got := ps.List()
+	assertCanonicalUniqueRuleIDs(t, got)
+	if got[0].ID != preserved {
+		t.Fatalf("first canonical unique ID changed from %q to %q", preserved, got[0].ID)
+	}
+}
+
+func TestPolicyStoreLoadMigratesMalformedAndDuplicateIDs(t *testing.T) {
+	preserved := newRuleID()
+	rules := []PolicyRule{
+		{ID: preserved, Priority: 1, Name: "preserved", Action: ActionAllow},
+		{ID: preserved, Priority: 2, Name: "duplicate", Action: ActionAllow},
+		{ID: "not-a-ulid", Priority: 3, Name: "malformed", Action: ActionAllow},
+		{Priority: 4, Name: "missing", Action: ActionAllow},
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps := &PolicyStore{}
+	if err := ps.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	assertCanonicalUniqueRuleIDs(t, ps.List())
 }

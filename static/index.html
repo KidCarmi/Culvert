@@ -5853,10 +5853,13 @@ async function importConfig(input) {
 }
 
 // ── Config Versioning ────────────────────────────────────────────────────
+let configVersionsLoadRevision = 0;
 async function loadConfigVersions() {
+  const revision = ++configVersionsLoadRevision;
   const el = document.getElementById('config-versions-list');
   try {
     const versions = await api('/api/config/versions');
+    if (revision !== configVersionsLoadRevision) return;
     if (!versions || versions.length === 0) {
       el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No config versions yet. Versions are created automatically when you change settings.</em>';
       return;
@@ -5873,6 +5876,7 @@ async function loadConfigVersions() {
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch (err) {
+    if (revision !== configVersionsLoadRevision) return;
     el.innerHTML = `<em style="color:var(--red);font-size:.82rem">Failed to load versions: ${escHtml(err.message)}</em>`;
   }
 }

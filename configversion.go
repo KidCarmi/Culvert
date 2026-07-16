@@ -199,7 +199,10 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyConfigBackup(&target)
+	if err := applyConfigBackup(&target); err != nil {
+		http.Error(w, "configuration changed in memory but policy save failed", http.StatusInternalServerError)
+		return
+	}
 
 	actor := sessionAdmin(r)
 	auditEvent(r, "config.rollback", "system",
@@ -283,7 +286,7 @@ func restoreBlocklistFromBackup(b *configBackup) {
 }
 
 // applyConfigBackup restores all config stores from a backup snapshot.
-func applyConfigBackup(b *configBackup) {
+func applyConfigBackup(b *configBackup) error {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
 	restoreBlocklistFromBackup(b)
@@ -346,7 +349,9 @@ func applyConfigBackup(b *configBackup) {
 		validRules = append(validRules, b.PolicyRules[i])
 	}
 	policyStore.ReplaceAll(validRules)
-	policyStore.Save()
+	if err := policyStore.Save(); err != nil {
+		return err
+	}
 	setDefaultPolicyAction(b.DefaultAction)
 
 	// Rewrite rules: replace all.
@@ -422,6 +427,7 @@ func applyConfigBackup(b *configBackup) {
 		ProxyPort:  b.PACProxyPort,
 		Exclusions: b.PACExclusions,
 	})
+	return nil
 }
 
 // configChange is a single field-level difference between two config versions.

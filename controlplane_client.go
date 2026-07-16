@@ -243,7 +243,11 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return
 	}
 	snap.IdPProfiles = nil
-	applyConfigSnapshot(snap)
+	if err := applyConfigSnapshot(snap); err != nil {
+		dpControlPlanePollFailing.Store(true)
+		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+		return
+	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpControlPlanePollFailing.Store(false)
 	c.lastVersion = snap.Version
