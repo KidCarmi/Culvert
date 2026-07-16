@@ -519,7 +519,7 @@ culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
 	// because of a learned exclusion, and current cache occupancy (inspection-
 	// coverage erosion the operator can alert on). Learn events (by reason) append
 	// via autoExcludeLearns.writePrometheus below.
-	aeStats := autoExclude.Stats()
+	aeStats := autoExclude().Stats()
 	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion
 # TYPE culvert_decrypt_autoexclude_hit_total counter
 culvert_decrypt_autoexclude_hit_total %d

@@ -47,8 +47,8 @@ func TestBenchGate_AutoExcludeResolveAllocs(t *testing.T) {
 	fc, _ := bindFailOpenProfile(t, "fc", "fail-close")
 	fo, foScope := bindFailOpenProfile(t, "fo", "fail-open")
 	// Seed one active exclusion so the hit path is exercised.
-	autoExclude.Observe(foScope, "fo", "hit.example", autoexclude.ReasonUnsupportedParams, "id:u1")
-	if _, ok := autoExclude.Contains(foScope, "hit.example"); !ok {
+	autoExclude().Observe(foScope, "fo", "hit.example", autoexclude.ReasonUnsupportedParams, "id:u1")
+	if _, ok := autoExclude().Contains(foScope, "hit.example"); !ok {
 		t.Fatal("precondition: hit.example must be excluded under fo scope")
 	}
 
