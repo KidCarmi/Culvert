@@ -160,7 +160,12 @@ audit) instead of a bare mark-only.
      `OpDrainTimeout` (default 30s) before returning, so an in-flight state-changing op is drained
      (or reaches a safe point) rather than abandoned with the stack half-mutated. State-changing
      ops are NOT cancelled mid-flight (that is the corruption risk) — the drain waits.
-   - **PR-B3 (T2.2)** — `LogRetentionDays` enforcement + audit rotation + tail-bound `audit.Recent`.
+   - **PR-B3 (T2.2a) — ✅ SHIPPED.** Tail-bounded `audit.Recent` (seek-from-EOF backward block
+     read; O(n events) not O(file size), so `/v1/audit` can't OOM on an unbounded log) +
+     `LogRetentionDays` enforcement (startup + daily sweep of `operations/*.log` via
+     `ops.SweepOpLogs`; running-op logs are too fresh to sweep).
+   - **PR-B3b (T2.2b)** — audit.jsonl size-based rotation (deferred: the riskier piece; the
+     tail-read already removes the OOM-on-read, so rotation is disk-bound-only and separable).
    - **PR-B4 (T2.3)** — admission control (read-only-op semaphore + UDS `LimitListener`).
 3. **PR-C (Tier 1 infra) — journal package + structural digest.** The `internal/journal` package
    (fail-closed writer, corrupt-record refuse-to-serve) + T1.2 structural digest selection +

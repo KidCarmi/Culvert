@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
@@ -139,7 +140,30 @@ func run(configPath string) error {
 		return fmt.Errorf("status: %w", err)
 	}
 
-	srv, err := server.New(server.Options{
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays)
+
+	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
+	if err := srv.Serve(ctx); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	log.Printf("culvert-maint: shutdown")
+	return nil
+}
+
+// newServer wires the agent HTTP server from its already-constructed
+// dependencies. Extracted from run() to keep that function within the funlen
+// budget; no behavior change.
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string) (*server.Server, error) {
+	return server.New(server.Options{
 		Cfg:       cfg,
 		Auth:      pol,
 		Audit:     al,
@@ -157,18 +181,36 @@ func run(configPath string) error {
 			}
 		},
 	})
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-	defer func() { _ = srv.Close() }()
+}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+// opLogRetentionInterval is how often the per-op transcript sweep runs after the
+// startup sweep. A day is ample for a retention measured in days; the sweep is
+// cheap (one readdir + stat per file).
+const opLogRetentionInterval = 24 * time.Hour
 
-	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
-	if err := srv.Serve(ctx); err != nil {
-		return fmt.Errorf("serve: %w", err)
+// startOpLogRetention runs an immediate LogRetentionDays sweep of the per-op
+// transcripts, then a periodic one until ctx is cancelled. retentionDays <= 0
+// disables it (defensive; config validation already enforces > 0).
+func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int) {
+	if retentionDays <= 0 {
+		return
 	}
-	log.Printf("culvert-maint: shutdown")
-	return nil
+	maxAge := time.Duration(retentionDays) * 24 * time.Hour
+	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now()); removed > 0 {
+		log.Printf("culvert-maint: op-log retention swept %d file(s) older than %d day(s)", removed, retentionDays)
+	}
+	go func() {
+		t := time.NewTicker(opLogRetentionInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now()); removed > 0 {
+					log.Printf("culvert-maint: op-log retention swept %d file(s)", removed)
+				}
+			}
+		}
+	}()
 }
