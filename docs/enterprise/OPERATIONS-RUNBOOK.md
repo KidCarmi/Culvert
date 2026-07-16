@@ -188,4 +188,4 @@ Escalate to vendor/engineering when: `/ready` stays 503 after restart with an un
 2. Preserve evidence: final encrypted `--backup` copied off-host; export audit (`/api/audit?source=file`).
 3. Revoke: revoke enrolled DP nodes / IdP client secrets / webhook secrets; remove trust of the Culvert root CA from endpoints (GPO/MDM).
 4. Destroy data: `docker compose down -v` **[HOST]** removes volumes (`proxy-data`, `clamav-db`, `culvert-backups`); wipe the host disk per policy (the CA key + secrets live in `/data`).
-5. Remove the host agent: stop/disable `culvert-maint`, remove the sudoers entry and user **[HOST]**.
+5. Remove the Maintenance Agent: stop/disable `culvert-maint`, remove the sudoers entry and user **[HOST]**.

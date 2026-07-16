@@ -157,7 +157,7 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 - It does **not** open a network port on the agent.
 - It does **not** widen the sudoers allowlist or the agent's authz.
 
-## Remote / multi-host agents
+## Remote / multi-host Maintenance Agents
 
 This UDS path is for the **CP-local** agent. Reaching an agent on another host
 needs an authenticated network endpoint (`CULVERT_MAINT_AGENT_URL=https://…`),

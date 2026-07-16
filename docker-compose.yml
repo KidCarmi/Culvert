@@ -105,7 +105,7 @@ services:
       - CULVERT_LOG_PASSPHRASE=${CULVERT_LOG_PASSPHRASE:-}
       # Release Management catalog/dispatch config. The maint-agent URL is
       # intentionally supplied only by docker-compose.maint-agent.yml, because
-      # it is valid only when the host agent socket is mounted.
+      # it is valid only when the Maintenance Agent socket is mounted.
       - CULVERT_RELEASE_PROXY_REPO=${CULVERT_RELEASE_PROXY_REPO:-}
       - CULVERT_RELEASE_CATALOG_TRUST_KEYS=${CULVERT_RELEASE_CATALOG_TRUST_KEYS:-}
       # Break-glass ONLY. Catalog signature verification is enforce-by-default

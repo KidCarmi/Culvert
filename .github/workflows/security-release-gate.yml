@@ -89,7 +89,7 @@ jobs:
       - name: Run gosec on cmd/culvert-maint (nested module)
         # gosec walks Go-module boundaries — `./...` from the repo root
         # does not descend into the nested cmd/culvert-maint module, so
-        # the privileged host-side agent's code requires its own pass.
+        # the privileged Maintenance Agent's code requires its own pass.
         # qa-gate.yml's qa-agent job runs the same scan; this is the
         # belt-and-suspenders run that surfaces findings in the Security
         # gate's logs as well.
