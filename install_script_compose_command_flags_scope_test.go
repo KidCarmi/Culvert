@@ -64,6 +64,24 @@ volumes:
   proxy-data:
 `
 
+// fixtureComposeWithAnchoredProxyHeader declares the proxy service header
+// with a trailing YAML anchor ("proxy: &proxy"), a normal and valid way for
+// an operator to reference the service's mapping elsewhere in the same file
+// (or from an override file). Only the proxy service is present, so any
+// scoping approach that fails to recognize this header as the start of the
+// proxy block will report zero flags — silently defeating the §6c
+// compose↔image preflight rather than just leaking a foreign flag into it.
+const fixtureComposeWithAnchoredProxyHeader = `services:
+  proxy: &proxy
+    image: culvert/proxy:pinned
+    command: [
+      "-port",           "8080",
+      "-ui-port",        "9090"
+    ]
+volumes:
+  proxy-data:
+`
+
 // runComposeCommandFlags extracts compose_command_flags() from
 // scripts/install.sh and runs it with INSTALL_DIR pointed at dir, exactly
 // how scripts/install.sh invokes it during the §6c preflight.
@@ -156,5 +174,35 @@ func TestInstallScript_MissingComposeFlags_IgnoresNonProxyServiceFlags(t *testin
 		t.Fatalf("missing_compose_flags(%q) = %q, want empty — the cli service's -confirm/-backup-dir "+
 			"flags are not culvert proxy flags and must not trigger preflight_compose_image_compat() to "+
 			"overwrite docker-compose.yml", supported, got)
+	}
+}
+
+// TestInstallScript_ComposeCommandFlags_RecognizesAnchoredProxyHeader proves
+// that scoping compose_command_flags() to the proxy service does not depend
+// on the `proxy:` header line having nothing else on it: a YAML anchor
+// ("proxy: &proxy") is valid compose syntax and must still be recognized as
+// the start of the proxy block. An earlier fix for the cross-service leak
+// (see TestInstallScript_ComposeCommandFlags_ScopedToProxyService) matched
+// the header only when followed by end-of-line or a comment, which made an
+// anchored header fall out of scope entirely — compose_command_flags()
+// silently returned NO flags, which would make preflight_compose_image_compat()
+// skip the compose/image compatibility check altogether (flagged in PR #763
+// review).
+func TestInstallScript_ComposeCommandFlags_RecognizesAnchoredProxyHeader(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(fixtureComposeWithAnchoredProxyHeader), 0o644); err != nil { //nolint:gosec // test fixture, not sensitive
+		t.Fatalf("write fixture compose file: %v", err)
+	}
+
+	got := runComposeCommandFlags(t, dir)
+	gotSet := map[string]bool{}
+	for _, f := range got {
+		gotSet[f] = true
+	}
+	for _, want := range []string{"-port", "-ui-port"} {
+		if !gotSet[want] {
+			t.Errorf("compose_command_flags() = %v with an anchored \"proxy: &proxy\" header, missing real "+
+				"proxy flag %q — an anchor on the proxy service header must not drop it out of scope", got, want)
+		}
 	}
 }

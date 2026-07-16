@@ -930,7 +930,12 @@ compose_command_flags() {
   # Single-line awk program (no embedded "}"-only lines) so a simple
   # line-based function extractor (used by this repo's install_script_*_test.go
   # suite) can still find this function's own closing brace unambiguously.
-  { awk '/^  [a-zA-Z0-9_-]+:[[:space:]]*(#.*)?$/{inproxy=($0 ~ /^  proxy:/)?1:0} inproxy && /command:[ \t]*\[/{inblk=1} inproxy && inblk{print} inproxy && inblk && /\]/{inblk=0}' \
+  # Entering/exiting the proxy block: `/^  proxy:/` matches the header
+  # regardless of what follows the colon (a bare mapping, a YAML anchor like
+  # "proxy: &proxy", or a trailing comment) so an anchored service header
+  # doesn't fall out of scope; a DIFFERENT top-level 2-space-indented key
+  # (matched only on lines that are not the proxy header itself) closes it.
+  { awk '/^  proxy:/{inproxy=1} !/^  proxy:/ && /^  [a-zA-Z0-9_-]+:/{inproxy=0} inproxy && /command:[ \t]*\[/{inblk=1} inproxy && inblk{print} inproxy && inblk && /\]/{inblk=0}' \
       "$INSTALL_DIR/docker-compose.yml" 2>/dev/null \
     | grep -vE '^[[:space:]]*#' \
     | grep -oE '"-[a-zA-Z0-9-]+"' | tr -d '"' | sort -u; } || true
