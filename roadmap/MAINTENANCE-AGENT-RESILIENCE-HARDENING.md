@@ -183,8 +183,20 @@ audit) instead of a bare mark-only.
    `rollbacks.create`, record retired at terminal via `OrchestratorDeps.Journal`, and
    `MarkAllInterrupted(orphans)` marks orphaned ops `failed(agent_restart_interrupted)` so they're
    queryable post-restart. Startup reads the journal fail-closed (corrupt ⇒ refuse to serve).
-   Non-destructive. Follow-up: the intermediate phase progression (`captured`→`verified` + digests)
-   and the `PhaseRestarting` write-ahead barrier inside `tagAndUp` land with the reconciler slices.
+   Non-destructive.
+4b. **PR-D2 (Tier 1 phase progression + write-ahead barrier) — ✅ SHIPPED.** The `upgrades.apply`
+   flow now advances its journal record through the lifecycle: `PhaseCaptured` (folds the prior /
+   rollback digest), `PhaseResolved` (folds the target digest), `PhasePulled` (the last SAFE
+   boundary — image local, tag NOT advanced), and, on the happy path, `PhaseRestarted` /
+   `PhaseVerified`. The progress writes are BEST-EFFORT (a flaky journal never fails a good
+   upgrade). The `PhaseRestarting` **write-ahead barrier** (`restartWithBarrier`, journal_phases.go)
+   is FAIL-CLOSED: it is fsync'd immediately BEFORE the fixed-tag advance in `tagAndUp`, and if it
+   cannot be written the `restart` stage aborts before crossing into the danger window (the
+   pulled-but-not-restarted stack stays on the old tag — safe). Still non-destructive (records
+   intent; nothing reconciles yet). **Scope note:** only the apply flow is instrumented — the
+   standalone rollback (`POST /v1/rollbacks`) and apply's inline auto-rollback share `tagAndUp` but
+   are not separately barriered; they'll be covered by the reconciler slice (PR-E) which is their
+   only consumer. T1.2 structural digest selection shipped as its own follow-up (PR #751).
 5. **PR-E (Tier 1 reconcile) — ReconcileOnStartup.** Docker-truth decision (digest-set
    intersection + bounded health retry), local-first rollback (T1.1), cross-process guard (T1.5),
    startup reorder. **Closes the T3 acceptance test.**
