@@ -172,9 +172,12 @@ audit) instead of a bare mark-only.
      state-changing ops bypass it (the maintenance lock already caps them at one). The slot is
      acquired at admission and released when the op flow finishes (or on any early-return path).
      UDS `LimitListener` (connection-count bound) is a small follow-up.
-3. **PR-C (Tier 1 infra) — journal package + structural digest.** The `internal/journal` package
-   (fail-closed writer, corrupt-record refuse-to-serve) + T1.2 structural digest selection +
-   the `image inspect` tag-target runner method. No behavior change beyond digest-selection fix.
+3. **PR-C (Tier 1 infra) — journal package. ✅ SHIPPED (journal half).** The `internal/journal`
+   package: `Record`/`Phase` schema, a stdlib fail-closed atomic writer (fsync file + parent dir),
+   `Write`/`Read`/`List`/`Remove`, strict-ULID paths (traversal-safe), and corrupt-record
+   fail-closed (`List`/`Read` surface `ErrCorruptRecord`, never silently skip). Pure infra, no
+   wiring. T1.2 structural digest selection + the `image inspect` tag-target runner method are a
+   separate follow-up slice.
 4. **PR-D (Tier 1 write+mark) — wire journal + MarkAllInterrupted.** Journal write points
    (incl. the fail-closed barrier), atomic Finish+Remove, mark orphans queryable.
 5. **PR-E (Tier 1 reconcile) — ReconcileOnStartup.** Docker-truth decision (digest-set
