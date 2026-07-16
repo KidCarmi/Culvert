@@ -26,9 +26,12 @@ The qualification (`roadmap/AUTOEXCLUDE-PRODUCTION-QUALIFICATION.md`, finding **
 must be adjustable from the admin UI, but these five are frozen at build time — an operator who wants a
 stricter confirm-count for a hostile population, or a shorter TTL, must recompile.
 
-**F9a shipped as the prerequisite** (PR #740): the singleton now lives behind `atomic.Pointer`
-(`autoExclude()` read / `setAutoExclude()` swap), so the cache can be reconfigured at runtime without
-racing the lockless proxy hot path.
+**F9a is the hard prerequisite and must land first.** It is proposed in **PR #740** (open, not yet
+merged to `main` — this tree still has the plain `var autoExclude = autoexclude.New(...)`). F9a puts the
+singleton behind `atomic.Pointer` (`autoExclude()` read / `setAutoExclude()` swap) so the cache can be
+reconfigured at runtime without racing the lockless proxy hot path. **This ADR's implementation depends
+on that seam and MUST NOT be merged before #740** — otherwise the runtime `Reconfigure` would either not
+compile against the plain var or reintroduce the exact race F9a removes.
 
 ## Decision (proposed)
 
@@ -67,7 +70,10 @@ rebuild, which drops the cache — rejected as the apply path for a routine tuni
 - `GET /api/decryption-exclusions/tunables` (viewer) → current effective values + the built-in defaults +
   bounds, so the UI can render "current / default / allowed range".
 - `PUT /api/decryption-exclusions/tunables` (admin) → validate → persist → `Reconfigure` the live cache →
-  `auditEvent` + `saveConfigVersion(actor, action)` per the config-mutation convention. `requireRole`
+  `auditEvent`. **No `saveConfigVersion`**: because the tunables are deliberately OFF version-rollback
+  (below), snapshotting them would create config-version entries that a rollback cannot actually restore —
+  misleading history. This matches the existing off-rollback admin-settings handlers (e.g. the conn-limit
+  / upstream-pool durable-but-unversioned settings), which intentionally omit the call. `requireRole`
   admin for write, viewer for read (defense-in-depth alongside C2 metadata).
 - A **Tunables** section in the Decryption Exclusions SPA panel: five inputs with the default shown as
   placeholder and inline range hints; a "Reset to defaults" action.
@@ -123,7 +129,9 @@ A partial `PUT` (only some fields) merges onto the current set; an omitted field
 4. **Persistence round-trips.** A `PUT` survives restart via `admin_settings.json`; the value is OFF
    export/import and OFF rollback (pinned by the `config_surfaces_test.go` parity suite).
 5. **Race-free apply.** Reconfigure under concurrent hot-path reads is race-free (rides F9a; `-race`).
-6. **RBAC.** Read = viewer, write = admin; audit + config-version snapshot on write.
+6. **RBAC + audit.** Read = viewer, write = admin; every write emits an `auditEvent`. NO
+   `saveConfigVersion` (consistent with the off-rollback placement — a snapshot rollback can't restore is
+   misleading); the `config_surfaces_test.go` parity suite pins the tunables OFF the rollback surface.
 
 ## Related
 
