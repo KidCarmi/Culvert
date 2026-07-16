@@ -424,6 +424,26 @@ func (m *Manager) ActiveSize() int {
 	return len(m.active)
 }
 
+// HasLiveIdempotent reports whether a still-live op already exists for the
+// (actor, kind, idempotencyKey) tuple — i.e. whether BeginIdempotent would
+// DEDUPE this submission rather than admit new work. Read-only admission control
+// peeks with this so a duplicate of an in-flight op is not rejected for capacity
+// (429) before it can reach the dedupe path; only genuinely-new admissions are
+// gated on the concurrency semaphore. Empty key never dedupes.
+func (m *Manager) HasLiveIdempotent(actor, kind, idempotencyKey string) bool {
+	if idempotencyKey == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.idempCache[idempCacheKey(actor, kind, idempotencyKey)]
+	if !ok {
+		return false
+	}
+	_, alive := m.active[entry.OpID]
+	return alive
+}
+
 // IsRunning reports whether opID is a known, still-running (non-terminal) op.
 // The op-log retention sweep consults this so it never deletes the transcript of
 // an in-flight operation — an mtime-only check could reap a running op's log if

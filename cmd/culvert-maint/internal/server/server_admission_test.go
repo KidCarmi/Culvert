@@ -119,6 +119,39 @@ func TestAdmission_StateChangingBypassesSemaphore(t *testing.T) {
 	srv.opWG.Wait()
 }
 
+// TestAdmission_DedupRetryNotRejectedAtCapacity pins the Codex P2 fix: a retry
+// of an already-running read-only op (same idempotency_key) must dedupe to the
+// existing op_id even when the semaphore is saturated — NOT get 429.
+func TestAdmission_DedupRetryNotRejectedAtCapacity(t *testing.T) {
+	srv := newAdmissionTestServer(t, 1) // single read-only slot
+	peer := auth.PeerInfo{UID: 1000, Username: "test-cp"}
+	release := make(chan struct{})
+
+	// Admit a keyed read-only op that blocks — it holds the only slot.
+	first, _, e := srv.startAsyncOp(nil, peer, ops.KindBackupList, "check-key", nil, blockingStages(release))
+	if e != nil {
+		t.Fatalf("first admit: %+v", e)
+	}
+	// Retry with the SAME key while it's still running: the semaphore is full, but
+	// this must dedupe (return the original op_id), not 429.
+	got, deduped, e := srv.startAsyncOp(nil, peer, ops.KindBackupList, "check-key", nil, blockingStages(release))
+	if e != nil {
+		t.Fatalf("same-key retry at capacity must dedupe, got error: %+v", e)
+	}
+	if !deduped {
+		t.Fatal("same-key retry of a running op must dedupe")
+	}
+	if got.ID != first.ID {
+		t.Errorf("dedup returned a different op: got %s, want %s", got.ID, first.ID)
+	}
+	// A DIFFERENT read-only op is still correctly rejected at capacity.
+	if _, _, e := srv.startAsyncOp(nil, peer, ops.KindBackupList, "other-key", nil, blockingStages(release)); e == nil || e.Status != http.StatusTooManyRequests {
+		t.Fatalf("a new op at capacity must still be 429, got %+v", e)
+	}
+	close(release)
+	srv.opWG.Wait()
+}
+
 // TestAdmission_DedupReleasesSlot: a deduped read-only retry must not leak a
 // slot (it returns the prior op without spawning a goroutine).
 func TestAdmission_DedupReleasesSlot(t *testing.T) {

@@ -183,11 +183,14 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// T2.3 admission control: cap concurrently-executing READ-ONLY ops (not
 	// serialized by the maintenance lock) so a flood can't spawn unbounded root
 	// docker subprocesses; return 429 when at capacity. State-changing ops bypass
-	// — the lock already caps them at one. releaseSlot is invoked on every path
-	// that does NOT hand the slot to the orchestrator goroutine (set to nil on the
-	// spawn path so the goroutine owns the release).
+	// — the lock already caps them at one. A duplicate of an already-running
+	// read-only op must DEDUPE (return the existing op_id), not be rejected for
+	// capacity, so only genuinely-new admissions are gated (HasLiveIdempotent
+	// peek). releaseSlot is invoked on every path that does NOT hand the slot to
+	// the orchestrator goroutine (set to nil on the spawn path so the goroutine
+	// owns the release).
 	var releaseSlot func()
-	if !ops.IsStateChanging(kind) {
+	if !ops.IsStateChanging(kind) && !s.opts.Ops.HasLiveIdempotent(peer.String(), kind, idempotencyKey) {
 		rel, ok := s.acquireReadOnlySlot()
 		if !ok {
 			return nil, false, &opError{Status: http.StatusTooManyRequests, Body: map[string]string{"error": "agent_busy"}}
