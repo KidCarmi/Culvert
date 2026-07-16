@@ -13,11 +13,18 @@ import (
 // <op_id>.log forever and the state dir fills over the agent's lifetime (which
 // in turn arms the disk-full failures on the audit/journal write paths).
 //
+// isRunning guards against reaping an IN-FLIGHT op's log: an op still running is
+// skipped regardless of mtime, because a long-silent stage (or a retention
+// shorter than operation_timeout) could otherwise age its log past the cutoff,
+// and /v1/operations/{id}/logs reopens by path — deleting it would lose the
+// transcript for exactly the op an operator is inspecting. May be nil (skip the
+// guard) for callers with no live-op view, e.g. a pure startup sweep before any
+// op could be admitted.
+//
 // Best-effort and non-fatal: a stat/remove error on one file is skipped, never
-// returned, so a single unreadable entry can't block the sweep. A currently-
-// running op's log has a fresh mtime and is far younger than any sane retention,
-// so it is never swept. now is injected for tests.
-func SweepOpLogs(stateDir string, maxAge time.Duration, now time.Time) int {
+// returned, so a single unreadable entry can't block the sweep. now is injected
+// for tests.
+func SweepOpLogs(stateDir string, maxAge time.Duration, now time.Time, isRunning func(opID string) bool) int {
 	if maxAge <= 0 {
 		return 0
 	}
@@ -30,6 +37,11 @@ func SweepOpLogs(stateDir string, maxAge time.Duration, now time.Time) int {
 	removed := 0
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		// Never sweep the log of a still-running op (path-reopened by the logs
+		// endpoint). The filename is "<op_id>.log".
+		if isRunning != nil && isRunning(strings.TrimSuffix(e.Name(), ".log")) {
 			continue
 		}
 		info, err := e.Info()

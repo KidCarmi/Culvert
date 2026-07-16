@@ -149,7 +149,7 @@ func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays)
+	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays, mgr.IsRunning)
 
 	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
 	if err := srv.Serve(ctx); err != nil {
@@ -191,12 +191,12 @@ const opLogRetentionInterval = 24 * time.Hour
 // startOpLogRetention runs an immediate LogRetentionDays sweep of the per-op
 // transcripts, then a periodic one until ctx is cancelled. retentionDays <= 0
 // disables it (defensive; config validation already enforces > 0).
-func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int) {
+func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int, isRunning func(opID string) bool) {
 	if retentionDays <= 0 {
 		return
 	}
 	maxAge := time.Duration(retentionDays) * 24 * time.Hour
-	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now()); removed > 0 {
+	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), isRunning); removed > 0 {
 		log.Printf("culvert-maint: op-log retention swept %d file(s) older than %d day(s)", removed, retentionDays)
 	}
 	go func() {
@@ -207,7 +207,7 @@ func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now()); removed > 0 {
+				if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), isRunning); removed > 0 {
 					log.Printf("culvert-maint: op-log retention swept %d file(s)", removed)
 				}
 			}

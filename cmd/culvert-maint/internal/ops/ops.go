@@ -424,6 +424,19 @@ func (m *Manager) ActiveSize() int {
 	return len(m.active)
 }
 
+// IsRunning reports whether opID is a known, still-running (non-terminal) op.
+// The op-log retention sweep consults this so it never deletes the transcript of
+// an in-flight operation — an mtime-only check could reap a running op's log if
+// a stage stays silent past the retention window (or retention_days is shorter
+// than operation_timeout), and /v1/operations/{id}/logs reopens by path, so the
+// transcript would vanish for exactly the op an operator wants to inspect.
+func (m *Manager) IsRunning(opID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.active[opID]
+	return ok && !op.State.IsTerminal()
+}
+
 // purgeActiveLocked bounds the active map so terminal ops don't accumulate for
 // the whole process lifetime. It drops TERMINAL ops finished before the
 // retention cutoff and — if still over maxActive — evicts the oldest-finished

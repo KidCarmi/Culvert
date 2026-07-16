@@ -27,16 +27,19 @@ func TestSweepOpLogs(t *testing.T) {
 		return p
 	}
 
-	old1 := write("01OLD1.log", 40*24*time.Hour) // 40 days — swept
-	old2 := write("01OLD2.log", 31*24*time.Hour) // 31 days — swept
-	fresh := write("01NEW.log", 2*24*time.Hour)  // 2 days — kept
+	old1 := write("01OLD1.log", 40*24*time.Hour)          // 40 days — swept
+	old2 := write("01OLD2.log", 31*24*time.Hour)          // 31 days — swept
+	fresh := write("01NEW.log", 2*24*time.Hour)           // 2 days — kept (young)
+	oldRunning := write("01RUNNING.log", 40*24*time.Hour) // 40 days but RUNNING — kept
 	// A non-.log file and a directory must be ignored even if old.
 	other := write("notes.txt", 90*24*time.Hour)
 	if err := os.MkdirAll(filepath.Join(opsDir, "01DIR.log"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
-	removed := SweepOpLogs(stateDir, 30*24*time.Hour, now)
+	// isRunning protects the in-flight op's log despite its stale mtime.
+	isRunning := func(opID string) bool { return opID == "01RUNNING" }
+	removed := SweepOpLogs(stateDir, 30*24*time.Hour, now, isRunning)
 	if removed != 2 {
 		t.Errorf("removed = %d, want 2", removed)
 	}
@@ -44,6 +47,9 @@ func TestSweepOpLogs(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be swept", filepath.Base(p))
 		}
+	}
+	if _, err := os.Stat(oldRunning); err != nil {
+		t.Errorf("a still-running op's log must be kept despite a stale mtime: %v", err)
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("fresh log must be kept: %v", err)
@@ -57,12 +63,12 @@ func TestSweepOpLogs(t *testing.T) {
 }
 
 func TestSweepOpLogs_NoDirOrDisabled(t *testing.T) {
-	// Missing operations dir → 0, no panic.
-	if n := SweepOpLogs(t.TempDir(), 24*time.Hour, time.Now()); n != 0 {
+	// Missing operations dir → 0, no panic. nil isRunning is allowed.
+	if n := SweepOpLogs(t.TempDir(), 24*time.Hour, time.Now(), nil); n != 0 {
 		t.Errorf("missing dir sweep = %d, want 0", n)
 	}
 	// maxAge <= 0 disables the sweep.
-	if n := SweepOpLogs(t.TempDir(), 0, time.Now()); n != 0 {
+	if n := SweepOpLogs(t.TempDir(), 0, time.Now(), nil); n != 0 {
 		t.Errorf("disabled sweep = %d, want 0", n)
 	}
 }
