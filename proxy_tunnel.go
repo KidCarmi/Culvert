@@ -241,11 +241,23 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 // srcConn is the conn src reads (idle-deadline anchor — see idleCopyCounted).
 // Shared by the WebSocket and CONNECT-bypass raw relays.
 func relayCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atomic.Int64, count *int64, done chan<- struct{}) {
+	defer func() {
+		if v := recover(); v != nil {
+			// Detached relay goroutine: no request-plane recover reaches here.
+			// Close BOTH conns so the peer relay (blocked in a deadline-less copy)
+			// unblocks immediately instead of leaking until the ~1h idle timeout.
+			recordCrash("tunnel-relay", "", v)
+			_ = dst.Close()
+			if srcConn != nil {
+				_ = srcConn.Close()
+			}
+		}
+		done <- struct{}{} // SOLE sender — the parent's <-done always completes (buffered chan)
+	}()
 	*count += idleCopyCounted(dst, src, srcConn, shared)
 	if tc, ok := dst.(interface{ CloseWrite() error }); ok {
 		tc.CloseWrite() //nolint:errcheck // best-effort EOF signal; peer may already be gone
 	}
-	done <- struct{}{}
 }
 
 // bidiRelayCounted runs two relayCounted goroutines (aDst←aSrc and bDst←bSrc)
@@ -613,6 +625,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		logger.Printf("SSL_INSPECT hijack error: %v", err)
 		return
 	}
+	// FD-leak guard: a panic between the hijack and relay spawn would otherwise
+	// leak the hijacked conn. Idempotent — the relay closes it on the happy path
+	// (this function blocks on relay completion), so this is a harmless 2nd close.
+	defer rawClient.Close() //nolint:errcheck
 
 	// 3b. Peek the first byte from the client to detect the protocol.
 	// TLS ClientHello starts with 0x16 (handshake record). If the client
@@ -652,8 +668,17 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		shared := newTunnelActivityStamp()
 		done := make(chan struct{}, 2)
 		relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
+			defer func() {
+				if v := recover(); v != nil {
+					recordCrash("tunnel-relay", "", v)
+					_ = dst.Close()
+					if srcConn != nil {
+						_ = srcConn.Close()
+					}
+				}
+				done <- struct{}{} // sole sender
+			}()
 			*count = idleCopyCounted(dst, src, srcConn, shared)
-			done <- struct{}{}
 		}
 		go relay(upstreamTLS, peekBuf, rawClient, &toUpstream)   // client → upstream
 		go relay(rawClient, upstreamTLS, upstreamTLS, &toClient) // upstream → client
@@ -774,8 +799,15 @@ relayLoop:
 			shared := newTunnelActivityStamp()
 			done := make(chan struct{}, 2)
 			rawRelay := func(dst, src net.Conn) {
+				defer func() {
+					if v := recover(); v != nil {
+						recordCrash("tunnel-relay", "", v)
+						_ = dst.Close()
+						_ = src.Close()
+					}
+					done <- struct{}{} // sole sender
+				}()
 				idleCopyCounted(dst, src, src, shared)
-				done <- struct{}{}
 			}
 			go rawRelay(upstreamTLS, clientTLS)
 			go rawRelay(clientTLS, upstreamTLS)

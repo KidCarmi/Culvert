@@ -113,9 +113,36 @@ func (readinessCollector) Collect(_ context.Context, in support.CollectInput, si
 	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
 }
 
+type crashCollector struct{}
+
+func (crashCollector) Meta() support.CollectorMeta {
+	return support.CollectorMeta{
+		ID: "crash", Path: "sections/crash.json", Owner: "observability", SchemaVersion: 1,
+		Description: "Most-recent recovered panic (redacted; seeds the crash timeline)", Timeout: 2 * time.Second,
+		ByteBudget: 16 << 10, Mandatory: false, MinLevel: support.L0,
+		MaxClass: redaction.ClassInternal, Sensitivity: redaction.ClassInternal,
+	}
+}
+
+func (crashCollector) Collect(_ context.Context, in support.CollectInput, sink support.SectionSink) support.Result {
+	rec, ok := lastCrashSnapshot()
+	if !ok {
+		if err := sink.WriteJSON(map[string]any{"last_crash": nil}); err != nil {
+			return support.Result{Status: support.StatusFailed, Note: "write"}
+		}
+		return support.Result{Status: support.StatusOK, ClassMax: redaction.ClassPublic}
+	}
+	res := in.Redactor.Classify(rec) // masks Summary/Stack; counts feed the redaction report
+	if err := sink.WriteJSON(map[string]any{"last_crash": res.Value}); err != nil {
+		return support.Result{Status: support.StatusFailed, Note: "write"}
+	}
+	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+}
+
 func init() {
 	support.Register(productCollector{})
 	support.Register(diagnosticsCollector{})
 	support.Register(healthCollector{})
 	support.Register(readinessCollector{})
+	support.Register(crashCollector{})
 }

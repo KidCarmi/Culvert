@@ -21,6 +21,7 @@ var collectedStructs = []any{
 	healthReport{},
 	readinessReport{},
 	readinessCheck{},
+	crashRecord{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

@@ -477,8 +477,15 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			logger.Printf("POLICY_DROP rule=%q pri=%s %s -> %q [%s] {req_id=%s identity=%s rule=%s action=drop}", sanitizeLog(match.Rule.Name), strings.ReplaceAll(fmt.Sprintf("%d", match.Rule.Priority), "\n", ""), clientIP, sanitizeLog(host), sanitizeLog(match.MatchedConditions), reqID, sanitizeLog(authenticatedIdentity), sanitizeLog(match.Rule.Name))
 			// Silent TCP RST — hijack and close without sending an HTTP response.
 			if hj, ok := w.(http.Hijacker); ok {
-				conn, _, _ := hj.Hijack()
-				conn.Close()
+				if conn, _, err := hj.Hijack(); err == nil && conn != nil {
+					conn.Close() // intended silent RST
+				} else {
+					// Hijack unsupported (HTTP/2 CONNECT) / already flushed: use
+					// net/http's own intentional silent-abort protocol instead of a
+					// nil-deref. proxyCrashGuard re-panics ErrAbortHandler unchanged,
+					// so the drop stays covert (no 502, no crash record).
+					panic(http.ErrAbortHandler)
+				}
 			}
 			return true
 
@@ -669,6 +676,7 @@ func trackDestinationCountry(host string) {
 		return
 	}
 	defer func() { <-geoTrackSem }()
+	defer recoverGoroutine("geo") // detached goroutine: no request-plane recover reaches here
 	code, name := geo.LookupFull(host)
 	if code != "" {
 		countryTraffic.Record(code, name)
@@ -680,6 +688,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
 	reqID := setupRequestTracing(w, r)
+
+	// PROXY-plane panic backstop (record-only; never writes an HTTP status, so a
+	// hijacked CONNECT/WS tunnel is never corrupted and the happy path is
+	// byte-identical). See crashguard.go.
+	defer proxyCrashGuard(reqID)
 
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {

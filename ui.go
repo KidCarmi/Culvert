@@ -90,7 +90,10 @@ func newAdminUIHandler() http.Handler { //nolint:funlen // route registration; e
 	registerReleaseRoutes(mux)       // release_api.go    —  5 routes (P1.6d-0, no GUI)
 	registerSupportRoutes(mux)       // ui_support.go     —  2 routes (M1 Slice 1)
 
-	return uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux))))
+	// ADMIN-plane panic backstop (outermost). The admin chain never hijacks, so a
+	// clean 500 is valid when nothing was committed; trackedRW preserves
+	// ResponseController + SSE Flusher. Registers no route (C1/D0 unaffected).
+	return withAdminPanicRecovery(uiIPGuardMiddleware(securityMiddleware(uiAuthMiddleware(uiMetadataEnforcement(mux)))))
 }
 
 func newAdminUIServer(port int) *http.Server {

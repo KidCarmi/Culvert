@@ -252,6 +252,7 @@ func socks5Negotiate(conn net.Conn, clientIP string) bool {
 }
 
 func handleSOCKS5(conn net.Conn) {
+	defer recoverGoroutine("socks5") // the whole SOCKS5 chain runs in its own goroutine
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
@@ -382,8 +383,15 @@ func socks5Relay(client, dest net.Conn, clientIP, host string) {
 	shared := newTunnelActivityStamp()
 	done := make(chan struct{}, 2)
 	relay := func(dst, src net.Conn, count *int64) {
+		defer func() {
+			if v := recover(); v != nil {
+				recordCrash("socks5-relay", "", v)
+				_ = dst.Close()
+				_ = src.Close()
+			}
+			done <- struct{}{} // sole sender
+		}()
 		*count = idleCopyCounted(dst, src, src, shared)
-		done <- struct{}{}
 	}
 	go relay(dest, client, &toDest)
 	go relay(client, dest, &toClient)
