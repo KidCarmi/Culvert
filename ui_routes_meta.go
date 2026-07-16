@@ -283,7 +283,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/decryption-exclusions/tunables", Handler: "apiDecryptionExclusionTunables", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "F10: defaults + bounds + schema (current values live on /api/decryption-exclusions)"},
-			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F10: set auto-exclusion tunables; validate→apply→persist→rollback; no config-version (off rollback surface)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F10: set auto-exclusion tunables; validate→persist→apply (persist-before-apply, no rollback branch); no config-version (off rollback surface)"},
 		}},
 	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{

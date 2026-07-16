@@ -1,8 +1,8 @@
 # ADR-0010: Runtime-tunable auto-exclusion parameters (confirm-count / TTLs / window / cap)
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-07-16) — implemented (F10 PRs #747, #749, #752, #753)
 - **Date:** 2026-07-16
-- **Deciders:** Engineering Advisor (proposed); project maintainer (to ratify — this adds an admin-editable operational control and a persisted setting)
+- **Deciders:** Engineering Advisor (proposed); project maintainer (ratified — this adds an admin-editable operational control and a persisted setting)
 
 ## Context
 
@@ -95,13 +95,26 @@ Reject out-of-range input at the API (never let a value disable the guardrails):
 
 | Field | Min | Max | Note |
 |---|---|---|---|
-| confirmN | 1 | 10 | 1 = single-client promote (documented weaker posture) |
+| confirmN | 2 | 10 | 1 is rejected — a single-client threshold defeats the anti-poisoning guarantee |
 | ttl | 1m | 168h | |
 | pinnedTTL | 1m | ttl | pinned TTL ≤ TTL (invariant) |
 | window | 10s | 24h | |
-| maxEntries | 256 | 1048576 | memory-DoS bound stays sane |
+| maxEntries | 256 | 262144 | memory-DoS bound stays sane |
 
-A partial `PUT` (only some fields) merges onto the current set; an omitted field is unchanged.
+A `PUT` is a **full-set replacement**: an omitted or zero field **resets to its default**
+(`zero ⇒ default`, `resolveAutoExcludeTunables`); the server validates the merged effective
+set. **Reset to defaults** is therefore a `PUT` of `{}`. (A negative value is preserved
+through resolution so it fails validation — fail-closed.)
+
+> **Erratum (accepted, implementation).** Two bounds and the PUT semantic were tightened
+> from this proposal during implementation, and the table + sentence above reflect what
+> shipped (not the original draft): (1) `confirmN` min was raised **1 → 2** (a one-client
+> promote defeats anti-poisoning and is not an acceptable production posture); (2) the
+> `maxEntries` ceiling was lowered **1048576 → 262144**; (3) the PUT was defined as a
+> **full-set replacement with `zero ⇒ default`**, NOT a partial merge — an omitted field
+> resets rather than persists. The original draft proposed confirmN-min 1, maxEntries-max
+> 1048576, and merge-on-partial-PUT; those are superseded. History is left intact here so
+> the change of record is visible.
 
 ## Consequences
 
