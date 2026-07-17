@@ -4027,6 +4027,15 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">Diagnostics</div>
+            <p class="hint">Local, read-only checks — no network, no shell.</p>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
+              <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
+            </div>
+            <div id="support-diagnose" role="status" aria-live="polite" style="margin-top:6px"></div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
@@ -4409,6 +4418,7 @@ document.addEventListener('click', e => {
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
+    case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -11905,6 +11915,38 @@ async function supportCreateBundle() {
   } finally {
     if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
   }
+}
+
+async function diagnoseStorage() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseStorage"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/storage', { method: 'POST' });
+    renderDiagnoseStorage(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Storage check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseStorage(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const hdr = '<p class="hint">Storage <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
+    '</strong> · free ' + escHtml(String(Math.round((d.free_bytes || 0) / (1024 * 1024)))) + ' MiB / used ' +
+    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>';
+  const rows = (d.checks || []).map(c =>
+    '<tr><td>' + escHtml(String(c.name)) + '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
+    (c.ok ? 'ok' : 'fail') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function supportSetDebugLevel() {

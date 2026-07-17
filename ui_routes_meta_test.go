@@ -52,7 +52,7 @@ import (
 //   - 142 — Supportability M1 added /api/support/status + /api/health/explain
 //     (the explained operator-contract health verdict).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 145
+	const want = 146
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -159,6 +159,7 @@ var helperSourceFiles = []string{
 	"ui_governance.go",
 	"release_api.go",
 	"ui_support.go",
+	"diagnose.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a
