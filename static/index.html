@@ -3986,9 +3986,12 @@ Firefox (all platforms):
             <label class="hint" for="support-scope" data-min-role="admin">Scope</label>
             <select id="support-scope" class="input sm" data-min-role="admin" title="Incident scope: focus the bundle on collectors relevant to one incident type"><option value="standard">standard</option></select>
             <label class="hint" for="support-level" data-min-role="admin">Level</label>
-            <select id="support-level" class="input sm" data-min-role="admin" title="Debug-capture depth: L1 standard, L2 adds runtime/host facts">
+            <select id="support-level" class="input sm" data-min-role="admin" title="Debug-capture depth. Auto uses the effective capture level (any active elevation, else L1).">
+              <option value="">Auto (effective)</option>
               <option value="1">L1 (standard)</option>
               <option value="2">L2 (+runtime)</option>
+              <option value="3">L3</option>
+              <option value="4">L4</option>
             </select>
             <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
@@ -4006,16 +4009,18 @@ Firefox (all platforms):
             <div style="font-weight:600;margin-bottom:6px">Capture level</div>
             <p class="hint">Elevate the default bundle capture depth for a bounded window. A TTL is <strong>mandatory</strong> — the level auto-reverts to baseline when it expires (even across a restart).</p>
             <div id="support-debug-level" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
-              <label class="hint" for="support-dl-level">Level</label>
-              <select id="support-dl-level" class="input sm" title="Elevated capture depth">
+            <!-- Row is operator-visible so operators can Revert an active elevation
+                 (DELETE is RoleOperator); the SET controls stay admin-only. -->
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
+              <label class="hint" for="support-dl-level" data-min-role="admin">Level</label>
+              <select id="support-dl-level" class="input sm" data-min-role="admin" title="Elevated capture depth">
                 <option value="1">L1 (baseline)</option>
                 <option value="2">L2 (+runtime)</option>
                 <option value="3">L3</option>
                 <option value="4">L4</option>
               </select>
-              <label class="hint" for="support-dl-ttl">TTL (min)</label>
-              <input id="support-dl-ttl" class="input sm" type="number" min="1" max="1440" value="60" style="width:80px" title="Minutes until auto-revert (1–1440)">
+              <label class="hint" for="support-dl-ttl" data-min-role="admin">TTL (min)</label>
+              <input id="support-dl-ttl" class="input sm" type="number" min="1" max="1440" value="60" style="width:80px" data-min-role="admin" title="Minutes until auto-revert (1–1440)">
               <button class="btn primary sm" data-click="supportSetDebugLevel" data-min-role="admin" title="Elevate capture level for the window">Set level</button>
               <button class="btn ghost sm" data-click="supportClearDebugLevel" data-min-role="operator" title="Revert to baseline now">Revert now</button>
             </div>
@@ -11876,10 +11881,14 @@ async function supportCreateBundle() {
   const scopeSel = document.getElementById('support-scope');
   const scope = (scopeSel && scopeSel.value) || 'standard';
   const levelSel = document.getElementById('support-level');
-  const level = (levelSel && levelSel.value) || '1';
+  // Empty value = "Auto": omit the level param so the server applies the
+  // effective capture level (any active elevation, else baseline L1). Only an
+  // explicit L0..L4 choice overrides the controller.
+  const level = (levelSel && levelSel.value) || '';
+  const levelLabel = level === '' ? 'auto (effective)' : 'L' + level;
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (scope: ' + scope + ', level: L' + level + ') will be collected and written to disk — internal, non-secret operational detail.',
+    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + ') will be collected and written to disk — internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
@@ -11887,7 +11896,8 @@ async function supportCreateBundle() {
   const prev = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
-    const man = await api('/api/support/bundles?scope=' + encodeURIComponent(scope) + '&level=' + encodeURIComponent(level), { method: 'POST' });
+    const qs = '/api/support/bundles?scope=' + encodeURIComponent(scope) + (level === '' ? '' : '&level=' + encodeURIComponent(level));
+    const man = await api(qs, { method: 'POST' });
     toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
     await loadSupport();
   } catch (err) {
