@@ -672,36 +672,39 @@ func clusterRoleAndOK(in clusterInputs) (role string, ok bool, detail string) {
 		// status API; here we confirm the DP client is live.
 		return "data-plane", true, "data-plane node; detailed sync health via /api/cluster"
 	case in.haStatus.Enabled:
-		role = in.haStatus.Role // "leader" | "standby"
-		switch role {
-		case "leader":
-			ok = in.writeAllowed && nodesOK
-			switch {
-			case in.leaseMode == "lease" && !in.leaseValid:
-				detail = "leader fencing lease not valid"
-			case !nodesOK:
-				detail = "some enrolled nodes not connected"
-			}
-		case "standby":
-			ok = in.haStatus.SyncFailCount == 0
-			if !ok {
-				detail = "standby sync loop is failing"
-			}
-		default:
-			role = "control-plane"
-			ok = nodesOK
-		}
-		return role, ok, detail
+		return haRoleAndOK(in, nodesOK)
 	case in.nodeRole == "control-plane" || in.total > 0:
 		// Authoritative CP role (covers a freshly enabled CP with zero enrolled
 		// nodes) or, defensively, any node that already has enrollments.
-		ok = nodesOK
-		if !ok {
-			detail = "some enrolled nodes not connected"
+		if !nodesOK {
+			return "control-plane", false, "some enrolled nodes not connected"
 		}
-		return "control-plane", ok, detail
+		return "control-plane", true, ""
 	default:
 		return "standalone", true, ""
+	}
+}
+
+// haRoleAndOK resolves the leader/standby verdict for an HA-enabled control plane
+// (split out of clusterRoleAndOK to keep each function under the cyclop threshold).
+func haRoleAndOK(in clusterInputs, nodesOK bool) (role string, ok bool, detail string) {
+	switch in.haStatus.Role {
+	case "leader":
+		ok = in.writeAllowed && nodesOK
+		switch {
+		case in.leaseMode == "lease" && !in.leaseValid:
+			detail = "leader fencing lease not valid"
+		case !nodesOK:
+			detail = "some enrolled nodes not connected"
+		}
+		return "leader", ok, detail
+	case "standby":
+		if in.haStatus.SyncFailCount != 0 {
+			return "standby", false, "standby sync loop is failing"
+		}
+		return "standby", true, ""
+	default:
+		return "control-plane", nodesOK, ""
 	}
 }
 
