@@ -57,16 +57,38 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := pacStore.Set(c); err != nil {
+		// Strict validation lives HERE, at the API boundary — never in
+		// Store.Set, whose replay callers (rollback, cluster apply) discard
+		// errors. Invalid input is rejected with actionable per-entry issues.
+		norm, issues := pac.ValidateConfig(c)
+		if len(issues) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"error":  "validation failed",
+				"issues": issues,
+			})
+			return
+		}
+		// Persist the canonical form (lowercased/punycoded hosts, deduped,
+		// host-bits-cleared CIDRs) so on-disk config and generated PAC agree.
+		canonical := PACConfig{ProxyHost: norm.ProxyHost, ProxyPort: norm.ProxyPort}
+		for _, e := range norm.Exclusions {
+			canonical.Exclusions = append(canonical.Exclusions, e.Canonical())
+		}
+		if err := pacStore.Set(canonical); err != nil {
 			http.Error(w, "save error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		actor := sessionAdmin(r)
 		auditEvent(r, "pac.update", "pac-config", fmt.Sprintf("host=%s port=%d exclusions=%d",
-			sanitizeLog(c.ProxyHost), c.ProxyPort, len(c.Exclusions)))
+			sanitizeLog(canonical.ProxyHost), canonical.ProxyPort, len(canonical.Exclusions)))
 		saveConfigVersion(actor, "pac.update")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(c) //nolint:errcheck
+		json.NewEncoder(w).Encode(struct { //nolint:errcheck
+			PACConfig
+			Warnings []pac.ValidationIssue `json:"warnings,omitempty"`
+		}{PACConfig: canonical, Warnings: norm.Warnings})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -91,11 +113,49 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 		}
 		return -1
 	}, r.Host)
-	pacBody := pacStore.GeneratePAC(reqHost)
+	art := pacStore.Compile(reqHost)
+	etag := `"` + art.Digest + `"`
+
 	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-	w.Header().Set("Cache-Control", "no-cache, no-store")
-	fmt.Fprint(w, pacBody) //nolint:errcheck,gosec // best-effort response write
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Culvert-PAC-Version", art.CompilerVersion+"-"+art.Digest[:16])
+	if art.HostFallback {
+		// The body embeds the request-derived proxy host, so it varies per
+		// Host header — a shared cache serving it cross-host would poison
+		// clients. Keep the legacy no-store posture in fallback mode.
+		w.Header().Set("Cache-Control", "no-cache, no-store")
+	} else {
+		// Configured proxy host: the body is request-independent, so clients
+		// may cache but must revalidate (cheap 304 via the strong ETag).
+		w.Header().Set("Cache-Control", "max-age=0, must-revalidate")
+		if mt := pacStore.ModTime(); !mt.IsZero() {
+			w.Header().Set("Last-Modified", mt.UTC().Format(http.TimeFormat))
+		}
+	}
+	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatches(inm, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	fmt.Fprint(w, art.JS) //nolint:errcheck,gosec // best-effort response write
 	// #nosec G705 -- host is character-whitelisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
+}
+
+// etagMatches implements If-None-Match comparison for a single strong ETag:
+// "*" matches anything; otherwise each comma-separated candidate matches on
+// byte equality, ignoring a weak-validator prefix (weak comparison is
+// sufficient for cache revalidation per RFC 9110 §13.1.2).
+func etagMatches(ifNoneMatch, etag string) bool {
+	if strings.TrimSpace(ifNoneMatch) == "*" {
+		return true
+	}
+	for _, cand := range strings.Split(ifNoneMatch, ",") {
+		cand = strings.TrimSpace(cand)
+		cand = strings.TrimPrefix(cand, "W/")
+		if cand == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // registerPACRoutes wires the PAC file endpoint and its admin config API.

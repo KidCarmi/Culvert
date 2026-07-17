@@ -14,6 +14,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -183,7 +184,7 @@ func TestBackup_Tier2_OnlyIncludedIfPresent(t *testing.T) {
 		"data/node_groups.json",
 		"data/categories.json",
 		"data/blocklist.txt",
-		"data/pac.json",
+		"data/pac_config.json",
 		"data/scan_exclusions.json",
 		"data/alert_settings.json",
 		"data/admin_settings.json",
@@ -394,4 +395,41 @@ func sortedNames(m map[string][]byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ── PAC config backup round-trip (PR "pac foundation hardening") ────
+//
+// Regression pin for the pre-existing backup gap: the artifact list used to
+// reference data/pac.json while the store persisted pac_config.json in the
+// process CWD, so PAC config was silently absent from every backup. The store
+// now lives at <dataDir>/pac_config.json and must round-trip.
+
+func TestBackup_PACConfig_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	pacBody := []byte(`{"proxyHost":"proxy.corp.example","proxyPort":3128,"exclusions":["corp.local","10.0.0.0/8"]}`)
+	seedFile(t, dataDir, "pac_config.json", pacBody, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	manifest, files, _ := readBackupTarball(t, out)
+
+	got, ok := files["data/pac_config.json"]
+	if !ok {
+		t.Fatalf("data/pac_config.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, pacBody) {
+		t.Errorf("PAC config content mismatch in backup:\n got: %s\nwant: %s", got, pacBody)
+	}
+	found := false
+	for _, e := range manifest.Files {
+		if e.Path == "data/pac_config.json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("data/pac_config.json missing from backup manifest")
+	}
 }

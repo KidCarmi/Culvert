@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 	"github.com/KidCarmi/Culvert/internal/session"
@@ -869,6 +870,31 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
+// importPACPreValidationOK strictly validates the PAC fields of an import
+// payload BEFORE any store mutation, writing a structured 400 and returning
+// false on failure. Only the incoming payload is judged; the tolerant apply
+// path never rejects.
+func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
+	if b.PACProxyHost == "" && b.PACProxyPort == 0 && len(b.PACExclusions) == 0 {
+		return true
+	}
+	_, issues := pac.ValidateConfig(PACConfig{
+		ProxyHost:  b.PACProxyHost,
+		ProxyPort:  b.PACProxyPort,
+		Exclusions: b.PACExclusions,
+	})
+	if len(issues) == 0 {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
+		"error":  "PAC configuration in import failed validation",
+		"issues": issues,
+	})
+	return false
+}
+
 func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -898,6 +924,15 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// import (P2 import-preview, POLICY-ARCHITECTURE-FUTURE §6).
 	if r.URL.Query().Get("dryRun") == "true" {
 		writeImportPreview(w, r, &b, replaceMode)
+		return
+	}
+
+	// PAC pre-validation (before ANY store mutation): strictly validate the
+	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
+	// with actionable errors instead of silently importing junk. Pre-existing
+	// live entries are untouched by this gate — only the incoming payload is
+	// judged, and the tolerant apply below never rejects.
+	if !importPACPreValidationOK(w, &b) {
 		return
 	}
 

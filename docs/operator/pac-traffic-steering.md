@@ -1,0 +1,134 @@
+# PAC Traffic Steering — Foundation (Part 1)
+
+This document covers the hardened PAC (proxy auto-config) foundation: typed
+validation, the deterministic compiler, HTTP delivery semantics, and the
+storage migration. Profiles/proxy pools and the simulator/publish lifecycle
+are delivered in follow-up parts.
+
+## What `/proxy.pac` serves
+
+`/proxy.pac` returns a generated `FindProxyForURL` script built from the PAC
+configuration (proxy host, proxy port, exclusion list). It is served
+**unauthenticated by design** on both listeners (PAC clients cannot send
+credentials):
+
+- the proxy port (plain HTTP — Windows/macOS clients fetch without TLS), and
+- the admin UI port (allowlisted in the auth middleware).
+
+Evaluation order in the generated script:
+
+1. hostname hygiene (lowercase, strip one trailing dot),
+2. plain (dotless) hostnames → `DIRECT`,
+3. DNS-free exclusions — bare domains (exact + subdomains), `*.` wildcards,
+   IP literals — in configured order,
+4. **one** `dnsResolve(host)` call, truthiness-guarded,
+5. loopback + RFC-1918 → `DIRECT`, then CIDR exclusions, in configured order,
+6. terminal `PROXY <host>:<port>` (no implicit `DIRECT` fallback — the legacy
+   fail-closed posture is preserved).
+
+All rules before the terminal return `DIRECT`, so the DNS-free-first grouping
+cannot change any outcome — it only avoids DNS lookups when a domain rule
+already answers, and collapses the previous 5+ `dnsResolve` calls per
+evaluation into at most one.
+
+### Generated-JS portability contract
+
+The compiler emits pure **ECMAScript 3**, 7-bit ASCII, no BOM, no trailing
+commas — the floor imposed by Windows WinINET/WinHTTP's JScript engine. Only
+`PROXY` and `DIRECT` directives are emitted (WinHTTP supports no others).
+DNS failure is truthiness-tested, covering both `null` (Chromium, Firefox)
+and `""` (Windows Ex API) return conventions. Unicode hostnames are stored
+and emitted as punycode A-labels (Chromium and Firefox pass punycoded hosts
+into `FindProxyForURL`).
+
+## Validation
+
+`POST /api/pac-config` and config **import** are strictly validated. Invalid
+input is rejected with HTTP 400 and a structured issue list:
+
+```json
+{"error": "validation failed",
+ "issues": [{"field": "exclusions", "entry": "192.168.0.0/33",
+             "code": "invalid_cidr",
+             "message": "\"192.168.0.0/33\" is not a valid CIDR (expected e.g. 192.168.0.0/16)"}]}
+```
+
+Checked: proxy host shape (hostname or IP literal, no scheme/port/credentials),
+port range (0–65535; 0 = auto-detect), per-entry grammar (bare domain,
+`*.wildcard`, IPv4 CIDR, IP literal), control characters, entry length
+(≤253), list size (≤10 000 — the cluster snapshot cap), wildcard placement
+(`*` only as a leading `*.`), IDNA normalization (Unicode → punycode), and a
+compiled-output byte budget (reject > 1 MiB — Chromium's PAC fetch cap;
+warn > 512 KiB). Duplicates (after normalization) are deduplicated with a
+warning, and CIDRs with host bits set are normalized to the network address
+with a warning. Accepted configs are persisted in canonical form.
+
+**Replay paths stay tolerant.** Loading a legacy `pac_config.json`,
+config-version rollback, and cluster snapshot apply never reject: entries
+that cannot be parsed are dropped from the *generated script* with a logged
+warning, and the stored file is left as-is. Strictness lives only at the API
+boundary, so historical snapshots and mixed-version clusters can always
+replay.
+
+## HTTP caching
+
+- `ETag`: strong, the SHA-256 of the exact response body; `If-None-Match`
+  is honored (`304 Not Modified`).
+- `X-Culvert-PAC-Version`: `<compiler-version>-<digest-prefix>`.
+- When **proxyHost is configured**: `Cache-Control: max-age=0,
+  must-revalidate` plus `Last-Modified` — clients may cache but revalidate
+  every use, so a config change propagates on the next fetch (cheap 304s
+  otherwise).
+- When **proxyHost is empty** (fallback mode): the body embeds each request's
+  Host header, so the response stays `Cache-Control: no-cache, no-store` —
+  a shared cache must never serve one client's PAC to another. Set an
+  explicit proxy host to enable revalidation caching.
+
+## Storage location and migration
+
+PAC configuration now lives at **`<dataDir>/pac_config.json`** (default
+`/data/pac_config.json`), which puts it on the backup/restore surface —
+previously it was written to `pac_config.json` in the process working
+directory and was silently **absent from every backup**.
+
+On first start after upgrade, if `<dataDir>/pac_config.json` does not exist
+but the legacy CWD file does, the config is migrated automatically (one-way)
+and a log line records it. The legacy file is left in place but **frozen**:
+
+> **Downgrade note:** a binary older than this release reads the legacy CWD
+> file, which stops receiving updates after migration. If you downgrade after
+> changing PAC config, re-apply those changes (or copy
+> `<dataDir>/pac_config.json` over the CWD file) — otherwise the downgraded
+> binary serves the pre-migration config.
+
+## Determinism
+
+The same configuration always compiles to byte-identical PAC output
+(`compiler: v1` header, config fingerprint included). Timestamps are never
+embedded in the script. Golden-file tests pin the exact output; any change to
+generated bytes requires a compiler-version bump.
+
+## Client compatibility notes (authoritative-behavior basis)
+
+- Chromium and Firefox strip the path/query from `https://` URLs before
+  calling `FindProxyForURL` — rules are host-granular by design.
+- WinINET caches the PAC *result per hostname* (Automatic Proxy Result
+  Cache) — another reason rules are host-granular.
+- Multi-entry failover chains (`PROXY a; PROXY b`) are honored by Chromium
+  (~5 min bad-proxy quarantine) and Firefox (30 min,
+  `network.proxy.failover_timeout`); pool-based chains arrive with PAC
+  profiles in part 2.
+- `isInNet` is IPv4-only in the portable API — IPv4 CIDR exclusions only.
+
+### Intentional matching-behavior deltas vs. the legacy generator
+
+Two fix-forward changes tighten previously inconsistent matching; both are
+deliberate:
+
+- **CIDRs with host bits set** (e.g. `192.168.1.55/24`) are normalized to the
+  network address (`192.168.1.0/24`) and now match the whole network. Some
+  PAC engines never matched the un-masked legacy form at all.
+- **Case and trailing dots are normalized** on both sides: an exclusion for
+  `corp.local` now also matches `Corp.LOCAL` and `corp.local.` (the legacy
+  exact-`===` compare missed both), and a trailing-dot plain name (`foo.`)
+  is treated as a plain hostname (DIRECT).

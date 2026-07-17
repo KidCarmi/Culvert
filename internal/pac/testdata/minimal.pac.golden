@@ -1,0 +1,25 @@
+// Culvert proxy auto-config (PAC). Generated file - do not edit.
+// compiler: v1
+// fingerprint: 50611b48ac5e18e8b3fe2f2135420ab3e0f9cbd9c7f7641d1904b7e1894d9c62
+function FindProxyForURL(url, host) {
+  // Normalize: clients differ on casing and trailing dots.
+  host = host.toLowerCase();
+  if (host.charAt(host.length - 1) === ".") {
+    host = host.substring(0, host.length - 1);
+  }
+  // Always bypass for plain (dotless) names
+  if (isPlainHostName(host)) return "DIRECT";
+
+  // DNS-dependent rules: resolve once, tolerate failure
+  var ip = dnsResolve(host);
+  if (ip) {
+    // Loopback and RFC-1918 private ranges - always DIRECT
+    if (isInNet(ip, "127.0.0.0", "255.0.0.0")) return "DIRECT";
+    if (isInNet(ip, "10.0.0.0", "255.0.0.0")) return "DIRECT";
+    if (isInNet(ip, "172.16.0.0", "255.240.0.0")) return "DIRECT";
+    if (isInNet(ip, "192.168.0.0", "255.255.0.0")) return "DIRECT";
+  }
+
+  // All other traffic routes through the proxy
+  return "PROXY p.example:8080";
+}

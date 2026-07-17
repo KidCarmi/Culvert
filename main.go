@@ -617,7 +617,7 @@ func initUIAccessPolicy(s *startupState) {
 // initPAC is the PR3 expansion shim: resolve the PAC slice (config
 // path + default proxy port) and apply it.
 func initPAC(s *startupState) {
-	cfg := resolvePACStartupConfig(s.pPort)
+	cfg := resolvePACStartupConfig(dataDir, s.pPort)
 	if err := loadPAC(cfg); err != nil {
 		log.Fatalf("%v", err)
 	}
