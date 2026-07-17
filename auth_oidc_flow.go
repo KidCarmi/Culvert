@@ -330,6 +330,15 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 
 func (p *OIDCFlowProvider) Name() string { return "oidc:" + p.profile.ID }
 
+// DisplayName returns the admin-configured label shown to end users (e.g. on
+// the IdP selection screen), falling back to the machine key if unset.
+func (p *OIDCFlowProvider) DisplayName() string {
+	if p.profile.Name != "" {
+		return p.profile.Name
+	}
+	return p.Name()
+}
+
 // Verify supports non-browser clients that supply an access token as the
 // proxy password (RFC 7662 introspection).
 func (p *OIDCFlowProvider) Verify(username, token string) bool {

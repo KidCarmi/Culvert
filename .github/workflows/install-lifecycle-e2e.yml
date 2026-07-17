@@ -4,7 +4,7 @@ name: Install Lifecycle E2E
 # (scripts/install.sh) on a real ubuntu-latest VM — high level (does the stack
 # install, run, migrate, and upgrade while staying healthy?) AND low level (do
 # the installer's own contracts hold: pinned-tag seeding, .env idempotency,
-# fresh-vs-existing detection, non-destructive re-run, host-agent install?).
+# fresh-vs-existing detection, non-destructive re-run, Maintenance Agent install?).
 #
 # Two independent jobs so a flake in one cannot fail the other:
 #   stack-lifecycle  — install.sh brings up the proxy stack, then a second run

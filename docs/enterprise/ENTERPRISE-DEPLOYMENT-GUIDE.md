@@ -95,7 +95,7 @@ Culvert makes no NTP calls and has no hostname/DNS setter — these are host-OS 
 curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/install.sh | bash
 ```
 
-This installs Docker + Compose, provisions `/srv/culvert` from the image's `/app/deploy` bundle, seeds the local `culvert/proxy:pinned` tag from a signed release, starts the stack, and (best-effort) installs the `culvert-maint` host agent. Opt out of the agent with `CULVERT_SKIP_MAINT_AGENT=1`.
+This installs Docker + Compose, provisions `/srv/culvert` from the image's `/app/deploy` bundle, seeds the local `culvert/proxy:pinned` tag from a signed release, starts the stack, and (best-effort) installs the `culvert-maint` Maintenance Agent. Opt out of the agent with `CULVERT_SKIP_MAINT_AGENT=1`.
 
 **Manual Docker:**
 

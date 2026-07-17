@@ -379,7 +379,7 @@ jobs:
   # The agent is a separate Go module — `go test ./...` from the repo root
   # does NOT descend into nested modules, so its tests would silently fall
   # outside the gate without an explicit job here. D1.6a introduces a
-  # privileged host-side agent; CI coverage of the new module is mandatory
+  # privileged Maintenance Agent; CI coverage of the new module is mandatory
   # before merge.
   qa-agent:
     name: "QA · Maintenance Agent (cmd/culvert-maint)"

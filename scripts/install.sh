@@ -715,7 +715,7 @@ seed_pinned_tag() {
   if [[ -n "$signed_ref" ]]; then
     info "Seeding $PINNED_TAG from the latest signed release $signed_ref ..."
     if sudo docker pull "$signed_ref" && sudo docker tag "$signed_ref" "$PINNED_TAG"; then
-      info "Seeded $PINNED_TAG from $signed_ref (signed release — the host agent installs from a trusted image)"
+      info "Seeded $PINNED_TAG from $signed_ref (signed release — the Maintenance Agent installs from a trusted image)"
       return 0
     fi
     warn "Could not seed from $signed_ref — falling back to :latest ..."

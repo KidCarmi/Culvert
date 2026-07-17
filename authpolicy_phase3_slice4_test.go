@@ -31,6 +31,7 @@ var ssoCaptiveCalls atomic.Int64
 func (p *ssoTestProvider) Verify(string, string) bool                       { return false }
 func (p *ssoTestProvider) ResolveIdentity(string, string) (*Identity, bool) { return nil, false }
 func (p *ssoTestProvider) Name() string                                     { return p.name }
+func (p *ssoTestProvider) DisplayName() string                              { return p.name }
 func (p *ssoTestProvider) CaptiveLoginURL(relay string, _ *http.Request) string {
 	ssoCaptiveCalls.Add(1)
 	return "/auth/" + stripIdPPrefix(p.name) + "?relay=" + url.QueryEscape(relay)
