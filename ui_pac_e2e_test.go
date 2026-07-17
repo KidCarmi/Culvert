@@ -78,11 +78,12 @@ func TestUIE2E_PACServedAndPreviewed(t *testing.T) {
 // /pac/default.pac alias is served unauthenticated and byte-equal to
 // /proxy.pac, and the PAC panel renders the Steering Profiles section.
 func TestUIE2E_PACProfileEndpointsServed(t *testing.T) {
-	user := seedUIRoster(t)
+	const adminUser, viewerUser, pass = "admin-pacprof", "viewer-pacprof", "Pac-e2e-pass-1!" // #nosec G101 -- test-only fixture credentials
+	seedUIRoster(t, adminUser, viewerUser, pass)
 	srv := httptest.NewServer(newAdminUIHandler())
 	t.Cleanup(srv.Close)
 
-	client := &http.Client{} // deliberately cookie-less
+	client := &http.Client{Timeout: 5 * time.Second} // deliberately cookie-less
 	fetch := func(path string) string {
 		t.Helper()
 		resp, err := client.Get(srv.URL + path)
@@ -106,9 +107,9 @@ func TestUIE2E_PACProfileEndpointsServed(t *testing.T) {
 	}
 
 	browser := uiE2EBrowser(t)
-	page := newAuthedUIPage(t, browser, srv.URL, user, RoleAdmin)
+	_, page := newAuthedUIPage(t, browser, srv.URL, adminUser, RoleAdmin)
 	assert := playwright.NewPlaywrightAssertions(8000)
-	if err := page.Locator(`.nav-item[data-view="pac"]`).Click(); err != nil {
+	if err := page.Locator(`.nav-item[data-view="pac"]`).First().Click(); err != nil {
 		t.Fatalf("open PAC panel: %v", err)
 	}
 	if err := assert.Locator(page.Locator("#pac-profiles-list")).ToContainText("default"); err != nil {
