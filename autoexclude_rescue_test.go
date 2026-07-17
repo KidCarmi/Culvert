@@ -175,7 +175,7 @@ func TestClientCertRescue_SSRFRedialRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodConnect, "http://127.0.0.1:9/", http.NoBody)
 	req.Host = "127.0.0.1:9" // loopback = private (not relaxed in this test)
-	handleTunnelBypass(rec, req, nil, ProxyIdentity{ClientIP: "203.0.113.7"}, feedReasonClientCertRescue)
+	handleTunnelBypass(rec, req, nil, ProxyIdentity{ClientIP: "203.0.113.7"}, feedReasonClientCertRescue, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("rescue re-dial to a private host: got %d, want 403 — the SSRF guard must reject it", rec.Code)
 	}
