@@ -238,14 +238,22 @@ func mergePersistedCounterByID(byID map[string]persistedRuleCounter, rec persist
 // baseline into them. Starting the goroutine earlier lets a save that races the
 // load→restore startup window (e.g. ctx cancelled mid-startup) clobber a
 // non-empty hit_counters.json with zeros — the caller loads and restores first.
-func startHitCounterPersistence(ctx context.Context, path string) {
+// It returns a channel that is closed once the goroutine has performed its
+// final on-cancel save and exited. Production callers may ignore it; tests that
+// point path at a t.TempDir() MUST cancel the context and then wait on this
+// channel before the temp dir is cleaned up — otherwise the goroutine's final
+// save races (and loses to) TempDir's RemoveAll, recreating a file in the dir
+// ("directory not empty" cleanup failure).
+func startHitCounterPersistence(ctx context.Context, path string) <-chan struct{} {
 	// Ensure the directory exists for the saves below (and the caller's
 	// immediate post-restore save).
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		os.MkdirAll(dir, 0o750) //nolint:errcheck // best-effort
 	}
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
 		for {
@@ -258,6 +266,7 @@ func startHitCounterPersistence(ctx context.Context, path string) {
 			}
 		}
 	}()
+	return done
 }
 
 // RestoreHitCounts copies persisted hit counter values + lastHit from ruleMet

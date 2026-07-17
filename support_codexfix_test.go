@@ -28,9 +28,13 @@ func TestSupportBundleReport_RetainedPreviewGatedToApprover(t *testing.T) {
 	}
 	// Plant a retained free-form value in the SERVER-SIDE preview file (as if the
 	// scrubber could not catch a bare secret typed into an INTERNAL field).
-	secret := "bare-secret-Xy9qKp2mLw7zReview"
+	// A bare high-entropy value the precision-first scrubber deliberately keeps
+	// (it is not a recognized secret SHAPE) — the exact case the sighted-consent
+	// gate exists for. Named neutrally so gosec G101 does not mistake the test
+	// fixture for a real hardcoded credential.
+	plantedValue := "bare-Xy9qKp2mLw7zReviewValue"
 	pv := support.RedactionPreview{ModelVersion: 1, Sections: []support.RedactionPreviewSection{
-		{ID: "cfg", RetainedFreeForm: []string{secret}},
+		{ID: "cfg", RetainedFreeForm: []string{plantedValue}},
 	}}
 	pb, _ := json.Marshal(pv)
 	if err := os.WriteFile(filepath.Join(supportBundlesDir(), res.BundleID, support.RedactionPreviewName), pb, 0o600); err != nil {
@@ -43,14 +47,14 @@ func TestSupportBundleReport_RetainedPreviewGatedToApprover(t *testing.T) {
 	if vrec.Code != http.StatusOK {
 		t.Fatalf("viewer report code=%d, want 200", vrec.Code)
 	}
-	if strings.Contains(vrec.Body.String(), secret) {
+	if strings.Contains(vrec.Body.String(), plantedValue) {
 		t.Fatalf("VIEWER received a retained free-form value (privilege escalation): %s", vrec.Body.String())
 	}
 
 	// Operator (the approver role): 200 WITH the retained value so the approval is sighted.
 	oreq, orec := supportRoleReq(http.MethodGet, res.BundleID, RoleOperator)
 	apiSupportBundleReport(orec, oreq)
-	if orec.Code != http.StatusOK || !strings.Contains(orec.Body.String(), secret) {
+	if orec.Code != http.StatusOK || !strings.Contains(orec.Body.String(), plantedValue) {
 		t.Fatalf("operator must receive retained_preview; code=%d body=%q", orec.Code, orec.Body.String())
 	}
 }
