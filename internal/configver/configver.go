@@ -197,6 +197,46 @@ func (s *Store) List() []Meta {
 	return metas
 }
 
+// metaEnvelope decodes ONLY the meta half of a version file. Because the
+// "config" field is absent from this struct, json.Unmarshal parse-skips the
+// config body instead of allocating a json.RawMessage copy of it — so ListMeta
+// never holds a (potentially large) config snapshot's bytes in memory.
+type metaEnvelope struct {
+	Meta Meta `json:"meta"`
+}
+
+// ListMeta is List without the config bodies: it decodes only each file's meta
+// object, so a metadata-only caller (e.g. the support-bundle collector) never
+// copies up to `max` config snapshots into memory. Same descending order and
+// skip-on-error semantics as List; the result is always non-nil.
+func (s *Store) ListMeta() []Meta {
+	dir := s.dirSnapshot()
+	metas := make([]Meta, 0)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return metas
+	}
+	for _, e := range entries {
+		if _, ok := versionOf(e.Name()); !ok {
+			continue
+		}
+		fullPath := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			obs.Printf("Loader: config_versions: skipping unreadable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), err)
+			continue
+		}
+		var env metaEnvelope
+		if jerr := json.Unmarshal(data, &env); jerr != nil {
+			obs.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), jerr)
+			continue
+		}
+		metas = append(metas, env.Meta)
+	}
+	sort.Slice(metas, func(i, j int) bool { return metas[i].Version > metas[j].Version })
+	return metas
+}
+
 // Seq returns the current sequence counter (the last assigned version).
 func (s *Store) Seq() int {
 	s.mu.Lock()

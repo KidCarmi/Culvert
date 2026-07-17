@@ -112,7 +112,7 @@ func (configVersionsCollector) Meta() support.CollectorMeta {
 }
 
 func (configVersionsCollector) Collect(_ context.Context, in support.CollectInput, sink support.SectionSink) support.Result {
-	metas := configVersions.List() // metadata only — snapshot bodies are NOT returned
+	metas := configVersions.ListMeta() // metadata only — config bodies are never read into memory
 	sec := configVersionsSection{Seq: configVersions.Seq(), Count: len(metas)}
 	if len(metas) > supportMaxConfigVersions {
 		metas = metas[:supportMaxConfigVersions]
