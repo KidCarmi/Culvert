@@ -178,3 +178,22 @@ Ran a multi-lens fleet (4 subsystem mappers → 4 expert judges [product/arch/se
 
 ### Open at ledger time
 - **#736 only** — awaiting gates on `efca07b7`; merge on green.
+
+### Post-queue addendum (same day, evening)
+- **#736 — MERGED** (`937b17fa`) after a post-#788 rebase (one conflict in
+  healthcheck.go: kept the /ready detail-redaction fix on #788's renamed
+  `readinessCheck` type); both required gates green on the rebased head.
+- **#792** (decryptobs P1 wiring seam) — NEW, author-marked "Do not auto-merge";
+  all gates green; **parked for owner review** (same checkpoint pattern as #786).
+  Its only red check was the ADVISORY Admin-UI RBAC browser E2E lane.
+- **#793 fix(test): de-flake TestUIE2E_AuditLog_FilterableByRuleID — MERGED.**
+  Root cause of the #792 "UI problem": the browser test filled panel inputs
+  immediately after a nav click without proving the view had activated (Fill
+  requires visibility; slow-runner view switch lags the click). Added the
+  established sibling-test ToBeVisible guards at both nav clicks. Test-only;
+  #792's code was exonerated (touches no UI, byte-identical on the wire).
+
+**Queue state at close: 1 open PR (#792, awaiting owner review by design). All
+others merged or closed. Both repo-wide CI flakes found this session
+(hit-counter determinism/race family; UI e2e view-activation race) are fixed
+in main.**
