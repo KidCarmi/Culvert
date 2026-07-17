@@ -4488,6 +4488,7 @@ document.addEventListener('click', e => {
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
+    case 'supportExportSealed':    supportExportSealed(arg); break;
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -12300,7 +12301,8 @@ function renderSupportBundles(list) {
       if (canWrite) {
         ops += ready
           ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>' +
-            ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>'
+            ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>' +
+            ' <button class="btn ghost sm" data-click="supportExportSealed" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download sealed to a recipient public key (E2E — appliance holds no decrypt key)">Seal</button>'
           : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
         if (!ready && uiRole === 'admin') {
           ops += ' <button class="btn primary sm" data-click="supportApproveBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Approve</button>';
@@ -12569,6 +12571,29 @@ async function supportApproveBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Approve failed: ' + err.message, 'error');
+  }
+}
+
+async function supportExportSealed(id) {
+  if (!id) return;
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const key = window.prompt("Recipient's X25519 public key (base64) to seal the bundle to. Only the holder of the matching private key can open it — the appliance keeps no decrypt key.");
+  if (key === null) return; // cancelled
+  const k = key.trim();
+  if (!k) { toast('A recipient public key is required', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/support/bundles/' + encodeURIComponent(String(id)) + '/download-sealed',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recipient_public_key: k }) });
+    if (!r.ok) { toast('Seal failed: ' + (await r.text()), 'error'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = String(id) + '.csb.sealed';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('Sealed bundle downloaded — only the recipient can open it', 'success');
+  } catch (err) {
+    toast('Seal failed: ' + err.message, 'error');
   }
 }
 

@@ -121,6 +121,25 @@ Hand a redacted bundle to TAC over an untrusted channel without sharing a stored
 - Recipient decrypts with the same passphrase (wrong-passphrase and tampered
   ciphertext are reported identically, giving no oracle).
 
+### 6a. Sealed export (recipient public key, true E2E)
+
+When there is no shared secret to establish, seal the bundle to the recipient's
+**public key** instead — the appliance holds **no** decryption capability, so
+only the recipient's private key can ever open it.
+
+**UI:** Support panel → **Seal** on a ready bundle → paste the recipient's base64
+X25519 public key → the `.csb.sealed` downloads.
+**API:** `POST /api/support/bundles/{id}/download-sealed` (operator, body
+`{"recipient_public_key":"<base64 X25519>"}`).
+
+- The bundle is wrapped in a NaCl anonymous sealed box (`CVRTSB01`: X25519 key
+  agreement + XSalsa20-Poly1305). The operator supplies the recipient's public key
+  (obtained out-of-band — e.g. TAC publishes it and you verify its fingerprint);
+  the appliance never sees or stores a private key.
+- Same approval gate as plain download — a pending bundle is refused.
+- Anonymous boxes carry no sender identity by design; the bundle's **own** manifest
+  hashes remain the integrity/authenticity anchor for the contents.
+
 ---
 
 ## 7. On-appliance diagnostics (`diagnose`)
