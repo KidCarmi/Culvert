@@ -42,8 +42,12 @@ func loadPAC(cfg pacStartupConfig) error {
 		}
 	}
 	if cfg.LifecyclePath != "" {
+		// The lifecycle store is NODE-LOCAL operator history, not serving-
+		// critical config. A corrupt file self-quarantines and starts empty
+		// inside Load; treat any load error as a warning (never fatal) so a
+		// bad history file cannot brick the proxy at startup.
 		if err := pacLifecycle.Load(cfg.LifecyclePath); err != nil {
-			return fmt.Errorf("PAC config load error: %w", err)
+			logger.Printf("PAC lifecycle history WARNING: %v", err)
 		}
 	}
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)

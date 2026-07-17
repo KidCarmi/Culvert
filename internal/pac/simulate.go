@@ -152,7 +152,13 @@ func simRuleDecision(res *SimResult, p Profile, pools map[string]Pool, r *Rule, 
 	if r.Action == ActionDirect && p.AvailabilityMode != ModeSecure {
 		return simDirect(res, res.MatchedRule, "rule "+itoa(idx+1)+" ("+r.Kind+" "+r.Pattern+") → DIRECT")
 	}
-	directive, _ := ruleDirective(r, p, pools, terminal)
+	// Honor ruleDirective's ok bool exactly as writeProfileRule does: a
+	// use_pool rule whose pool override is missing/empty degrades to the
+	// profile terminal (not an empty directive), matching the compiled JS.
+	directive, ok := ruleDirective(r, p, pools, terminal)
+	if !ok {
+		directive = terminal
+	}
 	res.Directive = directive
 	res.Chain = strings.Split(directive, "; ")
 	res.DirectPossible = strings.Contains(directive, "DIRECT")
@@ -216,34 +222,56 @@ func simRuleMatches(r *Rule, in SimInput, host string) (matched, undetermined bo
 	pattern := strings.TrimSpace(r.Pattern)
 	switch r.Kind {
 	case RuleKindDomain:
-		e, _, reject := normalizeExclusion(pattern)
-		if reject != nil {
-			return false, false
-		}
-		if e.Kind == KindHostLiteral {
-			return host == e.Host, false
-		}
-		return host == e.Host || strings.HasSuffix(host, "."+e.Host), false
+		return simMatchDomain(pattern, host), false
 	case RuleKindSuffix:
-		e, _, reject := normalizeExclusion(pattern)
-		if reject != nil {
-			return false, false
-		}
-		return strings.HasSuffix(host, "."+e.Host), false
+		return simMatchSuffix(pattern, host), false
 	case RuleKindWildcard:
-		return globMatch(strings.ToLower(pattern), host), false
+		return simMatchWildcard(pattern, host), false
 	case RuleKindCIDR4:
-		e, _, reject := normalizeCIDR(pattern)
-		if reject != nil {
-			return false, false
-		}
-		if in.ResolvedIP == "" {
-			return false, true // needs DNS
-		}
-		return ipInCIDR(in.ResolvedIP, e.CIDRIP, e.CIDRPrefix), false
+		return simMatchCIDR(pattern, in)
 	default:
 		return false, false
 	}
+}
+
+// simMatch* mirror the compiler's ruleCondition acceptance per kind: a rule
+// whose pattern doesn't normalize to the kind's expected form is DROPPED
+// (never emitted), so the simulator must not honor it either.
+func simMatchDomain(pattern, host string) bool {
+	e, _, reject := normalizeExclusion(pattern)
+	if reject != nil || (e.Kind != KindDomain && e.Kind != KindHostLiteral) {
+		return false
+	}
+	if e.Kind == KindHostLiteral {
+		return host == e.Host
+	}
+	return host == e.Host || strings.HasSuffix(host, "."+e.Host)
+}
+
+func simMatchSuffix(pattern, host string) bool {
+	e, _, reject := normalizeExclusion(pattern)
+	if reject != nil || e.Kind != KindDomain {
+		return false
+	}
+	return strings.HasSuffix(host, "."+e.Host)
+}
+
+func simMatchWildcard(pattern, host string) bool {
+	if hasControlOrSpace(pattern) || strings.ContainsAny(pattern, `"\`) {
+		return false
+	}
+	return globMatch(strings.ToLower(pattern), host)
+}
+
+func simMatchCIDR(pattern string, in SimInput) (matched, undetermined bool) {
+	e, _, reject := normalizeCIDR(pattern)
+	if reject != nil {
+		return false, false
+	}
+	if in.ResolvedIP == "" {
+		return false, true // needs DNS
+	}
+	return ipInCIDR(in.ResolvedIP, e.CIDRIP, e.CIDRPrefix), false
 }
 
 // simGuardsMatch evaluates the optional scheme/port guards.
@@ -295,42 +323,35 @@ func ipInCIDR(ipStr, network string, prefix int) bool {
 }
 
 // globMatch implements shExpMatch semantics (`*` = any run, `?` = one char)
-// on already-lowercased inputs — the same glob the compiler emits.
+// on already-lowercased inputs — the same glob the compiler emits. It uses a
+// linear two-pointer scan with single-star backtracking (O(len(p)·len(s))
+// worst case) rather than per-star recursion, so an admin- OR viewer-supplied
+// pattern like "*a*a*…*b" against "aaaa…" cannot trigger catastrophic
+// exponential backtracking (a management-plane DoS via the simulator/analyzer).
 func globMatch(pattern, s string) bool {
-	return globMatchAt(pattern, s, 0, 0)
-}
-
-func globMatchAt(p, s string, pi, si int) bool {
-	for pi < len(p) {
-		switch p[pi] {
-		case '*':
-			for pi+1 < len(p) && p[pi+1] == '*' {
-				pi++
-			}
-			if pi == len(p)-1 {
-				return true
-			}
-			for k := si; k <= len(s); k++ {
-				if globMatchAt(p, s, pi+1, k) {
-					return true
-				}
-			}
-			return false
-		case '?':
-			if si >= len(s) {
-				return false
-			}
+	var pi, si int
+	star, mark := -1, 0
+	for si < len(s) {
+		switch {
+		case pi < len(pattern) && (pattern[pi] == '?' || pattern[pi] == s[si]):
 			pi++
 			si++
+		case pi < len(pattern) && pattern[pi] == '*':
+			star = pi // remember the star and the position it started matching
+			mark = si
+			pi++
+		case star != -1:
+			pi = star + 1 // backtrack: let the last star consume one more char
+			mark++
+			si = mark
 		default:
-			if si >= len(s) || p[pi] != s[si] {
-				return false
-			}
-			pi++
-			si++
+			return false
 		}
 	}
-	return si == len(s)
+	for pi < len(pattern) && pattern[pi] == '*' {
+		pi++
+	}
+	return pi == len(pattern)
 }
 
 func schemeFromURL(u string) string {

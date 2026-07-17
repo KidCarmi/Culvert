@@ -262,6 +262,89 @@ func TestAPIPACLifecycle_ConcurrentSaveDraftAndPublish(t *testing.T) {
 	}
 }
 
+// ─── Rollback re-introducing DIRECT requires confirmation ──────────────────────
+
+func TestAPIPACLifecycle_RollbackNewDirectRequiresConfirmation(t *testing.T) {
+	resetPACPublishGlobals(t)
+	seedPublishProfile(t)
+	ip := "198.51.100.150:0"
+
+	// v1: a DIRECT rule (confirmed) → active now has DIRECT.
+	v1 := `{"action":"publish","confirmDirect":"hq","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"x.example","action":"direct"}]}}`
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", v1, RoleAdmin, ip); rec.Code != http.StatusOK {
+		t.Fatalf("publish v1: %d (%s)", rec.Code, rec.Body.String())
+	}
+	// v2: no DIRECT → active no longer has DIRECT.
+	v2 := `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}]}}`
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", v2, RoleAdmin, ip); rec.Code != http.StatusOK {
+		t.Fatalf("publish v2: %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Rollback to v1 re-introduces DIRECT relative to the current active (v2) →
+	// 409 confirmation required.
+	rb := `{"action":"rollback","targetN":1}`
+	rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", rb, RoleAdmin, ip)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rollback re-introducing DIRECT must require confirmation (409), got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if p, _ := pacProfiles.ProfileByID("hq"); p.Rules[0].Action != pac.ActionUsePool {
+		t.Error("unconfirmed rollback must not mutate the active profile")
+	}
+
+	// With the typed confirmation → proceeds.
+	rbc := `{"action":"rollback","targetN":1,"confirmDirect":"hq"}`
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", rbc, RoleAdmin, ip); rec.Code != http.StatusOK {
+		t.Fatalf("confirmed rollback: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if p, _ := pacProfiles.ProfileByID("hq"); p.Rules[0].Action != pac.ActionDirect {
+		t.Error("confirmed rollback should restore the DIRECT rule")
+	}
+}
+
+// ─── Publish advances the PR2 PUT optimistic-concurrency token, not the N ───────
+
+func TestAPIPACLifecycle_PublishAdvancesProfileRevisionToken(t *testing.T) {
+	resetPACPublishGlobals(t)
+	seedPublishProfile(t) // hq starts at Profile.Revision = 1
+	body := `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}]}}`
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.151:0"); rec.Code != http.StatusOK {
+		t.Fatalf("publish: %d (%s)", rec.Code, rec.Body.String())
+	}
+	// Lifecycle N is 1, but the active profile's PUT token must advance to 2 —
+	// aliasing it to N would move the token backwards and break PR2 stale-write
+	// detection.
+	if p, _ := pacProfiles.ProfileByID("hq"); p.Revision != 2 {
+		t.Errorf("Profile.Revision (PUT token) should advance to 2, got %d", p.Revision)
+	}
+	if rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.151:0"); rec.Code != http.StatusOK {
+		t.Fatalf("publish 2: %d", rec.Code)
+	}
+	if p, _ := pacProfiles.ProfileByID("hq"); p.Revision != 3 {
+		t.Errorf("Profile.Revision should advance to 3, got %d", p.Revision)
+	}
+}
+
+// ─── analyze bounds a viewer-supplied draft (DoS guard) ─────────────────────────
+
+func TestAPIPACAnalyze_RejectsOversizedDraft(t *testing.T) {
+	resetPACPublishGlobals(t)
+	seedPublishProfile(t)
+	var rules strings.Builder
+	rules.WriteString(`[`)
+	for i := 0; i < pac.MaxRulesPerProfile+5; i++ {
+		if i > 0 {
+			rules.WriteString(",")
+		}
+		rules.WriteString(`{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}`)
+	}
+	rules.WriteString(`]`)
+	body := `{"profileId":"hq","action":"diff","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"main","privateNetworks":"proxy","availabilityMode":"balanced","rules":` + rules.String() + `}}`
+	rec := pacPost(t, "/api/pac/analyze", body, RoleViewer, "198.51.100.152:0")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized draft must be rejected (400), got %d", rec.Code)
+	}
+}
+
 // ─── RBAC + DP gate on lifecycle mutations ─────────────────────────────────────
 
 func TestAPIPACLifecycle_RBAC(t *testing.T) {

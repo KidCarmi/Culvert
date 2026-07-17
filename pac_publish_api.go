@@ -61,10 +61,19 @@ func pacResolveProfileForEval(id string) (pac.Profile, map[string]pac.Pool, bool
 		// ProxyHost:ProxyPort; otherwise profileTerminal treats the pool as
 		// missing and returns the fail-closed placeholder, misrepresenting the
 		// live default PAC for every non-DIRECT destination.
-		if c := pacStore.Get(); c.ProxyHost != "" {
+		// Resolve host + port the same way CompileConfig does so the simulated
+		// terminal matches the served /proxy.pac: lenient-normalized host, and
+		// port 0 → 8080 (the compiler's final fallback). Empty ProxyHost is the
+		// request-host-fallback case the simulator cannot model, so we leave the
+		// pool absent (terminal shows the fail-closed placeholder as a signal).
+		if n := pac.NormalizeLenient(pacStore.Get()); n.ProxyHost != "" {
+			port := n.ProxyPort
+			if port == 0 {
+				port = 8080
+			}
 			pools["__legacy__"] = pac.Pool{
 				ID: "__legacy__", Name: "Legacy PAC proxy",
-				Endpoints: []pac.PoolEndpoint{{Host: c.ProxyHost, Port: c.ProxyPort}},
+				Endpoints: []pac.PoolEndpoint{{Host: n.ProxyHost, Port: port}},
 			}
 		}
 		return pacSyntheticDefaultProfile(), pools, true
@@ -152,16 +161,19 @@ func pacLifecycleGet(w http.ResponseWriter, id string) {
 
 func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
-		Action        string      `json:"action"` // save_draft | diff | impact | publish | rollback
+		Action        string      `json:"action"` // save_draft | publish | rollback
 		Draft         pac.Profile `json:"draft"`
 		ConfirmDirect string      `json:"confirmDirect"` // must equal id to publish new DIRECT paths
 		TargetN       int64       `json:"targetN"`       // rollback target
-		Sample        []string    `json:"sample"`        // impact test vectors
-		UseObserved   bool        `json:"useObserved"`   // impact: sample from topHosts
+		Reason        string      `json:"reason"`        // optional change-reason recorded on the revision
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	reason := req.Reason
+	if len(reason) > pacMaxReasonLen {
+		reason = reason[:pacMaxReasonLen]
 	}
 	// Only mutating actions live here — the lifecycle POST route is
 	// AuditExpected, so every action must emit an audit event (C2c). The
@@ -171,9 +183,9 @@ func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 	case "save_draft":
 		pacLifecycleSaveDraft(w, r, id, req.Draft)
 	case "publish":
-		pacLifecyclePublish(w, r, id, req.Draft, req.ConfirmDirect)
+		pacLifecyclePublish(w, r, id, req.Draft, req.ConfirmDirect, reason)
 	case "rollback":
-		pacLifecycleRollback(w, r, id, req.TargetN)
+		pacLifecycleRollback(w, r, id, req.TargetN, req.ConfirmDirect)
 	default:
 		http.Error(w, "unknown or non-mutating action: "+sanitizeLog(req.Action)+" (use /api/pac/analyze for diff/impact)", http.StatusBadRequest)
 	}
@@ -225,6 +237,22 @@ func apiPACAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Draft.ID = req.ProfileID
+	// This route is viewer-reachable and replays a caller-supplied draft +
+	// sample through the evaluator. Validate the draft (bounds rules/patterns)
+	// and cap the sample so a low-privilege user cannot drive unbounded
+	// evaluation work from the management plane.
+	if issues := pac.ValidateProfilesConfig(pac.ProfilesConfig{Profiles: []pac.Profile{req.Draft}, Pools: pacProfiles.Get().Pools}); len(issues) > 0 {
+		writePACIssues(w, "invalid draft", issues)
+		return
+	}
+	if len(req.Sample) > pacMaxAnalyzeSample {
+		req.Sample = req.Sample[:pacMaxAnalyzeSample]
+	}
+	for i := range req.Sample {
+		if len(req.Sample[i]) > pac.MaxEntryLen {
+			req.Sample[i] = req.Sample[i][:pac.MaxEntryLen] // no legitimate host exceeds this
+		}
+	}
 	active, hasActive := pacProfiles.ProfileByID(req.ProfileID)
 	switch req.Action {
 	case "diff":
@@ -246,7 +274,9 @@ func apiPACAnalyze(w http.ResponseWriter, r *http.Request) {
 // destination hosts from the in-memory top-hosts counter (no live DNS, no
 // telemetry fabrication — real observed hostnames only).
 func pacObservedDestinations() []string {
-	const maxSample = 500
+	// Cap at 100 to match the established viewer disclosure limit on
+	// /api/top-hosts (observed destinations are cross-user browsing telemetry).
+	const maxSample = 100
 	stats := topHosts.Top(maxSample)
 	out := make([]string, 0, len(stats))
 	for i := range stats {
@@ -255,7 +285,7 @@ func pacObservedDestinations() []string {
 	return out
 }
 
-func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, confirmDirect string) {
+func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, confirmDirect, reason string) {
 	draft.ID = id
 
 	// Serialize the guardrail evaluation WITH the write under the profile
@@ -272,10 +302,17 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 	active, hasActive := pacProfiles.ProfileByID(id)
 	chk := pac.EvaluatePublish(draft, pools, active, hasActive)
 	if !chk.OK && !chk.RequiresConfirmation {
+		// Guardrail block is a security-relevant attempt (fail-closed on a bad
+		// or DIRECT-widening draft); count + log it so a SOC/SRE can alert —
+		// non-2xx, so it must NOT audit on the AuditExpected route.
+		pacPublishBlockedTotal.Add(1)
+		logger.Printf("PAC: publish blocked by guardrails for %q", sanitizeLog(id))
 		writePACIssues(w, "publish blocked by guardrails", chk.Issues)
 		return
 	}
 	if chk.RequiresConfirmation && confirmDirect != id {
+		pacPublishConfirmRequiredTotal.Add(1)
+		logger.Printf("PAC: publish of %q requires typed DIRECT confirmation", sanitizeLog(id))
 		// High-friction typed confirmation for new DIRECT paths.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -294,8 +331,16 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 	actor := sessionAdmin(r)
 
 	lc, _ := pacLifecycle.Get(id)
-	n := lc.Publish(draft, chk.Digest, actor, "", ts)
-	published := lc.Draft // carries the assigned revision
+	n := lc.Publish(draft, chk.Digest, actor, reason, ts)
+	published := lc.Draft // carries the assigned lifecycle revision
+	// The active profile's Revision is the PR2 PUT optimistic-concurrency token
+	// (monotonic +1 per mutation), a DIFFERENT counter from the lifecycle
+	// revision N. Advance it monotonically instead of aliasing it to N —
+	// aliasing moves the token backwards and defeats stale-write detection.
+	published.Revision = 1
+	if hasActive {
+		published.Revision = active.Revision + 1
+	}
 
 	replaced := false
 	for i := range candidate.Profiles {
@@ -312,12 +357,21 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 		return
 	}
 	if err := pacLifecycle.Put(lc); err != nil {
-		logger.Printf("PAC: lifecycle persist after publish: %v", err)
+		// The active spec is already published (traffic is correct), but the
+		// node-local revision history did not persist. Report failure rather
+		// than a false 200 so the operator knows the timeline is inconsistent
+		// and can re-publish (silent success here would let nextRevisionN
+		// re-issue N after a restart).
+		logger.Printf("PAC: lifecycle persist after publish failed for %q: %v", sanitizeLog(id), err)
+		http.Error(w, "profile published but revision-history persistence failed: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+	logger.Printf("PAC: published profile %q revision %d (digest %s)", sanitizeLog(id), n, chk.Digest)
+	pacPublishesTotal.Add(1)
 	jsonOK(w, map[string]any{"published": true, "revision": n, "digest": chk.Digest})
 }
 
-func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, targetN int64) {
+func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, targetN int64, confirmDirect string) {
 	pacProfilesAPIMu.Lock()
 	defer pacProfilesAPIMu.Unlock()
 	lc, ok := pacLifecycle.Get(id)
@@ -325,6 +379,8 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 		http.Error(w, "no publish history for profile: "+sanitizeLog(id), http.StatusNotFound)
 		return
 	}
+	active, hasActive := pacProfiles.ProfileByID(id)
+	pools := pacProfiles.PoolMap()
 	ts := time.Now().UTC().Format(time.RFC3339)
 	actor := sessionAdmin(r)
 	n, ok := lc.Rollback(targetN, actor, ts)
@@ -333,6 +389,38 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 		return
 	}
 	restored := lc.Draft // rollback set Draft to the target spec at revision n
+
+	// A rollback that re-introduces DIRECT relative to the CURRENTLY-active
+	// revision must pass the same typed confirmation as a forward publish —
+	// "previously published" is not sufficient because the threat posture (and
+	// the operator) may differ now, and skipping it would make the publish
+	// confirmation launderable through a rollback.
+	chk := pac.EvaluatePublish(restored, pools, active, hasActive)
+	if !chk.OK && !chk.RequiresConfirmation {
+		pacPublishBlockedTotal.Add(1)
+		logger.Printf("PAC: rollback of %q blocked by guardrails", sanitizeLog(id))
+		writePACIssues(w, "rollback blocked by guardrails", chk.Issues)
+		return
+	}
+	if chk.RequiresConfirmation && confirmDirect != id {
+		pacPublishConfirmRequiredTotal.Add(1)
+		logger.Printf("PAC: rollback of %q requires typed DIRECT confirmation", sanitizeLog(id))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort body
+			"error":          "rollback re-introduces new DIRECT paths; retype the profile ID in confirmDirect to proceed",
+			"newDirectPaths": chk.NewDirectPaths,
+			"confirmField":   "confirmDirect",
+			"confirmValue":   id,
+		})
+		return
+	}
+
+	// Advance the PUT optimistic-concurrency token monotonically (see publish).
+	restored.Revision = 1
+	if hasActive {
+		restored.Revision = active.Revision + 1
+	}
 
 	before := pacProfiles.Get()
 	candidate := pacProfiles.Get()
@@ -351,7 +439,11 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 		return
 	}
 	if err := pacLifecycle.Put(lc); err != nil {
-		logger.Printf("PAC: lifecycle persist after rollback: %v", err)
+		logger.Printf("PAC: lifecycle persist after rollback failed for %q: %v", sanitizeLog(id), err)
+		http.Error(w, "profile rolled back but revision-history persistence failed: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
+	logger.Printf("PAC: rolled back profile %q to revision %d (new revision %d)", sanitizeLog(id), targetN, n)
+	pacRollbacksTotal.Add(1)
 	jsonOK(w, map[string]any{"rolledBack": true, "toRevision": targetN, "newRevision": n})
 }

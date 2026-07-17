@@ -260,23 +260,44 @@ simulatable too (its legacy exclusions are expressed as DIRECT rules).
 Each custom profile carries a mutable **draft** and an append-only stack of
 **immutable published revisions** (`<dataDir>/pac_profiles_lifecycle.json`,
 node-local operator history — the ACTIVE spec still cluster-syncs via the
-Part 2 surface). Endpoints live under
-`/api/pac/profiles/{id}/lifecycle` (GET viewer, POST admin) with actions
-`save_draft`, `diff`, `impact`, `publish`, `rollback`.
+Part 2 surface). The **mutating** lifecycle endpoint is
+`POST /api/pac/profiles/{id}/lifecycle` (admin) with actions `save_draft`,
+`publish`, `rollback` (plus an optional `reason` recorded on the published
+revision); `GET` (viewer) returns the draft/active/history. The **read-only**
+diff/impact analysis lives on its own viewer route, `POST /api/pac/analyze`
+(actions `diff`, `impact`) — kept off the mutating, audited lifecycle route so
+its audit-completion signal stays meaningful.
+
+> **HA / failover note.** The revision history and drafts are **node-local**:
+> they are not cluster-synced and are not on the backup-rollback config
+> surface (they ARE included in `culvert backup`). After a control-plane
+> failover, the promoted node serves the correct ACTIVE spec (that syncs) but
+> starts with its own revision timeline — rollback targets published on the
+> former leader are not present until you restore `pac_profiles_lifecycle.json`
+> from a backup on the promoted node. Revision numbers are per-node.
 
 Publishing validates + compiles the draft, then **fails closed** when any of
 these hold: validation fails, no valid proxy route exists, the referenced
 pool is missing, secure mode could emit DIRECT, compilation/digest fails, or
 rule conflicts violate the documented invariants. Publishing a change that
-introduces **new DIRECT paths** (a new DIRECT rule, or switching to
-availability mode) is refused with `409` until the admin retypes the profile
-ID in `confirmDirect` — a high-friction typed confirmation.
+introduces **new DIRECT paths** — a new DIRECT rule, switching to availability
+mode, **or flipping private-networks to `direct`** (which sends the entire
+RFC-1918/loopback space DIRECT) — is refused with `409` until the admin
+retypes the profile ID in `confirmDirect` (a high-friction typed
+confirmation). **Rollback is gated the same way:** rolling back to a revision
+whose DIRECT footprint exceeds the currently-active one also requires the
+typed confirmation, so the guardrail cannot be laundered through a rollback.
 
 Each published revision records the exact spec, the compiled **artifact
-digest** (the convergence oracle and the "restore exact prior artifact"
-anchor), author, reason, and timestamp. Revision numbers are **monotonic**
-and never reused; a rollback does not rewrite history — it re-activates a
-prior revision's spec as a NEW revision authored `system/rollback`.
+digest** (a local restore/verify anchor — see the pool-mutability caveat
+below; convergence itself is guaranteed by the deterministic compiler, not a
+cross-node digest check), author, reason, and timestamp. Revision numbers are
+**monotonic** and never reused; the history is bounded (oldest revisions are
+trimmed past the per-profile cap, mirroring the config-version store). A
+rollback does not rewrite history — it re-activates a prior revision's spec as
+a NEW revision. The active profile's own `revision` field is the Part-2 PUT
+optimistic-concurrency token and advances independently of the lifecycle
+revision number.
 
 > **Pool-mutability caveat.** A revision captures the profile *spec* (which
 > references pools by ID) and the artifact digest computed at publish time.

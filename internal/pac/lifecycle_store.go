@@ -44,7 +44,15 @@ func (s *LifecycleStore) Load(path string) error {
 	}
 	var loaded map[string]*ProfileLifecycle
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		return fmt.Errorf("pac lifecycle: parse %s: %w", path, err)
+		// This is NODE-LOCAL operator history, not serving-critical config (the
+		// active served spec lives in pac_profiles.json). A corrupt/truncated
+		// file must NOT brick the proxy at startup — quarantine it and start
+		// with an empty store so serving comes up fail-open.
+		quarantine := path + ".corrupt"
+		_ = os.Rename(path, quarantine) //nolint:errcheck // best-effort; empty-start is the fallback
+		s.byID = map[string]*ProfileLifecycle{}
+		s.modTime = time.Now()
+		return fmt.Errorf("pac lifecycle: parse %s failed, quarantined to %s and started empty: %w", path, quarantine, err)
 	}
 	s.byID = loaded
 	if s.byID == nil {

@@ -88,6 +88,21 @@ func (lc *ProfileLifecycle) nextRevisionN() int64 {
 	return highest + 1
 }
 
+// maxRevisionsPerProfile bounds the immutable history (mirrors the 50-version
+// config-version store) so a long-lived, frequently-published profile cannot
+// grow the node-local lifecycle file/memory without bound. Oldest revisions
+// are dropped first; nextRevisionN stays monotonic because it maxes over the
+// kept set, whose newest entry (the highest N) is always preserved.
+const maxRevisionsPerProfile = 50
+
+func (lc *ProfileLifecycle) trimRevisions() {
+	if len(lc.Revisions) > maxRevisionsPerProfile {
+		// Copy into a fresh slice so the dropped tail's backing array is freed.
+		lc.Revisions = append([]PublishedRevision(nil),
+			lc.Revisions[len(lc.Revisions)-maxRevisionsPerProfile:]...)
+	}
+}
+
 // PublishGuardCode identifies why a publish was refused.
 type PublishGuardCode = string
 
@@ -190,6 +205,15 @@ func newDirectPaths(draft, active Profile, hasActive bool) []string {
 	if draftAvail && !activeAvail {
 		out = append(out, "availability mode appends DIRECT to the terminal chain")
 	}
+	// A flip to private-networks-direct (non-secure) routes the ENTIRE
+	// RFC-1918/loopback space to DIRECT, bypassing inspection — the same
+	// class of new-DIRECT exposure DiffProfiles already flags SecuritySensitive.
+	// It must drive the typed confirmation too, or the guardrail and the diff
+	// disagree and the confirmation is bypassable via a private-net flip.
+	if draft.PrivateNetworks == PrivateDirect && draft.AvailabilityMode != ModeSecure &&
+		(!hasActive || active.PrivateNetworks != PrivateDirect) {
+		out = append(out, "private-networks=direct sends all RFC-1918/loopback destinations DIRECT")
+	}
 	activeDirect := map[string]bool{}
 	if hasActive {
 		for i := range active.Rules {
@@ -221,6 +245,7 @@ func (lc *ProfileLifecycle) Publish(draft Profile, digest, author, reason, ts st
 	lc.Revisions = append(lc.Revisions, PublishedRevision{
 		N: n, Spec: draft, Digest: digest, Author: author, Reason: reason, TS: ts,
 	})
+	lc.trimRevisions()
 	lc.Draft = draft
 	lc.ActiveN = n
 	lc.DraftDirty = false
@@ -244,6 +269,7 @@ func (lc *ProfileLifecycle) Rollback(targetN int64, author, ts string) (int64, b
 		N: n, Spec: spec, Digest: target.Digest, Author: author,
 		Reason: "rollback to revision " + itoa(int(targetN)), TS: ts,
 	})
+	lc.trimRevisions()
 	lc.Draft = spec
 	lc.ActiveN = n
 	lc.DraftDirty = false
