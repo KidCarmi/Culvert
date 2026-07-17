@@ -22,9 +22,11 @@ package sealbox
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"io"
 
+	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -49,6 +51,45 @@ const (
 // because they leak no key information.
 var ErrOpenFailed = errors.New("sealed bundle open failed (wrong key or tampered)")
 
+// ErrLowOrderKey is returned for a recipient public key that is a low-order
+// Curve25519 point. Sealing to such a key would derive an all-zero shared secret,
+// so the resulting box could be opened WITHOUT the recipient's private key —
+// silently breaking the end-to-end confidentiality guarantee. We reject these
+// before ever sealing.
+var ErrLowOrderKey = errors.New("sealbox: low-order recipient public key")
+
+// probeScalar is a fixed, non-secret X25519 scalar used ONLY to test a recipient
+// public key for low order. Its value is immaterial: X25519 yields the all-zero
+// shared secret (and curve25519.X25519 returns an error) for a low-order input
+// point regardless of the scalar, so any valid scalar exposes the weakness.
+var probeScalar = [KeyLen]byte{
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+}
+
+// ValidateRecipientPublicKey rejects a nil or low-order X25519 public key. A
+// low-order point drives box.SealAnonymous to an all-zero shared key, which would
+// let anyone (not just the private-key holder) open the sealed bundle; guarding
+// here keeps that class of key from ever producing a "sealed" blob.
+func ValidateRecipientPublicKey(pub *[KeyLen]byte) error {
+	if pub == nil {
+		return errors.New("sealbox: nil recipient key")
+	}
+	shared, err := curve25519.X25519(probeScalar[:], pub[:])
+	if err != nil {
+		// curve25519.X25519 returns an error exactly for the low-order points
+		// that would collapse the shared secret.
+		return ErrLowOrderKey
+	}
+	// Belt-and-suspenders: reject an all-zero shared secret even if a future
+	// implementation stopped erroring. subtle keeps the check constant-time.
+	var zero [KeyLen]byte
+	if subtle.ConstantTimeCompare(shared, zero[:]) == 1 {
+		return ErrLowOrderKey
+	}
+	return nil
+}
+
 // IsSealed reports whether prefix begins with the sealbox magic.
 func IsSealed(prefix []byte) bool {
 	return len(prefix) >= MagicLen && string(prefix[:MagicLen]) == Magic
@@ -57,8 +98,8 @@ func IsSealed(prefix []byte) bool {
 // Seal wraps plaintext for recipientPub. randSource defaults to crypto/rand when
 // nil (tests may inject a deterministic reader).
 func Seal(plaintext []byte, recipientPub *[KeyLen]byte, randSource io.Reader) ([]byte, error) {
-	if recipientPub == nil {
-		return nil, errors.New("sealbox: nil recipient key")
+	if err := ValidateRecipientPublicKey(recipientPub); err != nil {
+		return nil, err
 	}
 	if randSource == nil {
 		randSource = rand.Reader

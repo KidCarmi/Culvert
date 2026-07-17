@@ -90,8 +90,12 @@ func TestSupportExportSealed_Gates(t *testing.T) {
 	if vRec.Code != http.StatusForbidden {
 		t.Fatalf("viewer code=%d want 403", vRec.Code)
 	}
-	// Malformed keys → 400 (not base64, wrong length).
-	for _, bad := range []string{"", "!!!notbase64!!!", base64.StdEncoding.EncodeToString([]byte("short"))} {
+	// Malformed keys → 400 (not base64, wrong length, low-order point).
+	// The all-zero 32-byte key is a low-order Curve25519 point: it decodes to the
+	// right length but would seal to an all-zero shared secret, so it must be
+	// rejected before any blob is produced.
+	lowOrder := base64.StdEncoding.EncodeToString(make([]byte, sealbox.KeyLen))
+	for _, bad := range []string{"", "!!!notbase64!!!", base64.StdEncoding.EncodeToString([]byte("short")), lowOrder} {
 		bRec := httptest.NewRecorder()
 		apiSupportBundleExportSealed(bRec, sealedReq(t, id, RoleOperator, bad))
 		if bRec.Code != http.StatusBadRequest {

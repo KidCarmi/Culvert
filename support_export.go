@@ -123,6 +123,12 @@ func decodeX25519PubKey(s string) (*[sealbox.KeyLen]byte, error) {
 			}
 			var k [sealbox.KeyLen]byte
 			copy(k[:], b)
+			// Reject low-order/invalid X25519 points: sealing to one derives an
+			// all-zero shared secret, so the blob would be openable without the
+			// recipient's private key — defeating the E2E guarantee.
+			if err := sealbox.ValidateRecipientPublicKey(&k); err != nil {
+				return nil, errors.New("key is not a valid X25519 point")
+			}
 			return &k, nil
 		}
 	}
