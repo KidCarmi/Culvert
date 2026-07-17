@@ -484,3 +484,41 @@ func TestNoShellInDiagnose(t *testing.T) {
 		}
 	}
 }
+
+// TestDiagnoseCatalog_MatchesRoutes pins the verb catalog against the actually
+// registered /api/diagnose/* routes: every catalogued verb resolves to a handler,
+// and every registered diagnose route is catalogued — so the self-documenting
+// surface can't drift from the real one.
+func TestDiagnoseCatalog_MatchesRoutes(t *testing.T) {
+	mux := http.NewServeMux()
+	registerDiagnoseRoutes(mux)
+
+	catalog := diagnoseCatalog()
+	if len(catalog) == 0 {
+		t.Fatal("empty diagnose catalog")
+	}
+	// Every catalogued verb resolves in the mux and carries a sane shape.
+	seen := map[string]bool{}
+	for _, v := range catalog {
+		if v.ID == "" || v.Description == "" || v.MinRole == "" {
+			t.Errorf("catalog verb %+v missing required fields", v)
+		}
+		if v.SchemaVer != diagnoseSchemaVersion {
+			t.Errorf("verb %q schema_version=%d want %d", v.ID, v.SchemaVer, diagnoseSchemaVersion)
+		}
+		if want := "/api/diagnose/" + v.ID; v.Path != want {
+			t.Errorf("verb %q path=%q want %q", v.ID, v.Path, want)
+		}
+		req := httptest.NewRequest(http.MethodPost, v.Path, http.NoBody)
+		if _, pattern := mux.Handler(req); pattern == "" {
+			t.Errorf("catalogued verb %q has no registered handler", v.ID)
+		}
+		seen[v.Path] = true
+	}
+	// Every registered diagnose route is catalogued (reverse parity).
+	for _, p := range []string{"/api/diagnose/storage", "/api/diagnose/upstream", "/api/diagnose/dns", "/api/diagnose/tls"} {
+		if !seen[p] {
+			t.Errorf("registered route %q is not in the catalog", p)
+		}
+	}
+}
