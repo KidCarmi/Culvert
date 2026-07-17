@@ -8243,16 +8243,10 @@ async function loadSettings() {
       const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
       el.textContent = '✅ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
-      const dropsEl = document.getElementById('s-syslog-drops');
-      const drops = sl.drops || 0;
-      dropsEl.style.display = '';
-      if (drops > 0) {
-        dropsEl.textContent = '⚠ ' + drops + ' message' + (drops === 1 ? '' : 's') + ' dropped since forwarding started — check collector connectivity/capacity';
-        dropsEl.style.color = 'var(--warn,#b8860b)';
-      } else {
-        dropsEl.textContent = 'No delivery drops since forwarding started';
-        dropsEl.style.color = 'var(--muted)';
-      }
+      renderSyslogDrops(sl.drops);
+    } else {
+      // No forwarding configured — never leave a stale drop warning visible.
+      hideSyslogDrops();
     }
   } catch(e) { console.error(e); }
   // Log level
@@ -8408,6 +8402,27 @@ async function saveUIAllowIPs() {
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
+// renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
+// forwarding state so a stale amber warning can't survive a reconfigure/disable
+// (a new collector starts a fresh writer at Drops()==0; disabling clears it).
+function renderSyslogDrops(drops) {
+  const dropsEl = document.getElementById('s-syslog-drops');
+  const n = drops || 0;
+  dropsEl.style.display = '';
+  if (n > 0) {
+    dropsEl.textContent = '⚠ ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started — check collector connectivity/capacity';
+    dropsEl.style.color = 'var(--warn,#b8860b)';
+  } else {
+    dropsEl.textContent = 'No delivery drops since forwarding started';
+    dropsEl.style.color = 'var(--muted)';
+  }
+}
+function hideSyslogDrops() {
+  const dropsEl = document.getElementById('s-syslog-drops');
+  dropsEl.style.display = 'none';
+  dropsEl.textContent = '';
+}
+
 async function saveSyslog() {
   const addr = document.getElementById('s-syslog-addr').value.trim();
   const format = document.getElementById('s-syslog-format').value;
@@ -8422,6 +8437,9 @@ async function saveSyslog() {
     const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
     el.textContent = '✅ Forwarding to ' + addr + ' (' + fmtLabel + ')';
     el.style.color = 'var(--green)';
+    // Reconfiguring points at a fresh writer whose drop counter starts at 0 —
+    // reset the row rather than leaving a prior collector's stale warning up.
+    renderSyslogDrops(res.drops);
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -8438,6 +8456,8 @@ async function disableSyslog() {
     el.style.display = '';
     el.textContent = 'Syslog disabled';
     el.style.color = 'var(--muted)';
+    // Forwarding is off now — clear any prior drop warning.
+    hideSyslogDrops();
     toast('Syslog disabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
