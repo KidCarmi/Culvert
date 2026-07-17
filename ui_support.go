@@ -199,19 +199,26 @@ func apiSupportBundleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Attach the server-side consent preview (retained INTERNAL free-form values)
-	// so the approver SEES what the counts-only report cannot show — the whole
+	// so the APPROVER sees what the counts-only report cannot show — the whole
 	// point of the mandatory-preview gate. Read from redaction-preview.json (never
 	// in the bundle); a pre-feature bundle simply has none and the field stays
-	// empty. This surfaces values ALREADY in the operator-downloadable bundle, so
-	// it is not a new exposure — it is the human backstop being made sighted.
+	// empty.
+	//
+	// RBAC: the counts-only report is viewer-safe, but the retained free-form
+	// values can carry a bare secret the precision-first scrubber cannot catch, so
+	// they are the APPROVER's backstop, NOT viewer-safe. Only attach retained_preview
+	// for operator+ (the approve/download role — RoleOperator ⊆ RoleAdmin); a viewer
+	// still gets a 200 with the counts-only report, just without the preview.
 	resp := struct {
 		support.RedactionReport
 		RetainedPreview []support.RedactionPreviewSection `json:"retained_preview"`
 	}{RedactionReport: rep}
-	if pb, perr := os.ReadFile(filepath.Join(supportBundlesDir(), id, support.RedactionPreviewName)); perr == nil {
-		var prev support.RedactionPreview
-		if json.Unmarshal(pb, &prev) == nil {
-			resp.RetainedPreview = prev.Sections
+	if uiRole(r).HasRole(RoleOperator) {
+		if pb, perr := os.ReadFile(filepath.Join(supportBundlesDir(), id, support.RedactionPreviewName)); perr == nil {
+			var prev support.RedactionPreview
+			if json.Unmarshal(pb, &prev) == nil {
+				resp.RetainedPreview = prev.Sections
+			}
 		}
 	}
 	jsonOK(w, resp)
@@ -624,7 +631,7 @@ func parseSupportLevel(s string) (support.DebugLevel, bool) {
 	return support.L1, false
 }
 
-func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope string) (*support.BuildResult, error) {
+func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope, caseID string) (*support.BuildResult, error) {
 	include, ok := resolveSupportScope(scope)
 	if !ok {
 		return nil, fmt.Errorf("unknown incident scope %q", scope)
@@ -646,8 +653,11 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope str
 		Profile:           "default",
 		IncidentScope:     scope,
 		IncludeCollectors: include, // nil for "standard" → every collector runs
-		Nonce:             hex.EncodeToString(nonce),
-		Clock:             time.Now,
+		// case_id binds the persisted manifest + downloaded tar to a TAC support
+		// case (offline evidence↔case binding); empty when none was supplied.
+		CaseID: caseID,
+		Nonce:  hex.EncodeToString(nonce),
+		Clock:  time.Now,
 	})
 }
 
@@ -662,7 +672,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if _, free, _, err := diskUsage(dataDir); err == nil && free < supportMinFreeBytes {
 		return nil, errSupportLowDisk
 	}
-	res, err := buildSupportBundle(ctx, level, scope)
+	res, err := buildSupportBundle(ctx, level, scope, caseID)
 	if err != nil {
 		return nil, err
 	}
@@ -764,7 +774,7 @@ func pruneSupportBundles(keep int) {
 // and writes it to outPath. This is the "GUI is down" escape hatch (the endorsed
 // GAP-MON-01 recovery path). Prints a short summary to stdout.
 func runSupportBundleCommand(outPath string) error {
-	res, err := buildSupportBundle(context.Background(), support.L0, "standard")
+	res, err := buildSupportBundle(context.Background(), support.L0, "standard", "")
 	if err != nil {
 		return err
 	}

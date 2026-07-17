@@ -32,6 +32,27 @@
 | RISK-018 | LOW | ✅ CLOSED | Leaked HA `standbyLoop` goroutine races test `logger` swaps (determinism-gate flake) | `resyncCtx(t)` cleanup-cancelled ctx (2026-07-04) |
 | RISK-013 | LOW | ✅ CLOSED | `normalizeHost` IDNA failure is fail-open | fail-closed `NormalizeHostStrict` gate at proxy+SOCKS5 dispatch (2026-07-05); adversarially reviewed |
 | RISK-020 | LOW | OPEN | Native HTTP/2 inspection: deferred hardening on the opt-in path | `proxy_tunnel_h2.go` — see below |
+| RISK-023 | LOW | ✅ ACCEPTED | `diagnose tls` probe uses `InsecureSkipVerify` to inspect invalid/expired chains | `diagnose.go` `tlsHandshakeProbe`; bounded, SSRF-guarded, never carries traffic — see below |
+
+---
+
+## RISK-023 — `diagnose tls` handshake probe disables cert verification · LOW · ✅ ACCEPTED
+- **What CodeQL flags:** `diagnose.go`'s `tlsHandshakeProbe` sets `InsecureSkipVerify: true`
+  ("go/disabled-certificate-check", high). This is **intentional and inherent to the feature**,
+  not a defect.
+- **Why it must:** the `diagnose tls` support verb exists to let an operator inspect an endpoint's
+  TLS chain — including an **invalid or expired** one — and report `chain_verified` separately (via
+  a subsequent `cert.Verify` in `summarizeTLSState`). A handshake against an invalid chain cannot
+  complete with verification enabled; this is the same pattern `openssl s_client` uses. Reporting
+  validity is the whole point of the verb, so verification is deliberately deferred, not skipped.
+- **Why LOW / bounded:** the probe is **SSRF-guarded** (`ssrfControl` on the dialer, private-IP
+  refusal), enforces `MinVersion: TLS 1.2`, is bounded by `diagnoseTLSTimeout`, is admin/operator-
+  RBAC-gated, and the connection **never carries traffic** — it is opened, its `ConnectionState` is
+  copied out, and it is closed. No proxied bytes ever flow over an unverified connection; the
+  enforcement path is untouched.
+- **Disposition:** ACCEPTED. The CodeQL alert is dismissed with this justification (owner action in
+  the Security tab, "used intentionally"). Do not "fix" it by removing `InsecureSkipVerify` — that
+  deletes the diagnostic capability. Pinned by `#nosec G402` at the call site with the same rationale.
 
 ---
 

@@ -305,6 +305,18 @@ func TestSaveAndLoadHitCounters(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hit_counters.json")
 
+	// saveHitCounters treats the live policy store as authoritative and only falls
+	// back to persisting the raw ruleMet counters when policyStore is EMPTY. This
+	// test drives that fallback path with synthetic rule names that exist only in
+	// ruleMet, so it must run against an empty policy store. Otherwise an unrelated
+	// test that leaves rules in the global store (test ordering under -shuffle or
+	// the default registration order) makes saveHitCounters skip the fallback and
+	// the synthetic counters are never persisted — an order-dependent flake.
+	// Isolate the global store for the duration of the test and restore it after.
+	savedRules := policyStore.List()
+	policyStore.ReplaceAll(nil)
+	t.Cleanup(func() { policyStore.ReplaceAll(savedRules) })
+
 	// Use unique rule names to avoid polluting other tests.
 	ruleMet.RecordHit("test-save-alpha")
 	ruleMet.RecordHit("test-save-alpha")

@@ -64,7 +64,7 @@ func TestResolveSupportScope(t *testing.T) {
 // TestSupportScope_FiltersCollectors proves an incident-scoped build runs only the
 // scope's collectors (+ baseline) and skips the rest with a scope note.
 func TestSupportScope_FiltersCollectors(t *testing.T) {
-	res, err := buildSupportBundle(context.Background(), support.L1, "tls")
+	res, err := buildSupportBundle(context.Background(), support.L1, "tls", "")
 	if err != nil {
 		t.Fatalf("buildSupportBundle(tls): %v", err)
 	}
@@ -121,7 +121,7 @@ func TestParseSupportLevel(t *testing.T) {
 // a standard (L1) bundle and runs at L2 — the debug-level capture control.
 func TestSupportLevel_RuntimeGatedAtL2(t *testing.T) {
 	at := func(level support.DebugLevel) support.SectionEntry {
-		res, err := buildSupportBundle(context.Background(), level, "standard")
+		res, err := buildSupportBundle(context.Background(), level, "standard", "")
 		if err != nil {
 			t.Fatalf("build L%d: %v", level, err)
 		}
@@ -148,7 +148,7 @@ func TestSupportLevel_RuntimeGatedAtL2(t *testing.T) {
 // even matters. At L1 it is level-skipped; at L2 it runs — never scope-skipped.
 func TestSupportLevel_RuntimeInScopedL2(t *testing.T) {
 	find := func(level support.DebugLevel) support.SectionEntry {
-		res, err := buildSupportBundle(context.Background(), level, "tls")
+		res, err := buildSupportBundle(context.Background(), level, "tls", "")
 		if err != nil {
 			t.Fatalf("build tls L%d: %v", level, err)
 		}
@@ -174,7 +174,7 @@ func TestSupportLevel_RuntimeInScopedL2(t *testing.T) {
 
 // TestSupportScope_StandardRunsAll confirms the standard scope applies no filter.
 func TestSupportScope_StandardRunsAll(t *testing.T) {
-	res, err := buildSupportBundle(context.Background(), support.L1, "standard")
+	res, err := buildSupportBundle(context.Background(), support.L1, "standard", "")
 	if err != nil {
 		t.Fatalf("buildSupportBundle(standard): %v", err)
 	}
