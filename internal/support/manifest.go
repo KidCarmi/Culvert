@@ -121,3 +121,25 @@ type RedactionReportCounts struct {
 	Dropped  int `json:"dropped"`
 	Scrubbed int `json:"scrubbed"`
 }
+
+// RedactionPreviewName is the SERVER-SIDE-ONLY consent-preview file. It is
+// written next to the manifest in the bundle dir but is NEVER added to the
+// shareable tar and NEVER downloaded — it exists only so the pre-export consent
+// endpoint can show the approver the retained free-form values. The bundled
+// redaction-report.json stays counts-only (P4/P6); this is the sighted-gate
+// companion that closes the "the human backstop is blind to the value it
+// releases" gap without weakening the shareable report.
+const RedactionPreviewName = "redaction-preview.json"
+
+// RedactionPreview is redaction-preview.json — a BOUNDED sample of the INTERNAL
+// free-form string values KEPT (post-scrub) in each section, surfaced to the
+// approving admin only. Server-side; not part of the bundle.
+type RedactionPreview struct {
+	ModelVersion int                       `json:"model_version"`
+	Sections     []RedactionPreviewSection `json:"sections"`
+}
+
+type RedactionPreviewSection struct {
+	ID               string   `json:"id"`
+	RetainedFreeForm []string `json:"retained_freeform"`
+}

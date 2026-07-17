@@ -126,3 +126,25 @@ Independent of profile, class, or operator override, these are `NEVER_EXPORT` an
 - The per-bundle redaction salt.
 
 This list is duplicated as constants + a fitness test so it cannot silently shrink.
+
+## Sighted consent gate — retained free-form preview (P4/P6 companion)
+
+The scrubber is precision-first by design (no entropy rule) so it will not catch a
+**bare, shapeless secret** an operator types into an INTERNAL free-form field (a
+policy rule name, an upstream endpoint, a diagnostic message). That value is KEPT
+in the shareable bundle, and the bundled `redaction-report.json` is counts-only —
+so the human approving an export could not *see* the value they release.
+
+To close that gap without weakening the counts-only bundle report or the scrubber's
+deliberate precision, the runner captures a **bounded, post-scrub sample of the
+retained INTERNAL free-form values** per section (`Result.RetainedFreeForm`, capped
+and deduped) and writes it to **`redaction-preview.json`** in the server-side bundle
+directory. This file is **NEVER added to the tar and NEVER downloaded** — it exists
+only so the mandatory pre-export consent surface (`GET /api/support/bundles/{id}/
+redaction-report`, and the SPA panel) can show the approver the actual strings being
+released, with an explicit "review before approving" warning. It is a review aid,
+not a redaction control: it never changes what is exported, only what the approver
+can see. PUBLIC fields (version/counts) and masked SENSITIVE/dropped SECRET values
+are never surfaced; a value the scrubber fully replaced (a lone `[redacted:…]`
+token) is skipped. Pinned by `redactor_retained_test.go` and
+`TestRunner_ConsentPreview_SurfacedButNotInTar`.

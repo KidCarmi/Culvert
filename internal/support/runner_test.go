@@ -195,3 +195,42 @@ func TestRunner_SecretFieldNeverInBundle(t *testing.T) {
 		t.Fatal("planted secret survived into the bundle bytes")
 	}
 }
+
+// TestRunner_ConsentPreview_SurfacedButNotInTar pins the sighted-consent-gate:
+// the runner surfaces retained INTERNAL free-form values in BuildResult.Preview
+// (so the approver can review them), but redaction-preview.json is SERVER-SIDE
+// ONLY and must never be packaged into the shareable bundle tar.
+func TestRunner_ConsentPreview_SurfacedButNotInTar(t *testing.T) {
+	type cfg struct {
+		RuleName string `json:"ruleName" redact:"internal"`
+	}
+	bare := "prod-db creds Xy9qKp2mLw7zBareValue" // shapeless; scrubber leaves it, class INTERNAL keeps it
+	res := buildWith(t, okCollector("cfg", redaction.ClassInternal, cfg{RuleName: bare}))
+
+	// (1) The consent preview surfaces the retained free-form value.
+	found := false
+	for _, s := range res.Preview.Sections {
+		for _, v := range s.RetainedFreeForm {
+			if v == bare {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("consent preview must surface the retained INTERNAL free-form value; got %+v", res.Preview.Sections)
+	}
+
+	// (2) The preview FILE is never in the shareable tar (it is written only to
+	// the server-side bundle dir by createSupportBundle).
+	files := tarFiles(t, res.TarGz)
+	if _, ok := files[RedactionPreviewName]; ok {
+		t.Fatalf("%s must NEVER be inside the shareable bundle tar", RedactionPreviewName)
+	}
+
+	// (3) The bundled redaction-report.json stays counts-only — no retained values.
+	if rep, ok := files[RedactionReportName]; ok {
+		if strings.Contains(string(rep), "retained") || strings.Contains(string(rep), bare) {
+			t.Errorf("redaction-report.json (in the tar) must stay counts-only, never carry retained values")
+		}
+	}
+}

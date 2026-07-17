@@ -182,7 +182,23 @@ func apiSupportBundleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "redaction report corrupt", http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, rep)
+	// Attach the server-side consent preview (retained INTERNAL free-form values)
+	// so the approver SEES what the counts-only report cannot show — the whole
+	// point of the mandatory-preview gate. Read from redaction-preview.json (never
+	// in the bundle); a pre-feature bundle simply has none and the field stays
+	// empty. This surfaces values ALREADY in the operator-downloadable bundle, so
+	// it is not a new exposure — it is the human backstop being made sighted.
+	resp := struct {
+		support.RedactionReport
+		RetainedPreview []support.RedactionPreviewSection `json:"retained_preview"`
+	}{RedactionReport: rep}
+	if pb, perr := os.ReadFile(filepath.Join(supportBundlesDir(), id, support.RedactionPreviewName)); perr == nil {
+		var prev support.RedactionPreview
+		if json.Unmarshal(pb, &prev) == nil {
+			resp.RetainedPreview = prev.Sections
+		}
+	}
+	jsonOK(w, resp)
 }
 
 // apiHealthExplain returns the explained operator-contract health verdict —
@@ -650,6 +666,18 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	}
 	if err := os.WriteFile(filepath.Join(dir, support.RedactionReportName), reportJSON, 0o600); err != nil {
 		return nil, fmt.Errorf("write report: %w", err)
+	}
+	// redaction-preview.json is the SERVER-SIDE consent preview: a bounded sample
+	// of the retained INTERNAL free-form values, surfaced to the approving admin
+	// so the mandatory-preview gate is SIGHTED. It is written to the bundle dir
+	// but is NEVER inside bundle.csb.tgz and is NEVER downloaded — it exists only
+	// to inform approval. 0600, same as the report.
+	previewJSON, err := json.MarshalIndent(res.Preview, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal preview: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, support.RedactionPreviewName), previewJSON, 0o600); err != nil {
+		return nil, fmt.Errorf("write preview: %w", err)
 	}
 	// manifest.json is the list/commit marker (listSupportBundles keys on it), so
 	// write it atomically via tmp+rename — a torn write can never present a

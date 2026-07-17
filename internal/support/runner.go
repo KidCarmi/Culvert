@@ -43,7 +43,8 @@ type BuildOptions struct {
 type BuildResult struct {
 	BundleID     string
 	Manifest     SupportBundleManifest
-	Report       RedactionReport // counts-only redaction report (also packaged in the tar)
+	Report       RedactionReport  // counts-only redaction report (also packaged in the tar)
+	Preview      RedactionPreview // server-side consent preview; NEVER packaged in the tar
 	TarGz        []byte
 	BundleSHA256 string
 }
@@ -86,11 +87,12 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 	}
 
 	var (
-		sections   []SectionEntry
-		reportSecs []RedactionReportSection
-		errs       = []CollectionError{}
-		packed     []tarEntry
-		stats      CollectionStats
+		sections    []SectionEntry
+		reportSecs  []RedactionReportSection
+		previewSecs []RedactionPreviewSection // server-side consent preview; NOT packed into the tar
+		errs        = []CollectionError{}
+		packed      []tarEntry
+		stats       CollectionStats
 	)
 
 	for _, c := range Collectors() {
@@ -176,6 +178,9 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 			reportSecs = append(reportSecs, RedactionReportSection{
 				ID: m.ID, ClassMax: classMax.String(), Masked: cr.masked, Dropped: cr.dropped, Scrubbed: cr.scrubbed,
 			})
+			if len(cr.retained) > 0 {
+				previewSecs = append(previewSecs, RedactionPreviewSection{ID: m.ID, RetainedFreeForm: cr.retained})
+			}
 			stats.OK++
 		}
 		sections = append(sections, entry)
@@ -191,6 +196,9 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 		ModelVersion: RedactionModelVer, Profile: profile, FailClosed: true,
 		Sections: reportSecs, Totals: totalCounts(reportSecs),
 	}
+	// Consent preview: server-side only, deliberately NOT added to `entries`
+	// (the tar) below — it must never leave the box in the shareable bundle.
+	preview := RedactionPreview{ModelVersion: RedactionModelVer, Sections: previewSecs}
 	reportBytes, _ := json.MarshalIndent(report, "", "  ")
 	errBytes, _ := json.MarshalIndent(errs, "", "  ")
 
@@ -237,7 +245,7 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 	man.Integrity.BundleSHA256 = hex.EncodeToString(bs[:])
 
 	return &BuildResult{
-		BundleID: bundleID, Manifest: man, Report: report, TarGz: tgz,
+		BundleID: bundleID, Manifest: man, Report: report, Preview: preview, TarGz: tgz,
 		BundleSHA256: man.Integrity.BundleSHA256,
 	}, nil
 }
@@ -307,7 +315,12 @@ type countingRedactor struct {
 	base                      redaction.Redactor
 	masked, dropped, scrubbed int
 	classMax                  redaction.DataClass
+	retained                  []string // bounded, deduped sample of kept INTERNAL free-form (consent preview)
 }
+
+// maxRetainedPerSection bounds the consent-preview sample per section so a
+// large section cannot balloon the server-side preview file.
+const maxRetainedPerSection = 64
 
 func (c *countingRedactor) Struct(v any) any {
 	r := c.base.Classify(v)
@@ -328,6 +341,23 @@ func (c *countingRedactor) tally(r redaction.Result) {
 	if r.ClassMax > c.classMax {
 		c.classMax = r.ClassMax
 	}
+	for _, v := range r.RetainedFreeForm {
+		if len(c.retained) >= maxRetainedPerSection {
+			break
+		}
+		if !containsStr(c.retained, v) {
+			c.retained = append(c.retained, v)
+		}
+	}
+}
+
+func containsStr(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func totalCounts(secs []RedactionReportSection) RedactionReportCounts {

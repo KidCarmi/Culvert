@@ -12634,13 +12634,35 @@ async function supportShowReport(id) {
       '<td>' + escHtml(String(s.masked || 0)) + '</td>' +
       '<td>' + escHtml(String(s.dropped || 0)) + '</td>' +
       '<td>' + escHtml(String(s.scrubbed || 0)) + '</td></tr>').join('');
-    const html = '<p class="hint">Counts only — no values. fail_closed=<code>' + escHtml(String(rep.fail_closed)) +
+    // Sighted consent gate: automated redaction is counts-only in the bundle, so
+    // surface the RETAINED free-form values the approver is releasing. The
+    // precision-first scrubber cannot catch a bare secret typed into a rule name
+    // or endpoint — a human must eyeball these before approving an export.
+    const prev = (rep && rep.retained_preview) || [];
+    let previewHtml = '';
+    if (prev.length) {
+      const pblocks = prev.map(s => {
+        const vals = (s.retained_freeform || []).map(v =>
+          '<li style="font-family:monospace;white-space:pre-wrap;word-break:break-all">' + escHtml(String(v)) + '</li>').join('');
+        if (!vals) return '';
+        return '<div style="margin:6px 0"><div style="font-weight:600;font-family:monospace">' + escHtml(String(s.id)) +
+          '</div><ul style="margin:4px 0 0 18px">' + vals + '</ul></div>';
+      }).join('');
+      if (pblocks) {
+        previewHtml = '<div style="margin-top:14px;padding:10px;border:1px solid var(--warn,#b8860b);border-radius:6px">' +
+          '<div style="font-weight:700;color:var(--warn,#b8860b)">⚠ Review before approving — retained free-form values</div>' +
+          '<p class="hint" style="margin:4px 0">These INTERNAL free-form strings are KEPT in the shareable bundle. ' +
+          'Automated redaction cannot catch a bare secret embedded here (e.g. a credential typed into a rule name or endpoint). ' +
+          'Confirm none contains a secret before you approve.</p>' + pblocks + '</div>';
+      }
+    }
+    const html = '<p class="hint">Bundle report is counts only — no values. fail_closed=<code>' + escHtml(String(rep.fail_closed)) +
       '</code> · model v' + escHtml(String(rep.model_version || '')) + '</p>' +
       '<p><strong>Totals</strong>: ' + escHtml(String(t.masked || 0)) + ' masked · ' +
       escHtml(String(t.dropped || 0)) + ' dropped · ' + escHtml(String(t.scrubbed || 0)) + ' scrubbed</p>' +
       '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
       '<th>Section</th><th>Class max</th><th>Masked</th><th>Dropped</th><th>Scrubbed</th></tr></thead><tbody>' +
-      rows + '</tbody></table></div>';
+      rows + '</tbody></table></div>' + previewHtml;
     const el = document.getElementById('support-bundles');
     if (el) {
       let box = document.getElementById('support-report-box');

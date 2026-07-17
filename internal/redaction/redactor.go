@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Result is the outcome of redacting one value.
@@ -19,6 +20,55 @@ type Result struct {
 	Masked   int       // count of SENSITIVE fields masked
 	Dropped  int       // count of SECRET/NEVER_EXPORT fields dropped
 	Scrubbed int       // count of free-form secret-shapes redacted in KEPT strings
+	// RetainedFreeForm is a BOUNDED, post-scrub sample of INTERNAL free-form
+	// string values KEPT in the shareable output. The scrubber is precision-first
+	// (no entropy rule, by design), so a bare shapeless secret typed into an
+	// operator-controlled free-form field (a policy rule name, an upstream
+	// endpoint, a diagnostic message) survives it — and the bundled
+	// redaction-report is counts-only (P4/P6). These samples feed the
+	// pre-export consent surface ONLY (server-side; never written to the tar) so
+	// the approving admin can SEE what automated redaction structurally cannot
+	// catch. Deterministic; capped by the maxRetained* constants below.
+	RetainedFreeForm []string
+}
+
+const (
+	// freeFormMinLen: a KEPT INTERNAL string shorter than this (and space-free)
+	// is a short enum/flag/id, not review-worthy free-form — skip it.
+	freeFormMinLen = 12
+	// maxRetainedPerResult bounds the sample from one Classify call.
+	maxRetainedPerResult = 32
+	// maxRetainedLen truncates each surfaced value (review, not exfil-of-report).
+	maxRetainedLen = 240
+)
+
+// captureRetained records s (a post-scrub, KEPT INTERNAL string) into the
+// consent-preview sample: bounded, deduped, truncated, and skipping values the
+// scrubber already fully replaced (a lone "[redacted:...]" token carries nothing
+// to review). Not a security control itself — it makes the human approval gate
+// SIGHTED, layered under the structural class redaction + the scrubber.
+func (acc *Result) captureRetained(s string) {
+	t := strings.TrimSpace(s)
+	if t == "" || len(acc.RetainedFreeForm) >= maxRetainedPerResult {
+		return
+	}
+	// Short, space-free tokens (ids, enums) are not free-form worth surfacing.
+	if utf8.RuneCountInString(t) < freeFormMinLen && !strings.ContainsRune(t, ' ') {
+		return
+	}
+	// A value the scrubber fully replaced retains nothing sensitive.
+	if strings.HasPrefix(t, "[redacted:") && strings.HasSuffix(t, "]") && strings.Count(t, "[redacted:") == 1 {
+		return
+	}
+	if utf8.RuneCountInString(t) > maxRetainedLen {
+		t = string([]rune(t)[:maxRetainedLen]) + "…"
+	}
+	for _, e := range acc.RetainedFreeForm {
+		if e == t {
+			return
+		}
+	}
+	acc.RetainedFreeForm = append(acc.RetainedFreeForm, t)
 }
 
 // Redactor redacts collected values structurally by DataClass. Field classes are
@@ -189,11 +239,19 @@ func (r *redactor) leaf(rv reflect.Value, ctx DataClass, acc *Result) any {
 // is a no-op passthrough.
 func (r *redactor) scrubString(s string, ctx DataClass, acc *Result) any {
 	acc.ClassMax = maxClass(acc.ClassMax, ctx)
-	if r.scrubber == nil {
-		return s
+	out := s
+	if r.scrubber != nil {
+		var n int
+		out, n = r.scrubber.Scrub(s)
+		acc.Scrubbed += n
 	}
-	out, n := r.scrubber.Scrub(s)
-	acc.Scrubbed += n
+	// Sighted-consent capture: an INTERNAL free-form string is KEPT verbatim in
+	// the shareable output. Surface a bounded post-scrub sample so the human
+	// approving the export can review what the precision-first scrubber cannot
+	// catch (a bare shapeless secret). PUBLIC (version/counts) is not surfaced.
+	if ctx == ClassInternal {
+		acc.captureRetained(out)
+	}
 	return out
 }
 
