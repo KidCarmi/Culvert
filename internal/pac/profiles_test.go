@@ -410,3 +410,28 @@ func TestArtifactCache_LegacyFallbackNotCached(t *testing.T) {
 		t.Error("configured-mode artifact must be cacheable and stable")
 	}
 }
+
+// TestCompileProfile_IDNEndpointPunycoded pins that an IDN pool endpoint host
+// is emitted as an ASCII punycode A-label, never raw non-ASCII (Codex P2).
+func TestCompileProfile_IDNEndpointPunycoded(t *testing.T) {
+	p := Profile{ID: "hq", Name: "HQ", Enabled: true, PoolID: "idn",
+		PrivateNetworks: PrivateProxy, AvailabilityMode: ModeBalanced}
+	pools := map[string]Pool{"idn": {ID: "idn", Endpoints: []PoolEndpoint{{Host: "münchen.example", Port: 8080}}}}
+	art := CompileProfile(p, pools)
+	if !strings.Contains(art.JS, "PROXY xn--mnchen-3ya.example:8080") {
+		t.Errorf("IDN endpoint must be emitted as punycode:\n%s", art.JS)
+	}
+	for i := 0; i < len(art.JS); i++ {
+		if art.JS[i] > 0x7e {
+			t.Fatalf("non-ASCII byte in generated PAC at %d", i)
+		}
+	}
+}
+
+func TestCompileConfig_IDNProxyHostPunycoded(t *testing.T) {
+	// Legacy path with a raw IDN host (e.g. replayed) must still emit ASCII.
+	art := CompileConfig(Config{ProxyHost: "münchen.example", ProxyPort: 8080}, "", 0)
+	if !strings.Contains(art.JS, "PROXY xn--mnchen-3ya.example:8080") {
+		t.Errorf("legacy IDN proxy host must be emitted as punycode:\n%s", art.JS)
+	}
+}

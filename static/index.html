@@ -11848,15 +11848,21 @@ function editPACProfile(id) {
   if (p) openPACProfileEditor(p);
 }
 
+let pacEditingRevision = 0; // revision of the profile loaded into the editor (0 = new)
+
 function openPACProfileEditor(p) {
   pacEditingProfile = p ? p.id : '';
+  pacEditingRevision = p ? (p.revision || 0) : 0;
   document.getElementById('pac-profile-editor').style.display = '';
   document.getElementById('pacp-id').value = p ? p.id : '';
   document.getElementById('pacp-id').disabled = !!p;
   document.getElementById('pacp-name').value = p ? p.name : '';
   document.getElementById('pacp-desc').value = p ? (p.description || '') : '';
+  // New-profile defaults: secure mode is the safe default, but secure forbids
+  // the private-direct bypass — so default private networks to PROXY (a valid
+  // secure combination) rather than direct, which would fail validation.
   document.getElementById('pacp-mode').value = p ? p.availabilityMode : 'secure';
-  document.getElementById('pacp-private').value = p ? p.privateNetworks : 'direct';
+  document.getElementById('pacp-private').value = p ? p.privateNetworks : 'proxy';
   document.getElementById('pacp-enabled').value = p ? String(!!p.enabled) : 'true';
   const poolSel = document.getElementById('pacp-pool');
   poolSel.innerHTML = (pacProfilesData.pools || []).map(pl =>
@@ -11913,6 +11919,10 @@ async function savePACProfile() {
     rules: collectPACRules(),
   };
   const isNew = pacEditingProfile === '';
+  // Send the loaded revision on edits so the server's optimistic-concurrency
+  // guard rejects a stale overwrite instead of silently clobbering a
+  // concurrent admin's change.
+  if (!isNew) body.revision = pacEditingRevision;
   const path = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
   try {
     const resp = await apiFetch(path, {
@@ -11920,6 +11930,10 @@ async function savePACProfile() {
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
+    if (resp.status === 409) {
+      toast(await resp.text(), 'error'); // stale revision or conflict
+      return;
+    }
     if (resp.status === 400) {
       const data = await resp.json().catch(() => null);
       renderPACPanelIssues('pac-profile-errors', data && data.issues);

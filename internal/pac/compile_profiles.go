@@ -24,7 +24,7 @@ import (
 func PoolDirectives(pool Pool) string {
 	parts := make([]string, 0, len(pool.Endpoints))
 	for _, ep := range pool.Endpoints {
-		parts = append(parts, fmt.Sprintf("PROXY %s:%d", ep.Host, ep.Port))
+		parts = append(parts, fmt.Sprintf("PROXY %s:%d", emitProxyHost(ep.Host), ep.Port))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -67,7 +67,7 @@ func profileTerminal(p Profile, pools map[string]Pool, warn func(code, entry, ms
 			fmt.Sprintf("pool %q is missing or empty; terminal keeps the pool reference unresolved", p.PoolID))
 	} else {
 		for _, ep := range pool.Endpoints {
-			chain = append(chain, fmt.Sprintf("PROXY %s:%d", ep.Host, ep.Port))
+			chain = append(chain, fmt.Sprintf("PROXY %s:%d", emitProxyHost(ep.Host), ep.Port))
 		}
 	}
 	if p.AvailabilityMode == ModeAvailability {

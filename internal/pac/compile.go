@@ -23,6 +23,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/hostutil"
 )
 
 // CompilerVersion identifies the PAC generator's output contract. Bump on any
@@ -80,7 +82,7 @@ func CompileConfig(c Config, fallbackAddr string, defaultPort int) Artifact {
 		host = hostFromAddr(fallbackAddr)
 		fallback = true
 	}
-	directive := fmt.Sprintf("PROXY %s:%d", host, port)
+	directive := fmt.Sprintf("PROXY %s:%d", emitProxyHost(host), port)
 	if host == "" {
 		// Degenerate branch: no configured host AND no usable request host.
 		// Legacy behavior (preserved): fail open to DIRECT.
@@ -99,6 +101,19 @@ func CompileConfig(c Config, fallbackAddr string, defaultPort int) Artifact {
 		ProxyChain:      []string{directive},
 		HostFallback:    fallback,
 	}
+}
+
+// emitProxyHost returns the ASCII form of a proxy endpoint host for emission
+// into a PROXY directive: IP literals pass through, IDN hostnames are
+// punycoded (A-label). Enforced at the single emission point so a non-ASCII
+// host can never reach the generated PAC regardless of how the store was
+// populated (API, replay, cluster sync). Falls back to the raw value only if
+// normalization fails (already rejected at the strict boundary).
+func emitProxyHost(host string) string {
+	if norm, ok := hostutil.NormalizeHostStrict(host); ok && norm != "" {
+		return norm
+	}
+	return host
 }
 
 // hostFromAddr extracts the bare hostname from a request Host value
