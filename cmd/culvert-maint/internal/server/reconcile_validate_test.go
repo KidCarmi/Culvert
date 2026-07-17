@@ -1,14 +1,10 @@
 package server
 
 import (
-	"regexp"
 	"testing"
 
 	"culvert-maint/internal/journal"
 )
-
-// allowlist mirrors the shape the apply handler uses: the pinned repo by digest.
-var testAllowlist = regexp.MustCompile(`^ghcr\.io/kidcarmi/culvert@sha256:[a-f0-9]{64}$`)
 
 func recWith(targetRef, targetDig, priorRef, priorDig string) *journal.Record {
 	return &journal.Record{
@@ -19,7 +15,7 @@ func recWith(targetRef, targetDig, priorRef, priorDig string) *journal.Record {
 
 func TestValidateReconcileRefs_Valid(t *testing.T) {
 	rec := recWith(repo+"@sha256:"+digNew, digNew, repo+"@sha256:"+digOld, digOld)
-	ok, why := validateReconcileRefs(rec, repo, testAllowlist)
+	ok, why := validateReconcileRefs(rec, repo)
 	if !ok {
 		t.Errorf("valid refs rejected: %s", why)
 	}
@@ -28,7 +24,7 @@ func TestValidateReconcileRefs_Valid(t *testing.T) {
 func TestValidateReconcileRefs_OnlyTarget(t *testing.T) {
 	// A record with just a target (no prior) is still actionable.
 	rec := recWith(repo+"@sha256:"+digNew, digNew, "", "")
-	if ok, why := validateReconcileRefs(rec, repo, testAllowlist); !ok {
+	if ok, why := validateReconcileRefs(rec, repo); !ok {
 		t.Errorf("target-only record rejected: %s", why)
 	}
 }
@@ -41,7 +37,6 @@ func TestValidateReconcileRefs_Rejections(t *testing.T) {
 	}{
 		{"foreign repo", recWith("evil.io/malware@sha256:"+digNew, digNew, "", "")},
 		{"tag not digest", recWith("ghcr.io/kidcarmi/culvert:latest", digNew, "", "")},
-		{"not in allowlist", recWith("ghcr.io/other/img@sha256:"+digNew, digNew, "", "")},
 		{"ref digest != record digest", recWith(repo+"@sha256:"+digNew, foreignDig, "", "")},
 		{"no actionable ref", recWith("", "", "", "")},
 		{"digest present but ref empty", recWith("", digNew, "", "")},
@@ -49,7 +44,7 @@ func TestValidateReconcileRefs_Rejections(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, why := validateReconcileRefs(tc.rec, repo, testAllowlist)
+			ok, why := validateReconcileRefs(tc.rec, repo)
 			if ok {
 				t.Errorf("expected rejection for %s, got accepted", tc.name)
 			}
@@ -60,27 +55,31 @@ func TestValidateReconcileRefs_Rejections(t *testing.T) {
 	}
 }
 
-// TestValidateReconcileRefs_CustomProxyRepo proves the proxyRepo parameter is
-// load-bearing: a ref bound to a non-default repo validates only when proxyRepo
-// (and the allowlist) match it — an air-gapped/mirror deployment's case.
-func TestValidateReconcileRefs_CustomProxyRepo(t *testing.T) {
-	const customRepo = "registry.internal.example/culvert/proxy"
-	customAllow := regexp.MustCompile(`^registry\.internal\.example/culvert/proxy@sha256:[a-f0-9]{64}$`)
-	rec := recWith(customRepo+"@sha256:"+digNew, digNew, "", "")
-
-	if ok, why := validateReconcileRefs(rec, customRepo, customAllow); !ok {
-		t.Errorf("custom-repo ref rejected under matching proxyRepo: %s", why)
-	}
-	// The same ref must be rejected under the DEFAULT proxyRepo (repo binding).
-	if ok, _ := validateReconcileRefs(rec, repo, customAllow); ok {
-		t.Error("custom-repo ref must be rejected when proxyRepo is the default")
+// TestValidateReconcileRefs_TagScopedAllowlistUnaffected is the Codex P2
+// regression: a digest ref must validate regardless of any operator
+// image_allowlist shape (the allowlist is admission-time and deliberately not
+// re-checked here) — a policy-admitted tag upgrade whose journal stores the
+// resolved digest ref must NOT be loud-stopped by reconcile.
+func TestValidateReconcileRefs_TagScopedAllowlistUnaffected(t *testing.T) {
+	// The record carries only the resolved digest ref (as apply stores it).
+	rec := recWith(repo+"@sha256:"+digNew, digNew, "", "")
+	if ok, why := validateReconcileRefs(rec, repo); !ok {
+		t.Errorf("resolved digest ref must validate irrespective of allowlist shape: %s", why)
 	}
 }
 
-func TestValidateReconcileRefs_NilAllowlistRejects(t *testing.T) {
-	// A missing allowlist must fail closed, never accept.
-	rec := recWith(repo+"@sha256:"+digNew, digNew, "", "")
-	if ok, _ := validateReconcileRefs(rec, repo, nil); ok {
-		t.Error("nil allowlist must reject (fail closed)")
+// TestValidateReconcileRefs_CustomProxyRepo proves the proxyRepo parameter is
+// load-bearing: a ref bound to a non-default repo validates only when proxyRepo
+// matches it — an air-gapped/mirror deployment's case.
+func TestValidateReconcileRefs_CustomProxyRepo(t *testing.T) {
+	const customRepo = "registry.internal.example/culvert/proxy"
+	rec := recWith(customRepo+"@sha256:"+digNew, digNew, "", "")
+
+	if ok, why := validateReconcileRefs(rec, customRepo); !ok {
+		t.Errorf("custom-repo ref rejected under matching proxyRepo: %s", why)
+	}
+	// The same ref must be rejected under the DEFAULT proxyRepo (repo binding).
+	if ok, _ := validateReconcileRefs(rec, repo); ok {
+		t.Error("custom-repo ref must be rejected when proxyRepo is the default")
 	}
 }
