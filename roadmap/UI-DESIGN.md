@@ -5,43 +5,50 @@ roadmap. This document is preserved as a design reference.
 
 ## Navigation Structure (Current Sidebar)
 
+> Refreshed 2026-07-17 to match the live sidebar in `static/index.html` (27 nav items across
+> 6 sections). The prior version of this block dated back to an earlier milestone and used
+> since-renamed labels ("Live Feed", "Policy Rules", "File Blocking", "Users") and a standalone
+> "HA Failover" entry that no longer exists — HA is now a section inside the single Cluster panel.
+
 ```
-MONITOR
+OVERVIEW
   Dashboard
-  Live Feed
 
-ACCESS CONTROL
-  Blocklist
-  Security
-  Policy Rules
-  URL Categories
-  File Blocking
-
-NETWORK
-  Header Rewrite
-  Upstream Proxies        ✅ DONE
-  PAC File
-
-IDENTITY
-  Identity Providers
-  Users
-
-SECURITY SCANNING        (inside Security panel)
-  Scan Engine             ✅ DONE (expanded)
-  Threat Feeds            ✅ DONE
-
-CERTIFICATES             ✅ DONE (expanded)
-  SSL / TLS
-  CA Management           ✅ DONE — OCSP, HSM/KMS, dual-CA, CA export
-  
-INFRASTRUCTURE           ✅ DONE
-  Cluster Nodes           ✅ DONE
-  HA Failover             ✅ DONE
-
-TOOLS
-  Policy Tester
+MONITOR
+  Traffic
   Audit Log
-  Settings                ✅ DONE (expanded — syslog, logger, metrics, GeoIP, OTLP, block page)
+  Decryption Exclusions
+  Policy Tester
+
+POLICIES
+  Access Rules
+  Authentication Rules
+  Blocklist
+  Content & Scanning
+  File Control
+  CDR
+
+OBJECTS
+  URL Categories
+  Category Groups
+  Decryption Profiles
+  Header Rewrite
+  Identity Providers
+
+PLATFORM
+  Certificates
+  CA Management           — OCSP, HSM/KMS, dual-CA, CA export
+  Cluster                 — includes the HA Fencing Lease section
+  Upstream Proxies
+  PAC File
+  Releases
+  Diagnostics
+  Support
+  Settings                — syslog, logger, metrics, GeoIP, OTLP, block page
+
+ADMINISTRATION
+  Administrators
+  Governance
 ```
 
 ---
