@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
@@ -207,6 +209,56 @@ func TestAPIPACLifecycle_PublishBlockedByGuardrail(t *testing.T) {
 	rec := pacPost(t, "/api/pac/profiles/hq/lifecycle", bad, RoleAdmin, "198.51.100.125:0")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing pool must hard-block (400), got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// ─── Concurrency: lifecycle RMW is serialized (no lost/duplicate revisions) ────
+
+func TestAPIPACLifecycle_ConcurrentSaveDraftAndPublish(t *testing.T) {
+	resetPACPublishGlobals(t)
+	seedPublishProfile(t)
+
+	pubBody := func(pool string) string {
+		return `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"` + pool +
+			`","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}]}}`
+	}
+	const draftBody = `{"action":"save_draft","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"alt","privateNetworks":"proxy","availabilityMode":"balanced"}}`
+
+	const workers = 8
+	var wg sync.WaitGroup
+	var publishOK int64
+	for i := 0; i < workers; i++ {
+		pool := "main"
+		if i%2 == 0 {
+			pool = "alt"
+		}
+		wg.Add(2)
+		go func(p string) {
+			defer wg.Done()
+			if pacPost(t, "/api/pac/profiles/hq/lifecycle", pubBody(p), RoleAdmin, "198.51.100.140:0").Code == http.StatusOK {
+				atomic.AddInt64(&publishOK, 1)
+			}
+		}(pool)
+		go func() {
+			defer wg.Done()
+			pacPost(t, "/api/pac/profiles/hq/lifecycle", draftBody, RoleAdmin, "198.51.100.141:0")
+		}()
+	}
+	wg.Wait()
+
+	// Every published revision number must be unique (no lost-update re-mint)
+	// and the history length must equal the number of successful publishes (no
+	// revision erased by a racing save_draft).
+	lc, _ := pacLifecycle.Get("hq")
+	seen := map[int64]bool{}
+	for i := range lc.Revisions {
+		if seen[lc.Revisions[i].N] {
+			t.Fatalf("duplicate revision number %d — lifecycle RMW not serialized", lc.Revisions[i].N)
+		}
+		seen[lc.Revisions[i].N] = true
+	}
+	if got := int64(len(lc.Revisions)); got != atomic.LoadInt64(&publishOK) {
+		t.Errorf("history has %d revisions but %d publishes succeeded — a revision was lost", got, publishOK)
 	}
 }
 

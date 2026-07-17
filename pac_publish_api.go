@@ -119,8 +119,15 @@ func apiPACProfileLifecycle(w http.ResponseWriter, r *http.Request) {
 }
 
 func pacLifecycleGet(w http.ResponseWriter, id string) {
+	// Read the active profile and the lifecycle record under the mutation
+	// mutex so a concurrent publish/rollback — which updates pacProfiles
+	// before pacLifecycle — cannot present a torn cross-store view (a stale
+	// draft diffed against the new active spec, i.e. a spurious dirty/diff).
+	// Both accessors return deep copies, so the lock is released before use.
+	pacProfilesAPIMu.Lock()
 	active, activeOK := pacProfiles.ProfileByID(id)
 	lc, _ := pacLifecycle.Get(id)
+	pacProfilesAPIMu.Unlock()
 	var diff *pac.ProfileDiff
 	if lc.DraftDirty && activeOK {
 		d := pac.DiffProfiles(active, true, lc.Draft)
@@ -174,6 +181,13 @@ func pacLifecyclePost(w http.ResponseWriter, r *http.Request, id string) {
 
 func pacLifecycleSaveDraft(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile) {
 	draft.ID = id
+	// Serialize the lifecycle read-modify-write under the same mutex as
+	// publish/rollback. Without it, a save_draft that reads the record before a
+	// concurrent publish and writes it back after would clobber the published
+	// revision (lost update) and let the next publish re-mint that revision
+	// number — breaking the monotonic, never-reused revision invariant.
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
 	lc, _ := pacLifecycle.Get(id)
 	lc.TouchDraft(draft)
 	if err := pacLifecycle.Put(lc); err != nil {
