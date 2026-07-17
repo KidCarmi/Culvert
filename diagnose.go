@@ -737,6 +737,68 @@ func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
 	return d
 }
 
+// ── diagnose config ───────────────────────────────────────────────────────────
+
+// configCollectionSize is the non-secret size of one config-snapshot collection —
+// a COUNT only, never the values. It answers "how big is my policy set / blocklist
+// / category set" for config-apply triage.
+type configCollectionSize struct {
+	Name string `json:"name"`
+	Size int    `json:"size"`
+}
+
+// configDiagnosis is the typed contract for `diagnose config`. It reports whether
+// the live configuration snapshot the CP would push (and a DP would apply) passes
+// the same structural cap validation (validateConfigSnapshot) that gates a real
+// sync, plus non-secret collection sizes and the policy/epoch versions. It NEVER
+// surfaces any snapshot value (rules, hosts, session HMAC, IdP secrets) — only
+// counts and the pass/fail verdict.
+type configDiagnosis struct {
+	SchemaVersion int                    `json:"schema_version"`
+	GeneratedAt   string                 `json:"generated_at"`
+	OK            bool                   `json:"ok"` // validateConfigSnapshot == nil (no cap exceeded)
+	PolicyVersion int64                  `json:"policy_version"`
+	Epoch         int64                  `json:"epoch"`
+	Sizes         []configCollectionSize `json:"sizes"`
+	Error         string                 `json:"error,omitempty"` // first cap violation (names the collection + cap)
+}
+
+// diagnoseConfigFrom validates a snapshot and summarizes its non-secret sizes.
+// Pure (no I/O), so tests drive the pass/fail branches with a fabricated snapshot.
+// validateConfigSnapshot supplies the COMPLETE verdict (it checks every capped
+// collection); the Sizes list surfaces the operationally-relevant subset.
+func diagnoseConfigFrom(snap ConfigSnapshot, now time.Time) configDiagnosis {
+	d := configDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		PolicyVersion: snap.PolicyVersion,
+		Epoch:         snap.Epoch,
+		Sizes: []configCollectionSize{
+			{"policy_rules", len(snap.PolicyRules)},
+			{"blocked_hosts", len(snap.BlockedHosts)},
+			{"ip_list", len(snap.IPList)},
+			{"ssl_bypass_patterns", len(snap.SSLBypassPatterns)},
+			{"url_categories", len(snap.URLCategories)},
+			{"category_groups", len(snap.CategoryGroups)},
+			{"file_profiles", len(snap.FileProfiles)},
+			{"rewrite_rules", len(snap.RewriteRules)},
+			{"dpi_patterns", len(snap.DPIPatterns)},
+			{"pac_exclusions", len(snap.PACExclusions)},
+			{"threat_feed_urls", len(snap.ThreatFeedURLs)},
+			{"threat_feed_domains", len(snap.ThreatFeedDomains)},
+			{"node_groups", len(snap.NodeGroups)},
+			{"bandwidth_policies", len(snap.BandwidthPolicies)},
+			{"decryption_profiles", len(snap.DecryptionProfiles)},
+		},
+	}
+	if err := validateConfigSnapshot(snap); err != nil {
+		d.Error = boundedErr(err.Error())
+	} else {
+		d.OK = true
+	}
+	return d
+}
+
 // diagnoseCluster gathers the live in-memory HA/cluster snapshot and produces the
 // diagnosis. Every accessor here is a mutex-guarded READ; none dials the network.
 func diagnoseCluster(now time.Time) clusterDiagnosis {
@@ -775,6 +837,29 @@ func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// diagnoseConfig assembles the live config snapshot and diagnoses it. The snapshot
+// build is a read-only assembly over the config stores; the snapshot VALUES never
+// leave this function (only counts + the verdict are returned).
+func diagnoseConfig(now time.Time) configDiagnosis {
+	return diagnoseConfigFrom(CurrentConfigSnapshot(), now)
+}
+
+// apiDiagnoseConfig reports live config-snapshot validity + non-secret sizes
+// (POST, operator). Read-only, no network, no shell, no snapshot values.
+func apiDiagnoseConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseConfig(time.Now())
+	auditEvent(r, "diagnose.config", "config", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
@@ -782,4 +867,5 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
+	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
 }
