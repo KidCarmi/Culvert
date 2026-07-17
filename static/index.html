@@ -11978,7 +11978,8 @@ function renderDiagnoseUpstream(d) {
   }
   const color = d.ok ? 'var(--green)' : 'var(--red)';
   const hdr = '<p class="hint">Upstream pool <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
-    '</strong> · ' + escHtml(String(d.healthy_count || 0)) + '/' + escHtml(String(d.count || 0)) + ' healthy</p>';
+    '</strong> · ' + escHtml(String(d.usable_count || 0)) + '/' + escHtml(String(d.count || 0)) + ' usable (' +
+    escHtml(String(d.healthy_count || 0)) + ' healthy)</p>';
   const rows = (d.proxies || []).map(p =>
     '<tr><td>' + escHtml(String(p.url)) + '</td><td style="color:' + (p.healthy ? 'var(--green)' : 'var(--red)') + '">' +
     (p.healthy ? 'healthy' : 'down') + '</td><td>' + escHtml(String(p.circuit || '')) + '</td><td class="hint">' +

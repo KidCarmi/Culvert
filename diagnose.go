@@ -170,10 +170,28 @@ type upstreamDiagnosis struct {
 	SchemaVersion int             `json:"schema_version"`
 	GeneratedAt   string          `json:"generated_at"`
 	Enabled       bool            `json:"enabled"`
-	OK            bool            `json:"ok"` // enabled ⇒ at least one healthy proxy; disabled ⇒ trivially ok (direct)
+	OK            bool            `json:"ok"` // enabled ⇒ at least one USABLE proxy; disabled ⇒ trivially ok (direct)
 	Count         int             `json:"count"`
 	HealthyCount  int             `json:"healthy_count"`
+	UsableCount   int             `json:"usable_count"` // healthy AND circuit not open (matches the selection path)
 	Proxies       []upstreamProbe `json:"proxies"`
+}
+
+// upstreamCounts returns (healthy, usable) over a status snapshot. "Usable"
+// mirrors the selection path (up.Healthy.Load() && up.CB.Allow()): a proxy with an
+// OPEN breaker is skipped even while its Healthy flag is set, so counting only
+// Healthy would report OK in the exact all-circuits-open outage operators are
+// troubleshooting. A half-open breaker still admits a probe, so it is usable.
+func upstreamCounts(list []UpstreamStatus) (healthy, usable int) {
+	for i := range list {
+		if list[i].Healthy {
+			healthy++
+			if list[i].Circuit != "open" {
+				usable++
+			}
+		}
+	}
+	return healthy, usable
 }
 
 // diagnoseUpstream surfaces the upstream pool's EXISTING health-loop + circuit
@@ -190,17 +208,16 @@ func diagnoseUpstream(now time.Time) upstreamDiagnosis {
 	d.Proxies = make([]upstreamProbe, 0, len(list))
 	for i := range list {
 		s := &list[i]
-		if s.Healthy {
-			d.HealthyCount++
-		}
 		d.Proxies = append(d.Proxies, upstreamProbe{
 			URL: s.URL, Healthy: s.Healthy, Circuit: s.Circuit,
 			Failures: s.Failures, RetryAfterMs: s.RetryAfterMs,
 		})
 	}
+	d.HealthyCount, d.UsableCount = upstreamCounts(list)
 	// Disabled = direct egress (no pool), which is a healthy posture, not a fault.
-	// Enabled = at least one proxy must be usable, else all upstream egress is down.
-	d.OK = !d.Enabled || d.HealthyCount > 0
+	// Enabled = at least one USABLE proxy (healthy + breaker not open), else all
+	// upstream egress is effectively down even if flags still read "healthy".
+	d.OK = !d.Enabled || d.UsableCount > 0
 	return d
 }
 

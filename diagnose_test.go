@@ -139,6 +139,33 @@ func TestDiagnoseUpstream_DisabledIsOK(t *testing.T) {
 	}
 }
 
+// TestUpstreamCounts_OpenCircuitNotUsable is the Codex #778 regression: a proxy
+// whose Healthy flag is set but whose breaker is OPEN is NOT usable — the selection
+// path skips it, so an all-circuits-open pool must diagnose as unavailable even
+// though every proxy still reads "healthy".
+func TestUpstreamCounts_OpenCircuitNotUsable(t *testing.T) {
+	cases := []struct {
+		name            string
+		list            []UpstreamStatus
+		healthy, usable int
+	}{
+		{"all-open", []UpstreamStatus{{Healthy: true, Circuit: "open"}, {Healthy: true, Circuit: "open"}}, 2, 0},
+		{"mixed", []UpstreamStatus{{Healthy: true, Circuit: "open"}, {Healthy: true, Circuit: "closed"}}, 2, 1},
+		{"half-open-usable", []UpstreamStatus{{Healthy: true, Circuit: "half-open"}}, 1, 1},
+		{"unhealthy", []UpstreamStatus{{Healthy: false, Circuit: "closed"}}, 0, 0},
+	}
+	for _, c := range cases {
+		h, u := upstreamCounts(c.list)
+		if h != c.healthy || u != c.usable {
+			t.Errorf("%s: got healthy=%d usable=%d want %d/%d", c.name, h, u, c.healthy, c.usable)
+		}
+	}
+	// The OK derivation an enabled pool uses: all-circuits-open ⇒ not ok.
+	if _, usable := upstreamCounts(cases[0].list); usable > 0 {
+		t.Fatal("all-circuits-open reported a usable proxy")
+	}
+}
+
 // TestDiagnoseUpstream_API proves POST + operator RBAC + typed contract, and that
 // the response never carries proxy credentials (List() is redacted to host:port).
 func TestDiagnoseUpstream_API(t *testing.T) {
