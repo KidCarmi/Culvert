@@ -55,7 +55,7 @@ blocklist_feed.go — Blocklist-feed shim: aliases over internal/blocklistfeed (
 rewrite_vars.go — Rewrite shim: aliases over internal/rewrite (ADR-0002; HTTP header rewrite rules — per-host, wildcard — live in the package)
 plugin.go     — Plugin shim: aliases over internal/plugin (ADR-0002)
 logger.go     — Rotating file logger with JSON mode
-syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164)
+syslog.go     — Syslog SIEM forwarding (UDP/TCP, RFC 3164/5424). Delivery is ASYNC (internal/syslog): callers format + enqueue on a bounded channel (drop-on-full → Drops counter); ONE drain goroutine owns the socket + reconnect/backoff. Request goroutines must never write to the collector socket — a slow SIEM must cost drops, not proxy latency (see internal/syslog/syslog_bench_test.go)
 config.go     — YAML + CLI flag configuration (goccy/go-yaml)
 pac.go        — PAC shim: handlers + routes over internal/pac (ADR-0002)
 hashcache_vars.go — Hash-cache shim: aliases over internal/hashcache (ADR-0002; SHA-256 scan result cache with TTL lives in the package)

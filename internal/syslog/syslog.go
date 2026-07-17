@@ -12,6 +12,14 @@
 //
 // Priority: facility=1 (user-level), severity=6 (informational) → PRI=14.
 // Audit events are sent at severity=5 (notice) → PRI=13.
+//
+// Delivery is ASYNCHRONOUS: senders format the line and enqueue it on a
+// bounded channel; a single drain goroutine (started by NewWriter) owns the
+// connection, the reconnect/backoff state machine, and every network write.
+// The request path therefore never takes the connection mutex and never
+// blocks on a socket — a slow or wedged TCP collector costs the caller a
+// channel send, with overflow counted in Drops rather than propagated as
+// proxy latency. Ordering is preserved (one drain goroutine).
 package syslog
 
 import (
@@ -27,6 +35,11 @@ import (
 )
 
 // Writer forwards log lines to a remote syslog server over UDP or TCP.
+//
+// A Writer built by NewWriter delivers asynchronously via queue/drainLoop; a
+// zero-value Writer (tests build these directly) has a nil queue and falls
+// back to the synchronous writeMsg path, so the delivery state machine stays
+// directly testable.
 type Writer struct {
 	mu            sync.Mutex
 	network       string
@@ -39,7 +52,30 @@ type Writer struct {
 	lastReconnErr time.Time // backoff: suppress reconnect attempts for 5s after failure
 	drops         atomic.Uint64
 	dialFunc      func() (net.Conn, error) // test seam; nil = real dialer
+
+	// Async delivery plumbing (nil/zero on a zero-value Writer → synchronous).
+	queue     chan string   // formatted lines awaiting delivery (bounded at queueCap)
+	stop      chan struct{} // closed by Close; tells drainLoop to flush and exit
+	done      chan struct{} // closed by drainLoop on exit (conn released)
+	closed    atomic.Bool   // post-Close sends drop instead of enqueueing
+	closeOnce sync.Once
 }
+
+// queueCap bounds the async delivery queue. At a formatted line of ~0.5 KB the
+// worst-case queue memory is ~1 MB; past this the collector is slower than the
+// entry rate and lines drop (counted) rather than backpressure the proxy.
+const queueCap = 2048
+
+// flushTimeout bounds the final drain on Close: queued lines are delivered
+// while within the window, then counted as drops. Keeps shutdown from paying
+// queueCap × writeTimeout against a wedged collector.
+const flushTimeout = 1 * time.Second
+
+// closeWait bounds how long Close waits for the drain goroutine to finish its
+// flush. Generous enough for the flush window plus one in-flight write; a
+// fully wedged collector cycle can outlast it, in which case Close returns and
+// the goroutine releases the connection itself when the write deadline fires.
+const closeWait = flushTimeout + writeTimeout + time.Second
 
 // NewWriter dials the syslog server and returns a ready Writer.
 // format selects the wire format: "rfc3164" (default) or "rfc5424".
@@ -62,7 +98,76 @@ func NewWriter(network, addr, format string) (*Writer, error) {
 	if err := sw.connect(); err != nil {
 		return nil, fmt.Errorf("syslog connect %s://%s: %w", network, addr, err)
 	}
+	sw.startAsync()
 	return sw, nil
+}
+
+// startAsync arms the bounded queue and starts the drain goroutine. Split from
+// NewWriter so tests can build a Writer with an injected conn/dialFunc and
+// still exercise the production async path.
+func (s *Writer) startAsync() {
+	s.queue = make(chan string, queueCap)
+	s.stop = make(chan struct{})
+	s.done = make(chan struct{})
+	go s.drainLoop()
+}
+
+// drainLoop is the single delivery goroutine: it owns every network write (and
+// therefore every s.mu hold of meaningful duration). On stop it flushes what
+// is already queued within flushTimeout, counts the remainder as drops, and
+// releases the connection.
+func (s *Writer) drainLoop() {
+	defer func() {
+		s.mu.Lock()
+		if s.conn != nil {
+			s.conn.Close() //nolint:errcheck // best-effort release on exit
+			s.conn = nil
+		}
+		s.mu.Unlock()
+		close(s.done)
+	}()
+	for {
+		select {
+		case line := <-s.queue:
+			s.deliverLine(line)
+		case <-s.stop:
+			deadline := time.Now().Add(flushTimeout)
+			for {
+				select {
+				case line := <-s.queue:
+					if time.Now().Before(deadline) {
+						s.deliverLine(line)
+					} else {
+						s.drops.Add(1)
+					}
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// send formats one message and hands it to the drain goroutine without ever
+// blocking: a full queue (collector slower than the entry rate) or a closed
+// Writer counts a drop instead. Formatting happens here so the syslog
+// timestamp is the EVENT time, not the (possibly later) delivery time. A
+// zero-value Writer (no queue) delivers synchronously — the pre-async
+// behavior, kept for the direct writeMsg tests.
+func (s *Writer) send(pri int, msg string) {
+	if s.queue == nil {
+		s.writeMsg(pri, msg)
+		return
+	}
+	if s.closed.Load() {
+		s.drops.Add(1)
+		return
+	}
+	select {
+	case s.queue <- s.formatMsg(pri, msg):
+	default:
+		s.drops.Add(1)
+	}
 }
 
 func (s *Writer) connect() error {
@@ -87,7 +192,7 @@ func (s *Writer) connect() error {
 
 // Write implements io.Writer. Each call is a single syslog message at PRI=14.
 func (s *Writer) Write(p []byte) (int, error) {
-	s.writeMsg(14, strings.TrimRight(string(p), "\r\n"))
+	s.send(14, strings.TrimRight(string(p), "\r\n"))
 	return len(p), nil
 }
 
@@ -99,7 +204,7 @@ func (s *Writer) WriteAudit(e any) {
 	if err != nil {
 		return
 	}
-	s.writeMsg(13, string(b)) // PRI=13: facility=1 severity=5 (notice)
+	s.send(13, string(b)) // PRI=13: facility=1 severity=5 (notice)
 }
 
 // WriteRequest sends a structured request-log entry as a JSON syslog message at
@@ -109,7 +214,7 @@ func (s *Writer) WriteRequest(e any) {
 	if err != nil {
 		return
 	}
-	s.writeMsg(14, string(b)) // PRI=14: facility=1 severity=6 (informational)
+	s.send(14, string(b)) // PRI=14: facility=1 severity=6 (informational)
 }
 
 // formatMsg builds a syslog line in the configured format.
@@ -139,9 +244,18 @@ func (s *Writer) writeLine(line string) error {
 	return err
 }
 
+// writeMsg formats and delivers one message synchronously. Production traffic
+// reaches deliverLine via the drain goroutine instead; this remains the
+// zero-value-Writer path and the unit under the deadline/backoff tests.
 func (s *Writer) writeMsg(pri int, msg string) {
-	line := s.formatMsg(pri, msg)
+	s.deliverLine(s.formatMsg(pri, msg))
+}
 
+// deliverLine sends one pre-formatted line, holding s.mu across the write and
+// the reconnect/backoff state machine. Only the drain goroutine (or a
+// zero-value Writer's caller) enters here, so the mutex no longer serializes
+// request goroutines — it now only fences deliverLine against Close/Format.
+func (s *Writer) deliverLine(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
@@ -187,18 +301,33 @@ func (s *Writer) writeMsg(pri int, msg string) {
 }
 
 // Drops reports the number of messages dropped because the collector was
-// unreachable or not draining. Monotonic per Writer; delivery is otherwise
+// unreachable or not draining, the delivery queue overflowed, or the Writer
+// was already closed. Monotonic per Writer; delivery is otherwise
 // silent-best-effort, so this is the only loss signal.
 func (s *Writer) Drops() uint64 { return s.drops.Load() }
 
-// Close closes the underlying connection.
+// Close stops the drain goroutine (flushing already-queued lines within
+// flushTimeout) and releases the connection. Idempotent; concurrent sends
+// after Close count as drops. On an async Writer the connection is owned and
+// released by the drain goroutine; Close waits up to closeWait for it — if a
+// wedged collector outlasts even that, Close returns and the goroutine
+// releases the conn when its write deadline fires.
 func (s *Writer) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn != nil {
-		err := s.conn.Close()
-		s.conn = nil
-		return err
+	if s.queue == nil { // zero-value Writer: no goroutine, close directly
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.conn != nil {
+			err := s.conn.Close()
+			s.conn = nil
+			return err
+		}
+		return nil
+	}
+	s.closed.Store(true)
+	s.closeOnce.Do(func() { close(s.stop) })
+	select {
+	case <-s.done:
+	case <-time.After(closeWait):
 	}
 	return nil
 }
