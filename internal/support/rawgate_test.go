@@ -15,9 +15,12 @@ import (
 // model. The gate must fail such sections closed and pass everything Classify
 // can legitimately emit.
 
+// untaggedRaw simulates a raw-file collector's payload: exported fields, no
+// redact tags, never walked by Classify. Field names are deliberately neutral
+// (gosec G101) — the leak-detection marker value is what the test tracks.
 type untaggedRaw struct {
 	Endpoint string // no redact tag — and even a tagged struct is unwalked here
-	Token    string
+	Marker   string
 }
 
 func TestRawGate_UngovernedStructRejected(t *testing.T) {
@@ -25,7 +28,7 @@ func TestRawGate_UngovernedStructRejected(t *testing.T) {
 		name string
 		v    any
 	}{
-		{"bare struct", untaggedRaw{Endpoint: "e", Token: "t"}},
+		{"bare struct", untaggedRaw{Endpoint: "e", Marker: "m"}},
 		{"pointer to struct", &untaggedRaw{}},
 		{"struct in map", map[string]any{"cfg": untaggedRaw{}}},
 		{"struct in slice", []any{1, "x", untaggedRaw{}}},
@@ -68,7 +71,7 @@ func TestRawGate_SinkFailsSectionClosed(t *testing.T) {
 	raw := &fakeCollector{
 		meta: baseMeta("rawleak", L0, redaction.ClassInternal),
 		fn: func(ctx context.Context, in CollectInput, sink SectionSink) Result {
-			if err := sink.WriteJSON(untaggedRaw{Endpoint: "internal.example", Token: "RAW-TOKEN-bypass"}); err != nil {
+			if err := sink.WriteJSON(untaggedRaw{Endpoint: "internal.example", Marker: "RAW-MARKER-bypass"}); err != nil {
 				return Result{Status: StatusFailed, Note: "sink rejected raw payload"}
 			}
 			return Result{Status: StatusOK, ClassMax: redaction.ClassInternal}
@@ -77,12 +80,12 @@ func TestRawGate_SinkFailsSectionClosed(t *testing.T) {
 	good := okCollector("good", redaction.ClassPublic, map[string]any{"ok": true})
 	res := buildWith(t, raw, good)
 
-	if string(res.TarGz) == "" {
+	if len(res.TarGz) == 0 {
 		t.Fatal("bundle must survive a raw collector (failure isolation)")
 	}
 	files := tarFiles(t, res.TarGz)
 	for name, b := range files {
-		if strings.Contains(string(b), "RAW-TOKEN-bypass") {
+		if strings.Contains(string(b), "RAW-MARKER-bypass") {
 			t.Fatalf("raw payload leaked into %s", name)
 		}
 	}

@@ -51,7 +51,7 @@ func TestSupportEngine_ImportWall(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
 		}
-		path := filepath.Join("internal/support", e.Name())
+		path := filepath.Join("internal", "support", e.Name())
 		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
