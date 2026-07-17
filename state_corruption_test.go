@@ -333,8 +333,18 @@ func TestHandleReady_SurfacesStateFileCorruption(t *testing.T) {
 	if !ok {
 		t.Fatal("state_file_ui_users row missing from /readyz after a corrupt roster load (CHAOS-05)")
 	}
-	if row.Status != "fail" || !strings.Contains(row.Detail, "quarantined to") {
-		t.Fatalf("row = %+v, want fail with the quarantine path in the detail", row)
+	if row.Status != "fail" {
+		t.Fatalf("row = %+v, want fail", row)
+	}
+	// The UNAUTHENTICATED /ready row must carry only a fixed, non-path detail —
+	// the absolute state-file path, the raw parse error, and the quarantine
+	// filename would fingerprint a security-degraded node to any proxy-port
+	// client. The full detail lives in the logs/alert/authenticated diagnostics.
+	if strings.Contains(row.Detail, "quarantined to") || strings.Contains(row.Detail, path) || strings.Contains(row.Detail, dir) {
+		t.Fatalf("readyz row leaked the quarantine path/detail on the unauthenticated probe: %q", row.Detail)
+	}
+	if row.Detail == "" {
+		t.Fatal("readyz row must still carry a (generic) degradation signal")
 	}
 	if gotCode != baseCode || got.Status != base.Status {
 		t.Fatalf("state-file row changed readiness (%s/%d → %s/%d) — must be report-only", base.Status, baseCode, got.Status, gotCode)

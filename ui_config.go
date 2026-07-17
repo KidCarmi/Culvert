@@ -814,13 +814,28 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 // pre-ID / hand-authored backups, else create fresh — so a re-import does not
 // accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1).
 func importPolicyRules(b *configBackup, replaceMode bool) {
+	// Object-reference IDs are re-derived from the submitted NAMES, exactly like
+	// the interactive write path (stampObjectRefIDs): enforcement is
+	// ID-authoritative (failOpenScopeForRule, MatchesCategoryByID), so a backup
+	// carrying a hand-edited decryptionProfileId/destCategoryGroupId that
+	// disagrees with the displayed name would otherwise enforce the hidden ID
+	// while UI/export/diff review shows the benign name. The taxonomy +
+	// profiles sections import before this (leaf-first), so names resolve
+	// against the just-imported objects; an unknown name leaves the ID empty
+	// (name fallback, same as interactive).
 	if replaceMode && len(b.PolicyRules) > 0 {
-		policyStore.ReplaceAll(b.PolicyRules)
+		rules := make([]PolicyRule, len(b.PolicyRules))
+		copy(rules, b.PolicyRules)
+		for i := range rules {
+			stampObjectRefIDs(&rules[i])
+		}
+		policyStore.ReplaceAll(rules)
 		return
 	}
 	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
 	for i := range b.PolicyRules {
 		rule := b.PolicyRules[i]
+		stampObjectRefIDs(&rule)
 		existing := policyStore.matchForImport(rule)
 		editPriority := -1
 		if existing != nil {

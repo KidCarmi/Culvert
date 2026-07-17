@@ -107,9 +107,21 @@ var configSnapshotValidatorOK = func() bool {
 // means the node is serving with an empty roster/cluster store —
 // survivable (env fallback creds / re-enrollment) but it must stay
 // visible to probes beyond the startup log line and the alert.
+//
+// /ready is served UNAUTHENTICATED on the proxy port (main.go), so the row
+// carries only a FIXED, non-path detail — the verbose text
+// (absolute state-file path, raw parse error, quarantine filename, the
+// "running with an EMPTY store" note) would fingerprint a security-degraded
+// node and disclose internal filesystem layout to any client that can reach
+// the proxy port. The full detail remains in the server logs, the
+// state_file_corrupt alert, and the authenticated diagnostics. The row KEY
+// (state_file_<kind>) still says which file, so the operator signal is intact.
 func appendStateFileChecks(checks map[string]*readinessCheck) {
-	for kind, detail := range stateCorruptionSnapshot() {
-		checks["state_file_"+kind] = &readinessCheck{Status: "fail", Detail: detail}
+	for kind := range stateCorruptionSnapshot() {
+		checks["state_file_"+kind] = &readinessCheck{
+			Status: "fail",
+			Detail: "state file quarantined; running with a degraded store — see server logs",
+		}
 	}
 }
 

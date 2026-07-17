@@ -480,6 +480,17 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 	np.UpdatedAt = now
 	delete(s.profiles, curKey)
 	s.profiles[newKey] = &np
+	// Re-key s.order too (mirrors catgroup.Store.Rename): List/Save/Names all
+	// iterate s.order and skip keys absent from s.profiles, so leaving the stale
+	// curKey in s.order (and newKey out of it) silently DROPS the renamed
+	// profile from the list, the on-disk file, and the CP→DP ConfigSnapshot —
+	// durable, fleet-wide config loss from one rename.
+	for i, k := range s.order {
+		if k == curKey {
+			s.order[i] = newKey
+			break
+		}
+	}
 	return oldName, nil
 }
 

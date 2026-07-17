@@ -1343,6 +1343,20 @@ func stampObjectRefIDs(rule *PolicyRule) {
 // mutations (no corruption), same as today. Truly-atomic check-and-write would
 // thread the expected version into the store mutators — a recorded follow-up.
 func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
+	// Effective version: the candidate's while a draft is ENGAGED (so two admins
+	// editing the shared draft collide), else running's (policy-draft G2).
+	cur, _ := effectivePolicyVersion()
+	return policyVersionConflictAgainst(w, r, cur)
+}
+
+// policyVersionConflictAgainst is the shared optimistic-concurrency precondition
+// against an EXPLICIT current generation. The draft-commit path uses it with the
+// candidate's version directly: a commit always operates on the candidate, so it
+// must compare against candidateVersion() even when RequireCommit is off (the
+// stranded-draft recovery state) — otherwise effectivePolicyVersion() would fall
+// back to running and 409 a legitimate recovery commit whose ?ifVersion= is the
+// candidate generation GET /api/policy/draft advertised.
+func policyVersionConflictAgainst(w http.ResponseWriter, r *http.Request, cur int64) bool {
 	raw := strings.TrimSpace(r.URL.Query().Get("ifVersion"))
 	if raw == "" {
 		return false
@@ -1352,9 +1366,6 @@ func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "invalid ifVersion", http.StatusBadRequest)
 		return true
 	}
-	// Effective version: the candidate's while a draft is open (so two admins
-	// editing the shared draft collide), else running's (policy-draft G2).
-	cur, _ := effectivePolicyVersion()
 	if want == cur {
 		return false
 	}
@@ -1373,8 +1384,10 @@ func policyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 func apiPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		// Effective view: the candidate while a draft is open (so the editor
-		// shows what will be committed), else running (policy-draft G2).
+		// Effective view: the candidate while the draft is engaged (so the editor
+		// shows what will be committed), else running (policy-draft G2). The
+		// draft flag mirrors the same predicate so the SPA banner never claims
+		// draft editing while the rules shown (and written) are the live ones.
 		rules := effectivePolicyList()
 		ver, updatedAt := effectivePolicyVersion()
 		jsonOK(w, map[string]any{
@@ -1382,7 +1395,7 @@ func apiPolicy(w http.ResponseWriter, r *http.Request) {
 			"count":     len(rules),
 			"version":   ver,
 			"updatedAt": updatedAt,
-			"draft":     policyDraft.active(),
+			"draft":     policyDraftEngaged(),
 		})
 	case http.MethodPost:
 		apiPolicyCreate(w, r)

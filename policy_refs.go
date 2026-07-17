@@ -136,7 +136,15 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			if r.DestCategoryGroupID == objID {
 				return "destCategoryGroup"
 			}
-			return ""
+			// Only suppress the name check when the ID resolves to a LIVE group.
+			// A DANGLING ID (points at no group) makes the match path fall back
+			// to the name (categoryGroupMatchesHostRule), so the walk must too —
+			// otherwise a rule enforcing this group by name is invisible here and
+			// the group can be deleted out from under it (walk vs match disagree,
+			// OBJECT-REFERENCES-BY-ID.md §8).
+			if globalCategoryGroups.GetByID(r.DestCategoryGroupID) != nil {
+				return ""
+			}
 		}
 		if strings.EqualFold(r.DestCategoryGroup, name) {
 			return "destCategoryGroup"
@@ -155,7 +163,14 @@ func ruleReferencesObject(r *PolicyRule, objType, name, objID string) string {
 			if r.DecryptionProfileID == objID {
 				return "decryptionProfile"
 			}
-			return ""
+			// Only suppress the name check when the ID resolves to a LIVE profile.
+			// A DANGLING ID makes the match path fall back to the name
+			// (resolveDecryptionProfile), so the walk must too — else a rule
+			// enforcing this profile by name is invisible here and the profile
+			// can be deleted out from under it (walk vs match disagree).
+			if globalDecryptionProfiles.GetByID(r.DecryptionProfileID) != nil {
+				return ""
+			}
 		}
 		if strings.EqualFold(r.DecryptionProfile, name) {
 			return "decryptionProfile"

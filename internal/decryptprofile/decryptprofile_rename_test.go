@@ -25,6 +25,21 @@ func TestRename(t *testing.T) {
 	if g == nil || g.ID != p.ID {
 		t.Errorf("new name does not resolve to the same id: %+v", g)
 	}
+	// A cross-key rename must re-key s.order too, or the profile silently
+	// vanishes from List/Save/Names (which iterate s.order). Regression guard
+	// for the order-desync bug: List must still contain the renamed profile,
+	// and a Save→Load round-trip must round-trip it.
+	if got := s.List(); len(got) != 1 || got[0].ID != p.ID || got[0].Name != "NewName" {
+		t.Fatalf("List() lost the renamed profile: %+v", got)
+	}
+	if names := s.Names(); len(names) != 1 || names[0] != "NewName" {
+		t.Errorf("Names() lost the renamed profile: %v", names)
+	}
+	s2 := New()
+	s2.ReplaceAll(s.List())
+	if got := s2.GetByID(p.ID); got == nil || got.Name != "NewName" {
+		t.Errorf("renamed profile did not survive a List→ReplaceAll round-trip: %+v", got)
+	}
 
 	// Collision with a different profile is rejected.
 	if _, err := s.Add(Profile{Name: "Taken", CertVerification: "strict"}); err != nil {

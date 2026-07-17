@@ -14019,9 +14019,11 @@ async function loadHA(isCP) {
         syncNote.style.display = '';
         const failCount = r.sync_fail_count || 0;
         const syncColor = failCount === 0 ? '#22c55e' : (failCount >= r.sync_max_fail ? '#ef4444' : '#f59e0b');
-        const lastOk = r.last_sync_ok ? `<br><span style="font-size:.65rem;color:var(--muted)">last ok ${timeAgo(new Date(r.last_sync_ok))}</span>` : '';
+        // escHtml on the interpolated fields: they come from another cluster
+        // node's status payload — never render peer-supplied data unescaped.
+        const lastOk = r.last_sync_ok ? `<br><span style="font-size:.65rem;color:var(--muted)">last ok ${escHtml(timeAgo(new Date(r.last_sync_ok)))}</span>` : '';
         document.getElementById('ha-sync-val').innerHTML =
-          `<span style="color:${syncColor}">${failCount}/${r.sync_max_fail} failed</span>${lastOk}`;
+          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}`;
       } else {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';

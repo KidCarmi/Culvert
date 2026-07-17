@@ -193,3 +193,41 @@ func TestCountImportUpserts(t *testing.T) {
 		t.Errorf("countImportUpserts = %d update / %d add; want 2/1", updates, adds)
 	}
 }
+
+// TestImport_ReDerivesObjectRefIDs pins the walk↔import parity fix: an imported
+// rule whose object-reference IDs disagree with its submitted NAMES (a
+// hand-edited or cross-node backup) must have the IDs re-derived server-side
+// from the names — exactly like the interactive write path (stampObjectRefIDs)
+// — so the ID-authoritative enforcement path can never follow a hidden object
+// the operator did not pick while UI/export/diff show the benign name.
+func TestImport_ReDerivesObjectRefIDs(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotConfigVersionsDir(t)
+	snapshotDecProfilesForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	policyStore.ReplaceAll(nil)
+	globalDecryptionProfiles.ReplaceAll(nil)
+	globalCategoryGroups.ReplaceAll(nil)
+
+	strict, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "strict", CertVerification: "strict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The backup names the strict profile but carries a bogus/foreign ID that,
+	// if applied verbatim, would dangle (or worse, point at a permissive
+	// profile). Import must overwrite it with the strict profile's real ID.
+	importMergeRules(t, []map[string]any{{
+		"name": "r", "action": "Allow",
+		"decryptionProfile":   "strict",
+		"decryptionProfileId": "01ARZ3NDEKTSV4RRFFQ69G5FAV", // attacker-chosen, wrong
+	}})
+
+	rules := policyStore.List()
+	if len(rules) != 1 {
+		t.Fatalf("want 1 imported rule, got %d", len(rules))
+	}
+	if rules[0].DecryptionProfileID != strict.ID {
+		t.Errorf("import applied a client-supplied ref ID verbatim: DecryptionProfileID=%q, want re-derived %q",
+			rules[0].DecryptionProfileID, strict.ID)
+	}
+}
