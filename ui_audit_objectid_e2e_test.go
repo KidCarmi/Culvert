@@ -35,6 +35,13 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 	if err := page.Locator(`.nav-item[data-view="policy"]`).First().Click(); err != nil {
 		t.Fatalf("open policy: %v", err)
 	}
+	// Wait for the policy view to actually activate before interacting (the
+	// established sibling-test pattern, e.g. ui_policy_e2e_test.go): Fill
+	// requires visibility, and on a slow runner the SPA's view switch can lag
+	// the click — filling immediately is a 30s "element is not visible" flake.
+	if err := assert.Locator(page.Locator("#pol-name")).ToBeVisible(); err != nil {
+		t.Fatalf("policy view did not activate: %v", err)
+	}
 	const ruleName = "auditid-rule"
 	if err := page.Locator("#pol-name").Fill(ruleName); err != nil {
 		t.Fatalf("fill name: %v", err)
@@ -73,6 +80,12 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 	// id tooltip.
 	if err := page.Locator(`.nav-item[data-view="audit"]`).First().Click(); err != nil {
 		t.Fatalf("open audit: %v", err)
+	}
+	// Same view-activation guard as above: the #audit-filter Fill below needs a
+	// visible input, so prove the audit view is active first (de-flake — this
+	// exact fill timed out "element is not visible" on a slow CI runner).
+	if err := assert.Locator(page.Locator("#audit-filter")).ToBeVisible(); err != nil {
+		t.Fatalf("audit view did not activate: %v", err)
 	}
 	// Force a fresh fetch so the assertion never races the view's one-shot load
 	// (the create's audit entry is written synchronously before its response,
