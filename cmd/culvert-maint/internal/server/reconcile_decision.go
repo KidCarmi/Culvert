@@ -184,7 +184,10 @@ func reconcileDecision(in reconcileInputs) reconcileVerdict {
 // class-invariant config digest (identical across tag-vs-digest pulls) and
 // falling back to a prefix-normalized manifest/repo-digest set intersection.
 func sameImage(idA, idB string, digestsA, digestsB []string) bool {
-	if idA != "" && idB != "" && idA == idB {
+	// Config digests are compared prefix-normalized so the record's stored form
+	// and a live `docker inspect .Image` capture match regardless of `sha256:`
+	// prefix on either side.
+	if idA != "" && idB != "" && strings.TrimPrefix(idA, "sha256:") == strings.TrimPrefix(idB, "sha256:") {
 		return true
 	}
 	return digestSetsIntersect(normDigests(digestsA), normDigests(digestsB))

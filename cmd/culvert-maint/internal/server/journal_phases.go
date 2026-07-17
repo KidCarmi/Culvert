@@ -42,6 +42,16 @@ func foldIdentifiers(rec *journal.Record, acc *upgradeApplyAccumulator) {
 			rec.PriorDigest = strings.TrimPrefix(acc.priorDigests[0], "sha256:")
 		}
 	}
+	// Class-invariant image config digests (design §0 P0-A/B). Captured
+	// incrementally: priorImageID at capture_before, the target's config digest
+	// (runningAfterID) only after the post-restart verify. Stored in the `sha256:`
+	// form docker reports so it compares directly to a live capture.
+	if acc.priorImageID != "" {
+		rec.PriorImageID = acc.priorImageID
+	}
+	if acc.runningAfterID != "" {
+		rec.TargetImageID = acc.runningAfterID
+	}
 }
 
 // advanceJournalPhase read-modify-writes the in-flight op's record to `phase`,
@@ -128,6 +138,15 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 		}
 		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart)
 		if uerr == nil {
+			// Capture the target's config digest NOW (best-effort) — the container
+			// is running the target after `up`. Without this, a crash between here
+			// and the verify stage would leave PhaseRestarted with an empty
+			// TargetImageID, forcing reconcile onto the false-rollback-prone
+			// manifest comparison for exactly the multi-arch case the config digest
+			// protects (Codex P1). verifyRunningImage re-captures + hard-verifies.
+			if ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx); cerr == nil {
+				acc.runningAfterID = ri.RunningImageID
+			}
 			s.advanceJournalPhaseBestEffort(acc, journal.PhaseRestarted)
 		}
 		return out, errOut, uerr
