@@ -18,6 +18,8 @@ package alerts
 //   "ca_load_failed"        — Root CA load/init failed at startup: SSL inspection disabled (fail-open)
 //   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
+//   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
+//   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.
