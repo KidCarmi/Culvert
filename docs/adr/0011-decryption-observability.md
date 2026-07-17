@@ -1,8 +1,11 @@
 # ADR-0011: Decryption Observability — a canonical decryption-outcome model
 
-- **Status:** Proposed (design only — **no runtime behavior changes until reviewed**)
+- **Status:** Accepted (ratified 2026-07-16) — implementing in phases (§9). Each phase is
+  additive telemetry; feature-off stays byte-identical. **Phase 1 is landing as small
+  reviewable slices** — Slice 1 (the `internal/decryptobs` bounded-enum vocabulary) is in,
+  dark/unwired; the `DecryptionOutcome` struct + `Entry.dec` block + record wiring follow.
 - **Date:** 2026-07-16
-- **Deciders:** Engineering Advisor (proposed); project maintainer (to ratify)
+- **Deciders:** Engineering Advisor (proposed); project maintainer (ratified)
 - **Depends on:** nothing blocking (observability is additive); relates to F9a (#740) / F10 (#741) which
   tune the same subsystem. Closes qualification findings **F6** and **F7**.
 
@@ -111,7 +114,10 @@ the CWE-117 / log-injection posture (`auditSafe`, `sanitizeLog`).
 - `Outcome` = `inspected` | `bypass_manual` | `bypass_learned` | `rescued` | `failed` | `not_decrypted`
   (plain-HTTP / non-TLS or no decision) — 6 values.
 - `DecisionSource` = `policy_inspect` | `manual_ssl_bypass` | `autoexclude_cache` | `autoexclude_rescue` |
-  `no_fail_open_502` | `cert_verify_block` | `non_tls_fallback` — 7 values.
+  `no_fail_open_502` | `cert_verify_block` | `non_tls_fallback` | `inspect_unavailable` — 8 values.
+  (`inspect_unavailable` = a rule selected inspection but the MITM CA was not ready, so `handleTunnel`
+  degraded to bypass — a misconfiguration that must be visible on the coverage view, not hidden inside
+  manual bypass. Added by the PR #758 red-team; see the corrections section.)
 - `FailStage` = `none` | `tcp_connect` | `client_hello` | `upstream_handshake` | `cert_verify` |
   `client_leaf_reject` | `relay` — 7 values.
 - `FailCategory` = `none` | `certificate` | `protocol` | `version` | `cipher` | `client_cert_required` |
@@ -338,6 +344,53 @@ additive telemetry.
    publish the field dictionary; add a normalized CEF/ECS mapping note.
 6. **Phase 6 — Qualification & rollout.** The full CI matrix (§8) green; operator-doc section (a
    "Decryption Health" how-to mirroring the PAN ACC→log→exclusion workflow); staged rollout note.
+
+## Red-team corrections (PR #758 fleet)
+
+An adversarial multi-agent red-team of Phase-1 slice 1 (the enum vocabulary) plus this
+design confirmed nine findings (none P0/P1). The code fixes landed in slice 1; the design
+corrections below are recorded here and are binding on the slices that implement them.
+
+- **[fixed, code] Model completeness — `inspect_unavailable`.** `handleTunnel`
+  (`proxy_tunnel.go`) silently degrades an `SSLInspect` decision to bypass when
+  `certMgr.Ready()` is false (no CA/passphrase). No `DecisionSource` could represent that
+  reachable state, so a coverage view would misattribute it to manual bypass. Added
+  `DecisionSource=inspect_unavailable` (§2.2). The wiring slice MUST emit it on that branch;
+  whether the coverage chart also needs a distinct `Outcome` bucket (vs folding into
+  `bypass_manual`) is a wiring-slice decision, flagged here.
+- **[fixed, code] Drift-guard is now a source-scan.** The exhaustiveness claim ("adding a
+  value is a deliberate, tested change") was previously a slice-vs-literal pin that could
+  NOT detect an orphan const (declared but absent from `All<Type>`) or a new enum type with
+  no pin. `decryptobs_parity_test.go` now AST-parses the source and asserts declared-consts ≡
+  `All<Type>` per type, and that every `All<Type>` slice is pinned — the real uiRoutes-style
+  reverse parity. `Valid()` is now a compile-time switch (not a scan of the exported slice),
+  so mutating an `All<Type>` var cannot corrupt validation.
+- **[design, `dec_fail_reason`] §2.1 lists a `dec_fail_reason` enum with a vocabulary defined
+  nowhere.** It is redundant with `dec_fail_category` (`FailCategory`). **Resolution:** the
+  wiring slice either (a) drops `dec_fail_reason` and lets `FailCategory` be the single
+  normalized reason, or (b) defines a `FailReason` enum in `decryptobs` (with its own pin)
+  before any field references it. No §2.1 field may reference an undefined vocabulary.
+- **[design, `dec_excl_reason`] the empty "no exclusion" member.** §2.1 lists
+  `client_cert_required | unsupported_params | client_pinned | ""` but §2.2 says the field
+  reuses `autoexclude.Reason`, whose `allReasons` has **no** empty member. **Resolution:** the
+  wiring slice models `dec_excl_reason` as `autoexclude.Reason` PLUS an explicit empty
+  sentinel (mirroring ALPN's valid empty member), documented as such.
+- **[design, `dec_host` omitempty] redaction contradiction.** §2.1 lists `dec_host` among the
+  `omitempty` optional strings while §4 says a privacy toggle "may omit" it. **Resolution:**
+  host is redacted by **hashing to a fixed-length token** (a present, non-empty sentinel), not
+  by omission; `dec_host` keeps a single static tag. The wiring slice reconciles the §2.1
+  category and the §4 wording so host appears in exactly one bucket.
+- **[design, int fields] §2.1 serialization rule is silent on the two int fields**
+  (`dec_schema_version`, `dec_scope_rule_count`). A `0` `scope_rule_count` (orphaned profile)
+  must remain queryable. **Resolution:** the int fields are **non-`omitempty`** once the block
+  is present (same rule as the booleans/enums) so an explicit `0` serializes; the wiring slice
+  pins this.
+- **[design, cardinality] profile-NAME label churn.** §4 relies on the
+  `maxAutoExcludeLabels` (200) cap, but the existing counter is keyed on the mutable profile
+  *name* with no eviction/decay, so renames can permanently exhaust the budget and bury live
+  counts in `_other_`. **Resolution:** Phase 2 keys the label on the **stable profile ID**
+  (bounded by admin-created profiles, rename-immune) or resolves ID→current-name at exposition
+  time — never the raw mutable name as the cardinality-bearing key.
 
 ## Consequences
 
