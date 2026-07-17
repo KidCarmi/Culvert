@@ -156,6 +156,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigVersionsReadable(cv),
 		checkConfigRollbackValidation(cv),
 		checkKeyAtRest(),
+		checkAuditPersistence(),
 	}
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
@@ -324,6 +325,38 @@ func checkSessionSecret() OperatorContractCheck {
 		Code:    "session_secret",
 		Status:  diagOK,
 		Message: "admin session HMAC key initialised",
+	}
+}
+
+// checkAuditPersistence reports whether the operator-configured audit log file
+// (audit_log_file / -audit-log) is actually persisting entries to disk. A
+// silent failure here (bad path, permissions, unmounted volume) degrades the
+// compliance audit trail to the volatile 500-entry in-memory ring with only a
+// startup log line as signal. GET /api/stats already exposes the configured
+// path (auditLogConfiguredPath) as a raw field; this surfaces it as an explicit
+// operator-contract VERDICT (fail + remediation) alongside the other health
+// rows. auditLogConfiguredPath records operator intent regardless of Init's
+// outcome, so it distinguishes "not configured" from "configured but degraded".
+func checkAuditPersistence() OperatorContractCheck {
+	if auditLogConfiguredPath == "" {
+		return OperatorContractCheck{
+			Code:    "audit_log_persistence",
+			Status:  diagOK,
+			Message: "not configured — audit trail is in-memory only (last 500 events, lost on restart)",
+		}
+	}
+	if !audit.PersistActive() {
+		return OperatorContractCheck{
+			Code:           "audit_log_persistence",
+			Status:         diagFail,
+			Message:        "configured but failed to open — audit trail has silently fallen back to the in-memory ring (last 500 events, lost on restart)",
+			OperatorAction: "Fix permissions/mount on the configured audit log path, then restart the proxy to restore durable audit persistence.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "audit_log_persistence",
+		Status:  diagOK,
+		Message: "audit trail is persisting to the configured log file",
 	}
 }
 

@@ -238,6 +238,7 @@ func mergePersistedCounterByID(byID map[string]persistedRuleCounter, rec persist
 // baseline into them. Starting the goroutine earlier lets a save that races the
 // load→restore startup window (e.g. ctx cancelled mid-startup) clobber a
 // non-empty hit_counters.json with zeros — the caller loads and restores first.
+//
 // It returns a channel that is closed once the goroutine has performed its
 // final on-cancel save and exited. Production callers may ignore it; tests that
 // point path at a t.TempDir() MUST cancel the context and then wait on this
