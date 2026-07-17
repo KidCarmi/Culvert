@@ -217,7 +217,8 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"` // selectable incident scopes
+	Scopes                []string               `json:"scopes"`      // selectable incident scopes
+	Diagnostics           []diagnoseVerbInfo     `json:"diagnostics"` // the diagnose verb catalog
 }
 
 // apiSupportStatus reports the support subsystem's static contract: engine +
@@ -246,6 +247,7 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		RedactionModelVersion: support.RedactionModelVer,
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
+		Diagnostics:           diagnoseCatalog(),
 	})
 }
 

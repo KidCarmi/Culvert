@@ -588,6 +588,30 @@ func tlsResult(d tlsDiagnosis) string {
 	}
 }
 
+// diagnoseVerbInfo is the read-only description of one diagnose verb, so the API
+// surface is self-documenting (the GUI renders its Diagnostics controls from it).
+type diagnoseVerbInfo struct {
+	ID          string `json:"id"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
+	MinRole     string `json:"min_role"`
+	Network     bool   `json:"network"`    // performs outbound I/O (SSRF-guarded) vs purely local
+	NeedsHost   bool   `json:"needs_host"` // requires a host[:port] argument
+	SchemaVer   int    `json:"schema_version"`
+}
+
+// diagnoseCatalog is the fixed in-binary verb registry — the same structural
+// allowlist the handlers implement, surfaced for discovery. Adding a verb here
+// without a handler (or vice versa) is caught by TestDiagnoseCatalog_MatchesRoutes.
+func diagnoseCatalog() []diagnoseVerbInfo {
+	return []diagnoseVerbInfo{
+		{ID: "storage", Path: "/api/diagnose/storage", Description: "Local storage: writability probe + free space + data-dir stat", MinRole: string(RoleOperator), Network: false, NeedsHost: false, SchemaVer: diagnoseSchemaVersion},
+		{ID: "upstream", Path: "/api/diagnose/upstream", Description: "Upstream pool health + circuit state (no new dial)", MinRole: string(RoleOperator), Network: false, NeedsHost: false, SchemaVer: diagnoseSchemaVersion},
+		{ID: "dns", Path: "/api/diagnose/dns", Description: "Bounded DNS resolution of a hostname (private targets refused)", MinRole: string(RoleOperator), Network: true, NeedsHost: true, SchemaVer: diagnoseSchemaVersion},
+		{ID: "tls", Path: "/api/diagnose/tls", Description: "Bounded TLS handshake + chain/expiry of host:port (no MITM; private refused)", MinRole: string(RoleOperator), Network: true, NeedsHost: true, SchemaVer: diagnoseSchemaVersion},
+	}
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
