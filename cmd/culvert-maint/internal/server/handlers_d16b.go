@@ -252,10 +252,26 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		// (image is Docker-reconcilable; data must NOT be auto-reconciled). "" for
 		// upgrades.apply (no mode).
 		mode, _ := paramsForAudit["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
-		if jerr := s.opts.Journal.Write(journal.Record{
+		rec := journal.Record{
 			OpID: op.ID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
 			Actor: peer.String(), StartedAt: now, UpdatedAt: now,
-		}); jerr != nil {
+		}
+		// Standalone image rollback: the target is FIXED and fully validated at
+		// admission (strict repo@sha256 shape + image_allowlist in rollbackImage),
+		// and no later stage folds it in (journal_phases is apply-specific). Persist
+		// it NOW — otherwise the record carries no actionable ref and the E1c trust
+		// gate (validateReconcileRefs) can only mark it invalid, so an interrupted
+		// image rollback — documented as Docker-reconcilable — would always
+		// loud-stop instead of reconciling.
+		if kind == ops.KindRollbackCreate && mode == "image" {
+			if ref, _ := paramsForAudit["image_ref"].(string); ref != "" { //nolint:errcheck // absent/typed-nil → ""
+				rec.TargetRef = ref
+				if i := strings.Index(ref, "@sha256:"); i >= 0 {
+					rec.TargetDigest = ref[i+len("@sha256:"):]
+				}
+			}
+		}
+		if jerr := s.opts.Journal.Write(rec); jerr != nil {
 			// The orchestrator never takes ownership of oplog on this fail-closed
 			// path, so close it here to avoid leaking the descriptor across repeated
 			// admission attempts on a broken journal (ENOSPC/permissions).
