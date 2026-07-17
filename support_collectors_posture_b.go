@@ -111,22 +111,24 @@ func (cdrCollector) Collect(_ context.Context, in support.CollectInput, sink sup
 // ── scan / DPI ───────────────────────────────────────────────────────────────
 
 type scanSection struct {
-	ScannerEnabled    bool  `json:"scanner_enabled" redact:"public"`
-	BodyScanEnabled   bool  `json:"body_scan_enabled" redact:"public"`
-	DPIEnabled        bool  `json:"dpi_enabled" redact:"public"`
-	DPIPatternCount   int   `json:"dpi_pattern_count" redact:"public"`
-	YARAEnabled       bool  `json:"yara_enabled" redact:"public"`
-	YARARuleCount     int   `json:"yara_rule_count" redact:"public"`
-	HashCacheReady    bool  `json:"hash_cache_ready" redact:"public"`
-	HashCacheSize     int   `json:"hash_cache_size" redact:"public"`
-	HashCacheHits     int64 `json:"hash_cache_hits" redact:"public"`
-	HashCacheMisses   int64 `json:"hash_cache_misses" redact:"public"`
-	DPIBlocked        int64 `json:"dpi_blocked" redact:"internal"`
-	ClamBlocked       int64 `json:"clam_blocked" redact:"internal"`
-	YARABlocked       int64 `json:"yara_blocked" redact:"internal"`
-	ThreatFeedBlocked int64 `json:"threat_feed_blocked" redact:"internal"`
-	ScanTimeout       int64 `json:"scan_timeout" redact:"internal"`
-	ScanSkipped       int64 `json:"scan_skipped" redact:"internal"`
+	ScanMode          string `json:"scan_mode" redact:"public"`           // local | remote
+	RemoteScanEnabled bool   `json:"remote_scan_enabled" redact:"public"` // sidecar scanning active
+	ScannerEnabled    bool   `json:"scanner_enabled" redact:"public"`     // LOCAL scanner initialized
+	BodyScanEnabled   bool   `json:"body_scan_enabled" redact:"public"`
+	DPIEnabled        bool   `json:"dpi_enabled" redact:"public"`
+	DPIPatternCount   int    `json:"dpi_pattern_count" redact:"public"`
+	YARAEnabled       bool   `json:"yara_enabled" redact:"public"`
+	YARARuleCount     int    `json:"yara_rule_count" redact:"public"`
+	HashCacheReady    bool   `json:"hash_cache_ready" redact:"public"`
+	HashCacheSize     int    `json:"hash_cache_size" redact:"public"`
+	HashCacheHits     int64  `json:"hash_cache_hits" redact:"public"`
+	HashCacheMisses   int64  `json:"hash_cache_misses" redact:"public"`
+	DPIBlocked        int64  `json:"dpi_blocked" redact:"internal"`
+	ClamBlocked       int64  `json:"clam_blocked" redact:"internal"`
+	YARABlocked       int64  `json:"yara_blocked" redact:"internal"`
+	ThreatFeedBlocked int64  `json:"threat_feed_blocked" redact:"internal"`
+	ScanTimeout       int64  `json:"scan_timeout" redact:"internal"`
+	ScanSkipped       int64  `json:"scan_skipped" redact:"internal"`
 }
 
 type scanCollector struct{}
@@ -143,12 +145,24 @@ func (scanCollector) Meta() support.CollectorMeta {
 func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink support.SectionSink) support.Result {
 	hits, misses, size := globalSecScanner.CacheStats()
 	c := secscan.Counters()
+	// Remote (sidecar) scan mode leaves the LOCAL scanner off, so report the mode
+	// + remote-enabled explicitly — otherwise a remote deployment misreads as
+	// "scanning disabled". Uses only the pure Enabled() probe (no sidecar dial).
+	remote := globalRemoteScanner.Enabled()
+	mode := "local"
+	if remote {
+		mode = "remote"
+	}
 	sec := scanSection{
+		ScanMode:          mode,
+		RemoteScanEnabled: remote,
 		ScannerEnabled:    globalSecScanner.Enabled(),
 		BodyScanEnabled:   globalSecScanner.BodyScanEnabled(),
 		DPIEnabled:        dpiScanner.Enabled(),
 		DPIPatternCount:   len(dpiScanner.List()),
-		YARAEnabled:       globalYARA.Enabled(),
+		// Honor the runtime YARA toggle, not just "rules loaded" (production
+		// adapter is yaraGetEnabled() && rs.Enabled()); rule count stays raw.
+		YARAEnabled:       yaraGetEnabled() && globalYARA.Enabled(),
 		YARARuleCount:     globalYARA.Count(),
 		HashCacheReady:    globalSecScanner.CacheReady(),
 		HashCacheSize:     size,
