@@ -319,7 +319,7 @@ func detectProtocolName(b byte) string {
 // can branch on identity without re-parsing headers.
 func handleTunnel(w http.ResponseWriter, r *http.Request, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
 	if dec.Action == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r, dec.SkipVerify, match, id)
+		handleTunnelInspect(w, r, dec, match, id)
 		return
 	}
 	// Bypass path — attach the ADR-0011 decryption outcome for the close record.
@@ -579,8 +579,10 @@ func upstreamInspectTLSConfig(hostOnly string, tlsSkipVerify bool) *tls.Config {
 // handleTunnelInspect performs SSL inspection (MITM) for CONNECT tunnels.
 // It terminates TLS on both sides using on-the-fly certificates signed by the
 // internal Root CA, allowing the proxy to inspect decrypted HTTP/1.x traffic.
-// tlsSkipVerify disables upstream certificate validation for specific policy
-// rules (e.g. internal sites with self-signed certs); use with caution.
+// dec carries the resolved SSL decision: dec.SkipVerify disables upstream
+// certificate validation for specific policy rules (e.g. internal sites with
+// self-signed certs); dec.Source/ScopeID/Consulted feed the ADR-0011 decryption
+// observability block attached to the per-request inspect log entries.
 //
 // pre-existing complexity predating the CDR integration (was gocognit 128 before CDR;
 // dropped to 112 after Phase 2b extracted runCDRStage out of here).  Further splitting
@@ -588,7 +590,7 @@ func upstreamInspectTLSConfig(hostOnly string, tlsSkipVerify bool) *tls.Config {
 // tracked as a day-2 refactor item in roadmap/roadmap-day2.md.
 //
 //nolint:gocognit,gocyclo,cyclop,funlen // handleTunnelInspect is the SSL-inspection orchestrator —
-func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
+func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
 	targetHost := r.Host
 	if _, _, err := net.SplitHostPort(targetHost); err != nil {
 		targetHost += ":443"
@@ -622,7 +624,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// this flow: reordering here would change the strip path's 502-before-200
 	// semantics. It takes ownership of the freshly-dialled rawUpstream.
 	if !resolveStripALPN(match) {
-		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, tlsSkipVerify, match, id)
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec.SkipVerify, match, id)
 		return
 	}
 
@@ -631,7 +633,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// default (fail-secure); tlsSkipVerify (admin-configured per-rule) skips
 	// cert validation for internal/self-signed hosts and is logged as a warning
 	// so it is auditable.
-	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, tlsSkipVerify, match)
+	upstreamTLSCfg := upstreamInspectTLSConfigForMatch(hostOnly, dec.SkipVerify, match)
 	// ADR-0009: structurally detect an origin CertificateRequest (a Go client's
 	// HandshakeContext never surfaces "certificate required" — TLS 1.3 returns nil,
 	// TLS 1.2 a generic handshake_failure — so the error string is not reliable). The
@@ -773,7 +775,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
 		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
 		<-done
-		recordTunnelCloseGated(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect")
+		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), false)
 		return
 	}
 
@@ -794,10 +796,17 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
+	// ADR-0011: build the inspected decryption-observability block ONCE from the
+	// completed origin TLS state and reuse it for every inner-request log entry. The
+	// entries are opt-in per rule (LogFullURI), so this projection is cheap and off the
+	// latency-critical handshake path. redact=false mirrors the bypass close path — the
+	// §4 host/SNI redaction config surface is a later slice.
+	decBlock := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match).toBlock(false)
+
 	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
 	// file-block via the shared inspection pipeline). Extracted so the native-ALPN
 	// path reuses the exact same loop when a tunnel negotiates HTTP/1.1.
-	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id)
+	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
 }
 
 // runH1InspectLoop drives the HTTP/1.1 keep-alive inspection loop over a decrypted
@@ -808,7 +817,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 // body that was inline in handleTunnelInspect; the native-ALPN dispatcher reuses it
 // for tunnels that negotiate HTTP/1.1 on either leg, so there is ONE enforcement
 // path for both protocols. Closes both conns on return.
-func runH1InspectLoop(r *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
+//
+// decBlock is the pre-built ADR-0011 inspected decryption block (built once per tunnel
+// from the completed TLS state); it rides the opt-in per-request LogFullURI entries. It
+// may be nil (the native-ALPN caller passes nil until that sub-path builds its own block
+// — a documented follow-up), in which case the entries carry no dec block.
+func runH1InspectLoop(r *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	clientBR := bufio.NewReaderSize(clientTLS, 32*1024)
 	upstreamBR := bufio.NewReaderSize(upstreamTLS, 32*1024)
 
@@ -904,14 +918,7 @@ relayLoop:
 			<-done
 			return
 		case exDelivered:
-			// Per-rule "log full URL": one log entry per delivered inner request,
-			// carrying the decrypted host+path (no query). Opt-in via the matched
-			// rule's LogFullURI flag — off by default.
-			if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
-				// Log-only: the enclosing CONNECT was already counted by the allow
-				// path, so this per-URL entry must not re-increment request stats.
-				recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{RuleID: match.Rule.ID})
-			}
+			logInspectedInnerRequest(clientIP, req, hostOnly, match, id, decBlock)
 			if out.closeAfter {
 				break relayLoop
 			}
@@ -919,6 +926,20 @@ relayLoop:
 	}
 	clientTLS.Close()   //nolint:errcheck // best-effort cleanup at relay end
 	upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at relay end
+}
+
+// logInspectedInnerRequest emits the per-rule "log full URL" entry for one delivered
+// inner request of an inspected tunnel — carrying the decrypted host+path (no query) and
+// the ADR-0011 inspected decryption block. Opt-in via the matched rule's LogFullURI flag
+// (off by default) and gated on the rule's log-traffic flag. Log-only: the enclosing
+// CONNECT was already counted by the allow path, so this per-URL entry must not
+// re-increment request stats. Extracted from runH1InspectLoop to keep its keep-alive loop
+// under the cyclop threshold.
+func logInspectedInnerRequest(clientIP string, req *http.Request, hostOnly string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
+	if match == nil || match.Rule == nil || !match.Rule.LogFullURI || !ruleLogsTraffic(match.Rule) {
+		return
+	}
+	recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, req.URL.Path), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock})
 }
 
 // exchangeOutcomeKind is the result of one protocol-neutral inspection exchange.

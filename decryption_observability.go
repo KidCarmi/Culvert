@@ -13,6 +13,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
@@ -122,6 +123,83 @@ func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 		NodeID:          o.NodeID,
 		CertFingerprint: o.CertFingerprint,
 	}
+}
+
+// inspectedOutcome builds the ADR-0011 DecryptionOutcome for a session that was
+// successfully MITM-decrypted and is being inspected. It is built ONCE per tunnel, after
+// BOTH handshakes complete, from the ORIGIN (upstream) TLS parameters — the real
+// encrypted session Culvert broke into — and reused for every inner-request log entry
+// (opt-in via the rule's LogFullURI, so most inspected sessions build it but never emit
+// it). The TLS/cipher/ALPN come from the completed upstream ConnectionState; CertVerify
+// reflects whether upstream verification was skipped for the matched rule (dec.SkipVerify);
+// CacheConsulted/ProfileID carry the fail-open scope read (hit-or-miss) from resolveSSLDecision.
+// FailStage/FailCategory stay `none` — a decrypted, inspected session has no failure.
+func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch) *DecryptionOutcome {
+	certVerify := decryptobs.CertVerifyVerified
+	if dec.SkipVerify {
+		certVerify = decryptobs.CertVerifySkipped
+	}
+	o := &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeInspected,
+		DecisionSource: dec.Source, // policy_inspect on the inspect dispatch path
+		Host:           hostOnly,
+		TLSVersion:     tlsVersionEnum(upstreamCS.Version),
+		Cipher:         tls.CipherSuiteName(upstreamCS.CipherSuite),
+		ALPN:           alpnEnum(upstreamCS.NegotiatedProtocol),
+		CertVerify:     certVerify,
+		FailStage:      decryptobs.FailStageNone,
+		FailCategory:   decryptobs.FailCategoryNone,
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
+// nonTLSFallbackOutcome builds the ADR-0011 DecryptionOutcome for a CONNECT that reached
+// the inspect path but whose CLIENT sent a non-TLS protocol (SSH/RDP/raw), so Culvert
+// could not MITM and fell back to a raw byte relay. The session was NOT decrypted; the
+// source is non_tls_fallback and the TLS/cert/fail fields stay at their sentinels (no
+// client handshake happened) — the honest "we did not inspect this" value, matching the
+// bypass path's sentinel philosophy.
+func nonTLSFallbackOutcome(hostOnly string) *DecryptionOutcome {
+	return &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeNotDecrypted,
+		DecisionSource: decryptobs.DecisionNonTLSFallback,
+		Host:           hostOnly,
+		FailStage:      decryptobs.FailStageNone,
+		FailCategory:   decryptobs.FailCategoryNone,
+	}
+}
+
+// tlsVersionEnum maps a crypto/tls version constant to the bounded ADR-0011 TLSVersion
+// enum. Anything outside the two versions Culvert inspects (incl. 0 = no handshake) is
+// `unknown` — the enum is bounded on purpose (§2.2), so a legacy/unexpected version never
+// widens the recorded vocabulary.
+func tlsVersionEnum(v uint16) decryptobs.TLSVersion {
+	switch v {
+	case tls.VersionTLS12:
+		return decryptobs.TLSVersion12
+	case tls.VersionTLS13:
+		return decryptobs.TLSVersion13
+	}
+	return decryptobs.TLSVersionUnknown
+}
+
+// alpnEnum maps a negotiated ALPN protocol string to the bounded ADR-0011 ALPN enum.
+// The empty string is the valid "no ALPN negotiated" member; any unrecognised protocol
+// also coerces to the empty member so the recorded vocabulary stays closed.
+func alpnEnum(proto string) decryptobs.ALPN {
+	switch proto {
+	case "h2":
+		return decryptobs.ALPNH2
+	case "http/1.1":
+		return decryptobs.ALPNHTTP11
+	}
+	return decryptobs.ALPNNone
 }
 
 // decExclReason bounds the exclusion reason: autoexclude.Reason has no Valid method, so
