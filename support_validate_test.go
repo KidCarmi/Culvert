@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/support"
@@ -119,6 +120,80 @@ func TestValidateBundleTar_MissingSection(t *testing.T) {
 	}
 	if len(v.Missing) != 1 || v.Missing[0].Path != target {
 		t.Fatalf("expected one missing on %q, got %+v", target, v.Missing)
+	}
+}
+
+// TestValidateBundleTar_ManifestOnlyTamper proves an edit to manifest.json alone —
+// section payloads byte-unchanged — is caught via the manifest self-hash (Codex #782).
+func TestValidateBundleTar_ManifestOnlyTamper(t *testing.T) {
+	res := buildRealBundle(t)
+	forged := repackTarGz(t, res.TarGz, func(name string, b []byte) []byte {
+		if name == support.ManifestName {
+			var m support.SupportBundleManifest
+			if json.Unmarshal(b, &m) != nil {
+				t.Fatal("manifest parse")
+			}
+			m.CaseID = "FORGED-CASE" // edit a field WITHOUT recomputing manifest_sha256
+			nb, _ := json.MarshalIndent(m, "", "  ")
+			return nb
+		}
+		return b
+	})
+	v := validateBundleTar(forged)
+	if v.ManifestHashOK {
+		t.Fatal("manifest self-hash matched after a manifest-only edit")
+	}
+	if v.OK {
+		t.Fatal("manifest-only tamper passed validation")
+	}
+}
+
+// TestValidateBundleTar_DuplicateEntryRejected proves a tar carrying a second
+// (forged) manifest.json is rejected rather than silently overriding (Codex #782).
+func TestValidateBundleTar_DuplicateEntryRejected(t *testing.T) {
+	res := buildRealBundle(t)
+	// Append a duplicate manifest.json after the originals.
+	var mBytes []byte
+	for name, b := range extractTarGz(t, res.TarGz) {
+		if name == support.ManifestName {
+			mBytes = b
+		}
+	}
+	if mBytes == nil {
+		t.Fatal("no manifest to duplicate")
+	}
+	var out bytes.Buffer
+	zw := gzip.NewWriter(&out)
+	tw := tar.NewWriter(zw)
+	// Re-emit the original archive, then append a duplicate manifest entry.
+	gz, _ := gzip.NewReader(bytes.NewReader(res.TarGz))
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("untar: %v", err)
+		}
+		b, _ := io.ReadAll(tr)
+		nh := *h
+		nh.Size = int64(len(b))
+		_ = tw.WriteHeader(&nh)
+		_, _ = tw.Write(b)
+	}
+	dupHdr := &tar.Header{Name: support.ManifestName, Mode: 0o600, Size: int64(len(mBytes)), Typeflag: tar.TypeReg}
+	_ = tw.WriteHeader(dupHdr)
+	_, _ = tw.Write(mBytes)
+	_ = tw.Close()
+	_ = zw.Close()
+
+	v := validateBundleTar(out.Bytes())
+	if v.OK || v.Error == "" {
+		t.Fatalf("duplicate manifest entry not rejected: %+v", v)
+	}
+	if !strings.Contains(v.Error, "duplicate") {
+		t.Fatalf("error=%q want a duplicate-entry rejection", v.Error)
 	}
 }
 

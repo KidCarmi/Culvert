@@ -39,6 +39,7 @@ type bundleValidation struct {
 	Format          string         `json:"format"`
 	FormatOK        bool           `json:"format_ok"`
 	ManifestPresent bool           `json:"manifest_present"`
+	ManifestHashOK  bool           `json:"manifest_hash_ok"` // integrity.manifest_sha256 re-derives
 	SectionsChecked int            `json:"sections_checked"`
 	SectionsOK      int            `json:"sections_ok"`
 	Mismatches      []sectionCheck `json:"mismatches,omitempty"`
@@ -79,6 +80,13 @@ func validateBundleTar(tgz []byte) bundleValidation {
 			v.Error = "read: " + err.Error()
 			return v
 		}
+		// Reject duplicate names: a well-formed csb/1 has none, and silently letting
+		// a later entry override an earlier one would let an attacker append a second
+		// forged manifest (or section) that the map read then compares against.
+		if _, dup := files[h.Name]; dup {
+			v.Error = "duplicate tar entry: " + h.Name
+			return v
+		}
 		files[h.Name] = b
 	}
 
@@ -96,6 +104,21 @@ func validateBundleTar(tgz []byte) bundleValidation {
 	v.BundleID = man.BundleID
 	v.Format = man.Format
 	v.FormatOK = man.Format == support.BundleFormat
+
+	// Manifest self-hash: the runner records integrity.manifest_sha256 over the
+	// manifest with its integrity fields zeroed (json.MarshalIndent, 2-space).
+	// Re-derive it the same way so a manifest-only edit (case_id, a section's
+	// status/class, collector metadata) is caught even when every section payload
+	// is byte-unchanged. (This is a self-referential check, not a signature — it
+	// catches corruption/naive tampering; cryptographic manifest signing is later.)
+	expectedMH := man.Integrity.ManifestSHA256
+	manForHash := man
+	manForHash.Integrity = support.IntegrityInfo{}
+	preHash, mErr := json.MarshalIndent(manForHash, "", "  ")
+	if mErr == nil && expectedMH != "" {
+		sum := sha256.Sum256(preHash)
+		v.ManifestHashOK = hex.EncodeToString(sum[:]) == expectedMH
+	}
 
 	for i := range man.Sections {
 		s := &man.Sections[i]
@@ -116,7 +139,7 @@ func validateBundleTar(tgz []byte) bundleValidation {
 		}
 		v.SectionsOK++
 	}
-	v.OK = v.FormatOK && v.ManifestPresent && len(v.Mismatches) == 0 && len(v.Missing) == 0
+	v.OK = v.FormatOK && v.ManifestPresent && v.ManifestHashOK && len(v.Mismatches) == 0 && len(v.Missing) == 0
 	return v
 }
 
