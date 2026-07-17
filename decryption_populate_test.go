@@ -142,6 +142,34 @@ func TestInspectedOutcome_FromTLSState(t *testing.T) {
 	}
 }
 
+// TestInspectedOutcome_CertVerifyFromEffectiveSkip pins that CertVerify reflects the
+// EFFECTIVE upstream verification (resolveInspectSkipVerify) — a decryption profile's
+// CertVerification overrides the rule's inline dec.SkipVerify, so the recorded value must
+// match what the origin handshake actually did, not the raw inline flag (Codex #801).
+func TestInspectedOutcome_CertVerifyFromEffectiveSkip(t *testing.T) {
+	withProfiles(t,
+		DecryptionProfile{Name: "skip", CertVerification: "skip"},
+		DecryptionProfile{Name: "strict", CertVerification: "strict"},
+	)
+	cs := tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
+
+	// Profile "skip" overrides a rule with inline SkipVerify=false ⇒ verification WAS
+	// skipped, so the record must say skipped (not verified).
+	mSkip := matchWith(&PolicyRule{DecryptionProfile: "skip"})
+	decNoInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: false}
+	if b := inspectedOutcome(decNoInline, "h", cs, mSkip).toBlock(false); b.CertVerify != "skipped" {
+		t.Fatalf("profile skip over inline-false: cert_verify=%s want skipped", b.CertVerify)
+	}
+
+	// Profile "strict" overrides a rule with inline SkipVerify=true ⇒ verification RAN,
+	// so the record must say verified (not skipped).
+	mStrict := matchWith(&PolicyRule{DecryptionProfile: "strict"})
+	decInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
+	if b := inspectedOutcome(decInline, "h", cs, mStrict).toBlock(false); b.CertVerify != "verified" {
+		t.Fatalf("profile strict over inline-true: cert_verify=%s want verified", b.CertVerify)
+	}
+}
+
 // TestNonTLSFallbackOutcome pins the not_decrypted/non_tls_fallback classification for a
 // CONNECT whose client spoke a non-TLS protocol (raw relay fallback): TLS/cert/fail fields
 // stay at sentinels because no MITM handshake happened.

@@ -135,8 +135,14 @@ func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 // CacheConsulted/ProfileID carry the fail-open scope read (hit-or-miss) from resolveSSLDecision.
 // FailStage/FailCategory stay `none` — a decrypted, inspected session has no failure.
 func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.ConnectionState, match *PolicyMatch) *DecryptionOutcome {
+	// CertVerify must reflect the EFFECTIVE upstream verification the origin leg actually
+	// performed — resolveInspectSkipVerify, the same resolver upstreamInspectTLSConfigForMatch
+	// feeds. A decryption profile's CertVerification ("skip"/"strict"/"permissive") overrides
+	// the rule's inline dec.SkipVerify, so deriving from dec.SkipVerify alone would record the
+	// opposite of what happened (Codex #801). resolveInspectSkipVerify is deterministic in
+	// match, so this reproduces the handshake's effective skip without a second config build.
 	certVerify := decryptobs.CertVerifyVerified
-	if dec.SkipVerify {
+	if resolveInspectSkipVerify(match, dec.SkipVerify) {
 		certVerify = decryptobs.CertVerifySkipped
 	}
 	o := &DecryptionOutcome{
