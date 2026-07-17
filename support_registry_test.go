@@ -37,6 +37,8 @@ var m2CollectorRoster = []string{
 	"runtime",
 	// M3 operational timeline (L1)
 	"timeline",
+	// M5 cluster/HA posture (L1)
+	"cluster",
 }
 
 func TestM2Wall_RosterLocked(t *testing.T) {

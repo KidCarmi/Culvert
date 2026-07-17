@@ -27,7 +27,7 @@ var supportIncidentScopes = map[string][]string{
 	"policy":   {"policy", "config", "audit", "logs", "config_versions"},
 	"storage":  {"metrics", "config_versions", "governance"},
 	"dns":      {"upstream", "logs", "config"},
-	"cluster":  {"governance", "config", "config_versions", "cdr"},
+	"cluster":  {"cluster", "governance", "config", "config_versions", "cdr"},
 	"scan":     {"scan", "cdr", "logs", "config"},
 }
 
