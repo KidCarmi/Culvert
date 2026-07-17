@@ -4430,6 +4430,7 @@ document.addEventListener('click', e => {
     case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
+    case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
@@ -11871,7 +11872,8 @@ function renderSupportBundles(list) {
         : '<span style="color:var(--orange)" title="Review the redaction report, then Approve to enable download">pending</span>';
       // Report preview is counts-only (viewer-safe). Download needs operator+ AND
       // an approved (ready) bundle. Approve is the admin mandatory-preview gate.
-      const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>';
+      const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>' +
+        ' <button class="btn ghost sm" data-click="supportValidateBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Re-derive + check section hashes (tamper detection)">Validate</button>';
       let ops = '';
       if (canWrite) {
         ops += ready
@@ -12144,6 +12146,21 @@ async function supportApproveBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Approve failed: ' + err.message, 'error');
+  }
+}
+
+async function supportValidateBundle(id) {
+  if (!id) return;
+  try {
+    const v = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/validate');
+    if (v.ok) {
+      toast('Integrity OK — ' + (v.sections_ok || 0) + '/' + (v.sections_checked || 0) + ' sections verified', 'success');
+    } else {
+      const bad = ((v.mismatches || []).length) + ' mismatched, ' + ((v.missing || []).length) + ' missing';
+      toast('Integrity FAILED — ' + (v.error ? v.error : bad), 'error');
+    }
+  } catch (err) {
+    toast('Validate failed: ' + err.message, 'error');
   }
 }
 

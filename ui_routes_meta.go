@@ -627,6 +627,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/approve", Handler: "apiSupportBundleApprove", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "approve a pending bundle for download after redaction-report review (mandatory-preview gate); admin; audited as support.bundle.approve"}}},
+	{Path: "/api/support/bundles/{id}/validate", Handler: "apiSupportBundleValidate", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "re-derive + check the bundle's per-section SHA-256 against its manifest (tamper detection); viewer (integrity metadata only, no section content)"}}},
 	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},
