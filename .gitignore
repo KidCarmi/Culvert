@@ -60,3 +60,6 @@ edge-case-lab/evidence/
 edge-case-lab/scenarios/
 edge-case-lab/reports/mutation-raw.jsonl
 /tmp/culvert.log
+
+# Local Claude Code agent worktrees / scratch (never committed)
+.claude/
