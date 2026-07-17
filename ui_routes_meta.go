@@ -643,4 +643,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/dns", Handler: "apiDiagnoseDNS", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "bounded, SSRF-guarded DNS resolution probe of a bare hostname (private-resolving targets refused); operator+; no shell; audited as diagnose.dns"}}},
+	{Path: "/api/diagnose/tls", Handler: "apiDiagnoseTLS", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "bounded, SSRF-guarded TLS handshake + chain/expiry check of host:port (private targets refused; no MITM); operator+; no shell; audited as diagnose.tls"}}},
 }

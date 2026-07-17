@@ -4034,6 +4034,8 @@ Firefox (all platforms):
               <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
               <input id="support-dns-host" class="input sm" type="text" placeholder="host to resolve" style="width:180px" title="Bare hostname (no scheme/port/path)">
               <button class="btn ghost sm" data-click="diagnoseDNS" data-min-role="operator" title="Bounded DNS resolution probe (private targets refused)">Resolve DNS</button>
+              <input id="support-tls-host" class="input sm" type="text" placeholder="host:port for TLS" style="width:180px" title="host[:port] (default 443); private targets refused">
+              <button class="btn ghost sm" data-click="diagnoseTLS" data-min-role="operator" title="Bounded TLS handshake + chain/expiry check (no MITM; private targets refused)">Check TLS</button>
             </div>
             <div id="support-diagnose" role="status" aria-live="polite" style="margin-top:6px"></div>
           </div>
@@ -4424,6 +4426,7 @@ document.addEventListener('click', e => {
     case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
     case 'diagnoseDNS':            diagnoseDNS(); break;
+    case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -12028,6 +12031,51 @@ function renderDiagnoseDNS(d) {
   const addrs = (d.addresses || []).map(a => escHtml(String(a))).join(', ');
   el.innerHTML = '<p class="hint">DNS <strong style="color:var(--green)">OK</strong> — ' + escHtml(String(d.host)) +
     ' → ' + addrs + ' <span class="hint">(' + escHtml(String(d.duration_ms || 0)) + ' ms)</span></p>';
+}
+
+async function diagnoseTLS() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const inp = document.getElementById('support-tls-host');
+  const host = (inp && inp.value || '').trim();
+  if (!host) { toast('Enter host:port to check', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseTLS"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/tls', { method: 'POST', body: JSON.stringify({ host: host }) });
+    renderDiagnoseTLS(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">TLS check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseTLS(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const label = escHtml(String(d.host || '')) + ':' + escHtml(String(d.port || ''));
+  if (d.blocked) {
+    el.innerHTML = '<p class="hint">TLS <strong style="color:var(--orange)">BLOCKED</strong> — ' + label +
+      ' is a private/internal target; the probe is refused (SSRF guard).</p>';
+    return;
+  }
+  if (!d.handshake_ok) {
+    el.innerHTML = '<p class="hint">TLS <strong style="color:var(--red)">FAILED</strong> — ' + label +
+      (d.error ? ': ' + escHtml(String(d.error)) : '') + '</p>';
+    return;
+  }
+  const color = d.ok ? 'var(--green)' : 'var(--orange)';
+  const verdict = d.ok ? 'OK' : (d.expired ? 'EXPIRED' : 'UNTRUSTED');
+  const leaf = d.leaf || {};
+  el.innerHTML = '<p class="hint">TLS <strong style="color:' + color + '">' + verdict + '</strong> — ' + label +
+    ' · ' + escHtml(String(d.version || '')) + ' · chain ' + (d.chain_verified ? 'verified' : 'unverified') +
+    ' · expires in ' + escHtml(String(d.days_until_expiry)) + 'd' +
+    (d.error ? ' <span class="hint">(' + escHtml(String(d.error)) + ')</span>' : '') + '</p>' +
+    '<p class="hint">subject ' + escHtml(String(leaf.subject || '')) + ' · issuer ' + escHtml(String(leaf.issuer || '')) + '</p>';
 }
 
 async function supportSetDebugLevel() {

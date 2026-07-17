@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"os"
@@ -381,9 +383,201 @@ func dnsResult(d dnsDiagnosis) string {
 	}
 }
 
+// ── diagnose tls ──────────────────────────────────────────────────────────────
+
+// diagnoseTLSTimeout bounds the whole probe (dial + handshake).
+const diagnoseTLSTimeout = 5 * time.Second
+
+// diagnoseMaxSANs caps the SANs reported for one leaf (a pathological cert could
+// otherwise carry thousands).
+const diagnoseMaxSANs = 32
+
+// tlsHandshakeProbe is the connect+handshake seam — overridden in tests so no real
+// network is used. The default implementation applies the SSRF connect guard
+// (ssrfControl) and performs the handshake with verification DISABLED so the peer
+// chain can be inspected even when it is invalid/expired; validity is reported
+// separately (chain_verified). ServerName drives SNI + later verification.
+var tlsHandshakeProbe = func(ctx context.Context, hostport, serverName string) (*tls.ConnectionState, error) {
+	raw, err := (&net.Dialer{Timeout: diagnoseTLSTimeout, Control: ssrfControl}).DialContext(ctx, "tcp", hostport)
+	if err != nil {
+		return nil, err
+	}
+	// #nosec G402 -- verification is intentionally deferred: this is a diagnostic
+	// that must observe even an invalid/expired chain, then reports validity via a
+	// separate cert.Verify (summarizeTLSState). It is never used to carry traffic.
+	conn := tls.Client(raw, &tls.Config{ServerName: serverName, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	defer conn.Close() //nolint:errcheck // best-effort; the ConnectionState is copied out below
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+	cs := conn.ConnectionState()
+	return &cs, nil
+}
+
+type tlsLeaf struct {
+	Subject   string   `json:"subject"`
+	Issuer    string   `json:"issuer"`
+	NotBefore string   `json:"not_before"`
+	NotAfter  string   `json:"not_after"`
+	DNSNames  []string `json:"dns_names,omitempty"`
+}
+
+type tlsDiagnosis struct {
+	SchemaVersion   int      `json:"schema_version"`
+	GeneratedAt     string   `json:"generated_at"`
+	Host            string   `json:"host"`
+	Port            string   `json:"port"`
+	Blocked         bool     `json:"blocked"` // private/internal target refused (SSRF guard)
+	OK              bool     `json:"ok"`      // handshake ok AND chain verifies AND not expired
+	HandshakeOK     bool     `json:"handshake_ok"`
+	Version         string   `json:"version,omitempty"`      // e.g. "TLS 1.3"
+	CipherSuite     string   `json:"cipher_suite,omitempty"` // e.g. "TLS_AES_128_GCM_SHA256"
+	ChainVerified   bool     `json:"chain_verified"`
+	Expired         bool     `json:"expired"`
+	DaysUntilExpiry int      `json:"days_until_expiry"`
+	Leaf            *tlsLeaf `json:"leaf,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	DurationMs      int64    `json:"duration_ms"`
+}
+
+// summarizeTLSState turns a completed handshake's ConnectionState into the typed
+// diagnosis: negotiated params, leaf identity/expiry, and chain verification
+// against the system roots for host. Pure (no I/O) so it is fully testable with a
+// fabricated cert.
+func summarizeTLSState(host string, cs *tls.ConnectionState, now time.Time) tlsDiagnosis {
+	d := tlsDiagnosis{
+		HandshakeOK: true,
+		Version:     tls.VersionName(cs.Version),
+		CipherSuite: tls.CipherSuiteName(cs.CipherSuite),
+	}
+	if len(cs.PeerCertificates) == 0 {
+		d.Error = "no peer certificate"
+		return d
+	}
+	leaf := cs.PeerCertificates[0]
+	sans := leaf.DNSNames
+	if len(sans) > diagnoseMaxSANs {
+		sans = sans[:diagnoseMaxSANs]
+	}
+	d.Leaf = &tlsLeaf{
+		Subject:   leaf.Subject.String(),
+		Issuer:    leaf.Issuer.String(),
+		NotBefore: leaf.NotBefore.UTC().Format(time.RFC3339),
+		NotAfter:  leaf.NotAfter.UTC().Format(time.RFC3339),
+		DNSNames:  sans,
+	}
+	d.Expired = now.Before(leaf.NotBefore) || now.After(leaf.NotAfter)
+	d.DaysUntilExpiry = int(leaf.NotAfter.Sub(now).Hours() / 24)
+
+	// Chain verification against the system roots, with the intermediates the peer
+	// presented. A failure is reported (not fatal) — the diagnostic's job is to say
+	// WHY, e.g. self-signed/expired/untrusted.
+	roots, _ := x509.SystemCertPool()
+	inter := x509.NewCertPool()
+	for _, c := range cs.PeerCertificates[1:] {
+		inter.AddCert(c)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		DNSName:       host,
+		Roots:         roots,
+		Intermediates: inter,
+		CurrentTime:   now,
+	}); err == nil {
+		d.ChainVerified = true
+	} else {
+		d.Error = boundedErr(err.Error())
+	}
+	d.OK = d.ChainVerified && !d.Expired
+	return d
+}
+
+// diagnoseTLS parses host[:port] (default 443), enforces the SSRF guard, performs
+// a bounded handshake via the seam, and summarizes it. now/ctx injected for tests.
+func diagnoseTLS(ctx context.Context, hostArg string, now time.Time) tlsDiagnosis {
+	host, port := hostArg, "443"
+	if h, p, err := net.SplitHostPort(hostArg); err == nil {
+		host, port = h, p
+	}
+	d := tlsDiagnosis{SchemaVersion: diagnoseSchemaVersion, GeneratedAt: now.UTC().Format(time.RFC3339), Host: host, Port: port}
+	if !validDiagnoseHost(host) || !validPort(port) {
+		d.Error = "invalid host:port (bare hostname + 1..65535 port)"
+		return d
+	}
+	hostport := net.JoinHostPort(host, port)
+
+	// SSRF guard (inline so CodeQL sees it): refuse a target that resolves to a
+	// private/internal address before any dial — the connect-layer ssrfControl in
+	// the seam is the DNS-rebinding backstop.
+	if err := isPrivateHost(hostport); err != nil {
+		d.Blocked = true
+		return d
+	}
+
+	lctx, cancel := context.WithTimeout(ctx, diagnoseTLSTimeout)
+	defer cancel()
+	start := now
+	cs, err := tlsHandshakeProbe(lctx, hostport, host)
+	dur := int64(time.Since(start) / time.Millisecond)
+	if err != nil {
+		d.Error = boundedErr(err.Error())
+		d.DurationMs = dur
+		return d
+	}
+	sum := summarizeTLSState(host, cs, now)
+	sum.SchemaVersion, sum.GeneratedAt, sum.Host, sum.Port, sum.DurationMs = d.SchemaVersion, d.GeneratedAt, host, port, dur
+	return sum
+}
+
+// validPort reports whether s is a decimal port in 1..65535.
+func validPort(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// apiDiagnoseTLS runs a bounded, SSRF-guarded TLS handshake diagnosis (POST, operator).
+func apiDiagnoseTLS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Host string `json:"host"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	hostArg := strings.TrimSpace(body.Host)
+	if hostArg == "" {
+		http.Error(w, "host is required (hostname[:port])", http.StatusBadRequest)
+		return
+	}
+	d := diagnoseTLS(r.Context(), hostArg, time.Now())
+	auditEvent(r, "diagnose.tls", sanitizeLog(hostArg), tlsResult(d))
+	jsonOK(w, d)
+}
+
+func tlsResult(d tlsDiagnosis) string {
+	switch {
+	case d.Blocked:
+		return "blocked"
+	case d.OK:
+		return "ok"
+	case d.HandshakeOK:
+		return "handshake-ok-untrusted"
+	default:
+		return "failed"
+	}
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
 	mux.HandleFunc("/api/diagnose/upstream", apiDiagnoseUpstream)
 	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
+	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 }

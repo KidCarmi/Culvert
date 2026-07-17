@@ -2,6 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +18,34 @@ import (
 	"testing"
 	"time"
 )
+
+// makeTestLeaf builds a self-signed leaf cert with the given validity window and
+// SAN, returning the parsed *x509.Certificate — no network, deterministic enough
+// for the summarize tests.
+func makeTestLeaf(t *testing.T, cn, san string, notBefore, notAfter time.Time) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: cn},
+		Issuer:       pkix.Name{CommonName: cn},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		DNSNames:     []string{san},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("createcert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parsecert: %v", err)
+	}
+	return cert
+}
 
 // TestDiagnoseStorage_HealthyDir proves the storage verb reports ok on a writable
 // data dir and fills the typed, versioned contract.
@@ -299,6 +334,110 @@ func TestDiagnoseDNS_API(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"schema_version"`) || !strings.Contains(rec.Body.String(), `"1.1.1.1"`) {
 		t.Fatalf("body missing typed fields: %s", rec.Body.String())
+	}
+}
+
+// TestSummarizeTLSState_SelfSignedUntrusted proves a valid but self-signed chain
+// reports handshake_ok + populated leaf but chain_verified=false (not in system
+// roots) — the diagnostic surfaces WHY without failing.
+func TestSummarizeTLSState_SelfSignedUntrusted(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	leaf := makeTestLeaf(t, "test-leaf", "svc.example", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	cs := &tls.ConnectionState{
+		Version:          tls.VersionTLS13,
+		CipherSuite:      tls.TLS_AES_128_GCM_SHA256,
+		PeerCertificates: []*x509.Certificate{leaf},
+	}
+	d := summarizeTLSState("svc.example", cs, now)
+	if !d.HandshakeOK {
+		t.Fatal("handshake_ok should be true")
+	}
+	if d.ChainVerified {
+		t.Fatal("self-signed leaf should NOT verify against system roots")
+	}
+	if d.Expired {
+		t.Fatal("cert within validity should not be expired")
+	}
+	if d.OK {
+		t.Fatal("untrusted chain must not be ok")
+	}
+	if d.Leaf == nil || !strings.Contains(d.Leaf.Subject, "test-leaf") {
+		t.Fatalf("leaf not summarized: %+v", d.Leaf)
+	}
+	if d.Version != tls.VersionName(tls.VersionTLS13) {
+		t.Fatalf("version=%q", d.Version)
+	}
+	if d.DaysUntilExpiry < 89 || d.DaysUntilExpiry > 90 {
+		t.Fatalf("days_until_expiry=%d want ~90", d.DaysUntilExpiry)
+	}
+}
+
+// TestSummarizeTLSState_Expired proves an expired cert is flagged expired and not ok.
+func TestSummarizeTLSState_Expired(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	leaf := makeTestLeaf(t, "old", "old.example", now.Add(-90*24*time.Hour), now.Add(-24*time.Hour))
+	cs := &tls.ConnectionState{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, PeerCertificates: []*x509.Certificate{leaf}}
+	d := summarizeTLSState("old.example", cs, now)
+	if !d.Expired {
+		t.Fatal("past-NotAfter cert should be expired")
+	}
+	if d.OK {
+		t.Fatal("expired cert must not be ok")
+	}
+	if d.DaysUntilExpiry > 0 {
+		t.Fatalf("days_until_expiry=%d want <= 0", d.DaysUntilExpiry)
+	}
+}
+
+// TestDiagnoseTLS_PrivateBlocked is the SSRF guard proof: a private/loopback target
+// is refused before any handshake — blocked=true, no leaf.
+func TestDiagnoseTLS_PrivateBlocked(t *testing.T) {
+	for _, target := range []string{"127.0.0.1:443", "10.0.0.1:8443", "192.168.0.1"} {
+		d := diagnoseTLS(context.Background(), target, time.Unix(1_700_000_000, 0))
+		if !d.Blocked {
+			t.Errorf("private target %q not blocked: %+v", target, d)
+		}
+		if d.HandshakeOK || d.Leaf != nil {
+			t.Errorf("private target %q reached handshake", target)
+		}
+	}
+}
+
+// TestDiagnoseTLS_InvalidTarget proves malformed host:port is rejected without a dial.
+func TestDiagnoseTLS_InvalidTarget(t *testing.T) {
+	for _, bad := range []string{"_sip._tcp.x:443", "example.com:0", "example.com:70000", "example.com:abc", "bad host:443"} {
+		d := diagnoseTLS(context.Background(), bad, time.Unix(1_700_000_000, 0))
+		if d.Error == "" || d.Blocked || d.HandshakeOK {
+			t.Errorf("invalid target %q not rejected: %+v", bad, d)
+		}
+	}
+}
+
+// TestDiagnoseTLS_API proves POST + operator RBAC + typed contract. The 200 path
+// uses a loopback target so the SSRF guard short-circuits before any network I/O.
+func TestDiagnoseTLS_API(t *testing.T) {
+	vRec := httptest.NewRecorder()
+	apiDiagnoseTLS(vRec, roleReq(RoleViewer, http.MethodPost, "/api/diagnose/tls", map[string]any{"host": "example.com:443"}))
+	if vRec.Code != http.StatusForbidden {
+		t.Fatalf("viewer code=%d want 403", vRec.Code)
+	}
+	gRec := httptest.NewRecorder()
+	apiDiagnoseTLS(gRec, roleReq(RoleOperator, http.MethodGet, "/api/diagnose/tls", nil))
+	if gRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET code=%d want 405", gRec.Code)
+	}
+	eRec := httptest.NewRecorder()
+	apiDiagnoseTLS(eRec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/tls", map[string]any{"host": ""}))
+	if eRec.Code != http.StatusBadRequest {
+		t.Fatalf("empty host code=%d want 400", eRec.Code)
+	}
+	rec := httptest.NewRecorder()
+	apiDiagnoseTLS(rec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/tls", map[string]any{"host": "127.0.0.1:443"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator POST code=%d want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"schema_version"`) || !strings.Contains(rec.Body.String(), `"blocked":true`) {
+		t.Fatalf("body missing typed/blocked fields: %s", rec.Body.String())
 	}
 }
 
