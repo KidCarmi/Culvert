@@ -656,6 +656,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	autoExcludeLearns.writePrometheus(&ruleMetBuf)
+	decSessions.writePrometheus(&ruleMetBuf)      // culvert_decrypt_sessions_total (ADR-0011 coverage)
 	crashByComponent.writePrometheus(&ruleMetBuf) // culvert_crash_records_* (panic recovery)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)

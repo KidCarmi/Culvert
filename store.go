@@ -1194,6 +1194,11 @@ func recordTunnelCloseGatedReason(match *PolicyMatch, id ProxyIdentity, method, 
 // plumbing. Projection (toBlock) happens off the latency-critical decision, at close.
 func recordTunnelCloseGatedDec(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionOutcome, redact bool) {
 	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
+	// ADR-0011 coverage metric: count the session once, unconditionally (a quiet rule
+	// still had a decryption decision). nil dec ⇒ a non-decryption close (WS/SOCKS) ⇒
+	// no-op. This is the choke point for bypass / learned-bypass / rescue / non-TLS
+	// fallback; the inspect-success path counts separately (it never reaches here).
+	recordDecryptSession(dec)
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
 	}
