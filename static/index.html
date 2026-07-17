@@ -4080,6 +4080,7 @@ Firefox (all platforms):
               <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
               <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
               <button class="btn ghost sm" data-click="diagnoseCluster" data-min-role="operator" title="Cluster/HA posture — role, fencing lease, node counts, write authority (no network, no secrets)">Run cluster check</button>
+              <button class="btn ghost sm" data-click="diagnoseConfig" data-min-role="operator" title="Live config-snapshot validity + collection sizes (no snapshot values)">Run config check</button>
               <input id="support-dns-host" class="input sm" type="text" placeholder="host to resolve" style="width:180px" title="Bare hostname (no scheme/port/path)">
               <button class="btn ghost sm" data-click="diagnoseDNS" data-min-role="operator" title="Bounded DNS resolution probe (private targets refused)">Resolve DNS</button>
               <input id="support-tls-host" class="input sm" type="text" placeholder="host:port for TLS" style="width:180px" title="host[:port] (default 443); private targets refused">
@@ -4484,6 +4485,7 @@ document.addEventListener('click', e => {
     case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
     case 'diagnoseCluster':        diagnoseCluster(); break;
+    case 'diagnoseConfig':         diagnoseConfig(); break;
     case 'diagnoseDNS':            diagnoseDNS(); break;
     case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
@@ -12473,6 +12475,37 @@ function renderDiagnoseCluster(d) {
   const detail = d.detail ? '<p class="hint">' + escHtml(String(d.detail)) + '</p>' : '';
   el.innerHTML = '<p class="hint">Cluster <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') + '</strong></p>' +
     detail + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><tbody>' + body + '</tbody></table></div>';
+}
+
+async function diagnoseConfig() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseConfig"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/config', { method: 'POST' });
+    renderDiagnoseConfig(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Config check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseConfig(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const hdr = '<p class="hint">Config snapshot <strong style="color:' + color + '">' + (d.ok ? 'VALID' : 'INVALID') +
+    '</strong> · policy v' + escHtml(String(d.policy_version || 0)) + ' · epoch ' + escHtml(String(d.epoch || 0)) + '</p>';
+  const err = d.error ? '<p class="hint" style="color:var(--red)">' + escHtml(String(d.error)) + '</p>' : '';
+  const rows = (d.sizes || []).map(s =>
+    '<tr><td class="hint">' + escHtml(String(s.name)) + '</td><td>' + escHtml(String(s.size)) + '</td></tr>').join('');
+  el.innerHTML = hdr + err + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Collection</th><th>Size</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function diagnoseDNS() {
