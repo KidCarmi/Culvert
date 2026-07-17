@@ -662,7 +662,16 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "download a READY bundle wrapped in the PSCA passphrase envelope (AES-256-GCM); operator+ (approval-gated exfil, like plain download); POST carries the passphrase in the body (never logged); audited as support.bundle.download_encrypted"}}},
 	{Path: "/api/support/bundles/{id}/download-sealed", Handler: "apiSupportBundleExportSealed", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
-			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key in body (not secret); audited as support.bundle.download_sealed"}}},
+			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key or registered recipient name in body (not secret); audited as support.bundle.download_sealed"}}},
+	{Path: "/api/support/recipients", Handler: "apiSupportRecipients", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "list registered sealing recipients (name + public key + fingerprint; nothing secret)"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "register a named recipient (validates the X25519 key against the low-order guard, stores its SHA-256 fingerprint); admin; audited as support.recipient.add"},
+		}},
+	{Path: "/api/support/recipients/{name}", Handler: "apiSupportRecipientItem", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "remove a registered recipient; operator+; audited as support.recipient.delete"}}},
 	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},

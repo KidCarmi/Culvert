@@ -4090,6 +4090,17 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">Sealing recipients</div>
+            <p class="hint">Register a TAC/recipient <strong>public</strong> X25519 key once (verify its fingerprint out-of-band), then seal bundles to it by name — no pasting raw keys. Keys are validated on registration; nothing here is secret.</p>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" data-min-role="admin">
+              <input id="recipient-name" class="input sm" type="text" placeholder="name (e.g. tac-prod)" maxlength="64" style="width:150px">
+              <input id="recipient-key" class="input sm" type="text" placeholder="base64 X25519 public key" style="width:240px">
+              <button class="btn ghost sm" data-click="addRecipient" data-min-role="admin" title="Register a named sealing recipient">Register</button>
+            </div>
+            <div id="support-recipients" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
@@ -4493,6 +4504,8 @@ document.addEventListener('click', e => {
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
     case 'supportExportSealed':    supportExportSealed(arg); break;
+    case 'addRecipient':           addRecipient(); break;
+    case 'deleteRecipient':        deleteRecipient(arg); break;
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -12206,6 +12219,7 @@ async function loadSupport() {
   if (dlR.status === 'fulfilled') renderSupportDebugLevel(dlR.value);
   else if (dlEl) dlEl.innerHTML = '<p class="hint">Failed to load capture level: ' + escHtml(dlR.reason.message) + '</p>';
   [healthEl, statusEl, bundlesEl, dlEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+  loadRecipients();
 }
 
 function renderSupportDebugLevel(d) {
@@ -12654,16 +12668,87 @@ async function supportApproveBundle(id) {
   }
 }
 
+let _supportRecipients = [];
+
+async function loadRecipients() {
+  const el = document.getElementById('support-recipients');
+  try {
+    const d = await api('/api/support/recipients');
+    _supportRecipients = (d && d.recipients) || [];
+    renderRecipients(_supportRecipients);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Could not load recipients: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderRecipients(list) {
+  const el = document.getElementById('support-recipients');
+  if (!el) return;
+  list = list || [];
+  if (!list.length) { el.innerHTML = '<p class="hint">No registered recipients.</p>'; return; }
+  const canDel = (uiRole === 'operator' || uiRole === 'admin');
+  const rows = list.map(rec => {
+    const fp = String(rec.fingerprint || '');
+    const del = canDel ? ' <button class="btn ghost sm" data-click="deleteRecipient" data-arg="' + escHtml(String(rec.name)) + '" title="Remove this recipient">Remove</button>' : '';
+    return '<tr><td>' + escHtml(String(rec.name)) + '</td>' +
+      '<td class="hint" style="font-family:monospace" title="SHA-256 fingerprint — verify out-of-band">' + escHtml(fp.slice(0, 16)) + '…</td>' +
+      '<td>' + del + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Name</th><th>Fingerprint</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function addRecipient() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const nameInp = document.getElementById('recipient-name');
+  const keyInp = document.getElementById('recipient-key');
+  const name = (nameInp && nameInp.value || '').trim();
+  const key = (keyInp && keyInp.value || '').trim();
+  if (!name || !key) { toast('Enter a name and a base64 public key', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/support/recipients',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, public_key: key }) });
+    if (!r.ok) { toast('Register failed: ' + (await r.text()), 'error'); return; }
+    const rec = await r.json();
+    if (nameInp) nameInp.value = '';
+    if (keyInp) keyInp.value = '';
+    toast('Recipient "' + name + '" registered — verify fingerprint ' + String(rec.fingerprint || '').slice(0, 16) + '… out-of-band', 'success');
+    await loadRecipients();
+  } catch (err) {
+    toast('Register failed: ' + err.message, 'error');
+  }
+}
+
+async function deleteRecipient(name) {
+  if (!name) return;
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  if (!window.confirm('Remove sealing recipient "' + name + '"?')) return;
+  try {
+    const r = await apiFetch('/api/support/recipients/' + encodeURIComponent(String(name)), { method: 'DELETE' });
+    if (!r.ok) { toast('Remove failed: ' + (await r.text()), 'error'); return; }
+    toast('Recipient removed', 'success');
+    await loadRecipients();
+  } catch (err) {
+    toast('Remove failed: ' + err.message, 'error');
+  }
+}
+
 async function supportExportSealed(id) {
   if (!id) return;
   if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
-  const key = window.prompt("Recipient's X25519 public key (base64) to seal the bundle to. Only the holder of the matching private key can open it — the appliance keeps no decrypt key.");
-  if (key === null) return; // cancelled
-  const k = key.trim();
-  if (!k) { toast('A recipient public key is required', 'error'); return; }
+  const names = _supportRecipients.map(r => r.name);
+  const hint = names.length
+    ? 'Enter a registered recipient NAME (' + names.join(', ') + '), or paste a raw base64 X25519 public key.'
+    : "Recipient's X25519 public key (base64) to seal the bundle to. Only the holder of the matching private key can open it — the appliance keeps no decrypt key.";
+  const val = window.prompt(hint);
+  if (val === null) return; // cancelled
+  const v = val.trim();
+  if (!v) { toast('A registered name or a recipient public key is required', 'error'); return; }
+  // If the input matches a registered recipient name, seal by name; else treat as a raw key.
+  const body = names.indexOf(v) >= 0 ? { recipient_name: v } : { recipient_public_key: v };
   try {
     const r = await apiFetch('/api/support/bundles/' + encodeURIComponent(String(id)) + '/download-sealed',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recipient_public_key: k }) });
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) { toast('Seal failed: ' + (await r.text()), 'error'); return; }
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);

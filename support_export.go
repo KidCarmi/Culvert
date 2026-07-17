@@ -107,6 +107,23 @@ type sealedExportReq struct {
 	// RecipientPublicKey is the recipient's base64 (std or url, padded or not)
 	// X25519 public key — obtained out-of-band (e.g. TAC publishes it).
 	RecipientPublicKey string `json:"recipient_public_key"`
+	// RecipientName references a registered recipient (support_recipients.go) whose
+	// key was validated + fingerprinted at registration — the safe, routine path.
+	RecipientName string `json:"recipient_name"`
+}
+
+// resolveSealRecipient picks the recipient key from EITHER a registered name OR a
+// raw public key. Exactly one must be supplied; a registered name takes precedence
+// and both-empty is rejected. Both paths run the same low-order validation
+// (lookup re-validates the stored key; decode validates the raw key).
+func resolveSealRecipient(req sealedExportReq) (*[sealbox.KeyLen]byte, error) {
+	if name := strings.TrimSpace(req.RecipientName); name != "" {
+		return lookupSupportRecipientKey(name)
+	}
+	if strings.TrimSpace(req.RecipientPublicKey) != "" {
+		return decodeX25519PubKey(req.RecipientPublicKey)
+	}
+	return nil, errors.New("supply recipient_name (registered) or recipient_public_key (raw base64 X25519)")
 }
 
 // decodeX25519PubKey accepts standard or URL base64, padded or raw, and requires
@@ -165,9 +182,13 @@ func apiSupportBundleExportSealed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	pub, err := decodeX25519PubKey(req.RecipientPublicKey)
+	pub, err := resolveSealRecipient(req)
 	if err != nil {
-		http.Error(w, "invalid recipient_public_key (base64 X25519, 32 bytes): "+err.Error(), http.StatusBadRequest)
+		if errors.Is(err, errRecipientNotFound) {
+			http.Error(w, "registered recipient not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "invalid recipient: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
