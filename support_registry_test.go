@@ -33,6 +33,8 @@ var m2CollectorRoster = []string{
 	"tls", "config_versions", "governance",
 	// M2 breadth (PR5)
 	"upstream", "cdr", "scan",
+	// M3 runtime capture (L2)
+	"runtime",
 }
 
 func TestM2Wall_RosterLocked(t *testing.T) {
@@ -104,18 +106,30 @@ func TestM2Wall_CollectorContract(t *testing.T) {
 // skipped section with class_max=PUBLIC and no payload, so accepting "" would let
 // a silently-failed or dropped L1 collector pass — defeating the proof.
 func TestM2Wall_EverySectionWithinCeiling(t *testing.T) {
-	res := buildRealBundle(t)
+	res := buildRealBundle(t) // L1 standard bundle
 	byID := map[string]support.SectionEntry{}
 	for _, s := range res.Manifest.Sections {
 		byID[s.ID] = s
+	}
+	minLevel := map[string]support.DebugLevel{}
+	for _, c := range support.Collectors() {
+		minLevel[c.Meta().ID] = c.Meta().MinLevel
 	}
 	for _, id := range m2CollectorRoster {
 		s, ok := byID[id]
 		if !ok {
 			t.Fatalf("roster collector %q produced no manifest section", id)
 		}
-		// At L1 every roster collector is level-eligible, so it must run and write
-		// bytes — not be skipped/failed/unavailable or empty.
+		// A collector whose MinLevel is above L1 is legitimately level-gated in the
+		// standard bundle — it must appear as a skipped entry, wired but not run.
+		if minLevel[id] > support.L1 {
+			if s.Status != support.StatusSkipped {
+				t.Fatalf("L%d collector %q status=%q (want skipped in an L1 bundle)", minLevel[id], id, s.Status)
+			}
+			continue
+		}
+		// Every L0/L1 collector must actually run and write bytes — not be silently
+		// skipped/failed/unavailable or empty.
 		if s.Status != support.StatusOK && s.Status != support.StatusPartial {
 			t.Fatalf("roster collector %q status=%q (want ok/partial) — silently absent from the bundle", id, s.Status)
 		}

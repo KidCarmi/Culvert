@@ -182,7 +182,13 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown incident scope", http.StatusBadRequest)
 			return
 		}
-		res, err := createSupportBundle(r.Context(), scope)
+		// Optional ?level= (0..4) for debug-capture depth (default L1 standard).
+		level, ok := parseSupportLevel(r.URL.Query().Get("level"))
+		if !ok {
+			http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
+			return
+		}
+		res, err := createSupportBundle(r.Context(), scope, level)
 		if err != nil {
 			if errors.Is(err, errSupportLowDisk) {
 				logger.Printf("support: bundle build refused — insufficient disk headroom")
@@ -196,7 +202,7 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		if scope == "" {
 			scope = "standard"
 		}
-		auditEvent(r, "support.bundle.create", res.BundleID, scope)
+		auditEvent(r, "support.bundle.create", res.BundleID, fmt.Sprintf("%s L%d", scope, int(level)))
 		jsonOK(w, res.Manifest)
 	default:
 		w.Header().Set("Allow", "GET, POST")
@@ -382,6 +388,26 @@ func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 
 // buildSupportBundle runs the engine over the registered collectors at the given
 // level. No model or network is in the path; the bundle is redacted at source.
+// parseSupportLevel maps an optional "0".."4" query value to a DebugLevel; empty
+// defaults to L1 (standard). ok=false for a malformed value.
+func parseSupportLevel(s string) (support.DebugLevel, bool) {
+	switch s {
+	case "":
+		return support.L1, true
+	case "0":
+		return support.L0, true
+	case "1":
+		return support.L1, true
+	case "2":
+		return support.L2, true
+	case "3":
+		return support.L3, true
+	case "4":
+		return support.L4, true
+	}
+	return support.L1, false
+}
+
 func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope string) (*support.BuildResult, error) {
 	include, ok := resolveSupportScope(scope)
 	if !ok {
@@ -413,14 +439,14 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope str
 // <dataDir>/support/bundles/<id>/. It is fail-closed on low disk (preflight),
 // crash-safe on the error path (a failed persist never strands a partial dir),
 // and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
-func createSupportBundle(ctx context.Context, scope string) (res *support.BuildResult, retErr error) {
+func createSupportBundle(ctx context.Context, scope string, level support.DebugLevel) (res *support.BuildResult, retErr error) {
 	// Disk-headroom preflight: never begin a build that could fill /data. A
 	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
 	// the write itself still errors and cleans up), a low reading is fail-closed.
 	if _, free, _, err := diskUsage(dataDir); err == nil && free < supportMinFreeBytes {
 		return nil, errSupportLowDisk
 	}
-	res, err := buildSupportBundle(ctx, support.L1, scope)
+	res, err := buildSupportBundle(ctx, level, scope)
 	if err != nil {
 		return nil, err
 	}

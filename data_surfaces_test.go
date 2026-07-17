@@ -38,6 +38,7 @@ var collectedStructs = []any{
 	upstreamProxyStatus{},
 	cdrSection{},
 	scanSection{},
+	runtimeSection{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

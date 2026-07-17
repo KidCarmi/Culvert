@@ -3985,6 +3985,11 @@ Firefox (all platforms):
           <div style="display:flex;gap:8px;align-items:center">
             <label class="hint" for="support-scope" data-min-role="admin">Scope</label>
             <select id="support-scope" class="input sm" data-min-role="admin" title="Incident scope: focus the bundle on collectors relevant to one incident type"><option value="standard">standard</option></select>
+            <label class="hint" for="support-level" data-min-role="admin">Level</label>
+            <select id="support-level" class="input sm" data-min-role="admin" title="Debug-capture depth: L1 standard, L2 adds runtime/host facts">
+              <option value="1">L1 (standard)</option>
+              <option value="2">L2 (+runtime)</option>
+            </select>
             <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
           </div>
@@ -11828,9 +11833,11 @@ async function supportCreateBundle() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
   const scopeSel = document.getElementById('support-scope');
   const scope = (scopeSel && scopeSel.value) || 'standard';
+  const levelSel = document.getElementById('support-level');
+  const level = (levelSel && levelSel.value) || '1';
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (scope: ' + scope + ') will be collected and written to disk — internal, non-secret operational detail.',
+    'A redacted diagnostic bundle (scope: ' + scope + ', level: L' + level + ') will be collected and written to disk — internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
@@ -11838,7 +11845,7 @@ async function supportCreateBundle() {
   const prev = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
-    const man = await api('/api/support/bundles?scope=' + encodeURIComponent(scope), { method: 'POST' });
+    const man = await api('/api/support/bundles?scope=' + encodeURIComponent(scope) + '&level=' + encodeURIComponent(level), { method: 'POST' });
     toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
     await loadSupport();
   } catch (err) {

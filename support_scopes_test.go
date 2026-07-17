@@ -95,6 +95,52 @@ func TestSupportScope_FiltersCollectors(t *testing.T) {
 	}
 }
 
+func TestParseSupportLevel(t *testing.T) {
+	cases := map[string]struct {
+		want support.DebugLevel
+		ok   bool
+	}{
+		"":  {support.L1, true},
+		"0": {support.L0, true},
+		"1": {support.L1, true},
+		"2": {support.L2, true},
+		"3": {support.L3, true},
+		"4": {support.L4, true},
+		"5": {support.L1, false},
+		"x": {support.L1, false},
+	}
+	for in, exp := range cases {
+		got, ok := parseSupportLevel(in)
+		if got != exp.want || ok != exp.ok {
+			t.Errorf("parseSupportLevel(%q)=(%d,%v) want (%d,%v)", in, got, ok, exp.want, exp.ok)
+		}
+	}
+}
+
+// TestSupportLevel_RuntimeGatedAtL2 proves the L2 runtime collector is skipped in
+// a standard (L1) bundle and runs at L2 — the debug-level capture control.
+func TestSupportLevel_RuntimeGatedAtL2(t *testing.T) {
+	at := func(level support.DebugLevel) support.SectionEntry {
+		res, err := buildSupportBundle(context.Background(), level, "standard")
+		if err != nil {
+			t.Fatalf("build L%d: %v", level, err)
+		}
+		for _, s := range res.Manifest.Sections {
+			if s.ID == "runtime" {
+				return s
+			}
+		}
+		t.Fatalf("no runtime section at L%d", level)
+		return support.SectionEntry{}
+	}
+	if s := at(support.L1); s.Status != support.StatusSkipped {
+		t.Errorf("runtime at L1 status=%q want skipped", s.Status)
+	}
+	if s := at(support.L2); s.Status != support.StatusOK && s.Status != support.StatusPartial {
+		t.Errorf("runtime at L2 status=%q want ok/partial", s.Status)
+	}
+}
+
 // TestSupportScope_StandardRunsAll confirms the standard scope applies no filter.
 func TestSupportScope_StandardRunsAll(t *testing.T) {
 	res, err := buildSupportBundle(context.Background(), support.L1, "standard")
