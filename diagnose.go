@@ -631,24 +631,43 @@ type clusterDiagnosis struct {
 // mutating the HA/cluster singletons (which would race the live loops).
 type clusterInputs struct {
 	haStatus     HAStatus
+	nodeRole     string // authoritative clusterRole.role: standalone|control-plane|data-plane
 	leaseMode    string
 	leaseValid   bool
 	epoch        int64
-	writeAllowed bool
+	writeAllowed bool // RAW lease-layer primitive (globalHA.WriteAllowed)
 	total        int
 	connected    int
 	dpActive     bool
+}
+
+// effectiveWriteAuthority collapses the lease-layer primitive with the HA role,
+// mirroring haIssuanceAllowed(): with HA disabled a node always has write
+// authority; an HA standby never does (WriteAllowed is only the lease primitive
+// and returns true in legacy mode, which would mislead failover diagnostics); an
+// HA leader has it exactly when the lease permits. Reporting this — not the raw
+// primitive — keeps /api/diagnose/cluster consistent with /healthz.
+func effectiveWriteAuthority(st HAStatus, leaseWriteAllowed bool) bool {
+	if !st.Enabled {
+		return true
+	}
+	if st.Role != "leader" {
+		return false
+	}
+	return leaseWriteAllowed
 }
 
 // clusterRoleAndOK derives the role label, the health verdict, and an advisory
 // detail string from a cluster snapshot. Standalone and data-plane presence are
 // healthy postures by construction; a control-plane is healthy when every enrolled
 // node is connected; an HA leader additionally needs live write authority; an HA
-// standby is healthy while its sync loop is not failing.
+// standby is healthy while its sync loop is not failing. The role label comes from
+// the authoritative clusterRole snapshot (nodeRole), so an enabled control plane
+// reports "control-plane" even before its first data-plane node enrolls.
 func clusterRoleAndOK(in clusterInputs) (role string, ok bool, detail string) {
 	nodesOK := in.total == 0 || in.connected == in.total
 	switch {
-	case in.dpActive:
+	case in.nodeRole == "data-plane" || in.dpActive:
 		// A data-plane node's detailed sync health is surfaced via the cluster
 		// status API; here we confirm the DP client is live.
 		return "data-plane", true, "data-plane node; detailed sync health via /api/cluster"
@@ -673,7 +692,9 @@ func clusterRoleAndOK(in clusterInputs) (role string, ok bool, detail string) {
 			ok = nodesOK
 		}
 		return role, ok, detail
-	case in.total > 0:
+	case in.nodeRole == "control-plane" || in.total > 0:
+		// Authoritative CP role (covers a freshly enabled CP with zero enrolled
+		// nodes) or, defensively, any node that already has enrollments.
 		ok = nodesOK
 		if !ok {
 			detail = "some enrolled nodes not connected"
@@ -697,7 +718,7 @@ func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
 		Term:           in.haStatus.Term,
 		AutoFailover:   in.haStatus.AutoFailover,
 		LeaseMode:      in.leaseMode,
-		WriteAuthority: in.writeAllowed,
+		WriteAuthority: effectiveWriteAuthority(in.haStatus, in.writeAllowed),
 		NodesTotal:     in.total,
 		NodesConnected: in.connected,
 		Detail:         detail,
@@ -718,8 +739,12 @@ func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
 func diagnoseCluster(now time.Time) clusterDiagnosis {
 	mode, valid, epoch := globalHA.leaseHealth()
 	total, connected := globalClusterStore.NodeCounts()
+	clusterRoleMu.RLock()
+	nodeRole := clusterRole.role
+	clusterRoleMu.RUnlock()
 	in := clusterInputs{
 		haStatus:     globalHA.Status(),
+		nodeRole:     nodeRole,
 		leaseMode:    mode,
 		leaseValid:   valid,
 		epoch:        epoch,

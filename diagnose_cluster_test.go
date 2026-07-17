@@ -14,65 +14,78 @@ func TestDiagnoseCluster_Roles(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 
 	cases := []struct {
-		name       string
-		in         clusterInputs
-		wantRole   string
-		wantOK     bool
-		wantLease  bool // lease_valid/epoch present in output
-		wantDetail bool // a non-empty advisory detail is expected
+		name          string
+		in            clusterInputs
+		wantRole      string
+		wantOK        bool
+		wantLease     bool // lease_valid/epoch present in output
+		wantDetail    bool // a non-empty advisory detail is expected
+		wantWriteAuth bool // expected effective write_authority in the output
 	}{
 		{
 			name:     "standalone",
-			in:       clusterInputs{leaseMode: "none", writeAllowed: true},
-			wantRole: "standalone", wantOK: true,
+			in:       clusterInputs{nodeRole: "standalone", leaseMode: "none", writeAllowed: true},
+			wantRole: "standalone", wantOK: true, wantWriteAuth: true,
 		},
 		{
 			name:     "data-plane always presence-ok",
-			in:       clusterInputs{leaseMode: "none", writeAllowed: true, dpActive: true},
-			wantRole: "data-plane", wantOK: true, wantDetail: true,
+			in:       clusterInputs{nodeRole: "data-plane", leaseMode: "none", writeAllowed: true, dpActive: true},
+			wantRole: "data-plane", wantOK: true, wantDetail: true, wantWriteAuth: true,
 		},
 		{
 			name:     "control-plane all nodes connected",
-			in:       clusterInputs{leaseMode: "none", writeAllowed: true, total: 3, connected: 3},
-			wantRole: "control-plane", wantOK: true,
+			in:       clusterInputs{nodeRole: "control-plane", leaseMode: "none", writeAllowed: true, total: 3, connected: 3},
+			wantRole: "control-plane", wantOK: true, wantWriteAuth: true,
+		},
+		{
+			// Freshly enabled CP with zero enrolled nodes: role must NOT collapse to
+			// standalone just because NodeCounts() == 0 (Codex P2).
+			name:     "control-plane empty (no enrolled nodes yet)",
+			in:       clusterInputs{nodeRole: "control-plane", leaseMode: "none", writeAllowed: true},
+			wantRole: "control-plane", wantOK: true, wantWriteAuth: true,
 		},
 		{
 			name:     "control-plane degraded node",
-			in:       clusterInputs{leaseMode: "none", writeAllowed: true, total: 3, connected: 2},
-			wantRole: "control-plane", wantOK: false, wantDetail: true,
+			in:       clusterInputs{nodeRole: "control-plane", leaseMode: "none", writeAllowed: true, total: 3, connected: 2},
+			wantRole: "control-plane", wantOK: false, wantDetail: true, wantWriteAuth: true,
 		},
 		{
 			name: "leader with valid lease + all nodes",
 			in: clusterInputs{
-				haStatus: HAStatus{Enabled: true, Role: "leader", Term: 7}, leaseMode: "lease",
+				haStatus: HAStatus{Enabled: true, Role: "leader", Term: 7}, nodeRole: "control-plane", leaseMode: "lease",
 				leaseValid: true, epoch: 42, writeAllowed: true, total: 2, connected: 2,
 			},
-			wantRole: "leader", wantOK: true, wantLease: true,
+			wantRole: "leader", wantOK: true, wantLease: true, wantWriteAuth: true,
 		},
 		{
 			name: "leader lost write authority",
 			in: clusterInputs{
-				haStatus: HAStatus{Enabled: true, Role: "leader"}, leaseMode: "lease",
+				haStatus: HAStatus{Enabled: true, Role: "leader"}, nodeRole: "control-plane", leaseMode: "lease",
 				leaseValid: false, epoch: 0, writeAllowed: false, total: 1, connected: 1,
 			},
-			wantRole: "leader", wantOK: false, wantLease: true, wantDetail: true,
+			wantRole: "leader", wantOK: false, wantLease: true, wantDetail: true, wantWriteAuth: false,
 		},
 		{
-			name: "standby healthy sync",
+			// A legacy (no-lease) standby has raw WriteAllowed()==true, but its
+			// EFFECTIVE write authority must be false (Codex P2) — it does not serve
+			// writes, and reporting true would mislead failover diagnostics.
+			name: "standby healthy sync — no write authority",
 			in: clusterInputs{
-				haStatus:   HAStatus{Enabled: true, Role: "standby", SyncFailCount: 0, LastSyncOK: now.Format(time.RFC3339)},
-				leaseMode:  "none",
-				leaseValid: false,
+				haStatus:     HAStatus{Enabled: true, Role: "standby", SyncFailCount: 0, LastSyncOK: now.Format(time.RFC3339)},
+				nodeRole:     "control-plane",
+				leaseMode:    "none",
+				writeAllowed: true, // raw lease primitive is true in legacy mode
 			},
-			wantRole: "standby", wantOK: true,
+			wantRole: "standby", wantOK: true, wantWriteAuth: false,
 		},
 		{
 			name: "standby failing sync",
 			in: clusterInputs{
 				haStatus:  HAStatus{Enabled: true, Role: "standby", SyncFailCount: 4},
+				nodeRole:  "control-plane",
 				leaseMode: "none",
 			},
-			wantRole: "standby", wantOK: false, wantDetail: true,
+			wantRole: "standby", wantOK: false, wantDetail: true, wantWriteAuth: false,
 		},
 	}
 
@@ -84,6 +97,9 @@ func TestDiagnoseCluster_Roles(t *testing.T) {
 			}
 			if d.OK != tc.wantOK {
 				t.Fatalf("ok=%v want %v", d.OK, tc.wantOK)
+			}
+			if d.WriteAuthority != tc.wantWriteAuth {
+				t.Fatalf("write_authority=%v want %v", d.WriteAuthority, tc.wantWriteAuth)
 			}
 			if d.SchemaVersion != diagnoseSchemaVersion {
 				t.Fatalf("schema_version=%d want %d", d.SchemaVersion, diagnoseSchemaVersion)
