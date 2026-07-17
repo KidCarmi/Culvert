@@ -50,10 +50,10 @@ import (
 //   - 141 — policy-draft (G2) added /api/policy/draft (+commit +revert):
 //     candidate/commit for the rulebase.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 142
-//   - 140 — Terminology governance T-10: added canonical /api/dpi and
-//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
-//     /api/content-scan/bypass aliases (same handlers).
+	const want = 144
+	//   - 140 — Terminology governance T-10: added canonical /api/dpi and
+	//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
+	//     /api/content-scan/bypass aliases (same handlers).
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

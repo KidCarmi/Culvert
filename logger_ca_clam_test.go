@@ -287,6 +287,34 @@ func TestLoadFileConfig_DeprecatedDPIKeyStillWorks(t *testing.T) {
 	}
 }
 
+// TestLoadFileConfig_EmptyCanonicalDPIPatternsWins is the Finding A regression:
+// an explicitly-set empty canonical list (dpi_patterns: []) must WIN over a
+// non-empty deprecated content_scan_patterns — clearing/disabling the seed
+// patterns — rather than falling through to the stale legacy list. Precedence
+// is decided by slice presence (nil vs. non-nil), not len, because goccy yields
+// a non-nil empty slice for "dpi_patterns: []" and nil only when the key is
+// absent. A len-based check would treat "[]" as absent and load the legacy
+// regexes, which loadDPIScanner/resolveInspectionRulesConfig would then apply.
+func TestLoadFileConfig_EmptyCanonicalDPIPatternsWins(t *testing.T) {
+	f, err := os.CreateTemp("", "config*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck // test cleanup
+	_, _ = f.WriteString("proxy:\n" +
+		"  dpi_patterns: []\n" +
+		"  content_scan_patterns: [\"legacy\"]\n")
+	f.Close()
+
+	fc, err := loadFileConfig(f.Name())
+	if err != nil {
+		t.Fatalf("loadFileConfig: %v", err)
+	}
+	if len(fc.Proxy.ContentScanPatterns) != 0 {
+		t.Errorf("ContentScanPatterns = %v, want [] (empty canonical dpi_patterns must disable the legacy list)", fc.Proxy.ContentScanPatterns)
+	}
+}
+
 // ─── store.go — InitAuditLog, authCacheStore ──────────────────────────────────
 
 func TestInitAuditLog_ValidPath(t *testing.T) {
