@@ -328,7 +328,15 @@ type sectionSink struct {
 // WriteJSON marshals v as the section body (indented, deterministic key
 // order), truncating to a budget-exceeded placeholder if v's encoding is
 // larger than the collector's byte budget.
+//
+// Raw-collector hard-gate (rawgate.go): v must be class-governed — the shape
+// redaction.Classify emits (maps/slices/primitives). A struct with exported
+// fields proves the payload bypassed the redaction walk and is rejected
+// fail-closed (the collector's own error path marks the section failed).
 func (s *sectionSink) WriteJSON(v any) error {
+	if bad := findUngovernedStruct(v); bad != "" {
+		return errUngovernedPayload(bad)
+	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
