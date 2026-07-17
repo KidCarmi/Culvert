@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
+	"github.com/KidCarmi/Culvert/internal/pac"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -1212,6 +1213,14 @@ type configBackup struct {
 	// field keeps omitempty (SnapshotWireWipe requires it for a
 	// non-WireWipeCapable field).
 	DecryptionProfiles []DecryptionProfile `json:"decryptionProfiles"`
+
+	// PACProfiles/PACPools put the PAC steering profiles feature (PAC
+	// initiative PR 2) on the export/import + rollback surfaces. Same
+	// posture as CategoryGroups: NO omitempty — nil → apply skips (old
+	// snapshot, no opinion); [] → apply wipes; populated → apply replaces.
+	// Both are cluster-synced WireWipeCapable (see config_surfaces.go).
+	PACProfiles []pac.Profile `json:"pacProfiles"`
+	PACPools    []pac.Pool    `json:"pacPools"`
 
 	// URLCategories extends the rollback surface to cover catStore
 	// (admin-managed Layer 1; communityDB Layer 2 is intentionally

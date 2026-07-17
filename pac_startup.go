@@ -30,6 +30,11 @@ func loadPAC(cfg pacStartupConfig) error {
 		logger.Printf("PAC config migrated from %s to %s (legacy file left in place, now frozen)",
 			cfg.LegacyConfigPath, cfg.ConfigPath)
 	}
+	if cfg.ProfilesPath != "" {
+		if err := pacProfiles.Load(cfg.ProfilesPath); err != nil {
+			return fmt.Errorf("PAC config load error: %w", err)
+		}
+	}
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
 }

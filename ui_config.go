@@ -573,6 +573,8 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
+		b.PACProfiles = nonNilProfiles(pacProfiles.Get().Profiles)
+		b.PACPools = nonNilPools(pacProfiles.Get().Pools)
 		filename = "culvert-pac"
 	case "alerts":
 		b.AlertWebhooks = globalAlertStore.List()
@@ -606,6 +608,8 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
+		b.PACProfiles = nonNilProfiles(pacProfiles.Get().Profiles)
+		b.PACPools = nonNilPools(pacProfiles.Get().Pools)
 		// Alert webhooks (secrets excluded by List()).
 		b.AlertWebhooks = globalAlertStore.List()
 		// Block page template.
@@ -907,7 +911,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// with actionable errors instead of silently importing junk. Pre-existing
 	// live entries are untouched by this gate — only the incoming payload is
 	// judged, and the tolerant apply below never rejects.
-	if !importPACPreValidationOK(w, &b) {
+	if !importPACPreValidationOK(w, &b, replaceMode) {
 		return
 	}
 
@@ -1031,6 +1035,13 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		_ = pacStore.Set(pc)
 	}
 
+	// PAC profiles/pools (PAC initiative PR 2): import never wipes —
+	// absent/empty fields skip in both modes; merge upserts by ID; replace
+	// replaces the whole set. Pre-validated above; tolerant Set here.
+	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		_ = pacProfiles.Set(importPACProfilesCandidate(pacProfiles.Get(), &b, replaceMode))
+	}
+
 	// Alert webhooks (Finding 10.3).
 	if len(b.AlertWebhooks) > 0 {
 		if replaceMode {
@@ -1084,15 +1095,24 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 // payload BEFORE any store mutation, writing a structured 400 and returning
 // false on failure. Only the incoming payload is judged; the tolerant apply
 // path never rejects.
-func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
-	if b.PACProxyHost == "" && b.PACProxyPort == 0 && len(b.PACExclusions) == 0 {
-		return true
+func importPACPreValidationOK(w http.ResponseWriter, b *configBackup, replaceMode bool) bool {
+	var issues []pac.ValidationIssue
+	if b.PACProxyHost != "" || b.PACProxyPort != 0 || len(b.PACExclusions) > 0 {
+		_, is := pac.ValidateConfig(PACConfig{
+			ProxyHost:  b.PACProxyHost,
+			ProxyPort:  b.PACProxyPort,
+			Exclusions: b.PACExclusions,
+		})
+		issues = append(issues, is...)
 	}
-	_, issues := pac.ValidateConfig(PACConfig{
-		ProxyHost:  b.PACProxyHost,
-		ProxyPort:  b.PACProxyPort,
-		Exclusions: b.PACExclusions,
-	})
+	// Profiles/pools are validated as the EXACT candidate the apply step
+	// would install (merged against existing state), so a profile that
+	// references an already-present pool passes and a dangling reference
+	// fails — before any mutation.
+	if len(b.PACProfiles) > 0 || len(b.PACPools) > 0 {
+		candidate := importPACProfilesCandidate(pacProfiles.Get(), b, replaceMode)
+		issues = append(issues, pac.ValidateProfilesConfig(candidate)...)
+	}
 	if len(issues) == 0 {
 		return true
 	}
@@ -1103,6 +1123,52 @@ func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
 		"issues": issues,
 	})
 	return false
+}
+
+// importPACProfilesCandidate builds the exact profiles/pools config an
+// import would install: replace mode swaps whole non-empty sets; merge mode
+// upserts by ID (existing objects updated in place, new ones appended).
+// Import never wipes — absent/empty payload fields keep the current set.
+func importPACProfilesCandidate(cur pac.ProfilesConfig, b *configBackup, replaceMode bool) pac.ProfilesConfig {
+	if replaceMode {
+		if len(b.PACPools) > 0 {
+			cur.Pools = b.PACPools
+		}
+		if len(b.PACProfiles) > 0 {
+			cur.Profiles = b.PACProfiles
+		}
+		return cur
+	}
+	for pi := range b.PACPools {
+		in := b.PACPools[pi]
+		replaced := false
+		for i := range cur.Pools {
+			if cur.Pools[i].ID == in.ID {
+				cur.Pools[i] = in
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cur.Pools = append(cur.Pools, in)
+		}
+	}
+	for pi := range b.PACProfiles {
+		in := b.PACProfiles[pi]
+		replaced := false
+		for i := range cur.Profiles {
+			if cur.Profiles[i].ID == in.ID {
+				in.Revision = cur.Profiles[i].Revision + 1
+				cur.Profiles[i] = in
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			cur.Profiles = append(cur.Profiles, in)
+		}
+	}
+	return cur
 }
 
 // importCategoryTaxonomy applies URL categories then category groups from an

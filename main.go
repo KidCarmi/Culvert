@@ -901,6 +901,13 @@ func buildAndStartProxyServer(s *startupState) *http.Server {
 			// without TLS — the proxy port is always HTTP.
 			servePACFile(w, r)
 		default:
+			// Per-profile PAC endpoints share the plain-HTTP contract. The
+			// Host guard keeps proxied absolute-URI requests (which carry
+			// r.URL.Host) out — only direct fetches hit the PAC handler.
+			if r.URL.Host == "" && strings.HasPrefix(r.URL.Path, "/pac/") {
+				servePACProfileFile(w, r)
+				return
+			}
 			handleRequest(w, r)
 		}
 	})

@@ -132,3 +132,76 @@ deliberate:
   `corp.local` now also matches `Corp.LOCAL` and `corp.local.` (the legacy
   exact-`===` compare missed both), and a trailing-dot plain name (`foo.`)
   is treated as a plain hostname (DIRECT).
+
+---
+
+# PAC Traffic Steering — Profiles & Proxy Pools (Part 2)
+
+## Steering profiles
+
+A **profile** is a named PAC configuration served at a stable URL:
+
+```
+/pac/<profile-id>.pac
+```
+
+`/proxy.pac` remains a permanent alias for the **default** profile
+(`/pac/default.pac`), which is the legacy configuration (proxy host/port +
+exclusions) — managed exactly as before via the PAC panel / `/api/pac-config`,
+byte-identical output. Custom profiles are managed in the PAC panel's
+Steering Profiles section (`/api/pac/profiles`, admin-only mutations) and
+persist in `<dataDir>/pac_profiles.json` (on the backup surface).
+
+Each profile carries:
+
+- a **proxy pool** reference — an ordered failover chain of 1–3 endpoints,
+  rendered as `PROXY primary:port; PROXY secondary:port; …`;
+- **ordered routing rules** (first match wins): kinds `domain` (exact +
+  subdomains), `suffix` (subdomains only), `wildcard` (`shExpMatch` glob),
+  `cidr4` (IPv4 CIDR against the resolved IP); optional `scheme` and
+  explicit-`port` guards (default ports are omitted by clients and cannot be
+  matched — documented limitation); actions `use_pool` (optionally naming an
+  override pool) or `direct`;
+- an **availability mode** (explicit, never implicit):
+  - `secure` — pool chain only, **no DIRECT anywhere** (plain dotless
+    hostnames excepted). DIRECT rules and `privateNetworks: direct` are
+    rejected in this mode; if no proxy endpoint resolves, the generated PAC
+    fails **closed** via an unresolvable placeholder, never open.
+  - `balanced` — pool-chain terminal without DIRECT, but explicit `direct`
+    rules are permitted where authored.
+  - `availability` — pool chain then `DIRECT` (fail open).
+- a **private-networks behavior** replacing the legacy hardcode: `direct`
+  (loopback + RFC-1918 bypass, the legacy default) or `proxy` (private
+  ranges follow rules/pool). The default profile keeps `direct`.
+
+DNS in profile PACs is resolved at most once per evaluation (a nested ES3
+helper). With `privateNetworks: proxy` the resolution is fully lazy — rule
+chains that answer before any `cidr4` rule never pay for a lookup. With
+`privateNetworks: direct` the private-network bypass must run before the
+rules to keep its guarantee, so every evaluation resolves once up front (the
+same cost profile as the legacy generator). Rules are emitted in exactly the
+authored order — with `use_pool` actions, order is semantic and is never
+reordered by the compiler. Explicit-port rule guards compare the URL
+authority tail, never a substring of the full URL.
+
+Profile PACs are served unauthenticated on both listeners (PAC clients
+cannot send credentials) — including plain HTTP on the proxy port, like
+`/proxy.pac`. Treat profile PAC contents (pool hostnames, routing rules) as
+**public information**: anyone who can reach a listener and guess an enabled
+profile ID can read them.
+
+## Distribution
+
+Profiles and pools participate in every config surface: export/import
+(import never wipes; merge upserts by ID), config versioning + rollback
+(nil = pre-feature snapshot skips; `[]` = explicit wipe), cluster CP→DP sync
+(wire-wipe capable — clearing the last profile clears DP state; this PR also
+fixes the pre-existing gap where clearing all legacy *exclusions* never
+reached DPs), backup/restore, and audit (`pac.profile_*`, `pac.pool_*`).
+
+## Downgrade
+
+`pac_profiles.json` is unknown to older binaries and ignored; the legacy
+default profile keeps working. Clients pointed at `/pac/<id>.pac` receive
+404 from a downgraded binary — repoint them at `/proxy.pac` first if a
+downgrade is planned.

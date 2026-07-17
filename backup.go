@@ -82,6 +82,7 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		// here never matched anything and PAC was silently absent from
 		// backups).
 		{SrcPath: p("pac_config.json"), TarPath: "data/pac_config.json"},
+		{SrcPath: p("pac_profiles.json"), TarPath: "data/pac_profiles.json"},
 		{SrcPath: p("scan_exclusions.json"), TarPath: "data/scan_exclusions.json"},
 		{SrcPath: p("alert_settings.json"), TarPath: "data/alert_settings.json"},
 		{SrcPath: p("admin_settings.json"), TarPath: "data/admin_settings.json"},

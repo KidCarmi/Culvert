@@ -308,10 +308,34 @@ var uiRoutes = []uiRouteMetadata{
 	// ── PAC file ──────────────────────────────────────────────────────────
 	{Path: "/proxy.pac", Handler: "servePACFile", Domain: "pac", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "Windows PAC clients cannot send credentials"}}},
+	{Path: "/pac/", Handler: "servePACProfileFile", Domain: "pac", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "per-profile PAC endpoints; PAC clients cannot send credentials"}}},
 	{Path: "/api/pac-config", Handler: "apiPACConfig", Domain: "pac", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
-			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles", Handler: "apiPACProfiles", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles/", Handler: "apiPACProfileItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools", Handler: "apiPACPools", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools/", Handler: "apiPACPoolItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────

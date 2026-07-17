@@ -73,3 +73,45 @@ func TestUIE2E_PACServedAndPreviewed(t *testing.T) {
 		t.Errorf("PAC panel preview should render the generated PAC; got:\n%.300s\n(%v)", got, err)
 	}
 }
+
+// TestUIE2E_PACProfileEndpointsServed pins the PR-2 profile surface: the
+// /pac/default.pac alias is served unauthenticated and byte-equal to
+// /proxy.pac, and the PAC panel renders the Steering Profiles section.
+func TestUIE2E_PACProfileEndpointsServed(t *testing.T) {
+	user := seedUIRoster(t)
+	srv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(srv.Close)
+
+	client := &http.Client{} // deliberately cookie-less
+	fetch := func(path string) string {
+		t.Helper()
+		resp, err := client.Get(srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s status %d, want 200 (unauthenticated PAC contract)", path, resp.StatusCode)
+		}
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return string(b)
+	}
+	legacy := fetch("/proxy.pac")
+	alias := fetch("/pac/default.pac")
+	if legacy != alias {
+		t.Errorf("/pac/default.pac must be byte-identical to /proxy.pac")
+	}
+
+	browser := uiE2EBrowser(t)
+	page := newAuthedUIPage(t, browser, srv.URL, user, RoleAdmin)
+	assert := playwright.NewPlaywrightAssertions(8000)
+	if err := page.Locator(`.nav-item[data-view="pac"]`).Click(); err != nil {
+		t.Fatalf("open PAC panel: %v", err)
+	}
+	if err := assert.Locator(page.Locator("#pac-profiles-list")).ToContainText("default"); err != nil {
+		t.Errorf("Steering Profiles list should render the default profile: %v", err)
+	}
+}
