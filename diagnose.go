@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -237,8 +240,141 @@ func apiDiagnoseUpstream(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose dns ──────────────────────────────────────────────────────────────
+
+// diagnoseDNSTimeout bounds the resolution probe so a slow/hostile resolver can
+// never hang the request or tie up the proxy.
+const diagnoseDNSTimeout = 3 * time.Second
+
+// diagnoseMaxAddrs caps the addresses reported for one host (a wildcard/round-robin
+// record could otherwise return an unbounded set).
+const diagnoseMaxAddrs = 16
+
+// diagnoseLookupIP is the resolver seam — overridden in tests so no real DNS is hit.
+var diagnoseLookupIP = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// validDiagnoseHost enforces that the probe target is a bare hostname: no scheme,
+// port, path, userinfo, whitespace, or control characters, and within DNS length
+// limits. This keeps an operator-supplied string from being anything but a name to
+// resolve (defence-in-depth alongside the SSRF guard below).
+func validDiagnoseHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	if strings.ContainsAny(h, "/@: \t\r\n\\?#%") {
+		return false
+	}
+	for _, r := range h {
+		if r < 0x20 || r == 0x7f { // control chars
+			return false
+		}
+	}
+	return true
+}
+
+type dnsDiagnosis struct {
+	SchemaVersion int      `json:"schema_version"`
+	GeneratedAt   string   `json:"generated_at"`
+	Host          string   `json:"host"`
+	Resolved      bool     `json:"resolved"`
+	Blocked       bool     `json:"blocked"` // resolved to a private/internal IP → refused (SSRF guard)
+	OK            bool     `json:"ok"`
+	Addresses     []string `json:"addresses,omitempty"` // PUBLIC addresses only
+	DurationMs    int64    `json:"duration_ms"`
+	Error         string   `json:"error,omitempty"`
+}
+
+// diagnoseDNS resolves host under a bounded context and enforces the SSRF guard:
+// if ANY resolved address is private/internal the probe is REFUSED (blocked=true,
+// addresses omitted) so the diagnostic cannot be used to map internal infra from
+// the proxy's network position. now/ctx are injected for deterministic tests.
+func diagnoseDNS(ctx context.Context, host string, now time.Time) dnsDiagnosis {
+	d := dnsDiagnosis{SchemaVersion: diagnoseSchemaVersion, GeneratedAt: now.UTC().Format(time.RFC3339), Host: host}
+
+	lctx, cancel := context.WithTimeout(ctx, diagnoseDNSTimeout)
+	defer cancel()
+	start := now
+	addrs, err := diagnoseLookupIP(lctx, host)
+	d.DurationMs = int64(time.Since(start) / time.Millisecond)
+	if err != nil {
+		d.Error = boundedErr(err.Error())
+		return d
+	}
+	d.Resolved = len(addrs) > 0
+
+	// SSRF guard (inline so CodeQL sees it): a single private hit blocks the whole
+	// result — never expose any address for a target that touches internal space.
+	for i := range addrs {
+		if isPrivateIP(addrs[i].IP) {
+			d.Blocked = true
+			d.Addresses = nil
+			return d
+		}
+	}
+	for i := range addrs {
+		if len(d.Addresses) >= diagnoseMaxAddrs {
+			break
+		}
+		d.Addresses = append(d.Addresses, addrs[i].IP.String())
+	}
+	d.OK = d.Resolved
+	return d
+}
+
+// boundedErr caps a resolver error string so a pathological message can't bloat
+// the response (the diagnostic surfaces cause, not a novel).
+func boundedErr(s string) string {
+	const max = 256
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
+}
+
+// apiDiagnoseDNS runs a bounded, SSRF-guarded DNS resolution probe (POST, operator).
+func apiDiagnoseDNS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	var body struct {
+		Host string `json:"host"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	host := strings.TrimSpace(body.Host)
+	if !validDiagnoseHost(host) {
+		http.Error(w, "invalid host (bare hostname required; no scheme/port/path)", http.StatusBadRequest)
+		return
+	}
+	d := diagnoseDNS(r.Context(), host, time.Now())
+	// Audit with the sanitised host so a hostile hostname can't forge a log line.
+	auditEvent(r, "diagnose.dns", sanitizeLog(host), dnsResult(d))
+	jsonOK(w, d)
+}
+
+func dnsResult(d dnsDiagnosis) string {
+	switch {
+	case d.Blocked:
+		return "blocked"
+	case d.OK:
+		return "resolved"
+	default:
+		return "unresolved"
+	}
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
 	mux.HandleFunc("/api/diagnose/upstream", apiDiagnoseUpstream)
+	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
 }

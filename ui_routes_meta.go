@@ -640,4 +640,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/upstream", Handler: "apiDiagnoseUpstream", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "upstream pool health/circuit diagnosis over the existing health-loop state (redacted List, no new dial); operator+; no shell; audited as diagnose.upstream"}}},
+	{Path: "/api/diagnose/dns", Handler: "apiDiagnoseDNS", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "bounded, SSRF-guarded DNS resolution probe of a bare hostname (private-resolving targets refused); operator+; no shell; audited as diagnose.dns"}}},
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -195,6 +197,99 @@ func TestDiagnoseUpstream_API(t *testing.T) {
 	// this pins the contract at the diagnose boundary).
 	if strings.Contains(body, "@") && strings.Contains(body, "://") {
 		t.Fatalf("possible credential in upstream diagnosis body: %s", body)
+	}
+}
+
+// withStubResolver swaps the DNS seam for the test's duration.
+func withStubResolver(t *testing.T, fn func(ctx context.Context, host string) ([]net.IPAddr, error)) {
+	t.Helper()
+	prev := diagnoseLookupIP
+	diagnoseLookupIP = fn
+	t.Cleanup(func() { diagnoseLookupIP = prev })
+}
+
+// TestDiagnoseDNS_PublicResolves proves a public-resolving host reports the
+// addresses and ok=true.
+func TestDiagnoseDNS_PublicResolves(t *testing.T) {
+	withStubResolver(t, func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	})
+	d := diagnoseDNS(context.Background(), "example.com", time.Unix(1_700_000_000, 0))
+	if !d.OK || d.Blocked || !d.Resolved {
+		t.Fatalf("public host: ok=%v blocked=%v resolved=%v", d.OK, d.Blocked, d.Resolved)
+	}
+	if len(d.Addresses) != 1 || d.Addresses[0] != "93.184.216.34" {
+		t.Fatalf("addresses=%v want [93.184.216.34]", d.Addresses)
+	}
+}
+
+// TestDiagnoseDNS_PrivateTargetBlocked is the SSRF guard proof: a host resolving to
+// a private IP is refused — blocked=true and NO addresses are exposed, so the probe
+// cannot be used to map internal infra from the proxy.
+func TestDiagnoseDNS_PrivateTargetBlocked(t *testing.T) {
+	for _, priv := range []string{"10.0.0.5", "127.0.0.1", "192.168.1.10", "169.254.169.254", "::1"} {
+		withStubResolver(t, func(_ context.Context, _ string) ([]net.IPAddr, error) {
+			// Mix a public and a private address — a single private hit must block all.
+			return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP(priv)}}, nil
+		})
+		d := diagnoseDNS(context.Background(), "rebind.evil.example", time.Unix(1_700_000_000, 0))
+		if !d.Blocked {
+			t.Fatalf("private target %s not blocked: %+v", priv, d)
+		}
+		if len(d.Addresses) != 0 {
+			t.Fatalf("private target %s leaked addresses: %v", priv, d.Addresses)
+		}
+		if d.OK {
+			t.Fatalf("private target %s reported ok", priv)
+		}
+	}
+}
+
+// TestDiagnoseDNS_InvalidHostRejected proves the handler rejects anything that is
+// not a bare hostname (defence-in-depth before the resolver is ever called).
+func TestDiagnoseDNS_InvalidHostRejected(t *testing.T) {
+	called := false
+	withStubResolver(t, func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		called = true
+		return nil, nil
+	})
+	for _, bad := range []string{"", "http://example.com", "example.com:443", "a/b", "user@host", "has space", "x\ny"} {
+		rec := httptest.NewRecorder()
+		apiDiagnoseDNS(rec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/dns", map[string]any{"host": bad}))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("host %q code=%d want 400", bad, rec.Code)
+		}
+	}
+	if called {
+		t.Fatal("resolver was invoked for an invalid host — validation must gate before resolution")
+	}
+}
+
+// TestDiagnoseDNS_API proves POST + operator RBAC and the typed contract.
+func TestDiagnoseDNS_API(t *testing.T) {
+	withStubResolver(t, func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("1.1.1.1")}}, nil
+	})
+	// Viewer < operator → 403.
+	vRec := httptest.NewRecorder()
+	apiDiagnoseDNS(vRec, roleReq(RoleViewer, http.MethodPost, "/api/diagnose/dns", map[string]any{"host": "example.com"}))
+	if vRec.Code != http.StatusForbidden {
+		t.Fatalf("viewer code=%d want 403", vRec.Code)
+	}
+	// GET → 405.
+	gRec := httptest.NewRecorder()
+	apiDiagnoseDNS(gRec, roleReq(RoleOperator, http.MethodGet, "/api/diagnose/dns", nil))
+	if gRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET code=%d want 405", gRec.Code)
+	}
+	// Operator POST → 200 typed.
+	rec := httptest.NewRecorder()
+	apiDiagnoseDNS(rec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/dns", map[string]any{"host": "example.com"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator POST code=%d want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"schema_version"`) || !strings.Contains(rec.Body.String(), `"1.1.1.1"`) {
+		t.Fatalf("body missing typed fields: %s", rec.Body.String())
 	}
 }
 
