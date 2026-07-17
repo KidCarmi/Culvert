@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/decryptobs"
 	"github.com/KidCarmi/Culvert/internal/fileblock"
 )
 
@@ -316,11 +317,48 @@ func detectProtocolName(b byte) string {
 // id is the authenticated context extracted by the top-level handler; it is
 // forwarded to inspect so downstream stages (CDR, future audit enrichment)
 // can branch on identity without re-parsing headers.
-func handleTunnel(w http.ResponseWriter, r *http.Request, sslAction SSLAction, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
-	if sslAction == SSLInspect && certMgr.Ready() {
-		handleTunnelInspect(w, r, tlsSkipVerify, match, id)
-	} else {
-		handleTunnelBypass(w, r, match, id, "")
+func handleTunnel(w http.ResponseWriter, r *http.Request, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
+	if dec.Action == SSLInspect && certMgr.Ready() {
+		handleTunnelInspect(w, r, dec.SkipVerify, match, id)
+		return
+	}
+	// Bypass path — attach the ADR-0011 decryption outcome for the close record.
+	handleTunnelBypass(w, r, match, id, "", bypassOutcome(dec, r.Host))
+}
+
+// bypassOutcome builds the ADR-0011 DecryptionOutcome for a CONNECT that was BYPASSED
+// (not inspected). A bypass does no MITM handshake, so the TLS/cert fields stay at their
+// sentinels — that is the honest value, not missing data. Classification: a learned
+// exclusion is bypass_learned/autoexclude_cache; an inspect rule that could not run
+// because the CA was not ready is inspect_unavailable (a misconfiguration, still
+// bypassed — surfaced distinctly via the source); anything else is a manual/policy bypass.
+func bypassOutcome(dec sslResolution, host string) *DecryptionOutcome {
+	source := dec.Source
+	outcome := decryptobs.OutcomeBypassManual
+	switch {
+	case dec.Action == SSLInspect: // inspect intended but the CA was not ready
+		source = decryptobs.DecisionInspectUnavailable
+	case dec.Source == decryptobs.DecisionAutoexcludeCache:
+		outcome = decryptobs.OutcomeBypassLearned
+	}
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	hit := dec.Source == decryptobs.DecisionAutoexcludeCache
+	exclScope := ""
+	if hit {
+		exclScope = dec.ScopeID // the scope of the exclusion that bypassed — only on a hit
+	}
+	return &DecryptionOutcome{
+		Outcome:        outcome,
+		DecisionSource: source,
+		Host:           h,
+		ExclReason:     dec.ExclReason, // set only on a hit
+		ExclScope:      exclScope,      // set only on a hit
+		ProfileID:      dec.ScopeID,    // the session's fail-open profile scope, if any (hit or consulted-miss)
+		CacheConsulted: dec.Consulted,  // the fail-open read path ran (hit OR miss)
+		CacheHit:       hit,
 	}
 }
 
@@ -352,8 +390,9 @@ func applyUpstreamProxy() {
 // re-runs its own SSRF guard (isPrivateHost + the ssrfControl connect-time gate)
 // so a rescue caller cannot use it to reach an internal host. bypassReason, when
 // non-empty, is written to the TUNNEL_CLOSED feed entry's ActionTaken field
-// (e.g. an ADR-0009 client-cert rescue); "" for an ordinary policy bypass.
-func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity, bypassReason string) {
+// (e.g. an ADR-0009 client-cert rescue); "" for an ordinary policy bypass. dec is the
+// ADR-0011 decryption outcome for the close record (nil ⇒ no dec block).
+func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity, bypassReason string, dec *DecryptionOutcome) {
 	if err := isPrivateHost(r.Host); err != nil {
 		logger.Printf("CONNECT SSRF block %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
@@ -424,7 +463,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 
 	// Per-connection accounting entry (bytes + lifetime). bypassReason (when set)
 	// tags the feed entry so a rescue is queryable, not just an unattributed bypass.
-	recordTunnelCloseGatedReason(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason)
+	recordTunnelCloseGatedDec(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason, dec, false)
 }
 
 // upstreamVerifyRoots returns the process-wide root pool used to verify
@@ -628,7 +667,18 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 		recordAutoExclude(match, hostOnly, autoExReasonClientCert, id)
 		recordAutoExcludeRescue(match, hostOnly, autoExReasonClientCert, id)
 		logger.Printf("SSL_AUTOEXCLUDE_RESCUE %q: origin requires a client certificate (handshake failed) — failing open to bypass", sanitizeLog(targetHost))
-		handleTunnelBypass(w, r, match, id, feedReasonClientCertRescue)
+		rescueDec := &DecryptionOutcome{
+			Outcome:        decryptobs.OutcomeRescued,
+			DecisionSource: decryptobs.DecisionAutoexcludeRescue,
+			Host:           hostOnly,
+			ExclReason:     autoExReasonClientCert,
+			FailStage:      decryptobs.FailStageUpstreamHandshake,
+			FailCategory:   decryptobs.FailCategoryClientCertRequired,
+			Rescued:        true,
+			CacheConsulted: true,
+			CacheLearned:   true, // recordAutoExclude above recorded this session's evidence
+		}
+		handleTunnelBypass(w, r, match, id, feedReasonClientCertRescue, rescueDec)
 		return
 	}
 
