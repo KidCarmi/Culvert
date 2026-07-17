@@ -3983,6 +3983,8 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Support</span>
           <div style="display:flex;gap:8px;align-items:center">
+            <label class="hint" for="support-scope" data-min-role="admin">Scope</label>
+            <select id="support-scope" class="input sm" data-min-role="admin" title="Incident scope: focus the bundle on collectors relevant to one incident type"><option value="standard">standard</option></select>
             <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
           </div>
@@ -11752,6 +11754,14 @@ function renderSupportStatus(s) {
   const el = document.getElementById('support-status');
   if (!el) return;
   s = s || {};
+  // Populate the incident-scope dropdown from the status catalog (preserve the
+  // current selection across refreshes).
+  const scopeSel = document.getElementById('support-scope');
+  if (scopeSel && Array.isArray(s.scopes) && s.scopes.length) {
+    const cur = scopeSel.value;
+    scopeSel.innerHTML = s.scopes.map(n => '<option value="' + escHtml(String(n)) + '">' + escHtml(String(n)) + '</option>').join('');
+    if (s.scopes.indexOf(cur) >= 0) scopeSel.value = cur;
+  }
   const cols = s.collectors || [];
   const hdr = '<p class="hint">Format <code>' + escHtml(String(s.bundle_format || '')) +
     '</code> · engine v' + escHtml(String(s.collector_engine_version || '')) +
@@ -11816,9 +11826,11 @@ function renderSupportBundles(list) {
 
 async function supportCreateBundle() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const scopeSel = document.getElementById('support-scope');
+  const scope = (scopeSel && scopeSel.value) || 'standard';
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (config, policy, health, logs, audit — internal, non-secret) will be collected and written to disk.',
+    'A redacted diagnostic bundle (scope: ' + scope + ') will be collected and written to disk — internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
@@ -11826,7 +11838,7 @@ async function supportCreateBundle() {
   const prev = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
-    const man = await api('/api/support/bundles', { method: 'POST' });
+    const man = await api('/api/support/bundles?scope=' + encodeURIComponent(scope), { method: 'POST' });
     toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
     await loadSupport();
   } catch (err) {

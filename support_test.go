@@ -179,7 +179,7 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = prev })
 
-	res, err := createSupportBundle(context.Background())
+	res, err := createSupportBundle(context.Background(), "standard")
 	if err != nil {
 		t.Fatalf("createSupportBundle: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestSupportBundle_PreviewGate(t *testing.T) {
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = prev })
 
-	res, err := createSupportBundle(context.Background())
+	res, err := createSupportBundle(context.Background(), "standard")
 	if err != nil {
 		t.Fatalf("createSupportBundle: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestBundlePermissions0600(t *testing.T) {
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = prev })
 
-	res, err := createSupportBundle(context.Background())
+	res, err := createSupportBundle(context.Background(), "standard")
 	if err != nil {
 		t.Fatalf("createSupportBundle: %v", err)
 	}

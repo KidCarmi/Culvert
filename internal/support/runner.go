@@ -27,11 +27,16 @@ type BuildOptions struct {
 	ClusterID     string
 	Level         DebugLevel
 	IncidentScope string
-	Profile       string
-	CaseID        string
-	Nonce         string
-	Clock         func() time.Time
-	Salt          []byte // optional; deterministic masking for tests
+	// IncludeCollectors, when non-empty, restricts the bundle to collectors whose
+	// ID is present (an incident-scoped collection). Empty/nil = every collector
+	// (the "standard" scope). The catalog of scope→IDs lives in the owning package;
+	// the engine stays generic. Level gating still applies within the scope.
+	IncludeCollectors map[string]bool
+	Profile           string
+	CaseID            string
+	Nonce             string
+	Clock             func() time.Time
+	Salt              []byte // optional; deterministic masking for tests
 }
 
 // BuildResult is a finished bundle: its id, manifest, and the gzipped-tar bytes.
@@ -95,6 +100,15 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 		entry := SectionEntry{
 			ID: m.ID, Path: m.Path, Collector: m.ID, CollectorVersion: m.SchemaVersion,
 			Owner: m.Owner, StartedAt: startAt, ClassMax: redaction.ClassPublic.String(),
+		}
+
+		if len(opts.IncludeCollectors) > 0 && !opts.IncludeCollectors[m.ID] {
+			entry.Status = StatusSkipped
+			entry.Note = "gated:scope=" + scope
+			entry.EndedAt = clock().UTC().Format(time.RFC3339)
+			sections = append(sections, entry)
+			stats.Skipped++
+			continue
 		}
 
 		if opts.Level < m.MinLevel {

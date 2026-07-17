@@ -112,6 +112,7 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
+	Scopes                []string               `json:"scopes"` // selectable incident scopes
 }
 
 // apiSupportStatus reports the support subsystem's static contract: engine +
@@ -139,6 +140,7 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		CollectorEngineVer:    support.CollectorEngineVer,
 		RedactionModelVersion: support.RedactionModelVer,
 		Collectors:            info,
+		Scopes:                supportScopeNames(),
 	})
 }
 
@@ -174,7 +176,13 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		res, err := createSupportBundle(r.Context())
+		// Optional ?scope= for an incident-focused bundle (default: standard = all).
+		scope := r.URL.Query().Get("scope")
+		if _, ok := resolveSupportScope(scope); !ok {
+			http.Error(w, "unknown incident scope", http.StatusBadRequest)
+			return
+		}
+		res, err := createSupportBundle(r.Context(), scope)
 		if err != nil {
 			if errors.Is(err, errSupportLowDisk) {
 				logger.Printf("support: bundle build refused — insufficient disk headroom")
@@ -185,7 +193,10 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bundle build failed", http.StatusInternalServerError)
 			return
 		}
-		auditEvent(r, "support.bundle.create", res.BundleID, support.BundleFormat)
+		if scope == "" {
+			scope = "standard"
+		}
+		auditEvent(r, "support.bundle.create", res.BundleID, scope)
 		jsonOK(w, res.Manifest)
 	default:
 		w.Header().Set("Allow", "GET, POST")
@@ -371,7 +382,14 @@ func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 
 // buildSupportBundle runs the engine over the registered collectors at the given
 // level. No model or network is in the path; the bundle is redacted at source.
-func buildSupportBundle(ctx context.Context, level support.DebugLevel) (*support.BuildResult, error) {
+func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope string) (*support.BuildResult, error) {
+	include, ok := resolveSupportScope(scope)
+	if !ok {
+		return nil, fmt.Errorf("unknown incident scope %q", scope)
+	}
+	if scope == "" {
+		scope = "standard"
+	}
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("nonce: %w", err)
@@ -382,11 +400,12 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel) (*support
 		Runtime: support.RuntimeInfo{
 			NodeID: clusterRole.nodeID, Role: clusterRole.role, Runtime: "unknown",
 		},
-		Level:         level,
-		Profile:       "default",
-		IncidentScope: "standard",
-		Nonce:         hex.EncodeToString(nonce),
-		Clock:         time.Now,
+		Level:             level,
+		Profile:           "default",
+		IncidentScope:     scope,
+		IncludeCollectors: include, // nil for "standard" → every collector runs
+		Nonce:             hex.EncodeToString(nonce),
+		Clock:             time.Now,
 	})
 }
 
@@ -394,14 +413,14 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel) (*support
 // <dataDir>/support/bundles/<id>/. It is fail-closed on low disk (preflight),
 // crash-safe on the error path (a failed persist never strands a partial dir),
 // and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
-func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr error) {
+func createSupportBundle(ctx context.Context, scope string) (res *support.BuildResult, retErr error) {
 	// Disk-headroom preflight: never begin a build that could fill /data. A
 	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
 	// the write itself still errors and cleans up), a low reading is fail-closed.
 	if _, free, _, err := diskUsage(dataDir); err == nil && free < supportMinFreeBytes {
 		return nil, errSupportLowDisk
 	}
-	res, err := buildSupportBundle(ctx, support.L1)
+	res, err := buildSupportBundle(ctx, support.L1, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +510,7 @@ func pruneSupportBundles(keep int) {
 // and writes it to outPath. This is the "GUI is down" escape hatch (the endorsed
 // GAP-MON-01 recovery path). Prints a short summary to stdout.
 func runSupportBundleCommand(outPath string) error {
-	res, err := buildSupportBundle(context.Background(), support.L0)
+	res, err := buildSupportBundle(context.Background(), support.L0, "standard")
 	if err != nil {
 		return err
 	}
