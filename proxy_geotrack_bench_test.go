@@ -22,7 +22,10 @@ package main
 // The regression gate for the disabled-path allocation contract is
 // TestBenchGate_GeoTrackDispatchDisabledAllocs (bench_regression_test.go).
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 
 // benchGeoTrackHosts defeats constant-folding of the spawn argument so the
 // PreGate baseline allocates the same capturing closure production did (a
@@ -52,10 +55,22 @@ func BenchmarkGeoTrackDispatch_Disabled_PreGate(b *testing.B) {
 	if geoTrackEnabledFn() {
 		b.Skip("GeoIP DB unexpectedly loaded; disabled-path benchmark requires no DB")
 	}
+	// Drain the spawned trackers after StopTimer so their (delayed) work stays
+	// out of the timer/allocation window and does not bleed into the next
+	// benchmark. The completion hook keeps the timed spawn byte-identical to
+	// handleRequest's `go trackDestinationCountry(host)` — the closure alloc the
+	// baseline measures is unchanged.
+	var wg sync.WaitGroup
+	orig := geoTrackSpawnHook
+	geoTrackSpawnHook = wg.Done
+	defer func() { geoTrackSpawnHook = orig }()
 	b.ReportAllocs()
+	wg.Add(b.N)
 	for i := 0; i < b.N; i++ {
 		go trackDestinationCountry(benchGeoTrackHosts[i&3])
 	}
+	b.StopTimer()
+	wg.Wait()
 }
 
 // BenchmarkGeoTrackDispatch_DisabledParallel exercises the gate under
@@ -82,12 +97,23 @@ func BenchmarkGeoTrackDispatch_PreGateParallel(b *testing.B) {
 	if geoTrackEnabledFn() {
 		b.Skip("GeoIP DB unexpectedly loaded; disabled-path benchmark requires no DB")
 	}
+	// Drain the spawned trackers after StopTimer (see the serial PreGate
+	// benchmark) so delayed tracker work does not overlap the timer window or
+	// the following benchmark. wg.Add(1) per spawn is alloc-free, so the
+	// measured closure allocation is unchanged.
+	var wg sync.WaitGroup
+	orig := geoTrackSpawnHook
+	geoTrackSpawnHook = wg.Done
+	defer func() { geoTrackSpawnHook = orig }()
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
+			wg.Add(1)
 			go trackDestinationCountry(benchGeoTrackHosts[i&3])
 			i++
 		}
 	})
+	b.StopTimer()
+	wg.Wait()
 }

@@ -700,11 +700,22 @@ func maybeTrackDestinationCountry(host string) bool {
 	return true
 }
 
+// geoTrackSpawnHook, when non-nil, is invoked on every tracker goroutine as it
+// exits (both the recorded and the dropped-when-saturated paths). It exists
+// solely so benchmarks can drain the goroutines they spawn; it stays nil in
+// production, so the only added cost is one pointer compare on the tracker
+// goroutine — the gated per-request path (maybeTrackDestinationCountry) is
+// untouched.
+var geoTrackSpawnHook func()
+
 // trackDestinationCountry records the destination country for the live
 // dashboard. Runs in its own goroutine (fire-and-forget); extracted from
 // handleRequest (DEBT-002). Dashboard stats are best-effort: when the tracker
 // pool is saturated the sample is dropped rather than queued.
 func trackDestinationCountry(host string) {
+	if geoTrackSpawnHook != nil {
+		defer geoTrackSpawnHook()
+	}
 	select {
 	case geoTrackSem <- struct{}{}:
 	default:
