@@ -282,6 +282,9 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "ContentScanBypassHosts", Apply: semNilSkipEmptyWipe}}},
 
 	// ── AdminSettings-only settings ──────────────────────────────────────
+	{ID: "require_commit", Kind: kindConfig, Owner: "policyDraft", AdminDurable: true,
+		Note:     "policy-draft opt-in governance mode; admin-durable only (governance posture, NOT rulebase content), NOT cluster-synced, NOT on the rollback surface — a rules rollback must not silently flip the commit mode",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "RequireCommit"}}},
 	{ID: "syslog_addr", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SyslogAddr"}}},
 	{ID: "syslog_format", Kind: kindConfig, Owner: "syslog", AdminDurable: true,
@@ -344,6 +347,23 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "yara_alert_degraded", Kind: kindConfig, Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
 
+	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
+	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,
+	// OFF CP→DP (ClusterSynced), not Sensitive. These are node-local OPERATIONAL
+	// tuning, not policy; the learned cache they govern is itself volatile and off
+	// every surface. Gated by the autoexclude_tunables_saved sentinel on load.
+	{ID: "autoexclude_confirm_n", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+		Note:     "gated by autoexclude_tunables_saved sentinel (as are all autoexclude_* tunable rows)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeConfirmN"}}},
+	{ID: "autoexclude_ttl_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTTLSecs"}}},
+	{ID: "autoexclude_pinned_ttl_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludePinnedTTLSecs"}}},
+	{ID: "autoexclude_window_secs", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeWindowSecs"}}},
+	{ID: "autoexclude_max_entries", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeMaxEntries"}}},
+
 	// ── AdminSettings sentinels + legacy migration inputs ────────────────
 	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
@@ -357,6 +377,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrustedProxyCIDRsSaved"}}},
 	{ID: "yara_settings_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
+	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,
 		Note:     "read iff blocklist_feeds_saved is false; never written back",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedURL"}}},

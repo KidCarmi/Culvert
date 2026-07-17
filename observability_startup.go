@@ -45,6 +45,10 @@ func loadObservability(cfg observabilityStartupConfig) {
 	}
 
 	if cfg.AuditLogPath != "" {
+		// Recorded regardless of Init's outcome (see auditLogConfiguredPath)
+		// so GET /api/stats can tell an intentional in-memory-only setup
+		// apart from a configured path that silently failed to open.
+		auditLogConfiguredPath = cfg.AuditLogPath
 		if err := InitAuditLog(cfg.AuditLogPath); err != nil {
 			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
 		} else {
@@ -53,6 +57,7 @@ func loadObservability(cfg observabilityStartupConfig) {
 	}
 
 	if cfg.RequestLogPath != "" {
+		requestLogConfiguredPath = cfg.RequestLogPath
 		if err := initRequestLog(cfg.RequestLogPath, cfg.RequestLogMaxMB); err != nil {
 			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
 		} else {

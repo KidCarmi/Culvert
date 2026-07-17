@@ -1,0 +1,2626 @@
+[
+  {
+    "id": "SWG-0001",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0002",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0003",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0004",
+    "behavior_id": "CB-002",
+    "capabilities": [
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0005",
+    "behavior_id": "CB-003",
+    "capabilities": [
+      "url_categories",
+      "category_groups",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0006",
+    "behavior_id": "CB-004",
+    "capabilities": [
+      "source_ip_subnet",
+      "rule_first_match",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0007",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "rule_ordering",
+      "default_deny",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0008",
+    "behavior_id": "CB-006",
+    "capabilities": [
+      "rule_first_match",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0009",
+    "behavior_id": "CB-007",
+    "capabilities": [
+      "default_deny",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0010",
+    "behavior_id": "CB-008",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0011",
+    "behavior_id": "CB-009",
+    "capabilities": [
+      "manual_ssl_bypass",
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0012",
+    "behavior_id": "CB-010",
+    "capabilities": [
+      "cert_validation",
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0013",
+    "behavior_id": "CB-011",
+    "capabilities": [
+      "threat_intel",
+      "blocklist",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0014",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0015",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0016",
+    "behavior_id": "CB-014",
+    "capabilities": [
+      "rule_lifecycle",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0017",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0018",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "http",
+      "upload_download"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0019",
+    "behavior_id": "CB-017",
+    "capabilities": [
+      "schedule_time",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0020",
+    "behavior_id": "CB-018",
+    "capabilities": [
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0021",
+    "behavior_id": "CB-019",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0022",
+    "behavior_id": "CB-020",
+    "capabilities": [
+      "streaming_chunked",
+      "large_files",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0023",
+    "behavior_id": "CB-021",
+    "capabilities": [
+      "auth_policy",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0024",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0025",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0026",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0027",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0028",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0029",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0030",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0031",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0032",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0033",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0034",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0035",
+    "behavior_id": "CB-015",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0036",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0037",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0038",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0039",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0040",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0041",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0042",
+    "behavior_id": "CB-002",
+    "capabilities": [
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0043",
+    "behavior_id": "CB-002",
+    "capabilities": [
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0044",
+    "behavior_id": "CB-002",
+    "capabilities": [
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0045",
+    "behavior_id": "CB-002",
+    "capabilities": [
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0046",
+    "behavior_id": "CB-003",
+    "capabilities": [
+      "url_categories",
+      "category_groups",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0047",
+    "behavior_id": "CB-003",
+    "capabilities": [
+      "url_categories",
+      "category_groups",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0048",
+    "behavior_id": "CB-003",
+    "capabilities": [
+      "url_categories",
+      "category_groups",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0049",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0050",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0051",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0052",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0053",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0054",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0055",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0056",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0057",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0058",
+    "behavior_id": "CB-006",
+    "capabilities": [
+      "rule_first_match",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0059",
+    "behavior_id": "CB-026",
+    "capabilities": [
+      "rule_first_match",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0060",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0061",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0062",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0063",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0064",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0065",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0066",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0067",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0068",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "cert_validation",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0069",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "cert_validation",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0070",
+    "behavior_id": "CB-017",
+    "capabilities": [
+      "schedule_time",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0071",
+    "behavior_id": "CB-018",
+    "capabilities": [
+      "schedule_time",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0072",
+    "behavior_id": "CB-019",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0073",
+    "behavior_id": "CB-030",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0074",
+    "behavior_id": "CB-031",
+    "capabilities": [
+      "file_type_mime",
+      "upload_download",
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0075",
+    "behavior_id": "CB-031",
+    "capabilities": [
+      "file_type_mime",
+      "upload_download",
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0076",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0077",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0078",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0079",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0080",
+    "behavior_id": "CB-014",
+    "capabilities": [
+      "rule_lifecycle",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0081",
+    "behavior_id": "CB-014",
+    "capabilities": [
+      "rule_lifecycle",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0082",
+    "behavior_id": "CB-020",
+    "capabilities": [
+      "streaming_chunked",
+      "large_files",
+      "redirect_chains",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0083",
+    "behavior_id": "CB-020",
+    "capabilities": [
+      "streaming_chunked",
+      "large_files",
+      "redirect_chains",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0084",
+    "behavior_id": "CB-020",
+    "capabilities": [
+      "streaming_chunked",
+      "large_files",
+      "redirect_chains",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0085",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0086",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0087",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0088",
+    "behavior_id": "CB-011",
+    "capabilities": [
+      "threat_intel",
+      "blocklist",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0089",
+    "behavior_id": "CB-011",
+    "capabilities": [
+      "threat_intel",
+      "blocklist",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0090",
+    "behavior_id": "CB-011",
+    "capabilities": [
+      "threat_intel",
+      "blocklist",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0091",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "http",
+      "upload_download"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0092",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "http",
+      "upload_download"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0093",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "http",
+      "upload_download"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0094",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0095",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0096",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0097",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0098",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0099",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0100",
+    "behavior_id": "CB-032",
+    "capabilities": [
+      "https_connect",
+      "url_domain_objects",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0101",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0102",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0103",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0104",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0105",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0106",
+    "behavior_id": "CB-023",
+    "capabilities": [
+      "default_deny",
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0107",
+    "behavior_id": "CB-033",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0108",
+    "behavior_id": "CB-033",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0109",
+    "behavior_id": "CB-033",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0110",
+    "behavior_id": "CB-033",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0111",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0112",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0113",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0114",
+    "behavior_id": "CB-029",
+    "capabilities": [
+      "tls_inspection",
+      "decryption_profile",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0115",
+    "behavior_id": "CB-018",
+    "capabilities": [
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0116",
+    "behavior_id": "CB-018",
+    "capabilities": [
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0117",
+    "behavior_id": "CB-017",
+    "capabilities": [
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0118",
+    "behavior_id": "CB-034",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0119",
+    "behavior_id": "CB-035",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0120",
+    "behavior_id": "CB-036",
+    "capabilities": [
+      "source_ip_subnet",
+      "url_categories",
+      "schedule_time",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0121",
+    "behavior_id": "CB-037",
+    "capabilities": [
+      "multi_tenant",
+      "source_ip_subnet",
+      "default_deny",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0122",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "observability",
+      "decision_trace",
+      "logging",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0123",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "concurrency",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0124",
+    "behavior_id": "CB-038",
+    "capabilities": [
+      "config_persistence",
+      "data_plane_restart",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0125",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "default_deny",
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0126",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "default_deny",
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0127",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "default_deny",
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0128",
+    "behavior_id": "CB-005",
+    "capabilities": [
+      "rule_first_match",
+      "default_deny",
+      "url_domain_objects",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0129",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0130",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0131",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0132",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0133",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0134",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0135",
+    "behavior_id": "CB-016",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0136",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0137",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0138",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0139",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0140",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0141",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0142",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0143",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0144",
+    "behavior_id": "CB-001",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0145",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0146",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0147",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0148",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0149",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0150",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0151",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0152",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0153",
+    "behavior_id": "CB-024",
+    "capabilities": [
+      "source_ip_subnet",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0154",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0155",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0156",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0157",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0158",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0159",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0160",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0161",
+    "behavior_id": "CB-028",
+    "capabilities": [
+      "tls_inspection",
+      "manual_ssl_bypass",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0162",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0163",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0164",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0165",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0166",
+    "behavior_id": "CB-039",
+    "capabilities": [
+      "rule_first_match",
+      "url_categories",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0167",
+    "behavior_id": "CB-039",
+    "capabilities": [
+      "rule_first_match",
+      "url_categories",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0168",
+    "behavior_id": "CB-039",
+    "capabilities": [
+      "rule_first_match",
+      "url_categories",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0169",
+    "behavior_id": "CB-039",
+    "capabilities": [
+      "rule_first_match",
+      "url_categories",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0170",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0171",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0172",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0173",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0174",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0175",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0176",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0177",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0178",
+    "behavior_id": "CB-022",
+    "capabilities": [
+      "url_domain_objects",
+      "http",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0179",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0180",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0181",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0182",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0183",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0184",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0185",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0186",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0187",
+    "behavior_id": "CB-025",
+    "capabilities": [
+      "source_ip_subnet",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0188",
+    "behavior_id": "CB-040",
+    "capabilities": [
+      "url_categories",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0189",
+    "behavior_id": "CB-040",
+    "capabilities": [
+      "url_categories",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0190",
+    "behavior_id": "CB-040",
+    "capabilities": [
+      "url_categories",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0191",
+    "behavior_id": "CB-040",
+    "capabilities": [
+      "url_categories",
+      "default_deny",
+      "http",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0192",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0193",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0194",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0195",
+    "behavior_id": "CB-013",
+    "capabilities": [
+      "drop",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0196",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0197",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0198",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0199",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0200",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0201",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0202",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0203",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0204",
+    "behavior_id": "CB-041",
+    "capabilities": [
+      "default_deny",
+      "tls_inspection",
+      "https_connect",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0205",
+    "behavior_id": "CB-042",
+    "capabilities": [
+      "geoip_country",
+      "limitation_record"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0206",
+    "behavior_id": "CB-043",
+    "capabilities": [
+      "ipv6",
+      "limitation_record"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0207",
+    "behavior_id": "CB-044",
+    "capabilities": [
+      "dns_rebinding",
+      "security",
+      "limitation_record"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0208",
+    "behavior_id": "CB-045",
+    "capabilities": [
+      "websocket",
+      "limitation_record"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0209",
+    "behavior_id": "CB-046",
+    "capabilities": [
+      "partial_content",
+      "limitation_record"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0210",
+    "behavior_id": "CB-047",
+    "capabilities": [
+      "socks5",
+      "authorization_policy",
+      "rule_first_match"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0211",
+    "behavior_id": "CB-047",
+    "capabilities": [
+      "socks5",
+      "authorization_policy",
+      "rule_first_match"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0212",
+    "behavior_id": "CB-027",
+    "capabilities": [
+      "header_scrub",
+      "identity",
+      "tls_inspection",
+      "https_connect"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0213",
+    "behavior_id": "CB-048",
+    "capabilities": [
+      "object_lifecycle",
+      "config_persistence",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0214",
+    "behavior_id": "CB-049",
+    "capabilities": [
+      "policy_conflict",
+      "rule_ordering",
+      "http"
+    ],
+    "canonical_representative": true,
+    "validity": "valid",
+    "weak_negative": []
+  },
+  {
+    "id": "SWG-0215",
+    "behavior_id": "CB-012",
+    "capabilities": [
+      "redirect",
+      "security",
+      "http"
+    ],
+    "canonical_representative": false,
+    "validity": "valid",
+    "weak_negative": []
+  }
+]

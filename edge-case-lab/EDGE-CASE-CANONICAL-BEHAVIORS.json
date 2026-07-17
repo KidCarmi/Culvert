@@ -1,0 +1,1494 @@
+[
+  {
+    "behavior_id": "CB-001",
+    "capability": "url_domain_objects",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 15,
+    "scenarios": [
+      "SWG-0001",
+      "SWG-0002",
+      "SWG-0003",
+      "SWG-0085",
+      "SWG-0086",
+      "SWG-0087",
+      "SWG-0136",
+      "SWG-0137",
+      "SWG-0138",
+      "SWG-0139",
+      "SWG-0140",
+      "SWG-0141",
+      "SWG-0142",
+      "SWG-0143",
+      "SWG-0144"
+    ]
+  },
+  {
+    "behavior_id": "CB-002",
+    "capability": "url_categories",
+    "policy_dimension": [
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 5,
+    "scenarios": [
+      "SWG-0004",
+      "SWG-0042",
+      "SWG-0043",
+      "SWG-0044",
+      "SWG-0045"
+    ]
+  },
+  {
+    "behavior_id": "CB-003",
+    "capability": "url_categories",
+    "policy_dimension": [
+      "category_group"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0005",
+      "SWG-0046",
+      "SWG-0047",
+      "SWG-0048"
+    ]
+  },
+  {
+    "behavior_id": "CB-004",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": true,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0006"
+    ]
+  },
+  {
+    "behavior_id": "CB-005",
+    "capability": "rule_first_match",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": true,
+    "scenario_count": 7,
+    "scenarios": [
+      "SWG-0007",
+      "SWG-0057",
+      "SWG-0123",
+      "SWG-0125",
+      "SWG-0126",
+      "SWG-0127",
+      "SWG-0128"
+    ]
+  },
+  {
+    "behavior_id": "CB-006",
+    "capability": "rule_first_match",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": true,
+    "scenario_count": 2,
+    "scenarios": [
+      "SWG-0008",
+      "SWG-0058"
+    ]
+  },
+  {
+    "behavior_id": "CB-007",
+    "capability": "default_deny",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http+https",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0009"
+    ]
+  },
+  {
+    "behavior_id": "CB-008",
+    "capability": "tls_inspection",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": true,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0010"
+    ]
+  },
+  {
+    "behavior_id": "CB-009",
+    "capability": "manual_ssl_bypass",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0011"
+    ]
+  },
+  {
+    "behavior_id": "CB-010",
+    "capability": "cert_validation",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": "https/other-src -> conn_fail",
+    "failure_mode": [
+      "tls_validation_fail_or_upstream"
+    ],
+    "expected_decision": [
+      "conn_fail"
+    ],
+    "required_evidence": [
+      "SSL_INSPECT cert error (tls_validation_fail) | upstream_fail"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0012"
+    ]
+  },
+  {
+    "behavior_id": "CB-011",
+    "capability": "threat_intel",
+    "policy_dimension": [
+      "threat_intel",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0013",
+      "SWG-0088",
+      "SWG-0089",
+      "SWG-0090"
+    ]
+  },
+  {
+    "behavior_id": "CB-012",
+    "capability": "redirect",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": "http/other-src -> redirect",
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "redirect"
+    ],
+    "required_evidence": [
+      "POLICY_REDIRECT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 7,
+    "scenarios": [
+      "SWG-0014",
+      "SWG-0076",
+      "SWG-0077",
+      "SWG-0163",
+      "SWG-0164",
+      "SWG-0165",
+      "SWG-0215"
+    ]
+  },
+  {
+    "behavior_id": "CB-013",
+    "capability": "drop",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> drop",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "drop"
+    ],
+    "required_evidence": [
+      "POLICY_DROP"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 7,
+    "scenarios": [
+      "SWG-0015",
+      "SWG-0078",
+      "SWG-0079",
+      "SWG-0192",
+      "SWG-0193",
+      "SWG-0194",
+      "SWG-0195"
+    ]
+  },
+  {
+    "behavior_id": "CB-014",
+    "capability": "rule_lifecycle",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 3,
+    "scenarios": [
+      "SWG-0016",
+      "SWG-0080",
+      "SWG-0081"
+    ]
+  },
+  {
+    "behavior_id": "CB-015",
+    "capability": "url_domain_objects",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http+https",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 11,
+    "scenarios": [
+      "SWG-0017",
+      "SWG-0024",
+      "SWG-0025",
+      "SWG-0026",
+      "SWG-0027",
+      "SWG-0028",
+      "SWG-0029",
+      "SWG-0030",
+      "SWG-0033",
+      "SWG-0034",
+      "SWG-0035"
+    ]
+  },
+  {
+    "behavior_id": "CB-016",
+    "capability": "http",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 7,
+    "scenarios": [
+      "SWG-0018",
+      "SWG-0091",
+      "SWG-0092",
+      "SWG-0093",
+      "SWG-0122",
+      "SWG-0134",
+      "SWG-0135"
+    ]
+  },
+  {
+    "behavior_id": "CB-017",
+    "capability": "schedule_time",
+    "policy_dimension": [
+      "schedule",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 3,
+    "scenarios": [
+      "SWG-0019",
+      "SWG-0070",
+      "SWG-0117"
+    ]
+  },
+  {
+    "behavior_id": "CB-018",
+    "capability": "schedule_time",
+    "policy_dimension": [
+      "schedule",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0020",
+      "SWG-0071",
+      "SWG-0115",
+      "SWG-0116"
+    ]
+  },
+  {
+    "behavior_id": "CB-019",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 2,
+    "scenarios": [
+      "SWG-0021",
+      "SWG-0072"
+    ]
+  },
+  {
+    "behavior_id": "CB-020",
+    "capability": "streaming_chunked",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0022",
+      "SWG-0082",
+      "SWG-0083",
+      "SWG-0084"
+    ]
+  },
+  {
+    "behavior_id": "CB-021",
+    "capability": "auth_policy",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": "http/other-src -> auth_challenge",
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "auth_challenge"
+    ],
+    "required_evidence": [
+      "CRED_REQUIRED | 407"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0023"
+    ]
+  },
+  {
+    "behavior_id": "CB-022",
+    "capability": "url_domain_objects",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http+https",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 11,
+    "scenarios": [
+      "SWG-0031",
+      "SWG-0032",
+      "SWG-0170",
+      "SWG-0171",
+      "SWG-0172",
+      "SWG-0173",
+      "SWG-0174",
+      "SWG-0175",
+      "SWG-0176",
+      "SWG-0177",
+      "SWG-0178"
+    ]
+  },
+  {
+    "behavior_id": "CB-023",
+    "capability": "default_deny",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http+https",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 12,
+    "scenarios": [
+      "SWG-0036",
+      "SWG-0037",
+      "SWG-0038",
+      "SWG-0039",
+      "SWG-0040",
+      "SWG-0041",
+      "SWG-0101",
+      "SWG-0102",
+      "SWG-0103",
+      "SWG-0104",
+      "SWG-0105",
+      "SWG-0106"
+    ]
+  },
+  {
+    "behavior_id": "CB-024",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "default_deny",
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 13,
+    "scenarios": [
+      "SWG-0049",
+      "SWG-0051",
+      "SWG-0053",
+      "SWG-0055",
+      "SWG-0145",
+      "SWG-0146",
+      "SWG-0147",
+      "SWG-0148",
+      "SWG-0149",
+      "SWG-0150",
+      "SWG-0151",
+      "SWG-0152",
+      "SWG-0153"
+    ]
+  },
+  {
+    "behavior_id": "CB-025",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 13,
+    "scenarios": [
+      "SWG-0050",
+      "SWG-0052",
+      "SWG-0054",
+      "SWG-0056",
+      "SWG-0179",
+      "SWG-0180",
+      "SWG-0181",
+      "SWG-0182",
+      "SWG-0183",
+      "SWG-0184",
+      "SWG-0185",
+      "SWG-0186",
+      "SWG-0187"
+    ]
+  },
+  {
+    "behavior_id": "CB-026",
+    "capability": "rule_first_match",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": true,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0059"
+    ]
+  },
+  {
+    "behavior_id": "CB-027",
+    "capability": "tls_inspection",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 17,
+    "scenarios": [
+      "SWG-0060",
+      "SWG-0062",
+      "SWG-0064",
+      "SWG-0066",
+      "SWG-0129",
+      "SWG-0130",
+      "SWG-0131",
+      "SWG-0132",
+      "SWG-0133",
+      "SWG-0154",
+      "SWG-0155",
+      "SWG-0156",
+      "SWG-0157",
+      "SWG-0158",
+      "SWG-0159",
+      "SWG-0162",
+      "SWG-0212"
+    ]
+  },
+  {
+    "behavior_id": "CB-028",
+    "capability": "tls_inspection",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 6,
+    "scenarios": [
+      "SWG-0061",
+      "SWG-0063",
+      "SWG-0065",
+      "SWG-0067",
+      "SWG-0160",
+      "SWG-0161"
+    ]
+  },
+  {
+    "behavior_id": "CB-029",
+    "capability": "tls_inspection",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 6,
+    "scenarios": [
+      "SWG-0068",
+      "SWG-0069",
+      "SWG-0111",
+      "SWG-0112",
+      "SWG-0113",
+      "SWG-0114"
+    ]
+  },
+  {
+    "behavior_id": "CB-030",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0073"
+    ]
+  },
+  {
+    "behavior_id": "CB-031",
+    "capability": "file_type_mime",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": "https/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 2,
+    "scenarios": [
+      "SWG-0074",
+      "SWG-0075"
+    ]
+  },
+  {
+    "behavior_id": "CB-032",
+    "capability": "https_connect",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "https",
+    "positive_vector": null,
+    "negative_vector": "https/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 7,
+    "scenarios": [
+      "SWG-0094",
+      "SWG-0095",
+      "SWG-0096",
+      "SWG-0097",
+      "SWG-0098",
+      "SWG-0099",
+      "SWG-0100"
+    ]
+  },
+  {
+    "behavior_id": "CB-033",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0107",
+      "SWG-0108",
+      "SWG-0109",
+      "SWG-0110"
+    ]
+  },
+  {
+    "behavior_id": "CB-034",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "schedule",
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0118"
+    ]
+  },
+  {
+    "behavior_id": "CB-035",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/corp-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0119"
+    ]
+  },
+  {
+    "behavior_id": "CB-036",
+    "capability": "source_ip_subnet",
+    "policy_dimension": [
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0120"
+    ]
+  },
+  {
+    "behavior_id": "CB-037",
+    "capability": "multi_tenant",
+    "policy_dimension": [
+      "default_deny",
+      "source",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/corp-src -> allow",
+    "negative_vector": "http/corp-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": true,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0121"
+    ]
+  },
+  {
+    "behavior_id": "CB-038",
+    "capability": "config_persistence",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0124"
+    ]
+  },
+  {
+    "behavior_id": "CB-039",
+    "capability": "rule_first_match",
+    "policy_dimension": [
+      "default_deny",
+      "url_category",
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": true,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0166",
+      "SWG-0167",
+      "SWG-0168",
+      "SWG-0169"
+    ]
+  },
+  {
+    "behavior_id": "CB-040",
+    "capability": "url_categories",
+    "policy_dimension": [
+      "default_deny",
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 4,
+    "scenarios": [
+      "SWG-0188",
+      "SWG-0189",
+      "SWG-0190",
+      "SWG-0191"
+    ]
+  },
+  {
+    "behavior_id": "CB-041",
+    "capability": "default_deny",
+    "policy_dimension": [
+      "default_deny",
+      "url_object"
+    ],
+    "protocol": "http+https",
+    "positive_vector": "https/other-src -> allow",
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow",
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT",
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "deny",
+    "precedence_sensitive": false,
+    "scenario_count": 9,
+    "scenarios": [
+      "SWG-0196",
+      "SWG-0197",
+      "SWG-0198",
+      "SWG-0199",
+      "SWG-0200",
+      "SWG-0201",
+      "SWG-0202",
+      "SWG-0203",
+      "SWG-0204"
+    ]
+  },
+  {
+    "behavior_id": "CB-042",
+    "capability": "geoip_country",
+    "policy_dimension": [
+      "default"
+    ],
+    "protocol": "n/a",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "recorded_limitation"
+    ],
+    "expected_decision": [],
+    "required_evidence": [],
+    "default_action": null,
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0205"
+    ]
+  },
+  {
+    "behavior_id": "CB-043",
+    "capability": "ipv6",
+    "policy_dimension": [
+      "default"
+    ],
+    "protocol": "n/a",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "recorded_limitation"
+    ],
+    "expected_decision": [],
+    "required_evidence": [],
+    "default_action": null,
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0206"
+    ]
+  },
+  {
+    "behavior_id": "CB-044",
+    "capability": "dns_rebinding",
+    "policy_dimension": [
+      "default"
+    ],
+    "protocol": "n/a",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "recorded_limitation"
+    ],
+    "expected_decision": [],
+    "required_evidence": [],
+    "default_action": null,
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0207"
+    ]
+  },
+  {
+    "behavior_id": "CB-045",
+    "capability": "websocket",
+    "policy_dimension": [
+      "default"
+    ],
+    "protocol": "n/a",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "recorded_limitation"
+    ],
+    "expected_decision": [],
+    "required_evidence": [],
+    "default_action": null,
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0208"
+    ]
+  },
+  {
+    "behavior_id": "CB-046",
+    "capability": "partial_content",
+    "policy_dimension": [
+      "default"
+    ],
+    "protocol": "n/a",
+    "positive_vector": null,
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "recorded_limitation"
+    ],
+    "expected_decision": [],
+    "required_evidence": [],
+    "default_action": null,
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0209"
+    ]
+  },
+  {
+    "behavior_id": "CB-047",
+    "capability": "socks5",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http+socks5",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 2,
+    "scenarios": [
+      "SWG-0210",
+      "SWG-0211"
+    ]
+  },
+  {
+    "behavior_id": "CB-048",
+    "capability": "object_lifecycle",
+    "policy_dimension": [
+      "url_category"
+    ],
+    "protocol": "http",
+    "positive_vector": null,
+    "negative_vector": "http/other-src -> block_page",
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "block_page"
+    ],
+    "required_evidence": [
+      "POLICY_BLOCK | POLICY_DEFAULT_DENY | FILE_BLOCKED | THREAT_BLOCKED"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0213"
+    ]
+  },
+  {
+    "behavior_id": "CB-049",
+    "capability": "policy_conflict",
+    "policy_dimension": [
+      "url_object"
+    ],
+    "protocol": "http",
+    "positive_vector": "http/other-src -> allow",
+    "negative_vector": null,
+    "boundary_vector": null,
+    "failure_mode": [
+      "none"
+    ],
+    "expected_decision": [
+      "allow"
+    ],
+    "required_evidence": [
+      "POLICY_ALLOW | default-allow | AUTH_DEFAULT_EXEMPT"
+    ],
+    "default_action": "allow",
+    "precedence_sensitive": false,
+    "scenario_count": 1,
+    "scenarios": [
+      "SWG-0214"
+    ]
+  }
+]

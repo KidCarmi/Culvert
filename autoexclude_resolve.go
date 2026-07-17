@@ -196,9 +196,24 @@ func decryptionScope(match *PolicyMatch) (id, name string) {
 // Documented NAT/DHCP limitation: unauthenticated devices sharing one egress IP
 // count as one client, so a host broken only for such a fleet needs failures from
 // two distinct egress IPs (or two authenticated users) before it is excluded.
-func clientEvidence(identity, clientIP string) string {
+//
+// ADR-0008: the reason gates whether IP-only evidence is ACCEPTABLE. For
+// client_pinned — "the spoofable class", where the client fully controls the TLS
+// alert it sends against our forged leaf — the raw-IPv4 confirm-count is near-zero
+// protection against a deliberate poisoner (two egress IPs trivially meet
+// confirmN=2). So an UNAUTHENTICATED client_pinned observation yields an EMPTY
+// token, which the engine's Observe discards (it can never contribute toward
+// promotion). Only two distinct AUTHENTICATED identities can promote a client_pinned
+// exclusion; the operator remedy for unauthenticated pinned apps is the manual SSL
+// Bypass list. The origin-observed reasons (client_cert_required, unsupported_params)
+// are NOT the spoofable class (the origin, not the client, controls those signals),
+// so they keep IP evidence and are unchanged.
+func clientEvidence(reason AutoExcludeReason, identity, clientIP string) string {
 	if identity != "" {
 		return "id:" + identity
+	}
+	if reason == autoExReasonClientPinned {
+		return "" // ADR-0008: IP-only evidence is not accepted for the spoofable class
 	}
 	if ip := net.ParseIP(clientIP); ip != nil && ip.To4() == nil {
 		return "net6:" + ip.Mask(net.CIDRMask(64, 128)).String()
@@ -218,8 +233,18 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	if scopeID == "" {
 		return // no fail-open profile to scope to (gated caller, defensive)
 	}
-	client := clientEvidence(id.Identity, id.ClientIP)
-	if !autoExclude.Observe(scopeID, scopeName, host, reason, client) {
+	client := clientEvidence(reason, id.Identity, id.ClientIP)
+	if client == "" {
+		// ADR-0008: an unauthenticated client_pinned observation carries no
+		// acceptable evidence. Return BEFORE Observe — not just relying on Observe to
+		// skip an empty token — because Observe creates/resets the pending
+		// (scope,host,reason) window before it skips the token, so passing "" here
+		// could reset an in-flight window and drop already-accumulated AUTHENTICATED
+		// tokens (letting IP-only noise indefinitely block the two-identity promotion
+		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
+		return
+	}
+	if !autoExclude().Observe(scopeID, scopeName, host, reason, client) {
 		return // still gathering confirmation, or already excluded
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
@@ -242,6 +267,103 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	go fireAlert("decryption_autoexclude", AlertPayload{
 		Host:   safeHost,
 		Detail: fmt.Sprintf("SSL inspection auto-disabled (profile=%s reason=%s)", safeScope, reason),
+		Source: "proxy",
+	})
+	// F4: feed the promotion-rate detector. A single abnormal-rate alert fires on
+	// a threshold crossing (poisoning-campaign signal) — the aggregate the
+	// per-host alert above cannot provide.
+	maybeFireAutoExcludeSurge(scopeName)
+}
+
+// feedReasonClientCertRescue is the structured feed ActionTaken tag for a
+// client-cert live-rescue (ADR-0009), so the TUNNEL_CLOSED entry is queryable in
+// the request/tunnel feed rather than only inferable from SSLAction=="bypass".
+const feedReasonClientCertRescue = "autoexclude_client_cert_rescue"
+
+// clientCertRescueDecision is the SOLE policy gate for the strip-path client-cert
+// live-rescue (ADR-0009). The GetClientCertificate callback only produces the
+// `originAsked` signal and never decides or bypasses; this function makes the
+// decision. It requires ALL of:
+//
+//   - failOpen: the matched rule resolved to a CONCRETE fail-open decryption
+//     profile (resolveFailOpen). A fail-close rule can never reach here — the
+//     caller attaches the detection callback only when failOpen — but we re-check
+//     defensively (invariant: fail-close never rescues/learns/consults).
+//   - originAsked: the origin sent a CertificateRequest (structural signal, set in
+//     both TLS 1.2 and 1.3, unlike the handshake error string which a real client
+//     dial never surfaces as "certificate required").
+//   - herr != nil: the handshake actually FAILED. This is the required-vs-optional
+//     mTLS distinction. An origin using tls.RequestClientCert /
+//     VerifyClientCertIfGiven (OPTIONAL client auth) ALSO sends a CertificateRequest
+//     but then COMPLETES the handshake without our cert (herr==nil) — that
+//     connection is perfectly inspectable, so we must NOT bypass it. Only when the
+//     missing client cert actually breaks the handshake have we PROVEN inspection
+//     cannot continue; a successful handshake is never rescued. (Consequence: a
+//     TLS 1.3 origin that REQUIRES a client cert completes our client handshake
+//     locally before rejecting — herr==nil — so it is not auto-rescued and uses the
+//     manual SSL Bypass list; this is the safe posture. See ADR-0009 §Alternatives.)
+//   - NOT a cert-verify failure: an untrusted/expired/hostname-mismatched origin
+//     cert must stay fail-closed (the poisoning/exfil vector).
+//
+// Generic TLS alerts and every other failure leave originAsked false, so they can
+// never rescue here.
+func clientCertRescueDecision(failOpen, originAsked bool, herr error) bool {
+	if !failOpen || !originAsked || herr == nil {
+		return false // no fail-open / no CertificateRequest / a SUCCESSFUL (inspectable) handshake
+	}
+	if isOriginCertVerifyErr(herr) {
+		return false // untrusted/expired/mismatched origin cert — stay fail-closed
+	}
+	return true
+}
+
+// autoExcludeRescueCounter counts LIVE-RESCUE events: sessions transparently
+// bypassed on the FIRST client_cert_required origin signal (confirm-count-exempt),
+// BEFORE — and independently of — any persistent-cache promotion. This closes the
+// F1 observability gap: the promotion path fired audit+alert+metric, but the
+// rescue path (which actually stops inspecting the CURRENT session) emitted only a
+// log line. A single client colluding with a cert-demanding origin under a
+// fail-open rule can force per-session bypasses that never reach the confirm-count
+// and so were previously invisible to the audit ring, the SIEM alert stream, and
+// metrics. Exposed as culvert_decrypt_autoexclude_rescue_total (metrics.go).
+var autoExcludeRescueCounter int64
+
+// recordAutoExcludeRescue makes the live-rescue ACT first-class observability,
+// mirroring recordAutoExclude's promotion triple (metric + audit + alert) but
+// fired on the rescue itself rather than on confirm-count promotion. It does NOT
+// change the security decision (the caller has already decided to bypass); it only
+// makes that decision loud and attributable (actor = triggering client IP).
+//
+// The reason is always ReasonClientCertRequired: the origin classifier returns
+// rescue=true for that reason ONLY (pinned by TestClassifyOriginInspectFailure_
+// TightenedTriggers), so the caller passes it explicitly rather than threading it
+// back through maybeFailOpenOrigin's bool return.
+func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
+	atomic.AddInt64(&autoExcludeRescueCounter, 1)
+	_, scopeName := decryptionScope(match)
+	// Strip quotes AND newlines before the audit/alert/log fields (log-injection
+	// DiD — same posture as recordAutoExclude).
+	safeHost := auditSafe(host)
+	safeScope := auditSafe(scopeName)
+	safeClient := auditSafe(id.ClientIP)
+	logger.Printf("SSL_AUTOEXCLUDE_RESCUE %s -> %q (scope=%q reason=%s) — current session bypassed on first signal (confirm-count-exempt)",
+		sanitizeLog(id.ClientIP), sanitizeLog(safeHost), sanitizeLog(safeScope), reason)
+	auditAdd(AuditEntry{
+		TS:     time.Now().UnixMilli(),
+		Time:   time.Now().Format("2006-01-02 15:04:05"),
+		Actor:  strings.ReplaceAll(id.ClientIP, `"`, ""),
+		Action: "decryption.autoexclude.rescue",
+		Object: safeScope + "/" + safeHost,
+		Detail: fmt.Sprintf("scope=%s reason=%s; live-rescue: this session bypassed SSL inspection (confirm-count-exempt; the persistent exclusion still requires the confirm-count)", safeScope, reason),
+	})
+	// Detail carries host AND client because alerts.Store.Dispatch suppresses
+	// duplicates for 30s keyed on event+Detail (internal/alerts/store.go): a
+	// per-profile-only Detail would collapse rescues to DIFFERENT hosts/clients in
+	// the same window into one alert — hiding the very repeated-evasion pattern this
+	// exposes. Including both makes each distinct (host, client) a distinct alert.
+	go fireAlert("decryption_autoexclude_rescue", AlertPayload{
+		Host:   safeHost,
+		Detail: fmt.Sprintf("SSL inspection live-bypassed for one session (host=%s client=%s profile=%s reason=%s)", safeHost, safeClient, safeScope, reason),
 		Source: "proxy",
 	})
 }

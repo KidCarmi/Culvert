@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"culvert-maint/internal/auth"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -211,11 +212,15 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 				if err != nil {
 					acc.priorCaptureReason = "no_prior_digest"
+					// Capture step done (no prior to record); advance the journal.
+					s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
 					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
 				}
 				acc.priorImageID = ri.RunningImageID
 				acc.priorDigests = bareDigests(ri.RepoDigests)
 				s.deriveRollbackTarget(acc, ri.PriorRef())
+				// Prior (rollback target) now known — fold it into the journal record.
+				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
 				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",
 					ri.RunningImageID, joinDigests(acc.priorDigests), acc.priorRef, rollbackTargetNote(acc))), nil, nil
 			},
@@ -241,21 +246,28 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					acc.pinnedRef = requestedRef
 					acc.pinnedDigest = d
 				} else {
-					// Tag ref — resolve to a digest and build the pin.
-					// (Multi-arch caveat: manifest inspect --verbose reports
-					// per-platform descriptors, so this resolves to one of
-					// them; CP/GUI will send list digests — see D1.6c plan.)
-					if len(acc.targetDigests) == 0 {
-						return []byte("resolve_target: no digest resolved for tag " + requestedRef), res.Stderr,
-							errors.New("resolve_target: could not resolve a digest for tag " + requestedRef)
+					// Tag ref — resolve to a single, host-correct manifest
+					// descriptor digest STRUCTURALLY. We must NOT pick
+					// targetDigests[0]: extractDigests scrapes every sha256
+					// token from the verbose JSON (including layer/config
+					// blob digests inside the embedded manifest bodies), and
+					// a multi-arch image offers one descriptor per platform.
+					// resolveTargetManifestDigest reads Descriptor.digest and
+					// disambiguates by host platform, failing closed on any
+					// ambiguity rather than pinning an arbitrary digest.
+					pd, derr := resolveTargetManifestDigest(res.Stdout)
+					if derr != nil {
+						return []byte("resolve_target: " + derr.Error() + " for tag " + requestedRef), res.Stderr,
+							fmt.Errorf("resolve_target: %w", derr)
 					}
-					// targetDigests already carry the `sha256:` prefix.
-					acc.pinnedDigest = acc.targetDigests[0]
+					acc.pinnedDigest = pd
 					acc.pinnedRef = imageRepo(requestedRef) + "@" + acc.pinnedDigest
 				}
 				if digestSetsIntersect(acc.priorDigests, acc.targetDigests) {
 					acc.alreadyCurrent = true
 				}
+				// Target pinned — fold TargetRef/TargetDigest into the journal record.
+				s.advanceJournalPhaseBestEffort(acc, journal.PhaseResolved)
 				return []byte(fmt.Sprintf("resolve_target: requested_ref=%q pinned_ref=%q target_digests=%s already_current=%v",
 					requestedRef, acc.pinnedRef, joinDigests(acc.targetDigests), acc.alreadyCurrent)), res.Stderr, nil
 			},
@@ -291,6 +303,11 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				if res == nil {
 					return nil, nil, rerr
 				}
+				if rerr == nil {
+					// New image is local; the fixed tag has NOT advanced — this is
+					// the last SAFE boundary (a crash here needs no reconciliation).
+					s.advanceJournalPhaseBestEffort(acc, journal.PhasePulled)
+				}
 				return res.Stdout, res.Stderr, rerr
 			}),
 		},
@@ -305,9 +322,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// it is treated as post-restart and inline rollback fires.
 			Name:          "restart",
 			FailureReason: ops.ReasonCommandError,
-			Run: skipIfCurrent(acc, "restart", func(ctx context.Context) ([]byte, []byte, error) {
-				return s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart)
-			}),
+			Run:           skipIfCurrent(acc, "restart", s.restartWithBarrier(acc)),
 		},
 		{
 			// Health gate. On a post-restart failure the op is marked
@@ -400,6 +415,9 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 					joinDigests(acc.runningAfterDigests), acc.pinnedDigest)), nil,
 				fmt.Errorf("post-restart running image does not match pinned digest %s", acc.pinnedDigest)
 		}
+		// Health + verify passed; success is imminent (the op still has the
+		// report stage, and terminal removal will retire the record).
+		s.advanceJournalPhaseBestEffort(acc, journal.PhaseVerified)
 		return []byte(fmt.Sprintf("verify: running_image_id=%s running_digests=%s",
 			ri.RunningImageID, joinDigests(acc.runningAfterDigests))), nil, nil
 	}

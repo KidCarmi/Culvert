@@ -23,6 +23,7 @@ import (
 type AdminSettings struct {
 	// Policy
 	DefaultAction string `json:"default_action,omitempty"` // "allow" or "deny"
+	RequireCommit bool   `json:"require_commit"`           // policy-draft opt-in: stage rulebase edits + require an explicit commit (default false ⇒ live-write)
 
 	// Security
 	IPFilterMode        string   `json:"ip_filter_mode,omitempty"`
@@ -118,6 +119,20 @@ type AdminSettings struct {
 	YARAOnTimeout     string `json:"yara_on_timeout,omitempty"`
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
+
+	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
+	// sentinel (like YARASettingsSaved): when false the values below are not applied
+	// on load, so a zero-value field can't override the engine defaults on settings
+	// files predating this feature. Durations persist as integer SECONDS to match the
+	// autoexclude.Stats() contract. The learned cache itself stays VOLATILE and
+	// node-local — only these five PARAMETERS are durable, and they are deliberately
+	// OFF export/import, version-rollback, and CP→DP propagation.
+	AutoExcludeTunablesSaved bool `json:"autoexclude_tunables_saved"`
+	AutoExcludeConfirmN      int  `json:"autoexclude_confirm_n,omitempty"`
+	AutoExcludeTTLSecs       int  `json:"autoexclude_ttl_secs,omitempty"`
+	AutoExcludePinnedTTLSecs int  `json:"autoexclude_pinned_ttl_secs,omitempty"`
+	AutoExcludeWindowSecs    int  `json:"autoexclude_window_secs,omitempty"`
+	AutoExcludeMaxEntries    int  `json:"autoexclude_max_entries,omitempty"`
 }
 
 var (
@@ -147,6 +162,7 @@ func LoadAdminSettings(path string) {
 	applyAdminServices(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminAutoExcludeTunables(&s)
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -157,6 +173,10 @@ func applyAdminSecurity(s *AdminSettings) {
 	if s.DefaultAction != "" {
 		setDefaultPolicyAction(s.DefaultAction)
 	}
+	// policy-draft opt-in. Plain bool (no sentinel): the default is false and
+	// there is no YAML seed to protect, so a pre-feature settings file (field
+	// absent ⇒ false) correctly lands on live-write mode.
+	setRequireCommit(s.RequireCommit)
 	if s.IPFilterMode != "" {
 		ipf.SetMode(s.IPFilterMode)
 		for _, ip := range s.IPFilterList {
@@ -318,6 +338,76 @@ func applyAdminYARA(s *AdminSettings) {
 	yaraSetAlertDegraded(s.YARAAlertDegraded)
 }
 
+// applyAdminAutoExcludeTunables restores the adaptive decryption-exclusion tunables
+// saved via the admin GUI (F10). Only applied when the sentinel is set, so a
+// settings file predating this feature (fields absent ⇒ zero, sentinel false) leaves
+// the engine defaults intact — feature-off is byte-identical. The persisted set is
+// resolved (zero ⇒ default) and VALIDATED; an out-of-range value (e.g. a hand-edited
+// file) is refused and the engine keeps its defaults (fail-closed), rather than
+// letting an out-of-bounds value through the engine's weaker last-resort clamp.
+func applyAdminAutoExcludeTunables(s *AdminSettings) {
+	if !s.AutoExcludeTunablesSaved {
+		return
+	}
+	resolved := resolveAutoExcludeTunables(autoExcludeTunables{
+		ConfirmN:      s.AutoExcludeConfirmN,
+		TTLSecs:       s.AutoExcludeTTLSecs,
+		PinnedTTLSecs: s.AutoExcludePinnedTTLSecs,
+		WindowSecs:    s.AutoExcludeWindowSecs,
+		MaxEntries:    s.AutoExcludeMaxEntries,
+	})
+	if err := validateAutoExcludeTunables(resolved); err != nil {
+		logger.Printf("AdminSettings: ignoring invalid persisted auto-exclusion tunables (%v) — keeping engine defaults", err)
+		return
+	}
+	autoExclude().Reconfigure(resolved.engineConfig())
+}
+
+// snapshotAdminEndpoints copies the external-URL / SANs, syslog, and OTLP endpoint
+// settings into s. Extracted to keep SaveAdminSettings under the funlen cap (mirrors
+// snapshotBlocklistFeeds / snapshotAutoExcludeTunables); no behavior change.
+func snapshotAdminEndpoints(s *AdminSettings) {
+	if proxyExternalBaseURL != "" {
+		s.BaseURL = proxyExternalBaseURL
+	}
+	if len(uiExtraSANs) > 0 {
+		s.UISANs = uiExtraSANs
+	}
+	if syslogConfigured != "" {
+		s.SyslogAddr = syslogConfigured
+		if globalSyslog != nil {
+			s.SyslogFormat = globalSyslog.Format()
+		}
+	}
+	s.OTLPEndpoint = globalOTLP.Endpoint()
+	if h := globalOTLP.Headers(); len(h) > 0 {
+		s.OTLPHeaders = h
+	}
+}
+
+// snapshotAutoExcludeTunables copies the effective tunables into s, so the durable
+// file always reflects what is (or is about to be) applied; on load they resolve to
+// themselves and Reconfigure is a no-op when unchanged. The learned cache contents
+// are NOT persisted (volatile). Extracted to keep SaveAdminSettings under the funlen
+// cap (mirrors snapshotBlocklistFeeds).
+//
+// override lets the F10 tunables PUT persist the TARGET values BEFORE they are applied
+// to the live cache (persist-before-apply): a persist failure then never touches the
+// cache, so learned entries an operator lowered max_entries below are not evicted-then-
+// stranded. nil ⇒ snapshot the current live values (every other caller).
+func snapshotAutoExcludeTunables(s *AdminSettings, override *autoExcludeTunables) {
+	t := currentAutoExcludeTunables()
+	if override != nil {
+		t = *override
+	}
+	s.AutoExcludeTunablesSaved = true
+	s.AutoExcludeConfirmN = t.ConfirmN
+	s.AutoExcludeTTLSecs = t.TTLSecs
+	s.AutoExcludePinnedTTLSecs = t.PinnedTTLSecs
+	s.AutoExcludeWindowSecs = t.WindowSecs
+	s.AutoExcludeMaxEntries = t.MaxEntries
+}
+
 // snapshotBlocklistFeeds copies the live feed set into s. blFeedSyncer is
 // nil until main() runs loadBlocklist, and SaveAdminSettings can run from a
 // detached goroutine (adminSettingsSave) that outlives the caller — so guard
@@ -339,17 +429,28 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 }
 
 // SaveAdminSettings snapshots all current runtime values and writes them
-// atomically to the settings file. Called after every API mutation.
-func SaveAdminSettings() {
+// atomically to the settings file. Called after every API mutation. Returns the
+// write error so a caller that needs durable-vs-runtime consistency (the F10
+// tunables PUT) can detect a persist failure; the fire-and-forget adminSettingsSave
+// wrapper ignores it (best-effort, as before).
+func SaveAdminSettings() error { return saveAdminSettingsWithAutoExclude(nil) }
+
+// saveAdminSettingsWithAutoExclude is SaveAdminSettings with an optional autoexclude
+// override. When ae is non-nil the durable file records those TARGET tunables instead
+// of the live cache's — the F10 PUT persists the target FIRST, then (only on success)
+// applies it to the live cache. Because the apply (Reconfigure) is infallible, a
+// persist failure leaves the cache — and every learned exclusion in it — untouched.
+func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	adminSettingsMu.Lock()
 	path := adminSettingsPath
 	adminSettingsMu.Unlock()
 	if path == "" {
-		return
+		return nil
 	}
 
 	s := AdminSettings{
 		DefaultAction:          defaultPolicyAction(),
+		RequireCommit:          requireCommitEnabled(),
 		IPFilterMode:           ipf.Mode(),
 		IPFilterList:           ipf.List(),
 		RateLimitRPM:           rl.Limit(),
@@ -366,27 +467,7 @@ func SaveAdminSettings() {
 		TrustedProxyCIDRsSaved: true, // once saved, the persisted list is authoritative (incl. empty)
 	}
 
-	// BaseURL / SANs
-	if proxyExternalBaseURL != "" {
-		s.BaseURL = proxyExternalBaseURL
-	}
-	if len(uiExtraSANs) > 0 {
-		s.UISANs = uiExtraSANs
-	}
-
-	// Syslog
-	if syslogConfigured != "" {
-		s.SyslogAddr = syslogConfigured
-		if globalSyslog != nil {
-			s.SyslogFormat = globalSyslog.Format()
-		}
-	}
-
-	// OTLP
-	s.OTLPEndpoint = globalOTLP.Endpoint()
-	if h := globalOTLP.Headers(); len(h) > 0 {
-		s.OTLPHeaders = h
-	}
+	snapshotAdminEndpoints(&s)
 
 	// Rewrite rules
 	s.RewriteRules = rewriter.List()
@@ -418,23 +499,30 @@ func SaveAdminSettings() {
 	s.YARAOnSaturation = yaraGetOnSaturation()
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
 
+	snapshotAutoExcludeTunables(&s, ae)
+
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		logger.Printf("AdminSettings: marshal error: %v", err)
-		return
+		return err
 	}
 	// AtomicWrite (unique temp + fsync): adminSettingsSave spawns this in a
 	// goroutine per API mutation, so a fixed ".tmp" name lets concurrent
 	// saves interleave into the same temp file and publish a torn result.
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		logger.Printf("AdminSettings: write error: %v", err)
+		return err
 	}
+	return nil
 }
 
 // adminSettingsSave is a convenience alias for use in API handlers.
 // Runs SaveAdminSettings in a goroutine to avoid blocking the HTTP response.
+// The write error is intentionally ignored here (best-effort, logged inside
+// SaveAdminSettings); callers that need durable-vs-runtime consistency call
+// SaveAdminSettings directly and handle the returned error (the F10 tunables PUT).
 func adminSettingsSave() {
-	go SaveAdminSettings()
+	go func() { _ = SaveAdminSettings() }()
 }
 
 // syslogConfigured is declared in ui.go (line 2404).

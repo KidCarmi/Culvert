@@ -172,8 +172,19 @@ func (s *Store) Load(path string) error {
 		obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
 		return err
 	}
-	s.replace(profiles, true)
+	migrated, skipped := s.replace(profiles, true)
 	obs.Printf("DecryptionProfiles: loaded %d profile(s) from %s", len(profiles), path)
+	// Persist backfilled IDs so ?id= addressing is stable across restart
+	// (idempotent: a second load finds all IDs present and writes nothing).
+	// Only when NOTHING was skipped: a Save here rewrites the file with just the
+	// accepted profiles, so persisting while invalid/dup entries were skipped
+	// would permanently delete them (Load's contract is to log-and-leave them on
+	// disk). With skipped entries present we keep the backfilled IDs in-memory
+	// only for this session; a later clean load persists them stably.
+	if migrated > 0 && skipped == 0 {
+		s.Save()
+		obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+	}
 	return nil
 }
 
@@ -229,6 +240,33 @@ func (s *Store) FailOpenScope(name string) (id string, ok bool) {
 	id = p.ID
 	s.mu.RUnlock()
 	return id, true
+}
+
+// FailOpenScopeByID resolves the autoexclude scope by the profile's stable ULID
+// (references-by-id / rename-safe). resolved=true iff a profile with that id
+// EXISTS; scope is its ID when that profile is fail-open, else "". The ID is
+// AUTHORITATIVE: a resolved fail-close profile returns ("", true) so the caller
+// does NOT fall back to the name — otherwise a rule whose id points at a
+// fail-close profile but whose stale name points at a different fail-open one
+// could get its (fail-close) session bypassed, violating the "fail-close is
+// un-poisonable" invariant. Mirrors resolveDecryptionProfile: name fallback only
+// when the id resolves to no profile at all. No-copy fast path; O(profiles), a
+// small admin set, only on the SSL-inspect CONNECT path.
+func (s *Store) FailOpenScopeByID(id string) (scope string, resolved bool) {
+	if id == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.profiles {
+		if p.ID == id {
+			if p.OnInspectError == "fail-open" {
+				return p.ID, true // resolved + fail-open → scope
+			}
+			return "", true // resolved but fail-close → no scope, and no name fallback
+		}
+	}
+	return "", false // not found → caller may fall back to the name
 }
 
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
@@ -318,7 +356,10 @@ func (s *Store) ReplaceAll(profiles []Profile) { s.replace(profiles, false) }
 
 // replace is the shared install path. skipInvalidLog controls whether skipped
 // entries are logged (Load logs; ReplaceAll stays quiet on the hot sync path).
-func (s *Store) replace(profiles []Profile, logSkips bool) {
+// Returns the number of profiles that had a stable ID backfilled (migrated) and
+// the number skipped as invalid/duplicate (skipped) — Load persists the backfill
+// only when migrated>0 AND skipped==0, so a rewrite never drops skipped entries.
+func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped int) {
 	built := make(map[string]*Profile, len(profiles))
 	order := make([]string, 0, len(profiles))
 	for i := range profiles {
@@ -328,14 +369,17 @@ func (s *Store) replace(profiles []Profile, logSkips bool) {
 			if logSkips {
 				obs.Printf("DecryptionProfiles: skipping invalid profile %q: %v", p.Name, err)
 			}
+			skipped++
 			continue
 		}
 		key := strings.ToLower(p.Name)
 		if _, dup := built[key]; dup {
+			skipped++
 			continue // last-write-wins would reorder; keep first, drop dup
 		}
 		if p.ID == "" {
 			p.ID = uuid.NewString()[:12]
+			migrated++
 		}
 		np := p
 		built[key] = &np
@@ -345,6 +389,122 @@ func (s *Store) replace(profiles []Profile, logSkips bool) {
 	s.profiles = built
 	s.order = order
 	s.mu.Unlock()
+	return migrated, skipped
+}
+
+// GetByID returns a copy of the profile with the given stable ID, or nil.
+func (s *Store) GetByID(id string) *Profile {
+	if id == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.profiles {
+		if p.ID == id {
+			cp := copyOut(p)
+			return &cp
+		}
+	}
+	return nil
+}
+
+// UpdateByID replaces the content of the profile with the given stable ID
+// (rename-safe addressing). Like the name-keyed Update, it edits content and
+// keeps the profile's current name + CreatedAt + ID — position/identity are not
+// changed by an edit. Returns error if no profile carries the id.
+func (s *Store) UpdateByID(id string, p Profile) error {
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, cur := range s.profiles {
+		if cur.ID != id {
+			continue
+		}
+		p.ID = id
+		p.Name = cur.Name // edits address by id and keep the name (mirrors Update)
+		p.CreatedAt = cur.CreatedAt
+		p.UpdatedAt = time.Now().UTC().Format(time.RFC3339) // parity with the name-keyed Update
+		if err := Validate(&p); err != nil {
+			return err
+		}
+		np := p
+		s.profiles[key] = &np
+		return nil
+	}
+	return fmt.Errorf("profile id %q not found", id)
+}
+
+// Rename changes the display name of the profile with the given stable ID,
+// re-keying the name index (references-by-id: rules link by ID, so the rename is
+// safe — the caller cascades the denormalized name onto referencing rules).
+// Validates the new name is non-empty and not already taken by a DIFFERENT
+// profile. Returns the OLD name (for audit + the caller's cascade). A case-only
+// change updates the display name in place without a collision check.
+func (s *Store) Rename(id, newName string) (oldName string, err error) {
+	newName = strings.TrimSpace(newName)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	if newName == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var curKey string
+	var cur *Profile
+	for key, p := range s.profiles {
+		if p.ID == id {
+			curKey, cur = key, p
+			break
+		}
+	}
+	if cur == nil {
+		return "", fmt.Errorf("profile id %q not found", id)
+	}
+	oldName = cur.Name
+	newKey := strings.ToLower(newName)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if newKey == curKey {
+		// Same key (no change or case-only) — update the display name in place.
+		cur.Name = newName
+		cur.UpdatedAt = now
+		return oldName, nil
+	}
+	if _, taken := s.profiles[newKey]; taken {
+		return "", fmt.Errorf("a profile named %q already exists", newName)
+	}
+	np := *cur
+	np.Name = newName
+	np.UpdatedAt = now
+	delete(s.profiles, curKey)
+	s.profiles[newKey] = &np
+	return oldName, nil
+}
+
+// DeleteByID removes the profile with the given stable ID. Returns the removed
+// profile's name (for audit) or an error if not found.
+func (s *Store) DeleteByID(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, p := range s.profiles {
+		if p.ID == id {
+			name := p.Name
+			delete(s.profiles, key)
+			for i, k := range s.order {
+				if k == key {
+					s.order = append(s.order[:i], s.order[i+1:]...)
+					break
+				}
+			}
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("profile id %q not found", id)
 }
 
 // Names returns all profile names (for UI dropdowns), in insertion order.

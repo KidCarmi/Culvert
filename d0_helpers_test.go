@@ -17,7 +17,7 @@ import (
 // docs/UI_REFACTOR_AUDIT.md §6 (Phase D).
 //
 // Invariants covered:
-//   D0a (this file)              — route inventory locked at 133
+//   D0a (this file)              — route inventory locked (see `const want`)
 //   d0_auth_safety_test.go        — public stays public; non-public → 401
 //   d0_rbac_safety_test.go        — admin-only handlers reject viewer+operator
 //   d0_mutation_safety_test.go    — CSRF, body limit, rate limit on mutations
@@ -121,7 +121,9 @@ var d0KnownRoutes = func() []string {
 // admin-UI route surface. After Phase C1 it enforces two invariants
 // against d0KnownRoutes (now derived from uiRoutes):
 //
-//  1. d0KnownRoutes contains exactly 141 entries (count locked).
+//  1. d0KnownRoutes contains exactly 142 entries (count locked; see `want` below
+//     and the Count history — the function name is a stable identifier kept across
+//     count bumps, the `const want` is the live lock).
 //  2. Every entry resolves through the wired mux to a non-empty pattern.
 //
 // Count history:
@@ -147,6 +149,15 @@ var d0KnownRoutes = func() []string {
 //     "how to decrypt" object referenced per policy rule).
 //   - 138 — Adaptive decryption exclusion added /api/decryption-exclusions
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
+//   - 142 — F10 added /api/decryption-exclusions/tunables (GET defaults+bounds /
+//     PUT admin runtime tunables for the auto-exclusion cache).
+//   - 140 — Terminology governance T-10: added canonical /api/dpi and
+//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
+//     /api/content-scan/bypass aliases (same handlers).
+//   - +13 — TAC support framework (M1-M4) added: support status/bundles/
+//     {id}(+report,+approve)/health-explain (+6); support/debug-level (+1);
+//     diagnose/storage, diagnose/upstream, diagnose/dns, diagnose/tls (+4);
+//     bundles/{id}/validate (+1); bundles/{id}/download-encrypted (+1).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -163,7 +174,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 151 // +6: support status/bundles/{id}(+report,+approve)/health-explain; +1: support/debug-level; +1: diagnose/storage; +1: diagnose/upstream; +1: diagnose/dns; +1: diagnose/tls; +1: bundles/{id}/validate; +1: bundles/{id}/download-encrypted
+	const want = 157
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

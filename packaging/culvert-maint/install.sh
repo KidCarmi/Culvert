@@ -88,15 +88,18 @@ sed_escape_replacement() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/|/\\|/g'
 }
 
-# Escape sudoers-special colons in a value destined to be a LITERAL inside a
-# sudoers command (Cmnd) — sudo treats a bare ':' as the Runas/Host separator,
-# so a proxy_repo with a registry port (e.g. 127.0.0.1:5000/culvert) renders an
-# unescaped ':' that visudo -c rejects with a syntax error. The template already
-# hand-escapes its own literal colons (sha256\:, culvert/proxy\:pinned); the
-# substituted repo must get the same treatment. Run this BEFORE
-# sed_escape_replacement so the backslash it adds is then sed-escaped correctly.
+# Escape sudoers-special colons and commas in a value destined to be a
+# LITERAL inside a sudoers command (Cmnd) — sudo treats a bare ':' as the
+# Runas/Host separator and a bare ',' as the Cmnd-list separator, so a
+# proxy_repo with a registry port (e.g. 127.0.0.1:5000/culvert) or a
+# compose_project_dir with a comma (e.g. /srv/culvert,backup — legal on
+# Linux) renders an unescaped ':' or ',' that visudo -c rejects with a syntax
+# error. The template already hand-escapes its own literal colons (sha256\:,
+# culvert/proxy\:pinned); the substituted values must get the same treatment.
+# Run this BEFORE sed_escape_replacement so the backslashes it adds are then
+# sed-escaped correctly.
 sudoers_escape_colon() {
-    printf '%s' "$1" | sed -e 's/:/\\:/g'
+    printf '%s' "$1" | sed -e 's/:/\\:/g' -e 's/,/\\,/g'
 }
 
 # Read a TOML basic-string value:  key = "value"  (any leading whitespace,

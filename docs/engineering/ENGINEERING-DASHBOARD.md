@@ -21,7 +21,7 @@ A score only moves when the underlying evidence changes in the repository.
 
 | Dimension | Score | Trend | Basis (see registers for evidence) |
 |---|:---:|:---:|---|
-| Security | 4.3 | ↑ | All non-accepted HIGH risks closed; the MEDIUM/LOW auth-surface risks closed 2026-07-05 (RISK-012 two-tier lockout, RISK-013 fail-closed host gate, RISK-019 trusted-proxy client IP — each adversarially reviewed). Open: RISK-010/011 (update image verify + rollback — resolve via the DEBT-008 updater retirement, not a patch). |
+| Security | 4.3 | ↑ | The MEDIUM/LOW auth-surface risks closed 2026-07-05 (RISK-012 two-tier lockout, RISK-013 fail-closed host gate, RISK-019 trusted-proxy client IP — each adversarially reviewed). RISK-010 CLOSED 2026-07-11 (legacy updater removed under DEBT-008; successor is digest-pinned + Sigstore-verified) and RISK-011 re-pointed/closed the same day. **Not yet reflected in this score:** a 2026-07-11 failure-mode audit opened two new HIGH risks — RISK-021 (fresh/unconfigured proxy runs default-allow + no-auth) and RISK-022 (maintenance-agent death mid-apply is unrecoverable) — so "All non-accepted HIGH risks closed" no longer holds; this dimension needs re-validation against the register before the score is trusted. |
 | Testing | 4.3 | ↑ | Behavioral suite, race+shuffle determinism gate. DEBT-007 closed (`mitm_inspect_e2e_test.go`, trust-asymmetry proof). Config-surface parity walls extended to the CP→DP `ConfigSnapshot` DTO (capture/apply/redaction/wire-wipe/owner, DEBT-006) — each proven to bite by negative test. |
 | CI/CD & Release | 4.2 | ↑ | SHA-pinned actions, cosign keyless, SLSA L3, signed catalog (P2b-2b). Gate hardening landed 2026-07-04: per-module govulncheck, unmasked-vuln advisory report, self-expiring `.trivyignore`, all scanners version-pinned. Open: RISK-015 (LOW), CodeQL-as-required-check (maintainer branch-protection toggle). |
 | Documentation | 4.0 | ↑ | Strong `CLAUDE.md` + roadmap + governance layer. Both formerly-missing runbooks now exist: `docs/operator/ha-lease-failover.md`, backup-restore §8b recovery. |
@@ -34,10 +34,14 @@ A score only moves when the underlying evidence changes in the repository.
 un-decomposed flat package — are both resolved with evidence, and the **config-surface drift**
 front is now essentially closed (DEBT-004 + DEBT-006 walled by the `config_surfaces` registry;
 DEBT-009's ownership half declared, only its effective-config-visibility half open). The MEDIUM/LOW
-auth-surface risks closed 2026-07-05 (RISK-012/013/019). The remaining risk mass is now
-concentrated almost entirely in the **update/supply-chain trust chain** (RISK-010/011) — and its
-resolution is the DEBT-008 updater retirement, not a code patch on the dying path. That is the one
-material open front; everything else on the board is LOW.
+auth-surface risks closed 2026-07-05 (RISK-012/013/019). **Update 2026-07-11:** the
+**update/supply-chain trust chain** (RISK-010/011), previously the one material open front, is now
+CLOSED — DEBT-008 removed the legacy updater sidecar entirely, RISK-010 closed by removal, and
+RISK-011 was re-pointed to its successor (RISK-022). A 2026-07-11 failure-mode audit found two new
+HIGH-severity open risks not yet triaged into this dashboard's priority ranking — RISK-021
+(default-allow + no-auth on a fresh/unconfigured proxy) and RISK-022 (unrecoverable agent death
+mid-apply on the new update path) — see §3 below and the register for detail; this headline needs
+a maintainer re-validation pass to re-rank the current material front.
 
 ---
 
@@ -70,13 +74,18 @@ The deferred artifacts will be created when there is validated content to put in
 > **The 2026-06-28 feature freeze is LIFTED** — its justification (RISK-001 BLOCKER + the
 > hours-to-fix security gaps) no longer exists; all of those items shipped with evidence.
 >
-> **New standing recommendation: before the next feature, close the update-trust gap.** Culvert
-> now verifies what it *advertises* (signed catalog, P2b) but not what it *runs* (RISK-010: the
-> applied image is never signature/digest-verified in-binary) and not what it *undoes* (RISK-011:
-> auto-rollback never confirms the node actually reverted). For a security product whose update
-> path is the highest-value supply-chain target, that asymmetry is the most important open item.
-> Removing the legacy updater (DEBT-008) is part of the same move — it deletes the entire
-> vulnerable dependency tree behind RISK-ACC-1 (all 5 open Dependabot alerts) at once.
+> **Update 2026-07-11 — the update-trust gap is CLOSED.** DEBT-008 removed the legacy updater
+> sidecar entirely; the maintenance-agent path is now the sole day-2 update mechanism and it *is*
+> digest-pinned + Sigstore-verified (closing RISK-010 by removal and RISK-ACC-1's dependency tree
+> with it). RISK-011's concern was resolved in the successor (`inline_rollback.go` verifies the
+> revert); its residual is re-pointed to RISK-022.
+>
+> **This recommendation has not yet been re-issued for what replaced it.** The same 2026-07-11
+> audit that closed this front also opened two new HIGH risks on the register — RISK-021
+> (fresh/unconfigured proxy runs default-allow + no-auth, silent) and RISK-022 (maintenance-agent
+> death mid-apply is unrecoverable, no op journal) — neither has been triaged into a standing
+> priority call here. Treat this section as stale until a maintainer re-validates against
+> `TECHNICAL-RISK-REGISTER.md` and issues the next recommendation.
 
 Sequenced backlog (full detail in the registers):
 
@@ -85,12 +94,11 @@ Sequenced backlog (full detail in the registers):
    already fixed in tree), DEBT-010 (found already resolved by CI-REDESIGN step 7).
    **Remaining from this batch, maintainer-only:** add CodeQL to the required status checks
    (branch-protection setting — not expressible in repo code).
-2. **The one material front — the update-trust chain (currently on hold):** DEBT-008 — finish
-   removing the legacy `updater/` (closes RISK-ACC-1, the Dependabot banner, and RISK-010 all at
-   once — RISK-010's fix is this migration, since the catalog/agent path already digest-pins +
-   Sigstore-verifies the image, P2b-2b). RISK-011 — post-rollback health verification + failure-path
-   tests, which is testable **independent** of the updater/catalog cutover. Gating item is the
-   production catalog-driven-update proof, not a code task.
+2. ~~**The one material front — the update-trust chain**~~ ✅ **DONE 2026-07-11** — DEBT-008
+   removed the legacy `updater/` (closed RISK-ACC-1, the Dependabot banner, and RISK-010 all at
+   once); RISK-011 resolved in the successor and re-pointed to RISK-022. **Needs a follow-up
+   entry:** RISK-021 (HIGH, default-allow + no-auth on fresh install) and RISK-022 (HIGH,
+   unrecoverable agent death mid-apply) are open on the register but not yet sequenced here.
 3. ~~**Config-surface drift** (DEBT-004/006)~~ ✅ **DONE 2026-07-05** — walled by the
    `config_surfaces` registry + reflection parity (configBackup **and** the CP→DP ConfigSnapshot
    DTO). The recommended "per-surface membership table" shipped and is CI-enforced.

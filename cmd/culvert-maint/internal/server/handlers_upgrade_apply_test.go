@@ -26,6 +26,7 @@ import (
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -44,6 +45,7 @@ type applyRig struct {
 	sockPath  string
 	stateDir  string
 	auditPath string
+	journal   *journal.Journal // crash-recovery journal wired into the server (RISK-022)
 
 	mu       sync.Mutex
 	captured [][]string
@@ -267,6 +269,11 @@ func startApplyRig(t *testing.T) *applyRig {
 	)
 
 	mgr := ops.NewManager(nil)
+	jnl, err := journal.New(tmp)
+	if err != nil {
+		t.Fatalf("journal: %v", err)
+	}
+	rig.journal = jnl
 	srv, err := New(Options{
 		Cfg:       cfg,
 		Auth:      pol,
@@ -276,6 +283,7 @@ func startApplyRig(t *testing.T) *applyRig {
 		StateDir:  tmp,
 		AuditPath: auditPath,
 		Runner:    rn,
+		Journal:   jnl,
 		HealthProbeFactory: func() health.Probe {
 			baseURL, _ := url.Parse("http://127.0.0.1:8080")
 			return health.Probe{

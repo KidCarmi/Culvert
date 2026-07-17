@@ -390,6 +390,10 @@ func alertDPCertRenewalFailure(nodeID, certFile string, renewErr error) {
 	if !needsRenewal {
 		return
 	}
+	// CHAOS-09: record for the /ready node_cert row. Unlike the alert latch
+	// below, the probe state is refreshed on every failed attempt so the row
+	// always shows the current days-left and last error.
+	recordDPCertRenewalFailure(days, renewErr)
 	level := dpCertAlertLevel(days)
 	dpCertExpiryAlert.mu.Lock()
 	latched := level <= dpCertExpiryAlert.level
@@ -420,6 +424,7 @@ func resetDPCertExpiryAlert() {
 	dpCertExpiryAlert.mu.Lock()
 	dpCertExpiryAlert.level = 0
 	dpCertExpiryAlert.mu.Unlock()
+	clearDPCertRenewalFailure() // CHAOS-09: /ready node_cert row recovers too
 }
 
 // forceRenewDPCert renews the DP cert unconditionally (triggered by CA rotation).

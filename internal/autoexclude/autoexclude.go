@@ -308,6 +308,21 @@ func lowWater(size int) int {
 	return lw
 }
 
+// evictLess is the DETERMINISTIC eviction ordering used everywhere the cache trims
+// by age: oldest first by the learn/first-seen time, and — critically — ties are
+// broken by the map key (lexicographic). Without the key tiebreaker, two entries
+// sharing a timestamp (common under an injected test clock, and possible in
+// production within a clock tick) would be ordered by Go's randomized map-iteration
+// order, making WHICH entry is evicted non-deterministic. Keying the tiebreaker on
+// the (already unique, opaque) map key makes eviction reproducible across runs and
+// independent of map iteration order.
+func evictLess(atI time.Time, keyI string, atJ time.Time, keyJ string) bool {
+	if atI.Equal(atJ) {
+		return keyI < keyJ
+	}
+	return atI.Before(atJ)
+}
+
 // evictLocked drops expired active entries and, if still over the cap, the oldest
 // by learnedAt DOWN TO the low-water mark (batched — see lowWater). Caller holds
 // the lock. Eviction only ever RE-ENABLES inspection (fail-closed), so a flood can
@@ -335,7 +350,7 @@ func (c *Cache) evictLocked(now time.Time) {
 	for k, e := range c.active {
 		all = append(all, ka{k, e.learnedAt})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	sort.Slice(all, func(i, j int) bool { return evictLess(all[i].at, all[i].k, all[j].at, all[j].k) })
 	for i := 0; i < len(all) && len(c.active) > target; i++ {
 		delete(c.active, all[i].k)
 	}
@@ -365,9 +380,133 @@ func (c *Cache) evictPendingLocked(now time.Time) {
 	for k, p := range c.pend {
 		all = append(all, kf{k, p.firstSeen})
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	sort.Slice(all, func(i, j int) bool { return evictLess(all[i].at, all[i].key, all[j].at, all[j].key) })
 	for i := 0; i < len(all) && len(c.pend) > target; i++ {
 		delete(c.pend, all[i].key)
+	}
+}
+
+// Reconfigure atomically applies new tunables to a LIVE cache, preserving learned
+// entries. It is the runtime seam for admin-editable tunables (F10 / ADR-0010): it
+// mutates the five scalar tunables IN PLACE under the write lock and NEVER replaces
+// the cache pointer, so the mutex alone makes it race-free against concurrent
+// Observe/Contains (which take the same lock) — a reader can never observe a
+// half-applied configuration. It never calls out to external code while holding the
+// lock, and it can never partially apply: all fields are resolved to locals first,
+// then assigned together.
+//
+// Semantics (deliberate, per ADR-0010):
+//   - Each field <= 0 resolves to its Default* (identical to New), so a zeroed field
+//     means "reset this tunable to default".
+//   - pinnedTTL is clamped to <= ttl DEFENSIVELY. This is the engine's last line of
+//     defense: the API layer (F10 PR3) also validates the merged set, but the engine
+//     guarantees a valid state for ANY caller — the spoofable client_pinned class can
+//     never outlive the server-observed class even if outer validation is bypassed.
+//   - maxPending is re-established to maxEntries (the New invariant), so the pending
+//     bound never desyncs from the active cap.
+//   - TTL / PinnedTTL changes are FORWARD-ONLY (ADR-0010 Model A): existing active
+//     entries KEEP their already-computed ExpiresAt; a new TTL applies only to
+//     entries promoted AFTER this call. This avoids retroactively moving live expiry
+//     times (no coverage blip, clean rollback). To shorten or drop EXISTING
+//     exclusions immediately, the operator uses Remove/Clear — TTL is forward policy.
+//   - If maxEntries is lowered below the current active count, the excess is evicted
+//     IMMEDIATELY and DETERMINISTICALLY (evictLess: oldest by learnedAt, ties by key)
+//     down to EXACTLY the new cap; the pending map is likewise bounded to the new
+//     maxPending. Eviction only ever RE-ENABLES inspection (fail-closed).
+//   - cfg.Now is IGNORED: Reconfigure tunes parameters, not the clock.
+func (c *Cache) Reconfigure(cfg Config) {
+	// Resolve every field to a local FIRST (default-floor + cross-field clamp), so
+	// the apply under the lock is a single atomic assignment with no window in which
+	// the cache holds a partially-updated configuration.
+	ttl := cfg.TTL
+	if ttl <= 0 {
+		ttl = DefaultTTL
+	}
+	pinnedTTL := cfg.PinnedTTL
+	if pinnedTTL <= 0 {
+		pinnedTTL = DefaultPinnedTTL
+	}
+	if pinnedTTL > ttl {
+		pinnedTTL = ttl // defensive: the spoofable pinned TTL never exceeds the server-observed TTL
+	}
+	confirmN := cfg.ConfirmN
+	if confirmN <= 0 {
+		confirmN = DefaultConfirmN
+	}
+	window := cfg.Window
+	if window <= 0 {
+		window = DefaultWindow
+	}
+	maxEntries := cfg.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = DefaultMaxEntries
+	}
+
+	// Snapshot the clock BEFORE locking. c.now may be caller-injected (tests /
+	// future instrumentation); calling it under c.mu could deadlock a wrapper that
+	// re-enters the cache (Len/Stats). This mirrors Observe/Contains, which both
+	// read now := c.now() before taking the lock.
+	now := c.now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ttl = ttl
+	c.pinnedTTL = pinnedTTL
+	c.confirmN = confirmN
+	c.window = window
+	c.maxEntries = maxEntries
+	c.maxPending = maxEntries // maintain the New invariant (pending shares the entry cap)
+	// Enforce the (possibly lowered) caps immediately and deterministically. Existing
+	// entries within the caps are preserved (Model A); only the excess is dropped.
+	c.evictToExactLocked(maxEntries, now)
+}
+
+// evictToExactLocked deterministically trims the active map to AT MOST `target`
+// entries and the pending map to AT MOST c.maxPending, dropping oldest-first
+// (evictLess: learnedAt/firstSeen, ties by key). Unlike the hot-path evictLocked
+// (which batches to a low-water mark to amortize the sort under a sustained flood),
+// this evicts to EXACTLY the target — it runs once per admin Reconfigure, not per
+// Observe, so exactness is affordable and is the operator-visible contract ("lower
+// the cap ⇒ the cache is at the cap"). Caller holds the write lock.
+func (c *Cache) evictToExactLocked(target int, now time.Time) {
+	// Expired/stale entries first — they should not count against the cap.
+	for k, e := range c.active {
+		if !now.Before(e.expiresAt) {
+			delete(c.active, k)
+		}
+	}
+	for k, p := range c.pend {
+		if now.Sub(p.firstSeen) > c.window {
+			delete(c.pend, k)
+		}
+	}
+	if len(c.active) > target {
+		type ka struct {
+			k  string
+			at time.Time
+		}
+		all := make([]ka, 0, len(c.active))
+		for k, e := range c.active {
+			all = append(all, ka{k, e.learnedAt})
+		}
+		sort.Slice(all, func(i, j int) bool { return evictLess(all[i].at, all[i].k, all[j].at, all[j].k) })
+		for i := 0; i < len(all) && len(c.active) > target; i++ {
+			delete(c.active, all[i].k)
+		}
+	}
+	if len(c.pend) > c.maxPending {
+		type kf struct {
+			k  string
+			at time.Time
+		}
+		all := make([]kf, 0, len(c.pend))
+		for k, p := range c.pend {
+			all = append(all, kf{k, p.firstSeen})
+		}
+		sort.Slice(all, func(i, j int) bool { return evictLess(all[i].at, all[i].k, all[j].at, all[j].k) })
+		for i := 0; i < len(all) && len(c.pend) > c.maxPending; i++ {
+			delete(c.pend, all[i].k)
+		}
 	}
 }
 

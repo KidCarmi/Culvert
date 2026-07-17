@@ -911,7 +911,7 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 			continue
 		}
 		fmt.Fprintf(w, `<a class="btn" href="%s">Continue with %s</a>`,
-			html.EscapeString(loginURL), html.EscapeString(p.Name()))
+			html.EscapeString(loginURL), html.EscapeString(p.DisplayName()))
 	}
 	if len(providers) == 0 {
 		fmt.Fprintf(w, `<p>No identity providers are configured.</p>`)

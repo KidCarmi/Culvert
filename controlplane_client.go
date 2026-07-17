@@ -184,7 +184,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		dpPollHist.Observe(time.Since(pollStart).Seconds())
 	}
 	if err != nil {
-		dpControlPlanePollFailing.Store(true)
+		dpMarkCPPollFailing()
 		c.failCount++
 		logger.Printf("DataPlane: GetConfig error: %v", err)
 		// Only attempt failover after 3 consecutive failures with a peer to
@@ -201,14 +201,14 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		// Retry immediately on the new connection; on success fall through to apply.
 		raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
 		if err != nil {
-			dpControlPlanePollFailing.Store(true)
+			dpMarkCPPollFailing()
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
 			return
 		}
 	}
 	c.resetBackoff()
-	dpControlPlanePollFailing.Store(false)
+	dpMarkCPPollHealthy()
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
@@ -245,7 +245,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	snap.IdPProfiles = nil
 	applyConfigSnapshot(snap)
 	persistDPLastGoodConfigSnapshot(snapForDisk)
-	dpControlPlanePollFailing.Store(false)
+	dpMarkCPPollHealthy()
 	c.lastVersion = snap.Version
 }
 

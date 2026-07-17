@@ -34,7 +34,7 @@ services:
       # rollback floor. Host-owned so a re-seed between phases just overwrites.
       - "${E2E_DATA}:/data"
       # The agent's socket DIRECTORY (not the file) is mounted so the socket the
-      # host agent creates appears inside the container at a stable path.
+      # Maintenance Agent creates appears inside the container at a stable path.
       - "${E2E_SOCK_DIR}:/run/culvert-maint"
     environment:
       - TZ=UTC

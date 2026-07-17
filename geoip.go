@@ -31,6 +31,13 @@ import (
 // count invocations; production never reassigns it.
 var lookupHostFn = net.LookupHost
 
+// geoTrackEnabledFn is the enabled-probe seam for the per-request geo-track
+// dispatch (maybeTrackDestinationCountry, proxy.go): with no GeoIP DB loaded
+// the tracker goroutine is never spawned. A var (not a direct call) so tests
+// can stub the enabled state without a .mmdb fixture — same pattern as
+// lookupHostFn above; production never reassigns it.
+var geoTrackEnabledFn = geoip.Enabled
+
 // hostIPCache memoises resolveHost's hostname→public-IP resolutions with a
 // TTL. The internal/geoip engine caches IP→country, but before this cache the
 // host→IP step in front of it re-ran a BLOCKING net.LookupHost on every call:

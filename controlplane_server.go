@@ -236,7 +236,7 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	if ok, reason := haIssuanceAllowed(); !ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "enrollment fenced: %s", reason)
 	}
-	req, tokInfo, err := admitEnrollment(ctx, raw)
+	req, tokInfo, priorNode, err := admitEnrollment(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +263,26 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		Status:     "connected",
 		EnrolledBy: tokInfo.CreatedBy,
 	}
+	if priorNode != nil {
+		// Expired-node re-enrollment: admin-assigned labels are config, not
+		// enrollment state — dropping them would silently detach the node
+		// from its node groups (and their bandwidth/QoS policies).
+		node.Labels = priorNode.Labels
+		// Preserve an operator-set maintenance (draining) state across
+		// re-enrollment. If the node was put into maintenance with
+		// SetNodeDraining before its cert expired, a recovery-token
+		// re-enrollment must not silently return it to active service —
+		// carry the draining status forward so an explicit undrain is still
+		// required. A normal (connected) prior record stays connected.
+		if priorNode.Status == "draining" {
+			node.Status = "draining"
+		}
+	}
 	globalClusterStore.RegisterNode(node)
+
+	if priorNode != nil {
+		recordExpiredNodeReenrollment(ctx, priorNode, node)
+	}
 
 	logger.Printf("Enrollment: node %q enrolled (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
 
@@ -280,15 +299,16 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 
 // admitEnrollment parses and admission-checks an Enroll request: shape,
 // required fields, per-IP rate limit, duplicate-node check, and atomic
-// token consumption (persisted). Returns the parsed request and the
-// consumed token's metadata. Extracted from Enroll (cyclop).
-func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, TokenInfo, error) {
+// token consumption (persisted). Returns the parsed request, the consumed
+// token's metadata, and — for an expired-node re-enrollment — a snapshot of
+// the registration being superseded. Extracted from Enroll (cyclop).
+func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, TokenInfo, *EnrolledNode, error) {
 	var req EnrollRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return req, TokenInfo{}, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
+		return req, TokenInfo{}, nil, status.Errorf(codes.InvalidArgument, "unmarshal: %v", err)
 	}
 	if req.Token == "" || req.CSR == "" || req.NodeID == "" {
-		return req, TokenInfo{}, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
+		return req, TokenInfo{}, nil, status.Errorf(codes.InvalidArgument, "token, csr, and node_id are required")
 	}
 
 	// Rate limit enrollment attempts per IP.
@@ -297,13 +317,30 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		sourceIP, _, _ = net.SplitHostPort(p.Addr.String())
 	}
 	if sourceIP != "" && !enrollRateLimitAllow(sourceIP) {
-		return req, TokenInfo{}, status.Errorf(codes.ResourceExhausted, "enrollment rate limited — try again later")
+		return req, TokenInfo{}, nil, status.Errorf(codes.ResourceExhausted, "enrollment rate limited — try again later")
 	}
 
 	// Check if node ID is already registered and not revoked.
 	// Use a generic error message to avoid leaking enrolled node names.
+	//
+	// CHAOS-12 remainder: a registered node whose cert has EXPIRED cannot
+	// present it (the TLS handshake rejects expired certs) and cannot renew
+	// (RenewCert requires that handshake) — a blanket denial here left the
+	// node permanently bricked with no recovery short of the revoke +
+	// re-enroll dance. An expired cert is exactly as unusable as a revoked
+	// one, so it is re-admitted on the same terms as a revoked node: a
+	// fresh, admin-issued enrollment token. The gate opens only once the
+	// mTLS path is provably dead per the CP clock — the same clock the CP's
+	// handshake uses — so at no moment can both a live cert and a token
+	// claim the same node ID. The denial stays byte-identical and the token
+	// stays unconsumed on the deny path.
+	var priorNode *EnrolledNode
 	if existing, ok := globalClusterStore.GetNode(req.NodeID); ok && existing.Status != "revoked" {
-		return req, TokenInfo{}, status.Errorf(codes.PermissionDenied, "enrollment denied")
+		if !nodeCertExpired(existing) {
+			return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied")
+		}
+		snapshot := *existing
+		priorNode = &snapshot
 	}
 
 	// Validate and consume the enrollment token atomically (persisted to disk).
@@ -311,9 +348,62 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 	tokInfo, err := globalClusterStore.ValidateAndConsumeToken(req.Token, req.NodeID, sourceIP)
 	if err != nil {
 		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
-		return req, TokenInfo{}, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
+		return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
-	return req, tokInfo, nil
+	return req, tokInfo, priorNode, nil
+}
+
+// nodeCertExpired reports whether an enrolled node's certificate is past its
+// expiry per the CP clock. A zero CertExpiry (unknown — e.g. a legacy or
+// hand-edited registration) is treated as NOT expired: fail closed on
+// missing data, keeping the blanket enrollment denial for such nodes.
+func nodeCertExpired(n *EnrolledNode) bool {
+	return !n.CertExpiry.IsZero() && time.Now().After(n.CertExpiry)
+}
+
+// enrollAlertFire is the alert seam for enrollment-path alerts (test hook,
+// mirroring releaseAlertFire in release_alerts.go).
+var enrollAlertFire = fireAlert
+
+// recordExpiredNodeReenrollment leaves the evidence trail for an
+// expired-node re-enrollment (the CHAOS-12 recovery path): the superseded
+// serial goes on the CRL (cert-serial pinning in verifyNodeCert already
+// excludes it — the CRL entry is defense-in-depth and the durable record
+// that the old identity was retired), and the identity swap is logged,
+// audited, and alerted so a token-holder replacing a bricked node is never
+// invisible to the operator.
+func recordExpiredNodeReenrollment(ctx context.Context, prior, replacement *EnrolledNode) {
+	sourceIP := "unknown"
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil && host != "" {
+			sourceIP = host
+		}
+	}
+	if prior.CertSerial != "" && !globalClusterStore.IsRevoked(prior.CertSerial) {
+		if err := globalClusterStore.RevokeSerial(prior.CertSerial, prior.NodeID, "system", "superseded by expired-node re-enrollment"); err != nil {
+			logger.Printf("Enrollment: failed to add superseded serial %s to CRL for node %q: %v",
+				prior.CertSerial, sanitizeLog(prior.NodeID), err)
+		}
+	}
+	detail := fmt.Sprintf("expired cert (serial=%s, expired %s) superseded by token re-enrollment (new serial=%s); old serial added to CRL",
+		prior.CertSerial, prior.CertExpiry.Format("2006-01-02"), replacement.CertSerial)
+	logger.Printf("Enrollment: node %q RE-ENROLLED after cert expiry from %q — %s",
+		sanitizeLog(prior.NodeID), sanitizeLog(sourceIP), detail)
+	now := time.Now()
+	auditAdd(AuditEntry{
+		TS:     now.UnixMilli(),
+		Time:   now.Format("2006-01-02 15:04:05"),
+		Actor:  strings.ReplaceAll(sourceIP, `"`, ""),
+		Action: "cluster.node.reenroll-expired",
+		Object: strings.ReplaceAll(prior.NodeID, `"`, ""),
+		Detail: detail,
+	})
+	enrollAlertFire("cluster_node_reenrolled", AlertPayload{
+		Actor:  sourceIP,
+		Host:   prior.NodeID,
+		Detail: detail,
+		Source: "cluster",
+	})
 }
 
 // validateEnrollCSR checks the CSR parses and that its CommonName matches

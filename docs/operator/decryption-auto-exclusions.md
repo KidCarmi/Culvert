@@ -28,6 +28,16 @@ Every learn event is **alerted** (to syslog/SIEM), **audited**, exposed as a
 **metric**, and listed in the **Decryption Exclusions** panel with its blast
 radius, where you can evict it.
 
+**Live rescues are observable too.** The confirm-count-exempt live rescue (step 2)
+does not wait for promotion, so it is surfaced independently: each rescue emits a
+`decryption.autoexclude.rescue` **audit** entry (actor = triggering client IP), a
+`decryption_autoexclude_rescue` **alert**, and increments the
+`culvert_decrypt_autoexclude_rescue_total` **metric**. This makes a client that
+repeatedly forces per-session bypasses (e.g. by routing through a cert-demanding
+origin under a fail-open rule) visible even before it ever reaches the
+confirm-count — watch the rescue counter's rate as an early poisoning/evasion
+signal.
+
 ## What it will and will NOT learn
 
 An origin controls its own TLS alerts, so the classifier trusts only **narrow,
@@ -36,9 +46,9 @@ incompatibility and never triggers a bypass.
 
 | Inspect failure | Learned? | Live-rescues the triggering session? |
 |---|---|---|
-| Origin requires a client certificate (`certificate_required` alert) | ✅ | ✅ (strip path only — the one reason allowed to rescue) |
+| Origin requires a client certificate (detected structurally via its `CertificateRequest`) | ✅ | ✅ only on a proven handshake failure — required mTLS on TLS 1.2 (strip path only). Optional mTLS and TLS-1.3 required mTLS stay inspected |
 | TLS parameter mismatch our OWN stack detected (no version/cipher overlap) | ✅ | ❌ learn-only; the next session self-heals |
-| Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded) | ❌ learn-only; spoofable → confirm-count + shorter TTL |
+| Client rejects our forged cert with a specific cert alert (pinning) | ✅ (guarded — **authenticated identity only**, ADR-0008) | ❌ learn-only; spoofable → identity-gated confirm-count + shorter TTL |
 | Generic origin alert (`handshake_failure`, `no_application_protocol`) | ❌ | ❌ origin-controlled + ambiguous → stays a `502` |
 | Origin cert untrusted / expired / hostname mismatch | ❌ | ❌ a **block** decision — auto-bypassing a bad cert is an exfil channel |
 | Connection reset / timeout / wrapped / unknown error | ❌ | ❌ fail-closed default |
@@ -46,6 +56,30 @@ incompatibility and never triggers a bypass.
 The classifier **defaults to not learning** — only a positive match on a narrow
 signal populates the cache, so a misclassification can only ever keep inspecting
 (fail closed), never wrongly bypass.
+
+> **How client-certificate origins are detected (ADR-0009).** A Go TLS *client*
+> dialing a cert-requiring origin never surfaces `certificate_required` on the
+> handshake — on **TLS 1.3** the handshake returns success before the origin rejects
+> the missing cert, and on **TLS 1.2** it arrives as a generic `handshake_failure`.
+> So Culvert does **not** rely on the handshake error string here: it detects the
+> origin's `CertificateRequest` **structurally** (via a signal-only
+> `GetClientCertificate` callback, attached for fail-open rules only). The callback
+> is a signal producer only; it never provides a client certificate and makes no
+> policy decision.
+>
+> The live rescue fires only when that signal is paired with a **proven handshake
+> failure** — i.e. **required mTLS on TLS 1.2**, where the origin demands a cert we
+> cannot present and the handshake genuinely breaks, so inspection provably cannot
+> continue. The strip-inspect path then bypasses the session to a raw tunnel and the
+> real client (which has a client certificate) completes its own mTLS straight to the
+> origin. A **successful** handshake is never bypassed: an origin that merely
+> *requests* a cert (**optional mTLS**, `tls.RequestClientCert`) completes the
+> handshake and stays inspected. **Required mTLS on TLS 1.3** also completes our
+> client handshake (the client finishes before the origin rejects), so it is
+> indistinguishable from the optional case at that point and is **not** auto-rescued
+> — put those origins on the manual **SSL Bypass** list. Cert-verify failures
+> (untrusted/expired/mismatched origin certs) stay fail-closed, and fail-close rules
+> never participate.
 
 > **Residual downgrade risk (live rescue).** Even `certificate_required` is an
 > origin-emitted alert, so an attacker-controlled origin *under a fail-open rule*
@@ -104,6 +138,20 @@ one egress IP count as one client, so a host that breaks only for such a fleet
 needs failures from two distinct egress IPs (or two authenticated users) before
 it is excluded. Authenticating clients gives the best device-independence signal.
 
+> **Client-pinning requires authenticated identity (ADR-0008).** The
+> `client_pinned` reason is the **spoofable class** — the client fully controls the
+> TLS alert it sends against Culvert's forged leaf, so a deliberate attacker on a
+> broad, *unauthenticated* fail-open scope could poison a host into a bypass just by
+> rejecting the leaf from two egress IPs. To close that, `client_pinned` counts
+> **only authenticated identities** toward its confirm-count: an unauthenticated
+> pinned rejection contributes **no** evidence and can never promote, no matter how
+> many source IPs send it. A pinned app that breaks inspection only for
+> **unauthenticated** traffic therefore will **not** auto-learn — add it to the
+> manual **SSL Bypass** list (the deliberate control for known pinned apps). The
+> origin-observed reasons (client-certificate-required, TLS-parameter mismatch) are
+> **not** the spoofable class — the origin, not the client, controls those signals —
+> so they keep IP evidence and are unchanged.
+
 ### Downgrade / rollback
 
 `OnInspectError` is an additive persisted decryption-profile field (a
@@ -123,7 +171,11 @@ This feature disables inspection for learned hosts, so roll it out gradually:
    `culvert_decrypt_autoexclude_active` for a week. Confirm the learned hosts are
    the ones you expect and the blast radius is small.
 3. Alert on the active gauge and on the `decryption_autoexclude` learn events in
-   your SIEM. Treat an unexpected host going dark as an incident.
+   your SIEM. Treat an unexpected host going dark as an incident. Culvert also
+   emits a built-in **abnormal-rate** alert (`decryption_autoexclude_surge`, audit
+   `decryption.autoexclude.surge`, metric `culvert_decrypt_autoexclude_surge_total`)
+   that fires once per window when the promotion rate crosses the surge threshold —
+   the aggregate poisoning-campaign signal the per-host learn alerts cannot give.
 4. Expand to more profiles only after the above is stable. Keep every
    inspection-mandatory host on a fail-close rule throughout.
 
@@ -149,6 +201,88 @@ The cache is **volatile**: it is in-memory only, per-node (never synced between
 Control Plane and Data Plane nodes), and **not** part of config export, import, or
 version rollback. It is cleared on restart and re-learns cheaply.
 
+### Tuning the cache (durable, per-node)
+
+The five parameters that govern the learn cache are adjustable at runtime from the
+**Cache Tuning** section of the Decryption Exclusions panel (**admin only**) or via
+the admin API. Unlike the learned entries, the *parameters* are **durable** — they
+persist across restart in admin settings — but they remain **node-local**: set them
+on each node. They are deliberately **not** part of config export, versioned
+rollback, or Control-Plane→Data-Plane sync.
+
+| Parameter | API field | Meaning | Bounds | Default |
+|---|---|---|---|---|
+| Confirm-count | `confirm_n` | Distinct clients that must independently hit an incompatible host before it is excluded (anti-poisoning) | 2–10 | 2 |
+| Entry TTL | `ttl_secs` | Lifetime of a learned exclusion before it expires and the host is re-inspected | 60 s – 7 d | 12 h |
+| Pinned-class TTL | `pinned_ttl_secs` | Shorter TTL for the `client_pinned` reason class; must not exceed the entry TTL | 60 s – 7 d (≤ `ttl_secs`) | 1 h |
+| Confirm window | `window_secs` | Window within which the confirm-count of distinct clients must accumulate | 10 s – 24 h | 10 m |
+| Max entries | `max_entries` | Hard cap on active exclusions per node (memory bound); lowering it evicts the least-recently-learned entries immediately | 256 – 262 144 | 4096 |
+
+- `confirm_n` cannot be set to 1: a single client can no longer create a bypass, by
+  design — a one-client threshold defeats the anti-poisoning guarantee.
+- Changing a value applies immediately and does **not** wipe the current entries;
+  new values take effect for **future** promotions (already-active exclusions keep
+  their current expiry).
+- **Exception — lowering `max_entries` below the current active count.** This is the
+  one change that *does* drop entries: the cache immediately evicts the
+  least-recently-learned exclusions down to the new cap. Those hosts are re-inspected
+  again (a visible inspection-coverage change) and may re-learn if still incompatible.
+  Lowering the cap is safe; just expect a one-time coverage bump for the evicted hosts.
+- **Applying vs. persisting.** A change is written to durable storage *first*, then
+  applied to the live cache. If the durable write fails, the live cache is left
+  untouched (no entries are evicted) and the change is rejected with `500` — runtime
+  and disk never disagree.
+- The **current effective values** are shown in the panel's status line and in the
+  `/api/decryption-exclusions` Stats block — that is the single source of truth. The
+  read endpoint below returns only the defaults and bounds (to populate the form),
+  never the live values.
+
+**How to change a value (admin):**
+
+1. Open the **Decryption Exclusions** panel → the **Cache Tuning** section. It is
+   **admin-only** — viewers and operators do not see it (the server also rejects a
+   non-admin write, so the hidden UI is convenience, not the security boundary).
+2. Each field's effect and range are in the table above; the inputs are pre-filled
+   with the **current effective values** (read from the status line — the single
+   source of truth) and show each field's range and default.
+3. Edit the field(s) and click **Save**. The change **applies immediately** and does
+   **not** wipe the learned entries; new values take effect for future promotions.
+4. Tunables are **per node** — repeat on each node. They are not synced Control
+   Plane → Data Plane.
+5. **Reset to defaults** restores all five parameters to their built-in defaults in
+   one action.
+
+**When to tune (use cases):**
+
+- **Hostile / untrusted / broad unauthenticated client population** → **raise
+  `confirm_n`** (e.g. 3–4) and/or **shorten `window_secs`**. Harder for a few clients
+  to poison a host into a bypass. Trade-off: a genuine fleet-wide incompatibility
+  promotes more slowly (more first-session failures before it self-heals).
+- **Flaky / short-lived origin incompatibility** → **shorten `ttl_secs`** (and
+  `pinned_ttl_secs`). The host is re-inspected sooner once the origin is fixed.
+  Trade-off: more re-learn churn and transient failures while it is still broken.
+- **High-assurance / inspection-mandatory posture** → **lower `ttl_secs`** so
+  re-inspection happens sooner, shrinking the window an exclusion keeps inspection
+  dark. Trade-off: more frequent re-learning load. (Truly inspection-mandatory hosts
+  belong on a **fail-close** rule — which never learns — not on a tuned fail-open one.)
+- **Memory pressure / very large fleet of learned hosts** → **adjust `max_entries`**
+  to bound worst-case memory. Trade-off: lowering it below the current active count
+  immediately evicts the oldest entries (see the coverage note above).
+- **Large legitimate BYOD / pinned-app population that learns slowly** → **lengthen
+  `window_secs`** so distinct-client evidence has more time to accumulate (fewer
+  missed promotions). Trade-off: a slow-drip poisoning attempt has longer to reach
+  the confirm-count.
+
+**API:**
+
+- `GET /api/decryption-exclusions/tunables` (viewer) — defaults + bounds + schema.
+- `PUT /api/decryption-exclusions/tunables` (admin) — a full replacement of the five
+  fields; an omitted or zero field resets to its default. The server validates the
+  merged effective set (bounds + `pinned_ttl_secs ≤ ttl_secs`) and rejects an
+  out-of-range set with `400`. **Reset to defaults** is a `PUT` of `{}` (an empty
+  JSON object — every field then resets to its default; a zero-length body is not
+  valid JSON and is rejected).
+
 ### Metrics
 
 - `culvert_decrypt_autoexclude_total{reason,scope}` — learn events by reason and
@@ -173,13 +307,16 @@ For a **never-before-seen** incompatible host, the *first* connection can still
 fail — you cannot rescue a client that refuses your certificate without prior
 knowledge of the host. Behavior by path:
 
-- **Strip inspection path, origin-requires-client-cert ONLY**: the current
-  session **is rescued live** — no visible failure. This is the single
+- **Strip inspection path, origin-requires-client-cert on TLS 1.2 ONLY**: the
+  current session **is rescued live** — no visible failure. This is the single
   live-rescued case, and it is **confirm-count-exempt** (it bypasses the
-  *triggering* session on the first `certificate_required` signal; the
-  confirm-count protects the *persistent* cache future sessions read). Because it
-  applies only to hosts an operator deliberately put on a fail-open rule, size
-  fail-open scope accordingly — keep DLP-critical hosts on fail-close.
+  *triggering* session on the first proven client-cert handshake failure; the
+  confirm-count protects the *persistent* cache future sessions read). It fires
+  only on a genuine handshake failure, so optional-mTLS origins (which complete the
+  handshake) and TLS-1.3 required-mTLS origins (which also complete our client
+  handshake) are **not** rescued — the latter go on the manual **SSL Bypass** list.
+  Because it applies only to hosts an operator deliberately put on a fail-open rule,
+  size fail-open scope accordingly — keep DLP-critical hosts on fail-close.
 - **Everything else** — unsupported-params (strip path), the native-HTTP/2 path,
   and client-pinning — is **learn-only**: the first session fails with a `502`,
   and the *next* session to that host self-heals via the cache once the
@@ -197,5 +334,7 @@ list is a planned enhancement.
 - Native-HTTP/2-path live rescue (currently learn-only there).
 - A curated predefined exclusion list of well-known pinned apps.
 - A `learn-review` posture (record + alert, bypass only after operator approval).
-- Operator-tunable confirm-count / TTL (currently fixed PAN-OS-aligned defaults;
-  the posture is surfaced read-only).
+
+Shipped since: **operator-tunable confirm-count / TTL / window / cap** (F10) — see
+[Tuning the cache](#tuning-the-cache-durable-per-node) above; the defaults remain the
+PAN-OS-aligned values, now adjustable per node.

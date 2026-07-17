@@ -171,6 +171,7 @@ var (
 	logGet                   = reqlog.Get
 	initRequestLog           = reqlog.Init
 	requestLogReadPersistent = reqlog.ReadPersistent
+	requestLogPersistActive  = reqlog.PersistActive
 )
 
 // The queryable-history hook: the closure performs the same lock-free atomic
@@ -211,6 +212,7 @@ var (
 	auditGetPersistent      = audit.GetPersistent
 	drainPendingAuditEvents = audit.Drain
 	requeueAuditEvents      = audit.Requeue
+	auditPersistActive      = audit.PersistActive
 )
 
 // InitAuditLog opens path for append-only JSONL audit persistence.
@@ -353,6 +355,9 @@ type Config struct {
 	user     string
 	passHash []byte // bcrypt hash; nil = no auth
 	cache    authCacheStore
+	// authRevision invalidates in-flight local-auth snapshots when credentials
+	// or backend selection changes.
+	authRevision uint64
 
 	// External auth provider (LDAP or OIDC). When non-nil, takes precedence
 	// over the local bcrypt credentials for Verify calls.
@@ -393,6 +398,8 @@ var cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
 func (c *Config) SetProvider(p AuthProvider) {
 	c.mu.Lock()
 	c.provider = p
+	c.authRevision++
+	c.cache.clear()
 	c.mu.Unlock()
 	if p != nil {
 		logger.Printf("Auth: provider %s", p.Name())
@@ -414,8 +421,9 @@ func (c *Config) SetAuth(user, pass string) error {
 		c.mu.Lock()
 		c.user = ""
 		c.passHash = nil
-		c.mu.Unlock()
+		c.authRevision++
 		c.cache.clear()
+		c.mu.Unlock()
 		return nil
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
@@ -425,13 +433,14 @@ func (c *Config) SetAuth(user, pass string) error {
 	c.mu.Lock()
 	c.user = user
 	c.passHash = hash
+	c.authRevision++
 	// Mirror into the RBAC user roster so the RBAC path works immediately.
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
 	}
 	c.uiUsers[user] = &uiAdminUser{passHash: hash, role: RoleAdmin}
-	c.mu.Unlock()
 	c.cache.clear()
+	c.mu.Unlock()
 	return nil
 }
 
@@ -442,38 +451,82 @@ func (c *Config) SetAuth(user, pass string) error {
 // oracle. Computed once at init; the input is always valid so the error is nil.
 var dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("culvert-timing-equaliser"), bcrypt.DefaultCost)
 
-// VerifyAuth checks credentials against the active auth backend:
-//   - External provider (LDAP / OIDC) if configured, otherwise
-//   - Local bcrypt hash with a short-lived cache.
-func (c *Config) VerifyAuth(user, pass string) bool {
+type authBackendSnapshot struct {
+	provider AuthProvider
+	user     string
+	passHash []byte
+	revision uint64
+}
+
+func (c *Config) snapshotAuthBackend() authBackendSnapshot {
 	c.mu.RLock()
-	p := c.provider
-	storedUser := c.user
-	storedHash := c.passHash
+	snapshot := authBackendSnapshot{provider: c.provider, user: c.user, passHash: c.passHash, revision: c.authRevision}
 	c.mu.RUnlock()
+	return snapshot
+}
 
-	// External provider takes precedence.
-	if p != nil {
-		return p.Verify(user, pass)
+func (c *Config) verifyAuthWithSnapshot(snapshot authBackendSnapshot, user, pass string) bool {
+	if snapshot.provider != nil {
+		return snapshot.provider.Verify(user, pass)
 	}
-
-	// Local bcrypt auth.
-	if storedUser == "" {
+	if snapshot.user == "" {
 		return true // auth disabled
 	}
-	if user != storedUser {
+	if user != snapshot.user {
 		// RISK-008: equalise timing with the correct-username path so a wrong
 		// username is indistinguishable from a wrong password — defeats
 		// username enumeration via a timing oracle.
 		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash, []byte(pass))
 		return false
 	}
-	if ok, hit := c.cache.get(user, pass); hit {
-		return ok
+	c.mu.RLock()
+	if c.authRevision == snapshot.revision {
+		if ok, hit := c.cache.get(user, pass); hit {
+			c.mu.RUnlock()
+			return ok
+		}
 	}
-	ok := bcrypt.CompareHashAndPassword(storedHash, []byte(pass)) == nil
-	c.cache.set(user, pass, ok)
+	c.mu.RUnlock()
+	ok := bcrypt.CompareHashAndPassword(snapshot.passHash, []byte(pass)) == nil
+	c.mu.RLock()
+	if c.authRevision == snapshot.revision {
+		c.cache.set(user, pass, ok)
+	}
+	c.mu.RUnlock()
 	return ok
+}
+
+// VerifyAuth checks credentials against one snapshot of the active auth backend:
+//   - External provider (LDAP / OIDC) if configured, otherwise
+//   - Local bcrypt hash with a short-lived cache.
+func (c *Config) VerifyAuth(user, pass string) bool {
+	return c.verifyAuthWithSnapshot(c.snapshotAuthBackend(), user, pass)
+}
+
+// resolveAuthIdentity preserves the legacy Config authentication selection but
+// returns a provider-derived identity when the configured backend supports it.
+// Non-identity providers and local bcrypt retain the historical caller username
+// and "local" source semantics.
+func (c *Config) resolveAuthIdentity(user, pass string) (*Identity, bool) {
+	return c.resolveAuthIdentityWithSnapshot(c.snapshotAuthBackend(), user, pass)
+}
+
+func (c *Config) resolveAuthIdentityWithSnapshot(snapshot authBackendSnapshot, user, pass string) (*Identity, bool) {
+	// VerifyAuth historically treats an empty backend as authentication disabled
+	// and succeeds for setup/UI compatibility. Presented proxy credentials must
+	// never turn that sentinel success into a caller-controlled identity.
+	if snapshot.provider == nil && snapshot.user == "" {
+		return nil, false
+	}
+	if resolver, ok := snapshot.provider.(interface {
+		ResolveIdentity(username, credential string) (*Identity, bool)
+	}); ok {
+		return resolver.ResolveIdentity(user, pass)
+	}
+	if !c.verifyAuthWithSnapshot(snapshot, user, pass) {
+		return nil, false
+	}
+	return &Identity{Sub: user, Provider: "local"}, true
 }
 
 // AuthEnabled returns true when any form of authentication is active, or when
@@ -706,6 +759,11 @@ func (c *Config) LoadUIUsersFile() error {
 	if path == "" {
 		return nil
 	}
+	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05):
+	// the fresh file we write after a corrupt load parses cleanly next
+	// time, so the /readyz row would otherwise vanish while the evidence
+	// and the empty-roster state persist.
+	noteResidualQuarantine("ui_users", path)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		logger.Printf("Loader: ui_users.json: file %q missing — caller may bootstrap defaults (D1.2-flag-F1)", sanitizeLog(path))
@@ -720,12 +778,19 @@ func (c *Config) LoadUIUsersFile() error {
 	if err := json.Unmarshal(data, &env); err == nil && env.Users != nil {
 		records = env.Users
 	} else if err := json.Unmarshal(data, &records); err != nil {
+		// CHAOS-05: present-but-corrupt roster. Quarantine before
+		// returning so the next SaveUIUsersFile (any admin mutation, or
+		// the --reset-password one-shot) cannot overwrite the only copy
+		// of the admin accounts + TOTP enrollments.
+		quarantineCorruptStateFile("ui_users", path, err)
 		return err
 	}
 	resolved := resolveLoadedDefaultAuthOutcome(env)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.authRevision++
+	c.cache.clear()
 	c.defaultAuthOutcome = resolved
 	if c.uiUsers == nil {
 		c.uiUsers = map[string]*uiAdminUser{}
@@ -1072,7 +1137,15 @@ func recordTunnelBytes(bytesSent, bytesRecv int64) {
 // ruleID is the matched rule's stable ULID (rename-safe decision attribution,
 // §1) — empty when no policy rule is attributed (e.g. raw SOCKS5).
 func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
-	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, "", identity,
+	persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, "")
+}
+
+// persistTunnelCloseReason is persistTunnelClose with a structured actionTaken
+// reason (surfaced in the feed entry's ActionTaken field) — e.g. an adaptive
+// decryption client-cert live-rescue (ADR-0009), so the bypass is queryable in
+// the request/tunnel feed and not just inferable from SSLAction.
+func persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
+	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, actionTaken, identity,
 		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID})
 }
 
@@ -1089,6 +1162,13 @@ func recordTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, b
 // LogTraffic=false suppresses the entry but not the byte accounting). A nil
 // match (no rule matched, default-allow) always logs.
 func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
+	recordTunnelCloseGatedReason(match, id, method, host, bytesSent, bytesRecv, start, sslAction, "")
+}
+
+// recordTunnelCloseGatedReason is recordTunnelCloseGated with a structured
+// actionTaken reason for the feed entry (ADR-0009 client-cert rescue). Byte
+// accounting is unconditional; the reason rides only the (gated) feed entry.
+func recordTunnelCloseGatedReason(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
 	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
@@ -1098,7 +1178,7 @@ func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host s
 		ruleName = match.Rule.Name
 		ruleID = match.Rule.ID
 	}
-	persistTunnelClose(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction)
+	persistTunnelCloseReason(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,

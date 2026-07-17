@@ -36,6 +36,8 @@ func (p *testProxyIdentityProvider) CaptiveLoginURL(relayURL string, _ *http.Req
 
 func (p *testProxyIdentityProvider) Name() string { return "test-idp" }
 
+func (p *testProxyIdentityProvider) DisplayName() string { return "test-idp" }
+
 // setupProxyTest resets all global state for a clean test run.
 func setupProxyTest(t *testing.T) {
 	t.Helper()

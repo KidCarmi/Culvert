@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -142,6 +143,11 @@ const (
 	ReasonCommandError            FailureReason = "command_error"
 	ReasonConcurrencyConflict     FailureReason = "concurrency_conflict"
 	ReasonAgentRestartInterrupted FailureReason = "agent_restart_interrupted"
+	// ReasonAgentPanic marks an op whose orchestrator goroutine panicked and was
+	// recovered by ops.Run's panic barrier. The op is failed and the maintenance
+	// lock released, so one malformed op can never take down the whole agent or
+	// strand the lock. Distinct from cli_error so the audit trail names the class.
+	ReasonAgentPanic FailureReason = "agent_panic"
 	// ReasonRollbackFailed marks an op that failed AND whose recovery
 	// (inline auto-)rollback also failed to restore service. It is
 	// surfaced via the narrow final-reason override (a recovery stage
@@ -199,6 +205,18 @@ type idempEntry struct {
 // operator wants treated as new work).
 const DefaultIdempCacheTTL = 24 * time.Hour
 
+// DefaultActiveRetention is how long a TERMINAL op stays in the active map
+// after it finishes, so GET /v1/operations/{id} can still answer while the CP
+// polls for the outcome. After this window the op is reaped. Running ops are
+// never reaped by age.
+const DefaultActiveRetention = 1 * time.Hour
+
+// DefaultMaxActive is the hard cap on the active map — a backstop against a
+// burst of ops within the retention window. Beyond it, the oldest-finished
+// TERMINAL ops are evicted early (running ops are never evicted). Bounds memory
+// for a long-lived agent regardless of throughput.
+const DefaultMaxActive = 1000
+
 // Manager owns the in-memory active-op map and the global maintenance
 // lock. Goroutine-safe.
 type Manager struct {
@@ -212,7 +230,13 @@ type Manager struct {
 	// were marked interrupted, so a resubmit must produce a fresh op).
 	idempCache    map[string]idempEntry
 	idempCacheTTL time.Duration
-	now           func() time.Time
+	// activeRetention / maxActive bound the active map: without them terminal
+	// ops accumulate for the whole process lifetime (a slow leak proportional to
+	// total ops run — flagged by the resilience break-review). Reaped
+	// opportunistically on admission, mirroring purgeIdempCacheLocked.
+	activeRetention time.Duration
+	maxActive       int
+	now             func() time.Time
 }
 
 // NewManager returns a fresh Manager. clock may be nil (defaults to
@@ -232,10 +256,12 @@ func NewManagerWithTTL(clock func() time.Time, idempTTL time.Duration) *Manager 
 		idempTTL = DefaultIdempCacheTTL
 	}
 	return &Manager{
-		active:        map[string]*Op{},
-		idempCache:    map[string]idempEntry{},
-		idempCacheTTL: idempTTL,
-		now:           clock,
+		active:          map[string]*Op{},
+		idempCache:      map[string]idempEntry{},
+		idempCacheTTL:   idempTTL,
+		activeRetention: DefaultActiveRetention,
+		maxActive:       DefaultMaxActive,
+		now:             clock,
 	}
 }
 
@@ -252,6 +278,7 @@ func (m *Manager) Begin(kind, actor, idempotencyKey string, params map[string]in
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.purgeActiveLocked() // bound the active map on every admission
 
 	stateChanging := IsStateChanging(kind)
 	if stateChanging && m.holder != nil {
@@ -308,6 +335,7 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 	// also self-throttling: as the cache shrinks past the TTL
 	// boundary, subsequent walks find less work to do.
 	m.purgeIdempCacheLocked()
+	m.purgeActiveLocked() // bound the active map on every admission
 
 	if idempotencyKey != "" {
 		cacheKey := idempCacheKey(actor, kind, idempotencyKey)
@@ -388,6 +416,116 @@ func (m *Manager) IdempCacheSize() int {
 	return len(m.idempCache)
 }
 
+// ActiveSize returns the current count of ops resident in the active map
+// (running + not-yet-reaped terminal). For tests asserting reap behavior.
+func (m *Manager) ActiveSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.active)
+}
+
+// HasLiveIdempotent reports whether a still-live op already exists for the
+// (actor, kind, idempotencyKey) tuple — i.e. whether BeginIdempotent would
+// DEDUPE this submission rather than admit new work. Read-only admission control
+// peeks with this so a duplicate of an in-flight op is not rejected for capacity
+// (429) before it can reach the dedupe path; only genuinely-new admissions are
+// gated on the concurrency semaphore. Empty key never dedupes.
+func (m *Manager) HasLiveIdempotent(actor, kind, idempotencyKey string) bool {
+	if idempotencyKey == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.idempCache[idempCacheKey(actor, kind, idempotencyKey)]
+	if !ok {
+		return false
+	}
+	_, alive := m.active[entry.OpID]
+	return alive
+}
+
+// IsRunning reports whether opID is a known, still-running (non-terminal) op.
+// The op-log retention sweep consults this so it never deletes the transcript of
+// an in-flight operation — an mtime-only check could reap a running op's log if
+// a stage stays silent past the retention window (or retention_days is shorter
+// than operation_timeout), and /v1/operations/{id}/logs reopens by path, so the
+// transcript would vanish for exactly the op an operator wants to inspect.
+func (m *Manager) IsRunning(opID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.active[opID]
+	return ok && !op.State.IsTerminal()
+}
+
+// purgeActiveLocked bounds the active map so terminal ops don't accumulate for
+// the whole process lifetime. It drops TERMINAL ops finished before the
+// retention cutoff and — if still over maxActive — evicts the oldest-finished
+// terminal ops down to the cap. Running ops (including the lock holder) are
+// NEVER reaped. Caller holds m.mu. Mirrors purgeIdempCacheLocked: O(N) over the
+// map, run opportunistically on admission, self-throttling.
+func (m *Manager) purgeActiveLocked() {
+	if len(m.active) == 0 {
+		return
+	}
+	// Ops still referenced by a LIVE idempotency entry must be retained for the
+	// full idempotency-cache TTL, NOT just activeRetention. Otherwise a keyed
+	// retry arriving after activeRetention (1h) but before idempCacheTTL (24h)
+	// would find its cache entry pointing at a reaped op, treat it as dangling,
+	// and re-admit a FRESH op — re-running a destructive restore/upgrade/rollback
+	// the CP expected to be deduped within the 24h window. In BeginIdempotent the
+	// caller purges expired idemp entries first, so `referenced` holds only ops
+	// inside their dedupe window; the op is reaped on a later pass once its entry
+	// ages out. Unkeyed ops are never in the cache → reaped at activeRetention.
+	referenced := m.idempReferencedLocked()
+	cutoff := m.now().Add(-m.activeRetention)
+	for id, op := range m.active {
+		if _, keep := referenced[id]; keep {
+			continue
+		}
+		if op.State.IsTerminal() && op.Finished != nil && op.Finished.Before(cutoff) {
+			delete(m.active, id)
+		}
+	}
+	if m.maxActive > 0 && len(m.active) > m.maxActive {
+		m.evictOverCapLocked(referenced)
+	}
+}
+
+// idempReferencedLocked returns the set of op IDs currently pointed at by a live
+// idempotency-cache entry — the ops purgeActiveLocked must retain for the dedupe
+// window. Caller holds m.mu.
+func (m *Manager) idempReferencedLocked() map[string]struct{} {
+	referenced := make(map[string]struct{}, len(m.idempCache))
+	for _, e := range m.idempCache {
+		referenced[e.OpID] = struct{}{}
+	}
+	return referenced
+}
+
+// evictOverCapLocked evicts oldest-finished terminal ops that are NOT
+// idempotency-referenced, down to maxActive (dedupe correctness wins over the
+// soft cap; the idempCache is itself TTL-bounded, so referenced ops can't grow
+// without bound). Running ops are never evicted. Caller holds m.mu.
+func (m *Manager) evictOverCapLocked(referenced map[string]struct{}) {
+	terminal := make([]*Op, 0, len(m.active))
+	for id, op := range m.active {
+		if _, keep := referenced[id]; keep {
+			continue
+		}
+		if op.State.IsTerminal() && op.Finished != nil {
+			terminal = append(terminal, op)
+		}
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].Finished.Before(*terminal[j].Finished)
+	})
+	excess := len(m.active) - m.maxActive
+	for i := 0; i < len(terminal) && excess > 0; i++ {
+		delete(m.active, terminal[i].ID)
+		excess--
+	}
+}
+
 // Finish transitions opID to terminal state. If reason is non-empty it
 // is recorded on the op. Releases the lock if the op was holding it.
 // finalState must be a terminal state.
@@ -457,16 +595,62 @@ func (m *Manager) Holder() *Op {
 	return m.cloneLocked(m.holder)
 }
 
-// MarkAllInterrupted is called at startup to scan persisted state and
-// transition any pending/running ops to failed with
-// ReasonAgentRestartInterrupted. The agent never guesses success after
-// restart (§ 5.4).
-//
-// D1.6a in-memory model has no persistence to scan; the function is a
-// no-op for D1.6a but ships now so the contract is in place. D1.6b/c
-// wire it to the on-disk index.
-func (m *Manager) MarkAllInterrupted() int {
-	return 0
+// journaledKinds are the state-changing kinds whose in-flight state is recorded
+// in the crash-recovery journal (RISK-022): the destructive day-2 Docker
+// operations whose interruption needs post-restart reconciliation. Other
+// state-changing kinds (backup/restore/cleanup) have their own recovery paths.
+var journaledKinds = map[string]struct{}{
+	KindUpgradeApply:   {},
+	KindRollbackCreate: {},
+}
+
+// IsJournaled reports whether kind's in-flight state is recorded in the
+// crash-recovery journal. Callers gate journal writes on this.
+func IsJournaled(kind string) bool {
+	_, ok := journaledKinds[kind]
+	return ok
+}
+
+// InterruptedOp is the minimal descriptor of an op that was in-flight when the
+// agent last stopped, reconstructed from the crash-recovery journal at startup.
+type InterruptedOp struct {
+	OpID  string
+	Kind  string
+	Actor string
+}
+
+// MarkAllInterrupted registers each orphaned op (recovered from the on-disk
+// journal at startup) into the active map as failed(agent_restart_interrupted),
+// so GET /v1/operations/{id} answers post-restart and the operator/CP can see
+// that the op did not complete. The agent NEVER guesses success after a restart
+// (§ 5.4). Returns the count marked. Ops already present in the map are skipped
+// (the map starts empty on a fresh process, so this is defensive).
+func (m *Manager) MarkAllInterrupted(orphans []InterruptedOp) int {
+	if len(orphans) == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	n := 0
+	for _, o := range orphans {
+		if _, exists := m.active[o.OpID]; exists {
+			continue
+		}
+		finished := now
+		m.active[o.OpID] = &Op{
+			ID:            o.OpID,
+			Kind:          o.Kind,
+			Actor:         o.Actor,
+			State:         StateFailed,
+			FailureReason: string(ReasonAgentRestartInterrupted),
+			Started:       now,
+			Finished:      &finished,
+			Progress:      []Stage{},
+		}
+		n++
+	}
+	return n
 }
 
 // cloneLocked returns a defensive copy. Caller must hold m.mu.
@@ -485,14 +669,39 @@ func (m *Manager) cloneLocked(op *Op) *Op {
 	if op.Params != nil {
 		cp.Params = make(map[string]interface{}, len(op.Params))
 		for k, v := range op.Params {
-			cp.Params[k] = v
+			cp.Params[k] = deepCopyValue(v)
 		}
 	}
 	if op.Result != nil {
 		cp.Result = make(map[string]interface{}, len(op.Result))
 		for k, v := range op.Result {
-			cp.Result[k] = v
+			cp.Result[k] = deepCopyValue(v)
 		}
 	}
 	return &cp
+}
+
+// deepCopyValue recursively copies the JSON-shaped values that appear in a
+// Params/Result map (nested maps and slices), so a snapshot handed to a status
+// handler shares no mutable structure with the live op. Scalars (string, bool,
+// numbers, nil) are immutable and returned as-is. Without this, cloneLocked's
+// fresh TOP-LEVEL map still aliased nested maps/slices — a latent race against a
+// concurrent JSON-encode of the "snapshot".
+func deepCopyValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		m := make(map[string]interface{}, len(t))
+		for k, vv := range t {
+			m[k] = deepCopyValue(vv)
+		}
+		return m
+	case []interface{}:
+		s := make([]interface{}, len(t))
+		for i, vv := range t {
+			s[i] = deepCopyValue(vv)
+		}
+		return s
+	default:
+		return v
+	}
 }

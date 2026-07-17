@@ -175,7 +175,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 		effectiveDefault = OutcomeDefault
 	}
 	credCapable := hasCredentialCapableProvider()
-	ssoCapable := len(idpRegistry.EnabledProviders()) > 0
+	ssoCapable := idpRegistry.HasEnabledProviders() // allocation-free probe — EnabledProviders() builds a slice per call, and this runs per request
 	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
 
 	if authRequired { //nolint:nestif // adaptive-auth decision tree is inherently nested (matches the if-match dispatch convention; DEBT-002 isolated it for testability)
@@ -202,20 +202,22 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 				// Try IdP registry providers first (OIDC introspection).
 				authed := false
 				for _, prov := range idpRegistry.EnabledProviders() {
-					if id, resolved := prov.ResolveIdentity(u, p); resolved && id != nil {
-						authenticatedIdentity = id.Sub
-						if authenticatedIdentity == "" {
-							authenticatedIdentity = u
-						}
-						authenticatedGroups = id.Groups
-						authenticatedSource = identityAuthSource(id, prov.Name())
-						authed = true
-						break
+					id, resolved := prov.ResolveIdentity(u, p)
+					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
+						continue
 					}
+					authenticatedIdentity = id.Sub
+					authenticatedGroups = id.Groups
+					authenticatedSource = identityAuthSource(id, prov.Name())
+					authed = true
+					break
 				}
-				// Fall back to legacy single provider or local bcrypt.
+				// Fall back to the legacy single provider or local bcrypt. Identity-
+				// capable legacy providers must supply the canonical authorization
+				// subject; the Basic username is never substituted for them.
 				if !authed {
-					if !cfg.VerifyAuth(u, p) {
+					id, resolved := cfg.resolveAuthIdentity(u, p)
+					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
 						atomic.AddInt64(&statAuthFail, 1)
 						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
 						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
@@ -223,8 +225,9 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
 						return authOutcome{}, false
 					}
-					authenticatedIdentity = u
-					authenticatedSource = "local"
+					authenticatedIdentity = id.Sub
+					authenticatedGroups = id.Groups
+					authenticatedSource = identityAuthSource(id, "local")
 				}
 			} else {
 				// ── 3. No credentials — resolve the Stage-1 outcome and dispatch.
@@ -641,17 +644,39 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 	// copyOut that a full resolve pays. A rule with no profile / a fail-close
 	// profile returns ok=false and never touches the cache — feature-off stays
 	// allocation-free here.
-	if sslAction == SSLInspect && match != nil && match.Rule != nil && match.Rule.DecryptionProfile != "" {
-		if scopeID, ok := globalDecryptionProfiles.FailOpenScope(match.Rule.DecryptionProfile); ok {
-			if reason, hit := autoExclude.Contains(scopeID, host); hit {
+	if sslAction == SSLInspect && match != nil && match.Rule != nil {
+		if scopeID, ok := failOpenScopeForRule(match.Rule); ok {
+			if reason, hit := autoExclude().Contains(scopeID, host); hit {
 				sslAction = SSLBypass
 				recordAutoExcludeHit()
 				logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%s reason=%s)",
-					sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(match.Rule.DecryptionProfile), reason)
+					sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(scopeID), reason)
 			}
 		}
 	}
 	return sslAction, tlsSkipVerify
+}
+
+// failOpenScopeForRule resolves the autoexclude fail-open scope for a matched
+// rule's decryption profile — ID-first (rename-safe), name fallback for
+// un-migrated rules. Returns ok=false for a rule with no profile or a
+// fail-close profile (the cache is never touched — feature-off stays
+// allocation-free on this per-CONNECT path).
+func failOpenScopeForRule(rule *PolicyRule) (scope string, ok bool) {
+	if id := rule.DecryptionProfileID; id != "" {
+		// ID is authoritative: if it resolves to a profile at all, that
+		// profile's fail-open decision is final. Only fall back to the
+		// name when the id resolves to NO profile (un-migrated / dangling),
+		// mirroring resolveDecryptionProfile — a resolved fail-close profile
+		// must NOT be rescued by a stale name pointing at a fail-open one.
+		if s, resolved := globalDecryptionProfiles.FailOpenScopeByID(id); resolved {
+			return s, s != ""
+		}
+	}
+	if rule.DecryptionProfile != "" {
+		return globalDecryptionProfiles.FailOpenScope(rule.DecryptionProfile)
+	}
+	return "", false
 }
 
 // resolveStripALPN and the DecryptionProfile-aware resolve* family live in
@@ -665,11 +690,42 @@ func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, boo
 // the proxy is already stressed.
 var geoTrackSem = make(chan struct{}, 256)
 
+// maybeTrackDestinationCountry spawns the async destination-country tracker
+// only when a GeoIP database is loaded, and reports whether it spawned one.
+// The tracker's first observable action is a geoip.Enabled() check (inside
+// geo.LookupFull), so on a non-GeoIP deployment — the default: no MaxMind DB
+// configured, and Enabled() can only flip via an operator config change — the
+// pre-gate `go trackDestinationCountry(host)` paid a heap-allocated closure,
+// a goroutine spawn/schedule round, and two semaphore channel ops per allowed
+// request for a guaranteed no-op. Hoisting the check makes the disabled path
+// a single RLock probe with zero allocations (gated by
+// TestBenchGate_GeoTrackDispatchDisabledAllocs); an enabled deployment spawns
+// exactly as before. A DB swap between the probe and the goroutine's own
+// re-check is benign: LookupFull returns "" and nothing is recorded.
+func maybeTrackDestinationCountry(host string) bool {
+	if !geoTrackEnabledFn() {
+		return false
+	}
+	go trackDestinationCountry(host)
+	return true
+}
+
+// geoTrackSpawnHook, when non-nil, is invoked on every tracker goroutine as it
+// exits (both the recorded and the dropped-when-saturated paths). It exists
+// solely so benchmarks can drain the goroutines they spawn; it stays nil in
+// production, so the only added cost is one pointer compare on the tracker
+// goroutine — the gated per-request path (maybeTrackDestinationCountry) is
+// untouched.
+var geoTrackSpawnHook func()
+
 // trackDestinationCountry records the destination country for the live
 // dashboard. Runs in its own goroutine (fire-and-forget); extracted from
 // handleRequest (DEBT-002). Dashboard stats are best-effort: when the tracker
 // pool is saturated the sample is dropped rather than queued.
 func trackDestinationCountry(host string) {
+	if geoTrackSpawnHook != nil {
+		defer geoTrackSpawnHook()
+	}
 	select {
 	case geoTrackSem <- struct{}{}:
 	default:
@@ -777,7 +833,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// ── Geo-IP tracking (async) ──────────────────────────────────────────────
 	// Record destination country for the live dashboard without blocking.
-	go trackDestinationCountry(host)
+	// No-op (no goroutine, no allocation) when no GeoIP DB is loaded.
+	maybeTrackDestinationCountry(host)
 
 	sslAction, tlsSkipVerify := resolveSSLAction(match, host, clientIP)
 

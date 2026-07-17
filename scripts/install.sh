@@ -715,7 +715,7 @@ seed_pinned_tag() {
   if [[ -n "$signed_ref" ]]; then
     info "Seeding $PINNED_TAG from the latest signed release $signed_ref ..."
     if sudo docker pull "$signed_ref" && sudo docker tag "$signed_ref" "$PINNED_TAG"; then
-      info "Seeded $PINNED_TAG from $signed_ref (signed release — the host agent installs from a trusted image)"
+      info "Seeded $PINNED_TAG from $signed_ref (signed release — the Maintenance Agent installs from a trusted image)"
       return 0
     fi
     warn "Could not seed from $signed_ref — falling back to :latest ..."
@@ -914,13 +914,28 @@ fi
 # path, and the direct fix for the -idp-profiles-file crash loop.)
 
 # compose_command_flags — culvert flags from the proxy service's `command:` array.
-# Scoped to the "command: [ ... ]" block so healthcheck test tokens (wget -qO-,
-# clamav --ping) and other services' args are never misread as culvert flags.
-# Comment lines are dropped so a commented-out "-flag" example never counts.
+# Scoped to the `proxy:` service block (top-level 2-space-indented key) so a
+# flow-style "command: [ ... ]" array on any OTHER service (e.g. `cli`, whose
+# flags are normally passed at `docker compose run --rm cli <flags>` time but
+# which the compose file's own comments show operators DO hand-edit) is never
+# misread as a culvert proxy flag — that previously made
+# preflight_compose_image_compat() falsely conclude the compose/image were
+# incompatible and silently overwrite an operator's hand-edited
+# docker-compose.yml. Healthcheck test tokens (wget -qO-, clamav --ping) are
+# also excluded, being outside the proxy service's command array. Comment
+# lines are dropped so a commented-out "-flag" example never counts.
 compose_command_flags() {
   # `|| true`: grep -o exits 1 on a (hypothetical) flagless command block; under
   # `set -o pipefail` that would surface as a function failure — degrade to empty.
-  { awk '/command:[ \t]*\[/{inblk=1} inblk{print} inblk && /\]/{inblk=0}' \
+  # Single-line awk program (no embedded "}"-only lines) so a simple
+  # line-based function extractor (used by this repo's install_script_*_test.go
+  # suite) can still find this function's own closing brace unambiguously.
+  # Entering/exiting the proxy block: `/^  proxy:/` matches the header
+  # regardless of what follows the colon (a bare mapping, a YAML anchor like
+  # "proxy: &proxy", or a trailing comment) so an anchored service header
+  # doesn't fall out of scope; a DIFFERENT top-level 2-space-indented key
+  # (matched only on lines that are not the proxy header itself) closes it.
+  { awk '/^  proxy:/{inproxy=1} !/^  proxy:/ && /^  [a-zA-Z0-9_-]+:/{inproxy=0} inproxy && /command:[ \t]*\[/{inblk=1} inproxy && inblk{print} inproxy && inblk && /\]/{inblk=0}' \
       "$INSTALL_DIR/docker-compose.yml" 2>/dev/null \
     | grep -vE '^[[:space:]]*#' \
     | grep -oE '"-[a-zA-Z0-9-]+"' | tr -d '"' | sort -u; } || true
@@ -1191,14 +1206,23 @@ setup_at_rest_encryption() {
 step "Encryption at rest"
 setup_at_rest_encryption
 
-info "Pulling images and starting services (first run may take 1-2 minutes)..."
+info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 
 # `docker compose up -d --wait` (Compose v2.17+) blocks until containers are
 # either healthy or exited, and returns non-zero on failure. Much more
 # reliable than the old "sleep + grep healthy" loop, which silently passed
 # even when services crash-looped.
+#
+# --wait-timeout must cover clamav's healthcheck start_period (300s in
+# docker-compose.yml — first boot downloads ~250 MB of virus signatures, which
+# alone can take longer than that on a modest-bandwidth host). --wait blocks on
+# EVERY service with a healthcheck, including clamav, even though the proxy
+# only depends_on it for start order and tolerates it being unreachable at
+# runtime. A shorter timeout here reports a false install failure while
+# ClamAV is still downloading signatures. Keep in sync with docker-compose.yml
+# (pinned by TestInstallScript_ComposeWaitTimeout_CoversClamAVStartPeriod).
 COMPOSE_UP_OK=0
-if sudo docker compose up -d --wait --wait-timeout 180; then
+if sudo docker compose up -d --wait --wait-timeout 330; then
   COMPOSE_UP_OK=1
 else
   # Fallback for older Compose versions that don't support --wait.

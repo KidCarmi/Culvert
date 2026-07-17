@@ -233,3 +233,64 @@ func TestRecent_FailsOnMalformedCompleteLine(t *testing.T) {
 		t.Errorf("error should mention 'malformed', got: %v", err)
 	}
 }
+
+// TestRecent_TailBoundedAcrossBlocks writes far more than the 64 KiB read block
+// so Recent must seek backward across multiple blocks and drop the partial
+// leading line — the last n events must still come back correct and in order.
+func TestRecent_TailBoundedAcrossBlocks(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	const total = 2000 // ~150 bytes each ≫ 64 KiB, forcing multi-block backward reads
+	for i := 0; i < total; i++ {
+		if err := l.Write(Event{
+			Actor:   "actor-with-some-length-to-grow-the-line",
+			OpID:    "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+			Kind:    "backup.create",
+			Outcome: OutcomeSucceeded,
+			Params:  map[string]interface{}{"i": i, "pad": "xxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+		}); err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+	}
+	_ = l.Close()
+
+	got, err := Recent(p, 5)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5 events, got %d", len(got))
+	}
+	// The last five must be i=1995..1999, in order — proving the multi-block
+	// tail read + partial-leading-line drop reassembled the tail correctly.
+	for j, want := range []float64{1995, 1996, 1997, 1998, 1999} {
+		gotI := got[j].Params["i"].(float64) //nolint:errcheck // JSON decodes ints as float64
+		if gotI != want {
+			t.Errorf("event[%d].i = %v, want %v", j, gotI, want)
+		}
+	}
+}
+
+// TestRecent_TailWindowLargerThanFile: n bigger than the number of events must
+// return all events (window reaches the file head, no partial-line drop).
+func TestRecent_TailWindowLargerThanFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "audit.jsonl")
+	l, _ := New(p)
+	for i := 0; i < 3; i++ {
+		_ = l.Write(Event{Actor: "a", OpID: "id", Kind: "k", Outcome: OutcomeStarted, Params: map[string]interface{}{"i": i}})
+	}
+	_ = l.Close()
+	got, err := Recent(p, 100)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want all 3 events, got %d", len(got))
+	}
+	if got[0].Params["i"].(float64) != 0 { //nolint:errcheck // test
+		t.Error("first event should be i=0 (window reached file head)")
+	}
+}

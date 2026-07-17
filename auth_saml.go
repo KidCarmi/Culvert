@@ -102,6 +102,15 @@ func configureSAMLServiceProviderURLs(sp *saml.ServiceProvider, rootURL *url.URL
 
 func (p *SAMLProvider) Name() string { return "saml:" + p.profile.ID }
 
+// DisplayName returns the admin-configured label shown to end users (e.g. on
+// the IdP selection screen), falling back to the machine key if unset.
+func (p *SAMLProvider) DisplayName() string {
+	if p.profile.Name != "" {
+		return p.profile.Name
+	}
+	return p.Name()
+}
+
 // Verify always returns false — SAML is a browser-only protocol.
 // Non-browser clients must use OIDC or LDAP.
 func (p *SAMLProvider) Verify(_, _ string) bool { return false }

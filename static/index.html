@@ -667,7 +667,7 @@ tr.dragging  { opacity: .4; }
           <div style="min-width:0"><div class="posture-label">Root CA</div><div class="posture-state" id="po-ca">Checking…</div></div>
         </div>
         <div class="posture-item" data-state="unknown" data-click="switchView" data-arg="livefeed" role="button" tabindex="0"
-             title="Persistent request-log write health — logWriteErrors from /api/stats">
+             title="Persistent request/audit log write health and fallback state — from /api/stats">
           <span class="posture-dot"></span>
           <div style="min-width:0"><div class="posture-label">Logging</div><div class="posture-state" id="po-logging">Checking…</div></div>
         </div>
@@ -1903,6 +1903,10 @@ Firefox (all platforms):
               <span class="info-key">Auth</span>
               <span class="info-val" id="s-auth">—</span>
             </div>
+            <div class="info-item" title="Whether audit_log_file/request_log_file are actually writing to disk. A configured path that failed to open (permissions, missing directory, full disk) falls back to volatile in-memory storage — wiped on every restart — with no error counter to flag it.">
+              <span class="info-key">Log Persistence</span>
+              <span class="info-val" id="s-log-persist">—</span>
+            </div>
           </div>
         </div>
 
@@ -2133,6 +2137,7 @@ Firefox (all platforms):
             <button class="btn ghost sm" data-click="disableSyslog">Disable</button>
           </div>
           <div id="s-syslog-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+          <div id="s-syslog-drops" style="display:none;margin-top:4px;font-size:.8rem"></div>
         </div>
       </div>
 
@@ -2626,12 +2631,22 @@ Firefox (all platforms):
           </div>
           <button class="btn sm ghost" id="pol-unused-btn" data-click="togglePolUnused"
             title="Show only rules not matched in the last 90 days (candidates for cleanup). Requires hit tracking — freshly-deployed systems have no history yet.">🕗 Unused</button>
+          <span style="flex:1"></span>
+          <button class="btn sm ghost" id="pol-commit-mode-btn" data-min-role="admin" data-click="polToggleCommitMode"
+            title="When ON, rule edits are staged in a draft and require an explicit commit before they go live (Palo Alto-style candidate config). When OFF, edits apply immediately.">Commit mode: <span id="pol-commit-mode-state">off</span></button>
         </div>
         <div id="pol-reorder-bar" class="banner warn reorder-bar" style="display:none" role="status">
           <span>⚠ Rule order edited — <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
           <span style="flex:1"></span>
           <button class="btn sm primary" data-click="polApplyOrder">Apply order</button>
           <button class="btn ghost sm" data-click="polRevertOrder">Revert</button>
+        </div>
+        <div id="pol-draft-bar" class="banner warn reorder-bar" style="display:none" role="status">
+          <span>📝 <strong id="pol-draft-count">0 changes</strong> staged — <strong>not yet live</strong>. The proxy still enforces the committed rulebase.</span>
+          <span id="pol-draft-actor" style="font-size:.72rem;color:var(--muted)"></span>
+          <span style="flex:1"></span>
+          <button class="btn sm primary" data-click="polCommitDraft">Review &amp; commit</button>
+          <button class="btn ghost sm" data-click="polRevertDraft">Discard</button>
         </div>
         <div class="tbl-wrap">
           <table id="policy-table">
@@ -2987,6 +3002,33 @@ Firefox (all platforms):
           <div id="decexcl-list"></div>
         </div>
       </div>
+
+      <!-- Cache tuning: durable, per-node parameters for the volatile learn cache.
+           Admin-only (server enforces admin on PUT; data-min-role hides it for lower
+           roles). Current values come from the status line above (the Stats source of
+           truth); defaults + bounds come from GET /api/decryption-exclusions/tunables. -->
+      <div class="panel" id="dectun-panel" data-min-role="admin" style="margin-top:16px">
+        <div class="panel-header">
+          <span class="panel-title">Cache Tuning</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn sm ghost" data-min-role="admin" data-click="resetDecTunables" title="Restore all five parameters to their built-in defaults">Reset to defaults</button>
+            <button class="btn sm" data-min-role="admin" data-click="saveDecTunables">Save</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            These five parameters govern how the fail-open learn cache behaves on <strong>this node</strong>.
+            Unlike the learned entries above (which are volatile and node-local), the parameters are
+            <strong>durable</strong> — they survive restart. Changing a value applies immediately and does
+            <em>not</em> wipe the current entries; new values take effect for future promotions. Tunables are
+            node-local — set them on each node — and are deliberately not part of config export, versioned
+            rollback, or cluster sync. The <strong>current effective values</strong> are the status line above
+            (the single source of truth); the fields below are pre-filled from it.
+          </p>
+          <div id="dectun-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;max-width:820px"></div>
+          <div id="dectun-error" class="hint" style="color:var(--red);margin-top:10px;display:none"></div>
+        </div>
+      </div>
     </div>
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
@@ -3326,7 +3368,7 @@ Firefox (all platforms):
         <div class="panel-header">
           <span class="panel-title">Audit Log</span>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter…" data-input="renderAuditLog">
+            <input type="text" class="input" style="width:200px" id="audit-filter" placeholder="Filter (name, rule id, actor…)" data-input="renderAuditLog">
             <button class="btn ghost sm" data-click="loadAuditLog">↺ Refresh</button>
           </div>
         </div>
@@ -3541,9 +3583,13 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="ha-failover-val">—</div><div class="stat-label">Failover</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-term-val">—</div><div class="stat-label">Term</div></div>
               <div class="stat-card"><div class="stat-val" id="ha-lease-val">—</div><div class="stat-label">Fencing Lease</div></div>
+              <div class="stat-card" id="ha-sync-card" style="display:none"><div class="stat-val" id="ha-sync-val">—</div><div class="stat-label">Sync to Leader</div></div>
             </div>
             <p id="ha-lease-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
               Fencing is configured at startup (<code>--ha-etcd-endpoints</code> / <code>cluster.etcd_endpoints</code>) and read once — this panel shows status only. With a lease armed, leadership and automatic failover are arbitrated by etcd; write authority requires a live lease. The <strong>Term</strong> tile above equals the epoch of the currently-held fencing lease (ADR-0005: term = a held lease's epoch). In a failure state where no lease is held — e.g. a leader that restarted and cannot reacquire the etcd lease, running read-only — the lease card shows <code>epoch 0</code> while <strong>Term</strong> retains the last synced value, so the two can differ precisely when you are diagnosing a fencing problem.
+            </p>
+            <p id="ha-sync-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
+              This standby polls the leader every ~5s. The <strong>Sync to Leader</strong> tile shows the current consecutive-failure streak — it resets to 0 on every successful sync. At the configured threshold this standby stops waiting and either self-promotes (automatic failover / fencing lease) or, if automatic failover is off, stays read-only until an operator promotes it manually. Watching this tile climb is your early warning before that happens.
             </p>
             <!-- Manual failover: shown only when this Control Plane is a standby -->
             <div id="ha-promote-row" style="display:none;margin-bottom:16px">
@@ -4314,6 +4360,9 @@ document.addEventListener('click', e => {
     case 'polTestRule':       polTestRule(+arg); break;
     case 'polApplyOrder':     polApplyOrder(); break;
     case 'polRevertOrder':    polRevertOrder(); break;
+    case 'polToggleCommitMode': polToggleCommitMode(); break;
+    case 'polCommitDraft':    polCommitDraft(); break;
+    case 'polRevertDraft':    polRevertDraft(); break;
     case 'polGotoRule':       polGotoRule(+arg); break;
     case 'trafficGotoRule':   trafficGotoRule(arg, arg2); break;
     case 'apGotoRuleByName':  apGotoRuleByName(arg); break;
@@ -4339,6 +4388,8 @@ document.addEventListener('click', e => {
     case 'editDecProf':       editDecProf(arg); break;
     case 'deleteDecProf':     deleteDecProf(arg); break;
     case 'fetchDecExclusions': fetchDecExclusions(); break;
+    case 'saveDecTunables':   saveDecTunables(); break;
+    case 'resetDecTunables':  resetDecTunables(); break;
     case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
     case 'clearDecExclusions': clearDecExclusions(); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
@@ -4676,7 +4727,7 @@ const viewMeta = {
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) — volatile, per-node, expiring; every entry reduces inspection coverage' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
-  cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled engines, policies, per-file testing' },
+  cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
   idproviders:  { title: 'Identity Providers', meta: 'OIDC & SAML 2.0 identity provider profiles' },
   pac:          { title: 'PAC File',      meta: 'Proxy Auto-Configuration — serve /proxy.pac to Windows/macOS clients' },
@@ -5122,6 +5173,7 @@ async function unlockUser(username) {
 
 let _catGroups = [];
 let _editingCatGroup = null;
+let _editingCatGroupId = null; // stable ID of the group being edited (rename-safe addressing); null for new groups / legacy groups without one
 
 async function fetchCatGroups() {
   try {
@@ -5155,6 +5207,7 @@ function renderCatGroups() {
 
 function showAddCatGroupForm() {
   _editingCatGroup = null;
+  _editingCatGroupId = null;
   document.getElementById('cg-name').value = '';
   document.getElementById('cg-name').disabled = false;
   _cgSelectedCats = [];
@@ -5167,8 +5220,12 @@ function editCatGroup(name) {
   const g = _catGroups.find(x => x.name === name);
   if (!g) return;
   _editingCatGroup = name;
+  _editingCatGroupId = g.id || null;
   document.getElementById('cg-name').value = g.name;
-  document.getElementById('cg-name').disabled = true;
+  // Rename is enabled for ID-bearing groups (references-by-id S2): the rule→group
+  // link is by stable ID, so referencing rules follow the rename automatically.
+  // Legacy groups without an ID stay name-locked (no rename-safe addressing).
+  document.getElementById('cg-name').disabled = !_editingCatGroupId;
   _cgSelectedCats = [...g.categories];
   renderCgChips();
   loadCgCatOptions();
@@ -5178,6 +5235,7 @@ function editCatGroup(name) {
 function cancelCatGroup() {
   document.getElementById('catgroup-form').style.display = 'none';
   _editingCatGroup = null;
+  _editingCatGroupId = null;
 }
 
 let _cgSelectedCats = [];
@@ -5225,8 +5283,10 @@ async function saveCatGroup() {
   if (!name) { toast('Group name is required', 'error'); return; }
   if (!_cgSelectedCats.length) { toast('Select at least one category', 'error'); return; }
   const method = _editingCatGroup ? 'PUT' : 'POST';
+  // On edit, address by stable ID (rename-safe) when the group has one.
+  const q = (_editingCatGroup && _editingCatGroupId) ? '?id=' + encodeURIComponent(_editingCatGroupId) : '';
   try {
-    await api('/api/category-groups', {
+    await api('/api/category-groups' + q, {
       method, headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ name, categories: _cgSelectedCats })
     });
@@ -5238,8 +5298,11 @@ async function saveCatGroup() {
 
 async function deleteCatGroup(name) {
   if (!await confirmAction('Delete Category Group', `Delete group "${name}"? Policy rules referencing it will no longer match.`)) return;
+  // Address by stable ID (rename-safe) when available; fall back to name.
+  const g = _catGroups.find(x => x.name === name);
+  const addr = (g && g.id) ? 'id=' + encodeURIComponent(g.id) : 'name=' + encodeURIComponent(name);
   try {
-    await api('/api/category-groups?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    await api('/api/category-groups?' + addr, { method: 'DELETE' });
     toast('Group deleted', 'success');
     fetchCatGroups();
   } catch(e) { if (!handleDeleteError(e, 'category group')) toast('Error: ' + e.message, 'error'); }
@@ -5254,6 +5317,7 @@ function loadCatGroupDropdown() {
 
 // ── Decryption Profiles ───────────────────────────────────────────────────
 let _decProfiles = [];
+let _editingDecProfId = null; // stable ID of the profile being edited (rename-safe addressing); null for new/legacy
 
 async function fetchDecProfiles() {
   try {
@@ -5300,6 +5364,7 @@ function renderDecProfiles() {
 
 function decProfFormReset() {
   document.getElementById('dp-editing').value = '';
+  _editingDecProfId = null;
   document.getElementById('dp-name').value = '';
   document.getElementById('dp-name').disabled = false;
   ['dp-http2','dp-cert','dp-onunsup','dp-oninspecterr','dp-mintls','dp-maxtls'].forEach(id => document.getElementById(id).value = '');
@@ -5323,9 +5388,14 @@ function editDecProf(name) {
   const p = _decProfiles.find(x => x.name === name);
   if (!p) return;
   decProfFormReset();
+  _editingDecProfId = p.id || null; // after reset (reset clears it) — prefer id addressing on save
   document.getElementById('dp-editing').value = p.name;
   document.getElementById('dp-name').value = p.name;
-  document.getElementById('dp-name').disabled = true; // name is the identity/reference
+  // Rename-safe (references-by-id): the profile is addressed by its stable ID on
+  // save, so the NAME is now editable on edit — renaming cascades to every
+  // referencing rule automatically. Only lock the name for a legacy profile with
+  // no ID (name is still its only handle there).
+  document.getElementById('dp-name').disabled = !_editingDecProfId;
   document.getElementById('dp-http2').value = p.inspectHttp2 === true ? 'true' : (p.inspectHttp2 === false ? 'false' : '');
   document.getElementById('dp-cert').value = p.certVerification || '';
   document.getElementById('dp-onunsup').value = p.onUnsupported || '';
@@ -5356,8 +5426,10 @@ async function saveDecProf() {
   const stall = parseInt(document.getElementById('dp-stall').value, 10);
   if (!isNaN(stall) && stall > 0) body.stallTimeoutSecs = stall;
   const editing = document.getElementById('dp-editing').value !== '';
+  // On edit, address by stable ID (rename-safe) when the profile has one.
+  const q = (editing && _editingDecProfId) ? '?id=' + encodeURIComponent(_editingDecProfId) : '';
   try {
-    await api('/api/decryption-profiles', {
+    await api('/api/decryption-profiles' + q, {
       method: editing ? 'PUT' : 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body)
@@ -5370,8 +5442,11 @@ async function saveDecProf() {
 
 async function deleteDecProf(name) {
   if (!await confirmAction('Delete Decryption Profile', `Delete profile "${name}"? Rules referencing it fall back to their inline SSL settings.`)) return;
+  // Address by stable ID (rename-safe) when available; fall back to name.
+  const p = _decProfiles.find(x => x.name === name);
+  const addr = (p && p.id) ? 'id=' + encodeURIComponent(p.id) : 'name=' + encodeURIComponent(name);
   try {
-    await api('/api/decryption-profiles?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    await api('/api/decryption-profiles?' + addr, { method: 'DELETE' });
     toast('Profile deleted', 'success');
     fetchDecProfiles();
   } catch(e) { if (!handleDeleteError(e, 'decryption profile')) toast('Error: ' + e.message, 'error'); }
@@ -5427,6 +5502,9 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
       `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients (identity, else IP) · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
       `(pinned ${Math.round((stats.pinned_ttl_secs ?? 0)/60)}m) · Max entries: ${stats.max_entries ?? '?'}`);
   }
+  // Pre-fill the admin Cache Tuning form from the same Stats snapshot (single
+  // source of truth for the CURRENT values); defaults/bounds load lazily.
+  renderDecTunables(stats);
   const el = document.getElementById('decexcl-list');
   if (!el) return;
   if (!_decExclusions.length) {
@@ -5489,6 +5567,119 @@ async function clearDecExclusions() {
     toast('All exclusions cleared', 'success');
     fetchDecExclusions();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Cache tuning (F10): durable, per-node parameters for the volatile learn cache.
+// GET /api/decryption-exclusions/tunables returns defaults + bounds ONLY; the CURRENT
+// values are read from the Stats block (single source of truth) and passed in here.
+let _decTunablesMeta = null; // {defaults, bounds} — loaded once, lazily.
+
+const DECTUN_FIELDS = [
+  { key: 'confirm_n',       label: 'Confirm-count',    unit: 'distinct clients' },
+  { key: 'ttl_secs',        label: 'Entry TTL',        unit: 'seconds', time: true },
+  { key: 'pinned_ttl_secs', label: 'Pinned-class TTL', unit: 'seconds', time: true },
+  { key: 'window_secs',     label: 'Confirm window',   unit: 'seconds', time: true },
+  { key: 'max_entries',     label: 'Max entries',      unit: 'hosts' },
+];
+
+// dectunDur renders a seconds count as a compact human duration for the field hint.
+function dectunDur(secs) {
+  secs = Number(secs) || 0;
+  if (secs > 0 && secs % 3600 === 0) return (secs / 3600) + 'h';
+  if (secs > 0 && secs % 60 === 0) return (secs / 60) + 'm';
+  return secs + 's';
+}
+
+async function loadDecTunablesMeta() {
+  if (_decTunablesMeta) return _decTunablesMeta;
+  _decTunablesMeta = await api('/api/decryption-exclusions/tunables'); // {defaults, bounds, ...}
+  return _decTunablesMeta;
+}
+
+// renderDecTunables fills the admin form. Current values come from `stats` (the Stats
+// source of truth); min/max/default come from the tunables meta endpoint. The panel
+// is admin-gated in markup, so lower roles never see it — but the server PUT is the
+// real backstop.
+async function renderDecTunables(stats) {
+  const host = document.getElementById('dectun-form');
+  if (!host) return;
+  let meta;
+  try { meta = await loadDecTunablesMeta(); }
+  catch(e) {
+    host.innerHTML = '<p class="hint" style="color:var(--red)">Could not load tuning schema: ' +
+      escHtml(e.message || 'request failed') + '</p>';
+    return;
+  }
+  const bounds = meta.bounds || {}, defs = meta.defaults || {};
+  host.innerHTML = DECTUN_FIELDS.map(f => {
+    const bd = bounds[f.key] || {};
+    const cur = (stats && stats[f.key] != null) ? stats[f.key] : (defs[f.key] ?? '');
+    const timeHint = (f.time && cur !== '') ? ' · = ' + dectunDur(cur) : '';
+    return `<div>
+      <label style="display:block;font-size:.78rem;color:var(--muted);margin-bottom:4px">${escHtml(f.label)} <span style="opacity:.7">(${escHtml(f.unit)})</span></label>
+      <input type="number" id="dectun-${f.key}" class="input" value="${escHtml(String(cur))}" min="${escHtml(String(bd.min ?? ''))}" max="${escHtml(String(bd.max ?? ''))}" step="1" style="width:100%">
+      <div class="hint" style="font-size:.7rem;margin-top:3px">range ${escHtml(String(bd.min ?? '?'))}–${escHtml(String(bd.max ?? '?'))} · default ${escHtml(String(defs[f.key] ?? '?'))}${timeHint}</div>
+    </div>`;
+  }).join('');
+}
+
+// dectunGather reads + client-validates the form. Returns {body} on success or
+// {problems:[...]} on failure. The server re-validates (the authoritative check);
+// this is just fail-fast UX so a bad value never leaves the browser.
+function dectunGather() {
+  const bounds = (_decTunablesMeta && _decTunablesMeta.bounds) || {};
+  const body = {}, problems = [];
+  for (const f of DECTUN_FIELDS) {
+    const inp = document.getElementById('dectun-' + f.key);
+    const v = parseInt(inp && inp.value, 10);
+    if (isNaN(v)) { problems.push(f.label + ' must be a whole number'); continue; }
+    const bd = bounds[f.key] || {};
+    if (bd.min != null && v < bd.min) problems.push(`${f.label} is below the minimum (${bd.min})`);
+    if (bd.max != null && v > bd.max) problems.push(`${f.label} is above the maximum (${bd.max})`);
+    body[f.key] = v;
+  }
+  if (body.pinned_ttl_secs != null && body.ttl_secs != null && body.pinned_ttl_secs > body.ttl_secs) {
+    problems.push('Pinned-class TTL must not exceed Entry TTL');
+  }
+  return problems.length ? { problems } : { body };
+}
+
+function dectunShowError(msg) {
+  const err = document.getElementById('dectun-error');
+  if (!err) return;
+  if (msg) { err.style.display = 'block'; err.textContent = msg; }
+  else { err.style.display = 'none'; err.textContent = ''; }
+}
+
+async function saveDecTunables() {
+  const g = dectunGather();
+  if (g.problems) { dectunShowError(g.problems.join('; ')); return; }
+  dectunShowError('');
+  try {
+    // Full-set PUT (zero ⇒ default); the server validates the merged effective set.
+    await api('/api/decryption-exclusions/tunables', { method: 'PUT', body: g.body });
+    toast('Decryption-exclusion tunables saved', 'success');
+    fetchDecExclusions(); // re-reads Stats so the status line + form reflect the applied values
+  } catch(e) {
+    dectunShowError(e.message || 'request failed');
+    toast('Error: ' + (e.message || 'request failed'), 'error');
+  }
+}
+
+async function resetDecTunables() {
+  if (!await confirmAction('Reset cache tuning',
+      'Restore all five decryption-exclusion parameters to their built-in defaults? This applies immediately on this node.',
+      'Reset')) return;
+  dectunShowError('');
+  try {
+    // An all-empty PUT resets every field to its default (zero ⇒ default).
+    await api('/api/decryption-exclusions/tunables', { method: 'PUT', body: {} });
+    toast('Tunables reset to defaults', 'success');
+    fetchDecExclusions();
+  } catch(e) {
+    dectunShowError(e.message || 'request failed');
+    toast('Error: ' + (e.message || 'request failed'), 'error');
+  }
 }
 
 // loadDecryptionProfileDropdown populates the policy-editor profile <select>.
@@ -5924,7 +6115,8 @@ async function loadConfigVersions() {
       const prev = i < versions.length - 1 ? versions[i + 1].version : null;
       const diffBtn = prev ? `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px" data-click="diffConfigVersions" data-arg="${prev}" data-arg2="${v.version}">Diff</button>` : '';
       const rollbackBtn = `<button class="btn ghost" style="font-size:.75rem;padding:2px 8px;color:var(--yellow)" data-click="rollbackConfigVersion" data-arg="${v.version}">Rollback</button>`;
-      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${escHtml(v.action)}</td><td>${escHtml(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
+      const note = v.note ? `<div style="font-size:.72rem;color:var(--muted);margin-top:2px">&ldquo;${escHtml(v.note)}&rdquo;</div>` : '';
+      html += `<tr><td>v${v.version}</td><td>${date}</td><td>${escHtml(v.action)}${note}</td><td>${escHtml(v.actor)}</td><td class="text-right">${diffBtn} ${rollbackBtn}</td></tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
@@ -6048,6 +6240,34 @@ function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// logPersistFallback — a configured audit_log_file/request_log_file that
+// failed to open at startup (bad permissions, missing directory, full disk)
+// falls back to volatile in-memory storage with zero write errors (in-memory
+// writes never fail), so logWriteErrors alone can't reveal it. This is the
+// only place that silent fallback is surfaced.
+function logPersistFallback(s) {
+  return {
+    req: !!(s.requestLogConfigured && !s.requestLogPersisted),
+    audit: !!(s.auditLogConfigured && !s.auditLogPersisted),
+  };
+}
+
+// describeLogPersistence — human-readable Settings-panel summary of
+// logPersistFallback plus which logs are configured at all.
+function describeLogPersistence(s) {
+  const f = logPersistFallback(s);
+  if (f.req || f.audit) {
+    const parts = [];
+    if (f.req) parts.push('request log');
+    if (f.audit) parts.push('audit log');
+    return '⚠ ' + parts.join(' + ') + ' in-memory only — restart wipes history';
+  }
+  const persisted = [];
+  if (s.requestLogConfigured) persisted.push('request log');
+  if (s.auditLogConfigured) persisted.push('audit log');
+  return persisted.length ? 'Persisting (' + persisted.join(', ') + ')' : 'In-memory only (not configured)';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Stats & chart polling
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6068,6 +6288,10 @@ async function fetchStats() {
     document.getElementById('s-uptime').textContent     = s.uptime;
     document.getElementById('s-bl-sz').textContent      = s.blocklistSz + ' hosts';
     document.getElementById('s-auth').textContent       = s.authEnabled ? 'Enabled' : 'Disabled';
+    const slp = document.getElementById('s-log-persist');
+    slp.textContent = describeLogPersistence(s);
+    const slpPaths = [s.requestLogPath, s.auditLogPath].filter(Boolean);
+    slp.title = slpPaths.length ? 'Path(s): ' + slpPaths.join(', ') : '';
     // nav badge
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
@@ -6077,8 +6301,13 @@ async function fetchStats() {
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';
     // Posture: API reachable + request-log write health (real fields only)
     setPosture('proxy', 'ok', 'Operational · :' + s.proxyPort);
+    const logFallback = logPersistFallback(s);
     if ((s.logWriteErrors || 0) > 0) {
       setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
+    } else if (logFallback.req || logFallback.audit) {
+      const which = logFallback.req && logFallback.audit ? 'Request+audit log'
+        : logFallback.req ? 'Request log' : 'Audit log';
+      setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
     } else {
       setPosture('logging', 'ok', 'Persisting');
     }
@@ -7484,6 +7713,9 @@ async function fetchPolicy() {
     }
     renderPolicy();
   } catch(e) { console.error(e); }
+  // policy-draft (G2): refresh the commit-mode toggle + pending-changes bar.
+  // Fired here so it stays in sync on view-open and after every mutation.
+  fetchDraftState();
 }
 
 function actionBadge(action) {
@@ -7678,7 +7910,11 @@ async function polApplyOrder() {
     // show the staged order — which now IS the server order — and
     // fetchPolicy paints the re-stamped truth.
     _polSetStagedState(null);
-    toast('Rule order applied', 'success');
+    // Under commit mode the reorder went into the draft candidate, not live —
+    // say so honestly (the pending-changes bar will appear after fetchPolicy).
+    toast(_polDraftState && _polDraftState.requireCommit
+      ? 'Rule order staged in the draft — commit to apply'
+      : 'Rule order applied', 'success');
     await fetchPolicy();
   } catch (e) {
     // Fail honest: the staged order stays visible so nothing is lost.
@@ -7692,6 +7928,150 @@ async function polApplyOrder() {
 function polRevertOrder() {
   polStageOrder(null);
   toast('Staged order discarded — showing the applied order', 'success');
+}
+
+// ── Candidate/commit (policy-draft, G2) ──────────────────────────────────────
+// Opt-in "require commit" mode: rule edits stage into a shared candidate and go
+// live only on an explicit commit. Backend: /api/policy/draft (state+diff / PUT
+// mode), /api/policy/draft/commit, /api/policy/draft/revert. GET /api/policy
+// already returns the candidate rules while a draft is open, so the rulebase
+// table below renders what will be committed.
+let _polDraftState = null;
+
+async function fetchDraftState() {
+  try {
+    _polDraftState = await api('/api/policy/draft');
+    renderDraftState(_polDraftState);
+  } catch (_) { /* viewer / transient — leave the last known state */ }
+}
+
+function renderDraftState(st) {
+  st = st || {};
+  const modeState = document.getElementById('pol-commit-mode-state');
+  const modeBtn   = document.getElementById('pol-commit-mode-btn');
+  if (modeState) modeState.textContent = st.requireCommit ? 'on' : 'off';
+  if (modeBtn)   modeBtn.classList.toggle('active', !!st.requireCommit);
+  const bar = document.getElementById('pol-draft-bar');
+  if (!bar) return;
+  if (st.active) {
+    const n = st.pendingCount || 0;
+    document.getElementById('pol-draft-count').textContent = n + (n === 1 ? ' change' : ' changes');
+    // Multi-admin awareness (S3): warn when the open draft belongs to someone
+    // else — committing/discarding would act on THEIR staged changes.
+    const actor = document.getElementById('pol-draft-actor');
+    if (actor) {
+      // Fail toward the warning: if we can't confirm the draft is OURS (actor
+      // differs, or our own identity is unknown), treat it as another admin's.
+      const other = !!st.actor && st.actor !== uiUsername;
+      actor.textContent = st.actor
+        ? (other ? '⚠ opened by ' + st.actor + ' — committing/discarding acts on their staged changes' : 'opened by you')
+        : '';
+      actor.style.color = other ? 'var(--warn)' : 'var(--muted)';
+    }
+    bar.style.display = 'flex';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function polToggleCommitMode() {
+  // Resolve the true current mode before flipping — a stale/failed last fetch
+  // would otherwise always compute "turn on" and the toggle couldn't turn off.
+  if (!_polDraftState) await fetchDraftState();
+  const turningOn = !(_polDraftState && _polDraftState.requireCommit);
+  try {
+    await api('/api/policy/draft', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ require_commit: turningOn }),
+    });
+    toast(turningOn
+      ? 'Commit mode ON — rule edits now stage into a draft until you commit'
+      : 'Commit mode OFF — rule edits apply immediately', 'success');
+    await fetchDraftState();
+  } catch (e) {
+    // 409 when disabling with a pending draft.
+    toast(e.message || 'Could not change commit mode', 'error');
+  }
+}
+
+// polDraftDiffSummary renders the candidate→running change set as one line.
+function polDraftDiffSummary(d) {
+  d = d || {};
+  const add = d.added || [], mod = d.modified || [], rem = d.removed || [];
+  const bits = [];
+  if (add.length) bits.push('+' + add.length + ' added (' + add.join(', ') + ')');
+  if (mod.length) bits.push('~' + mod.length + ' modified (' + mod.join(', ') + ')');
+  if (rem.length) bits.push('−' + rem.length + ' removed (' + rem.join(', ') + ')');
+  return bits.length ? bits.join('; ') : 'No changes';
+}
+
+async function polCommitDraft() {
+  // A pending client-side row reorder is NOT yet in the candidate — committing
+  // now would activate rules without the order shown on screen. Force the
+  // operator to Apply or Revert the staged order first.
+  if (polBlockWhileStaged()) return;
+  let st;
+  try { st = await api('/api/policy/draft'); }
+  catch (e) { toast('Could not load draft: ' + e.message, 'error'); return; }
+  if (!st.active) { toast('No staged changes to commit', 'error'); await fetchDraftState(); return; }
+  // Advisory shadow warning (G4): rules the candidate order makes unreachable.
+  let shadowWarn = '';
+  if (Array.isArray(st.shadows) && st.shadows.length) {
+    const s = st.shadows;
+    shadowWarn = '⚠ ' + s.length + ' possibly-shadowed rule' + (s.length === 1 ? '' : 's') + ': ' +
+      s.map(x => x.rule + ' (by ' + x.shadowedBy + ')').join(', ') +
+      ' — may never match; verify with the tester.  ';
+  }
+  const comment = await promptAction({
+    title: 'Commit policy changes',
+    msg: shadowWarn + polDraftDiffSummary(st.diff) + '  —  Committing activates these rules for live traffic. A comment is required (recorded in the audit log).',
+    label: 'Commit comment',
+    placeholder: 'Why these changes?',
+    okLabel: 'Commit',
+    okStyle: 'primary',
+  });
+  if (comment === null) return;                 // cancelled
+  if (!comment.trim()) { toast('A commit comment is required', 'error'); return; }
+  try {
+    // Precondition on the candidate generation reviewed above: if another admin
+    // staged a change while this dialog was open, the commit 409s so their
+    // unreviewed change is not activated on our comment.
+    const q = (typeof st.version === 'number') ? ('?ifVersion=' + st.version) : '';
+    const res = await api('/api/policy/draft/commit' + q, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment: comment.trim() }),
+    });
+    const n = res.committed || 0;
+    toast('Committed ' + n + ' change' + (n === 1 ? '' : 's') + ' — now live', 'success');
+    await fetchPolicy();
+  } catch (e) {
+    // A 409 here means the shared candidate changed since the diff was reviewed.
+    toast('Commit failed: ' + e.message, 'error');
+    await fetchDraftState();
+  }
+}
+
+async function polRevertDraft() {
+  // Re-fetch first: discard is destructive on the SHARED candidate, so the
+  // count shown must reflect what will actually be discarded (another admin may
+  // have staged more since the last poll).
+  await fetchDraftState();
+  if (!(_polDraftState && _polDraftState.active)) { toast('No staged changes to discard', 'error'); return; }
+  const n = _polDraftState.pendingCount || 0;
+  const ok = await confirmAction('Discard staged changes',
+    'Discard ' + n + ' staged policy change' + (n === 1 ? '' : 's') +
+    '? The committed rulebase stays exactly as it is now.', 'Discard');
+  if (!ok) return;
+  try {
+    await api('/api/policy/draft/revert', { method: 'POST' });
+    toast('Staged changes discarded', 'success');
+    await fetchPolicy();
+  } catch (e) {
+    toast('Discard failed: ' + e.message, 'error');
+    await fetchDraftState();
+  }
 }
 
 // polBlockWhileStaged — rule mutations under a pending staged order would
@@ -7965,6 +8345,10 @@ async function loadSettings() {
       const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
       el.textContent = '✅ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
       el.style.color = 'var(--green)';
+      renderSyslogDrops(sl.drops);
+    } else {
+      // No forwarding configured — never leave a stale drop warning visible.
+      hideSyslogDrops();
     }
   } catch(e) { console.error(e); }
   // Log level
@@ -8120,6 +8504,27 @@ async function saveUIAllowIPs() {
 }
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
+// renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
+// forwarding state so a stale amber warning can't survive a reconfigure/disable
+// (a new collector starts a fresh writer at Drops()==0; disabling clears it).
+function renderSyslogDrops(drops) {
+  const dropsEl = document.getElementById('s-syslog-drops');
+  const n = drops || 0;
+  dropsEl.style.display = '';
+  if (n > 0) {
+    dropsEl.textContent = '⚠ ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started — check collector connectivity/capacity';
+    dropsEl.style.color = 'var(--warn,#b8860b)';
+  } else {
+    dropsEl.textContent = 'No delivery drops since forwarding started';
+    dropsEl.style.color = 'var(--muted)';
+  }
+}
+function hideSyslogDrops() {
+  const dropsEl = document.getElementById('s-syslog-drops');
+  dropsEl.style.display = 'none';
+  dropsEl.textContent = '';
+}
+
 async function saveSyslog() {
   const addr = document.getElementById('s-syslog-addr').value.trim();
   const format = document.getElementById('s-syslog-format').value;
@@ -8134,6 +8539,9 @@ async function saveSyslog() {
     const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
     el.textContent = '✅ Forwarding to ' + addr + ' (' + fmtLabel + ')';
     el.style.color = 'var(--green)';
+    // Reconfiguring points at a fresh writer whose drop counter starts at 0 —
+    // reset the row rather than leaving a prior collector's stale warning up.
+    renderSyslogDrops(res.drops);
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -8150,6 +8558,8 @@ async function disableSyslog() {
     el.style.display = '';
     el.textContent = 'Syslog disabled';
     el.style.color = 'var(--muted)';
+    // Forwarding is off now — clear any prior drop warning.
+    hideSyslogDrops();
     toast('Syslog disabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -9874,8 +10284,9 @@ function polMarkEdited() {
 })();
 
 // polHistory — per-rule change trail: opens the Audit Log filtered to the
-// rule's name (the audit ring keys entries on the rule name today; the
-// ULID-keyed trail is the policy-identity backend record).
+// rule's stable ULID (audit entries now carry it in ObjectID), so the trail
+// survives renames — earlier entries logged under an old name still match.
+// Falls back to the rule name for legacy rules without an id.
 async function polHistory(priority) {
   const r = polRules.find(x => x.priority === Number(priority));
   if (!r) return;
@@ -9884,7 +10295,7 @@ async function polHistory(priority) {
   // cancelled navigation leaves no stale pre-filter behind on the Audit view.
   if (!await viewLeaveGuards.policy()) return;
   const f = document.getElementById('audit-filter');
-  if (f) f.value = r.name;
+  if (f) f.value = r.id || r.name;
   switchView('audit');
 }
 
@@ -12586,6 +12997,7 @@ function renderAuditLog() {
     ? auditEntries.filter(e =>
         (e.action||'').toLowerCase().includes(filter) ||
         (e.object||'').toLowerCase().includes(filter) ||
+        (e.objectId||'').toLowerCase().includes(filter) ||
         (e.actor||'').toLowerCase().includes(filter) ||
         (e.detail||'').toLowerCase().includes(filter))
     : auditEntries;
@@ -12604,7 +13016,7 @@ function renderAuditLog() {
       <td style="white-space:nowrap;font-size:.75rem">${escHtml(e.time||'')}</td>
       <td style="font-size:.78rem">${escHtml(e.actor||'')}</td>
       <td><code style="font-size:.78rem">${escHtml(e.action||'')}</code></td>
-      <td style="font-size:.82rem">${escHtml(e.object||'')}</td>
+      <td style="font-size:.82rem"${e.objectId ? ` title="id: ${escHtml(e.objectId)}"` : ''}>${escHtml(e.object||'')}${e.objectId ? ` <span style="color:var(--muted);font-size:.68rem">🔗</span>` : ''}</td>
       <td style="font-size:.78rem;color:var(--muted)">${escHtml(e.detail||'')}</td>
       <td>${diffBtn}</td>
     </tr>`;
@@ -13575,6 +13987,23 @@ async function loadHA(isCP) {
       }
       // Manual-failover button: only a standby can be promoted.
       document.getElementById('ha-promote-row').style.display = (r.role === 'standby') ? '' : 'none';
+      // Standby sync health: previously only visible as an "HA: sync failed
+      // (N/3)" log line — surface the same streak here so an operator can see
+      // a standby approaching the auto-failover/self-fence threshold.
+      const syncCard = document.getElementById('ha-sync-card');
+      const syncNote = document.getElementById('ha-sync-note');
+      if (r.role === 'standby' && r.sync_max_fail != null) {
+        syncCard.style.display = '';
+        syncNote.style.display = '';
+        const failCount = r.sync_fail_count || 0;
+        const syncColor = failCount === 0 ? '#22c55e' : (failCount >= r.sync_max_fail ? '#ef4444' : '#f59e0b');
+        const lastOk = r.last_sync_ok ? `<br><span style="font-size:.65rem;color:var(--muted)">last ok ${timeAgo(new Date(r.last_sync_ok))}</span>` : '';
+        document.getElementById('ha-sync-val').innerHTML =
+          `<span style="color:${syncColor}">${failCount}/${r.sync_max_fail} failed</span>${lastOk}`;
+      } else {
+        syncCard.style.display = 'none';
+        syncNote.style.display = 'none';
+      }
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
       }
@@ -13945,13 +14374,23 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="auth_lockout"> Auth lockout</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cert_expiry"> Cert expiry</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ca_load_failed"> CA load failed</label>
-        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="update_available"> Update available</label>
         <!-- M1-3 release-catalog detection events: the store filters on exact
              event names (or "*"), so events missing here would be silently
              filtered for GUI-managed webhooks (Codex review on PR #639). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_stale"> Release catalog stale</label>
-        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_refresh_failing"> Release refresh failing</label>
-        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_recovered"> Release refresh recovered</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_refresh_failing"> Release catalog refresh failing</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="release_catalog_recovered"> Release catalog recovered</label>
+        <!-- Adaptive decryption-exclusion alerts: the store filters on exact event
+             names (or "*"), so these must be listed here for GUI-managed webhooks
+             to subscribe (same class as the release-catalog events above). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude"> Decryption exclusion learned</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude_rescue"> Decryption live-rescue</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude_surge"> Decryption exclusion surge</label>
+        <!-- Chaos-hardening events (same exact-name filter class as above):
+             state_file_corrupt = CHAOS-05/07 quarantine, cluster_node_reenrolled
+             = expired-node re-enrollment (CHAOS-12 recovery path). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
       </div>
     </div>
     <div class="form-group">

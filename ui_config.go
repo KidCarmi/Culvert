@@ -80,6 +80,18 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// Persistent request-log health: non-zero means writes are failing
 		// (e.g. disk full) and the on-disk history is incomplete.
 		"logWriteErrors": reqlog.WriteErrors(),
+		// Audit/request-log persistence state: if the operator configured a
+		// file path but the engine could not open it at startup (bad
+		// permissions, missing directory, full disk), both silently fall
+		// back to volatile in-memory storage — wiped on every restart — with
+		// only a startup log line as evidence. "Configured" true + "Persisted"
+		// false means that silent fallback is currently active.
+		"auditLogConfigured":   auditLogConfiguredPath != "",
+		"auditLogPersisted":    auditPersistActive(),
+		"auditLogPath":         auditLogConfiguredPath,
+		"requestLogConfigured": requestLogConfiguredPath != "",
+		"requestLogPersisted":  requestLogPersistActive(),
+		"requestLogPath":       requestLogConfiguredPath,
 		// Admin-API RBAC enforcement mode ("enforce"/"shadow"). Surfaced here
 		// (in addition to the Governance panel) so shadow mode — where the
 		// metadata-driven role gate is log-only, not blocking — is visible
@@ -691,11 +703,18 @@ func buildImportPreview(b *configBackup, replaceMode bool) ([]importPreviewSecti
 		})
 	}
 
-	policyNote := ""
-	if !replaceMode && len(b.PolicyRules) > 0 {
-		policyNote = "merge appends — duplicate rules may accumulate"
+	// Policy rules: merge now UPSERTS by identity (ID then name), so report the
+	// real update/add split instead of a flat "add N" — and drop the old
+	// duplicate-accumulation warning, which no longer applies.
+	polCur := len(policyStore.List())
+	if replaceMode || len(b.PolicyRules) == 0 {
+		add("Policy Rules", len(b.PolicyRules), polCur, "")
+	} else {
+		updates, adds := policyStore.countImportUpserts(b.PolicyRules)
+		addFixed("Policy Rules", len(b.PolicyRules), polCur,
+			fmt.Sprintf("upsert %d: %d update, %d add", len(b.PolicyRules), updates, adds),
+			"merge upserts by ID then name — duplicates no longer accumulate")
 	}
-	add("Policy Rules", len(b.PolicyRules), len(policyStore.List()), policyNote)
 	add("Blocklist", len(b.Blocklist), bl.Count(), "")
 
 	taxonomyNote := ""
@@ -789,6 +808,49 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 	})
 }
 
+// importPolicyRules applies the backup's policy rules under the given mode.
+// Replace mode swaps the whole set; merge mode UPSERTS by identity — match by
+// stable ULID first (idempotent re-import), then a one-time name fallback for
+// pre-ID / hand-authored backups, else create fresh — so a re-import does not
+// accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1).
+func importPolicyRules(b *configBackup, replaceMode bool) {
+	if replaceMode && len(b.PolicyRules) > 0 {
+		policyStore.ReplaceAll(b.PolicyRules)
+		return
+	}
+	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
+	for i := range b.PolicyRules {
+		rule := b.PolicyRules[i]
+		existing := policyStore.matchForImport(rule)
+		editPriority := -1
+		if existing != nil {
+			// UpdateByID keeps the live rule's position and DISCARDS the payload
+			// priority — so validate against the priority it will actually apply,
+			// not the backup's. Otherwise a re-import after the rulebase was
+			// reordered (payload priority now owned by a different live rule)
+			// would spuriously fail the priority-uniqueness check and silently
+			// drop the content update, defeating idempotency.
+			rule.Priority = existing.Priority
+			editPriority = existing.Priority
+		}
+		if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
+			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
+			continue
+		}
+		if existing == nil {
+			policyStore.Add(rule)
+			continue
+		}
+		rule.ID = existing.ID // carry identity for the name-match upsert path
+		if !policyStore.UpdateByID(existing.ID, rule) {
+			// The matched rule vanished between match and update (concurrent
+			// delete / import of the same rule). Don't silently drop the
+			// incoming content — add it fresh rather than lose it.
+			policyStore.Add(rule)
+		}
+	}
+}
+
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
@@ -845,20 +907,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// groups reference categories by name).
 	importCategoryTaxonomy(&b, replaceMode)
 
-	// Policy rules — validate each before importing.
-	if replaceMode && len(b.PolicyRules) > 0 {
-		policyStore.ReplaceAll(b.PolicyRules)
-	} else {
-		// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
-		for i := range b.PolicyRules {
-			rule := b.PolicyRules[i]
-			if err := validatePolicyRule(rule, policyStore.List(), -1); err != nil {
-				logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(err.Error(), "\n", ""))
-				continue
-			}
-			policyStore.Add(rule)
-		}
-	}
+	// Policy rules — replace or upsert-by-identity (extracted to keep the
+	// handler under the nestif complexity threshold).
+	importPolicyRules(&b, replaceMode)
 	policyStore.Save()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
@@ -1205,6 +1256,17 @@ func apiUIAllowIPs(w http.ResponseWriter, r *http.Request) {
 // syslogConfigured tracks whether syslog was initialised so the UI can reflect it.
 var syslogConfigured string // the addr string, empty = not configured
 
+// auditLogConfiguredPath / requestLogConfiguredPath record the operator-
+// configured persistent-log path (set in loadObservability regardless of
+// whether the underlying engine's Init() actually succeeded). apiStats
+// compares these against {audit,requestLog}PersistActive() so the GUI can
+// tell an intentional in-memory-only setup apart from a configured path
+// that silently fell back to volatile storage on open failure.
+var (
+	auditLogConfiguredPath   string
+	requestLogConfiguredPath string
+)
+
 // GET/POST /api/syslog — configure remote syslog/SIEM forwarding at runtime.
 // GET  → returns current syslog address and format.
 // POST → {"addr": "udp://10.0.0.1:514", "format": "rfc5424"} — reconnects immediately.
@@ -1217,10 +1279,12 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		format := "rfc3164"
+		var drops uint64
 		if globalSyslog != nil {
 			format = globalSyslog.Format()
+			drops = globalSyslog.Drops()
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format})
+		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return

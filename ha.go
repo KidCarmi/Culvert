@@ -91,6 +91,12 @@ type HAState struct {
 	resync        haResyncContext // material to re-enter standby after a demotion (cluster loader)
 	lastSyncOK    time.Time       // last successful HASync apply (freshness-gate input)
 	lastSelfFence time.Time       // last self-fence (re-promotion hysteresis)
+
+	// syncFailCount mirrors standbyLoopState.failCount (standby side) so the
+	// consecutive-failure streak toward haStandbyMaxFail is visible outside the
+	// loop goroutine — previously an operator had no warning before a standby
+	// silently hit the auto-failover/self-fence threshold (see setSyncFailCount).
+	syncFailCount int
 }
 
 // promoteContext holds the parameters StartAsStandby threads into the sync loop,
@@ -105,13 +111,15 @@ var globalHA = &HAState{}
 
 // HAStatus returns a snapshot of the current HA state for API/UI consumption.
 type HAStatus struct {
-	Enabled      bool   `json:"enabled"`
-	Role         string `json:"role"`                   // "leader", "standby", or ""
-	Since        string `json:"since,omitempty"`        // RFC3339
-	PeerAddr     string `json:"peer_addr,omitempty"`    // other CP address
-	AutoFailover bool   `json:"auto_failover"`          // standby self-promotes on leader loss (ADR-0004)
-	Term         uint64 `json:"term"`                   // leadership epoch (ADR-0004 Slice 1c)
-	StandbyAddr  string `json:"standby_addr,omitempty"` // leader-side failback target (ADR-0005 S0)
+	Enabled       bool   `json:"enabled"`
+	Role          string `json:"role"`                      // "leader", "standby", or ""
+	Since         string `json:"since,omitempty"`           // RFC3339
+	PeerAddr      string `json:"peer_addr,omitempty"`       // other CP address
+	AutoFailover  bool   `json:"auto_failover"`             // standby self-promotes on leader loss (ADR-0004)
+	Term          uint64 `json:"term"`                      // leadership epoch (ADR-0004 Slice 1c)
+	StandbyAddr   string `json:"standby_addr,omitempty"`    // leader-side failback target (ADR-0005 S0)
+	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
+	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
 }
 
 func (h *HAState) Status() HAStatus {
@@ -128,7 +136,28 @@ func (h *HAState) Status() HAStatus {
 	if !h.since.IsZero() {
 		s.Since = h.since.Format(time.RFC3339)
 	}
+	// Standby-only: on auto-promotion setFail(N) can run just before promote()
+	// flips h.role to "leader" (nothing else resets syncFailCount), so gate
+	// here rather than trust callers not to leak a stale failure streak onto
+	// a freshly-promoted leader (e.g. via apiClusterStatus, which embeds this
+	// struct verbatim).
+	if h.role == "standby" {
+		s.SyncFailCount = h.syncFailCount
+		if !h.lastSyncOK.IsZero() {
+			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
+		}
+	}
 	return s
+}
+
+// setSyncFailCount records the standby sync loop's current consecutive-failure
+// streak (see standbyLoopState.failCount) so it can be read back through
+// Status()/apiClusterHA. Called from the standby loop goroutine on every
+// success/failure transition; safe to call from any goroutine.
+func (h *HAState) setSyncFailCount(n int) {
+	h.mu.Lock()
+	h.syncFailCount = n
+	h.mu.Unlock()
 }
 
 // snapshotConfigLocked builds the persisted haConfig from the live state.
@@ -322,6 +351,7 @@ func (h *HAState) StartAsStandby(ctx context.Context, leaderAddr, token string,
 	h.token = token
 	h.since = time.Now()
 	h.autoFailover = autoFailover
+	h.syncFailCount = 0 // fresh loop — don't carry over a stale streak from a prior standby stint
 	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile, onPromote: onPromote, set: true}
 	h.promoted.Store(false)
 	stopCh := make(chan struct{})
@@ -445,18 +475,25 @@ func (s *standbyLoopState) onMaxFail() bool {
 	return false
 }
 
+// setFail updates the loop-local failure streak and mirrors it onto HAState
+// so it's visible outside the loop goroutine (apiClusterHA / admin UI).
+func (s *standbyLoopState) setFail(n int) {
+	s.failCount = n
+	s.h.setSyncFailCount(n)
+}
+
 // syncOnce performs a single sync attempt without reconnecting (the immediate
 // try at loop start), updating failCount.
 func (s *standbyLoopState) syncOnce() {
 	if s.client == nil {
-		s.failCount++
+		s.setFail(s.failCount + 1)
 		return
 	}
 	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
-		s.failCount = 0
+		s.setFail(0)
 		s.manualWarned = false
 	} else {
-		s.failCount++
+		s.setFail(s.failCount + 1)
 	}
 }
 
@@ -466,14 +503,14 @@ func (s *standbyLoopState) tick() bool {
 	if s.client == nil {
 		c, err := NewDataPlaneClient("ha-standby", s.leaderAddr, s.certFile, s.keyFile, s.caFile)
 		if err != nil {
-			s.failCount++
+			s.setFail(s.failCount + 1)
 			logger.Printf("HA: reconnect to leader failed (%d/%d): %v", s.failCount, haStandbyMaxFail, err)
 			return s.failCount >= haStandbyMaxFail && s.onMaxFail()
 		}
 		s.client = c
 	}
 	if s.h.syncFromLeader(s.ctx, s.client, s.token) {
-		s.failCount = 0
+		s.setFail(0)
 		s.manualWarned = false // leader recovered — re-arm the warning
 		return false
 	}
@@ -484,7 +521,7 @@ func (s *standbyLoopState) tick() bool {
 		// promotion (role flip + lease grab) on a node that is going away.
 		return true
 	}
-	s.failCount++
+	s.setFail(s.failCount + 1)
 	logger.Printf("HA: sync failed (%d/%d)", s.failCount, haStandbyMaxFail)
 	return s.failCount >= haStandbyMaxFail && s.onMaxFail()
 }
@@ -917,6 +954,16 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		addLeaseHealth(resp, globalHA)
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
+		}
+		if status.Enabled && status.Role == "standby" {
+			// Previously invisible outside the "HA: sync failed (N/3)" log line —
+			// an operator had no warning before a standby silently crossed
+			// haStandbyMaxFail and self-fenced/failed-over (ADR-0004/RISK-001).
+			resp["sync_fail_count"] = status.SyncFailCount
+			resp["sync_max_fail"] = haStandbyMaxFail
+			if status.LastSyncOK != "" {
+				resp["last_sync_ok"] = status.LastSyncOK
+			}
 		}
 		jsonOK(w, resp)
 

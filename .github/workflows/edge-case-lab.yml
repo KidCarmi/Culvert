@@ -1,0 +1,261 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Edge-Case Validation Lab
+#
+# Runs the differential Secure-Web-Gateway validation lab (edge-case-lab/) in
+# CI. The lab is a DISCOVERY + coverage instrument, not the merge gate — the
+# authoritative product guards are the deterministic Go tests in the -race suite
+# (Fast PR Gate). This workflow keeps the lab alive so it catches regressions and
+# so its findings stay reproducible, without making a 215-scenario AI campaign a
+# load-bearing per-PR dependency.
+#
+# Tiers (authority: edge-case-lab/EDGE-CASE-CI-INTEGRATION-PLAN.md +
+# EDGE-CASE-SUITE-TIERS.md):
+#   smoke    — PRs touching the proxy/policy surface (+ the lab). 14 curated
+#              scenarios + the 24 harness self-tests (schema + sanitization
+#              self-checks included). ~1 min. Advisory: fails red on a real
+#              regression but is NOT a required branch-protection check (promote
+#              later via branch protection).
+#   nightly  — one representative per canonical behavior (49). Cron 05:00 UTC.
+#   full     — the entire 215-scenario campaign. Weekly (Mon 06:00 UTC) + manual.
+#
+# NOT wired here by design: the intentional-mutation gate. Product mutations must
+# never run in normal CI and are never pushed; that gate stays a manual,
+# worktree-only step (edge-case-lab/EDGE-CASE-MUTATION-VALIDATION.md).
+#
+# Safety posture: least-privilege (contents: read), no secrets, no
+# pull_request_target, every job has a timeout, artifacts upload ONLY after the
+# sanitizer succeeds (never keys/unsanitized evidence), and every job cleans up
+# its fixture + proxy processes even on failure.
+#
+# Hermetic: no public internet. The fixture origin binds TEST-NET 192.0.2.2
+# (RFC 5737); the SSRF guard treats that range as dialable while RFC-1918 and
+# loopback stay blocked (edge_case_lab_ssrf_guard_test.go).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Edge-Case Validation Lab
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # The smoke suite guards first-match, default-deny, tenant isolation, TLS
+      # inspection, SSL-bypass, file-blocking-under-TLS, threat-intel, schedule,
+      # persistence, auth-boundary, decision-trace, category, and wildcard
+      # contracts — so the filter covers every module those scenarios exercise,
+      # not just the core proxy files. A gap here means a regression in one of
+      # these modules would ship with no red PR check.
+      - "proxy*.go"
+      - "policy.go"
+      - "socks5.go"
+      - "store.go"
+      - "ui_policy.go"
+      - "auth.go"
+      - "authpolicy.go"
+      - "internal/ssrf/**"
+      - "internal/sslbypass/**"
+      - "internal/fileblock/**"
+      - "internal/threatfeed/**"
+      - "internal/blocklist/**"
+      - "internal/urlcat/**"
+      - "internal/catdb/**"
+      - "edge-case-lab/**"
+      - ".github/workflows/edge-case-lab.yml"
+  schedule:
+    - cron: "0 5 * * *"   # nightly canonical (05:00 UTC)
+    - cron: "0 6 * * 1"   # weekly full campaign (Mon 06:00 UTC)
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Tier to run on demand"
+        type: choice
+        options: [smoke, nightly, full]
+        default: full
+
+# Least privilege: the lab only reads the checkout; it never writes to the repo,
+# packages, or deployments.
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-case-lab-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── PR smoke — 14 curated scenarios + 24 harness self-tests ────────────────
+  smoke:
+    name: "Lab · PR smoke (14 scenarios + self-tests)"
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Bootstrap lab environment
+        run: bash edge-case-lab/ci/bootstrap.sh
+
+      - name: PR smoke tier
+        id: smoke
+        run: |
+          set -o pipefail
+          python3 edge-case-lab/harness/suite_tiers.py smoke 2>&1 | tee /tmp/smoke.log
+
+      - name: Sanitize logs before upload
+        id: sanitize
+        if: always()
+        run: |
+          python3 edge-case-lab/harness/sanitize_check.py \
+            /tmp/smoke.log /tmp/origin.log edge-case-lab/reports
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Edge-Case Lab — PR smoke"
+            echo ""
+            [ "${{ steps.smoke.outcome }}" = "success" ] \
+              && echo "✅ 14 curated scenarios + 24 harness self-tests passed." \
+              || echo "❌ Smoke regression — see \`smoke.log\` artifact."
+            echo ""
+            echo '```'
+            grep -E 'PR-smoke:|passed,|unexpected-fail' /tmp/smoke.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload smoke log (only if sanitizer passed)
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: edge-case-lab-smoke
+          path: |
+            /tmp/smoke.log
+            /tmp/origin.log
+          retention-days: 14
+
+      - name: Cleanup (stop fixture + proxy)
+        if: always()
+        run: bash edge-case-lab/ci/cleanup.sh
+
+  # ─── Nightly canonical — one representative per behavior (49) ────────────────
+  nightly:
+    name: "Lab · nightly canonical (49 behaviors)"
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 5 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Bootstrap lab environment
+        run: bash edge-case-lab/ci/bootstrap.sh
+
+      - name: Nightly canonical tier
+        id: nightly
+        run: |
+          set -o pipefail
+          python3 edge-case-lab/harness/suite_tiers.py nightly 2>&1 | tee /tmp/nightly.log
+
+      - name: Sanitize evidence before upload
+        id: sanitize
+        if: always()
+        run: |
+          python3 edge-case-lab/harness/sanitize_check.py \
+            /tmp/nightly.log /tmp/origin.log \
+            edge-case-lab/reports edge-case-lab/scenarios edge-case-lab/evidence
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Edge-Case Lab — nightly canonical"
+            echo ""
+            [ "${{ steps.nightly.outcome }}" = "success" ] \
+              && echo "✅ Every canonical behavior representative held (0 unexpected regressions)." \
+              || echo "❌ A canonical behavior regressed — see \`nightly.log\` artifact."
+            echo ""
+            echo '```'
+            grep -E 'nightly-canonical:|unexpected-fail' /tmp/nightly.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload nightly evidence (only if sanitizer passed)
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: edge-case-lab-nightly
+          path: |
+            /tmp/nightly.log
+            /tmp/origin.log
+            edge-case-lab/reports/
+          retention-days: 30
+
+      - name: Cleanup (stop fixture + proxy)
+        if: always()
+        run: bash edge-case-lab/ci/cleanup.sh
+
+  # ─── Full campaign — all 215 scenarios ──────────────────────────────────────
+  full:
+    name: "Lab · full campaign (215 scenarios)"
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Bootstrap lab environment
+        run: bash edge-case-lab/ci/bootstrap.sh
+
+      - name: Full campaign
+        id: full
+        run: |
+          set -o pipefail
+          python3 edge-case-lab/harness/suite_tiers.py full 2>&1 | tee /tmp/full.log
+
+      - name: Regenerate canonical registry + summaries
+        if: always()
+        run: python3 edge-case-lab/harness/canonical.py 2>&1 | tee /tmp/canonical.log || true
+
+      - name: Sanitize evidence before upload
+        id: sanitize
+        if: always()
+        run: |
+          python3 edge-case-lab/harness/sanitize_check.py \
+            /tmp/full.log /tmp/origin.log \
+            edge-case-lab/scenarios edge-case-lab/evidence \
+            edge-case-lab/representative_evidence edge-case-lab/reports
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "## Edge-Case Lab — full campaign"
+            echo ""
+            echo '```'
+            grep -E 'counts|pass_rate|PASS|SECURITY_BYPASS|CONFIG|TEST_INFRA|EXPECTED' /tmp/full.log | head -20 || true
+            echo '```'
+            echo ""
+            echo "Raw evidence is uploaded as an artifact (sanitized), never committed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full-campaign evidence (only if sanitizer passed)
+        if: always() && steps.sanitize.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: edge-case-lab-full-campaign
+          path: |
+            /tmp/full.log
+            /tmp/origin.log
+            edge-case-lab/reports/
+            edge-case-lab/scenarios/
+            edge-case-lab/evidence/
+          retention-days: 90
+
+      - name: Cleanup (stop fixture + proxy)
+        if: always()
+        run: bash edge-case-lab/ci/cleanup.sh

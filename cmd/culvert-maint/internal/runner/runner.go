@@ -454,21 +454,49 @@ func (r *Runner) runWithEnv(ctx context.Context, argv []string, envOverlay map[s
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	// Override default Cancel behaviour: send SIGTERM, then SIGKILL after grace.
+	// Put the child in its own process group so a timeout/cancel can terminate
+	// the WHOLE tree (docker + compose + buildkit grandchildren), not just the
+	// `sudo` wrapper. Without this, exec's default cancel signals only the leader
+	// and a wedged stack-mutating `docker compose up` is orphaned/reparented and
+	// then races a subsequent rollback on the same project (C-H3).
+	setProcGroup(cmd)
+
+	// On ctx cancel/timeout, SIGTERM the whole process group (graceful) instead
+	// of exec's default single-leader kill. WaitDelay stays as the exec backstop:
+	// it force-kills the leader and, crucially, closes the inherited stdout/stderr
+	// pipes after the grace period — without it a daemonized docker grandchild
+	// holding an inherited pipe could block Wait indefinitely.
 	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-		return nil
+		return killProcGroup(cmd, syscall.SIGTERM)
 	}
-	cmd.WaitDelay = sigtermGrace // exec applies SIGKILL after this
+	cmd.WaitDelay = sigtermGrace
 
 	start := time.Now()
 	startErr := r.startCmd(cmd)
 	if startErr != nil {
 		return nil, fmt.Errorf("runner: start: %w", startErr)
 	}
+
+	// Group-SIGKILL watcher: after the SIGTERM grace, hard-kill any group member
+	// that ignored SIGTERM (a wedged `docker compose up`), so no stack-mutating
+	// child is orphaned to race a later rollback (C-H3). Fires while the leader is
+	// still in Wait (watchDone not yet closed), so it targets a live group. Exits
+	// promptly without signaling when the command finishes on its own.
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-runCtx.Done():
+			select {
+			case <-time.After(sigtermGrace):
+				_ = killProcGroup(cmd, syscall.SIGKILL)
+			case <-watchDone:
+			}
+		case <-watchDone:
+		}
+	}()
+
 	waitErr := r.waitCmd(cmd)
+	close(watchDone)
 	dur := time.Since(start)
 
 	res := &Result{

@@ -71,6 +71,7 @@ import (
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -180,6 +181,29 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	for _, o := range opts {
 		o(&cfg)
 	}
+	// T2.3 admission control: cap concurrently-executing READ-ONLY ops (not
+	// serialized by the maintenance lock) so a flood can't spawn unbounded root
+	// docker subprocesses; return 429 when at capacity. State-changing ops bypass
+	// — the lock already caps them at one. A duplicate of an already-running
+	// read-only op must DEDUPE (return the existing op_id), not be rejected for
+	// capacity, so only genuinely-new admissions are gated (HasLiveIdempotent
+	// peek). releaseSlot is invoked on every path that does NOT hand the slot to
+	// the orchestrator goroutine (set to nil on the spawn path so the goroutine
+	// owns the release).
+	var releaseSlot func()
+	if !ops.IsStateChanging(kind) && !s.opts.Ops.HasLiveIdempotent(peer.String(), kind, idempotencyKey) {
+		rel, ok := s.acquireReadOnlySlot()
+		if !ok {
+			return nil, false, &opError{Status: http.StatusTooManyRequests, Body: map[string]string{"error": "agent_busy"}}
+		}
+		releaseSlot = rel
+	}
+	defer func() {
+		if releaseSlot != nil {
+			releaseSlot()
+		}
+	}()
+
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
 		if ops.IsConflict(err) {
@@ -217,12 +241,50 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		herr = &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "open_op_log_failed"}}
 		return nil, false, augmentErrorWithOp(herr, op.ID)
 	}
+	// Crash-recovery journal (RISK-022): record the admission of a destructive,
+	// reconcilable op BEFORE it runs. Fail-closed — if we cannot durably journal
+	// it, we refuse to run it (a broken journal, e.g. disk-full, must not silently
+	// leave a destructive op unrecoverable). Non-journaled kinds / nil journal skip.
+	if ops.IsJournaled(kind) && s.opts.Journal != nil {
+		now := time.Now().UTC()
+		// Persist the rollback mode: it is the ONLY durable signal of which
+		// rollback was interrupted, and image vs data need different recovery
+		// (image is Docker-reconcilable; data must NOT be auto-reconciled). "" for
+		// upgrades.apply (no mode).
+		mode, _ := paramsForAudit["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
+		if jerr := s.opts.Journal.Write(journal.Record{
+			OpID: op.ID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
+			Actor: peer.String(), StartedAt: now, UpdatedAt: now,
+		}); jerr != nil {
+			// The orchestrator never takes ownership of oplog on this fail-closed
+			// path, so close it here to avoid leaking the descriptor across repeated
+			// admission attempts on a broken journal (ENOSPC/permissions).
+			_ = oplog.Close()
+			s.recordAdmissionFailure(op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, "journal_write_failed: "+jerr.Error())
+			return nil, false, augmentErrorWithOp(&opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "journal_write_failed"}}, op.ID)
+		}
+	}
 	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
-	go func() {
+	if s.opts.Journal != nil {
+		deps.Journal = s.opts.Journal // retired on terminal by the orchestrator
+	}
+	// Tracked via goOp so shutdown drains it (T2.4). The op ctx stays detached
+	// from the request/shutdown ctx and bounded only by OperationTimeout: a
+	// state-changing op must NOT be cancelled mid-flight on SIGTERM (that is the
+	// stack-corruption risk) — the drain WAITS for it instead.
+	// Hand the read-only slot (if any) to the goroutine; clear releaseSlot so the
+	// deferred release above becomes a no-op and the slot is freed only when the
+	// op flow finishes.
+	slotRelease := releaseSlot
+	releaseSlot = nil
+	s.goOp(func() {
+		if slotRelease != nil {
+			defer slotRelease()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
 		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages, cfg.resultFn)
-	}()
+	})
 	return op, false, nil
 }
 

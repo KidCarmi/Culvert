@@ -57,6 +57,33 @@ func TestHAState_Status_Leader(t *testing.T) {
 	}
 }
 
+// TestHAState_Status_PromotedLeaderOmitsStaleSyncFailCount pins a promotion-race
+// scenario: onMaxFail's auto-failover path calls setFail(N) (recording the
+// failure streak that triggered promotion) and only afterwards does promote()
+// flip h.role to "leader" — nothing resets syncFailCount in between. Status()
+// must not let that stale standby-side counter leak onto a leader's status,
+// since apiClusterStatus (ui_cluster.go) embeds Status() verbatim regardless
+// of role, unlike apiClusterHA which additionally gates on role itself.
+func TestHAState_Status_PromotedLeaderOmitsStaleSyncFailCount(t *testing.T) {
+	h := &HAState{}
+	h.mu.Lock()
+	h.role = "standby"
+	h.syncFailCount = haStandbyMaxFail // simulates setFail(N) just before promote()
+	h.mu.Unlock()
+
+	h.mu.Lock()
+	h.role = "leader" // promote() flips role; syncFailCount is left as-is
+	h.mu.Unlock()
+
+	s := h.Status()
+	if s.Role != "leader" {
+		t.Fatalf("expected leader, got %q", s.Role)
+	}
+	if s.SyncFailCount != 0 {
+		t.Errorf("promoted leader must not report a stale standby sync_fail_count, got %d", s.SyncFailCount)
+	}
+}
+
 func TestHAState_IsLeader(t *testing.T) {
 	h := &HAState{}
 	if h.IsLeader() {
@@ -276,6 +303,82 @@ func TestAPIClusterHA_GET(t *testing.T) {
 	}
 	if resp["deploy_cmd"] == nil || resp["deploy_cmd"] == "" {
 		t.Error("expected non-empty deploy_cmd for leader")
+	}
+}
+
+func TestAPIClusterHA_GET_StandbySyncHealth(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "standby"
+	globalHA.peerAddr = "cp1:50051"
+	globalHA.since = time.Now()
+	globalHA.syncFailCount = 2
+	globalHA.lastSyncOK = time.Now().Add(-30 * time.Second)
+	globalHA.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["role"] != "standby" {
+		t.Fatalf("expected standby, got %v", resp["role"])
+	}
+	failCount, _ := resp["sync_fail_count"].(float64)
+	if int(failCount) != 2 {
+		t.Errorf("expected sync_fail_count=2, got %v", resp["sync_fail_count"])
+	}
+	maxFail, _ := resp["sync_max_fail"].(float64)
+	if int(maxFail) != haStandbyMaxFail {
+		t.Errorf("expected sync_max_fail=%d, got %v", haStandbyMaxFail, resp["sync_max_fail"])
+	}
+	if resp["last_sync_ok"] == nil || resp["last_sync_ok"] == "" {
+		t.Error("expected non-empty last_sync_ok")
+	}
+	if resp["deploy_cmd"] != nil {
+		t.Error("standby should not carry a leader-only deploy_cmd")
+	}
+}
+
+func TestAPIClusterHA_GET_LeaderOmitsStandbySyncFields(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "leader"
+	globalHA.since = time.Now()
+	globalHA.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cluster/ha", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	w := httptest.NewRecorder()
+	apiClusterHA(w, req)
+
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if _, ok := resp["sync_fail_count"]; ok {
+		t.Error("leader response should not carry standby-only sync_fail_count")
+	}
+}
+
+func TestStandbyLoopState_SetFail_MirrorsOntoHAState(t *testing.T) {
+	defer swapGlobalHA(t)()
+	globalHA.mu.Lock()
+	globalHA.role = "standby" // Status() only surfaces SyncFailCount for a standby
+	globalHA.mu.Unlock()
+	s := &standbyLoopState{h: globalHA}
+
+	s.setFail(2)
+	if got := globalHA.Status().SyncFailCount; got != 2 {
+		t.Errorf("expected HAState.syncFailCount=2, got %d", got)
+	}
+
+	s.setFail(0)
+	if got := globalHA.Status().SyncFailCount; got != 0 {
+		t.Errorf("expected HAState.syncFailCount=0 after reset, got %d", got)
 	}
 }
 

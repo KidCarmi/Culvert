@@ -26,8 +26,10 @@ type FileConfig struct {
 		CAPath                string   `yaml:"ca_path"`                 // Path for encrypted Root CA bundle
 		SSLBypassFile         string   `yaml:"ssl_bypass_file"`         // JSON file for persistent/dynamic SSL bypass patterns
 		SSLBypassPatterns     []string `yaml:"ssl_bypass_patterns"`     // Initial patterns (seeded into ssl_bypass_file on first run)
-		ContentScanFile       string   `yaml:"content_scan_file"`       // JSON file for persistent DPI signature patterns
-		ContentScanPatterns   []string `yaml:"content_scan_patterns"`   // Initial DPI patterns (seeded into content_scan_file on first run)
+		ContentScanFile       string   `yaml:"content_scan_file"`       // JSON file for persistent DPI signature patterns. Deprecated: use dpi_file (DPIFile below).
+		ContentScanPatterns   []string `yaml:"content_scan_patterns"`   // Initial DPI patterns. Deprecated: use dpi_patterns (DPIPatterns below).
+		DPIFile               string   `yaml:"dpi_file"`                // JSON file for persistent DPI signature patterns (canonical key; content_scan_file is a deprecated alias)
+		DPIPatterns           []string `yaml:"dpi_patterns"`            // Initial DPI patterns, seeded into dpi_file on first run (canonical key; content_scan_patterns is a deprecated alias)
 		GeoIPDB               string   `yaml:"geoip_db"`                // Path to GeoLite2-Country.mmdb; empty = GeoIP disabled
 		IdPProfilesFile       string   `yaml:"idp_profiles_file"`       // JSON file for generic IdP profiles
 		URLCategoriesFile     string   `yaml:"url_categories_file"`     // JSON file for dynamic URL categories (host lists per category)
@@ -317,11 +319,56 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	if err := fc.validate(); err != nil {
 		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
+	fc.reconcileDeprecatedDPIKeys()
 	return &fc, nil
 }
 
-// validate checks FileConfig fields for invalid values at startup.
-func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style validation; each branch is trivial
+// reconcileDeprecatedDPIKeys resolves the canonical dpi_file/dpi_patterns
+// YAML keys against the deprecated content_scan_file/content_scan_patterns
+// aliases they replace (terminology governance T-10: the DPI engine had two
+// names split across config/API vs. GUI/logs/metrics). The canonical key
+// wins when both are set; the deprecated key still works but logs a
+// one-line startup notice so operators can migrate on their own schedule.
+// Downstream code keeps reading ContentScanFile/ContentScanPatterns
+// unchanged — this is the single reconciliation point.
+func (fc *FileConfig) reconcileDeprecatedDPIKeys() {
+	if fc.Proxy.DPIFile != "" {
+		fc.Proxy.ContentScanFile = fc.Proxy.DPIFile
+	} else if fc.Proxy.ContentScanFile != "" {
+		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "content_scan_file", "dpi_file")
+	}
+	// Use slice PRESENCE (nil vs. non-nil), not len, to decide precedence: an
+	// explicitly-set empty canonical list (dpi_patterns: []) is present-but-empty
+	// and must WIN — clearing/disabling the seed patterns — rather than falling
+	// through to a stale legacy content_scan_patterns list. goccy/go-yaml yields
+	// nil for an absent key and a non-nil empty slice for "dpi_patterns: []".
+	if fc.Proxy.DPIPatterns != nil {
+		fc.Proxy.ContentScanPatterns = fc.Proxy.DPIPatterns
+	} else if len(fc.Proxy.ContentScanPatterns) > 0 {
+		fmt.Printf("[Culvert] config: %q is deprecated, use %q instead\n", "content_scan_patterns", "dpi_patterns")
+	}
+}
+
+// validate checks FileConfig fields for invalid values at startup. The
+// per-domain checks are grouped into cohesive helpers (each returns its own
+// error strings) so no single function carries the whole validation surface;
+// validate() concatenates them in declaration order and joins with "; ".
+func (fc *FileConfig) validate() error {
+	var errs []string
+	errs = append(errs, fc.validateEnums()...)
+	errs = append(errs, fc.validateLimits()...)
+	errs = append(errs, fc.validateCluster()...)
+	errs = append(errs, fc.validateCDR()...)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// validateEnums checks the string-enum fields (default_action, ip_filter_mode,
+// log_format, log_level, syslog_format).
+func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-style validation; each branch is trivial
 	var errs []string
 
 	// default_action
@@ -352,6 +399,14 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 		errs = append(errs, fmt.Sprintf("syslog_format: must be \"rfc3164\" or \"rfc5424\", got %q", f))
 	}
 
+	return errs
+}
+
+// validateLimits checks the numeric range fields (session_timeout_hours, port
+// ranges, max_conns_per_ip, rate_limit).
+func (fc *FileConfig) validateLimits() []string {
+	var errs []string
+
 	// session_timeout_hours
 	if h := fc.SessionTimeoutHours; h != 0 && (h < 1 || h > 168) {
 		errs = append(errs, fmt.Sprintf("session_timeout_hours: must be 1–168, got %d", h))
@@ -368,6 +423,15 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 		errs = append(errs, fmt.Sprintf("proxy.socks5_port: must be 1–65535, got %d", p))
 	}
 
+	// NOTE: port-collision checking deliberately does NOT live here. This
+	// validate() runs on the raw FileConfig fields BEFORE CLI-flag overrides
+	// and firstNonZero defaults are resolved (loadFileConfigAndFlags, in
+	// main.go), so a raw-field check would both reject configs a CLI
+	// override later makes non-colliding, and miss collisions created by an
+	// unset field silently taking its default (e.g. ui_port explicitly 8080
+	// with port omitted, which defaults to 8080 too). See
+	// validatePortCollisions in main.go, which runs on the resolved values.
+
 	// max_conns_per_ip
 	if n := fc.Security.MaxConnsPerIP; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.max_conns_per_ip: must be >= 0, got %d", n))
@@ -377,6 +441,14 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 	if n := fc.Security.RateLimit; n < 0 {
 		errs = append(errs, fmt.Sprintf("security.rate_limit: must be >= 0, got %d", n))
 	}
+
+	return errs
+}
+
+// validateCluster checks cluster.role, its grpc_addr requirement, and the
+// cert/key/ca path-traversal guard.
+func (fc *FileConfig) validateCluster() []string {
+	var errs []string
 
 	// cluster.role
 	if r := fc.Cluster.Role; r != "" && r != "control-plane" {
@@ -396,42 +468,46 @@ func (fc *FileConfig) validate() error { //nolint:cyclop // flat switch-style va
 		}
 	}
 
-	// CDR validation.
-	if fc.CDR.Enabled {
-		if fc.CDR.Endpoint == "" {
-			errs = append(errs, "cdr.endpoint is required when cdr.enabled is true")
-		}
-		if fm := fc.CDR.FailMode; fm != "" && fm != "open" && fm != "closed" {
-			errs = append(errs, fmt.Sprintf("cdr.fail_mode: must be \"open\" or \"closed\", got %q", fm))
-		}
-		if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
-			errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
-		}
-		if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
-			errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
-		}
-		if s := fc.CDR.MaxFileSizeMB; s < 0 {
-			errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))
-		}
-		if s := fc.CDR.ChunkSizeKB; s != 0 && (s < 16 || s > 3072) {
-			// 3072 KB = 3 MiB, a safe ceiling under the 4 MiB gRPC frame cap.
-			errs = append(errs, fmt.Sprintf("cdr.chunk_size_kb: must be 16–3072, got %d", s))
-		}
-		if fp := strings.TrimSpace(fc.CDR.ServerFingerprint); fp != "" {
-			fp = strings.TrimPrefix(fp, "sha256:")
-			fp = strings.TrimPrefix(fp, "SHA256:")
-			fp = strings.ReplaceAll(fp, ":", "")
-			if len(fp) != 64 {
-				errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
-			}
-		}
-		if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
-			errs = append(errs, "cdr.certs_dir: must not contain path traversal (..)")
-		}
+	return errs
+}
+
+// validateCDR checks the CDR block (only when cdr.enabled is true).
+func (fc *FileConfig) validateCDR() []string { //nolint:cyclop // flat switch-style validation; each branch is trivial
+	if !fc.CDR.Enabled {
+		return nil
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	var errs []string
+	if fc.CDR.Endpoint == "" {
+		errs = append(errs, "cdr.endpoint is required when cdr.enabled is true")
 	}
-	return nil
+	if fm := fc.CDR.FailMode; fm != "" && fm != "open" && fm != "closed" {
+		errs = append(errs, fmt.Sprintf("cdr.fail_mode: must be \"open\" or \"closed\", got %q", fm))
+	}
+	if m := fc.CDR.DefaultMode; m != "" && m != "ENFORCE" && m != "REPORT_ONLY" && m != "BYPASS_WITH_REPORT" {
+		errs = append(errs, fmt.Sprintf("cdr.default_mode: must be ENFORCE | REPORT_ONLY | BYPASS_WITH_REPORT, got %q", m))
+	}
+	if t := fc.CDR.TimeoutSec; t != 0 && t < 30 {
+		errs = append(errs, fmt.Sprintf("cdr.timeout_sec: must be >= 30 (Sluice's own cap), got %d", t))
+	}
+	if s := fc.CDR.MaxFileSizeMB; s < 0 {
+		errs = append(errs, fmt.Sprintf("cdr.max_file_size_mb: must be >= 0, got %d", s))
+	}
+	if s := fc.CDR.ChunkSizeKB; s != 0 && (s < 16 || s > 3072) {
+		// 3072 KB = 3 MiB, a safe ceiling under the 4 MiB gRPC frame cap.
+		errs = append(errs, fmt.Sprintf("cdr.chunk_size_kb: must be 16–3072, got %d", s))
+	}
+	if fp := strings.TrimSpace(fc.CDR.ServerFingerprint); fp != "" {
+		fp = strings.TrimPrefix(fp, "sha256:")
+		fp = strings.TrimPrefix(fp, "SHA256:")
+		fp = strings.ReplaceAll(fp, ":", "")
+		if len(fp) != 64 {
+			errs = append(errs, fmt.Sprintf("cdr.server_fingerprint: expected 64 hex chars (SHA-256), got %d", len(fp)))
+		}
+	}
+	if p := fc.CDR.CertsDir; p != "" && strings.Contains(p, "..") {
+		errs = append(errs, "cdr.certs_dir: must not contain path traversal (..)")
+	}
+
+	return errs
 }

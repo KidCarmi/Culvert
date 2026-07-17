@@ -24,10 +24,12 @@ import "context"
 //     (background-services slice, started earlier in main()) reads the store
 //     through a provider closure on each 10s tick, so it picks up the loaded
 //     webhooks without an ordering dependency.
-//  5. hit-counter persistence goroutine (parented to ctx) + RestoreHitCounts,
-//     which copies persisted counters back into PolicyRule.HitCount and must
-//     run AFTER the policy store is loaded (initPolicy precedes this slice in
-//     main()).
+//  5. hit-counter persistence: loadHitCounters → RestoreHitCounts (restores
+//     persisted values into stable per-rule counter cells; must run AFTER the
+//     policy store is loaded — initPolicy precedes this slice in main()) →
+//     startHitCounterPersistence (the ctx-parented saver goroutine). Order
+//     matters: the saver must start only AFTER restore so a save racing the
+//     load→restore window cannot clobber hit_counters.json with still-zero cells.
 //  6. LoadAdminSettings — it restores GUI-saved state (e.g. re-enables
 //     the log store) and therefore must run after the subsystems it toggles
 //     have been initialised earlier in startup.
@@ -40,8 +42,17 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	globalNodeGroups = NewNodeGroupStore(cfg.NodeGroupsPath)
 	globalBandwidth = NewBandwidthManager(cfg.BandwidthPath)
 	globalAlertStore.Init(cfg.AlertWebhooksPath)
-	startHitCounterPersistence(ctx, cfg.HitCountersPath)
+	// Load the persisted baseline, then merge it into the per-rule counter cells
+	// (RestoreHitCounts) BEFORE starting the periodic/shutdown saver. Starting
+	// the saver first would let a save racing the load→restore window (e.g. ctx
+	// cancelled mid-startup) persist still-zero cells over a non-empty
+	// hit_counters.json — the metrics.go:96 startup-window regression.
+	loadHitCounters(cfg.HitCountersPath)
 	RestoreHitCounts()
+	startHitCounterPersistence(ctx, cfg.HitCountersPath)
+	// Rewrite legacy name-only records immediately with stable rule IDs. This
+	// closes the rename/crash window before the first periodic counter save.
+	saveHitCounters(cfg.HitCountersPath)
 	LoadAdminSettings(cfg.AdminSettingsPath)
 	flushStartupAlerts()
 }

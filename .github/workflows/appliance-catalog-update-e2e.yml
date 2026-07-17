@@ -20,7 +20,7 @@ name: Appliance Install → Catalog Update E2E (Day-2 Ops)
 #   So a catalog-driven dispatch SIGKILLs its own dispatcher mid-flight — exactly
 #   what a self-updating appliance does. We therefore (a) capture the op_id from
 #   the 202 BEFORE the recreate, (b) verify the flip OUT-OF-BAND via docker
-#   inspect + the host-side agent's own op record, then (c) reconcile the freshly
+#   inspect + the Maintenance Agent's own op record, then (c) reconcile the freshly
 #   recreated CP via POST /api/releases/dispatch/resume.
 #
 # Everything is LOCAL (a TLS registry:2 on 127.0.0.1:5000, three locally-built
@@ -74,7 +74,7 @@ jobs:
       - uses: ./.github/actions/setup-go-cache
 
       # ── Layout: derive all runtime paths once and export them so every later
-      # step (separate shells) references the same dirs. The host-side agent is a
+      # step (separate shells) references the same dirs. The Maintenance Agent is a
       # nohup process that survives step boundaries (same pattern as maint-agent).
       - name: Prepare layout
         run: |

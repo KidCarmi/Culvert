@@ -9,6 +9,7 @@
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,8 +117,15 @@ func (l *Logger) Write(ev Event) error {
 
 // Recent reads the last n events from path. Used by GET /v1/audit.
 // Returns events in chronological order (oldest first within the
-// returned window). For D1.6a this is a simple full-file read; rotation
-// across multiple files is a future-slice concern.
+// returned window).
+//
+// The read is TAIL-BOUNDED: it seeks from EOF and reads only enough
+// trailing blocks to cover the last n lines, so the endpoint's allocation
+// is O(n events), NOT O(file size). Without this a long-lived agent's
+// unbounded audit.jsonl would allocate the whole file per /v1/audit call
+// and eventually OOM the agent. Corruption detection stays intact for the
+// complete lines WITHIN the window (a full-file integrity scan was never
+// the purpose of a "recent N" tail read).
 func Recent(path string, n int) ([]Event, error) {
 	if n <= 0 {
 		return nil, nil
@@ -131,15 +139,52 @@ func Recent(path string, n int) ([]Event, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	all, err := io.ReadAll(f)
+	tail, err := tailBytes(f, n)
 	if err != nil {
 		return nil, fmt.Errorf("audit: read %s: %w", path, err)
 	}
-	events, err := parseTail(all, n)
+	events, err := parseTail(tail, n)
 	if err != nil {
 		return nil, fmt.Errorf("audit: parse %s: %w", path, err)
 	}
 	return events, nil
+}
+
+// tailBytes returns a byte slice containing at least the last n newline-
+// terminated lines of f, read by seeking backward from EOF in blocks so the
+// whole file is never loaded. If the accumulated window does not start at the
+// file head, its leading partial line (a mid-file cut) is dropped so parseTail
+// never sees a fragment as a "complete" (corrupt) line.
+func tailBytes(f *os.File, n int) ([]byte, error) {
+	const block = 64 * 1024
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	var buf []byte
+	newlines := 0
+	pos := size
+	for pos > 0 && newlines <= n {
+		readSize := int64(block)
+		if pos < readSize {
+			readSize = pos
+		}
+		pos -= readSize
+		chunk := make([]byte, readSize)
+		if _, rerr := f.ReadAt(chunk, pos); rerr != nil && rerr != io.EOF {
+			return nil, rerr
+		}
+		buf = append(chunk, buf...)
+		newlines = bytes.Count(buf, []byte{'\n'})
+	}
+	// Dropped only when we stopped before the file head: the first line in the
+	// window was cut mid-record and is not a torn trailing write.
+	if pos > 0 {
+		if idx := bytes.IndexByte(buf, '\n'); idx >= 0 {
+			buf = buf[idx+1:]
+		}
+	}
+	return buf, nil
 }
 
 // parseTail parses a JSONL byte buffer and returns the last n events,

@@ -39,6 +39,11 @@ type IdentityProvider interface {
 	// for a given email domain hint (may be empty).  Returns "" if this
 	// provider does not support browser-based SSO.
 	CaptiveLoginURL(emailDomain string, r *http.Request) string
+	// DisplayName returns the admin-configured label for this provider
+	// (IdPProfile.Name, e.g. "Corporate Okta") for use anywhere a human
+	// reads the provider's identity — Name() stays the "type:ID" machine
+	// key used for policy/filtering lookups.
+	DisplayName() string
 }
 
 func identityAuthSource(id *Identity, fallback string) string {

@@ -37,7 +37,8 @@ type Meta struct {
 	Version   int    `json:"version"`
 	CreatedAt string `json:"created_at"`
 	Actor     string `json:"actor"`
-	Action    string `json:"action"` // what triggered the snapshot (e.g. "policy.update", "blocklist.import")
+	Action    string `json:"action"`         // what triggered the snapshot (e.g. "policy.update", "blocklist.import")
+	Note      string `json:"note,omitempty"` // optional free-text reason (e.g. a policy-draft commit comment)
 }
 
 // ErrCorrupt marks a version file that exists but cannot be parsed as an
@@ -99,6 +100,12 @@ func versionOf(name string) (int, bool) {
 // number is consumed even when the write fails (unchanged behavior — a gap,
 // not a reuse).
 func (s *Store) Save(actor, action, createdAt string, config json.RawMessage) (int, error) {
+	return s.SaveWithNote(actor, action, createdAt, "", config)
+}
+
+// SaveWithNote is Save plus an optional free-text note recorded in the version
+// metadata (used by the policy-draft commit path to persist the commit comment).
+func (s *Store) SaveWithNote(actor, action, createdAt, note string, config json.RawMessage) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,6 +118,7 @@ func (s *Store) Save(actor, action, createdAt string, config json.RawMessage) (i
 			CreatedAt: createdAt,
 			Actor:     actor,
 			Action:    action,
+			Note:      note,
 		},
 		Config: config,
 	}

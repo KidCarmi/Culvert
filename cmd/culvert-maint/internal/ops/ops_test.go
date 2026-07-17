@@ -244,10 +244,51 @@ func TestManager_GetUnknownReturnsNil(t *testing.T) {
 	}
 }
 
-func TestManager_MarkAllInterruptedReturnsZeroForD16a(t *testing.T) {
+func TestManager_MarkAllInterruptedEmpty(t *testing.T) {
 	m := NewManager(nil)
-	if n := m.MarkAllInterrupted(); n != 0 {
-		t.Errorf("D1.6a in-memory model has nothing to scan, got %d", n)
+	if n := m.MarkAllInterrupted(nil); n != 0 {
+		t.Errorf("no orphans → 0, got %d", n)
+	}
+}
+
+func TestManager_MarkAllInterruptedMarksQueryable(t *testing.T) {
+	m := NewManager(nil)
+	orphans := []InterruptedOp{
+		{OpID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: KindUpgradeApply, Actor: "uid=1000"},
+		{OpID: "01BX5ZZKBKACTAV9WEVGEMMVRZ", Kind: KindRollbackCreate, Actor: "uid=1000"},
+	}
+	if n := m.MarkAllInterrupted(orphans); n != 2 {
+		t.Fatalf("marked %d, want 2", n)
+	}
+	// Each orphan is now queryable as failed(agent_restart_interrupted).
+	for _, o := range orphans {
+		op := m.Get(o.OpID)
+		if op == nil {
+			t.Fatalf("orphan %s not queryable after MarkAllInterrupted", o.OpID)
+		}
+		if op.State != StateFailed || op.FailureReason != string(ReasonAgentRestartInterrupted) {
+			t.Errorf("orphan %s: state=%q reason=%q, want failed/agent_restart_interrupted", o.OpID, op.State, op.FailureReason)
+		}
+		if op.Finished == nil {
+			t.Errorf("orphan %s: Finished must be set", o.OpID)
+		}
+	}
+	// Idempotent-ish: re-marking the same orphans doesn't double-count (already present).
+	if n := m.MarkAllInterrupted(orphans); n != 0 {
+		t.Errorf("re-marking present orphans should mark 0, got %d", n)
+	}
+}
+
+func TestIsJournaled(t *testing.T) {
+	for _, k := range []string{KindUpgradeApply, KindRollbackCreate} {
+		if !IsJournaled(k) {
+			t.Errorf("%s must be journaled", k)
+		}
+	}
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeCheck, KindBackupList} {
+		if IsJournaled(k) {
+			t.Errorf("%s must NOT be journaled", k)
+		}
 	}
 }
 
@@ -425,5 +466,164 @@ func TestBeginIdempotent_DifferentKeyReturns409OnLockedSlot(t *testing.T) {
 	_, _, err := m.BeginIdempotent(KindBackupCreate, "uid=2", "k2", nil)
 	if !IsConflict(err) {
 		t.Errorf("second state-changing op with different key must be 409, got: %v", err)
+	}
+}
+
+// --- T2.1: active-map bounding (resilience hardening) ---
+
+// TestPurgeActive_ReapsTerminalAfterRetention: a terminal op is reaped from the
+// active map once it is older than the retention window (on the next admission).
+func TestPurgeActive_ReapsTerminalAfterRetention(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	m := NewManager(func() time.Time { return now })
+	m.activeRetention = 30 * time.Minute
+
+	// Read-only kind so we can admit several without the state-changing lock.
+	op1, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Finish(op1.ID, StateSucceeded, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Within retention: op1 is still queryable.
+	now = now.Add(10 * time.Minute)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Get(op1.ID) == nil {
+		t.Fatal("terminal op reaped before its retention window elapsed")
+	}
+	// Past retention: the next admission reaps op1.
+	now = now.Add(31 * time.Minute)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Get(op1.ID) != nil {
+		t.Error("terminal op should be reaped after the retention window")
+	}
+}
+
+// TestPurgeActive_HardCap: with a small maxActive, terminal ops beyond the cap
+// are evicted oldest-first, bounding the map regardless of throughput.
+func TestPurgeActive_HardCap(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	m := NewManager(func() time.Time { return now })
+	m.activeRetention = 24 * time.Hour // TTL not the bound here — the cap is
+	m.maxActive = 3
+
+	var ids []string
+	for i := 0; i < 10; i++ {
+		now = now.Add(time.Minute) // distinct Finished timestamps → deterministic oldest
+		op, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Finish(op.ID, StateSucceeded, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, op.ID)
+	}
+	// Bounded to at most maxActive+1 (the just-inserted op rides above the cap
+	// until the next admission purges).
+	if sz := m.ActiveSize(); sz > m.maxActive+1 {
+		t.Errorf("active map unbounded: size=%d, want <= %d", sz, m.maxActive+1)
+	}
+	// The oldest ops were evicted; the most-recent survive.
+	if m.Get(ids[0]) != nil {
+		t.Error("oldest terminal op should have been evicted under the cap")
+	}
+	if m.Get(ids[len(ids)-1]) == nil {
+		t.Error("most-recent terminal op must survive")
+	}
+}
+
+// TestPurgeActive_NeverReapsRunning: a still-running op is never reaped by age.
+func TestPurgeActive_NeverReapsRunning(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	m := NewManager(func() time.Time { return now })
+	m.activeRetention = 10 * time.Minute
+
+	running, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Advance well past retention and admit another op (triggers purge).
+	now = now.Add(2 * time.Hour)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Get(running.ID) == nil {
+		t.Error("a running op must never be reaped by age")
+	}
+}
+
+// TestCloneLocked_DeepCopiesNested: a Get() snapshot shares no mutable nested
+// structure with the live op, so mutating the snapshot cannot corrupt it.
+func TestCloneLocked_DeepCopiesNested(t *testing.T) {
+	m := NewManager(nil)
+	op, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "", map[string]interface{}{
+		"nested": map[string]interface{}{"x": 1},
+		"list":   []interface{}{"a", "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := m.Get(op.ID)
+	// Mutate the snapshot's nested structures.
+	snap.Params["nested"].(map[string]interface{})["x"] = 999
+	snap.Params["list"].([]interface{})[0] = "MUTATED"
+
+	// A fresh snapshot must reflect the ORIGINAL values.
+	fresh := m.Get(op.ID)
+	if got := fresh.Params["nested"].(map[string]interface{})["x"]; got != 1 {
+		t.Errorf("nested map aliased: live x=%v, want 1", got)
+	}
+	if got := fresh.Params["list"].([]interface{})[0]; got != "a" {
+		t.Errorf("nested slice aliased: live list[0]=%v, want a", got)
+	}
+}
+
+// TestPurgeActive_RetainsKeyedThroughIdempTTL pins the Codex P1 fix: a keyed
+// terminal op must survive past activeRetention as long as its idempotency entry
+// is live (up to idempCacheTTL), so a retry within the dedupe window returns the
+// completed op instead of re-running a destructive operation.
+func TestPurgeActive_RetainsKeyedThroughIdempTTL(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	// Short activeRetention (30m), long idempotency TTL (24h default).
+	m := NewManager(func() time.Time { return now })
+	m.activeRetention = 30 * time.Minute
+
+	op, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "retry-key", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Finish(op.ID, StateSucceeded, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	// Past activeRetention but well within the 24h idempotency TTL.
+	now = now.Add(2 * time.Hour)
+	// A retry with the SAME key must dedupe to the original completed op, NOT
+	// admit a fresh one (the purge triggered by this call must not have reaped it).
+	got, deduped, err := m.BeginIdempotent(KindBackupList, "uid=1", "retry-key", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deduped {
+		t.Fatal("keyed retry within idempotency TTL must dedupe, not re-admit")
+	}
+	if got.ID != op.ID {
+		t.Errorf("dedupe returned a different op: got %s, want %s", got.ID, op.ID)
+	}
+	if got.State != StateSucceeded {
+		t.Errorf("deduped op state = %q, want succeeded (the completed result)", got.State)
+	}
+	// Once the idempotency entry ages out (>24h), the op becomes reapable.
+	now = now.Add(25 * time.Hour)
+	if _, _, err := m.BeginIdempotent(KindBackupList, "uid=1", "other-key", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Get(op.ID) != nil {
+		t.Error("op should be reaped once its idempotency entry has expired")
 	}
 }

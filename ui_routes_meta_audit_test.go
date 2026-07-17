@@ -220,7 +220,7 @@ func analyzeHandler(fn *ast.FuncDecl) *handlerBehavior {
 				return true
 			}
 			switch id.Name {
-			case "auditEvent", "auditEventDiff":
+			case "auditEvent", "auditEventDiff", "auditEventDiffID":
 				beh.callsAudit = true
 			case "requireRole":
 				if role := extractRequireRoleArg(x); role != "" {
@@ -581,7 +581,7 @@ func collectMethodCalls(node ast.Node, method string, beh *handlerBehavior) {
 			return true
 		}
 		switch id.Name {
-		case "auditEvent", "auditEventDiff":
+		case "auditEvent", "auditEventDiff", "auditEventDiffID":
 			beh.recordAudit(method)
 		case "requireRole":
 			if role := extractRequireRoleArg(call); role != "" {

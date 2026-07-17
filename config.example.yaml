@@ -33,10 +33,13 @@ proxy:
     # - "~^.*\\.gov\\.il$"       # Regex (prefix with ~)
 
   # DPI content scanner
-  content_scan_file: "/data/content-scan.json"
-  content_scan_patterns: []
+  dpi_file: "/data/content-scan.json"
+  dpi_patterns: []
     # - "(?i)malware-signature"
     # - "eval\\(base64_decode"
+    # content_scan_file / content_scan_patterns are accepted as deprecated
+    # aliases for dpi_file / dpi_patterns (a startup log line is emitted
+    # when they're used); prefer the dpi_* keys in new configs.
     # - "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"  # CC numbers
 
   # Blocklist feed (auto-sync from URL)

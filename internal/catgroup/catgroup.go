@@ -103,10 +103,18 @@ func (s *Store) Load(path string) error {
 
 	built := make(map[string]*Group, len(groups))
 	order := make([]string, 0, len(groups))
+	migrated := 0
 	for i := range groups {
 		g := &groups[i]
 		g.Categories = normCats(g.Categories)
 		g.catSet = buildCatSet(g.Categories)
+		// Backfill a stable ID for legacy groups persisted before IDs existed,
+		// so ID addressing (GetByID / ?id= update+delete) is reliable and
+		// survives renames — mirrors PolicyRule's one-time ID migration.
+		if g.ID == "" {
+			g.ID = uuid.NewString()[:12]
+			migrated++
+		}
 		key := strings.ToLower(g.Name)
 		built[key] = g
 		order = append(order, key)
@@ -118,6 +126,12 @@ func (s *Store) Load(path string) error {
 	s.mu.Unlock()
 
 	obs.Printf("CategoryGroups: loaded %d group(s) from %s", len(groups), path)
+	// Persist newly-assigned IDs so they survive restart (idempotent: a second
+	// load finds all IDs present and writes nothing).
+	if migrated > 0 {
+		s.Save()
+		obs.Printf("CategoryGroups: assigned stable IDs to %d legacy group(s)", migrated)
+	}
 	return nil
 }
 
@@ -246,6 +260,146 @@ func (s *Store) Delete(name string) error {
 	return nil
 }
 
+// GetByID returns a copy of the group with the given stable ID, or nil. ID
+// addressing is rename-safe (the name key is mutable; the ID is not).
+func (s *Store) GetByID(id string) *Group {
+	if id == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.groups {
+		if g.ID == id {
+			cp := *g
+			cp.catSet = nil // internal index; not part of the public copy
+			return &cp
+		}
+	}
+	return nil
+}
+
+// UpdateByID replaces the categories of the group with the given stable ID.
+// Rename-safe counterpart to Update — the edit lands on the intended group even
+// if its name changed. Returns error if no group carries the id.
+func (s *Store) UpdateByID(id string, categories []string) error {
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	cats := normCats(categories)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.groups {
+		if g.ID == id {
+			g.Categories = cats
+			g.catSet = buildCatSet(cats)
+			g.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			return nil
+		}
+	}
+	return fmt.Errorf("group id %q not found", id)
+}
+
+// DeleteByID removes the group with the given stable ID. Returns the removed
+// group's name (for audit/reference bookkeeping) or an error if not found.
+func (s *Store) DeleteByID(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, g := range s.groups {
+		if g.ID == id {
+			name := g.Name
+			delete(s.groups, key)
+			for i, k := range s.order {
+				if k == key {
+					s.order = append(s.order[:i], s.order[i+1:]...)
+					break
+				}
+			}
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("group id %q not found", id)
+}
+
+// Rename changes the display name of the group with the given stable ID,
+// re-keying the name map and the order slice (references-by-id S2: rules link by
+// ID, so the rename is safe — the caller cascades the denormalized name onto
+// referencing rules). Validates the new name is non-empty and not already taken
+// by a DIFFERENT group. Returns the OLD name (for audit + the caller's cascade).
+// A case-only change updates the display name in place without a collision check.
+func (s *Store) Rename(id, newName string) (oldName string, err error) {
+	newName = strings.TrimSpace(newName)
+	if id == "" {
+		return "", fmt.Errorf("id is required")
+	}
+	if newName == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var curKey string
+	var cur *Group
+	for key, g := range s.groups {
+		if g.ID == id {
+			curKey, cur = key, g
+			break
+		}
+	}
+	if cur == nil {
+		return "", fmt.Errorf("group id %q not found", id)
+	}
+	oldName = cur.Name
+	newKey := strings.ToLower(newName)
+	now := time.Now().UTC().Format(time.RFC3339)
+	if newKey == curKey {
+		// Same key (no change or case-only) — update the display name in place.
+		cur.Name = newName
+		cur.UpdatedAt = now
+		return oldName, nil
+	}
+	if _, taken := s.groups[newKey]; taken {
+		return "", fmt.Errorf("a group named %q already exists", newName)
+	}
+	cur.Name = newName
+	cur.UpdatedAt = now
+	delete(s.groups, curKey)
+	s.groups[newKey] = cur
+	for i, k := range s.order {
+		if k == curKey {
+			s.order[i] = newKey
+			break
+		}
+	}
+	return oldName, nil
+}
+
+// MatchesCategoryByID is MatchesCategory keyed by the group's stable ID
+// (references-by-id S2 hot-path match). resolved=true iff a group with that id
+// EXISTS; matched is whether that group contains the (already-resolved) category.
+// The ID is AUTHORITATIVE: a resolved group returns its own membership result so
+// the caller does NOT fall back to a possibly-stale denormalized name (which
+// could match a DIFFERENT group). No-copy fast path (one RLock + a catSet probe);
+// O(groups), a small admin set. Empty id / not found ⇒ resolved=false so the
+// caller may fall back to the name.
+func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool) {
+	if id == "" {
+		return false, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, g := range s.groups {
+		if g.ID == id {
+			if category == "" {
+				return false, true
+			}
+			return g.catSet[strings.ToLower(category)], true
+		}
+	}
+	return false, false
+}
+
 // ReplaceAll atomically replaces all groups (used by cluster config sync).
 // Builds catSets outside the lock for zero contention.
 func (s *Store) ReplaceAll(groups []Group) {
@@ -255,6 +409,9 @@ func (s *Store) ReplaceAll(groups []Group) {
 		g := &groups[i]
 		g.Categories = normCats(g.Categories)
 		g.catSet = buildCatSet(g.Categories)
+		if g.ID == "" { // backfill for groups arriving without an ID (old import/CP)
+			g.ID = uuid.NewString()[:12]
+		}
 		key := strings.ToLower(g.Name)
 		built[key] = g
 		order = append(order, key)

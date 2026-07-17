@@ -102,9 +102,24 @@ var configSnapshotValidatorOK = func() bool {
 	return validateConfigSnapshot(ConfigSnapshot{}) == nil
 }
 
+// appendStateFileChecks adds the report-only CHAOS-05/07 rows
+// (state_file_ui_users / state_file_cluster): a quarantined state file
+// means the node is serving with an empty roster/cluster store —
+// survivable (env fallback creds / re-enrollment) but it must stay
+// visible to probes beyond the startup log line and the alert.
+func appendStateFileChecks(checks map[string]*readinessCheck) {
+	for kind, detail := range stateCorruptionSnapshot() {
+		checks["state_file_"+kind] = &readinessCheck{Status: "fail", Detail: detail}
+	}
+}
+
 // computeReadiness builds the readiness snapshot and the HTTP status code (200
 // when all gating checks pass, 503 otherwise). Shared by handleReady and the
-// readiness support collector.
+// readiness support collector. The verdict returned here is the DEFAULT
+// (non-strict) one — the report-only rows (ca, policy_loaded, state_file_*,
+// cp_poll, node_cert) never gate it; the opt-in strict verdict (CHAOS-09,
+// /ready?strict=1) is layered on top by handleReady via strictVerdictFails,
+// since it depends on the incoming request and the collector has none.
 func computeReadiness() (readinessReport, int) {
 	checks := map[string]*readinessCheck{}
 	allOK := true
@@ -179,6 +194,11 @@ func computeReadiness() (readinessReport, int) {
 		allOK = false
 	}
 
+	// 8+9. Quarantined state files (CHAOS-05/07) and DP dependency health
+	// (CHAOS-09, cp_poll + node_cert, DP mode only): report-only rows like ca.
+	appendStateFileChecks(checks)
+	appendDPHealthChecks(checks)
+
 	status, code := "ready", http.StatusOK
 	if !allOK {
 		status, code = "not_ready", http.StatusServiceUnavailable
@@ -189,13 +209,43 @@ func computeReadiness() (readinessReport, int) {
 // handleReady is a readiness probe — returns 200 only when all configured
 // subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
 // Unlike /health (liveness), this returns 503 when dependencies are degraded.
-func handleReady(w http.ResponseWriter, _ *http.Request) {
+// Supports the opt-in strict verdict (CHAOS-09): /ready?strict=1 treats every
+// failing row — including the report-only ones — as gating (see
+// strictVerdictFails).
+func handleReady(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	report, code := computeReadiness()
+	if strictVerdictFails(r, report.Checks) {
+		report.Status = "not_ready"
+		code = http.StatusServiceUnavailable
+	}
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(report); err != nil {
 		logger.Printf("handleReady encode: %v", err)
 	}
+}
+
+// strictVerdictFails implements the opt-in strict readiness verdict
+// (CHAOS-09): /ready?strict=1 (or strict=true) treats EVERY failing row as
+// gating, including the report-only rows (ca, policy_loaded, state_file_*,
+// cp_poll, node_cert) that never gate the default verdict. The default
+// posture is deliberately unchanged: gating on CP-poll failure by default
+// would let a CP outage eject the entire DP fleet from the load balancer at
+// once. A load balancer that SHOULD eject dependency-degraded nodes points
+// its probe at the strict URL instead. Nil-request tolerant (tests).
+func strictVerdictFails(r *http.Request, checks map[string]*readinessCheck) bool {
+	if r == nil {
+		return false
+	}
+	if s := r.URL.Query().Get("strict"); s != "1" && s != "true" {
+		return false
+	}
+	for _, c := range checks {
+		if c.Status == "fail" {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

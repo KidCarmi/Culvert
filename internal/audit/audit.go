@@ -32,14 +32,15 @@ import (
 // authenticated admin identity when available. Action follows a
 // "resource.verb" naming scheme (e.g. "policy.add").
 type Entry struct {
-	TS     int64  `json:"ts"`               // Unix milliseconds
-	Time   string `json:"time"`             // human-readable "2006-01-02 15:04:05"
-	Actor  string `json:"actor"`            // client IP (or authenticated username)
-	Action string `json:"action"`           // "policy.add" | "blocklist.remove" | …
-	Object string `json:"object"`           // the specific item that changed
-	Detail string `json:"detail"`           // extra context (never contains credentials)
-	Before string `json:"before,omitempty"` // JSON snapshot before the change
-	After  string `json:"after,omitempty"`  // JSON snapshot after the change
+	TS       int64  `json:"ts"`                 // Unix milliseconds
+	Time     string `json:"time"`               // human-readable "2006-01-02 15:04:05"
+	Actor    string `json:"actor"`              // client IP (or authenticated username)
+	Action   string `json:"action"`             // "policy.add" | "blocklist.remove" | …
+	Object   string `json:"object"`             // the specific item that changed (human-readable name)
+	ObjectID string `json:"objectId,omitempty"` // stable ULID of the changed item, when it has one — survives rename, so an object's audit trail is correlatable by ID (§1 identity seam)
+	Detail   string `json:"detail"`             // extra context (never contains credentials)
+	Before   string `json:"before,omitempty"`   // JSON snapshot before the change
+	After    string `json:"after,omitempty"`    // JSON snapshot after the change
 }
 
 // MaxRing bounds the in-memory ring. Tests MUST NOT assert on len() deltas
@@ -330,8 +331,11 @@ func ClearPersistForTest() {
 	mu.Unlock()
 }
 
-// PersistActive reports whether a persistent file handle is wired (test
-// support for the shutdown-hook coverage).
+// PersistActive reports whether a persistent file handle is wired. Used both
+// by tests (shutdown-hook coverage) and by the admin API (GET /api/stats) to
+// surface a silent Init failure: compare against the caller's own configured
+// path to detect an operator-configured log that fell back to volatile
+// in-memory storage.
 func PersistActive() bool {
 	mu.Lock()
 	defer mu.Unlock()

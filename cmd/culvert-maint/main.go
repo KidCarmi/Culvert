@@ -21,11 +21,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"culvert-maint/internal/audit"
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
@@ -126,8 +128,11 @@ func run(configPath string) error {
 		idempTTL = cfg.OperationTimeout
 	}
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
-	// D1.6a: nothing on disk to scan, but the contract is in place for D1.6b/c.
-	mgr.MarkAllInterrupted()
+
+	jnl, err := initJournal(cfg.StateDir, mgr)
+	if err != nil {
+		return err
+	}
 
 	r, err := newRunner(cfg)
 	if err != nil {
@@ -139,7 +144,55 @@ func run(configPath string) error {
 		return fmt.Errorf("status: %w", err)
 	}
 
-	srv, err := server.New(server.Options{
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	startOpLogRetention(ctx, cfg.StateDir, cfg.LogRetentionDays, mgr.IsRunning)
+
+	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
+	if err := srv.Serve(ctx); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	log.Printf("culvert-maint: shutdown")
+	return nil
+}
+
+// initJournal opens the crash-recovery journal (RISK-022) and marks any op that
+// was in flight at the last stop. It reads the journal FAIL-CLOSED: a corrupt
+// record means we cannot tell whether a destructive op was interrupted, so the
+// agent refuses to serve rather than silently ignore it. Orphaned records are
+// marked failed(agent_restart_interrupted) so GET /v1/operations/{id} answers;
+// Docker reconciliation of the danger window is a later slice.
+func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
+	jnl, err := journal.New(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("journal: %w", err)
+	}
+	recs, err := jnl.List()
+	if err != nil {
+		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	orphans := make([]ops.InterruptedOp, 0, len(recs))
+	for i := range recs {
+		orphans = append(orphans, ops.InterruptedOp{OpID: recs[i].OpID, Kind: recs[i].Kind, Actor: recs[i].Actor})
+	}
+	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
+		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted)", n)
+	}
+	return jnl, nil
+}
+
+// newServer wires the agent HTTP server from its already-constructed
+// dependencies. Extracted from run() to keep that function within the funlen
+// budget; no behavior change.
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal) (*server.Server, error) {
+	return server.New(server.Options{
 		Cfg:       cfg,
 		Auth:      pol,
 		Audit:     al,
@@ -147,6 +200,7 @@ func run(configPath string) error {
 		Status:    stp,
 		StateDir:  cfg.StateDir,
 		AuditPath: auditPath,
+		Journal:   jnl,
 		Runner:    r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
@@ -157,18 +211,36 @@ func run(configPath string) error {
 			}
 		},
 	})
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-	defer func() { _ = srv.Close() }()
+}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+// opLogRetentionInterval is how often the per-op transcript sweep runs after the
+// startup sweep. A day is ample for a retention measured in days; the sweep is
+// cheap (one readdir + stat per file).
+const opLogRetentionInterval = 24 * time.Hour
 
-	log.Printf("culvert-maint: listening on %s (privilege_mode=%s)", cfg.SocketPath, cfg.PrivilegeMode)
-	if err := srv.Serve(ctx); err != nil {
-		return fmt.Errorf("serve: %w", err)
+// startOpLogRetention runs an immediate LogRetentionDays sweep of the per-op
+// transcripts, then a periodic one until ctx is cancelled. retentionDays <= 0
+// disables it (defensive; config validation already enforces > 0).
+func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int, isRunning func(opID string) bool) {
+	if retentionDays <= 0 {
+		return
 	}
-	log.Printf("culvert-maint: shutdown")
-	return nil
+	maxAge := time.Duration(retentionDays) * 24 * time.Hour
+	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), isRunning); removed > 0 {
+		log.Printf("culvert-maint: op-log retention swept %d file(s) older than %d day(s)", removed, retentionDays)
+	}
+	go func() {
+		t := time.NewTicker(opLogRetentionInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), isRunning); removed > 0 {
+					log.Printf("culvert-maint: op-log retention swept %d file(s)", removed)
+				}
+			}
+		}
+	}()
 }

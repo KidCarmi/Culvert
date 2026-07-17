@@ -215,6 +215,17 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "access-only: moves a Stage-2 access rule among access rules (PermutePriorities); an auth rule is not found among them and is rejected"}}},
 	{Path: "/api/policy/test", Handler: "apiPolicyTest", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "POST is read-only in spirit (dry-run policy match), no audit"}}},
+	{Path: "/api/policy/draft", Handler: "apiPolicyDraft", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "draft state + candidate→running diff (policy-draft G2)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "arm/disarm RequireCommit; disarm blocked (409) while a dirty draft exists"},
+		}},
+	{Path: "/api/policy/draft/commit", Handler: "apiPolicyDraftCommit", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "validate + activate the candidate (running := candidate); required commit comment"}}},
+	{Path: "/api/policy/draft/revert", Handler: "apiPolicyDraftRevert", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "discard the candidate; running untouched"}}},
 	{Path: "/api/objects/references", Handler: "apiObjectReferences", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "read-only generic dependency walk (Where-Used); no audit, no mutation (policy-refs P0)"}}},
 	{Path: "/api/authpolicy", Handler: "apiAuthPolicy", Domain: "policy", Public: false,
@@ -269,6 +280,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer, Note: "read-only list of the volatile auto-exclusion cache + posture"},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "evict one (?host=) or clear all; volatile cache, no config-version"},
 		}},
+	{Path: "/api/decryption-exclusions/tunables", Handler: "apiDecryptionExclusionTunables", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "F10: defaults + bounds + schema (current values live on /api/decryption-exclusions)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "F10: set auto-exclusion tunables; validate→persist→apply (persist-before-apply, no rollback branch); no config-version (off rollback surface)"},
+		}},
 	{Path: "/api/urlcat", Handler: "apiURLCat", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
@@ -316,7 +332,13 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/content-scan", Handler: "apiContentScan", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "GET", MinRole: RoleViewer, Note: "deprecated alias of /api/dpi (T-10); GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi (T-10)"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi (T-10)"},
+		}},
+	{Path: "/api/dpi", Handler: "apiContentScan", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "canonical path (T-10); GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
 			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
@@ -367,6 +389,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/content-scan/bypass", Handler: "apiContentScanBypass", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "deprecated alias of /api/dpi/bypass (T-10)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi/bypass (T-10)"},
+		}},
+	{Path: "/api/dpi/bypass", Handler: "apiContentScanBypass", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
