@@ -4031,6 +4031,7 @@ Firefox (all platforms):
             <p class="hint">Local, read-only checks — no network, no shell.</p>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
               <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
+              <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
             </div>
             <div id="support-diagnose" role="status" aria-live="polite" style="margin-top:6px"></div>
           </div>
@@ -4419,6 +4420,7 @@ document.addEventListener('click', e => {
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
     case 'diagnoseStorage':        diagnoseStorage(); break;
+    case 'diagnoseUpstream':       diagnoseUpstream(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -11947,6 +11949,42 @@ function renderDiagnoseStorage(d) {
     (c.ok ? 'ok' : 'fail') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
   el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function diagnoseUpstream() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseUpstream"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/upstream', { method: 'POST' });
+    renderDiagnoseUpstream(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Upstream check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseUpstream(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  if (!d.enabled) {
+    el.innerHTML = '<p class="hint">Upstream <strong style="color:var(--green)">DIRECT</strong> — no proxy pool configured (direct egress).</p>';
+    return;
+  }
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const hdr = '<p class="hint">Upstream pool <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
+    '</strong> · ' + escHtml(String(d.healthy_count || 0)) + '/' + escHtml(String(d.count || 0)) + ' healthy</p>';
+  const rows = (d.proxies || []).map(p =>
+    '<tr><td>' + escHtml(String(p.url)) + '</td><td style="color:' + (p.healthy ? 'var(--green)' : 'var(--red)') + '">' +
+    (p.healthy ? 'healthy' : 'down') + '</td><td>' + escHtml(String(p.circuit || '')) + '</td><td class="hint">' +
+    escHtml(String(p.failures || 0)) + '</td></tr>').join('');
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Proxy</th><th>Health</th><th>Circuit</th><th>Failures</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function supportSetDebugLevel() {

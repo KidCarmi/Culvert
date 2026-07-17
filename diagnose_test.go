@@ -121,6 +121,56 @@ func TestDiagnoseStorage_API(t *testing.T) {
 	}
 }
 
+// TestDiagnoseUpstream_DisabledIsOK proves that with no upstream pool (direct
+// egress) the verb reports enabled=false and ok=true — direct is not a fault.
+func TestDiagnoseUpstream_DisabledIsOK(t *testing.T) {
+	d := diagnoseUpstream(time.Unix(1_700_000_000, 0))
+	if d.SchemaVersion != diagnoseSchemaVersion {
+		t.Fatalf("schema_version=%d want %d", d.SchemaVersion, diagnoseSchemaVersion)
+	}
+	if d.Enabled {
+		t.Skip("upstream pool enabled in this environment; disabled-path assertion N/A")
+	}
+	if !d.OK {
+		t.Fatalf("disabled pool (direct egress) reported not ok: %+v", d)
+	}
+	if d.Count != 0 || d.HealthyCount != 0 {
+		t.Fatalf("disabled pool has proxies: count=%d healthy=%d", d.Count, d.HealthyCount)
+	}
+}
+
+// TestDiagnoseUpstream_API proves POST + operator RBAC + typed contract, and that
+// the response never carries proxy credentials (List() is redacted to host:port).
+func TestDiagnoseUpstream_API(t *testing.T) {
+	// Viewer is below operator → 403.
+	vRec := httptest.NewRecorder()
+	apiDiagnoseUpstream(vRec, roleReq(RoleViewer, http.MethodPost, "/api/diagnose/upstream", nil))
+	if vRec.Code != http.StatusForbidden {
+		t.Fatalf("viewer POST code=%d want 403", vRec.Code)
+	}
+	// GET is rejected.
+	gRec := httptest.NewRecorder()
+	apiDiagnoseUpstream(gRec, roleReq(RoleOperator, http.MethodGet, "/api/diagnose/upstream", nil))
+	if gRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET code=%d want 405", gRec.Code)
+	}
+	// Operator POST → 200, typed body, no credential shapes.
+	rec := httptest.NewRecorder()
+	apiDiagnoseUpstream(rec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/upstream", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator POST code=%d want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"schema_version"`) || !strings.Contains(body, `"proxies"`) {
+		t.Fatalf("body missing typed fields: %s", body)
+	}
+	// A URL with embedded credentials must never appear (redaction is upstream, but
+	// this pins the contract at the diagnose boundary).
+	if strings.Contains(body, "@") && strings.Contains(body, "://") {
+		t.Fatalf("possible credential in upstream diagnosis body: %s", body)
+	}
+}
+
 // TestNoShellInDiagnose is the structural no-shell wall (DIAGNOSTIC-COMMAND-FRAMEWORK
 // §Absolute rule): the diagnose surface must never import os/exec or spawn a shell.
 func TestNoShellInDiagnose(t *testing.T) {

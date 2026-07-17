@@ -52,7 +52,7 @@ import (
 //   - 142 — Supportability M1 added /api/support/status + /api/health/explain
 //     (the explained operator-contract health verdict).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 146
+	const want = 147
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

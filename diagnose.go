@@ -156,7 +156,72 @@ func boolResult(ok bool) string {
 	return "degraded"
 }
 
+// ── diagnose upstream ─────────────────────────────────────────────────────────
+
+type upstreamProbe struct {
+	URL          string `json:"url"` // already redacted to host:port by the pool's List()
+	Healthy      bool   `json:"healthy"`
+	Circuit      string `json:"circuit"` // closed|open|half-open
+	Failures     int64  `json:"failures"`
+	RetryAfterMs int64  `json:"retry_after_ms,omitempty"`
+}
+
+type upstreamDiagnosis struct {
+	SchemaVersion int             `json:"schema_version"`
+	GeneratedAt   string          `json:"generated_at"`
+	Enabled       bool            `json:"enabled"`
+	OK            bool            `json:"ok"` // enabled ⇒ at least one healthy proxy; disabled ⇒ trivially ok (direct)
+	Count         int             `json:"count"`
+	HealthyCount  int             `json:"healthy_count"`
+	Proxies       []upstreamProbe `json:"proxies"`
+}
+
+// diagnoseUpstream surfaces the upstream pool's EXISTING health-loop + circuit
+// state — it performs NO new dial and reads only the redacted List() (host:port,
+// never credentials). now is injected for deterministic timestamps in tests.
+func diagnoseUpstream(now time.Time) upstreamDiagnosis {
+	d := upstreamDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Enabled:       upstreamPool.Enabled(),
+	}
+	list := upstreamPool.List() // redacted, in-memory snapshot; no outbound I/O
+	d.Count = len(list)
+	d.Proxies = make([]upstreamProbe, 0, len(list))
+	for i := range list {
+		s := &list[i]
+		if s.Healthy {
+			d.HealthyCount++
+		}
+		d.Proxies = append(d.Proxies, upstreamProbe{
+			URL: s.URL, Healthy: s.Healthy, Circuit: s.Circuit,
+			Failures: s.Failures, RetryAfterMs: s.RetryAfterMs,
+		})
+	}
+	// Disabled = direct egress (no pool), which is a healthy posture, not a fault.
+	// Enabled = at least one proxy must be usable, else all upstream egress is down.
+	d.OK = !d.Enabled || d.HealthyCount > 0
+	return d
+}
+
+// apiDiagnoseUpstream reports upstream pool health (POST, operator). Read-only,
+// no new dial, no network, no shell.
+func apiDiagnoseUpstream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseUpstream(time.Now())
+	auditEvent(r, "diagnose.upstream", "upstream", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
+	mux.HandleFunc("/api/diagnose/upstream", apiDiagnoseUpstream)
 }

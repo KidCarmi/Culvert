@@ -637,4 +637,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/storage", Handler: "apiDiagnoseStorage", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "local read-only storage diagnosis (writability probe + free space + data-dir stat); operator+; no network, no shell; audited as diagnose.storage"}}},
+	{Path: "/api/diagnose/upstream", Handler: "apiDiagnoseUpstream", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "upstream pool health/circuit diagnosis over the existing health-loop state (redacted List, no new dial); operator+; no shell; audited as diagnose.upstream"}}},
 }
