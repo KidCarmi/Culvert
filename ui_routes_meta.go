@@ -660,6 +660,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/download-encrypted", Handler: "apiSupportBundleExportEncrypted", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "download a READY bundle wrapped in the PSCA passphrase envelope (AES-256-GCM); operator+ (approval-gated exfil, like plain download); POST carries the passphrase in the body (never logged); audited as support.bundle.download_encrypted"}}},
+	{Path: "/api/support/bundles/{id}/download-sealed", Handler: "apiSupportBundleExportSealed", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key in body (not secret); audited as support.bundle.download_sealed"}}},
 	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},
