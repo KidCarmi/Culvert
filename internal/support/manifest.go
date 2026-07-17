@@ -113,9 +113,11 @@ type RedactionReportSection struct {
 	ClassMax string `json:"class_max"`
 	Masked   int    `json:"masked"`
 	Dropped  int    `json:"dropped"`
+	Scrubbed int    `json:"scrubbed"` // free-form secret shapes redacted in kept strings
 }
 
 type RedactionReportCounts struct {
-	Masked  int `json:"masked"`
-	Dropped int `json:"dropped"`
+	Masked   int `json:"masked"`
+	Dropped  int `json:"dropped"`
+	Scrubbed int `json:"scrubbed"`
 }

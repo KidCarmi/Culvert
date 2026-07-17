@@ -43,7 +43,40 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/status", apiSupportStatus)
 	mux.HandleFunc("/api/support/bundles", apiSupportBundles)
 	mux.HandleFunc("/api/support/bundles/{id}", apiSupportBundleItem)
+	mux.HandleFunc("/api/support/bundles/{id}/redaction-report", apiSupportBundleReport)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
+}
+
+// apiSupportBundleReport serves a persisted bundle's redaction report — the
+// counts-only (never values) per-section masked/dropped/scrubbed + class_max
+// summary — so an operator can preview WHAT a bundle redacted without downloading
+// and unpacking the whole archive (viewer; the report carries no sensitive data).
+func apiSupportBundleReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	id := r.PathValue("id")
+	if !supportBundleIDRe.MatchString(id) {
+		http.Error(w, "invalid bundle id", http.StatusBadRequest)
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(supportBundlesDir(), id, support.RedactionReportName))
+	if err != nil {
+		// A pre-report bundle (created before this feature) simply has no file.
+		http.Error(w, "redaction report not found", http.StatusNotFound)
+		return
+	}
+	var rep support.RedactionReport
+	if json.Unmarshal(b, &rep) != nil {
+		http.Error(w, "redaction report corrupt", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, rep)
 }
 
 // apiHealthExplain returns the explained operator-contract health verdict —
@@ -297,6 +330,17 @@ func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr 
 	manifestJSON, err := json.MarshalIndent(res.Manifest, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal manifest: %w", err)
+	}
+	// redaction-report.json is persisted alongside the manifest (it also lives
+	// inside the tar) so the preview endpoint can serve it without unpacking the
+	// whole bundle. Counts-only (REDACTION-MODEL P4/P6) — no values. Written
+	// BEFORE the manifest commit so a listable bundle always has its report.
+	reportJSON, err := json.MarshalIndent(res.Report, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal report: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, support.RedactionReportName), reportJSON, 0o600); err != nil {
+		return nil, fmt.Errorf("write report: %w", err)
 	}
 	// manifest.json is the list/commit marker (listSupportBundles keys on it), so
 	// write it atomically via tmp+rename — a torn write can never present a

@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -166,6 +168,60 @@ func TestReusedSections_IdentifiersMasked(t *testing.T) {
 		if strings.Contains(string(aout), raw) {
 			t.Fatalf("audit field %q leaked unmasked: %s", raw, aout)
 		}
+	}
+}
+
+// TestSupportReport_PersistedAndServed proves the redaction report is persisted
+// next to the manifest (counts-only, with the scrubbed tally) and served by the
+// preview endpoint without unpacking the bundle.
+func TestSupportReport_PersistedAndServed(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	res, err := createSupportBundle(context.Background())
+	if err != nil {
+		t.Fatalf("createSupportBundle: %v", err)
+	}
+	// Persisted on disk, counts-only, includes the scrubbed key.
+	b, err := os.ReadFile(filepath.Join(supportBundlesDir(), res.BundleID, support.RedactionReportName))
+	if err != nil {
+		t.Fatalf("report not persisted: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"scrubbed"`)) {
+		t.Fatalf("report missing scrubbed tally: %s", b)
+	}
+	var rep support.RedactionReport
+	if err := json.Unmarshal(b, &rep); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	if !rep.FailClosed || len(rep.Sections) == 0 {
+		t.Fatalf("report shape: fail_closed=%v sections=%d", rep.FailClosed, len(rep.Sections))
+	}
+
+	// Endpoint: valid id → 200 with the report.
+	req := httptest.NewRequest(http.MethodGet, "/api/support/bundles/"+res.BundleID+"/redaction-report", nil)
+	req.SetPathValue("id", res.BundleID)
+	rec := httptest.NewRecorder()
+	apiSupportBundleReport(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"scrubbed"`) {
+		t.Fatalf("endpoint code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	// Unknown-but-well-formed id → 404 (a pre-report bundle behaves the same).
+	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req2.SetPathValue("id", "csb_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+	rec2 := httptest.NewRecorder()
+	apiSupportBundleReport(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("missing report code=%d want 404", rec2.Code)
+	}
+	// Malformed id → 400.
+	req3 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req3.SetPathValue("id", "../etc/passwd")
+	rec3 := httptest.NewRecorder()
+	apiSupportBundleReport(rec3, req3)
+	if rec3.Code != http.StatusBadRequest {
+		t.Fatalf("malformed id code=%d want 400", rec3.Code)
 	}
 }
 

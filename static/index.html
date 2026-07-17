@@ -4377,6 +4377,7 @@ document.addEventListener('click', e => {
     case 'loadSupport':            loadSupport(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
+    case 'supportShowReport':      supportShowReport(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -11782,10 +11783,12 @@ function renderSupportBundles(list) {
       const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
         (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
       const href = '/api/support/bundles/' + encodeURIComponent(String(b.bundle_id));
-      const actions = canWrite
+      // Report preview is counts-only (viewer-safe); Download/Delete need operator+.
+      const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>';
+      const actions = reportBtn + ' ' + (canWrite
         ? '<a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a> ' +
           '<button class="btn ghost sm" data-click="supportDeleteBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Delete</button>'
-        : '<span class="hint" title="Operator role required to download or delete">operator+</span>';
+        : '<span class="hint" title="Operator role required to download or delete">operator+</span>');
       return '<tr>' +
         '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
         '<td title="' + escHtml(String(b.created_at)) + '">' + escHtml(fmtProvTime(b.created_at)) + '</td>' +
@@ -11832,6 +11835,37 @@ async function supportDeleteBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Bundle delete failed: ' + err.message, 'error');
+  }
+}
+
+async function supportShowReport(id) {
+  if (!id) return;
+  try {
+    const rep = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/redaction-report');
+    const t = (rep && rep.totals) || {};
+    const secs = (rep && rep.sections) || [];
+    const rows = secs.map(s =>
+      '<tr><td style="font-family:monospace">' + escHtml(String(s.id)) + '</td>' +
+      '<td>' + escHtml(String(s.class_max || '')) + '</td>' +
+      '<td>' + escHtml(String(s.masked || 0)) + '</td>' +
+      '<td>' + escHtml(String(s.dropped || 0)) + '</td>' +
+      '<td>' + escHtml(String(s.scrubbed || 0)) + '</td></tr>').join('');
+    const html = '<p class="hint">Counts only — no values. fail_closed=<code>' + escHtml(String(rep.fail_closed)) +
+      '</code> · model v' + escHtml(String(rep.model_version || '')) + '</p>' +
+      '<p><strong>Totals</strong>: ' + escHtml(String(t.masked || 0)) + ' masked · ' +
+      escHtml(String(t.dropped || 0)) + ' dropped · ' + escHtml(String(t.scrubbed || 0)) + ' scrubbed</p>' +
+      '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+      '<th>Section</th><th>Class max</th><th>Masked</th><th>Dropped</th><th>Scrubbed</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>';
+    const el = document.getElementById('support-bundles');
+    if (el) {
+      let box = document.getElementById('support-report-box');
+      if (!box) { box = document.createElement('div'); box.id = 'support-report-box'; box.style.marginTop = '12px'; el.appendChild(box); }
+      box.innerHTML = '<div style="font-weight:600;margin:6px 0">Redaction report — ' + escHtml(String(id)) + '</div>' + html;
+      box.scrollIntoView({ block: 'nearest' });
+    }
+  } catch (err) {
+    toast('Report unavailable: ' + err.message, 'error');
   }
 }
 

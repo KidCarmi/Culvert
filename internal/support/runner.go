@@ -38,6 +38,7 @@ type BuildOptions struct {
 type BuildResult struct {
 	BundleID     string
 	Manifest     SupportBundleManifest
+	Report       RedactionReport // counts-only redaction report (also packaged in the tar)
 	TarGz        []byte
 	BundleSHA256 string
 }
@@ -159,7 +160,7 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 			}
 			packed = append(packed, tarEntry{name: m.Path, body: sk.body})
 			reportSecs = append(reportSecs, RedactionReportSection{
-				ID: m.ID, ClassMax: classMax.String(), Masked: cr.masked, Dropped: cr.dropped,
+				ID: m.ID, ClassMax: classMax.String(), Masked: cr.masked, Dropped: cr.dropped, Scrubbed: cr.scrubbed,
 			})
 			stats.OK++
 		}
@@ -222,7 +223,7 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 	man.Integrity.BundleSHA256 = hex.EncodeToString(bs[:])
 
 	return &BuildResult{
-		BundleID: bundleID, Manifest: man, TarGz: tgz,
+		BundleID: bundleID, Manifest: man, Report: report, TarGz: tgz,
 		BundleSHA256: man.Integrity.BundleSHA256,
 	}, nil
 }
@@ -286,12 +287,12 @@ func (s *sectionSink) WriteJSON(v any) error {
 	return nil
 }
 
-// countingRedactor wraps the base redactor and tallies masked/dropped/class_max
-// across a single section, feeding the manifest entry + redaction report.
+// countingRedactor wraps the base redactor and tallies masked/dropped/scrubbed/
+// class_max across a single section, feeding the manifest entry + redaction report.
 type countingRedactor struct {
-	base            redaction.Redactor
-	masked, dropped int
-	classMax        redaction.DataClass
+	base                      redaction.Redactor
+	masked, dropped, scrubbed int
+	classMax                  redaction.DataClass
 }
 
 func (c *countingRedactor) Struct(v any) any {
@@ -309,6 +310,7 @@ func (c *countingRedactor) Classify(v any) redaction.Result {
 func (c *countingRedactor) tally(r redaction.Result) {
 	c.masked += r.Masked
 	c.dropped += r.Dropped
+	c.scrubbed += r.Scrubbed
 	if r.ClassMax > c.classMax {
 		c.classMax = r.ClassMax
 	}
@@ -319,6 +321,7 @@ func totalCounts(secs []RedactionReportSection) RedactionReportCounts {
 	for _, s := range secs {
 		t.Masked += s.Masked
 		t.Dropped += s.Dropped
+		t.Scrubbed += s.Scrubbed
 	}
 	return t
 }

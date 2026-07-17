@@ -621,4 +621,7 @@ var uiRoutes = []uiRouteMetadata{
 				Note: "download a created bundle by id; operator+ (bundle may contain INTERNAL sections); audited as support.bundle.download (the exfil event)"},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 				Note: "delete a persisted bundle by id; operator+; in-product reclaim path; audited as support.bundle.delete"}}},
+	{Path: "/api/support/bundles/{id}/redaction-report", Handler: "apiSupportBundleReport", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "counts-only redaction report (masked/dropped/scrubbed + class_max per section); preview what a bundle redacted without downloading it"}}},
 }
