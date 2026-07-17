@@ -345,15 +345,20 @@ func bypassOutcome(dec sslResolution, host string) *DecryptionOutcome {
 	if hh, _, err := net.SplitHostPort(host); err == nil {
 		h = hh
 	}
+	hit := dec.Source == decryptobs.DecisionAutoexcludeCache
+	exclScope := ""
+	if hit {
+		exclScope = dec.ScopeID // the scope of the exclusion that bypassed — only on a hit
+	}
 	return &DecryptionOutcome{
 		Outcome:        outcome,
 		DecisionSource: source,
 		Host:           h,
-		ExclReason:     dec.ExclReason,
-		ExclScope:      dec.ScopeID,
-		ProfileID:      dec.ScopeID,
-		CacheConsulted: dec.Source == decryptobs.DecisionAutoexcludeCache,
-		CacheHit:       dec.Source == decryptobs.DecisionAutoexcludeCache,
+		ExclReason:     dec.ExclReason, // set only on a hit
+		ExclScope:      exclScope,      // set only on a hit
+		ProfileID:      dec.ScopeID,    // the session's fail-open profile scope, if any (hit or consulted-miss)
+		CacheConsulted: dec.Consulted,  // the fail-open read path ran (hit OR miss)
+		CacheHit:       hit,
 	}
 }
 

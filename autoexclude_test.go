@@ -103,11 +103,11 @@ func TestResolveSSLAction_EmptyCacheByteIdentical(t *testing.T) {
 	swapAutoExclude(t, autoexclude.Config{})
 	swapProfiles(t)
 	m := &PolicyMatch{Action: ActionAllow, SSLAction: SSLInspect, Rule: &PolicyRule{Name: "r", SSLAction: SSLInspect}}
-	if a, _ := resolveSSLAction(m, "example.com", "1.2.3.4"); a != SSLInspect {
+	if a := resolveSSLAction(m, "example.com", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("empty cache changed the SSL action: got %q want Inspect", a)
 	}
 	fo, _ := bindFailOpenProfile(t, "fo", "fail-open")
-	if a, _ := resolveSSLAction(fo, "example.com", "1.2.3.4"); a != SSLInspect {
+	if a := resolveSSLAction(fo, "example.com", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("fail-open rule + empty cache should still Inspect: got %q", a)
 	}
 }
@@ -123,11 +123,11 @@ func TestResolveSSLAction_FailCloseNeverConsults(t *testing.T) {
 	}
 	// fail-close profile → resolveFailOpen false → cache NOT consulted → Inspect.
 	fc, _ := bindFailOpenProfile(t, "fc", "fail-close")
-	if a, _ := resolveSSLAction(fc, "locked.example", "1.2.3.4"); a != SSLInspect {
+	if a := resolveSSLAction(fc, "locked.example", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("fail-close rule consulted the cache: got %q want Inspect", a)
 	}
 	// The fail-open rule for the SAME host DOES self-heal.
-	if a, _ := resolveSSLAction(fo, "locked.example", "1.2.3.4"); a != SSLBypass {
+	if a := resolveSSLAction(fo, "locked.example", "1.2.3.4"); a != SSLBypass {
 		t.Fatalf("fail-open rule did not self-heal: got %q want Bypass", a)
 	}
 }
@@ -141,10 +141,10 @@ func TestResolveSSLAction_CrossScopeContamination(t *testing.T) {
 	foA, scopeA := bindFailOpenProfile(t, "profA", "fail-open")
 	foB, _ := bindFailOpenProfile(t, "profB", "fail-open")
 	autoExclude().Observe(scopeA, "profA", "shared.example", autoexclude.ReasonClientCertRequired, "id:u1")
-	if a, _ := resolveSSLAction(foA, "shared.example", "1.2.3.4"); a != SSLBypass {
+	if a := resolveSSLAction(foA, "shared.example", "1.2.3.4"); a != SSLBypass {
 		t.Fatalf("profA (owner) should bypass: got %q", a)
 	}
-	if a, _ := resolveSSLAction(foB, "shared.example", "1.2.3.4"); a != SSLInspect {
+	if a := resolveSSLAction(foB, "shared.example", "1.2.3.4"); a != SSLInspect {
 		t.Fatalf("profB must NOT consume profA's exclusion (cross-scope leak): got %q", a)
 	}
 }

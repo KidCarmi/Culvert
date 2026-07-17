@@ -45,7 +45,7 @@ func TestRolloutRehearsal(t *testing.T) {
 	}
 	// A rule with no fail-open profile never consults the cache (feature-off).
 	noProf := &PolicyMatch{Action: ActionAllow, SSLAction: SSLInspect, Rule: &PolicyRule{Name: "np", SSLAction: SSLInspect}}
-	if a, _ := resolveSSLAction(noProf, "any.example", "1.2.3.4"); a != SSLInspect {
+	if a := resolveSSLAction(noProf, "any.example", "1.2.3.4"); a != SSLInspect {
 		t.Fatal("step1: feature-off must Inspect")
 	}
 
@@ -94,7 +94,7 @@ func TestRolloutRehearsal(t *testing.T) {
 	}
 	// Hit: a fail-open session to an excluded host bypasses (increments hit counter).
 	before := autoExcludeHitCounter
-	if a, _ := resolveSSLAction(fo, "cc.example", "9.9.9.9"); a != SSLBypass {
+	if a := resolveSSLAction(fo, "cc.example", "9.9.9.9"); a != SSLBypass {
 		t.Fatal("step4: excluded host should bypass under its fail-open rule")
 	}
 	if autoExcludeHitCounter <= before {
@@ -116,7 +116,7 @@ func TestRolloutRehearsal(t *testing.T) {
 	fc := &PolicyMatch{Action: ActionAllow, SSLAction: SSLInspect, Rule: &PolicyRule{Name: "r-byod", SSLAction: SSLInspect, DecryptionProfile: "byod"}}
 
 	// 6. No further reads (still-cached cc.example is inspected now) and no learns.
-	if a, _ := resolveSSLAction(fc, "cc.example", "9.9.9.9"); a != SSLInspect {
+	if a := resolveSSLAction(fc, "cc.example", "9.9.9.9"); a != SSLInspect {
 		t.Fatal("step6: disabling fail-open must stop consulting the cache")
 	}
 	if maybeFailOpenOrigin("new.example", fc, ProxyIdentity{ClientIP: "10.0.0.3", Identity: "carol"}, errTLS("certificate required")) {

@@ -627,16 +627,22 @@ type sslResolution struct {
 	Action     SSLAction
 	SkipVerify bool
 	Source     decryptobs.DecisionSource // policy_inspect | manual_ssl_bypass | autoexclude_cache
-	ExclReason autoexclude.Reason        // set only when Source == autoexclude_cache
-	ScopeID    string                    // decryption-profile scope id when a fail-open scope applied
+	ExclReason autoexclude.Reason        // set only when the fail-open cache HIT
+	ScopeID    string                    // decryption-profile scope id when a fail-open scope was consulted (hit OR miss)
+	// Consulted is true when the fail-open auto-exclusion READ PATH ran (the rule opted
+	// into fail-open and Contains was called), regardless of hit/miss. Distinguishes a
+	// fail-open cache MISS from a fail-close / no-profile path in the observability
+	// record — the two would otherwise both read cache_consulted=false (PR #795 review).
+	Consulted bool
 }
 
-// resolveSSLAction is the hot-path decision used by the tunnel dispatcher and the
-// autoexclude tests/benchmarks. It stays a thin, byte-identical wrapper over
-// resolveSSLDecision so those callers (and the alloc benchgate) are unchanged.
-func resolveSSLAction(match *PolicyMatch, host, clientIP string) (SSLAction, bool) {
-	d := resolveSSLDecision(match, host, clientIP)
-	return d.Action, d.SkipVerify
+// resolveSSLAction returns just the SSL action; it is a thin, byte-identical wrapper
+// over resolveSSLDecision retained for the autoexclude tests + the alloc benchgate
+// (production dispatch uses resolveSSLDecision to also read the decision source). The
+// per-rule TLS-skip flag now lives on the sslResolution the dispatcher consumes, so this
+// wrapper does not re-return it.
+func resolveSSLAction(match *PolicyMatch, host, clientIP string) SSLAction {
+	return resolveSSLDecision(match, host, clientIP).Action
 }
 
 // resolveSSLDecision is resolveSSLAction plus the ADR-0011 decision source. The action
@@ -675,12 +681,16 @@ func resolveSSLDecision(match *PolicyMatch, host, clientIP string) sslResolution
 	// allocation-free here.
 	var exclReason autoexclude.Reason
 	var exclScope string
+	var consulted bool
 	if sslAction == SSLInspect && match != nil && match.Rule != nil {
 		if scopeID, ok := failOpenScopeForRule(match.Rule); ok {
+			// The fail-open read path runs here — record it (hit OR miss) and carry the
+			// scope so a consulted-but-missed session is distinguishable in the record.
+			consulted = true
+			exclScope = scopeID
 			if reason, hit := autoExclude().Contains(scopeID, host); hit {
 				sslAction = SSLBypass
 				exclReason = reason
-				exclScope = scopeID
 				recordAutoExcludeHit()
 				logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%s reason=%s)",
 					sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(scopeID), reason)
@@ -694,7 +704,7 @@ func resolveSSLDecision(match *PolicyMatch, host, clientIP string) sslResolution
 	case exclReason != "":
 		source = decryptobs.DecisionAutoexcludeCache
 	}
-	return sslResolution{Action: sslAction, SkipVerify: tlsSkipVerify, Source: source, ExclReason: exclReason, ScopeID: exclScope}
+	return sslResolution{Action: sslAction, SkipVerify: tlsSkipVerify, Source: source, ExclReason: exclReason, ScopeID: exclScope, Consulted: consulted}
 }
 
 // failOpenScopeForRule resolves the autoexclude fail-open scope for a matched

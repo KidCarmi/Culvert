@@ -56,7 +56,7 @@ func TestBenchGate_AutoExcludeResolveAllocs(t *testing.T) {
 		res := testing.Benchmark(func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_, _ = resolveSSLAction(m, host, "203.0.113.7")
+				_ = resolveSSLAction(m, host, "203.0.113.7")
 			}
 		})
 		return res.AllocsPerOp()
