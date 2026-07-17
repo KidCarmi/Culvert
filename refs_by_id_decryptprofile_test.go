@@ -110,6 +110,29 @@ func TestObjectReferences_DecryptionProfileIDFirst(t *testing.T) {
 	}
 }
 
+// TestObjectReferences_DecryptionProfileDanglingIDFallsBackToName pins the
+// walk↔match parity fix: a rule with a DANGLING DecryptionProfileID whose name
+// resolves to a live profile is enforcing that profile at eval time
+// (resolveDecryptionProfile falls back to the name), so the delete-block walk
+// must attribute it too — else the profile (carrying a strict cert posture)
+// is deletable while a rule still relies on it.
+func TestObjectReferences_DecryptionProfileDanglingIDFallsBackToName(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotDecProfilesForTest(t)
+	p, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "live", CertVerification: "strict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "dangler", DecryptionProfile: "live", DecryptionProfileID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Action: ActionAllow},
+	})
+	_, refs := objectReferences("decryption-profile", "live")
+	if len(refs) != 1 || refs[0].Name != "dangler" {
+		t.Errorf("dangling-ID rule enforcing by name must block the profile's delete: %+v", refs)
+	}
+	_ = p
+}
+
 func TestApiDecryptionProfile_RenameCascades(t *testing.T) {
 	snapshotDecProfilesForTest(t)
 	snapshotPolicyStoreForTest(t)

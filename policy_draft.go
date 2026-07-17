@@ -368,11 +368,27 @@ func policyWriteStore(actor string) *PolicyStore {
 	return policyStore
 }
 
+// policyDraftEngaged reports whether the draft actually intercepts the policy
+// read/write path: commit-mode armed AND a draft open. It must use the SAME
+// predicate family as policyWriteStore (requireCommitEnabled), not active()
+// alone: if the two ever diverge — a corrupt/defaulted admin_settings.json
+// resets RequireCommit to false while initPolicyDraft reloads a pending
+// policy_draft.json — writes go to RUNNING (policyWriteStore is live), so the
+// finalize/read helpers must follow the live path too. Keying them on active()
+// alone would skip policyStore.Save()+saveConfigVersion after a live write
+// (mutations silently lost on restart — fail-open for a staged Deny) and
+// render the stale candidate instead of the enforced rulebase. A stranded
+// active draft in that state stays recoverable via /api/policy/draft
+// (GET state, POST commit/revert), which deliberately key on active() only.
+func policyDraftEngaged() bool {
+	return requireCommitEnabled() && policyDraft.active()
+}
+
 // effectivePolicyList is the rulebase the admin is currently editing/viewing:
-// the candidate when a draft is open, else running. Used by write handlers for
-// validation and by the policy GET/reorder read paths. Does NOT open a draft.
+// the candidate when the draft is engaged, else running. Used by write handlers
+// for validation and by the policy GET/reorder read paths. Does NOT open a draft.
 func effectivePolicyList() []PolicyRule {
-	if policyDraft.active() {
+	if policyDraftEngaged() {
 		return policyDraft.candidateList()
 	}
 	return policyStore.List()
@@ -382,7 +398,7 @@ func effectivePolicyList() []PolicyRule {
 // candidate's while drafting (so two admins editing the shared draft collide),
 // else running's.
 func effectivePolicyVersion() (version int64, updatedAt string) {
-	if policyDraft.active() {
+	if policyDraftEngaged() {
 		return policyDraft.candidateVersion()
 	}
 	return policyStore.policyVersion()
@@ -394,7 +410,7 @@ func effectivePolicyVersion() (version int64, updatedAt string) {
 // is captured once at commit, so per-edit snapshots of the unchanged running
 // config would be misleading no-ops.
 func afterPolicyWrite(r *http.Request, action string) {
-	if policyDraft.active() {
+	if policyDraftEngaged() {
 		// A no-op edit (candidate == running) auto-discards the draft rather
 		// than leaving a zero-diff pending draft; otherwise persist the change.
 		if policyDraft.reconcile() {
@@ -579,9 +595,12 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	// Optimistic-concurrency precondition on the SHARED candidate: if the client
 	// sends ?ifVersion=N (the candidate generation it reviewed) and another admin
 	// staged a change in between, this 409s instead of committing unreviewed
-	// changes. policyVersionConflict compares against effectivePolicyVersion,
-	// which is the candidate's generation while a draft is open.
-	if policyVersionConflict(w, r) {
+	// changes. A commit ALWAYS operates on the candidate, so compare against the
+	// candidate's generation directly — not effectivePolicyVersion(), which falls
+	// back to running when RequireCommit is off (the stranded-draft recovery
+	// state) and would spuriously 409 a legitimate recovery commit.
+	candVer, _ := policyDraft.candidateVersion()
+	if policyVersionConflictAgainst(w, r, candVer) {
 		return
 	}
 	var body struct {

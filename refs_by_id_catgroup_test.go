@@ -166,6 +166,31 @@ func TestObjectReferences_CategoryGroupStaleNameNoFalsePositive(t *testing.T) {
 	_ = gB
 }
 
+// TestObjectReferences_CategoryGroupDanglingIDFallsBackToName pins the
+// walk↔match parity fix: a rule with a DANGLING DestCategoryGroupID (no live
+// group) whose denormalized name resolves to a live group is ENFORCING that
+// group at eval time (categoryGroupMatchesHostRule falls back to the name), so
+// the delete-block walk must attribute it too — else the group is deletable
+// while in use.
+func TestObjectReferences_CategoryGroupDanglingIDFallsBackToName(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	snapshotGlobalCategoryGroups(t)
+	globalCategoryGroups.ReplaceAll(nil)
+	g, err := globalCategoryGroups.Add("live", []string{"news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Dangling ID (no group has it) + a name that matches the live group.
+	policyStore.ReplaceAll([]PolicyRule{
+		{Name: "dangler", DestCategoryGroup: "live", DestCategoryGroupID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Action: ActionAllow},
+	})
+	_, refs := objectReferences("category-group", "live")
+	if len(refs) != 1 || refs[0].Name != "dangler" {
+		t.Errorf("dangling-ID rule enforcing by name must block the group's delete: %+v", refs)
+	}
+	_ = g
+}
+
 func TestApiCategoryGroup_RenameCascades(t *testing.T) {
 	snapshotGlobalCategoryGroups(t)
 	snapshotPolicyStoreForTest(t)

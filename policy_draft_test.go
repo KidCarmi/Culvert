@@ -257,6 +257,58 @@ func TestDraft_RestartDurability(t *testing.T) {
 	}
 }
 
+// TestDraft_StrandedDraftOffMode_LiveWriteStaysDurable: if RequireCommit is
+// OFF while an active draft exists anyway (a corrupt/defaulted
+// admin_settings.json alongside a reloaded policy_draft.json, or the
+// disarm-vs-stage race), writes go to RUNNING — so the finalize/read helpers
+// must follow the live path too: the mutation persists to disk with a per-edit
+// config version, and reads render running, not the stale candidate. Keying
+// them on active() alone silently dropped the live Save (mutations — including
+// a new Deny — lost on restart).
+func TestDraft_StrandedDraftOffMode_LiveWriteStaysDurable(t *testing.T) {
+	draftTestSetup(t)
+
+	// Manufacture the divergent state: an active draft with mode OFF.
+	setRequireCommit(true)
+	createRuleViaAPI(t, "stranded-staged-rule", "")
+	if !policyDraft.active() {
+		t.Fatal("setup: staging did not open a draft")
+	}
+	setRequireCommit(false)
+
+	if policyDraftEngaged() {
+		t.Fatal("draft must not be engaged while RequireCommit is off")
+	}
+
+	// A write in this state is a LIVE write and must stay durable.
+	before := countConfigVersions("policy.add")
+	if w := createRuleViaAPI(t, "live-deny-after-strand", ""); w.Code != http.StatusOK {
+		t.Fatalf("create = %d (%s)", w.Code, w.Body.String())
+	}
+	if n := ruleNames(policyStore.List()); len(n) != 1 || n[0] != "live-deny-after-strand" {
+		t.Fatalf("live write did not hit running: %v", n)
+	}
+	if countConfigVersions("policy.add") != before+1 {
+		t.Error("live write with a stranded draft skipped the per-edit config version (durability regression)")
+	}
+
+	// Reads must render RUNNING, not the stale candidate.
+	if n := ruleNames(effectivePolicyList()); len(n) != 1 || n[0] != "live-deny-after-strand" {
+		t.Errorf("effective list rendered the stale candidate: %v", n)
+	}
+	ver, _ := effectivePolicyVersion()
+	liveVer, _ := policyStore.policyVersion()
+	if ver != liveVer {
+		t.Errorf("effective version = %d, want running's %d", ver, liveVer)
+	}
+
+	// The stranded draft stays recoverable via the draft endpoints (active(),
+	// deliberately not engaged()).
+	if !policyDraft.active() {
+		t.Error("stranded draft must remain visible to /api/policy/draft for commit/revert recovery")
+	}
+}
+
 // TestDraft_Diff: the diff reports added/removed/modified vs running by ID.
 func TestDraft_Diff(t *testing.T) {
 	draftTestSetup(t)
@@ -378,6 +430,62 @@ func TestDraft_Commit_VersionPrecondition(t *testing.T) {
 		map[string]any{"comment": "x"}))
 	if w.Code != http.StatusOK {
 		t.Fatalf("correct-version commit = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestDraft_Commit_StrandedDraftUsesCandidateVersion pins the Codex #736 P2 fix:
+// in the stranded-draft recovery state (RequireCommit turned OFF while a draft is
+// still active), GET /api/policy/draft advertises the CANDIDATE generation, so a
+// recovery commit sends ?ifVersion=<candidate>. The commit's precondition must
+// compare against the candidate — not effectivePolicyVersion(), which falls back
+// to running when the draft is not "engaged" and would spuriously 409 the commit.
+func TestDraft_Commit_StrandedDraftUsesCandidateVersion(t *testing.T) {
+	draftTestSetup(t)
+
+	// Manufacture the stranded state: an active draft with mode OFF.
+	setRequireCommit(true)
+	createRuleViaAPI(t, "stranded-rule", "")
+	if !policyDraft.active() {
+		t.Fatal("setup: staging did not open a draft")
+	}
+	candV, _ := policyDraft.candidateVersion()
+	runV, _ := policyStore.policyVersion()
+	if candV == runV {
+		t.Skipf("candidate (%d) and running (%d) versions coincide; cannot exercise the mismatch", candV, runV)
+	}
+	setRequireCommit(false)
+	if policyDraftEngaged() || !policyDraft.active() {
+		t.Fatalf("want stranded draft (not engaged, active); engaged=%v active=%v", policyDraftEngaged(), policyDraft.active())
+	}
+
+	// The recovery commit carries the candidate version the GET advertised. Before
+	// the fix this compared against running (candV != runV) and 409'd.
+	w := httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit?ifVersion="+int64ToStr(candV),
+		map[string]any{"comment": "recover stranded draft"}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stranded-draft recovery commit with candidate ifVersion = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	if policyDraft.active() {
+		t.Error("draft still active after a successful recovery commit")
+	}
+	if n := ruleNames(policyStore.List()); len(n) != 1 || n[0] != "stranded-rule" {
+		t.Errorf("recovery commit did not activate the candidate onto running: %v", n)
+	}
+
+	// And a genuinely stale precondition in the same state still 409s.
+	setRequireCommit(true)
+	createRuleViaAPI(t, "second-rule", "")
+	setRequireCommit(false)
+	candV2, _ := policyDraft.candidateVersion()
+	w = httptest.NewRecorder()
+	apiPolicyDraftCommit(w, jsonReq("POST", "/api/policy/draft/commit?ifVersion="+int64ToStr(candV2-1),
+		map[string]any{"comment": "stale"}))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("stale ifVersion in stranded state = %d, want 409 (%s)", w.Code, w.Body.String())
+	}
+	if !policyDraft.active() {
+		t.Error("a rejected recovery commit cleared the draft")
 	}
 }
 
