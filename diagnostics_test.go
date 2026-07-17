@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
@@ -948,5 +949,94 @@ func TestApiDiagnostics_EmptyPolicyWarn(t *testing.T) {
 	// fail purely because of empty policy.
 	if c.Verdict == diagFail {
 		t.Errorf("top-level verdict = %q, want ok or warn (empty policy alone must not fail the report)", c.Verdict)
+	}
+}
+
+// findAuditPersistenceCheck locates the audit_log_persistence row so the three
+// tests below don't each repeat the scan loop.
+func findAuditPersistenceCheck(t *testing.T, c OperatorContract) OperatorContractCheck {
+	t.Helper()
+	for i := range c.Checks {
+		if c.Checks[i].Code == "audit_log_persistence" {
+			return c.Checks[i]
+		}
+	}
+	t.Fatal("audit_log_persistence check missing from report")
+	return OperatorContractCheck{}
+}
+
+// TestApiDiagnostics_AuditPersistenceNotConfigured — audit_log_file was never
+// set. This is a normal, valid posture (in-memory ring only) and must report
+// ok, not warn/fail.
+func TestApiDiagnostics_AuditPersistenceNotConfigured(t *testing.T) {
+	prev := auditLogConfiguredPath
+	auditLogConfiguredPath = ""
+	t.Cleanup(func() { auditLogConfiguredPath = prev })
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findAuditPersistenceCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("audit_log_persistence status = %q, want ok when not configured", found.Status)
+	}
+}
+
+// TestApiDiagnostics_AuditPersistenceFail — audit_log_file was configured but
+// InitAuditLog never succeeded (bad path/permissions), so audit.PersistActive()
+// is false. This is the silent-fallback scenario: the compliance audit trail
+// has degraded to the volatile 500-entry ring, so it must surface as fail.
+func TestApiDiagnostics_AuditPersistenceFail(t *testing.T) {
+	restoreAudit := audit.ResetForTest()
+	t.Cleanup(restoreAudit)
+	prev := auditLogConfiguredPath
+	auditLogConfiguredPath = "/data/audit.log"
+	t.Cleanup(func() { auditLogConfiguredPath = prev })
+
+	if audit.PersistActive() {
+		t.Fatal("test setup: PersistActive() = true, want false after ResetForTest")
+	}
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findAuditPersistenceCheck(t, c)
+	if found.Status != diagFail {
+		t.Errorf("audit_log_persistence status = %q, want fail when configured-but-inactive", found.Status)
+	}
+	if found.OperatorAction == "" {
+		t.Error("audit_log_persistence fail must include operator_action")
+	}
+}
+
+// TestApiDiagnostics_AuditPersistenceOK — audit_log_file configured and
+// audit.Init succeeded against a real file (persistC wired), matching the
+// production success path in loadObservability.
+func TestApiDiagnostics_AuditPersistenceOK(t *testing.T) {
+	restoreAudit := audit.ResetForTest()
+	t.Cleanup(func() {
+		_ = audit.Close()
+		restoreAudit()
+	})
+	path := filepath.Join(t.TempDir(), "audit.log")
+	if err := audit.Init(path); err != nil {
+		t.Fatalf("audit.Init: %v", err)
+	}
+	prev := auditLogConfiguredPath
+	auditLogConfiguredPath = path
+	t.Cleanup(func() { auditLogConfiguredPath = prev })
+
+	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	w := httptest.NewRecorder()
+	apiDiagnostics(w, r)
+
+	c := decodeContract(t, w)
+	found := findAuditPersistenceCheck(t, c)
+	if found.Status != diagOK {
+		t.Errorf("audit_log_persistence status = %q, want ok when persisting", found.Status)
 	}
 }
