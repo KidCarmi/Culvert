@@ -30,6 +30,10 @@ var collectedStructs = []any{
 	metricsSection{},
 	logsSection{},
 	logEntrySummary{},
+	tlsSection{},
+	configVersionsSection{},
+	supportCfgVerSummary{},
+	governanceSection{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {
