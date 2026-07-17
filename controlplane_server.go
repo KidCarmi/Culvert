@@ -268,6 +268,15 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 		// enrollment state — dropping them would silently detach the node
 		// from its node groups (and their bandwidth/QoS policies).
 		node.Labels = priorNode.Labels
+		// Preserve an operator-set maintenance (draining) state across
+		// re-enrollment. If the node was put into maintenance with
+		// SetNodeDraining before its cert expired, a recovery-token
+		// re-enrollment must not silently return it to active service —
+		// carry the draining status forward so an explicit undrain is still
+		// required. A normal (connected) prior record stays connected.
+		if priorNode.Status == "draining" {
+			node.Status = "draining"
+		}
 	}
 	globalClusterStore.RegisterNode(node)
 

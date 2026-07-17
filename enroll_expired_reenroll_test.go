@@ -159,6 +159,48 @@ func TestEnroll_ExpiredNodeReenrollsWithToken(t *testing.T) {
 	}
 }
 
+func TestEnroll_ExpiredDrainingNodePreservesDrainingOnReenroll(t *testing.T) {
+	swapEnrollFixture(t)
+	_ = enrollAlertCapture(t)
+
+	// An operator put the node into maintenance (draining) via SetNodeDraining
+	// BEFORE its cert expired. A recovery-token re-enrollment must not silently
+	// return it to active service — the draining status carries forward so an
+	// explicit undrain is still required.
+	globalClusterStore.RegisterNode(&EnrolledNode{
+		NodeID:     "dp-drained",
+		CertSerial: "old-serial-drain",
+		CertExpiry: time.Now().Add(-72 * time.Hour),
+		Status:     "draining",
+		Labels:     map[string]string{"region": "us-west"},
+	})
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), enrollRequestJSON(t, token, "dp-drained")); err != nil {
+		t.Fatalf("expired draining node must re-enroll with a valid token, got: %v", err)
+	}
+
+	node, ok := globalClusterStore.GetNode("dp-drained")
+	if !ok {
+		t.Fatal("node must remain registered after re-enrollment")
+	}
+	if node.Status != "draining" {
+		t.Fatalf("operator-set draining state must survive re-enrollment, status = %q, want draining", node.Status)
+	}
+	// Sanity: this is a genuine recovery (new serial), not a no-op denial.
+	if node.CertSerial == "old-serial-drain" || node.CertSerial == "" {
+		t.Fatalf("node must carry a NEW serial, got %q", node.CertSerial)
+	}
+	if node.Labels["region"] != "us-west" {
+		t.Fatalf("admin-assigned labels must carry forward, got %v", node.Labels)
+	}
+}
+
 func TestEnroll_ValidCertNodeStillDenied_TokenUnconsumed(t *testing.T) {
 	swapEnrollFixture(t)
 	alerts := enrollAlertCapture(t)
