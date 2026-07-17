@@ -98,20 +98,35 @@ func TestM2Wall_CollectorContract(t *testing.T) {
 }
 
 // TestM2Wall_EverySectionWithinCeiling is the runtime proof of wall #2's class
-// invariant across the FULL roster: a real standard bundle's every section is
-// PUBLIC or INTERNAL (never SENSITIVE/SECRET), by construction of the redactor.
+// invariant across the FULL roster: every collector at L1 must ACTUALLY EMIT a
+// section (ok/partial + bytes) and that section must be PUBLIC or INTERNAL. It
+// deliberately does NOT accept an empty class_max: the runner pre-seeds a failed/
+// skipped section with class_max=PUBLIC and no payload, so accepting "" would let
+// a silently-failed or dropped L1 collector pass — defeating the proof.
 func TestM2Wall_EverySectionWithinCeiling(t *testing.T) {
 	res := buildRealBundle(t)
-	if len(res.Manifest.Sections) < len(m2CollectorRoster) {
-		t.Fatalf("bundle has %d sections, roster has %d — a collector silently dropped?",
-			len(res.Manifest.Sections), len(m2CollectorRoster))
-	}
+	byID := map[string]support.SectionEntry{}
 	for _, s := range res.Manifest.Sections {
+		byID[s.ID] = s
+	}
+	for _, id := range m2CollectorRoster {
+		s, ok := byID[id]
+		if !ok {
+			t.Fatalf("roster collector %q produced no manifest section", id)
+		}
+		// At L1 every roster collector is level-eligible, so it must run and write
+		// bytes — not be skipped/failed/unavailable or empty.
+		if s.Status != support.StatusOK && s.Status != support.StatusPartial {
+			t.Fatalf("roster collector %q status=%q (want ok/partial) — silently absent from the bundle", id, s.Status)
+		}
+		if s.SHA256 == "" || s.SizeBytes == 0 {
+			t.Fatalf("roster collector %q emitted no section payload (sha=%q size=%d)", id, s.SHA256, s.SizeBytes)
+		}
 		switch s.ClassMax {
-		case "", "PUBLIC", "INTERNAL":
-			// "" = skipped/failed section (no bytes written) — acceptable.
+		case "PUBLIC", "INTERNAL":
+			// within the shareable ceiling
 		default:
-			t.Fatalf("section %q class_max=%q exceeds INTERNAL (redaction ceiling breach)", s.ID, s.ClassMax)
+			t.Fatalf("section %q class_max=%q not within the INTERNAL ceiling", id, s.ClassMax)
 		}
 	}
 }
