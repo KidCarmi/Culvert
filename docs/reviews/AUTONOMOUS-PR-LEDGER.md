@@ -128,3 +128,53 @@ Ran a multi-lens fleet (4 subsystem mappers → 4 expert judges [product/arch/se
   NO open PR merges the root (`claude/culvert-tac-support-framework-vf4plr`) into
   main. Cannot be merged piecemeal; the whole subsystem is a product/architecture
   decision. Escalate as a unit.
+
+---
+
+## Session continuation — 2026-07-17 (afternoon): queue cleared
+
+### Systemic unblocker
+- **#789 fix(test): de-flake determinism/race gate — MERGED** (`ab33fdca`). Root-caused the
+  repo-wide `Deep · determinism` / `-race` flake to the hit-counter test family on MAIN
+  itself (not any PR): (a) `startHitCounterPersistence`'s goroutine raced `t.TempDir`
+  cleanup ("directory not empty") in two tests — fixed with a `done` channel the tests
+  wait on; (b) `TestSaveAndLoadHitCounters` silently assumed an empty global `policyStore`
+  — fixed with isolate+restore. Proven by negative control (revert reproduces the exact CI
+  failure) + 60× `-race` green. This flake had reddened the required Deep gate on #734,
+  #787, #788 and main's own qa-gate.
+
+### Merged
+- **#734 feat(diagnostics): audit-persistence health check — MERGED** (rebuilt from an
+  unrelated-history branch to a minimal 2-file delta on current main; main had since
+  shipped the `auditLogConfiguredPath` intent flag, so only the missing
+  `/api/diagnostics` verdict row was ported; 3 state tests, 20× -race).
+- **#787 feat(maint): RISK-022 E1c record-ref trust gate — MERGED** (`9ca4324b`). Both
+  Codex findings verified and fixed before merge: P1 → allowlist deliberately NOT
+  re-checked at reconcile (admission-time policy; digest-vs-tag re-match would spuriously
+  loud-stop) with an invariant test; P2 → admission journal now persists
+  TargetRef/TargetDigest for standalone image rollbacks (was: guaranteed loud-stop).
+- **#788 feat(support): TAC supportability framework M1–M4 — MERGED** (`33b760f6`).
+  Palo-grade hardening landed before merge: runtime raw-collector hard-gate (fail-closed
+  section), csb/1 wire-format contract test, 3-layer no-egress wall, fail-closed
+  grandfathering + `GrandfatheredReady` visibility, Codex P1 (retained_preview gated to
+  operator+) and P2 (case_id → persisted manifest) with red/green regression tests,
+  RISK-023 recorded (diagnose-tls InsecureSkipVerify accept; CodeQL alert #249 dismissed
+  by owner). ADRs 0012/0018–0022 remain PROPOSED under docs/support/rfc/ (not ratified).
+- **#786 decryptobs — merged by owner** (`140ca6fb`) after their review (author had marked
+  it "do not auto-merge"; respected).
+- **#736 security(review) — rebuilt on current main, pushed** (`efca07b7`, post-#788
+  rebase; gates running at ledger time). Findings re-verified function-by-function:
+  PORTED with red/green proofs — HIGH decryptprofile.Rename `s.order` re-key (silent
+  fleet-wide profile loss), MED import-side `stampObjectRefIDs`, MED dangling-ID delete
+  guard (enforcement name-fallback vs ID-authoritative walk divergence — the earlier
+  "superseded by S2" call was WRONG and corrected), MED `policyDraftEngaged`, LOW /ready
+  detail redaction, LOW edge-case-lab harden-runner, INFO loadHA escHtml. DROPPED as
+  already-on-main: interactive stampObjectRefIDs, Cascade COW (their regression tests
+  ported and green).
+
+### Closed as superseded
+- **#760, #768–#785** (19-PR incremental TAC stack) — closed after #788 merged with the
+  consolidated equivalent (owner pre-approved).
+
+### Open at ledger time
+- **#736 only** — awaiting gates on `efca07b7`; merge on green.
