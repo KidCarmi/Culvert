@@ -667,20 +667,62 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	return res, nil
 }
 
-// pruneSupportBundles enforces an oldest-first retention cap so persisted bundles
-// cannot grow without bound. The full age-based, crash-safe lifecycle janitor is
-// M4; this is the minimal M1 disk-safety bound. Each eviction is audited as
-// support.bundle.expire (system actor). Best-effort: an eviction failure is
-// logged and skipped, never fatal to the build that triggered it.
+// supportRetentionMaxAge is the age beyond which a persisted bundle is evicted
+// even when the count cap has room. Support bundles are ephemeral, regenerable
+// diagnostics, so a generous 30-day ceiling keeps stale diagnostics from
+// lingering on disk while comfortably outlasting any active support case.
+const supportRetentionMaxAge = 30 * 24 * time.Hour
+
+// pruneSupportBundles enforces the retention policy so persisted bundles cannot
+// grow without bound: an oldest-first COUNT cap (keep the newest `keep`) plus an
+// AGE cap (evict anything older than supportRetentionMaxAge, even below the count
+// cap). Each eviction is audited as support.bundle.expire (system actor).
+// Best-effort: an eviction failure is logged and skipped, never fatal.
 func pruneSupportBundles(keep int) {
+	pruneSupportBundlesAt(keep, supportRetentionMaxAge, time.Now())
+}
+
+// supportRetentionSweepInterval is how often the background janitor enforces
+// retention on an idle appliance (one that isn't creating new bundles, whose
+// creation path would otherwise be the only trigger).
+const supportRetentionSweepInterval = 6 * time.Hour
+
+// startSupportRetentionJanitor enforces the retention policy independently of
+// bundle creation: once at boot (so a restart ages out stale bundles) and then
+// periodically, so an idle appliance still honors the age cap after the clock
+// crosses it. Parented to ctx; exits on shutdown.
+func startSupportRetentionJanitor(ctx context.Context) {
+	pruneSupportBundles(supportRetentionKeep)
+	t := time.NewTicker(supportRetentionSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pruneSupportBundles(supportRetentionKeep)
+		}
+	}
+}
+
+// pruneSupportBundlesAt is the testable core: now + maxAge are injected.
+func pruneSupportBundlesAt(keep int, maxAge time.Duration, now time.Time) {
 	if keep < 1 {
 		return
 	}
 	sums := listSupportBundles() // newest-first
-	if len(sums) <= keep {
-		return
-	}
-	for _, s := range sums[keep:] {
+	for i := range sums {
+		s := &sums[i]
+		overCap := i >= keep
+		tooOld := false
+		if maxAge > 0 && s.CreatedAt != "" {
+			if t, err := time.Parse(time.RFC3339, s.CreatedAt); err == nil && now.Sub(t) > maxAge {
+				tooOld = true
+			}
+		}
+		if !overCap && !tooOld {
+			continue
+		}
 		// Defense-in-depth: BundleID here comes from manifest content, so re-guard
 		// against the path-traversal shape before any os.RemoveAll.
 		if !supportBundleIDRe.MatchString(s.BundleID) {
@@ -691,7 +733,14 @@ func pruneSupportBundles(keep int) {
 				strings.ReplaceAll(s.BundleID, "\n", ""), err)
 			continue
 		}
-		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+		reason := "retention cap"
+		switch {
+		case tooOld && overCap:
+			reason = "retention cap+age"
+		case tooOld:
+			reason = "retention age"
+		}
+		auditSystem("support.bundle.expire", s.BundleID, reason)
 	}
 }
 
