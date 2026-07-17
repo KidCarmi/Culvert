@@ -403,6 +403,33 @@ func TestDiagnoseTLS_PrivateBlocked(t *testing.T) {
 	}
 }
 
+// TestDiagnoseTLS_PublicPathViaSeam drives the full path: a public-resolving host
+// passes the context-bounded SSRF preflight (Codex #780) and the handshake seam
+// yields a ConnectionState that is summarized. No real network.
+func TestDiagnoseTLS_PublicPathViaSeam(t *testing.T) {
+	withStubResolver(t, func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+	})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	leaf := makeTestLeaf(t, "svc", "svc.example", now.Add(-time.Hour), now.Add(30*24*time.Hour))
+	prev := tlsHandshakeProbe
+	tlsHandshakeProbe = func(_ context.Context, _, _ string) (*tls.ConnectionState, error) {
+		return &tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256, PeerCertificates: []*x509.Certificate{leaf}}, nil
+	}
+	t.Cleanup(func() { tlsHandshakeProbe = prev })
+
+	d := diagnoseTLS(context.Background(), "svc.example:443", now)
+	if d.Blocked {
+		t.Fatal("public host wrongly blocked")
+	}
+	if !d.HandshakeOK || d.Leaf == nil {
+		t.Fatalf("handshake not summarized: %+v", d)
+	}
+	if d.Port != "443" || d.Host != "svc.example" {
+		t.Fatalf("host/port not carried: %q/%q", d.Host, d.Port)
+	}
+}
+
 // TestDiagnoseTLS_InvalidTarget proves malformed host:port is rejected without a dial.
 func TestDiagnoseTLS_InvalidTarget(t *testing.T) {
 	for _, bad := range []string{"_sip._tcp.x:443", "example.com:0", "example.com:70000", "example.com:abc", "bad host:443"} {

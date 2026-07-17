@@ -505,17 +505,31 @@ func diagnoseTLS(ctx context.Context, hostArg string, now time.Time) tlsDiagnosi
 	}
 	hostport := net.JoinHostPort(host, port)
 
-	// SSRF guard (inline so CodeQL sees it): refuse a target that resolves to a
-	// private/internal address before any dial — the connect-layer ssrfControl in
-	// the seam is the DNS-rebinding backstop.
-	if err := isPrivateHost(hostport); err != nil {
-		d.Blocked = true
-		return d
-	}
-
+	// The whole probe — including the SSRF resolution preflight — runs under the
+	// deadline so a wedged resolver can never exceed the advertised bound
+	// (isPrivateHost delegates to a context.Background() LookupHost, so it is NOT
+	// used here; the DNS lookup below is context-bounded instead).
 	lctx, cancel := context.WithTimeout(ctx, diagnoseTLSTimeout)
 	defer cancel()
 	start := now
+
+	// SSRF guard (inline so CodeQL sees it): resolve under the deadline and refuse a
+	// target that resolves to a private/internal address before any dial. The
+	// connect-layer ssrfControl in the seam is the DNS-rebinding backstop.
+	addrs, rErr := diagnoseLookupIP(lctx, host)
+	if rErr != nil {
+		d.Error = boundedErr(rErr.Error())
+		d.DurationMs = int64(time.Since(start) / time.Millisecond)
+		return d
+	}
+	for i := range addrs {
+		if isPrivateIP(addrs[i].IP) {
+			d.Blocked = true
+			d.DurationMs = int64(time.Since(start) / time.Millisecond)
+			return d
+		}
+	}
+
 	cs, err := tlsHandshakeProbe(lctx, hostport, host)
 	dur := int64(time.Since(start) / time.Millisecond)
 	if err != nil {
