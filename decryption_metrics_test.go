@@ -133,6 +133,24 @@ func globalDecSessionCount(t *testing.T, outcome, source, tlsVer string) int64 {
 	return 0
 }
 
+// inspectedSessionTotal sums the global coverage counter across all tls_versions for
+// outcome=inspected/source=policy_inspect. Used by the native-ALPN e2e to assert (delta)
+// that a successfully inspected native tunnel is counted, without depending on the exact
+// TLS version the loopback origin negotiates.
+func inspectedSessionTotal(t *testing.T) int64 {
+	t.Helper()
+	var sb strings.Builder
+	decSessions.writePrometheus(&sb)
+	var total int64
+	for _, m := range decSessionLineRE.FindAllStringSubmatch(sb.String(), -1) {
+		if m[1] == "inspected" && m[2] == "policy_inspect" {
+			n, _ := strconv.ParseInt(m[4], 10, 64)
+			total += n
+		}
+	}
+	return total
+}
+
 // TestRecordTunnelCloseDec_IncrementsCoverage proves the close seam is a session-counting
 // terminal: a non-nil outcome through recordTunnelCloseGatedDec bumps the coverage counter
 // exactly once (delta-based, so it is robust under -count/-shuffle accumulation).

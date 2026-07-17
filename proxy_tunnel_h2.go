@@ -122,7 +122,7 @@ func (s *h2StallReader) Close() error { return s.rc.Close() }
 // downstream and its handshake fails with no_application_protocol — but this is
 // identical to the strip path, which pins http/1.1 for all clients, and browsers
 // always include http/1.1 in their offer.)
-func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream net.Conn, targetHost, hostOnly string, tlsSkipVerify bool, match *PolicyMatch, id ProxyIdentity) {
+func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream net.Conn, targetHost, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		rawUpstream.Close() //nolint:errcheck // best-effort cleanup
@@ -160,7 +160,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	if clientOffersH2(clientOffer) {
 		upstreamProtos = []string{"h2", "http/1.1"}
 	}
-	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, tlsSkipVerify, upstreamProtos, match)
+	upstreamTLS, up, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, dec.SkipVerify, upstreamProtos, match)
 	if err != nil {
 		rawClient.Close() //nolint:errcheck // best-effort cleanup (200 already sent; cannot 502)
 		// Learn-only on the native path: the 200 is already sent, so the current
@@ -192,14 +192,28 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
+	// ADR-0011 coverage: count the native inspected session ONCE here — both handshakes
+	// succeeded, and both dispatches (native H2 and native H1-fallback) are inspect-
+	// success terminals that never reach the strip path's counter or the close seam, so
+	// without this native-ALPN rules would silently under-report in
+	// culvert_decrypt_sessions_total (Codex #803). The per-request dec BLOCK on native
+	// paths stays a documented follow-up; only the session COUNT lands here.
+	recordDecryptSession(inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match))
+	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, match, id)
+}
+
+// dispatchNativeInspect routes an established native-ALPN inspected tunnel to the H2 or H1
+// enforcement loop by the negotiated protocols — both are inspect-success terminals over
+// the shared pipeline. Extracted from handleInspectNativeALPN to keep that orchestrator
+// under the funlen threshold. The H1 leg passes a nil dec block: the native path's own
+// ADR-0011 inspected block (carrying the h2 leg's TLS state) is a documented follow-up.
+func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
 	if up == "h2" && down == "h2" {
 		handleInspectH2(r, clientTLS, upstreamTLS, hostOnly, match, id)
 		return
 	}
-	// Both legs HTTP/1.1 (origin declined h2, or client offered only h1) — reuse
-	// the shared H1 inspection loop. One enforcement path for both protocols.
-	// decBlock is nil here: the native-ALPN path's own ADR-0011 inspected block
-	// (which would carry the h2 leg's TLS state) is a documented follow-up slice.
+	// Both legs HTTP/1.1 (origin declined h2, or client offered only h1) — reuse the
+	// shared H1 inspection loop. One enforcement path for both protocols.
 	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, nil)
 }
 

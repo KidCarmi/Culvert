@@ -624,7 +624,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// this flow: reordering here would change the strip path's 502-before-200
 	// semantics. It takes ownership of the freshly-dialled rawUpstream.
 	if !resolveStripALPN(match) {
-		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec.SkipVerify, match, id)
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec, match, id)
 		return
 	}
 

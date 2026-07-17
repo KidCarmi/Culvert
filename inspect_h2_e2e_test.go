@@ -88,6 +88,11 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	inspectRuleNative()
 
 	target := origin.Listener.Addr().String()
+	// ADR-0011 P2: the native-ALPN inspect path must count the session in the coverage
+	// metric (Codex #803 — it returns before the strip path's counter). Capture the
+	// baseline before driving the session, then assert the delta after a successful
+	// inspected round-trip.
+	coverageBefore := inspectedSessionTotal(t)
 	tc, proto := connectTLSWithProto(t, proxyURL.Host, target, "origin.test", proxyRoots, []string{"h2", "http/1.1"})
 	if proto != "h2" {
 		t.Fatalf("downstream ALPN = %q, want h2 (native inspection must not downgrade)", proto)
@@ -116,6 +121,9 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	}
 	if sawIdentity != "" {
 		t.Fatalf("origin saw X-User-Identity=%q — pipeline scrub did not run on the H2 path", sawIdentity)
+	}
+	if got := inspectedSessionTotal(t); got <= coverageBefore {
+		t.Fatalf("culvert_decrypt_sessions_total{outcome=inspected} did not increment for the native-H2 session (%d ≤ %d)", got, coverageBefore)
 	}
 }
 
