@@ -301,9 +301,12 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 			level = currentDebugLevel()
 		}
 		// Optional ?case= binds the bundle to a support case for triage/history.
-		caseID := strings.TrimSpace(r.URL.Query().Get("case"))
+		// Validate the RAW value (no trimming): the grammar disallows whitespace, so
+		// a padded "%20CASE-7%20" or whitespace-only "%20" must 400, not be silently
+		// trimmed into a different/empty case. An absent-or-empty param = no case.
+		caseID := r.URL.Query().Get("case")
 		if caseID != "" && !validSupportCaseID(caseID) {
-			http.Error(w, "invalid case id (1..64 of letters/digits/._-)", http.StatusBadRequest)
+			http.Error(w, "invalid case id (1..64 of letters/digits/._-, no whitespace)", http.StatusBadRequest)
 			return
 		}
 		res, err := createSupportBundle(r.Context(), scope, level, caseID)

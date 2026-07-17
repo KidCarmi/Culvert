@@ -76,13 +76,17 @@ func TestSupportBundle_InvalidCaseIDRejected(t *testing.T) {
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = prev })
 
-	r := httptest.NewRequest(http.MethodPost, "/api/support/bundles?case=bad%20id", nil)
-	rec := httptest.NewRecorder()
-	apiSupportBundles(rec, withRoleCtx(r, RoleAdmin))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("invalid case id code=%d want 400 (body=%q)", rec.Code, rec.Body.String())
+	// Malformed values must 400 BEFORE any build — including whitespace-padded and
+	// whitespace-only (Codex #781: the raw value is validated, never trimmed).
+	for _, q := range []string{"case=bad%20id", "case=%20CASE-7%20", "case=%20", "case=a%2Fb"} {
+		r := httptest.NewRequest(http.MethodPost, "/api/support/bundles?"+q, nil)
+		rec := httptest.NewRecorder()
+		apiSupportBundles(rec, withRoleCtx(r, RoleAdmin))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q code=%d want 400 (body=%q)", q, rec.Code, rec.Body.String())
+		}
 	}
-	// No bundle was persisted.
+	// No bundle was persisted by any of the rejected requests.
 	if n := len(listSupportBundles()); n != 0 {
 		t.Fatalf("a bundle was created despite the invalid case id (%d listed)", n)
 	}
