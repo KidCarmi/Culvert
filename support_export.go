@@ -117,20 +117,22 @@ func decodeX25519PubKey(s string) (*[sealbox.KeyLen]byte, error) {
 		return nil, errors.New("empty or oversized key")
 	}
 	for _, dec := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if b, err := dec.DecodeString(s); err == nil {
-			if len(b) != sealbox.KeyLen {
-				return nil, errors.New("key must decode to 32 bytes")
-			}
-			var k [sealbox.KeyLen]byte
-			copy(k[:], b)
-			// Reject low-order/invalid X25519 points: sealing to one derives an
-			// all-zero shared secret, so the blob would be openable without the
-			// recipient's private key — defeating the E2E guarantee.
-			if err := sealbox.ValidateRecipientPublicKey(&k); err != nil {
-				return nil, errors.New("key is not a valid X25519 point")
-			}
-			return &k, nil
+		b, err := dec.DecodeString(s)
+		if err != nil {
+			continue
 		}
+		if len(b) != sealbox.KeyLen {
+			return nil, errors.New("key must decode to 32 bytes")
+		}
+		var k [sealbox.KeyLen]byte
+		copy(k[:], b)
+		// Reject low-order/invalid X25519 points: sealing to one derives an
+		// all-zero shared secret, so the blob would be openable without the
+		// recipient's private key — defeating the E2E guarantee.
+		if err := sealbox.ValidateRecipientPublicKey(&k); err != nil {
+			return nil, errors.New("key is not a valid X25519 point")
+		}
+		return &k, nil
 	}
 	return nil, errors.New("not valid base64")
 }
