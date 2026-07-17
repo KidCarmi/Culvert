@@ -287,10 +287,37 @@ func validateProxyHost(host string) *ValidationIssue {
 	if strings.Contains(host, ":") {
 		return bad("proxy host must not include a port (set proxyPort instead)")
 	}
-	if _, ok := hostutil.NormalizeHostStrict(host); !ok {
-		return bad("proxy host is not a valid hostname (IDNA normalization failed)")
+	norm, ok := hostutil.NormalizeHostStrict(host)
+	if !ok || !validHostnameLabels(norm) {
+		return bad("proxy host is not a valid hostname")
 	}
 	return nil
+}
+
+// validHostnameLabels reports whether host (already lowercased and IDNA
+// punycoded) is syntactically valid: dot-separated labels of 1-63 chars from
+// [a-z0-9_-], no label starting or ending with '-'. The permissive IDNA
+// conversion alone passes punctuation like "bad#host" straight through, so
+// this label check is what actually rejects malformed names.
+func validHostnameLabels(host string) bool {
+	if host == "" || len(host) > MaxEntryLen {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // normalizeExclusion parses one raw exclusion entry into canonical form.
@@ -316,7 +343,7 @@ func normalizeExclusion(raw string) (entry NormalizedExclusion, warn, reject *Va
 			return bad(IssueInvalidWildcard, "wildcard exclusions must look like *.example.com")
 		}
 		norm, ok := hostutil.NormalizeHostStrict(rest)
-		if !ok || norm == "" {
+		if !ok || !validHostnameLabels(norm) {
 			return bad(IssueInvalidHost, fmt.Sprintf("%q is not a valid domain", rest))
 		}
 		return NormalizedExclusion{Kind: KindWildcard, Host: norm, Raw: trimmed}, nil, nil
@@ -327,7 +354,7 @@ func normalizeExclusion(raw string) (entry NormalizedExclusion, warn, reject *Va
 			return NormalizedExclusion{Kind: KindHostLiteral, Host: strings.ToLower(strings.Trim(trimmed, "[]")), Raw: trimmed}, nil, nil
 		}
 		norm, ok := hostutil.NormalizeHostStrict(trimmed)
-		if !ok || norm == "" {
+		if !ok || !validHostnameLabels(norm) {
 			return bad(IssueInvalidHost, fmt.Sprintf("%q is not a valid domain, IP, or CIDR", trimmed))
 		}
 		return NormalizedExclusion{Kind: KindDomain, Host: norm, Raw: trimmed}, nil, nil

@@ -197,10 +197,12 @@ func TestCompile_ProxyChain(t *testing.T) {
 // ─── Size guardrail ───────────────────────────────────────────────────────────
 
 func TestValidateConfig_OutputSizeGuardrail(t *testing.T) {
-	// ~6000 entries × ~240 chars ≈ several MB compiled — must reject.
+	// ~6000 entries × ~200 chars (valid ≤63-char labels) ≈ several MB
+	// compiled — must reject on size, not on entry grammar.
+	longSuffix := strings.Repeat("x", 60) + "." + strings.Repeat("y", 60) + "." + strings.Repeat("z", 60)
 	excl := make([]string, 6000)
 	for i := range excl {
-		excl[i] = fmt.Sprintf("host%04d.%s.example", i, strings.Repeat("x", 200))
+		excl[i] = fmt.Sprintf("host%04d.%s.example", i, longSuffix)
 	}
 	_, issues := ValidateConfig(Config{ProxyHost: "p.example", Exclusions: excl})
 	found := false

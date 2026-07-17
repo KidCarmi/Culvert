@@ -64,7 +64,7 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 		if len(issues) > 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
 				"error":  "validation failed",
 				"issues": issues,
 			})
@@ -85,7 +85,7 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 			sanitizeLog(canonical.ProxyHost), canonical.ProxyPort, len(canonical.Exclusions)))
 		saveConfigVersion(actor, "pac.update")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(struct { //nolint:errcheck
+		json.NewEncoder(w).Encode(struct { //nolint:errcheck // best-effort response write
 			PACConfig
 			Warnings []pac.ValidationIssue `json:"warnings,omitempty"`
 		}{PACConfig: canonical, Warnings: norm.Warnings})

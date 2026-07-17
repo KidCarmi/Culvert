@@ -20,7 +20,7 @@ import (
 func loadPAC(cfg pacStartupConfig) error {
 	if dir := filepath.Dir(cfg.ConfigPath); dir != "." {
 		// Best-effort: Store.Set surfaces real write failures later.
-		_ = os.MkdirAll(dir, 0o700) //nolint:errcheck
+		_ = os.MkdirAll(dir, 0o700) //nolint:errcheck // best-effort; Store.Set surfaces real failures
 	}
 	migrated, err := pacStore.LoadMigrate(cfg.ConfigPath, cfg.LegacyConfigPath)
 	if err != nil {

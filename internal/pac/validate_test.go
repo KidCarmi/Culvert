@@ -39,6 +39,17 @@ func TestValidateConfig_Table(t *testing.T) {
 		{"bare star", Config{Exclusions: []string{"*"}}, IssueInvalidWildcard},
 		{"double star", Config{Exclusions: []string{"*.*.corp.com"}}, IssueInvalidWildcard},
 		{"invalid host", Config{Exclusions: []string{"exa mple.com"}}, IssueControlChars},
+
+		// Punctuation the permissive IDNA conversion passes through must be
+		// rejected by the hostname-label check (Codex P2 finding on PR #799).
+		{"proxy host with hash", Config{ProxyHost: "bad#host"}, IssueInvalidProxyHost},
+		{"proxy host with query", Config{ProxyHost: "bad?host"}, IssueInvalidProxyHost},
+		{"exclusion with hash", Config{Exclusions: []string{"bad#host.example"}}, IssueInvalidHost},
+		{"wildcard with hash", Config{Exclusions: []string{"*.bad#host.example"}}, IssueInvalidHost},
+		{"label leading hyphen", Config{Exclusions: []string{"-bad.example"}}, IssueInvalidHost},
+		{"label trailing hyphen", Config{Exclusions: []string{"bad-.example"}}, IssueInvalidHost},
+		{"label too long", Config{Exclusions: []string{strings.Repeat("a", 64) + ".example"}}, IssueInvalidHost},
+		{"empty label", Config{Exclusions: []string{"bad..example"}}, IssueInvalidHost},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

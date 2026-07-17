@@ -870,31 +870,6 @@ func importPolicyRules(b *configBackup, replaceMode bool) {
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
-// importPACPreValidationOK strictly validates the PAC fields of an import
-// payload BEFORE any store mutation, writing a structured 400 and returning
-// false on failure. Only the incoming payload is judged; the tolerant apply
-// path never rejects.
-func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
-	if b.PACProxyHost == "" && b.PACProxyPort == 0 && len(b.PACExclusions) == 0 {
-		return true
-	}
-	_, issues := pac.ValidateConfig(PACConfig{
-		ProxyHost:  b.PACProxyHost,
-		ProxyPort:  b.PACProxyPort,
-		Exclusions: b.PACExclusions,
-	})
-	if len(issues) == 0 {
-		return true
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
-		"error":  "PAC configuration in import failed validation",
-		"issues": issues,
-	})
-	return false
-}
-
 func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1103,6 +1078,31 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// survives a restart — import previously left it runtime-only.
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
+}
+
+// importPACPreValidationOK strictly validates the PAC fields of an import
+// payload BEFORE any store mutation, writing a structured 400 and returning
+// false on failure. Only the incoming payload is judged; the tolerant apply
+// path never rejects.
+func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
+	if b.PACProxyHost == "" && b.PACProxyPort == 0 && len(b.PACExclusions) == 0 {
+		return true
+	}
+	_, issues := pac.ValidateConfig(PACConfig{
+		ProxyHost:  b.PACProxyHost,
+		ProxyPort:  b.PACProxyPort,
+		Exclusions: b.PACExclusions,
+	})
+	if len(issues) == 0 {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
+		"error":  "PAC configuration in import failed validation",
+		"issues": issues,
+	})
+	return false
 }
 
 // importCategoryTaxonomy applies URL categories then category groups from an

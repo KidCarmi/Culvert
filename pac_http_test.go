@@ -29,7 +29,7 @@ func resetPACHTTPGlobals(t *testing.T) {
 }
 
 func pacGET(host, ifNoneMatch string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", nil)
+	req := httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
 	req.Host = host
 	if ifNoneMatch != "" {
 		req.Header.Set("If-None-Match", ifNoneMatch)
