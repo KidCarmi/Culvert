@@ -253,7 +253,16 @@ func TestDiagnoseDNS_InvalidHostRejected(t *testing.T) {
 		called = true
 		return nil, nil
 	})
-	for _, bad := range []string{"", "http://example.com", "example.com:443", "a/b", "user@host", "has space", "x\ny"} {
+	badHosts := []string{
+		"", "http://example.com", "example.com:443", "a/b", "user@host", "has space", "x\ny",
+		"_sip._tcp.internal",                 // SRV-style: underscore is not LDH (Codex #779)
+		"a..b",                               // empty label
+		"host.",                              // trailing dot ⇒ empty final label
+		"-lead.example",                      // leading hyphen label
+		"trail-.example",                     // trailing hyphen label
+		strings.Repeat("a", 64) + ".example", // label > 63 bytes
+	}
+	for _, bad := range badHosts {
 		rec := httptest.NewRecorder()
 		apiDiagnoseDNS(rec, roleReq(RoleOperator, http.MethodPost, "/api/diagnose/dns", map[string]any{"host": bad}))
 		if rec.Code != http.StatusBadRequest {

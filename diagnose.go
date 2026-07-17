@@ -255,20 +255,29 @@ var diagnoseLookupIP = func(ctx context.Context, host string) ([]net.IPAddr, err
 	return net.DefaultResolver.LookupIPAddr(ctx, host)
 }
 
-// validDiagnoseHost enforces that the probe target is a bare hostname: no scheme,
-// port, path, userinfo, whitespace, or control characters, and within DNS length
-// limits. This keeps an operator-supplied string from being anything but a name to
-// resolve (defence-in-depth alongside the SSRF guard below).
+// validDiagnoseHost enforces that the probe target is a valid bare hostname —
+// LDH-label grammar (letters/digits/hyphen), each label 1..63 bytes with no
+// leading/trailing hyphen, no empty labels (rejects trailing dots and "a..b"),
+// total ≤ 253, and no underscore (so SRV-style names like "_sip._tcp.internal"
+// are refused). This keeps an operator-supplied string from being anything but a
+// resolvable hostname (defence-in-depth alongside the SSRF guard below).
 func validDiagnoseHost(h string) bool {
 	if h == "" || len(h) > 253 {
 		return false
 	}
-	if strings.ContainsAny(h, "/@: \t\r\n\\?#%") {
-		return false
-	}
-	for _, r := range h {
-		if r < 0x20 || r == 0x7f { // control chars
+	for _, label := range strings.Split(h, ".") {
+		if len(label) == 0 || len(label) > 63 {
 			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			isLDH := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+			if !isLDH {
+				return false
+			}
 		}
 	}
 	return true
