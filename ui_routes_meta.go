@@ -627,4 +627,11 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/approve", Handler: "apiSupportBundleApprove", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 			Note: "approve a pending bundle for download after redaction-report review (mandatory-preview gate); admin; audited as support.bundle.approve"}}},
+	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "elevate the default bundle capture depth for a bounded window (mandatory positive ttl_seconds); admin; audited as support.debug_level.set"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+				Note: "revert the capture level to baseline immediately; operator+; audited as support.debug_level.clear"}}},
 }

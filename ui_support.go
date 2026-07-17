@@ -45,7 +45,110 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/bundles/{id}", apiSupportBundleItem)
 	mux.HandleFunc("/api/support/bundles/{id}/redaction-report", apiSupportBundleReport)
 	mux.HandleFunc("/api/support/bundles/{id}/approve", apiSupportBundleApprove)
+	mux.HandleFunc("/api/support/debug-level", apiSupportDebugLevel)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
+}
+
+// debugLevelView is the read-only status of the capture-level controller.
+type debugLevelView struct {
+	EffectiveLevel int    `json:"effective_level"` // level a bundle would capture at right now
+	BaselineLevel  int    `json:"baseline_level"`  // the un-elevated default
+	Elevated       bool   `json:"elevated"`        // an unexpired elevation is in force
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	RemainingSecs  int64  `json:"remaining_secs,omitempty"`
+	SetBy          string `json:"set_by,omitempty"`
+	MinTTLSecs     int64  `json:"min_ttl_secs"`
+	MaxTTLSecs     int64  `json:"max_ttl_secs"`
+}
+
+type debugLevelSetReq struct {
+	Level      int   `json:"level"`
+	TTLSeconds int64 `json:"ttl_seconds"`
+}
+
+// apiSupportDebugLevel is the capture-level controller surface:
+//   - GET (viewer): the effective level, elevation state, and remaining TTL.
+//   - POST (admin): elevate the default capture depth for a BOUNDED window. A
+//     positive, in-range ttl_seconds is MANDATORY (400 otherwise) — an elevation
+//     can never be open-ended.
+//   - DELETE (operator): revert to baseline immediately.
+func apiSupportDebugLevel(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		now := time.Now()
+		eff := effectiveDebugLevel(now)
+		view := debugLevelView{
+			EffectiveLevel: int(eff),
+			BaselineLevel:  int(debugLevelBaseline),
+			Elevated:       eff != debugLevelBaseline,
+			MinTTLSecs:     int64(debugLevelMinTTL / time.Second),
+			MaxTTLSecs:     int64(debugLevelMaxTTL / time.Second),
+		}
+		debugLevelMu.Lock()
+		st := readDebugLevelStateLocked()
+		debugLevelMu.Unlock()
+		if st.ExpiresAt != "" {
+			if exp, err := time.Parse(time.RFC3339, st.ExpiresAt); err == nil && now.Before(exp) {
+				view.ExpiresAt = st.ExpiresAt
+				view.RemainingSecs = int64(exp.Sub(now).Seconds())
+				view.SetBy = st.SetBy
+			}
+		}
+		jsonOK(w, view)
+
+	case http.MethodPost:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var req debugLevelSetReq
+		if err := decodeJSON(r, &req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Level < 0 || req.Level > 4 {
+			http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
+			return
+		}
+		// Mandatory TTL: a positive, bounded window is required.
+		if req.TTLSeconds <= 0 {
+			http.Error(w, "ttl_seconds is required and must be positive", http.StatusBadRequest)
+			return
+		}
+		ttl := time.Duration(req.TTLSeconds) * time.Second
+		exp, err := setDebugLevel(support.DebugLevel(req.Level), ttl, sanitizeLog(auditActor(r)), time.Now())
+		if err != nil {
+			if errors.Is(err, errDebugTTL) {
+				http.Error(w, fmt.Sprintf("ttl_seconds must be between %d and %d",
+					int64(debugLevelMinTTL/time.Second), int64(debugLevelMaxTTL/time.Second)), http.StatusBadRequest)
+				return
+			}
+			logger.Printf("support: set debug level failed: %v", err)
+			http.Error(w, "could not set debug level", http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "support.debug_level.set", "debug-level",
+			fmt.Sprintf("L%d until %s", req.Level, exp.Format(time.RFC3339)))
+		jsonOK(w, map[string]any{"level": req.Level, "expires_at": exp.Format(time.RFC3339)})
+
+	case http.MethodDelete:
+		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		if err := clearDebugLevel(); err != nil {
+			logger.Printf("support: clear debug level failed: %v", err)
+			http.Error(w, "could not clear debug level", http.StatusInternalServerError)
+			return
+		}
+		auditEvent(r, "support.debug_level.clear", "debug-level", "reverted to baseline")
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		w.Header().Set("Allow", "GET, POST, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // apiSupportBundleReport serves a persisted bundle's redaction report — the
@@ -182,11 +285,19 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown incident scope", http.StatusBadRequest)
 			return
 		}
-		// Optional ?level= (0..4) for debug-capture depth (default L1 standard).
-		level, ok := parseSupportLevel(r.URL.Query().Get("level"))
-		if !ok {
-			http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
-			return
+		// Optional ?level= (0..4) explicitly overrides the capture depth. When
+		// absent, the effective controller level applies — the operator's bounded
+		// elevation (if any), else baseline L1.
+		var level support.DebugLevel
+		if r.URL.Query().Has("level") {
+			lv, ok := parseSupportLevel(r.URL.Query().Get("level"))
+			if !ok {
+				http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
+				return
+			}
+			level = lv
+		} else {
+			level = currentDebugLevel()
 		}
 		res, err := createSupportBundle(r.Context(), scope, level)
 		if err != nil {

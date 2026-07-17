@@ -4003,6 +4003,25 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">Capture level</div>
+            <p class="hint">Elevate the default bundle capture depth for a bounded window. A TTL is <strong>mandatory</strong> — the level auto-reverts to baseline when it expires (even across a restart).</p>
+            <div id="support-debug-level" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
+              <label class="hint" for="support-dl-level">Level</label>
+              <select id="support-dl-level" class="input sm" title="Elevated capture depth">
+                <option value="1">L1 (baseline)</option>
+                <option value="2">L2 (+runtime)</option>
+                <option value="3">L3</option>
+                <option value="4">L4</option>
+              </select>
+              <label class="hint" for="support-dl-ttl">TTL (min)</label>
+              <input id="support-dl-ttl" class="input sm" type="number" min="1" max="1440" value="60" style="width:80px" title="Minutes until auto-revert (1–1440)">
+              <button class="btn primary sm" data-click="supportSetDebugLevel" data-min-role="admin" title="Elevate capture level for the window">Set level</button>
+              <button class="btn ghost sm" data-click="supportClearDebugLevel" data-min-role="operator" title="Revert to baseline now">Revert now</button>
+            </div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
@@ -4383,6 +4402,8 @@ document.addEventListener('click', e => {
     case 'loadReleases':           loadReleases(); break;
     case 'loadSupport':            loadSupport(); break;
     case 'supportCreateBundle':    supportCreateBundle(); break;
+    case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
+    case 'supportClearDebugLevel': supportClearDebugLevel(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -11716,10 +11737,13 @@ async function loadSupport() {
   });
   // The three reads are independent — fetch concurrently, render each as it
   // resolves, and surface per-panel errors without letting one fail the others.
-  const [healthR, statusR, bundlesR] = await Promise.allSettled([
+  const dlEl = document.getElementById('support-debug-level');
+  if (dlEl) { dlEl.innerHTML = '<p class="hint">Loading…</p>'; dlEl.setAttribute('aria-busy', 'true'); }
+  const [healthR, statusR, bundlesR, dlR] = await Promise.allSettled([
     api('/api/health/explain'),
     api('/api/support/status'),
     api('/api/support/bundles'),
+    api('/api/support/debug-level'),
   ]);
   if (healthR.status === 'fulfilled') renderSupportHealth(healthR.value);
   else if (healthEl) healthEl.innerHTML = '<p class="hint">Failed to load health: ' + escHtml(healthR.reason.message) + '</p>';
@@ -11727,7 +11751,25 @@ async function loadSupport() {
   else if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(statusR.reason.message) + '</p>';
   if (bundlesR.status === 'fulfilled') { _supportBundles = bundlesR.value || []; renderSupportBundles(_supportBundles); }
   else if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(bundlesR.reason.message) + '</p>';
-  [healthEl, statusEl, bundlesEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+  if (dlR.status === 'fulfilled') renderSupportDebugLevel(dlR.value);
+  else if (dlEl) dlEl.innerHTML = '<p class="hint">Failed to load capture level: ' + escHtml(dlR.reason.message) + '</p>';
+  [healthEl, statusEl, bundlesEl, dlEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+}
+
+function renderSupportDebugLevel(d) {
+  const el = document.getElementById('support-debug-level');
+  if (!el) return;
+  d = d || {};
+  const eff = _supportLevelName[d.effective_level] || ('L' + d.effective_level);
+  if (d.elevated) {
+    const mins = Math.max(0, Math.round((d.remaining_secs || 0) / 60));
+    el.innerHTML = '<p class="hint">Effective <strong style="color:var(--orange)">' + escHtml(eff) +
+      '</strong> (elevated) · reverts to L' + escHtml(String(d.baseline_level)) + ' in ~' + escHtml(String(mins)) +
+      ' min' + (d.set_by ? ' · set by ' + escHtml(String(d.set_by)) : '') + '</p>';
+  } else {
+    el.innerHTML = '<p class="hint">Effective <strong style="color:var(--green)">' + escHtml(eff) +
+      '</strong> (baseline) · no elevation in force</p>';
+  }
 }
 
 function renderSupportHealth(oc) {
@@ -11852,6 +11894,33 @@ async function supportCreateBundle() {
     toast('Bundle create failed: ' + err.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+async function supportSetDebugLevel() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const levelSel = document.getElementById('support-dl-level');
+  const ttlInp = document.getElementById('support-dl-ttl');
+  const level = parseInt((levelSel && levelSel.value) || '1', 10);
+  const mins = parseInt((ttlInp && ttlInp.value) || '0', 10);
+  if (!(mins > 0)) { toast('A positive TTL (minutes) is required', 'error'); return; }
+  try {
+    await api('/api/support/debug-level', { method: 'POST', body: JSON.stringify({ level: level, ttl_seconds: mins * 60 }) });
+    toast('Capture level set to L' + level + ' for ' + mins + ' min', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Set level failed: ' + err.message, 'error');
+  }
+}
+
+async function supportClearDebugLevel() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  try {
+    await api('/api/support/debug-level', { method: 'DELETE' });
+    toast('Capture level reverted to baseline', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Revert failed: ' + err.message, 'error');
   }
 }
 
