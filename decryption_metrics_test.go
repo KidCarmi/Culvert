@@ -36,20 +36,20 @@ func scrapeDecSessions(t *testing.T, c *decSessionCounter) map[[3]string]int64 {
 
 // boundedLabelSets returns the closed membership sets for each label, for the cardinality
 // invariant: no metric label may ever carry a value outside these.
-func boundedLabelSets() (map[string]bool, map[string]bool, map[string]bool) {
-	oc := map[string]bool{}
+func boundedLabelSets() (outcomes, sources, tlsVers map[string]bool) {
+	outcomes = map[string]bool{}
 	for _, o := range decryptobs.AllOutcomes {
-		oc[o.String()] = true
+		outcomes[o.String()] = true
 	}
-	ds := map[string]bool{}
+	sources = map[string]bool{}
 	for _, d := range decryptobs.AllDecisionSources {
-		ds[d.String()] = true
+		sources[d.String()] = true
 	}
-	tv := map[string]bool{}
+	tlsVers = map[string]bool{}
 	for _, v := range decryptobs.AllTLSVersions {
-		tv[v.String()] = true
+		tlsVers[v.String()] = true
 	}
-	return oc, ds, tv
+	return outcomes, sources, tlsVers
 }
 
 // TestDecSessionCounter_RecordAndExposition pins exact counts and the text-exposition
