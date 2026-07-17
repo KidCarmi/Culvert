@@ -39,6 +39,8 @@ var collectedStructs = []any{
 	cdrSection{},
 	scanSection{},
 	runtimeSection{},
+	timelineSection{},
+	timelineEvent{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

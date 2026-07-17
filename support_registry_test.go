@@ -35,6 +35,8 @@ var m2CollectorRoster = []string{
 	"upstream", "cdr", "scan",
 	// M3 runtime capture (L2)
 	"runtime",
+	// M3 operational timeline (L1)
+	"timeline",
 }
 
 func TestM2Wall_RosterLocked(t *testing.T) {

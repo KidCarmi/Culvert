@@ -16,7 +16,7 @@ import "sort"
 // applies the scope gate before the level gate, so a level-gated collector must be
 // a scope candidate here or it can never run in a scoped bundle regardless of the
 // requested level — it is still level-gated out below its MinLevel.
-var supportScopeBaseline = []string{"product", "health", "readiness", "diagnostics", "crash", "runtime"}
+var supportScopeBaseline = []string{"product", "health", "readiness", "diagnostics", "crash", "runtime", "timeline"}
 
 // supportIncidentScopes maps a scope name to its incident-specific collector IDs
 // (baseline is unioned in by resolveSupportScope). IDs must exist in the

@@ -137,7 +137,7 @@ func TestReusedCollectors_SectionsPresent(t *testing.T) {
 	for _, s := range res.Manifest.Sections {
 		ids[s.ID] = true
 	}
-	for _, want := range []string{"config", "policy", "audit", "metrics", "logs", "tls", "config_versions", "governance", "upstream", "cdr", "scan"} {
+	for _, want := range []string{"config", "policy", "audit", "metrics", "logs", "tls", "config_versions", "governance", "upstream", "cdr", "scan", "timeline"} {
 		if !ids[want] {
 			t.Errorf("standard bundle missing reused-accessor section %q", want)
 		}
