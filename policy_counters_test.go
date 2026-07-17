@@ -435,8 +435,12 @@ func TestStartHitCounterPersistence_DoesNotLoad(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	startHitCounterPersistence(ctx, path)
+	// Cancel AND wait for the saver goroutine's final on-cancel save to finish
+	// before t.TempDir()'s RemoveAll runs (registered earlier ⇒ runs after this
+	// in LIFO order); otherwise that save races the cleanup and recreates a file
+	// in the temp dir ("directory not empty").
+	done := startHitCounterPersistence(ctx, path)
+	t.Cleanup(func() { cancel(); <-done })
 
 	ruleMet.mu.RLock()
 	_, loaded := ruleMet.hits["decoupled-rule"]
@@ -472,8 +476,11 @@ func TestHitCounterPersistence_StartupOrderPreservesCounts(t *testing.T) {
 		t.Fatalf("after restore, cell HitCount = %d, want 7 (restore must populate cells before any save)", got)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	startHitCounterPersistence(ctx, path)
+	// Cancel AND wait for the saver goroutine's final on-cancel save to finish
+	// before t.TempDir()'s RemoveAll runs; otherwise that save races the cleanup
+	// and recreates a file in the temp dir ("directory not empty").
+	done := startHitCounterPersistence(ctx, path)
+	t.Cleanup(func() { cancel(); <-done })
 	saveHitCounters(path)
 
 	data, err := os.ReadFile(path)
