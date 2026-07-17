@@ -175,6 +175,38 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 // caller-provided opError carries its own status (typically 400 or
 // 500) for admission-time failures.
 //
+// admissionJournalRecord builds the PhaseAdmitted crash-recovery record for a
+// journaled op (RISK-022).
+//
+// Mode is persisted because it is the ONLY durable signal of which rollback was
+// interrupted, and image vs data need different recovery (image is
+// Docker-reconcilable; data must NOT be auto-reconciled). "" for upgrades.apply.
+//
+// For a standalone image rollback the target is FIXED and fully validated at
+// admission (strict repo@sha256 shape + image_allowlist in rollbackImage), and
+// no later stage folds it in (journal_phases is apply-specific) — so the
+// admission record must carry TargetRef/TargetDigest itself. Otherwise the
+// record has no actionable ref and the E1c trust gate (validateReconcileRefs)
+// can only mark it invalid, making an interrupted image rollback — documented
+// as Docker-reconcilable — permanently loud-stop instead of reconciling.
+func admissionJournalRecord(opID, kind, actor string, params map[string]interface{}) journal.Record {
+	now := time.Now().UTC()
+	mode, _ := params["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
+	rec := journal.Record{
+		OpID: opID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
+		Actor: actor, StartedAt: now, UpdatedAt: now,
+	}
+	if kind == ops.KindRollbackCreate && mode == "image" {
+		if ref, _ := params["image_ref"].(string); ref != "" { //nolint:errcheck // absent/typed-nil → ""
+			rec.TargetRef = ref
+			if i := strings.Index(ref, "@sha256:"); i >= 0 {
+				rec.TargetDigest = ref[i+len("@sha256:"):]
+			}
+		}
+	}
+	return rec
+}
+
 //nolint:cyclop // single-pass admission flow; splitting hides the dedup→build→spawn ordering
 func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempotencyKey string, paramsForAudit map[string]interface{}, buildStages func() ([]ops.FlowStage, *opError), opts ...startOpt) (*ops.Op, bool, *opError) {
 	var cfg startCfg
@@ -246,32 +278,7 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 	// it, we refuse to run it (a broken journal, e.g. disk-full, must not silently
 	// leave a destructive op unrecoverable). Non-journaled kinds / nil journal skip.
 	if ops.IsJournaled(kind) && s.opts.Journal != nil {
-		now := time.Now().UTC()
-		// Persist the rollback mode: it is the ONLY durable signal of which
-		// rollback was interrupted, and image vs data need different recovery
-		// (image is Docker-reconcilable; data must NOT be auto-reconciled). "" for
-		// upgrades.apply (no mode).
-		mode, _ := paramsForAudit["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
-		rec := journal.Record{
-			OpID: op.ID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
-			Actor: peer.String(), StartedAt: now, UpdatedAt: now,
-		}
-		// Standalone image rollback: the target is FIXED and fully validated at
-		// admission (strict repo@sha256 shape + image_allowlist in rollbackImage),
-		// and no later stage folds it in (journal_phases is apply-specific). Persist
-		// it NOW — otherwise the record carries no actionable ref and the E1c trust
-		// gate (validateReconcileRefs) can only mark it invalid, so an interrupted
-		// image rollback — documented as Docker-reconcilable — would always
-		// loud-stop instead of reconciling.
-		if kind == ops.KindRollbackCreate && mode == "image" {
-			if ref, _ := paramsForAudit["image_ref"].(string); ref != "" { //nolint:errcheck // absent/typed-nil → ""
-				rec.TargetRef = ref
-				if i := strings.Index(ref, "@sha256:"); i >= 0 {
-					rec.TargetDigest = ref[i+len("@sha256:"):]
-				}
-			}
-		}
-		if jerr := s.opts.Journal.Write(rec); jerr != nil {
+		if jerr := s.opts.Journal.Write(admissionJournalRecord(op.ID, kind, peer.String(), paramsForAudit)); jerr != nil {
 			// The orchestrator never takes ownership of oplog on this fail-closed
 			// path, so close it here to avoid leaking the descriptor across repeated
 			// admission attempts on a broken journal (ENOSPC/permissions).
