@@ -44,6 +44,13 @@ func TestDiagnoseStorage_HealthyDir(t *testing.T) {
 			t.Errorf("writability probe leaked temp file %q", e.Name())
 		}
 	}
+	// The probe must NOT have created the support tree — that is the bundle path's
+	// job (at 0700). Running a diagnostic first must not mutate storage.
+	for _, sub := range []string{"support", filepath.Join("support", "bundles")} {
+		if _, err := os.Stat(filepath.Join(dataDir, sub)); !os.IsNotExist(err) {
+			t.Errorf("storage probe created %q (err=%v) — diagnostic must not pre-seed the support tree", sub, err)
+		}
+	}
 }
 
 // TestDiagnoseStorage_ReadOnlyDirDegraded proves an unwritable target is flagged,

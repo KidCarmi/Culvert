@@ -43,14 +43,14 @@ type storageDiagnosis struct {
 	Checks        []storageCheck `json:"checks"`
 }
 
-// probeWritable creates and removes a uniquely-named temp file in dir to prove the
-// process can actually write there — a stat/permission bit can lie (read-only mount,
-// full disk, SELinux). The probe file is always removed (create+remove is the whole
-// test); a failure to create is the diagnostic signal.
+// probeWritable creates and removes a uniquely-named temp file in an EXISTING dir
+// to prove the process can actually write there — a stat/permission bit can lie
+// (read-only mount, full disk, SELinux). The probe file is always removed
+// (create+remove is the whole test); a failure to create is the diagnostic signal.
+// It deliberately does NOT create dir: the diagnostic must not mutate storage or
+// pre-create the support tree (which the bundle path owns, at 0700). Callers stat
+// first and only probe dirs that already exist.
 func probeWritable(dir string) (ok bool, detail string) {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return false, "mkdir: " + err.Error()
-	}
 	f, err := os.CreateTemp(dir, ".diag-write-*")
 	if err != nil {
 		return false, "create: " + err.Error()
@@ -92,14 +92,28 @@ func diagnoseStorage(now time.Time) storageDiagnosis {
 		})
 	}
 
-	// Writability of the data dir and the two critical support subdirs.
+	// Writability of the data dir and the two critical support subdirs. A subdir
+	// that does not yet exist is NOT created here — the diagnostic must not mutate
+	// storage or pre-seed the support tree (the bundle path owns that, at 0700). An
+	// absent subdir is fine as long as its parent is writable, which the
+	// data_dir_writable check establishes.
 	for _, c := range []struct{ name, path string }{
 		{"data_dir_writable", dataDir},
-		{"bundles_dir_writable", supportBundlesDir()},
 		{"support_dir_writable", filepath.Join(dataDir, "support")},
+		{"bundles_dir_writable", supportBundlesDir()},
 	} {
-		ok, detail := probeWritable(c.path)
-		d.Checks = append(d.Checks, storageCheck{Name: c.name, Path: c.path, OK: ok, Detail: detail})
+		fi, err := os.Stat(c.path)
+		switch {
+		case err == nil && fi.IsDir():
+			ok, detail := probeWritable(c.path)
+			d.Checks = append(d.Checks, storageCheck{Name: c.name, Path: c.path, OK: ok, Detail: detail})
+		case err == nil: // exists but is not a directory
+			d.Checks = append(d.Checks, storageCheck{Name: c.name, Path: c.path, OK: false, Detail: "not a directory"})
+		case os.IsNotExist(err):
+			d.Checks = append(d.Checks, storageCheck{Name: c.name, Path: c.path, OK: true, Detail: "absent (created on first bundle)"})
+		default:
+			d.Checks = append(d.Checks, storageCheck{Name: c.name, Path: c.path, OK: false, Detail: "stat: " + err.Error()})
+		}
 	}
 
 	d.OK = true
