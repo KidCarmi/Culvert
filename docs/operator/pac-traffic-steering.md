@@ -235,3 +235,80 @@ legacy default) before downgrading.
 > file), then re-upgrade, the re-upgraded binary reads `<dataDir>/pac_config.json`
 > and the downgrade-window edits are silently ignored. Re-apply them, or copy
 > the CWD file over `<dataDir>/pac_config.json` before re-upgrading.
+
+---
+
+# PAC Traffic Steering — Simulation & Safe Publishing (Part 3)
+
+## Simulator
+
+`POST /api/pac/simulate` (viewer) answers "what would profile P return for
+URL/host X?" using the **same** normalized rule evaluation the compiler
+emits — not a second engine (a parity test pins agreement). It returns the
+directive, the matched rule (index + kind + pattern), a human reason, the
+selected pool, the failover chain, whether DIRECT is possible, the compiler
+version, and the profile revision.
+
+**No live DNS.** The API never resolves hostnames (it is viewer-reachable).
+Supply an optional `resolvedIp` to evaluate `cidr4` and private-network
+rules definitively; without one, those rules return an explicit
+`undetermined_dns` outcome rather than a guess. The `default` profile is
+simulatable too (its legacy exclusions are expressed as DIRECT rules).
+
+## Draft → Publish → Rollback lifecycle
+
+Each custom profile carries a mutable **draft** and an append-only stack of
+**immutable published revisions** (`<dataDir>/pac_profiles_lifecycle.json`,
+node-local operator history — the ACTIVE spec still cluster-syncs via the
+Part 2 surface). Endpoints live under
+`/api/pac/profiles/{id}/lifecycle` (GET viewer, POST admin) with actions
+`save_draft`, `diff`, `impact`, `publish`, `rollback`.
+
+Publishing validates + compiles the draft, then **fails closed** when any of
+these hold: validation fails, no valid proxy route exists, the referenced
+pool is missing, secure mode could emit DIRECT, compilation/digest fails, or
+rule conflicts violate the documented invariants. Publishing a change that
+introduces **new DIRECT paths** (a new DIRECT rule, or switching to
+availability mode) is refused with `409` until the admin retypes the profile
+ID in `confirmDirect` — a high-friction typed confirmation.
+
+Each published revision records the exact spec, the compiled **artifact
+digest** (the convergence oracle and the "restore exact prior artifact"
+anchor), author, reason, and timestamp. Revision numbers are **monotonic**
+and never reused; a rollback does not rewrite history — it re-activates a
+prior revision's spec as a NEW revision authored `system/rollback`.
+
+> **Pool-mutability caveat.** A revision captures the profile *spec* (which
+> references pools by ID) and the artifact digest computed at publish time.
+> Pools are separate, mutable objects: editing a pool's endpoints after a
+> revision is published changes the compiled `/pac/{id}.pac` bytes for every
+> revision that references it, so re-serving or rolling back to an older
+> revision reproduces the recorded *spec* but not necessarily the recorded
+> *digest*. The digest therefore verifies "same spec + same referenced pool
+> definitions", not "same spec regardless of later pool edits". Treat pool
+> edits as their own change event (they are audited and cluster-synced
+> independently); to freeze a routing outcome end-to-end, avoid mutating a
+> pool a published revision depends on.
+
+## Change diff & impact analysis
+
+`diff` reports rules added/removed/reordered, pool/mode/private-network
+changes, and DIRECT-path deltas, flagging security-sensitive widenings.
+
+`impact` replays a sample of destinations through the active vs candidate
+revision and categorizes each: `unchanged`, `pool_changed`, `became_direct`,
+`no_longer_direct`, `lost_proxy_path`, `undetermined_dns`. The sample is
+either admin-supplied test vectors or (`useObserved`) a bounded snapshot of
+the in-memory top-hosts counter — **real observed destination hostnames, no
+fabricated telemetry**. Because observed samples carry no resolved IPs,
+`cidr4`/private-network outcomes are reported `undetermined_dns`, not
+guessed; full historical request-log replay is a documented future
+extension. Impact also statically flags shadowed, duplicate, and unreachable
+rules independent of the sample.
+
+## Rollback
+
+`{"action":"rollback","targetN":N}` re-activates published revision N: it
+mints a new revision, updates the active served profile, audits
+(`pac.profile_rollback`), snapshots config, and republishes the cluster
+snapshot so DPs converge — restoring the exact prior artifact digest.

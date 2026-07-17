@@ -41,6 +41,11 @@ func loadPAC(cfg pacStartupConfig) error {
 			return fmt.Errorf("PAC config load error: %w", err)
 		}
 	}
+	if cfg.LifecyclePath != "" {
+		if err := pacLifecycle.Load(cfg.LifecyclePath); err != nil {
+			return fmt.Errorf("PAC config load error: %w", err)
+		}
+	}
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
 }

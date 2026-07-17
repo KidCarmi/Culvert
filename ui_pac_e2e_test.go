@@ -116,3 +116,28 @@ func TestUIE2E_PACProfileEndpointsServed(t *testing.T) {
 		t.Errorf("Steering Profiles list should render the default profile: %v", err)
 	}
 }
+
+// TestUIE2E_PACSimulator pins the PR-3 simulator panel: it renders and a
+// simulate call returns an explained directive for the default profile.
+func TestUIE2E_PACSimulator(t *testing.T) {
+	const adminUser, viewerUser, pass = "admin-pacsim", "viewer-pacsim", "Pac-e2e-pass-1!" // #nosec G101 -- test-only fixture credentials
+	seedUIRoster(t, adminUser, viewerUser, pass)
+	srv := httptest.NewServer(newAdminUIHandler())
+	t.Cleanup(srv.Close)
+
+	browser := uiE2EBrowser(t)
+	_, page := newAuthedUIPage(t, browser, srv.URL, adminUser, RoleAdmin)
+	assert := playwright.NewPlaywrightAssertions(8000)
+	if err := page.Locator(`.nav-item[data-view="pac"]`).First().Click(); err != nil {
+		t.Fatalf("open PAC panel: %v", err)
+	}
+	if err := page.Locator("#pacsim-host").Fill("intranet.corp.example"); err != nil {
+		t.Fatalf("fill sim host: %v", err)
+	}
+	if err := page.Locator(`[data-click="runPACSimulate"]`).Click(); err != nil {
+		t.Fatalf("run simulate: %v", err)
+	}
+	if err := assert.Locator(page.Locator("#pacsim-result")).ToContainText("Directive"); err != nil {
+		t.Errorf("simulator should render a directive result: %v", err)
+	}
+}
