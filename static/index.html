@@ -4079,6 +4079,7 @@ Firefox (all platforms):
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
               <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
               <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
+              <button class="btn ghost sm" data-click="diagnoseCluster" data-min-role="operator" title="Cluster/HA posture — role, fencing lease, node counts, write authority (no network, no secrets)">Run cluster check</button>
               <input id="support-dns-host" class="input sm" type="text" placeholder="host to resolve" style="width:180px" title="Bare hostname (no scheme/port/path)">
               <button class="btn ghost sm" data-click="diagnoseDNS" data-min-role="operator" title="Bounded DNS resolution probe (private targets refused)">Resolve DNS</button>
               <input id="support-tls-host" class="input sm" type="text" placeholder="host:port for TLS" style="width:180px" title="host[:port] (default 443); private targets refused">
@@ -4482,6 +4483,7 @@ document.addEventListener('click', e => {
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
     case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
+    case 'diagnoseCluster':        diagnoseCluster(); break;
     case 'diagnoseDNS':            diagnoseDNS(); break;
     case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
@@ -12424,6 +12426,51 @@ function renderDiagnoseUpstream(d) {
     escHtml(String(p.failures || 0)) + '</td></tr>').join('');
   el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Proxy</th><th>Health</th><th>Circuit</th><th>Failures</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function diagnoseCluster() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseCluster"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/cluster', { method: 'POST' });
+    renderDiagnoseCluster(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Cluster check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseCluster(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const rows = [];
+  rows.push(['Role', escHtml(String(d.role || 'unknown'))]);
+  if (d.ha_enabled) {
+    rows.push(['HA', 'enabled (term ' + escHtml(String(d.term || 0)) + ')']);
+    rows.push(['Auto-failover', d.auto_failover ? 'on' : 'off']);
+  }
+  rows.push(['Write authority', d.write_authority ? 'yes' : 'no']);
+  if (d.lease_mode === 'lease') {
+    rows.push(['Fencing lease', (d.lease_valid ? 'valid' : 'invalid') + ' (epoch ' + escHtml(String(d.epoch || 0)) + ')']);
+  } else {
+    rows.push(['Fencing lease', 'not configured']);
+  }
+  rows.push(['Enrolled nodes', escHtml(String(d.nodes_connected || 0)) + '/' + escHtml(String(d.nodes_total || 0)) + ' connected']);
+  if (d.role === 'standby') {
+    rows.push(['Sync failures', escHtml(String(d.sync_fail_count || 0))]);
+    if (d.last_sync_ok) rows.push(['Last sync OK', escHtml(String(d.last_sync_ok))]);
+  }
+  const body = rows.map(r => '<tr><td class="hint">' + r[0] + '</td><td>' + r[1] + '</td></tr>').join('');
+  const detail = d.detail ? '<p class="hint">' + escHtml(String(d.detail)) + '</p>' : '';
+  el.innerHTML = '<p class="hint">Cluster <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') + '</strong></p>' +
+    detail + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><tbody>' + body + '</tbody></table></div>';
 }
 
 async function diagnoseDNS() {

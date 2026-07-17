@@ -154,10 +154,11 @@ var d0KnownRoutes = func() []string {
 //   - 140 — Terminology governance T-10: added canonical /api/dpi and
 //     /api/dpi/bypass alongside the retained legacy /api/content-scan and
 //     /api/content-scan/bypass aliases (same handlers).
-//   - +13 — TAC support framework (M1-M4) added: support status/bundles/
+//   - +14 — TAC support framework (M1-M5) added: support status/bundles/
 //     {id}(+report,+approve)/health-explain (+6); support/debug-level (+1);
-//     diagnose/storage, diagnose/upstream, diagnose/dns, diagnose/tls (+4);
-//     bundles/{id}/validate (+1); bundles/{id}/download-encrypted (+1).
+//     diagnose/storage, diagnose/upstream, diagnose/dns, diagnose/tls,
+//     diagnose/cluster (+5); bundles/{id}/validate (+1);
+//     bundles/{id}/download-encrypted (+1).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -174,7 +175,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 157
+	const want = 158
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
