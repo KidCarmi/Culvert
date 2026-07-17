@@ -417,6 +417,15 @@ func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr 
 			_ = os.RemoveAll(dir)
 		}
 	}()
+	// Write PENDING state FIRST — before the tgz and the manifest — so no openable
+	// or listable artifact can ever exist without a pending state. If we wrote it
+	// last, a crash between the manifest commit and the state write would leave a
+	// bundle that readBundleState grandfathers to READY (missing state ⇒ ready),
+	// i.e. downloadable without approval. State-first closes that bypass window:
+	// a missing state file now means only a genuine pre-gate bundle.
+	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt}); err != nil {
+		return nil, fmt.Errorf("write state: %w", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {
 		return nil, fmt.Errorf("write bundle: %w", err)
 	}
@@ -444,12 +453,6 @@ func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr 
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
-	}
-	// A newly created bundle is PENDING: not downloadable until an admin reviews
-	// the redaction report and approves it (mandatory-preview gate). Written after
-	// the manifest commit; a failure here still triggers the defer-cleanup.
-	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt}); err != nil {
-		return nil, fmt.Errorf("write state: %w", err)
 	}
 	pruneSupportBundles(supportRetentionKeep)
 	return res, nil

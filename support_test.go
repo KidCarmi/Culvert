@@ -247,6 +247,11 @@ func TestSupportBundle_PreviewGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createSupportBundle: %v", err)
 	}
+	// State is written FIRST (before the tgz/manifest), so a listable/openable
+	// bundle can never lack a pending state (no grandfather-to-ready bypass window).
+	if _, err := os.Stat(supportBundleStatePath(res.BundleID)); err != nil {
+		t.Fatalf("state.json must be present immediately after create: %v", err)
+	}
 	download := func() int {
 		req, rec := supportRoleReq(http.MethodGet, res.BundleID, RoleOperator)
 		apiSupportBundleItem(rec, req)
