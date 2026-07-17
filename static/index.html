@@ -12690,8 +12690,10 @@ function renderRecipients(list) {
   const rows = list.map(rec => {
     const fp = String(rec.fingerprint || '');
     const del = canDel ? ' <button class="btn ghost sm" data-click="deleteRecipient" data-arg="' + escHtml(String(rec.name)) + '" title="Remove this recipient">Remove</button>' : '';
+    // Render the FULL SHA-256 fingerprint (wraps) so an operator can compare every
+    // hex digit out-of-band before trusting a recipient — a prefix is not a trust anchor.
     return '<tr><td>' + escHtml(String(rec.name)) + '</td>' +
-      '<td class="hint" style="font-family:monospace" title="SHA-256 fingerprint — verify out-of-band">' + escHtml(fp.slice(0, 16)) + '…</td>' +
+      '<td class="hint" style="font-family:monospace;word-break:break-all;max-width:360px" title="SHA-256 fingerprint — verify all 64 hex digits out-of-band">' + escHtml(fp) + '</td>' +
       '<td>' + del + '</td></tr>';
   }).join('');
   el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
@@ -12712,7 +12714,7 @@ async function addRecipient() {
     const rec = await r.json();
     if (nameInp) nameInp.value = '';
     if (keyInp) keyInp.value = '';
-    toast('Recipient "' + name + '" registered — verify fingerprint ' + String(rec.fingerprint || '').slice(0, 16) + '… out-of-band', 'success');
+    toast('Recipient "' + name + '" registered — verify its full SHA-256 fingerprint (shown in the list) out-of-band before sealing', 'success');
     await loadRecipients();
   } catch (err) {
     toast('Register failed: ' + err.message, 'error');

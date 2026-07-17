@@ -113,17 +113,24 @@ type sealedExportReq struct {
 }
 
 // resolveSealRecipient picks the recipient key from EITHER a registered name OR a
-// raw public key. Exactly one must be supplied; a registered name takes precedence
-// and both-empty is rejected. Both paths run the same low-order validation
-// (lookup re-validates the stored key; decode validates the raw key).
+// raw public key. EXACTLY one must be supplied — both-present is rejected (rather
+// than silently preferring one, which could seal to a stale default instead of the
+// key the operator just pasted) and both-empty is rejected. Both paths run the same
+// low-order validation (lookup re-validates the stored key; decode validates the
+// raw key).
 func resolveSealRecipient(req sealedExportReq) (*[sealbox.KeyLen]byte, error) {
-	if name := strings.TrimSpace(req.RecipientName); name != "" {
+	name := strings.TrimSpace(req.RecipientName)
+	rawKey := strings.TrimSpace(req.RecipientPublicKey)
+	switch {
+	case name != "" && rawKey != "":
+		return nil, errors.New("supply exactly one of recipient_name or recipient_public_key, not both")
+	case name != "":
 		return lookupSupportRecipientKey(name)
+	case rawKey != "":
+		return decodeX25519PubKey(rawKey)
+	default:
+		return nil, errors.New("supply recipient_name (registered) or recipient_public_key (raw base64 X25519)")
 	}
-	if strings.TrimSpace(req.RecipientPublicKey) != "" {
-		return decodeX25519PubKey(req.RecipientPublicKey)
-	}
-	return nil, errors.New("supply recipient_name (registered) or recipient_public_key (raw base64 X25519)")
 }
 
 // decodeX25519PubKey accepts standard or URL base64, padded or raw, and requires

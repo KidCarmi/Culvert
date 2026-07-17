@@ -198,4 +198,14 @@ func TestSealByRegisteredRecipient(t *testing.T) {
 	if rec2.Code != http.StatusNotFound {
 		t.Fatalf("unknown recipient code=%d want 404", rec2.Code)
 	}
+
+	// Both selectors present → 400 (never silently prefer one).
+	r3 := roleReq(RoleOperator, http.MethodPost, "/api/support/bundles/"+id+"/download-sealed",
+		map[string]any{"recipient_name": "tac", "recipient_public_key": pubB64})
+	r3.SetPathValue("id", id)
+	rec3 := httptest.NewRecorder()
+	apiSupportBundleExportSealed(rec3, r3)
+	if rec3.Code != http.StatusBadRequest {
+		t.Fatalf("both-selectors code=%d want 400", rec3.Code)
+	}
 }
