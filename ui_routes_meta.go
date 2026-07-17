@@ -682,4 +682,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/tls", Handler: "apiDiagnoseTLS", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "bounded, SSRF-guarded TLS handshake + chain/expiry check of host:port (private targets refused; no MITM); operator+; no shell; audited as diagnose.tls"}}},
+	{Path: "/api/diagnose/cluster", Handler: "apiDiagnoseCluster", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "cluster/HA posture diagnosis over in-memory state (role, lease, node counts, write authority); no network, no shell, no secret/infra detail; operator+; audited as diagnose.cluster"}}},
 }

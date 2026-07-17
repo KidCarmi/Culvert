@@ -155,6 +155,7 @@ input or reach a host binary.
 |---|---|---|
 | `storage` | data-dir writability (real create+remove probe), free space, support-tree stat | none |
 | `upstream` | upstream pool health + circuit state (from the existing health loop) | none (no new dial) |
+| `cluster` | cluster/HA posture — role, fencing-lease validity/epoch, write authority, enrolled-node counts, standby sync health | none (in-memory state only) |
 | `dns <host>` | bounded resolution of a bare hostname | resolves; **refuses** private/internal targets |
 | `tls <host:port>` | bounded handshake + leaf identity + chain/expiry (no MITM) | connects; **refuses** private/internal targets; verification deferred then reported |
 

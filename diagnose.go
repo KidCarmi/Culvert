@@ -598,10 +598,188 @@ func tlsResult(d tlsDiagnosis) string {
 	}
 }
 
+// ── diagnose cluster ──────────────────────────────────────────────────────────
+
+// clusterDiagnosis is the typed, versioned contract for `diagnose cluster`. It is
+// built ENTIRELY from in-memory HA/cluster state via mutex-guarded accessors — it
+// performs NO network I/O (no RPC to peers, no etcd dial) and exposes NO secret or
+// infrastructure detail: peer/standby addresses, tokens, and cert material are
+// deliberately omitted. Only health booleans, counts, and the fencing epoch are
+// surfaced so the diagnostic answers "is the cluster posture healthy?" without
+// re-exposing anything an operator can't already see on /api/cluster/ha.
+type clusterDiagnosis struct {
+	SchemaVersion  int    `json:"schema_version"`
+	GeneratedAt    string `json:"generated_at"`
+	Role           string `json:"role"` // standalone|control-plane|leader|standby|data-plane
+	OK             bool   `json:"ok"`
+	HAEnabled      bool   `json:"ha_enabled"`
+	Term           uint64 `json:"term,omitempty"`
+	AutoFailover   bool   `json:"auto_failover"`
+	LeaseMode      string `json:"lease_mode"` // none|lease
+	LeaseValid     bool   `json:"lease_valid,omitempty"`
+	Epoch          int64  `json:"epoch,omitempty"`
+	WriteAuthority bool   `json:"write_authority"`
+	NodesTotal     int    `json:"nodes_total"`
+	NodesConnected int    `json:"nodes_connected"`
+	SyncFailCount  int    `json:"sync_fail_count,omitempty"`
+	LastSyncOK     string `json:"last_sync_ok,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+}
+
+// clusterInputs is the pure snapshot the diagnosis core consumes. Keeping the
+// role/OK logic separate from the global reads makes it fully testable without
+// mutating the HA/cluster singletons (which would race the live loops).
+type clusterInputs struct {
+	haStatus     HAStatus
+	nodeRole     string // authoritative clusterRole.role: standalone|control-plane|data-plane
+	leaseMode    string
+	leaseValid   bool
+	epoch        int64
+	writeAllowed bool // RAW lease-layer primitive (globalHA.WriteAllowed)
+	total        int
+	connected    int
+	dpActive     bool
+}
+
+// effectiveWriteAuthority collapses the lease-layer primitive with the HA role,
+// mirroring haIssuanceAllowed(): with HA disabled a node always has write
+// authority; an HA standby never does (WriteAllowed is only the lease primitive
+// and returns true in legacy mode, which would mislead failover diagnostics); an
+// HA leader has it exactly when the lease permits. Reporting this — not the raw
+// primitive — keeps /api/diagnose/cluster consistent with /healthz.
+func effectiveWriteAuthority(st HAStatus, leaseWriteAllowed bool) bool {
+	if !st.Enabled {
+		return true
+	}
+	if st.Role != "leader" {
+		return false
+	}
+	return leaseWriteAllowed
+}
+
+// clusterRoleAndOK derives the role label, the health verdict, and an advisory
+// detail string from a cluster snapshot. Standalone and data-plane presence are
+// healthy postures by construction; a control-plane is healthy when every enrolled
+// node is connected; an HA leader additionally needs live write authority; an HA
+// standby is healthy while its sync loop is not failing. The role label comes from
+// the authoritative clusterRole snapshot (nodeRole), so an enabled control plane
+// reports "control-plane" even before its first data-plane node enrolls.
+func clusterRoleAndOK(in clusterInputs) (role string, ok bool, detail string) {
+	nodesOK := in.total == 0 || in.connected == in.total
+	switch {
+	case in.nodeRole == "data-plane" || in.dpActive:
+		// A data-plane node's detailed sync health is surfaced via the cluster
+		// status API; here we confirm the DP client is live.
+		return "data-plane", true, "data-plane node; detailed sync health via /api/cluster"
+	case in.haStatus.Enabled:
+		return haRoleAndOK(in, nodesOK)
+	case in.nodeRole == "control-plane" || in.total > 0:
+		// Authoritative CP role (covers a freshly enabled CP with zero enrolled
+		// nodes) or, defensively, any node that already has enrollments.
+		if !nodesOK {
+			return "control-plane", false, "some enrolled nodes not connected"
+		}
+		return "control-plane", true, ""
+	default:
+		return "standalone", true, ""
+	}
+}
+
+// haRoleAndOK resolves the leader/standby verdict for an HA-enabled control plane
+// (split out of clusterRoleAndOK to keep each function under the cyclop threshold).
+func haRoleAndOK(in clusterInputs, nodesOK bool) (role string, ok bool, detail string) {
+	switch in.haStatus.Role {
+	case "leader":
+		ok = in.writeAllowed && nodesOK
+		switch {
+		case in.leaseMode == "lease" && !in.leaseValid:
+			detail = "leader fencing lease not valid"
+		case !nodesOK:
+			detail = "some enrolled nodes not connected"
+		}
+		return "leader", ok, detail
+	case "standby":
+		if in.haStatus.SyncFailCount != 0 {
+			return "standby", false, "standby sync loop is failing"
+		}
+		return "standby", true, ""
+	default:
+		return "control-plane", nodesOK, ""
+	}
+}
+
+// diagnoseClusterFrom builds the typed diagnosis from a snapshot. Pure (no I/O),
+// so tests drive every role/health branch with fabricated inputs.
+func diagnoseClusterFrom(in clusterInputs, now time.Time) clusterDiagnosis {
+	role, ok, detail := clusterRoleAndOK(in)
+	d := clusterDiagnosis{
+		SchemaVersion:  diagnoseSchemaVersion,
+		GeneratedAt:    now.UTC().Format(time.RFC3339),
+		Role:           role,
+		OK:             ok,
+		HAEnabled:      in.haStatus.Enabled,
+		Term:           in.haStatus.Term,
+		AutoFailover:   in.haStatus.AutoFailover,
+		LeaseMode:      in.leaseMode,
+		WriteAuthority: effectiveWriteAuthority(in.haStatus, in.writeAllowed),
+		NodesTotal:     in.total,
+		NodesConnected: in.connected,
+		Detail:         detail,
+	}
+	if in.leaseMode == "lease" {
+		d.LeaseValid = in.leaseValid
+		d.Epoch = in.epoch
+	}
+	if in.haStatus.Role == "standby" {
+		d.SyncFailCount = in.haStatus.SyncFailCount
+		d.LastSyncOK = in.haStatus.LastSyncOK
+	}
+	return d
+}
+
+// diagnoseCluster gathers the live in-memory HA/cluster snapshot and produces the
+// diagnosis. Every accessor here is a mutex-guarded READ; none dials the network.
+func diagnoseCluster(now time.Time) clusterDiagnosis {
+	mode, valid, epoch := globalHA.leaseHealth()
+	total, connected := globalClusterStore.NodeCounts()
+	clusterRoleMu.RLock()
+	nodeRole := clusterRole.role
+	clusterRoleMu.RUnlock()
+	in := clusterInputs{
+		haStatus:     globalHA.Status(),
+		nodeRole:     nodeRole,
+		leaseMode:    mode,
+		leaseValid:   valid,
+		epoch:        epoch,
+		writeAllowed: globalHA.WriteAllowed(),
+		total:        total,
+		connected:    connected,
+		dpActive:     activeDPClient.Load() != nil,
+	}
+	return diagnoseClusterFrom(in, now)
+}
+
+// apiDiagnoseCluster reports cluster/HA posture (POST, operator). Read-only over
+// in-memory state — no network, no shell, no secret/infra detail.
+func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseCluster(time.Now())
+	auditEvent(r, "diagnose.cluster", d.Role, boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
 	mux.HandleFunc("/api/diagnose/upstream", apiDiagnoseUpstream)
 	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
+	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
 }
