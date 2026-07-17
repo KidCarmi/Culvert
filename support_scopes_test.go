@@ -141,6 +141,37 @@ func TestSupportLevel_RuntimeGatedAtL2(t *testing.T) {
 	}
 }
 
+// TestSupportLevel_RuntimeInScopedL2 is the Codex-780 regression: an incident-
+// scoped bundle at L2 must still surface the level-gated runtime collector. Because
+// the runner applies the scope gate before the level gate, runtime has to be a
+// scope candidate (baseline) or it is dropped with a scope note before the level
+// even matters. At L1 it is level-skipped; at L2 it runs — never scope-skipped.
+func TestSupportLevel_RuntimeInScopedL2(t *testing.T) {
+	find := func(level support.DebugLevel) support.SectionEntry {
+		res, err := buildSupportBundle(context.Background(), level, "tls")
+		if err != nil {
+			t.Fatalf("build tls L%d: %v", level, err)
+		}
+		for _, s := range res.Manifest.Sections {
+			if s.ID == "runtime" {
+				return s
+			}
+		}
+		t.Fatalf("no runtime section in tls-scoped L%d bundle", level)
+		return support.SectionEntry{}
+	}
+	// Never scope-gated out of a scoped bundle.
+	if s := find(support.L1); strings.Contains(s.Note, "scope=") {
+		t.Fatalf("runtime scope-skipped in tls L1 (note=%q) — must be a scope candidate", s.Note)
+	}
+	if s := find(support.L1); s.Status != support.StatusSkipped {
+		t.Errorf("runtime in tls L1 status=%q want skipped (level-gated)", s.Status)
+	}
+	if s := find(support.L2); s.Status != support.StatusOK && s.Status != support.StatusPartial {
+		t.Errorf("runtime in tls L2 status=%q want ok/partial — L2 facts missing from scoped bundle", s.Status)
+	}
+}
+
 // TestSupportScope_StandardRunsAll confirms the standard scope applies no filter.
 func TestSupportScope_StandardRunsAll(t *testing.T) {
 	res, err := buildSupportBundle(context.Background(), support.L1, "standard")

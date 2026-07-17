@@ -11,8 +11,12 @@ import "sort"
 // The catalog lives here (package main, where collectors are defined) — the
 // engine stays generic and only takes an include-set of collector IDs.
 
-// supportScopeBaseline is always included in any incident scope.
-var supportScopeBaseline = []string{"product", "health", "readiness", "diagnostics", "crash"}
+// supportScopeBaseline is always included in any incident scope. It carries
+// level-gated collectors too (e.g. the L2 "runtime" host snapshot): the runner
+// applies the scope gate before the level gate, so a level-gated collector must be
+// a scope candidate here or it can never run in a scoped bundle regardless of the
+// requested level — it is still level-gated out below its MinLevel.
+var supportScopeBaseline = []string{"product", "health", "readiness", "diagnostics", "crash", "runtime"}
 
 // supportIncidentScopes maps a scope name to its incident-specific collector IDs
 // (baseline is unioned in by resolveSupportScope). IDs must exist in the
