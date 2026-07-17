@@ -262,7 +262,8 @@ type supportBundleSummary struct {
 	OK              int    `json:"ok"`
 	Failed          int    `json:"failed"`
 	SizeBytes       int64  `json:"size_bytes"`
-	State           string `json:"state"` // pending|ready (mandatory-preview lifecycle)
+	State           string `json:"state"`             // pending|ready (mandatory-preview lifecycle)
+	CaseID          string `json:"case_id,omitempty"` // operator-bound support case (M4)
 }
 
 // apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
@@ -299,7 +300,13 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		} else {
 			level = currentDebugLevel()
 		}
-		res, err := createSupportBundle(r.Context(), scope, level)
+		// Optional ?case= binds the bundle to a support case for triage/history.
+		caseID := strings.TrimSpace(r.URL.Query().Get("case"))
+		if caseID != "" && !validSupportCaseID(caseID) {
+			http.Error(w, "invalid case id (1..64 of letters/digits/._-)", http.StatusBadRequest)
+			return
+		}
+		res, err := createSupportBundle(r.Context(), scope, level, caseID)
 		if err != nil {
 			if errors.Is(err, errSupportLowDisk) {
 				logger.Printf("support: bundle build refused — insufficient disk headroom")
@@ -313,7 +320,11 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		if scope == "" {
 			scope = "standard"
 		}
-		auditEvent(r, "support.bundle.create", res.BundleID, fmt.Sprintf("%s L%d", scope, int(level)))
+		detail := fmt.Sprintf("%s L%d", scope, int(level))
+		if caseID != "" {
+			detail += " case=" + caseID
+		}
+		auditEvent(r, "support.bundle.create", res.BundleID, detail)
 		jsonOK(w, res.Manifest)
 	default:
 		w.Header().Set("Allow", "GET, POST")
@@ -346,10 +357,11 @@ func listSupportBundles() []supportBundleSummary {
 		if fi, err := os.Stat(filepath.Join(supportBundlesDir(), id, "bundle.csb.tgz")); err == nil {
 			size = fi.Size()
 		}
+		st := readBundleState(id)
 		out = append(out, supportBundleSummary{
 			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
 			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
-			Failed: man.Collection.Failed, SizeBytes: size, State: readBundleState(id).State,
+			Failed: man.Collection.Failed, SizeBytes: size, State: st.State, CaseID: st.CaseID,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -370,7 +382,18 @@ type supportBundleStateFile struct {
 	CreatedAt  string `json:"created_at,omitempty"`
 	ApprovedAt string `json:"approved_at,omitempty"`
 	ApprovedBy string `json:"approved_by,omitempty"`
+	CaseID     string `json:"case_id,omitempty"` // operator-bound support case (M4)
 }
+
+// supportCaseIDRe pins the safe shape of an operator-supplied support case id:
+// 1..64 of letters/digits/dot/hyphen/underscore. Bounded and free of path,
+// whitespace, and control characters so it can be echoed in the UI and audit
+// without escaping surprises. Empty (no case) is allowed at the call sites.
+var supportCaseIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// validSupportCaseID reports whether s is a well-formed case id. The empty string
+// is NOT valid here — callers treat "" as "no case" before calling.
+func validSupportCaseID(s string) bool { return supportCaseIDRe.MatchString(s) }
 
 func supportBundleStatePath(id string) string {
 	return filepath.Join(supportBundlesDir(), id, "state.json")
@@ -550,7 +573,7 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope str
 // <dataDir>/support/bundles/<id>/. It is fail-closed on low disk (preflight),
 // crash-safe on the error path (a failed persist never strands a partial dir),
 // and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
-func createSupportBundle(ctx context.Context, scope string, level support.DebugLevel) (res *support.BuildResult, retErr error) {
+func createSupportBundle(ctx context.Context, scope string, level support.DebugLevel, caseID string) (res *support.BuildResult, retErr error) {
 	// Disk-headroom preflight: never begin a build that could fill /data. A
 	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
 	// the write itself still errors and cleans up), a low reading is fail-closed.
@@ -579,7 +602,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	// bundle that readBundleState grandfathers to READY (missing state ⇒ ready),
 	// i.e. downloadable without approval. State-first closes that bypass window:
 	// a missing state file now means only a genuine pre-gate bundle.
-	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt}); err != nil {
+	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt, CaseID: caseID}); err != nil {
 		return nil, fmt.Errorf("write state: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "bundle.csb.tgz"), res.TarGz, 0o600); err != nil {

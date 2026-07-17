@@ -3993,6 +3993,7 @@ Firefox (all platforms):
               <option value="3">L3</option>
               <option value="4">L4</option>
             </select>
+            <input id="support-case" class="input sm" type="text" placeholder="case id (optional)" data-min-role="admin" maxlength="64" style="width:140px" title="Bind this bundle to a support case (letters/digits/._-, ≤64)">
             <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
             <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
           </div>
@@ -11859,7 +11860,7 @@ function renderSupportBundles(list) {
   // so gate dynamically-rendered controls imperatively (server enforces regardless).
   const canWrite = (uiRole === 'operator' || uiRole === 'admin');
   el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Bundle</th><th>Created</th><th>State</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
+    '<th>Bundle</th><th>Case</th><th>Created</th><th>State</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
     list.map(b => {
       const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
         (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
@@ -11885,6 +11886,7 @@ function renderSupportBundles(list) {
       }
       return '<tr>' +
         '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
+        '<td>' + (b.case_id ? '<span style="font-family:monospace">' + escHtml(String(b.case_id)) + '</span>' : '<span class="hint">—</span>') + '</td>' +
         '<td title="' + escHtml(String(b.created_at)) + '">' + escHtml(fmtProvTime(b.created_at)) + '</td>' +
         '<td>' + stateCell + '</td>' +
         '<td>' + sections + '</td>' +
@@ -11904,9 +11906,12 @@ async function supportCreateBundle() {
   // explicit L0..L4 choice overrides the controller.
   const level = (levelSel && levelSel.value) || '';
   const levelLabel = level === '' ? 'auto (effective)' : 'L' + level;
+  const caseInp = document.getElementById('support-case');
+  const caseID = (caseInp && caseInp.value || '').trim();
+  if (caseID && !/^[A-Za-z0-9._-]{1,64}$/.test(caseID)) { toast('Invalid case id (letters/digits/._-, ≤64)', 'error'); return; }
   const ok = await confirmAction(
     'Create support bundle?',
-    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + ') will be collected and written to disk — internal, non-secret operational detail.',
+    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk — internal, non-secret operational detail.',
     'Create bundle',
     { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
   if (!ok) return;
@@ -11914,7 +11919,9 @@ async function supportCreateBundle() {
   const prev = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
-    const qs = '/api/support/bundles?scope=' + encodeURIComponent(scope) + (level === '' ? '' : '&level=' + encodeURIComponent(level));
+    const qs = '/api/support/bundles?scope=' + encodeURIComponent(scope) +
+      (level === '' ? '' : '&level=' + encodeURIComponent(level)) +
+      (caseID ? '&case=' + encodeURIComponent(caseID) : '');
     const man = await api(qs, { method: 'POST' });
     toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
     await loadSupport();
