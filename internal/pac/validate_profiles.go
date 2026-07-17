@@ -29,6 +29,9 @@ const (
 )
 
 // ValidateProfilesConfig strictly validates a full profiles+pools config.
+// No compiled-size probe here (unlike the legacy exclusions surface): the
+// worst case is bounded by MaxRulesPerProfile × MaxEntryLen ≈ 300 KB,
+// comfortably under the 1 MiB client fetch cap enforced for exclusions.
 // Empty config is valid. Issues are actionable and name the offending
 // object in Entry ("profile <id>" / "pool <id>" / "rule N of <id>").
 func ValidateProfilesConfig(cfg ProfilesConfig) []ValidationIssue {
@@ -102,14 +105,36 @@ func validateProfilesSection(cfg ProfilesConfig) []ValidationIssue {
 			Message: fmt.Sprintf("%d profiles exceed the maximum of %d", len(cfg.Profiles), MaxProfiles)})
 	}
 	pools := map[string]bool{}
+	poolIndex := make(map[string]Pool, len(cfg.Pools))
 	for i := range cfg.Pools {
 		pools[cfg.Pools[i].ID] = true
+		poolIndex[cfg.Pools[i].ID] = cfg.Pools[i]
 	}
 	seen := map[string]bool{}
 	for i := range cfg.Profiles {
 		issues = append(issues, validateProfile(&cfg.Profiles[i], pools, seen)...)
+		// Size probe only for otherwise-valid profiles (compiling a
+		// structurally broken profile would be noise).
+		if len(issues) == 0 {
+			if is := validateProfileSize(&cfg.Profiles[i], poolIndex); is != nil {
+				issues = append(issues, *is)
+			}
+		}
 	}
 	return issues
+}
+
+// validateProfileSize probes the compiled output size of one profile against
+// the same 1 MiB client fetch cap the legacy exclusions path enforces —
+// otherwise a fully-valid 1000-rule profile can compile past the cap and
+// ship an artifact clients silently reject (Palo perf/security F2/F4).
+func validateProfileSize(p *Profile, poolIndex map[string]Pool) *ValidationIssue {
+	art := CompileProfile(*p, poolIndex)
+	if len(art.JS) > MaxArtifactBytes {
+		return &ValidationIssue{Field: "profiles", Entry: "profile " + p.ID, Code: IssueOutputTooLarge,
+			Message: fmt.Sprintf("profile %q compiles to %d bytes; clients reject PAC over %d bytes — reduce rules", p.ID, len(art.JS), MaxArtifactBytes)}
+	}
+	return nil
 }
 
 func validateProfile(p *Profile, pools map[string]bool, seen map[string]bool) []ValidationIssue {

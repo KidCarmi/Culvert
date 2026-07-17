@@ -199,9 +199,39 @@ Profiles and pools participate in every config surface: export/import
 fixes the pre-existing gap where clearing all legacy *exclusions* never
 reached DPs), backup/restore, and audit (`pac.profile_*`, `pac.pool_*`).
 
+## Observability
+
+PAC serving is instrumented (`/metrics`): `culvert_pac_serves_total`,
+`culvert_pac_not_modified_total` (304 revalidations),
+`culvert_pac_compile_warnings_total` (degraded compiles surfaced at serve
+time), and the gauges `culvert_pac_profiles`, `culvert_pac_profiles_enabled`,
+`culvert_pac_pools`. A degraded compile — a dropped rule, an unresolvable
+pool, or a secure-mode conflict in a replayed/synced config — is logged and
+fires the `pac_profile_degraded` alert once per profile (the latch resets
+when the profile is next mutated). A secure-mode profile whose pool becomes
+unresolvable fails **closed** (an unresolvable placeholder), so the alert is
+the operator's signal before the helpdesk queue is.
+
+## Propagation to the fleet
+
+Every control-plane PAC mutation — `/api/pac-config`, profile/pool CRUD,
+config import, and config-version rollback — republishes the cluster
+snapshot immediately; data-plane nodes converge on their next poll (≤~30 s).
+Data-plane-local PAC mutation is refused (409, "managed by the control
+plane"): the profile store on a DP is control-plane-owned, so a local edit
+would silently diverge until the next snapshot overwrote it.
+
 ## Downgrade
 
 `pac_profiles.json` is unknown to older binaries and ignored; the legacy
 default profile keeps working. Clients pointed at `/pac/<id>.pac` receive
-404 from a downgraded binary — repoint them at `/proxy.pac` first if a
-downgrade is planned.
+404 from a downgraded binary — **and a PAC fetch that 404s makes clients
+fall back to DIRECT, so a `secure`-mode fleet silently bypasses the proxy
+for the entire downgrade window.** Repoint clients at `/proxy.pac` (the
+legacy default) before downgrading.
+
+> **Downgrade + edit hazard:** the CWD→dataDir migration is one-way. If you
+> downgrade, edit PAC config (the downgraded binary writes the legacy CWD
+> file), then re-upgrade, the re-upgraded binary reads `<dataDir>/pac_config.json`
+> and the downgrade-window edits are silently ignored. Re-apply them, or copy
+> the CWD file over `<dataDir>/pac_config.json` before re-upgrading.

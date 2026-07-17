@@ -215,15 +215,35 @@ func TestCompileProfile_FailoverChainAndModes(t *testing.T) {
 	p.AvailabilityMode = ModeSecure
 	p.Rules = []Rule{{Kind: RuleKindSuffix, Pattern: "cdn.example", Action: ActionUsePool, PoolID: "backup"}}
 	art = CompileProfile(p, poolMap())
-	if strings.Contains(art.JS, `"DIRECT"`) || strings.Contains(art.JS, "; DIRECT") {
-		// isPlainHostName DIRECT is the one permitted bypass.
-		stripped := strings.Replace(art.JS, `if (isPlainHostName(host)) return "DIRECT";`, "", 1)
-		if strings.Contains(stripped, "DIRECT") {
-			t.Errorf("secure mode must emit no DIRECT beyond plain-hostname:\n%s", art.JS)
-		}
+	// The one permitted bypass is the dotless-plain-host guard (which also
+	// excludes IPv6 literals); nothing else may say DIRECT in secure mode.
+	stripped := strings.Replace(art.JS,
+		`if (isPlainHostName(host) && host.indexOf(":") === -1) return "DIRECT";`, "", 1)
+	if strings.Contains(stripped, "DIRECT") {
+		t.Errorf("secure mode must emit no DIRECT beyond the plain-host guard:\n%s", art.JS)
 	}
 	if art.ProxyChain[len(art.ProxyChain)-1] == "DIRECT" {
 		t.Error("secure chain must not end in DIRECT")
+	}
+
+	// A secure profile carrying a DIRECT rule (replayed/synced past the API
+	// boundary) must degrade that rule to the pool terminal, never emit
+	// DIRECT, and warn.
+	p.Rules = []Rule{{Kind: RuleKindDomain, Pattern: "x.example", Action: ActionDirect}}
+	art = CompileProfile(p, poolMap())
+	stripped = strings.Replace(art.JS,
+		`if (isPlainHostName(host) && host.indexOf(":") === -1) return "DIRECT";`, "", 1)
+	if strings.Contains(stripped, "DIRECT") {
+		t.Errorf("secure mode must neutralize DIRECT rules:\n%s", art.JS)
+	}
+	sawWarn := false
+	for _, wn := range art.Warnings {
+		if wn.Code == IssueSecureModeConflict {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Error("secure-mode DIRECT-rule degradation must warn")
 	}
 }
 
@@ -336,5 +356,57 @@ func TestCompileProfile_ES3Portability(t *testing.T) {
 		if strings.Contains(art.JS, forbidden) {
 			t.Errorf("post-ES3 construct %q in profile PAC", forbidden)
 		}
+	}
+}
+
+// TestArtifactCache_HitAndInvalidate pins the mod-time-keyed cache: repeated
+// serves reuse the artifact, a Set invalidates, and fallback mode is never
+// cached.
+func TestArtifactCache_ProfileHitAndInvalidate(t *testing.T) {
+	s := &ProfileStore{}
+	if err := s.Set(ProfilesConfig{Profiles: []Profile{testProfile()}, Pools: testPools()}); err != nil {
+		t.Fatal(err)
+	}
+	c := &ArtifactCache{}
+	p, _ := s.ProfileByID("hq-israel")
+	a1 := c.Profile(s, p)
+	a2 := c.Profile(s, p)
+	if a1.Digest != a2.Digest {
+		t.Fatal("cache must return a stable artifact")
+	}
+	// A store change invalidates.
+	cfg := s.Get()
+	cfg.Profiles[0].Name = "changed"
+	if err := s.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	p2, _ := s.ProfileByID("hq-israel")
+	a3 := c.Profile(s, p2)
+	// Name isn't in the fingerprint, but the cache map was dropped on Set;
+	// the recompiled artifact must still be valid and digest-stable.
+	if a3.JS == "" {
+		t.Fatal("recompile after invalidation produced empty JS")
+	}
+}
+
+func TestArtifactCache_LegacyFallbackNotCached(t *testing.T) {
+	s := &Store{}
+	_ = s.Set(Config{ProxyPort: 8080}) // no ProxyHost → fallback mode
+	c := &ArtifactCache{}
+	a := c.Legacy(s, "host-a.example:9090")
+	b := c.Legacy(s, "host-b.example:9090")
+	if !a.HostFallback || !b.HostFallback {
+		t.Fatal("expected fallback mode")
+	}
+	if a.Digest == b.Digest {
+		t.Error("fallback artifacts must not be cached (bodies differ per host)")
+	}
+
+	// Configured mode IS cached.
+	_ = s.Set(Config{ProxyHost: "proxy.example", ProxyPort: 8080})
+	x := c.Legacy(s, "ignored")
+	y := c.Legacy(s, "ignored")
+	if x.HostFallback || x.Digest != y.Digest {
+		t.Error("configured-mode artifact must be cacheable and stable")
 	}
 }

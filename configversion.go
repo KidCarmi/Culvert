@@ -42,6 +42,7 @@ func initConfigVersioning() {
 // captureConfigBackup takes a point-in-time snapshot of all config stores.
 func captureConfigBackup() *configBackup {
 	pc := pacStore.Get()
+	profCfg := pacProfiles.Get() // single Get: a torn two-call capture could carry dangling pool refs
 	return &configBackup{
 		Version:             1,
 		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
@@ -92,8 +93,8 @@ func captureConfigBackup() *configBackup {
 		// PR 2). Captured non-nil so a zero-object state serializes as []
 		// and round-trips through apply as a wipe (nil = pre-extension
 		// snapshot, apply skips).
-		PACProfiles: nonNilProfiles(pacProfiles.Get().Profiles),
-		PACPools:    nonNilPools(pacProfiles.Get().Pools),
+		PACProfiles: nonNilProfiles(profCfg.Profiles),
+		PACPools:    nonNilPools(profCfg.Pools),
 	}
 }
 

@@ -27,8 +27,11 @@ const DefaultProfileID = "default"
 
 // Availability modes: what the terminal directive chain may contain.
 const (
-	// ModeSecure: pool chain only — NO DIRECT terminal. If every proxy is
-	// down, traffic fails closed (legacy /proxy.pac semantics).
+	// ModeSecure: pool chain only — NO DIRECT anywhere (DIRECT rules and the
+	// private-network bypass are rejected too). If every proxy is down,
+	// traffic fails closed. NOTE: the legacy /proxy.pac output corresponds
+	// to BALANCED + PrivateDirect (its exclusions are explicit DIRECT
+	// carve-outs), not to secure.
 	ModeSecure = "secure"
 	// ModeBalanced: pool chain terminal (no DIRECT), but explicit DIRECT
 	// rules are permitted where the admin authored them.
@@ -84,8 +87,7 @@ type Pool struct {
 }
 
 // Rule is one ordered routing rule. Order is admin-authored and
-// order-sensitive (first match wins); the compiler and simulator both honor
-// it verbatim.
+// order-sensitive (first match wins); the compiler honors it verbatim.
 type Rule struct {
 	// Kind is one of RuleKind*.
 	Kind string `json:"kind"`

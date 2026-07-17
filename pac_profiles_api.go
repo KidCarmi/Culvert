@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
@@ -68,6 +69,27 @@ func writePACIssues(w http.ResponseWriter, msg string, issues []pac.ValidationIs
 	})
 }
 
+// pacProfilesAPIMu serializes the read-modify-write of every profile/pool
+// mutation (Get → modify → Set replaces the WHOLE config): without it two
+// concurrent admin mutations lose one update and can mint duplicate
+// revisions. Mirrors the saveConfigVersionMu precedent (configversion.go).
+var pacProfilesAPIMu sync.Mutex
+
+// pacProfilesMutationAllowed gates mutations to CP/standalone nodes: a
+// data-plane node's profile store is CP-managed (snapshot-synced) — a local
+// edit would silently diverge until the next CP version bump, then be
+// obliterated without trace (Panorama managed-object semantics).
+func pacProfilesMutationAllowed(w http.ResponseWriter) bool {
+	clusterRoleMu.RLock()
+	role := clusterRole.role
+	clusterRoleMu.RUnlock()
+	if role == "data-plane" {
+		http.Error(w, "PAC profiles are managed by the control plane on this node", http.StatusConflict)
+		return false
+	}
+	return true
+}
+
 // pacApplyProfilesMutation validates the candidate config strictly, persists
 // it, audits, versions, and republishes the cluster snapshot. Returns false
 // after writing the error response when the mutation is rejected.
@@ -85,6 +107,7 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 		before, candidate)
 	saveConfigVersion(sessionAdmin(r), action)
 	publishCurrentConfigSnapshot()
+	pacResetProfileAlert(object)
 	return true
 }
 
@@ -99,7 +122,7 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			"pools":          cfg.Pools,
 		})
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
 		var p pac.Profile
@@ -107,6 +130,8 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		pacProfilesAPIMu.Lock()
+		defer pacProfilesAPIMu.Unlock()
 		if _, exists := pacProfiles.ProfileByID(p.ID); exists {
 			http.Error(w, "profile already exists: "+sanitizeLog(p.ID), http.StatusConflict)
 			return
@@ -131,6 +156,8 @@ func apiPACProfileItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id == pac.DefaultProfileID {
+		// GET returns the synthesized view; the legacy default is managed
+		// via /api/pac-config, so mutations are refused here.
 		if r.Method == http.MethodGet {
 			jsonOK(w, pacDefaultView())
 			return
@@ -147,25 +174,31 @@ func apiPACProfileItem(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, p)
 	case http.MethodPut:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
 		pacProfilePut(w, r, id)
 	case http.MethodDelete:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
-		before := pacProfiles.Get()
-		candidate, removed := pacRemoveProfile(pacProfiles.Get(), id)
-		if !removed {
-			http.NotFound(w, r)
-			return
-		}
-		if pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
-			w.WriteHeader(http.StatusNoContent)
-		}
+		pacProfileDelete(w, r, id)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
+	before := pacProfiles.Get()
+	candidate, removed := pacRemoveProfile(pacProfiles.Get(), id)
+	if !removed {
+		http.NotFound(w, r)
+		return
+	}
+	if pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -180,16 +213,26 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	p.ID = id
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
 	candidate := pacProfiles.Get() // independent deep copy (audit diff keeps before intact)
 	found := false
 	for i := range candidate.Profiles {
-		if candidate.Profiles[i].ID == id {
-			p.Revision = candidate.Profiles[i].Revision + 1
-			candidate.Profiles[i] = p
-			found = true
-			break
+		if candidate.Profiles[i].ID != id {
+			continue
 		}
+		// Optimistic concurrency: a client that echoes the revision it
+		// loaded gets reject-on-stale instead of silent last-writer-wins.
+		// Revision 0 (older clients) skips the check — additive contract.
+		if p.Revision != 0 && p.Revision != candidate.Profiles[i].Revision {
+			http.Error(w, fmt.Sprintf("stale revision %d (current %d) — reload and retry", p.Revision, candidate.Profiles[i].Revision), http.StatusConflict)
+			return
+		}
+		p.Revision = candidate.Profiles[i].Revision + 1
+		candidate.Profiles[i] = p
+		found = true
+		break
 	}
 	if !found {
 		http.NotFound(w, r)
@@ -216,7 +259,7 @@ func apiPACPools(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		jsonOK(w, pacProfiles.Get().Pools)
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
 		var p pac.Pool
@@ -224,6 +267,8 @@ func apiPACPools(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		pacProfilesAPIMu.Lock()
+		defer pacProfilesAPIMu.Unlock()
 		if _, exists := pacProfiles.PoolByID(p.ID); exists {
 			http.Error(w, "pool already exists: "+sanitizeLog(p.ID), http.StatusConflict)
 			return
@@ -255,12 +300,12 @@ func apiPACPoolItem(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonOK(w, p)
 	case http.MethodPut:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
 		pacPoolPut(w, r, id)
 	case http.MethodDelete:
-		if !requireRole(w, r, RoleAdmin) {
+		if !requireRole(w, r, RoleAdmin) || !pacProfilesMutationAllowed(w) {
 			return
 		}
 		pacPoolDelete(w, r, id)
@@ -280,15 +325,18 @@ func pacPoolPut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	p.ID = id
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
 	candidate := pacProfiles.Get() // independent deep copy (audit diff keeps before intact)
 	found := false
 	for i := range candidate.Pools {
-		if candidate.Pools[i].ID == id {
-			candidate.Pools[i] = p
-			found = true
-			break
+		if candidate.Pools[i].ID != id {
+			continue
 		}
+		candidate.Pools[i] = p
+		found = true
+		break
 	}
 	if !found {
 		http.NotFound(w, r)
@@ -300,6 +348,8 @@ func pacPoolPut(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func pacPoolDelete(w http.ResponseWriter, r *http.Request, id string) {
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
 	for i := range before.Profiles {
 		if before.Profiles[i].PoolID == id {

@@ -29,6 +29,12 @@ func loadPAC(cfg pacStartupConfig) error {
 	if migrated {
 		logger.Printf("PAC config migrated from %s to %s (legacy file left in place, now frozen)",
 			cfg.LegacyConfigPath, cfg.ConfigPath)
+	} else if warnStaleLegacyPAC(cfg.ConfigPath, cfg.LegacyConfigPath) {
+		// Downgrade→edit→re-upgrade hazard (Palo ops F5a): the store already
+		// exists but a newer legacy CWD file means edits made by a downgraded
+		// binary are being silently ignored. Warn loudly instead.
+		logger.Printf("PAC config WARNING: legacy %s is newer than the active store %s — edits made by a downgraded binary are being ignored; re-apply them or copy the legacy file over the store",
+			cfg.LegacyConfigPath, cfg.ConfigPath)
 	}
 	if cfg.ProfilesPath != "" {
 		if err := pacProfiles.Load(cfg.ProfilesPath); err != nil {
@@ -37,4 +43,22 @@ func loadPAC(cfg pacStartupConfig) error {
 	}
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
+}
+
+// warnStaleLegacyPAC reports whether both the active store and the legacy CWD
+// file exist AND the legacy file is strictly newer — the signature of a
+// downgrade-window edit that the re-upgraded binary is about to ignore.
+func warnStaleLegacyPAC(path, legacyPath string) bool {
+	if legacyPath == "" {
+		return false
+	}
+	ps, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	ls, err := os.Stat(legacyPath)
+	if err != nil {
+		return false
+	}
+	return ls.ModTime().After(ps.ModTime())
 }

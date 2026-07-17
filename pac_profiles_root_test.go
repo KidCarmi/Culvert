@@ -9,9 +9,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -411,5 +413,210 @@ func TestConfigRollback_PACProfiles(t *testing.T) {
 	applyConfigBackup(&wipe)
 	if got := pacProfiles.Get(); len(got.Profiles) != 0 || len(got.Pools) != 0 {
 		t.Errorf("[]-rollback must wipe: %+v", got)
+	}
+}
+
+// ─── Proxy-listener routing (Palo QA #2, #11) ──────────────────────────────────
+
+func TestRouteProxyListenerBuiltin_PAC(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	seedProfilesConfig(t)
+	if err := pacStore.Set(PACConfig{ProxyHost: "proxy.example", ProxyPort: 8080}); err != nil {
+		t.Fatal(err)
+	}
+
+	// (a) Direct GET /pac/{id}.pac on the proxy listener is served.
+	req := httptest.NewRequest(http.MethodGet, "/pac/branch-il.pac", http.NoBody)
+	rec := httptest.NewRecorder()
+	if !routeProxyListenerBuiltin(rec, req) {
+		t.Fatal("direct /pac/{id}.pac must be handled by the proxy listener")
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "FindProxyForURL") {
+		t.Errorf("profile PAC not served on proxy listener: %d", rec.Code)
+	}
+
+	// (b) Direct GET /proxy.pac is served.
+	req = httptest.NewRequest(http.MethodGet, "/proxy.pac", http.NoBody)
+	rec = httptest.NewRecorder()
+	if !routeProxyListenerBuiltin(rec, req) || rec.Code != http.StatusOK {
+		t.Errorf("/proxy.pac must be served on the proxy listener: %d", rec.Code)
+	}
+
+	// (c) A PROXIED absolute-URI request for /pac/... (URL.Host set) must NOT
+	// be hijacked — it falls through to handleRequest.
+	proxied := httptest.NewRequest(http.MethodGet, "http://origin.example/pac/branch-il.pac", http.NoBody)
+	if proxied.URL.Host == "" {
+		t.Fatal("test setup: absolute-URI request must carry URL.Host")
+	}
+	rec = httptest.NewRecorder()
+	if routeProxyListenerBuiltin(rec, proxied) {
+		t.Error("proxied absolute-URI /pac/ request must fall through to handleRequest, not be served locally")
+	}
+
+	// (d) An ordinary proxied request falls through.
+	ordinary := httptest.NewRequest(http.MethodGet, "http://example.com/index.html", http.NoBody)
+	rec = httptest.NewRecorder()
+	if routeProxyListenerBuiltin(rec, ordinary) {
+		t.Error("ordinary proxied request must fall through")
+	}
+}
+
+// ─── Concurrent mutation safety (Palo QA #1, #12) ──────────────────────────────
+
+func TestPACProfilesAPI_ConcurrentMutationsNoLostUpdate(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	// Seed a pool so profiles validate.
+	if err := pacProfiles.Set(pac.ProfilesConfig{
+		Pools: []pac.Pool{{ID: "p", Name: "P", Endpoints: []pac.PoolEndpoint{{Host: "x.example", Port: 8080}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const n = 12
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"id":"prof-%02d","name":"P%02d","enabled":true,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced"}`, i, i)
+			rec := pacAPIReq(t, http.MethodPost, "/api/pac/profiles", body, RoleAdmin, fmt.Sprintf("198.51.100.%d:0", 100+i))
+			if rec.Code != http.StatusOK {
+				t.Errorf("concurrent create %d: %d (%s)", i, rec.Code, rec.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+	// Every successful create must survive — no lost updates from the RMW.
+	got := pacProfiles.Get()
+	if len(got.Profiles) != n {
+		t.Errorf("lost update: expected %d profiles, got %d", n, len(got.Profiles))
+	}
+}
+
+// ─── Optimistic concurrency (Palo API #1) ──────────────────────────────────────
+
+func TestPACProfilesAPI_StaleRevisionRejected(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	if err := pacProfiles.Set(pac.ProfilesConfig{
+		Profiles: []pac.Profile{{ID: "hq", Name: "HQ", Enabled: true, PoolID: "p",
+			PrivateNetworks: pac.PrivateProxy, AvailabilityMode: pac.ModeBalanced, Revision: 5}},
+		Pools: []pac.Pool{{ID: "p", Name: "P", Endpoints: []pac.PoolEndpoint{{Host: "x.example", Port: 8080}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Stale revision (3 != current 5) → 409.
+	rec := pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq",
+		`{"name":"HQ","enabled":true,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced","revision":3}`,
+		RoleAdmin, "198.51.100.80:0")
+	if rec.Code != http.StatusConflict {
+		t.Errorf("stale revision must 409, got %d", rec.Code)
+	}
+	// Correct revision (5) → OK, bumps to 6.
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq",
+		`{"name":"HQ2","enabled":true,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced","revision":5}`,
+		RoleAdmin, "198.51.100.80:0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("matching revision must succeed, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if p, _ := pacProfiles.ProfileByID("hq"); p.Revision != 6 {
+		t.Errorf("revision must bump to 6, got %d", p.Revision)
+	}
+	// Revision 0 (older client) skips the check → OK.
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/hq",
+		`{"name":"HQ3","enabled":true,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced"}`,
+		RoleAdmin, "198.51.100.80:0")
+	if rec.Code != http.StatusOK {
+		t.Errorf("revision 0 must skip the precondition, got %d", rec.Code)
+	}
+}
+
+// ─── HEAD + 304 on the profile endpoint (Palo QA #4) ───────────────────────────
+
+func TestServePACProfileFile_HeadAnd304(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	seedProfilesConfig(t)
+
+	get := httptest.NewRequest(http.MethodGet, "/pac/branch-il.pac", http.NoBody)
+	rec := httptest.NewRecorder()
+	servePACProfileFile(rec, get)
+	etag := rec.Header().Get("ETag")
+	if etag == "" || rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 + ETag, got %d %q", rec.Code, etag)
+	}
+
+	// HEAD: headers, no body.
+	head := httptest.NewRequest(http.MethodHead, "/pac/branch-il.pac", http.NoBody)
+	rec = httptest.NewRecorder()
+	servePACProfileFile(rec, head)
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Errorf("HEAD must return 200 with no body, got %d len=%d", rec.Code, rec.Body.Len())
+	}
+	if rec.Header().Get("ETag") != etag {
+		t.Error("HEAD must carry the same ETag")
+	}
+
+	// Conditional GET → 304.
+	cond := httptest.NewRequest(http.MethodGet, "/pac/branch-il.pac", http.NoBody)
+	cond.Header.Set("If-None-Match", etag)
+	rec = httptest.NewRecorder()
+	servePACProfileFile(rec, cond)
+	if rec.Code != http.StatusNotModified {
+		t.Errorf("matching If-None-Match must 304, got %d", rec.Code)
+	}
+}
+
+// ─── DP-local mutation gate (Palo ops #3) ──────────────────────────────────────
+
+func TestPACProfilesAPI_DataPlaneMutationBlocked(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	clusterRoleMu.Lock()
+	prev := clusterRole.role
+	clusterRole.role = "data-plane"
+	clusterRoleMu.Unlock()
+	t.Cleanup(func() {
+		clusterRoleMu.Lock()
+		clusterRole.role = prev
+		clusterRoleMu.Unlock()
+	})
+
+	rec := pacAPIReq(t, http.MethodPost, "/api/pac/pools",
+		`{"id":"x","name":"X","endpoints":[{"host":"p.example","port":8080}]}`, RoleAdmin, "198.51.100.90:0")
+	if rec.Code != http.StatusConflict {
+		t.Errorf("DP-local pool mutation must be 409 (CP-managed), got %d", rec.Code)
+	}
+	// Reads still work on a DP.
+	rec = pacAPIReq(t, http.MethodGet, "/api/pac/profiles", "", RoleViewer, "198.51.100.90:0")
+	if rec.Code != http.StatusOK {
+		t.Errorf("DP read must still work, got %d", rec.Code)
+	}
+}
+
+// ─── Import replace-mode for profiles (Palo QA #3) ─────────────────────────────
+
+func TestConfigImport_PACProfilesReplaceMode(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	// Pre-existing state that replace mode must overwrite.
+	if err := pacProfiles.Set(pac.ProfilesConfig{
+		Profiles: []pac.Profile{{ID: "old", Name: "Old", Enabled: true, PoolID: "oldp",
+			PrivateNetworks: pac.PrivateProxy, AvailabilityMode: pac.ModeBalanced}},
+		Pools: []pac.Pool{{ID: "oldp", Name: "OldP", Endpoints: []pac.PoolEndpoint{{Host: "old.example", Port: 8080}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"version":1,"pacProfiles":[{"id":"new","name":"New","enabled":true,"poolId":"newp","privateNetworks":"proxy","availabilityMode":"balanced"}],"pacPools":[{"id":"newp","name":"NewP","endpoints":[{"host":"new.example","port":8080}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config/import?mode=replace", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "198.51.100.91:0"
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleAdmin))
+	rec := httptest.NewRecorder()
+	apiConfigImport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replace import: %d (%s)", rec.Code, rec.Body.String())
+	}
+	got := pacProfiles.Get()
+	if len(got.Profiles) != 1 || got.Profiles[0].ID != "new" {
+		t.Errorf("replace mode must swap the whole set, got %+v", got.Profiles)
+	}
+	if len(got.Pools) != 1 || got.Pools[0].ID != "newp" {
+		t.Errorf("replace mode must swap pools, got %+v", got.Pools)
 	}
 }

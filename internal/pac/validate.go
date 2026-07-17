@@ -281,7 +281,14 @@ func validateProxyHost(host string) *ValidationIssue {
 		return bad("proxy host must be a bare hostname or IP (no scheme, path, or credentials)")
 	}
 	trimmed := strings.Trim(host, "[]")
-	if net.ParseIP(trimmed) != nil {
+	if ip := net.ParseIP(trimmed); ip != nil {
+		// IPv6 proxy endpoints are rejected: WinINET/WinHTTP cannot consume
+		// IPv6 PROXY directives from PAC at all, and an unbracketed literal
+		// is unparseable by every client — a config that validates clean but
+		// breaks the fleet. Use a hostname that resolves to the IPv6 address.
+		if ip.To4() == nil {
+			return bad("IPv6 literal proxy endpoints are not portable across PAC clients; use a hostname instead")
+		}
 		return nil
 	}
 	if strings.Contains(host, ":") {

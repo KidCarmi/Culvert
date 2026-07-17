@@ -573,8 +573,9 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
-		b.PACProfiles = nonNilProfiles(pacProfiles.Get().Profiles)
-		b.PACPools = nonNilPools(pacProfiles.Get().Pools)
+		profCfg := pacProfiles.Get() // single Get (torn-capture guard)
+		b.PACProfiles = nonNilProfiles(profCfg.Profiles)
+		b.PACPools = nonNilPools(profCfg.Pools)
 		filename = "culvert-pac"
 	case "alerts":
 		b.AlertWebhooks = globalAlertStore.List()
@@ -608,8 +609,9 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProxyHost = pc.ProxyHost
 		b.PACProxyPort = pc.ProxyPort
 		b.PACExclusions = pc.Exclusions
-		b.PACProfiles = nonNilProfiles(pacProfiles.Get().Profiles)
-		b.PACPools = nonNilPools(pacProfiles.Get().Pools)
+		fullProfCfg := pacProfiles.Get() // single Get (torn-capture guard)
+		b.PACProfiles = nonNilProfiles(fullProfCfg.Profiles)
+		b.PACPools = nonNilPools(fullProfCfg.Pools)
 		// Alert webhooks (secrets excluded by List()).
 		b.AlertWebhooks = globalAlertStore.List()
 		// Block page template.
@@ -1088,6 +1090,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// rules, block page, conn limit, upstream pool, …) so the imported state
 	// survives a restart — import previously left it runtime-only.
 	adminSettingsSave()
+	// Republish the cluster snapshot: import is a recovery path operators use
+	// interchangeably with rollback (which already republishes) — DPs must
+	// converge on the imported state without waiting for an unrelated
+	// mutation (Palo fleet review, ops finding 2).
+	publishCurrentConfigSnapshot()
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
 }
 

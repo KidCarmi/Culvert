@@ -41,12 +41,13 @@ func CompileProfile(p Profile, pools map[string]Pool) Artifact {
 	}
 
 	terminal, chain := profileTerminal(p, pools, warn)
-	js := compileProfileJS(p, pools, terminal, warn)
+	fingerprint := profileFingerprint(p, pools)
+	js := compileProfileJS(p, pools, terminal, fingerprint, warn)
 	sum := sha256.Sum256([]byte(js))
 	return Artifact{
 		JS:              js,
 		Digest:          hex.EncodeToString(sum[:]),
-		Fingerprint:     profileFingerprint(p, pools),
+		Fingerprint:     fingerprint,
 		CompilerVersion: CompilerVersion,
 		GeneratedAt:     time.Now(),
 		Warnings:        warnings,
@@ -85,7 +86,11 @@ func profileTerminal(p Profile, pools map[string]Pool, warn func(code, entry, ms
 }
 
 // profileFingerprint hashes the canonical profile+resolved-pool material.
+// The Revision counter is EXCLUDED: fingerprint (and thus digest/ETag) is
+// config identity — a no-op save that only bumps Revision must not
+// invalidate fleet-wide 304 revalidation.
 func profileFingerprint(p Profile, pools map[string]Pool) string {
+	p.Revision = 0
 	canon := struct {
 		Profile Profile `json:"profile"`
 		Pool    Pool    `json:"pool"`
@@ -102,20 +107,23 @@ func profileFingerprint(p Profile, pools map[string]Pool) string {
 }
 
 // compileProfileJS emits the FindProxyForURL body for a profile.
-func compileProfileJS(p Profile, pools map[string]Pool, terminal string, warn func(code, entry, msg string)) string {
+func compileProfileJS(p Profile, pools map[string]Pool, terminal, fingerprintHex string, warn func(code, entry, msg string)) string {
 	var sb strings.Builder
 	sb.WriteString("// Culvert proxy auto-config (PAC). Generated file - do not edit.\n")
 	fmt.Fprintf(&sb, "// compiler: v%s\n", CompilerVersion)
-	fmt.Fprintf(&sb, "// profile: %s revision %d\n", p.ID, p.Revision)
-	fmt.Fprintf(&sb, "// fingerprint: %s\n", profileFingerprint(p, pools))
+	fmt.Fprintf(&sb, "// profile: %s\n", p.ID)
+	fmt.Fprintf(&sb, "// fingerprint: %s\n", fingerprintHex)
 	sb.WriteString("function FindProxyForURL(url, host) {\n")
 	sb.WriteString("  // Normalize: clients differ on casing and trailing dots.\n")
 	sb.WriteString("  host = host.toLowerCase();\n")
 	sb.WriteString("  if (host.charAt(host.length - 1) === \".\") {\n")
 	sb.WriteString("    host = host.substring(0, host.length - 1);\n")
 	sb.WriteString("  }\n")
-	sb.WriteString("  // Plain (dotless) names never traverse the proxy.\n")
-	sb.WriteString("  if (isPlainHostName(host)) return \"DIRECT\";\n")
+	sb.WriteString("  // Plain (dotless) intranet names never traverse the proxy.\n")
+	sb.WriteString("  // IPv6 literals are also dotless but MUST follow the profile\n")
+	sb.WriteString("  // rules - a bare isPlainHostName bypass would punch a hole\n")
+	sb.WriteString("  // through secure mode for any IPv6 destination.\n")
+	sb.WriteString("  if (isPlainHostName(host) && host.indexOf(\":\") === -1) return \"DIRECT\";\n")
 	sb.WriteString("  // Lazy single DNS resolution shared by all IP-based rules.\n")
 	sb.WriteString("  var ipDone = false;\n")
 	sb.WriteString("  var ipVal = null;\n")
@@ -125,21 +133,18 @@ func compileProfileJS(p Profile, pools map[string]Pool, terminal string, warn fu
 	sb.WriteString("  }\n")
 
 	if profileUsesPortGuards(&p) {
-		// Extract the URL authority ("host:port") once so port guards
-		// compare against the authority tail, never the path/query. All
-		// string ops are ES3 (String.prototype.indexOf/substring are ES3;
-		// only the Array variants are ES5+).
-		sb.WriteString("  // URL authority for explicit-port rule guards.\n")
-		sb.WriteString("  var auth = url;\n")
-		sb.WriteString("  var ai = auth.indexOf(\"//\");\n")
-		sb.WriteString("  if (ai !== -1) { auth = auth.substring(ai + 2); }\n")
-		sb.WriteString("  var as = auth.indexOf(\"/\");\n")
-		sb.WriteString("  if (as !== -1) { auth = auth.substring(0, as); }\n")
-		sb.WriteString("  var aat = auth.lastIndexOf(\"@\");\n")
-		sb.WriteString("  if (aat !== -1) { auth = auth.substring(aat + 1); }\n")
+		writeAuthorityPreamble(&sb)
 	}
 
-	if p.PrivateNetworks == PrivateDirect {
+	if p.PrivateNetworks == PrivateDirect && p.AvailabilityMode == ModeSecure {
+		// Secure mode's "no DIRECT ever" guarantee is enforced HERE, not just
+		// at the API boundary: a replayed/synced/rolled-back config that
+		// smuggled this combination must NOT emit a DIRECT bypass. Drop the
+		// private-direct block and warn (Palo security review F3).
+		warn(IssueSecureModeConflict, "profile "+p.ID,
+			"secure mode forbids the privateNetworks=direct bypass (replayed config); bypass dropped, private ranges follow the pool")
+	}
+	if p.PrivateNetworks == PrivateDirect && p.AvailabilityMode != ModeSecure {
 		sb.WriteString("  // Private networks: DIRECT (profile setting).\n")
 		sb.WriteString("  var pip = resolveOnce();\n")
 		sb.WriteString("  if (pip) {\n")
@@ -160,27 +165,59 @@ func compileProfileJS(p Profile, pools map[string]Pool, terminal string, warn fu
 	return sb.String()
 }
 
+// writeAuthorityPreamble emits the ES3 URL-authority extractor used by
+// explicit-port rule guards: strip scheme, cut at the first path slash, drop
+// query/fragment, then strip userinfo — so a ":port" guard compares the
+// authority tail, never the path/query. String.prototype.indexOf/substring
+// are ES3 (only the Array variants are ES5+).
+func writeAuthorityPreamble(sb *strings.Builder) {
+	sb.WriteString("  // URL authority for explicit-port rule guards.\n")
+	sb.WriteString("  var auth = url;\n")
+	sb.WriteString("  var ai = auth.indexOf(\"//\");\n")
+	sb.WriteString("  if (ai !== -1) { auth = auth.substring(ai + 2); }\n")
+	sb.WriteString("  var as = auth.indexOf(\"/\");\n")
+	sb.WriteString("  if (as !== -1) { auth = auth.substring(0, as); }\n")
+	sb.WriteString("  var aq = auth.indexOf(\"?\");\n")
+	sb.WriteString("  if (aq !== -1) { auth = auth.substring(0, aq); }\n")
+	sb.WriteString("  var af = auth.indexOf(\"#\");\n")
+	sb.WriteString("  if (af !== -1) { auth = auth.substring(0, af); }\n")
+	sb.WriteString("  var aat = auth.lastIndexOf(\"@\");\n")
+	sb.WriteString("  if (aat !== -1) { auth = auth.substring(aat + 1); }\n")
+}
+
 // writeProfileRule emits one ordered rule. Junk patterns and unknown pool
 // overrides are dropped with warnings (tolerant compile).
 func writeProfileRule(sb *strings.Builder, r *Rule, idx int, p Profile, pools map[string]Pool, terminal string, warn func(code, entry, msg string)) {
 	entry := fmt.Sprintf("profile %s rule %d", p.ID, idx+1)
 	directive, ok := ruleDirective(r, p, pools, terminal)
 	if !ok {
-		warn(IssueInvalidRule, entry, "rule references an unknown or empty pool; dropped from generated PAC")
-		return
+		// Degrade toward the profile terminal, NOT by dropping the rule:
+		// dropping would silently re-steer matching traffic to later rules
+		// (or DIRECT in availability mode) — a quiet policy change.
+		warn(IssueInvalidRule, entry, "rule references an unknown or empty pool; matching traffic degrades to the profile terminal chain")
+		directive = terminal
 	}
 	cond, ok := ruleCondition(r)
 	if !ok {
 		warn(IssueInvalidRule, entry, fmt.Sprintf("pattern %q could not be compiled; rule dropped from generated PAC", r.Pattern))
 		return
 	}
+	if r.Action == ActionDirect && p.AvailabilityMode == ModeSecure {
+		warn(IssueSecureModeConflict, entry,
+			"secure mode forbids DIRECT rules (replayed config); rule degraded to the pool terminal")
+	}
 	guards := ruleGuards(r)
 	fmt.Fprintf(sb, "  if (%s%s) return %q;\n", guards, cond, directive)
 }
 
-// ruleDirective resolves the rule's return value.
+// ruleDirective resolves the rule's return value. Secure mode's no-DIRECT
+// guarantee is enforced here (defense in depth vs the API boundary): a
+// DIRECT-action rule in a secure profile degrades to the pool terminal.
 func ruleDirective(r *Rule, p Profile, pools map[string]Pool, terminal string) (string, bool) {
 	if r.Action == ActionDirect {
+		if p.AvailabilityMode == ModeSecure {
+			return terminal, true
+		}
 		return "DIRECT", true
 	}
 	if r.PoolID == "" {

@@ -665,5 +665,6 @@ culvert_decrypt_autoexclude_surge_total %d
 	cdrWritePrometheus(&ruleMetBuf)
 	liveFeedWritePrometheus(&ruleMetBuf)
 	releaseCatalogWritePrometheus(&ruleMetBuf)
+	pacWritePrometheus(&ruleMetBuf)
 	fmt.Fprint(w, ruleMetBuf.String()) //nolint:errcheck
 }
