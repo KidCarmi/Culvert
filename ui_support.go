@@ -127,7 +127,7 @@ func apiSupportDebugLevel(w http.ResponseWriter, r *http.Request) {
 					int64(debugLevelMinTTL/time.Second), int64(debugLevelMaxTTL/time.Second)), http.StatusBadRequest)
 				return
 			}
-			logger.Printf("support: set debug level failed: %v", err)
+			logger.Printf("support: set debug level failed: %v", sanitizeLog(err.Error()))
 			http.Error(w, "could not set debug level", http.StatusInternalServerError)
 			return
 		}
@@ -140,7 +140,7 @@ func apiSupportDebugLevel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := clearDebugLevel(); err != nil {
-			logger.Printf("support: clear debug level failed: %v", err)
+			logger.Printf("support: clear debug level failed: %v", sanitizeLog(err.Error()))
 			http.Error(w, "could not clear debug level", http.StatusInternalServerError)
 			return
 		}
@@ -345,7 +345,7 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "insufficient disk headroom for bundle", http.StatusInsufficientStorage)
 				return
 			}
-			logger.Printf("support: bundle build failed: %v", err)
+			logger.Printf("support: bundle build failed: %v", sanitizeLog(err.Error()))
 			http.Error(w, "bundle build failed", http.StatusInternalServerError)
 			return
 		}
@@ -500,7 +500,7 @@ func apiSupportBundleApprove(w http.ResponseWriter, r *http.Request) {
 	st.ApprovedAt = time.Now().UTC().Format(time.RFC3339)
 	st.ApprovedBy = auditActor(r)
 	if err := writeBundleState(id, st); err != nil {
-		logger.Printf("support: bundle approve failed: %v", err)
+		logger.Printf("support: bundle approve failed: %v", sanitizeLog(err.Error()))
 		http.Error(w, "approve failed", http.StatusInternalServerError)
 		return
 	}
@@ -552,7 +552,7 @@ func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := os.RemoveAll(dir); err != nil {
-			logger.Printf("support: bundle delete failed: %v", err)
+			logger.Printf("support: bundle delete failed: %v", sanitizeLog(err.Error()))
 			http.Error(w, "bundle delete failed", http.StatusInternalServerError)
 			return
 		}

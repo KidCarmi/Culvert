@@ -53,7 +53,7 @@ import (
 //     /api/dpi/bypass alongside the retained legacy /api/content-scan and
 //     /api/content-scan/bypass aliases (same handlers).
 //   - 140 — Supportability M1 Slice 1 added /api/support/bundles (POST create)
-//     + /api/support/bundles/{id} (GET download).
+//   - /api/support/bundles/{id} (GET download).
 //   - 142 — Supportability M1 added /api/support/status + /api/health/explain
 //     (the explained operator-contract health verdict).
 //   - +N — Supportability M2-M4 added the rest of the TAC support-framework

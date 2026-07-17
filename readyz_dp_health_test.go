@@ -82,7 +82,7 @@ func readyChecks(t *testing.T, target string) (code int, status string, checks m
 	r := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 	handleReady(w, r)
 	var resp struct {
-		Status string                  `json:"status"`
+		Status string                     `json:"status"`
 		Checks map[string]*readinessCheck `json:"checks"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
