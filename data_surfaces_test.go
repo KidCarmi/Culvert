@@ -34,6 +34,10 @@ var collectedStructs = []any{
 	configVersionsSection{},
 	supportCfgVerSummary{},
 	governanceSection{},
+	upstreamSection{},
+	upstreamProxyStatus{},
+	cdrSection{},
+	scanSection{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {
