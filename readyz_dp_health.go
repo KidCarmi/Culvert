@@ -98,12 +98,12 @@ func dpCertRenewalFailureSnapshot() (failing bool, days int, lastErr string) {
 // appendDPHealthChecks adds the cp_poll and node_cert rows to /ready when
 // running as a data plane. Contributes nothing on a CP/standalone node, so
 // every existing probe consumer outside DP mode is byte-identical.
-func appendDPHealthChecks(checks map[string]*checkResult) {
+func appendDPHealthChecks(checks map[string]*readinessCheck) {
 	if !audit.DPMode() {
 		return
 	}
 
-	cp := &checkResult{Status: "ok"}
+	cp := &readinessCheck{Status: "ok"}
 	if dpControlPlanePollFailing.Load() {
 		since := dpCPPollFailingSince.Load()
 		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
@@ -119,7 +119,7 @@ func appendDPHealthChecks(checks map[string]*checkResult) {
 	}
 	checks["cp_poll"] = cp
 
-	cert := &checkResult{Status: "ok"}
+	cert := &readinessCheck{Status: "ok"}
 	if failing, days, lastErr := dpCertRenewalFailureSnapshot(); failing {
 		cert.Status = "fail"
 		if days < 0 {

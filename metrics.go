@@ -656,6 +656,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	autoExcludeLearns.writePrometheus(&ruleMetBuf)
+	crashByComponent.writePrometheus(&ruleMetBuf) // culvert_crash_records_* (panic recovery)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)

@@ -579,6 +579,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="diagnostics" data-min-role="admin" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-wrench"/></svg> Diagnostics
     </div>
+    <div class="nav-item" data-view="support" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-package"/></svg> Support
+    </div>
     <div class="nav-item" data-view="settings" data-min-role="admin" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-gear"/></svg> Settings
     </div>
@@ -4020,6 +4023,88 @@ Firefox (all platforms):
       </div>
     </div><!-- /view-releases -->
 
+    <!-- ═══ SUPPORT (M1 supportability framework) ═════════════════════════ -->
+    <div class="view" id="view-support">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Support</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label class="hint" for="support-scope" data-min-role="admin">Scope</label>
+            <select id="support-scope" class="input sm" data-min-role="admin" title="Incident scope: focus the bundle on collectors relevant to one incident type"><option value="standard">standard</option></select>
+            <label class="hint" for="support-level" data-min-role="admin">Level</label>
+            <select id="support-level" class="input sm" data-min-role="admin" title="Debug-capture depth. Auto uses the effective capture level (any active elevation, else L1).">
+              <option value="">Auto (effective)</option>
+              <option value="1">L1 (standard)</option>
+              <option value="2">L2 (+runtime)</option>
+              <option value="3">L3</option>
+              <option value="4">L4</option>
+            </select>
+            <input id="support-case" class="input sm" type="text" placeholder="case id (optional)" data-min-role="admin" maxlength="64" style="width:140px" title="Bind this bundle to a support case (letters/digits/._-, ≤64)">
+            <button class="btn primary sm" data-click="supportCreateBundle" data-min-role="admin" title="Collect a redacted diagnostic bundle for support">＋ Create bundle</button>
+            <button class="btn ghost sm" data-click="loadSupport">↺ Refresh</button>
+          </div>
+        </div>
+        <div style="padding:16px;display:grid;gap:16px">
+          <p class="hint">Diagnostic support bundles are <strong>redacted at source</strong> — secrets are dropped and identifiers masked before anything is written. Creating a bundle is admin-only; a standard bundle may contain internal (non-secret) operational detail.</p>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Health verdict</div>
+            <div id="support-health" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Capture level</div>
+            <p class="hint">Elevate the default bundle capture depth for a bounded window. A TTL is <strong>mandatory</strong> — the level auto-reverts to baseline when it expires (even across a restart).</p>
+            <div id="support-debug-level" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
+            <!-- Row is operator-visible so operators can Revert an active elevation
+                 (DELETE is RoleOperator); the SET controls stay admin-only. -->
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
+              <label class="hint" for="support-dl-level" data-min-role="admin">Level</label>
+              <select id="support-dl-level" class="input sm" data-min-role="admin" title="Elevated capture depth">
+                <option value="1">L1 (baseline)</option>
+                <option value="2">L2 (+runtime)</option>
+                <option value="3">L3</option>
+                <option value="4">L4</option>
+              </select>
+              <label class="hint" for="support-dl-ttl" data-min-role="admin">TTL (min)</label>
+              <input id="support-dl-ttl" class="input sm" type="number" min="1" max="1440" value="60" style="width:80px" data-min-role="admin" title="Minutes until auto-revert (1–1440)">
+              <button class="btn primary sm" data-click="supportSetDebugLevel" data-min-role="admin" title="Elevate capture level for the window">Set level</button>
+              <button class="btn ghost sm" data-click="supportClearDebugLevel" data-min-role="operator" title="Revert to baseline now">Revert now</button>
+            </div>
+          </div>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Diagnostics</div>
+            <p class="hint">Local, read-only checks — no network, no shell.</p>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
+              <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
+              <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
+              <input id="support-dns-host" class="input sm" type="text" placeholder="host to resolve" style="width:180px" title="Bare hostname (no scheme/port/path)">
+              <button class="btn ghost sm" data-click="diagnoseDNS" data-min-role="operator" title="Bounded DNS resolution probe (private targets refused)">Resolve DNS</button>
+              <input id="support-tls-host" class="input sm" type="text" placeholder="host:port for TLS" style="width:180px" title="host[:port] (default 443); private targets refused">
+              <button class="btn ghost sm" data-click="diagnoseTLS" data-min-role="operator" title="Bounded TLS handshake + chain/expiry check (no MITM; private targets refused)">Check TLS</button>
+            </div>
+            <div id="support-diagnose" role="status" aria-live="polite" style="margin-top:6px"></div>
+          </div>
+
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Collectors</div>
+            <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
+          <div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <span style="font-weight:600">Bundles</span>
+              <input id="support-case-filter" class="input sm" type="text" placeholder="filter by case" maxlength="64" style="width:140px" title="Show only bundles bound to this support case">
+              <button class="btn ghost sm" data-click="supportApplyCaseFilter" title="Apply the case filter">Filter</button>
+              <button class="btn ghost sm" data-click="supportClearCaseFilter" title="Clear the filter">Clear</button>
+            </div>
+            <div id="support-bundles" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-support -->
+
     <!-- ═══ BLOCK PAGE EDITOR ════════════════════════════════════════════ -->
     <!-- (embedded inside Security panel later, but available as standalone) -->
 
@@ -4391,6 +4476,21 @@ document.addEventListener('click', e => {
 
     // ── Release management (P1.6d-1) ──
     case 'loadReleases':           loadReleases(); break;
+    case 'loadSupport':            loadSupport(); break;
+    case 'supportCreateBundle':    supportCreateBundle(); break;
+    case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
+    case 'supportClearDebugLevel': supportClearDebugLevel(); break;
+    case 'diagnoseStorage':        diagnoseStorage(); break;
+    case 'diagnoseUpstream':       diagnoseUpstream(); break;
+    case 'diagnoseDNS':            diagnoseDNS(); break;
+    case 'diagnoseTLS':            diagnoseTLS(); break;
+    case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
+    case 'supportShowReport':      supportShowReport(arg); break;
+    case 'supportValidateBundle':  supportValidateBundle(arg); break;
+    case 'supportExportEncrypted': supportExportEncrypted(arg); break;
+    case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
+    case 'supportClearCaseFilter': supportClearCaseFilter(); break;
+    case 'supportApproveBundle':   supportApproveBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -4643,6 +4743,7 @@ const viewMeta = {
   audit:          { title: 'Audit Log',        meta: 'Configuration change history with actor, action and diff' },
   releases:       { title: 'Release Management', meta: 'Dispatch verified catalog releases to agents' },
   governance:     { title: 'Governance',      meta: 'Control-plane route metadata, RBAC enforcement counters and parity-test health' },
+  support:        { title: 'Support',         meta: 'Collect redacted diagnostic bundles and review the collector inventory' },
 };
 
 document.querySelectorAll('.nav-item').forEach(el => {
@@ -4718,6 +4819,7 @@ function switchView(name) {
   if (name === 'diagnostics')    loadDiagnostics();
   if (name === 'governance')     loadGovernance();
   if (name === 'releases')       loadReleases();
+  if (name === 'support')        loadSupport();
   if (name !== 'releases')       releaseStopStatusPoll(); // stop polling when leaving the panel
 }
 
@@ -12065,6 +12167,513 @@ function releaseCurrentAgent() {
 }
 function releaseAgentChange() { loadReleaseCurrent(); loadReleaseStatus(); }
 function releaseStopStatusPoll() { if (releaseStatusTimer) { clearTimeout(releaseStatusTimer); releaseStatusTimer = null; } }
+
+// ── Support (M1 supportability framework) ────────────────────────────────────
+let _supportBundles = [];
+const _supportLevelName = ['L0', 'L1', 'L2', 'L3', 'L4'];
+
+async function loadSupport() {
+  const healthEl = document.getElementById('support-health');
+  const statusEl = document.getElementById('support-status');
+  const bundlesEl = document.getElementById('support-bundles');
+  [healthEl, statusEl, bundlesEl].forEach(el => {
+    if (el) { el.innerHTML = '<p class="hint">Loading…</p>'; el.setAttribute('aria-busy', 'true'); }
+  });
+  // The three reads are independent — fetch concurrently, render each as it
+  // resolves, and surface per-panel errors without letting one fail the others.
+  const dlEl = document.getElementById('support-debug-level');
+  if (dlEl) { dlEl.innerHTML = '<p class="hint">Loading…</p>'; dlEl.setAttribute('aria-busy', 'true'); }
+  const cf = document.getElementById('support-case-filter');
+  const caseFilter = (cf && cf.value || '').trim();
+  const bundlesPath = '/api/support/bundles' + (caseFilter ? '?case=' + encodeURIComponent(caseFilter) : '');
+  const [healthR, statusR, bundlesR, dlR] = await Promise.allSettled([
+    api('/api/health/explain'),
+    api('/api/support/status'),
+    api(bundlesPath),
+    api('/api/support/debug-level'),
+  ]);
+  if (healthR.status === 'fulfilled') renderSupportHealth(healthR.value);
+  else if (healthEl) healthEl.innerHTML = '<p class="hint">Failed to load health: ' + escHtml(healthR.reason.message) + '</p>';
+  if (statusR.status === 'fulfilled') renderSupportStatus(statusR.value);
+  else if (statusEl) statusEl.innerHTML = '<p class="hint">Failed to load collectors: ' + escHtml(statusR.reason.message) + '</p>';
+  if (bundlesR.status === 'fulfilled') { _supportBundles = bundlesR.value || []; renderSupportBundles(_supportBundles); }
+  else if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(bundlesR.reason.message) + '</p>';
+  if (dlR.status === 'fulfilled') renderSupportDebugLevel(dlR.value);
+  else if (dlEl) dlEl.innerHTML = '<p class="hint">Failed to load capture level: ' + escHtml(dlR.reason.message) + '</p>';
+  [healthEl, statusEl, bundlesEl, dlEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+}
+
+function renderSupportDebugLevel(d) {
+  const el = document.getElementById('support-debug-level');
+  if (!el) return;
+  d = d || {};
+  const eff = _supportLevelName[d.effective_level] || ('L' + d.effective_level);
+  if (d.elevated) {
+    const mins = Math.max(0, Math.round((d.remaining_secs || 0) / 60));
+    el.innerHTML = '<p class="hint">Effective <strong style="color:var(--orange)">' + escHtml(eff) +
+      '</strong> (elevated) · reverts to L' + escHtml(String(d.baseline_level)) + ' in ~' + escHtml(String(mins)) +
+      ' min' + (d.set_by ? ' · set by ' + escHtml(String(d.set_by)) : '') + '</p>';
+  } else {
+    el.innerHTML = '<p class="hint">Effective <strong style="color:var(--green)">' + escHtml(eff) +
+      '</strong> (baseline) · no elevation in force</p>';
+  }
+}
+
+function renderSupportHealth(oc) {
+  const el = document.getElementById('support-health');
+  if (!el) return;
+  oc = oc || {};
+  const verdict = String(oc.verdict || 'unknown');
+  const color = verdict === 'ok' ? 'var(--green)' : verdict === 'warn' ? 'var(--orange)' : 'var(--red)';
+  const checks = oc.checks || [];
+  const hdr = '<p class="hint">Verdict <strong style="color:' + color + '">' + escHtml(verdict.toUpperCase()) +
+    '</strong>' + (oc.generated_at ? ' · ' + escHtml(fmtProvTime(oc.generated_at)) : '') + '</p>';
+  if (!checks.length) { el.innerHTML = hdr + '<p class="hint">No checks reported.</p>'; return; }
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>' +
+    checks.map(c => {
+      const st = String(c.status || '');
+      const sc = st === 'ok' ? 'var(--green)' : st === 'warn' ? 'var(--orange)' : 'var(--red)';
+      const detail = escHtml(String(c.message || '')) +
+        (c.operator_action ? ' <span class="hint">→ ' + escHtml(String(c.operator_action)) + '</span>' : '');
+      return '<tr>' +
+        '<td style="font-family:monospace">' + escHtml(String(c.code)) + '</td>' +
+        '<td style="color:' + sc + ';font-weight:600">' + escHtml(st) + '</td>' +
+        '<td>' + detail + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function renderSupportStatus(s) {
+  const el = document.getElementById('support-status');
+  if (!el) return;
+  s = s || {};
+  // Populate the incident-scope dropdown from the status catalog (preserve the
+  // current selection across refreshes).
+  const scopeSel = document.getElementById('support-scope');
+  if (scopeSel && Array.isArray(s.scopes) && s.scopes.length) {
+    const cur = scopeSel.value;
+    scopeSel.innerHTML = s.scopes.map(n => '<option value="' + escHtml(String(n)) + '">' + escHtml(String(n)) + '</option>').join('');
+    if (s.scopes.indexOf(cur) >= 0) scopeSel.value = cur;
+  }
+  const cols = s.collectors || [];
+  const hdr = '<p class="hint">Format <code>' + escHtml(String(s.bundle_format || '')) +
+    '</code> · engine v' + escHtml(String(s.collector_engine_version || '')) +
+    ' · redaction model v' + escHtml(String(s.redaction_model_version || '')) + '</p>';
+  if (!cols.length) { el.innerHTML = hdr + '<p class="hint">No collectors registered.</p>'; return; }
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Collector</th><th>Owner</th><th>Level</th><th>Max class</th><th>Mandatory</th></tr></thead><tbody>' +
+    cols.map(c => '<tr>' +
+      '<td style="font-family:monospace">' + escHtml(String(c.id)) + '</td>' +
+      '<td>' + escHtml(String(c.owner)) + '</td>' +
+      '<td>' + escHtml(_supportLevelName[c.min_level] || ('L' + c.min_level)) + '</td>' +
+      '<td>' + escHtml(String(c.max_class)) + '</td>' +
+      '<td>' + (c.mandatory ? 'yes' : 'no') + '</td>' +
+    '</tr>').join('') + '</tbody></table></div>';
+}
+
+function renderSupportBundles(list) {
+  const el = document.getElementById('support-bundles');
+  if (!el) return;
+  if (!list || !list.length) {
+    el.innerHTML = '<p class="hint">No bundles yet' + (uiRole === 'admin' ? ' — click “Create bundle” to collect one.' : '.') + '</p>';
+    return;
+  }
+  // Download + Delete require operator+. data-min-role only re-applies at login,
+  // so gate dynamically-rendered controls imperatively (server enforces regardless).
+  const canWrite = (uiRole === 'operator' || uiRole === 'admin');
+  el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Bundle</th><th>Case</th><th>Created</th><th>State</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
+    list.map(b => {
+      const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
+        (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
+      const href = '/api/support/bundles/' + encodeURIComponent(String(b.bundle_id));
+      const ready = (b.state === 'ready');
+      const stateCell = ready
+        ? '<span style="color:var(--green)">ready</span>'
+        : '<span style="color:var(--orange)" title="Review the redaction report, then Approve to enable download">pending</span>';
+      // Report preview is counts-only (viewer-safe). Download needs operator+ AND
+      // an approved (ready) bundle. Approve is the admin mandatory-preview gate.
+      const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>' +
+        ' <button class="btn ghost sm" data-click="supportValidateBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Re-derive + check section hashes (tamper detection)">Validate</button>';
+      let ops = '';
+      if (canWrite) {
+        ops += ready
+          ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>' +
+            ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>'
+          : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
+        if (!ready && uiRole === 'admin') {
+          ops += ' <button class="btn primary sm" data-click="supportApproveBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Approve</button>';
+        }
+        ops += ' <button class="btn ghost sm" data-click="supportDeleteBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Delete</button>';
+      } else {
+        ops = ' <span class="hint" title="Operator role required to download or delete">operator+</span>';
+      }
+      return '<tr>' +
+        '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
+        '<td>' + (b.case_id ? '<span style="font-family:monospace">' + escHtml(String(b.case_id)) + '</span>' : '<span class="hint">—</span>') + '</td>' +
+        '<td title="' + escHtml(String(b.created_at)) + '">' + escHtml(fmtProvTime(b.created_at)) + '</td>' +
+        '<td>' + stateCell + '</td>' +
+        '<td>' + sections + '</td>' +
+        '<td>' + escHtml(fmtBytes(b.size_bytes)) + '</td>' +
+        '<td>' + reportBtn + ops + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+async function supportCreateBundle() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const scopeSel = document.getElementById('support-scope');
+  const scope = (scopeSel && scopeSel.value) || 'standard';
+  const levelSel = document.getElementById('support-level');
+  // Empty value = "Auto": omit the level param so the server applies the
+  // effective capture level (any active elevation, else baseline L1). Only an
+  // explicit L0..L4 choice overrides the controller.
+  const level = (levelSel && levelSel.value) || '';
+  const levelLabel = level === '' ? 'auto (effective)' : 'L' + level;
+  const caseInp = document.getElementById('support-case');
+  const caseID = (caseInp && caseInp.value || '').trim();
+  if (caseID && !/^[A-Za-z0-9._-]{1,64}$/.test(caseID)) { toast('Invalid case id (letters/digits/._-, ≤64)', 'error'); return; }
+  const ok = await confirmAction(
+    'Create support bundle?',
+    'A redacted diagnostic bundle (scope: ' + scope + ', level: ' + levelLabel + (caseID ? ', case: ' + caseID : '') + ') will be collected and written to disk — internal, non-secret operational detail.',
+    'Create bundle',
+    { okStyle: 'primary', impact: 'Collects and persists internal diagnostic data; oldest bundles beyond the retention cap are evicted.' });
+  if (!ok) return;
+  const btn = document.querySelector('[data-click="supportCreateBundle"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
+  try {
+    const qs = '/api/support/bundles?scope=' + encodeURIComponent(scope) +
+      (level === '' ? '' : '&level=' + encodeURIComponent(level)) +
+      (caseID ? '&case=' + encodeURIComponent(caseID) : '');
+    const man = await api(qs, { method: 'POST' });
+    toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Bundle create failed: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+async function diagnoseStorage() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseStorage"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/storage', { method: 'POST' });
+    renderDiagnoseStorage(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Storage check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseStorage(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const hdr = '<p class="hint">Storage <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
+    '</strong> · free ' + escHtml(String(Math.round((d.free_bytes || 0) / (1024 * 1024)))) + ' MiB / used ' +
+    escHtml((d.used_pct || 0).toFixed(1)) + '%</p>';
+  const rows = (d.checks || []).map(c =>
+    '<tr><td>' + escHtml(String(c.name)) + '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') + '">' +
+    (c.ok ? 'ok' : 'fail') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function diagnoseUpstream() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseUpstream"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/upstream', { method: 'POST' });
+    renderDiagnoseUpstream(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Upstream check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseUpstream(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  if (!d.enabled) {
+    el.innerHTML = '<p class="hint">Upstream <strong style="color:var(--green)">DIRECT</strong> — no proxy pool configured (direct egress).</p>';
+    return;
+  }
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const hdr = '<p class="hint">Upstream pool <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
+    '</strong> · ' + escHtml(String(d.usable_count || 0)) + '/' + escHtml(String(d.count || 0)) + ' usable (' +
+    escHtml(String(d.healthy_count || 0)) + ' healthy)</p>';
+  const rows = (d.proxies || []).map(p =>
+    '<tr><td>' + escHtml(String(p.url)) + '</td><td style="color:' + (p.healthy ? 'var(--green)' : 'var(--red)') + '">' +
+    (p.healthy ? 'healthy' : 'down') + '</td><td>' + escHtml(String(p.circuit || '')) + '</td><td class="hint">' +
+    escHtml(String(p.failures || 0)) + '</td></tr>').join('');
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Proxy</th><th>Health</th><th>Circuit</th><th>Failures</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function diagnoseDNS() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const hostInp = document.getElementById('support-dns-host');
+  const host = (hostInp && hostInp.value || '').trim();
+  if (!host) { toast('Enter a hostname to resolve', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseDNS"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Resolving…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/dns', { method: 'POST', body: JSON.stringify({ host: host }) });
+    renderDiagnoseDNS(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">DNS check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseDNS(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  if (d.blocked) {
+    el.innerHTML = '<p class="hint">DNS <strong style="color:var(--orange)">BLOCKED</strong> — ' + escHtml(String(d.host)) +
+      ' resolves to a private/internal address; the probe is refused (SSRF guard).</p>';
+    return;
+  }
+  if (!d.resolved) {
+    el.innerHTML = '<p class="hint">DNS <strong style="color:var(--red)">UNRESOLVED</strong> — ' + escHtml(String(d.host)) +
+      (d.error ? ': ' + escHtml(String(d.error)) : '') + '</p>';
+    return;
+  }
+  const addrs = (d.addresses || []).map(a => escHtml(String(a))).join(', ');
+  el.innerHTML = '<p class="hint">DNS <strong style="color:var(--green)">OK</strong> — ' + escHtml(String(d.host)) +
+    ' → ' + addrs + ' <span class="hint">(' + escHtml(String(d.duration_ms || 0)) + ' ms)</span></p>';
+}
+
+async function diagnoseTLS() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const inp = document.getElementById('support-tls-host');
+  const host = (inp && inp.value || '').trim();
+  if (!host) { toast('Enter host:port to check', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseTLS"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/tls', { method: 'POST', body: JSON.stringify({ host: host }) });
+    renderDiagnoseTLS(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">TLS check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseTLS(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const label = escHtml(String(d.host || '')) + ':' + escHtml(String(d.port || ''));
+  if (d.blocked) {
+    el.innerHTML = '<p class="hint">TLS <strong style="color:var(--orange)">BLOCKED</strong> — ' + label +
+      ' is a private/internal target; the probe is refused (SSRF guard).</p>';
+    return;
+  }
+  if (!d.handshake_ok) {
+    el.innerHTML = '<p class="hint">TLS <strong style="color:var(--red)">FAILED</strong> — ' + label +
+      (d.error ? ': ' + escHtml(String(d.error)) : '') + '</p>';
+    return;
+  }
+  const color = d.ok ? 'var(--green)' : 'var(--orange)';
+  const verdict = d.ok ? 'OK' : (d.expired ? 'EXPIRED' : 'UNTRUSTED');
+  const leaf = d.leaf || {};
+  el.innerHTML = '<p class="hint">TLS <strong style="color:' + color + '">' + verdict + '</strong> — ' + label +
+    ' · ' + escHtml(String(d.version || '')) + ' · chain ' + (d.chain_verified ? 'verified' : 'unverified') +
+    ' · expires in ' + escHtml(String(d.days_until_expiry)) + 'd' +
+    (d.error ? ' <span class="hint">(' + escHtml(String(d.error)) + ')</span>' : '') + '</p>' +
+    '<p class="hint">subject ' + escHtml(String(leaf.subject || '')) + ' · issuer ' + escHtml(String(leaf.issuer || '')) + '</p>';
+}
+
+async function supportSetDebugLevel() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const levelSel = document.getElementById('support-dl-level');
+  const ttlInp = document.getElementById('support-dl-ttl');
+  const level = parseInt((levelSel && levelSel.value) || '1', 10);
+  const mins = parseInt((ttlInp && ttlInp.value) || '0', 10);
+  if (!(mins > 0)) { toast('A positive TTL (minutes) is required', 'error'); return; }
+  try {
+    await api('/api/support/debug-level', { method: 'POST', body: JSON.stringify({ level: level, ttl_seconds: mins * 60 }) });
+    toast('Capture level set to L' + level + ' for ' + mins + ' min', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Set level failed: ' + err.message, 'error');
+  }
+}
+
+async function supportClearDebugLevel() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  try {
+    await api('/api/support/debug-level', { method: 'DELETE' });
+    toast('Capture level reverted to baseline', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Revert failed: ' + err.message, 'error');
+  }
+}
+
+async function supportDeleteBundle(id) {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  if (!id) return;
+  const ok = await confirmAction(
+    'Delete support bundle?',
+    'Bundle ' + String(id) + ' will be permanently removed from disk.',
+    'Delete');
+  if (!ok) return;
+  try {
+    await api('/api/support/bundles/' + encodeURIComponent(String(id)), { method: 'DELETE' });
+    toast('Bundle deleted', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Bundle delete failed: ' + err.message, 'error');
+  }
+}
+
+async function supportApproveBundle(id) {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  if (!id) return;
+  const ok = await confirmAction(
+    'Approve bundle for download?',
+    'Confirm you have reviewed the redaction report for ' + String(id) + '. Approving marks the bundle downloadable (it may contain internal, non-secret operational detail).',
+    'Approve',
+    { okStyle: 'primary' });
+  if (!ok) return;
+  try {
+    await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/approve', { method: 'POST' });
+    toast('Bundle approved — download enabled', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Approve failed: ' + err.message, 'error');
+  }
+}
+
+async function supportExportEncrypted(id) {
+  if (!id) return;
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const pass = window.prompt('Passphrase to encrypt the bundle (12–512 chars). Keep it safe — it is never stored and is required to decrypt.');
+  if (pass === null) return; // cancelled
+  if (pass.length < 12) { toast('Passphrase must be at least 12 characters', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/support/bundles/' + encodeURIComponent(String(id)) + '/download-encrypted',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: pass }) });
+    if (!r.ok) { toast('Encrypt failed: ' + (await r.text()), 'error'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = String(id) + '.csb.enc';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('Encrypted bundle downloaded — decrypt with your passphrase', 'success');
+  } catch (err) {
+    toast('Encrypt failed: ' + err.message, 'error');
+  }
+}
+
+function supportApplyCaseFilter() {
+  const cf = document.getElementById('support-case-filter');
+  const v = (cf && cf.value || '').trim();
+  if (v && !/^[A-Za-z0-9._-]{1,64}$/.test(v)) { toast('Invalid case id filter (letters/digits/._-, ≤64)', 'error'); return; }
+  loadSupport();
+}
+
+function supportClearCaseFilter() {
+  const cf = document.getElementById('support-case-filter');
+  if (cf) cf.value = '';
+  loadSupport();
+}
+
+async function supportValidateBundle(id) {
+  if (!id) return;
+  try {
+    const v = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/validate');
+    if (v.ok) {
+      toast('Integrity OK — ' + (v.sections_ok || 0) + '/' + (v.sections_checked || 0) + ' sections verified', 'success');
+    } else {
+      const bad = ((v.mismatches || []).length) + ' mismatched, ' + ((v.missing || []).length) + ' missing';
+      toast('Integrity FAILED — ' + (v.error ? v.error : bad), 'error');
+    }
+  } catch (err) {
+    toast('Validate failed: ' + err.message, 'error');
+  }
+}
+
+async function supportShowReport(id) {
+  if (!id) return;
+  try {
+    const rep = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/redaction-report');
+    const t = (rep && rep.totals) || {};
+    const secs = (rep && rep.sections) || [];
+    const rows = secs.map(s =>
+      '<tr><td style="font-family:monospace">' + escHtml(String(s.id)) + '</td>' +
+      '<td>' + escHtml(String(s.class_max || '')) + '</td>' +
+      '<td>' + escHtml(String(s.masked || 0)) + '</td>' +
+      '<td>' + escHtml(String(s.dropped || 0)) + '</td>' +
+      '<td>' + escHtml(String(s.scrubbed || 0)) + '</td></tr>').join('');
+    // Sighted consent gate: automated redaction is counts-only in the bundle, so
+    // surface the RETAINED free-form values the approver is releasing. The
+    // precision-first scrubber cannot catch a bare secret typed into a rule name
+    // or endpoint — a human must eyeball these before approving an export.
+    const prev = (rep && rep.retained_preview) || [];
+    let previewHtml = '';
+    if (prev.length) {
+      const pblocks = prev.map(s => {
+        const vals = (s.retained_freeform || []).map(v =>
+          '<li style="font-family:monospace;white-space:pre-wrap;word-break:break-all">' + escHtml(String(v)) + '</li>').join('');
+        if (!vals) return '';
+        return '<div style="margin:6px 0"><div style="font-weight:600;font-family:monospace">' + escHtml(String(s.id)) +
+          '</div><ul style="margin:4px 0 0 18px">' + vals + '</ul></div>';
+      }).join('');
+      if (pblocks) {
+        previewHtml = '<div style="margin-top:14px;padding:10px;border:1px solid var(--warn,#b8860b);border-radius:6px">' +
+          '<div style="font-weight:700;color:var(--warn,#b8860b)">⚠ Review before approving — retained free-form values</div>' +
+          '<p class="hint" style="margin:4px 0">These INTERNAL free-form strings are KEPT in the shareable bundle. ' +
+          'Automated redaction cannot catch a bare secret embedded here (e.g. a credential typed into a rule name or endpoint). ' +
+          'Confirm none contains a secret before you approve.</p>' + pblocks + '</div>';
+      }
+    }
+    const html = '<p class="hint">Bundle report is counts only — no values. fail_closed=<code>' + escHtml(String(rep.fail_closed)) +
+      '</code> · model v' + escHtml(String(rep.model_version || '')) + '</p>' +
+      '<p><strong>Totals</strong>: ' + escHtml(String(t.masked || 0)) + ' masked · ' +
+      escHtml(String(t.dropped || 0)) + ' dropped · ' + escHtml(String(t.scrubbed || 0)) + ' scrubbed</p>' +
+      '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+      '<th>Section</th><th>Class max</th><th>Masked</th><th>Dropped</th><th>Scrubbed</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>' + previewHtml;
+    const el = document.getElementById('support-bundles');
+    if (el) {
+      let box = document.getElementById('support-report-box');
+      if (!box) { box = document.createElement('div'); box.id = 'support-report-box'; box.style.marginTop = '12px'; el.appendChild(box); }
+      box.innerHTML = '<div style="font-weight:600;margin:6px 0">Redaction report — ' + escHtml(String(id)) + '</div>' + html;
+      box.scrollIntoView({ block: 'nearest' });
+    }
+  } catch (err) {
+    toast('Report unavailable: ' + err.message, 'error');
+  }
+}
 
 async function loadReleases() {
   await loadReleaseCatalog();

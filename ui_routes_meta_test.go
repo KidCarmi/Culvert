@@ -49,11 +49,19 @@ import (
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
 //   - 141 — policy-draft (G2) added /api/policy/draft (+commit +revert):
 //     candidate/commit for the rulebase.
+//   - 140 — Terminology governance T-10: added canonical /api/dpi and
+//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
+//     /api/content-scan/bypass aliases (same handlers).
+//   - 140 — Supportability M1 Slice 1 added /api/support/bundles (POST create)
+//   - /api/support/bundles/{id} (GET download).
+//   - 142 — Supportability M1 added /api/support/status + /api/health/explain
+//     (the explained operator-contract health verdict).
+//   - +N — Supportability M2-M4 added the rest of the TAC support-framework
+//     surface (bundle report/approve, debug-level, diagnose/{storage,upstream,
+//     dns,tls}, bundle validate + download-encrypted, and related routes); see
+//     `const want` below for the current authoritative total.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 144
-	//   - 140 — Terminology governance T-10: added canonical /api/dpi and
-	//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
-	//     /api/content-scan/bypass aliases (same handlers).
+	const want = 157
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -159,6 +167,8 @@ var helperSourceFiles = []string{
 	"diagnostics.go",
 	"ui_governance.go",
 	"release_api.go",
+	"ui_support.go",
+	"diagnose.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a

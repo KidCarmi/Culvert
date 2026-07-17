@@ -8,10 +8,22 @@ import (
 	"github.com/KidCarmi/Culvert/internal/geoip"
 )
 
-// handleHealth returns liveness + readiness details for monitoring tools.
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+// healthReport is the liveness + posture snapshot served by /healthz and
+// collected into sections/health.json. Status/version/uptime are PUBLIC; the
+// subsystem-posture fields are INTERNAL (operationally revealing, not secret).
+type healthReport struct {
+	Status            string `json:"status" redact:"public"`
+	Uptime            string `json:"uptime" redact:"public"`
+	Version           string `json:"version" redact:"public"`
+	ClamAV            string `json:"clamav" redact:"internal"`
+	CAExpiresDays     int    `json:"ca_expires_days" redact:"internal"`
+	SSLInspection     string `json:"ssl_inspection" redact:"internal"`
+	ThreatFeedEntries int64  `json:"threat_feed_entries" redact:"internal"`
+}
 
+// computeHealth builds the liveness/posture snapshot from side-effect-free reads.
+// Shared by handleHealth and the health support collector.
+func computeHealth() healthReport {
 	// CA cert expiry
 	caExpiresDays := -1
 	if info := certMgr.CACertInfo(); info["ready"] == true {
@@ -31,8 +43,8 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		clamStatus = globalSecScanner.ClamAVStatus()
 	}
 
-	// SSL inspection state (CHAOS-06): a CA that was configured but failed
-	// to load leaves the gateway serving TLS as tunnel-only bypass — that
+	// SSL inspection state (CHAOS-06): a CA that was configured but failed to
+	// load leaves the gateway serving TLS as tunnel-only bypass — that
 	// degradation must be visible to monitoring, not just a startup log line.
 	//
 	// The recorded load failure is consulted BEFORE Ready(): LoadOrInitCA calls
@@ -48,16 +60,7 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		sslInspection = "unavailable"
 	}
 
-	type healthResponse struct {
-		Status            string `json:"status"`
-		Uptime            string `json:"uptime"`
-		Version           string `json:"version"`
-		ClamAV            string `json:"clamav"`
-		CAExpiresDays     int    `json:"ca_expires_days"`
-		SSLInspection     string `json:"ssl_inspection"`
-		ThreatFeedEntries int64  `json:"threat_feed_entries"`
-	}
-	resp := healthResponse{
+	return healthReport{
 		Status:            "ok",
 		Uptime:            uptime(),
 		Version:           version,
@@ -66,27 +69,37 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 		SSLInspection:     sslInspection,
 		ThreatFeedEntries: tfEntries,
 	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
+}
+
+// handleHealth returns liveness + readiness details for monitoring tools.
+func handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(computeHealth()); err != nil {
 		logger.Printf("handleHealth encode: %v", err)
 	}
 }
 
-// handleReady is a readiness probe — returns 200 only when all configured
-// subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
-// Unlike /health (liveness), this returns 503 when dependencies are degraded.
-// configSnapshotValidatorOK reports whether the config-snapshot
-// validator accepts the empty baseline (its identity contract). Defined
-// as a package-level variable so tests can swap in a stub that simulates
-// a broken validator without mutating the per-slice caps in
-// configversion / controlplane.
-var configSnapshotValidatorOK = func() bool {
-	return validateConfigSnapshot(ConfigSnapshot{}) == nil
+// readinessCheck is one row of the readiness probe.
+type readinessCheck struct {
+	Status string `json:"status" redact:"public"` // "ok" or "fail"
+	Detail string `json:"detail,omitempty" redact:"public"`
 }
 
-// checkResult is one row of the /readyz checks map.
-type checkResult struct {
-	Status string `json:"status"` // "ok" or "fail"
-	Detail string `json:"detail,omitempty"`
+// readinessReport is the /readyz snapshot, also collected into
+// sections/readiness.json (PUBLIC — no identities or secrets).
+type readinessReport struct {
+	Status  string                     `json:"status" redact:"public"`
+	Uptime  string                     `json:"uptime" redact:"public"`
+	Version string                     `json:"version" redact:"public"`
+	Checks  map[string]*readinessCheck `json:"checks" redact:"public"`
+}
+
+// configSnapshotValidatorOK reports whether the config-snapshot validator accepts
+// the empty baseline (its identity contract). Defined as a package-level variable
+// so tests can swap in a stub that simulates a broken validator without mutating
+// the per-slice caps in configversion / controlplane.
+var configSnapshotValidatorOK = func() bool {
+	return validateConfigSnapshot(ConfigSnapshot{}) == nil
 }
 
 // appendStateFileChecks adds the report-only CHAOS-05/07 rows
@@ -94,32 +107,37 @@ type checkResult struct {
 // means the node is serving with an empty roster/cluster store —
 // survivable (env fallback creds / re-enrollment) but it must stay
 // visible to probes beyond the startup log line and the alert.
-func appendStateFileChecks(checks map[string]*checkResult) {
+func appendStateFileChecks(checks map[string]*readinessCheck) {
 	for kind, detail := range stateCorruptionSnapshot() {
-		checks["state_file_"+kind] = &checkResult{Status: "fail", Detail: detail}
+		checks["state_file_"+kind] = &readinessCheck{Status: "fail", Detail: detail}
 	}
 }
 
-func handleReady(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	checks := map[string]*checkResult{}
+// computeReadiness builds the readiness snapshot and the HTTP status code (200
+// when all gating checks pass, 503 otherwise). Shared by handleReady and the
+// readiness support collector. The verdict returned here is the DEFAULT
+// (non-strict) one — the report-only rows (ca, policy_loaded, state_file_*,
+// cp_poll, node_cert) never gate it; the opt-in strict verdict (CHAOS-09,
+// /ready?strict=1) is layered on top by handleReady via strictVerdictFails,
+// since it depends on the incoming request and the collector has none.
+func computeReadiness() (report readinessReport, code int) {
+	checks := map[string]*readinessCheck{}
 	allOK := true
 
-	// 1. CA: report status but don't fail readiness — proxy still works
-	// as a plain forward proxy if the CA didn't load. A configured-but-
-	// failed load is surfaced as a failing (non-gating) check so the
-	// degradation is visible to probes instead of the row silently
-	// disappearing (CHAOS-06); posture (report-only) mirrors policy_loaded.
+	// 1. CA: report status but don't fail readiness — proxy still works as a
+	// plain forward proxy if the CA didn't load. A configured-but-failed load is
+	// surfaced as a failing (non-gating) check so the degradation is visible to
+	// probes instead of the row silently disappearing (CHAOS-06); posture
+	// (report-only) mirrors policy_loaded.
 	//
 	// The recorded load failure is checked BEFORE Ready(): LoadOrInitCA runs
 	// InitCA() (Ready() → true) before SaveCA(), so a SaveCA failure leaves a
-	// recorded failure while Ready() stays true. Reporting "ok" there would
-	// hide a configured CA bundle that never persisted.
+	// recorded failure while Ready() stays true. Reporting "ok" there would hide
+	// a configured CA bundle that never persisted.
 	if detail := sslInspectionLoadFailure(); detail != "" {
-		checks["ca"] = &checkResult{Status: "fail", Detail: detail}
+		checks["ca"] = &readinessCheck{Status: "fail", Detail: detail}
 	} else if certMgr.Ready() {
-		checks["ca"] = &checkResult{Status: "ok"}
+		checks["ca"] = &readinessCheck{Status: "ok"}
 	}
 
 	// 2. ClamAV: if scanner is initialised, verify connectivity.
@@ -129,55 +147,50 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 		case "disabled":
 			// Not configured — skip.
 		case "connected":
-			checks["clamav"] = &checkResult{Status: "ok"}
+			checks["clamav"] = &readinessCheck{Status: "ok"}
 		default:
-			checks["clamav"] = &checkResult{Status: "fail", Detail: st}
+			checks["clamav"] = &readinessCheck{Status: "fail", Detail: st}
 			allOK = false
 		}
 	}
 
 	// 3. GeoIP: if configured, verify DB is loaded.
 	if geoip.Enabled() {
-		checks["geoip"] = &checkResult{Status: "ok"}
+		checks["geoip"] = &readinessCheck{Status: "ok"}
 	}
 	// GeoIP is optional — absence is not a failure.
 
 	// 4. YARA rules: if configured, verify loaded.
 	if globalYARA.Enabled() {
-		checks["yara"] = &checkResult{Status: "ok"}
+		checks["yara"] = &readinessCheck{Status: "ok"}
 	}
 
-	// 5. Policy loaded (informational). Empty policy is a valid
-	// Zero-Trust posture — default-deny applies — so this row does NOT
-	// gate readiness. Surfaces "no rules yet" as a hint to operators
-	// without flapping load balancers on a fresh install.
+	// 5. Policy loaded (informational). Empty policy is a valid Zero-Trust posture
+	// — default-deny applies — so this row does NOT gate readiness. Surfaces "no
+	// rules yet" as a hint without flapping load balancers on a fresh install.
 	if ver, _ := policyStore.policyVersion(); ver > 0 {
-		checks["policy_loaded"] = &checkResult{Status: "ok"}
+		checks["policy_loaded"] = &readinessCheck{Status: "ok"}
 	} else {
-		checks["policy_loaded"] = &checkResult{Status: "fail", Detail: "no rules"}
+		checks["policy_loaded"] = &readinessCheck{Status: "fail", Detail: "no rules"}
 	}
 
-	// 6. Admin session HMAC initialised. Without this, signed cookies
-	// cannot be issued or verified — the admin UI is effectively
-	// unmanageable. Fail readiness so traffic is held off until the
-	// node is restarted with a valid secret.
+	// 6. Admin session HMAC initialised. Without this, signed cookies cannot be
+	// issued or verified — the admin UI is effectively unmanageable. Fail
+	// readiness so traffic is held off until the node is restarted with a secret.
 	if sessionSecretSet() {
-		checks["session_secret"] = &checkResult{Status: "ok"}
+		checks["session_secret"] = &readinessCheck{Status: "ok"}
 	} else {
-		checks["session_secret"] = &checkResult{Status: "fail", Detail: "uninitialised"}
+		checks["session_secret"] = &readinessCheck{Status: "fail", Detail: "uninitialised"}
 		allOK = false
 	}
 
-	// 7. ConfigSnapshot validator. The pure validateConfigSnapshot
-	// function must accept the empty baseline (its identity contract).
-	// If it ever rejects, the cluster control-plane apply path is
-	// broken and we must shed load. configSnapshotValidatorOK is a
-	// package-level seam so tests can simulate a broken validator
-	// without mutating the per-slice caps.
+	// 7. ConfigSnapshot validator. The pure validateConfigSnapshot function must
+	// accept the empty baseline (its identity contract). If it ever rejects, the
+	// cluster control-plane apply path is broken and we must shed load.
 	if configSnapshotValidatorOK() {
-		checks["config_snapshot_validator"] = &checkResult{Status: "ok"}
+		checks["config_snapshot_validator"] = &readinessCheck{Status: "ok"}
 	} else {
-		checks["config_snapshot_validator"] = &checkResult{Status: "fail", Detail: "validator rejected empty baseline"}
+		checks["config_snapshot_validator"] = &readinessCheck{Status: "fail", Detail: "validator rejected empty baseline"}
 		allOK = false
 	}
 
@@ -186,37 +199,28 @@ func handleReady(w http.ResponseWriter, r *http.Request) {
 	appendStateFileChecks(checks)
 	appendDPHealthChecks(checks)
 
-	// Opt-in strict verdict (CHAOS-09) — see strictVerdictFails.
-	if strictVerdictFails(r, checks) {
-		allOK = false
+	status, code := "ready", http.StatusOK
+	if !allOK {
+		status, code = "not_ready", http.StatusServiceUnavailable
 	}
-
-	writeReadyResponse(w, allOK, checks)
+	return readinessReport{Status: status, Uptime: uptime(), Version: version, Checks: checks}, code
 }
 
-// writeReadyResponse renders the /ready verdict + checks map.
-func writeReadyResponse(w http.ResponseWriter, allOK bool, checks map[string]*checkResult) {
-	status := "ready"
-	code := http.StatusOK
-	if !allOK {
-		status = "not_ready"
+// handleReady is a readiness probe — returns 200 only when all configured
+// subsystems are operational. Use for Kubernetes readinessProbe / startup gate.
+// Unlike /health (liveness), this returns 503 when dependencies are degraded.
+// Supports the opt-in strict verdict (CHAOS-09): /ready?strict=1 treats every
+// failing row — including the report-only ones — as gating (see
+// strictVerdictFails).
+func handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	report, code := computeReadiness()
+	if strictVerdictFails(r, report.Checks) {
+		report.Status = "not_ready"
 		code = http.StatusServiceUnavailable
 	}
-
-	resp := struct {
-		Status  string                  `json:"status"`
-		Uptime  string                  `json:"uptime"`
-		Version string                  `json:"version"`
-		Checks  map[string]*checkResult `json:"checks"`
-	}{
-		Status:  status,
-		Uptime:  uptime(),
-		Version: version,
-		Checks:  checks,
-	}
-
 	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
+	if err := json.NewEncoder(w).Encode(report); err != nil {
 		logger.Printf("handleReady encode: %v", err)
 	}
 }
@@ -229,7 +233,7 @@ func writeReadyResponse(w http.ResponseWriter, allOK bool, checks map[string]*ch
 // would let a CP outage eject the entire DP fleet from the load balancer at
 // once. A load balancer that SHOULD eject dependency-degraded nodes points
 // its probe at the strict URL instead. Nil-request tolerant (tests).
-func strictVerdictFails(r *http.Request, checks map[string]*checkResult) bool {
+func strictVerdictFails(r *http.Request, checks map[string]*readinessCheck) bool {
 	if r == nil {
 		return false
 	}

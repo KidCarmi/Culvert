@@ -56,6 +56,33 @@ func TestInit_IgnoresNonVersionFiles(t *testing.T) {
 
 // ─── Save: naming, mode, envelope, seq consumption ───────────────────────────
 
+func TestListMeta_MatchesListMetadataWithoutConfig(t *testing.T) {
+	s := New(t.TempDir(), 0)
+	s.Init()
+	if _, err := s.Save("alice", "policy.update", "2026-01-01T00:00:00Z", json.RawMessage(`{"blocklist":["a","b","c"]}`)); err != nil {
+		t.Fatalf("Save v1: %v", err)
+	}
+	if _, err := s.Save("bob", "rollback", "2026-01-02T00:00:00Z", json.RawMessage(`{"defaultAction":"deny"}`)); err != nil {
+		t.Fatalf("Save v2: %v", err)
+	}
+	full, meta := s.List(), s.ListMeta()
+	if len(meta) != len(full) {
+		t.Fatalf("ListMeta len=%d, List len=%d", len(meta), len(full))
+	}
+	for i := range full {
+		if meta[i] != full[i] {
+			t.Fatalf("ListMeta[%d]=%+v != List[%d]=%+v", i, meta[i], i, full[i])
+		}
+	}
+	// Descending order preserved (v2 before v1).
+	if len(meta) != 2 || meta[0].Version != 2 || meta[1].Version != 1 {
+		t.Fatalf("ListMeta ordering/content wrong: %+v", meta)
+	}
+	if meta[0].Actor != "bob" || meta[0].Action != "rollback" {
+		t.Fatalf("ListMeta metadata wrong: %+v", meta[0])
+	}
+}
+
 func TestSave_WritesEnvelopeAtomically(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir, 0)

@@ -19,4 +19,8 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 
 	// F16: alert retry queue.
 	go startAlertRetryLoop(ctx)
+
+	// M3: support debug capture-level auto-revert watchdog (active auto-stop; the
+	// on-read expiry check already guarantees restart-surviving revert without it).
+	go startDebugLevelWatchdog(ctx)
 }

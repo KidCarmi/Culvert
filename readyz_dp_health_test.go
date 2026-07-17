@@ -76,14 +76,14 @@ func resetCertRenewalState(t *testing.T) {
 }
 
 // readyChecks calls handleReady and decodes the checks map.
-func readyChecks(t *testing.T, target string) (code int, status string, checks map[string]*checkResult) {
+func readyChecks(t *testing.T, target string) (code int, status string, checks map[string]*readinessCheck) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 	handleReady(w, r)
 	var resp struct {
-		Status string                  `json:"status"`
-		Checks map[string]*checkResult `json:"checks"`
+		Status string                     `json:"status"`
+		Checks map[string]*readinessCheck `json:"checks"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode /ready: %v (body %q)", err, w.Body.String())

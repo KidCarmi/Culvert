@@ -33,6 +33,7 @@ var globalAlertStore = &AlertStore{}
 // process-wide store. Installed as the alerts.Fire sink at init so internal
 // packages (the scan engines) fire through the same path.
 func fireAlert(event string, payload AlertPayload) {
+	defer recoverGoroutine("alert") // fired via `go fireAlert(...)` from the proxy hot path
 	globalAlertStore.Dispatch(event, payload)
 }
 
