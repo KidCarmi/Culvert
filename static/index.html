@@ -4047,7 +4047,12 @@ Firefox (all platforms):
           </div>
 
           <div>
-            <div style="font-weight:600;margin-bottom:6px">Bundles</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <span style="font-weight:600">Bundles</span>
+              <input id="support-case-filter" class="input sm" type="text" placeholder="filter by case" maxlength="64" style="width:140px" title="Show only bundles bound to this support case">
+              <button class="btn ghost sm" data-click="supportApplyCaseFilter" title="Apply the case filter">Filter</button>
+              <button class="btn ghost sm" data-click="supportClearCaseFilter" title="Clear the filter">Clear</button>
+            </div>
             <div id="support-bundles" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
         </div>
@@ -4432,6 +4437,8 @@ document.addEventListener('click', e => {
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
+    case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
+    case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
@@ -11765,10 +11772,13 @@ async function loadSupport() {
   // resolves, and surface per-panel errors without letting one fail the others.
   const dlEl = document.getElementById('support-debug-level');
   if (dlEl) { dlEl.innerHTML = '<p class="hint">Loading…</p>'; dlEl.setAttribute('aria-busy', 'true'); }
+  const cf = document.getElementById('support-case-filter');
+  const caseFilter = (cf && cf.value || '').trim();
+  const bundlesPath = '/api/support/bundles' + (caseFilter ? '?case=' + encodeURIComponent(caseFilter) : '');
   const [healthR, statusR, bundlesR, dlR] = await Promise.allSettled([
     api('/api/health/explain'),
     api('/api/support/status'),
-    api('/api/support/bundles'),
+    api(bundlesPath),
     api('/api/support/debug-level'),
   ]);
   if (healthR.status === 'fulfilled') renderSupportHealth(healthR.value);
@@ -12171,6 +12181,19 @@ async function supportExportEncrypted(id) {
   } catch (err) {
     toast('Encrypt failed: ' + err.message, 'error');
   }
+}
+
+function supportApplyCaseFilter() {
+  const cf = document.getElementById('support-case-filter');
+  const v = (cf && cf.value || '').trim();
+  if (v && !/^[A-Za-z0-9._-]{1,64}$/.test(v)) { toast('Invalid case id filter (letters/digits/._-, ≤64)', 'error'); return; }
+  loadSupport();
+}
+
+function supportClearCaseFilter() {
+  const cf = document.getElementById('support-case-filter');
+  if (cf) cf.value = '';
+  loadSupport();
 }
 
 async function supportValidateBundle(id) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,6 +67,55 @@ func TestSupportBundle_CaseIDBinds(t *testing.T) {
 	st := readBundleState(res.BundleID)
 	if st.State != bundleStateReady || st.CaseID != "CASE-777" {
 		t.Fatalf("post-approve state=%q case_id=%q want ready/CASE-777", st.State, st.CaseID)
+	}
+}
+
+// TestSupportBundles_CaseFilter proves GET ?case= narrows history to one case and
+// 400s a malformed filter.
+func TestSupportBundles_CaseFilter(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	if _, err := createSupportBundle(context.Background(), "standard", support.L1, "CASE-A"); err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	if _, err := createSupportBundle(context.Background(), "standard", support.L1, "CASE-B"); err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	if _, err := createSupportBundle(context.Background(), "standard", support.L1, ""); err != nil {
+		t.Fatalf("create none: %v", err)
+	}
+
+	get := func(q string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/support/bundles"+q, nil)
+		rec := httptest.NewRecorder()
+		apiSupportBundles(rec, withRoleCtx(r, RoleViewer))
+		return rec
+	}
+
+	// No filter → all three.
+	var all []supportBundleSummary
+	if err := json.Unmarshal(get("").Body.Bytes(), &all); err != nil || len(all) != 3 {
+		t.Fatalf("unfiltered len=%d want 3 (err=%v)", len(all), err)
+	}
+	// ?case=CASE-A → exactly one, the CASE-A bundle.
+	var a []supportBundleSummary
+	if err := json.Unmarshal(get("?case=CASE-A").Body.Bytes(), &a); err != nil {
+		t.Fatalf("filter A: %v", err)
+	}
+	if len(a) != 1 || a[0].CaseID != "CASE-A" {
+		t.Fatalf("filter CASE-A returned %+v", a)
+	}
+	// ?case=CASE-Z → none.
+	var z []supportBundleSummary
+	_ = json.Unmarshal(get("?case=CASE-Z").Body.Bytes(), &z)
+	if len(z) != 0 {
+		t.Fatalf("filter CASE-Z len=%d want 0", len(z))
+	}
+	// Malformed filter → 400.
+	if rec := get("?case=bad%20id"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed filter code=%d want 400", rec.Code)
 	}
 }
 

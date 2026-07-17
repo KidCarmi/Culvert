@@ -277,7 +277,18 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, listSupportBundles())
+		// Optional ?case= filters the history to one support case. Validate the raw
+		// value (same grammar as creation) so a malformed filter 400s rather than
+		// silently matching nothing.
+		bundles := listSupportBundles()
+		if caseFilter := r.URL.Query().Get("case"); caseFilter != "" {
+			if !validSupportCaseID(caseFilter) {
+				http.Error(w, "invalid case id filter", http.StatusBadRequest)
+				return
+			}
+			bundles = filterBundlesByCase(bundles, caseFilter)
+		}
+		jsonOK(w, bundles)
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
 			return
@@ -335,6 +346,18 @@ func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// filterBundlesByCase returns only the bundles bound to caseID (exact match). A
+// new slice is returned; the input is not mutated.
+func filterBundlesByCase(in []supportBundleSummary, caseID string) []supportBundleSummary {
+	out := make([]supportBundleSummary, 0, len(in))
+	for i := range in {
+		if in[i].CaseID == caseID {
+			out = append(out, in[i])
+		}
+	}
+	return out
 }
 
 // listSupportBundles reads persisted bundle manifests newest-first. Malformed or
