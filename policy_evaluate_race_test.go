@@ -1,14 +1,12 @@
 package main
 
-// policy_evaluate_race_test.go — proves the PolicyStore snapshot readers
-// (List, Save) no longer race with Evaluate's lock-free counter bumps.
+// policy_evaluate_race_test.go — proves PolicyStore snapshot readers (List,
+// Save) do not race with Evaluate's lock-free shared-cell counter bumps.
 //
-// Evaluate bumps rule.HitCount/lastHitUnix via atomics under a shared RLock;
-// List() and Save() snapshot-copy the whole rule (a plain read of those two
-// fields). Before the fix the readers held only RLock (shared with Evaluate's
-// RLock), so the plain copy raced with the atomic writes. The readers now take
-// the exclusive Lock, which serializes them against the writers. Under -race
-// the pre-fix code fails here; the fixed code is clean.
+// Evaluate scans an immutable definition revision and updates its stable atomic
+// accounting cell after releasing the store lock. List and Save detach nested
+// definition data and atomic-load that cell, so snapshots remain race-free
+// without holding a store lock across request evaluation.
 
 import (
 	"sync"
@@ -28,7 +26,7 @@ func TestEvaluate_NoRaceWithListAndSave(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Writer: hammer Evaluate (bumps HitCount/lastHitUnix on match).
+	// Writer: hammer Evaluate (bumps the shared accounting cell on match).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

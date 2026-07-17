@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -57,17 +58,63 @@ type OIDCConfig struct {
 
 // introspectionResponse is the RFC 7662 JSON payload.
 type introspectionResponse struct {
-	Active   bool   `json:"active"`
-	Sub      string `json:"sub"`
-	Username string `json:"username"`
-	Scope    string `json:"scope"`
-	Audience any    `json:"aud"` // string or []string per JWT spec
-	Exp      int64  `json:"exp"`
+	Active   bool            `json:"active"`
+	Sub      string          `json:"sub"`
+	Username string          `json:"username"`
+	Scope    string          `json:"scope"`
+	Audience any             `json:"aud"` // string or []string per JWT spec
+	Exp      json.RawMessage `json:"exp,omitempty"`
+}
+
+// parseDeclaredExpiry distinguishes an omitted RFC 7662 exp claim from every
+// explicitly present representation. Present values must be numeric int64 Unix
+// seconds; null, strings, fractions, and out-of-range numbers fail closed.
+func parseDeclaredExpiry(raw json.RawMessage) (*int64, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var exp int64
+	if err := json.Unmarshal(raw, &exp); err != nil {
+		return nil, false
+	}
+	return &exp, true
+}
+
+// decodeStrictJSON rejects oversized bodies, trailing garbage, and additional
+// JSON values. useNumber preserves exact number lexemes for security-sensitive
+// claims such as RFC 7662 exp.
+func decodeStrictJSON(r io.Reader, limit int64, dst any, useNumber bool) error {
+	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("JSON body exceeds %d bytes", limit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if useNumber {
+		decoder.UseNumber()
+	}
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 type oidcCacheEntry struct {
-	ok     bool
-	expiry time.Time
+	ok       bool
+	identity *Identity
+	expiry   time.Time
 }
 
 // OIDCAuth verifies proxy credentials via RFC 7662 token introspection.
@@ -108,30 +155,43 @@ func NewOIDCAuth(cfg OIDCConfig) (*OIDCAuth, error) {
 func (a *OIDCAuth) Name() string { return "oidc" }
 
 // Verify treats the password field as an OAuth2 access token and introspects it.
-// The username field is used only for logging.
 func (a *OIDCAuth) Verify(username, token string) bool {
-	if token == "" {
-		return false
-	}
-
-	k := cacheKey(username, token)
-	if ok, hit := a.oidcCacheGet(k); hit {
-		return ok
-	}
-
-	ok, exp := a.introspect(token)
-	a.oidcCacheSetWithExp(k, ok, exp)
-	if ok {
-		logger.Printf("OIDC auth OK: user=%q", sanitizeLog(username))
-	} else {
-		logger.Printf("OIDC auth FAIL: user=%q", sanitizeLog(username))
-	}
+	_, ok := a.ResolveIdentity(username, token)
 	return ok
 }
 
-// introspect returns (active, exp) where exp is the Unix timestamp from the
-// token's "exp" claim (0 if absent or not active).
-func (a *OIDCAuth) introspect(token string) (bool, int64) {
+// ResolveIdentity binds authorization identity exclusively to claims returned
+// by the introspection endpoint. The Basic username is an untrusted transport
+// hint and is never used as the authenticated subject.
+func (a *OIDCAuth) ResolveIdentity(_ string, token string) (*Identity, bool) {
+	if token == "" {
+		return nil, false
+	}
+
+	// A bearer token has one canonical identity regardless of which Basic
+	// username accompanies it, so cache by token only.
+	k := cacheKey("", token)
+	if id, ok, hit := a.oidcIdentityCacheGet(k); hit {
+		return id, ok
+	}
+
+	id, ok, exp := a.introspect(token)
+	id, ok = a.oidcCacheSetIdentityWithExp(k, id, ok, exp)
+	if ok {
+		logger.Printf("OIDC auth OK: subject=%q", sanitizeLog(id.Sub))
+	} else {
+		logger.Printf("OIDC auth FAIL")
+	}
+	return id, ok
+}
+
+// CaptiveLoginURL implements IdentityProvider for the legacy OIDC backend.
+func (a *OIDCAuth) CaptiveLoginURL(_ string, _ *http.Request) string {
+	return a.cfg.LoginURL
+}
+
+// introspect returns the canonical token identity and its Unix expiry.
+func (a *OIDCAuth) introspect(token string) (identity *Identity, active bool, tokenExp *int64) {
 	body := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
@@ -144,7 +204,7 @@ func (a *OIDCAuth) introspect(token string) (bool, int64) {
 	)
 	if err != nil {
 		logger.Printf("OIDC introspect build error: %v", err)
-		return false, 0
+		return nil, false, nil
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.SetBasicAuth(a.cfg.ClientID, a.cfg.ClientSecret)
@@ -152,44 +212,56 @@ func (a *OIDCAuth) introspect(token string) (bool, int64) {
 	resp, err := a.client.Do(req)
 	if err != nil {
 		logger.Printf("OIDC introspect request error: %v", err)
-		return false, 0
+		return nil, false, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Printf("OIDC introspect HTTP %d", resp.StatusCode)
-		return false, 0
-	}
-
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return false, 0
+		return nil, false, nil
 	}
 
 	var ir introspectionResponse
-	if err := json.Unmarshal(raw, &ir); err != nil {
+	if err := decodeStrictJSON(resp.Body, 64<<10, &ir, false); err != nil {
 		logger.Printf("OIDC introspect parse error: %v", err)
-		return false, 0
+		return nil, false, nil
 	}
 	if !ir.Active {
-		return false, 0
+		return nil, false, nil
+	}
+	tokenExp, validExp := parseDeclaredExpiry(ir.Exp)
+	if !validExp {
+		logger.Printf("OIDC: active token has invalid declared expiry")
+		return nil, false, nil
 	}
 
 	// Optional scope check.
 	if a.cfg.RequiredScope != "" {
 		if !strings.Contains(" "+ir.Scope+" ", " "+a.cfg.RequiredScope+" ") {
 			logger.Printf("OIDC: required scope %q not in %q", a.cfg.RequiredScope, ir.Scope)
-			return false, 0
+			return nil, false, nil
 		}
 	}
 
 	// Optional audience check.
 	if a.cfg.RequiredAudience != "" && !audienceContains(ir.Audience, a.cfg.RequiredAudience) {
 		logger.Printf("OIDC: required audience %q not present", a.cfg.RequiredAudience)
-		return false, 0
+		return nil, false, nil
 	}
 
-	return true, ir.Exp
+	canonicalSub := ir.Sub
+	if strings.TrimSpace(canonicalSub) == "" {
+		canonicalSub = ir.Username
+	}
+	if strings.TrimSpace(canonicalSub) == "" {
+		logger.Printf("OIDC: active token has no canonical sub or username claim")
+		return nil, false, nil
+	}
+	return &Identity{
+		Sub:      canonicalSub,
+		Name:     strings.TrimSpace(ir.Username),
+		Provider: a.Name(),
+	}, true, tokenExp
 }
 
 // audienceContains handles both string and []string JWT aud claims.
@@ -207,21 +279,32 @@ func audienceContains(aud any, want string) bool {
 	return false
 }
 
-func (a *OIDCAuth) oidcCacheGet(key string) (ok, hit bool) {
+func (a *OIDCAuth) oidcIdentityCacheGet(key string) (identity *Identity, ok, hit bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if e, found := a.cache[key]; found && time.Now().Before(e.expiry) {
-		return e.ok, true
+		return cloneIdentity(e.identity), e.ok, true
 	}
-	return false, false
+	return nil, false, false
 }
 
-// oidcCacheSetWithExp caps the cache TTL to min(CacheTTL, time.Until(tokenExp))
-// so a cached "ok" entry never outlives the actual token expiry (MED-4).
-func (a *OIDCAuth) oidcCacheSetWithExp(key string, ok bool, tokenExp int64) {
+func (a *OIDCAuth) oidcCacheSetIdentityWithExp(key string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
+	// A positive cache entry must always carry the canonical identity needed by
+	// ResolveIdentity. Fail closed if an internal caller violates that invariant.
+	if ok && (identity == nil || strings.TrimSpace(identity.Sub) == "") {
+		identity = nil
+		ok = false
+	}
+	now := time.Now()
 	ttl := a.ttl
-	if tokenExp > 0 {
-		if until := time.Until(time.Unix(tokenExp, 0)); until > 0 && until < ttl {
+	if ok && tokenExp != nil {
+		until := time.Unix(*tokenExp, 0).Sub(now)
+		if until <= 0 {
+			// An IdP may transiently report active=true at the expiry boundary,
+			// but the declared token lifetime remains authoritative.
+			identity = nil
+			ok = false
+		} else if until < ttl {
 			ttl = until
 		}
 	}
@@ -233,6 +316,16 @@ func (a *OIDCAuth) oidcCacheSetWithExp(key string, ok bool, tokenExp int64) {
 			break
 		}
 	}
-	a.cache[key] = &oidcCacheEntry{ok: ok, expiry: time.Now().Add(ttl)}
+	a.cache[key] = &oidcCacheEntry{ok: ok, identity: cloneIdentity(identity), expiry: now.Add(ttl)}
 	a.mu.Unlock()
+	return cloneIdentity(identity), ok
+}
+
+func cloneIdentity(id *Identity) *Identity {
+	if id == nil {
+		return nil
+	}
+	clone := *id
+	clone.Groups = append([]string(nil), id.Groups...)
+	return &clone
 }

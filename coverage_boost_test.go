@@ -358,6 +358,7 @@ func TestLoadHitCounters_InvalidJSON(t *testing.T) {
 }
 
 func TestStartHitCounterPersistence_SaveOnShutdown(t *testing.T) {
+	withEmptyPolicyStore(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "counters.json")
 

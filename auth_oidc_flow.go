@@ -605,7 +605,7 @@ func (p *OIDCFlowProvider) enrichFromUserinfo(id *Identity, accessToken string) 
 // RFC 7662 introspection (non-browser path)
 // ---------------------------------------------------------------------------
 
-func (p *OIDCFlowProvider) introspect(username, token string) (*Identity, bool) {
+func (p *OIDCFlowProvider) introspect(_ string, token string) (*Identity, bool) {
 	form := url.Values{
 		"token":           {token},
 		"token_type_hint": {"access_token"},
@@ -625,14 +625,31 @@ func (p *OIDCFlowProvider) introspect(username, token string) (*Identity, bool) 
 		return nil, false
 	}
 	defer resp.Body.Close()
-
-	var claims map[string]interface{}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&claims); err != nil {
+	if resp.StatusCode != http.StatusOK {
 		return nil, false
 	}
+
+	var claims map[string]interface{}
+	if err := decodeStrictJSON(resp.Body, 64<<10, &claims, true); err != nil {
+		return nil, false
+	}
+	return p.identityFromIntrospectionClaims(claims)
+}
+
+func (p *OIDCFlowProvider) identityFromIntrospectionClaims(claims map[string]interface{}) (*Identity, bool) {
 	active, _ := claims["active"].(bool)
 	if !active {
 		return nil, false
+	}
+	if rawExp, present := claims["exp"]; present {
+		expNumber, numeric := rawExp.(json.Number)
+		if !numeric {
+			return nil, false
+		}
+		exp, valid := parseDeclaredExpiry(json.RawMessage(expNumber.String()))
+		if !valid || exp == nil || *exp <= time.Now().Unix() {
+			return nil, false
+		}
 	}
 	scope, _ := claims["scope"].(string)
 	if p.cfg.RequiredScope != "" {
@@ -645,11 +662,11 @@ func (p *OIDCFlowProvider) introspect(username, token string) (*Identity, bool) 
 	}
 
 	sub, _ := claims["sub"].(string)
-	if sub == "" {
+	if strings.TrimSpace(sub) == "" {
 		sub, _ = claims["username"].(string)
 	}
-	if sub == "" {
-		sub = username
+	if strings.TrimSpace(sub) == "" {
+		return nil, false
 	}
 	email, _ := claims["email"].(string)
 	name, _ := claims["name"].(string)

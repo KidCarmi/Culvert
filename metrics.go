@@ -24,18 +24,20 @@ import (
 const maxRuleMetrics = 200
 
 type ruleMetrics struct {
-	mu    sync.RWMutex
-	hits  map[string]*int64 // rule name → hit count
-	last  map[string]*int64 // rule name → unix-seconds of last hit (policy-metadata P1)
-	order []string          // insertion order for cap enforcement
+	mu            sync.RWMutex
+	hits          map[string]*int64               // rule name → hit count
+	last          map[string]*int64               // rule name → unix-seconds of last hit (policy-metadata P1)
+	byID          map[string]persistedRuleCounter // stable rule ID → persisted accounting
+	loadedByName  map[string]persistedRuleCounter // immutable legacy persistence baseline
+	appliedByName map[string]int64                // greatest persisted hit baseline merged into telemetry
+	order         []string                        // insertion order for cap enforcement
 }
 
-var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64)}
+var ruleMet = &ruleMetrics{hits: make(map[string]*int64), last: make(map[string]*int64), byID: make(map[string]persistedRuleCounter), loadedByName: make(map[string]persistedRuleCounter), appliedByName: make(map[string]int64)}
 
-// RecordHit increments the hit counter for the given policy rule name and
-// stamps its last-hit time. Both are the persisted source of truth (the live
-// PolicyRule.HitCount/lastHitUnix are incremented separately in Evaluate);
-// RestoreHitCounts copies these back onto the rules at startup.
+// RecordHit increments the telemetry counter for the given policy rule name and
+// stamps its last-hit time. Live policy accounting is maintained by Evaluate;
+// saveHitCounters overlays that rename-safe accounting before persistence.
 func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ruleName == "" {
 		return
@@ -48,7 +50,7 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ok {
 		atomic.AddInt64(ctr, 1)
 		if lastPtr != nil {
-			atomic.StoreInt64(lastPtr, now)
+			atomicStoreMax(lastPtr, now)
 		}
 		return
 	}
@@ -61,7 +63,7 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 	if ctr, ok = rm.hits[ruleName]; ok {
 		atomic.AddInt64(ctr, 1)
 		if lp := rm.last[ruleName]; lp != nil {
-			atomic.StoreInt64(lp, now)
+			atomicStoreMax(lp, now)
 		}
 		return
 	}
@@ -79,23 +81,44 @@ func (rm *ruleMetrics) RecordHit(ruleName string) {
 // (policy-metadata P1: lastHit joined the long-standing hit count). LastHit is
 // omitempty so a never-matched rule and the legacy loader stay compatible.
 type persistedRuleCounter struct {
-	Hits    int64 `json:"hits"`
-	LastHit int64 `json:"lastHit,omitempty"` // unix seconds; 0 = never
+	ID      string `json:"id,omitempty"`
+	Hits    int64  `json:"hits"`
+	LastHit int64  `json:"lastHit,omitempty"` // unix seconds; 0 = never
 }
 
 // saveHitCounters marshals the current hit counters + lastHit to JSON and
 // writes them to path using a temp-file-then-rename pattern for crash safety.
 func saveHitCounters(path string) {
-	ruleMet.mu.RLock()
-	data := make(map[string]persistedRuleCounter, len(ruleMet.hits))
-	for name, ptr := range ruleMet.hits {
-		rec := persistedRuleCounter{Hits: atomic.LoadInt64(ptr)}
-		if lp := ruleMet.last[name]; lp != nil {
-			rec.LastHit = atomic.LoadInt64(lp)
+	// Current policy definitions are authoritative for persisted accounting:
+	// their stable counters cells survive rename and reorder. Populate them first
+	// so a stale telemetry entry under a pre-rename name cannot win at restart.
+	data := make(map[string]persistedRuleCounter, maxRuleMetrics)
+	rules := policyStore.List()
+	for i := range rules {
+		rule := &rules[i]
+		if rule.Name == "" || (rule.HitCount == 0 && rule.lastHitUnix == 0) || len(data) >= maxRuleMetrics {
+			continue
 		}
-		data[name] = rec
+		data[rule.Name] = persistedRuleCounter{ID: rule.ID, Hits: rule.HitCount, LastHit: rule.lastHitUnix}
 	}
-	ruleMet.mu.RUnlock()
+
+	// An empty store is retained as a compatibility path for callers/tests that
+	// use ruleMet before policy initialization. Once rules exist, persisting only
+	// current names also drops stale pre-rename/deleted telemetry aliases.
+	if len(rules) == 0 {
+		ruleMet.mu.RLock()
+		for name, ptr := range ruleMet.hits {
+			if len(data) >= maxRuleMetrics {
+				break
+			}
+			rec := persistedRuleCounter{Hits: atomic.LoadInt64(ptr)}
+			if lp := ruleMet.last[name]; lp != nil {
+				rec.LastHit = atomic.LoadInt64(lp)
+			}
+			data[name] = rec
+		}
+		ruleMet.mu.RUnlock()
+	}
 
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -145,38 +168,82 @@ func (rm *ruleMetrics) restoreRecords(recs map[string]persistedRuleCounter) {
 	if rm.last == nil {
 		rm.last = make(map[string]*int64)
 	}
+	// This index represents exactly this persisted snapshot; rebuilding it also
+	// prevents stale IDs and repeated loads from bypassing the cardinality cap.
+	if rm.appliedByName == nil {
+		rm.appliedByName = make(map[string]int64, min(len(recs), maxRuleMetrics))
+	}
+	rm.byID = make(map[string]persistedRuleCounter, min(len(recs), maxRuleMetrics))
+	rm.loadedByName = make(map[string]persistedRuleCounter, min(len(recs), maxRuleMetrics))
 	for name, rec := range recs {
-		if ptr, ok := rm.hits[name]; ok {
-			atomic.StoreInt64(ptr, rec.Hits)
-			if lp := rm.last[name]; lp != nil {
-				atomic.StoreInt64(lp, rec.LastHit)
-			} else {
-				l := rec.LastHit
-				rm.last[name] = &l
-			}
+		if !rm.restoreRecordLocked(name, rec) {
 			continue
 		}
-		if len(rm.hits) >= maxRuleMetrics {
-			continue
-		}
-		h := rec.Hits
-		rm.hits[name] = &h
-		l := rec.LastHit
-		rm.last[name] = &l
-		rm.order = append(rm.order, name)
+		mergePersistedCounterByID(rm.byID, rec)
+		rm.loadedByName[name] = rec
 	}
 }
 
-// startHitCounterPersistence loads persisted counters from path, then starts
-// a background goroutine that saves them every 5 minutes. It also performs
-// a final save when the context is cancelled (graceful shutdown).
+func (rm *ruleMetrics) restoreRecordLocked(name string, rec persistedRuleCounter) bool {
+	ptr := rm.hits[name]
+	if ptr == nil {
+		if len(rm.hits) >= maxRuleMetrics {
+			return false
+		}
+		h := rec.Hits
+		rm.hits[name] = &h
+		rm.appliedByName[name] = rec.Hits
+		l := rec.LastHit
+		rm.last[name] = &l
+		rm.order = append(rm.order, name)
+		return true
+	}
+
+	// Add only growth in the immutable persisted baseline. Live RecordHit
+	// increments may proceed through an already-obtained pointer while this lock
+	// is held and must never be overwritten by a repeated runtime load.
+	if delta := rec.Hits - rm.appliedByName[name]; delta > 0 {
+		atomic.AddInt64(ptr, delta)
+		rm.appliedByName[name] = rec.Hits
+	}
+	if lp := rm.last[name]; lp != nil {
+		atomicStoreMax(lp, rec.LastHit)
+		return true
+	}
+	l := rec.LastHit
+	rm.last[name] = &l
+	return true
+}
+
+func mergePersistedCounterByID(byID map[string]persistedRuleCounter, rec persistedRuleCounter) {
+	if !validRuleID(rec.ID) {
+		return
+	}
+	if prior, exists := byID[rec.ID]; exists {
+		if prior.Hits > rec.Hits {
+			rec.Hits = prior.Hits
+		}
+		if prior.LastHit > rec.LastHit {
+			rec.LastHit = prior.LastHit
+		}
+	}
+	byID[rec.ID] = rec
+}
+
+// startHitCounterPersistence starts a background goroutine that saves the hit
+// counters every 5 minutes and once more when the context is cancelled
+// (graceful shutdown). It must be called AFTER loadHitCounters and
+// RestoreHitCounts have run: the goroutine's saves persist from the per-rule
+// counter cells, which are still zero until RestoreHitCounts merges the loaded
+// baseline into them. Starting the goroutine earlier lets a save that races the
+// load→restore startup window (e.g. ctx cancelled mid-startup) clobber a
+// non-empty hit_counters.json with zeros — the caller loads and restores first.
 func startHitCounterPersistence(ctx context.Context, path string) {
-	// Ensure the directory exists.
+	// Ensure the directory exists for the saves below (and the caller's
+	// immediate post-restore save).
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		os.MkdirAll(dir, 0o750) //nolint:errcheck // best-effort
 	}
-
-	loadHitCounters(path)
 
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
@@ -203,12 +270,44 @@ func RestoreHitCounts() {
 	defer ruleMet.mu.RUnlock()
 	policyStore.mu.Lock()
 	defer policyStore.mu.Unlock()
-	for _, rule := range policyStore.rules {
-		if ctr, ok := ruleMet.hits[rule.Name]; ok {
-			atomic.StoreInt64(&rule.HitCount, atomic.LoadInt64(ctr))
+	next := make([]*PolicyRule, len(policyStore.rules))
+	for i, rule := range policyStore.rules {
+		// Restore can run safely even if an evaluator still holds the current
+		// revision. Never fill a nil cell on a published definition in place.
+		next[i] = clonePolicyRuleForPublication(rule)
+		counters := next[i].counters
+		if rec, ok := ruleMet.byID[rule.ID]; ok {
+			restorePolicyHitCount(counters, rec.Hits)
+			atomicStoreMax(&counters.lastHitUnix, rec.LastHit)
+			continue
 		}
-		if lp, ok := ruleMet.last[rule.Name]; ok {
-			atomic.StoreInt64(&rule.lastHitUnix, atomic.LoadInt64(lp))
+		// Backward-compatible fallback uses the immutable loaded snapshot, not
+		// live telemetry that RecordHit continues to increment after startup.
+		if rec, ok := ruleMet.loadedByName[rule.Name]; ok {
+			restorePolicyHitCount(counters, rec.Hits)
+			atomicStoreMax(&counters.lastHitUnix, rec.LastHit)
+		}
+	}
+	policyStore.rules = next
+	policyStore.sortLocked()
+}
+
+// restorePolicyHitCount adds only the not-yet-restored persisted baseline. The
+// caller serializes restorations under policyStore.mu; Evaluate can increment the
+// total concurrently without being overwritten.
+func restorePolicyHitCount(counters *policyRuleCounters, persisted int64) {
+	restored := atomic.LoadInt64(&counters.restoredHitCount)
+	if persisted <= restored {
+		return
+	}
+	atomic.AddInt64(&counters.hitCount, persisted-restored)
+	atomic.StoreInt64(&counters.restoredHitCount, persisted)
+}
+
+func atomicStoreMax(dst *int64, value int64) {
+	for current := atomic.LoadInt64(dst); value > current; current = atomic.LoadInt64(dst) {
+		if atomic.CompareAndSwapInt64(dst, current, value) {
+			return
 		}
 	}
 }
