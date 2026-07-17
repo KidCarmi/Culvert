@@ -230,16 +230,20 @@ func mergePersistedCounterByID(byID map[string]persistedRuleCounter, rec persist
 	byID[rec.ID] = rec
 }
 
-// startHitCounterPersistence loads persisted counters from path, then starts
-// a background goroutine that saves them every 5 minutes. It also performs
-// a final save when the context is cancelled (graceful shutdown).
+// startHitCounterPersistence starts a background goroutine that saves the hit
+// counters every 5 minutes and once more when the context is cancelled
+// (graceful shutdown). It must be called AFTER loadHitCounters and
+// RestoreHitCounts have run: the goroutine's saves persist from the per-rule
+// counter cells, which are still zero until RestoreHitCounts merges the loaded
+// baseline into them. Starting the goroutine earlier lets a save that races the
+// load→restore startup window (e.g. ctx cancelled mid-startup) clobber a
+// non-empty hit_counters.json with zeros — the caller loads and restores first.
 func startHitCounterPersistence(ctx context.Context, path string) {
-	// Ensure the directory exists.
+	// Ensure the directory exists for the saves below (and the caller's
+	// immediate post-restore save).
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		os.MkdirAll(dir, 0o750) //nolint:errcheck // best-effort
 	}
-
-	loadHitCounters(path)
 
 	go func() {
 		t := time.NewTicker(5 * time.Minute)

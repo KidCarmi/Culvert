@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -392,5 +394,97 @@ func TestLastHitWritersAreMonotonic(t *testing.T) {
 	rm.RecordHit("future-hit")
 	if got := atomic.LoadInt64(&last); got != future {
 		t.Fatalf("RecordHit reduced last timestamp from %d to %d", future, got)
+	}
+}
+
+// TestPersistentAdminState_RestoreBeforePersistenceLoop pins the startup
+// ordering that closes the metrics.go:96 window (Codex #738 P2): the hit-counter
+// baseline must be loaded and merged into the per-rule cells (loadHitCounters →
+// RestoreHitCounts) BEFORE the periodic/shutdown saver goroutine
+// (startHitCounterPersistence) starts. If the saver starts first, a save racing
+// the load→restore window (e.g. ctx cancelled mid-startup) persists still-zero
+// cells over a non-empty hit_counters.json. Source-scanned so a future reorder
+// of loadPersistentAdminState re-fails here.
+func TestPersistentAdminState_RestoreBeforePersistenceLoop(t *testing.T) {
+	src, err := os.ReadFile("persistent_admin_state_startup.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	iLoad := strings.Index(body, "loadHitCounters(cfg.HitCountersPath)")
+	iRestore := strings.Index(body, "RestoreHitCounts()")
+	iStart := strings.Index(body, "startHitCounterPersistence(ctx, cfg.HitCountersPath)")
+	if iLoad < 0 || iRestore < 0 || iStart < 0 {
+		t.Fatalf("expected all three calls in loadPersistentAdminState (load=%d restore=%d start=%d)", iLoad, iRestore, iStart)
+	}
+	if !(iLoad < iRestore && iRestore < iStart) {
+		t.Fatalf("startup order must be loadHitCounters(%d) < RestoreHitCounts(%d) < startHitCounterPersistence(%d)", iLoad, iRestore, iStart)
+	}
+}
+
+// TestStartHitCounterPersistence_DoesNotLoad proves the saver goroutine starter
+// no longer loads the baseline itself — that responsibility moved to the caller
+// so it can run before RestoreHitCounts. If a refactor folds loading back in,
+// the load→restore ordering guarantee silently breaks; this catches it.
+func TestStartHitCounterPersistence_DoesNotLoad(t *testing.T) {
+	withCleanRuleMet(t)
+	withEmptyPolicyStore(t)
+	path := filepath.Join(t.TempDir(), "hit_counters.json")
+	if err := os.WriteFile(path, []byte(`{"decoupled-rule":{"hits":9}}`), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startHitCounterPersistence(ctx, path)
+
+	ruleMet.mu.RLock()
+	_, loaded := ruleMet.hits["decoupled-rule"]
+	ruleMet.mu.RUnlock()
+	if loaded {
+		t.Fatal("startHitCounterPersistence loaded the baseline itself; load must be caller-driven (before RestoreHitCounts)")
+	}
+}
+
+// TestHitCounterPersistence_StartupOrderPreservesCounts runs the exact
+// production sequence (load → restore → start → immediate save) against a
+// non-empty seed and asserts the persisted count survives — i.e. restore has
+// populated the cells before any save, so the file is never clobbered to zero.
+func TestHitCounterPersistence_StartupOrderPreservesCounts(t *testing.T) {
+	withCleanRuleMet(t)
+	saved := policyStore.List()
+	t.Cleanup(func() { policyStore.ReplaceAll(saved) })
+
+	id := newRuleID()
+	policyStore.ReplaceAll([]PolicyRule{{ID: id, Priority: 1, Name: "guard-rule", DestFQDN: "*", Action: ActionAllow}})
+
+	path := filepath.Join(t.TempDir(), "hit_counters.json")
+	lastHit := time.Now().Add(-time.Minute).Unix()
+	seed := fmt.Sprintf(`{"guard-rule":{"id":%q,"hits":7,"lastHit":%d}}`, id, lastHit)
+	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	// Production order (see loadPersistentAdminState).
+	loadHitCounters(path)
+	RestoreHitCounts()
+	if got := policyStore.List()[0].HitCount; got != 7 {
+		t.Fatalf("after restore, cell HitCount = %d, want 7 (restore must populate cells before any save)", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startHitCounterPersistence(ctx, path)
+	saveHitCounters(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var counts map[string]persistedRuleCounter
+	if err := json.Unmarshal(data, &counts); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if counts["guard-rule"].Hits != 7 {
+		t.Fatalf("persisted guard-rule hits = %d, want 7 (startup-window save clobbered the count)", counts["guard-rule"].Hits)
 	}
 }
