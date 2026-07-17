@@ -308,10 +308,20 @@
   verifies keyless Sigstore signatures with catalog↔image identity parity, P2b-2b).
 - **Update (2026-07-11):** the legacy updater sidecar and `update.go` were fully removed under
   **DEBT-008** — `apiUpdateApply` no longer exists. The maintenance agent (Release Management →
-  agent `/v1/upgrades/apply`) is now the sole day-2 update path, and it *is* the digest-pinned,
-  Sigstore-verified flow described above. RISK-010 closes by removal, the same move that closed
-  RISK-ACC-1; no residual verification gap remains on this surface (see RISK-022 for the *new*
-  agent-death-mid-apply residual on the successor).
+  agent `/v1/upgrades/apply`) is now the sole day-2 update path. RISK-010 closes by removal, the
+  same move that closed RISK-ACC-1.
+- **Where the Sigstore verification actually lives (precision, 2026-07-13):** the keyless
+  Sigstore + catalog↔image identity check runs in the **CP release-dispatch planner** *before* it
+  calls the agent, not inside the agent handler. The agent's `/v1/upgrades/apply`
+  (`handlers_upgrade_apply.go`) admits any ref matching `image_allowlist` — whose default
+  (`config.go`) permits **mutable tags** as well as digests — and its `resolve_target` step pins
+  the resolved `repo@sha256:` digest but performs **no per-call signature verification**. So the
+  no-in-binary-verification gap is closed **for the CP-dispatched path** (the intended and only
+  UI/API-exposed one); a caller that reaches the agent socket *directly* (an allowed peer or
+  local automation, bypassing CP dispatch) still gets digest-pinning without Sigstore
+  verification — a residual bounded by the agent's local-socket + allowlist trust boundary, not a
+  UI-reachable one. Narrow the closure claim accordingly rather than reading it as "no residual on
+  any surface." See RISK-022 for the separate agent-death-mid-apply residual on the successor.
 
 ## RISK-011 — Rolling-update auto-rollback unverified · MEDIUM · ⚠ STALE→RE-POINTED 2026-07-11
 - **Was:** `triggerAutoRollback` (`update_cluster.go:804-852`) re-pushed the previous tag but never

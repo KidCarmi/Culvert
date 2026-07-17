@@ -104,6 +104,9 @@ Counts below are derived from `ui.go:103-274`.
 |---|---|---|
 | ~~`POST /api/update/apply`~~ | ~~`apiUpdateApply`~~ | REMOVED 2026-07-11 (DEBT-008) — legacy updater deleted; see maintenance-agent `/v1/upgrades/apply` |
 | ~~`POST /api/update/cluster`~~ | ~~`apiClusterUpdate`~~ | REMOVED 2026-07-11 (DEBT-008) — legacy cluster updater deleted |
+| `POST /api/releases/dispatch` | `apiReleaseDispatch` | **Live day-2 update surface** (replaces the removed rows above) — dispatches a verified upgrade to the `culvert-maint` agent (`release_api.go:290`, wired in `ui.go`); admin-only. RBAC reviews must include this, not just the raw agent `/v1/upgrades/apply` URL |
+| `POST /api/releases/dispatch/resume` | `apiReleaseDispatchResume` | Resumes an interrupted dispatch; admin-only |
+| `POST /api/releases/catalog-refresh` | `apiReleaseCatalogRefresh` | Triggers a verified catalog refresh/auto-seed (`release_api.go:293`); admin-only |
 | `POST /api/ca/rotate` | `apiCARotate` | Two-step token (`pendingCARotation`) |
 | `POST /api/cluster/revoke` | `apiClusterRevoke` | Removes a node from cluster |
 | `POST /api/cluster/mode` | `apiClusterMode` | Switches CP/DP role |
