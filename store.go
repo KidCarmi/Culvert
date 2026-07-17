@@ -145,6 +145,12 @@ type AuthLogFields struct {
 	// decision-attribution seam. Rides this structured-fields carrier so the
 	// hot-path recorders need no new positional param. Maps to LogEntry.RuleID.
 	RuleID string
+	// Dec is the ADR-0011 decryption-observability block, riding the same
+	// structured carrier as RuleID so the tunnel-close recorders need no new
+	// positional param. nil on every path that made no decryption decision
+	// (the wire stays byte-identical); populated only on the CONNECT decision
+	// path. Maps to LogEntry.Dec.
+	Dec *DecryptionBlock
 }
 
 // applyTo copies the auth observability fields onto a log entry. It never touches
@@ -156,6 +162,7 @@ func (a AuthLogFields) applyTo(e *LogEntry) {
 	e.AuthSubjectMatchTypes = a.SubjectMatchTypes
 	e.AuthSchemaVersion = a.SchemaVersion
 	e.RuleID = a.RuleID
+	e.Dec = a.Dec // nil ⇒ no dec block (byte-identical); set only on the decryption decision path
 }
 
 // The request-log engine (ring + persistent JSONL layer + TTL read cache +
@@ -1145,8 +1152,14 @@ func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, 
 // decryption client-cert live-rescue (ADR-0009), so the bypass is queryable in
 // the request/tunnel feed and not just inferable from SSLAction.
 func persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
+	persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, nil)
+}
+
+// persistTunnelCloseDec is persistTunnelCloseReason plus an optional ADR-0011
+// decryption-observability block on the feed entry. nil ⇒ no dec block (byte-identical).
+func persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionBlock) {
 	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, actionTaken, identity,
-		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID})
+		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID, Dec: dec})
 }
 
 // recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
@@ -1169,6 +1182,17 @@ func recordTunnelCloseGated(match *PolicyMatch, id ProxyIdentity, method, host s
 // actionTaken reason for the feed entry (ADR-0009 client-cert rescue). Byte
 // accounting is unconditional; the reason rides only the (gated) feed entry.
 func recordTunnelCloseGatedReason(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string) {
+	recordTunnelCloseGatedDec(match, id, method, host, bytesSent, bytesRecv, start, sslAction, actionTaken, nil, false)
+}
+
+// recordTunnelCloseGatedDec is recordTunnelCloseGatedReason plus an optional ADR-0011
+// decryption OUTCOME, projected onto the feed entry's nested dec block. A nil outcome
+// leaves the entry byte-identical (no dec key); redact applies the §4 host/SNI privacy
+// posture. Byte accounting stays unconditional; the block rides only the (gated) feed
+// entry via AuthLogFields.Dec. The decryption decision path passes a non-nil outcome (a
+// later ADR-0011 slice); every current caller passes nil, so this is behavior-neutral
+// plumbing. Projection (toBlock) happens off the latency-critical decision, at close.
+func recordTunnelCloseGatedDec(match *PolicyMatch, id ProxyIdentity, method, host string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionOutcome, redact bool) {
 	recordTunnelBytes(bytesSent, bytesRecv) // always — independent of the log gate
 	if match != nil && !ruleLogsTraffic(match.Rule) {
 		return
@@ -1178,7 +1202,11 @@ func recordTunnelCloseGatedReason(match *PolicyMatch, id ProxyIdentity, method, 
 		ruleName = match.Rule.Name
 		ruleID = match.Rule.ID
 	}
-	persistTunnelCloseReason(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken)
+	var block *DecryptionBlock
+	if dec != nil {
+		block = dec.toBlock(redact)
+	}
+	persistTunnelCloseDec(id.ClientIP, method, host, id.Identity, ruleName, ruleID, bytesSent, bytesRecv, start, sslAction, actionTaken, block)
 }
 
 // persistLogEntry builds the LogEntry and writes it to the ring, JSONL file,

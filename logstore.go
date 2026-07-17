@@ -28,6 +28,9 @@ import (
 type (
 	logStore = logstore.Store
 	LogEntry = logstore.Entry
+	// DecryptionBlock is the nested "dec" observability block on a LogEntry
+	// (ADR-0011); re-exposed unqualified for the recorder seam and callers.
+	DecryptionBlock = logstore.DecryptionBlock
 )
 
 // errLogStoreEncMismatch is re-exposed for the retention API handler.
