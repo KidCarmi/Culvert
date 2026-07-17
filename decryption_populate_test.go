@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
@@ -82,5 +83,129 @@ func TestBypassOutcome_Matrix(t *testing.T) {
 	b := bypassOutcome(sslResolution{Action: SSLBypass, Source: decryptobs.DecisionAutoexcludeCache, ExclReason: autoexclude.ReasonClientPinned, ScopeID: "prof1"}, "h").toBlock(false)
 	if b.ExclReason != "client_pinned" || b.ExclScope != "prof1" || b.ProfileID != "prof1" {
 		t.Fatalf("learned bypass must carry excl reason/scope/profile: %+v", b)
+	}
+}
+
+// TestInspectedOutcome_FromTLSState pins that the inspected block is built from the
+// completed origin TLS state (version/cipher/ALPN mapping), reflects the fail-open scope
+// read, and maps CertVerify off dec.SkipVerify.
+func TestInspectedOutcome_FromTLSState(t *testing.T) {
+	rule := &PolicyRule{ID: "r1", Name: "inspect-all"}
+	match := &PolicyMatch{Rule: rule}
+
+	// Verified inspect, TLS 1.3 / h2, fail-open scope consulted (miss).
+	dec := sslResolution{
+		Action:    SSLInspect,
+		Source:    decryptobs.DecisionPolicyInspect,
+		ScopeID:   "prof-fo",
+		Consulted: true,
+	}
+	cs := tls.ConnectionState{
+		Version:            tls.VersionTLS13,
+		CipherSuite:        tls.TLS_AES_128_GCM_SHA256,
+		NegotiatedProtocol: "h2",
+	}
+	// inspectedOutcome threads hostOnly through unchanged — the inspect path passes an
+	// already-port-stripped host, so the builder does no normalization of its own.
+	b := inspectedOutcome(dec, "site.example", cs, match).toBlock(false)
+	if b.Outcome != "inspected" || b.DecisionSource != "policy_inspect" {
+		t.Fatalf("outcome/source: %s/%s want inspected/policy_inspect", b.Outcome, b.DecisionSource)
+	}
+	if b.TLSVersion != "1.3" || b.ALPN != "h2" {
+		t.Fatalf("tls/alpn: %s/%s want 1.3/h2", b.TLSVersion, b.ALPN)
+	}
+	if b.Cipher != tls.CipherSuiteName(tls.TLS_AES_128_GCM_SHA256) {
+		t.Fatalf("cipher not named: %q", b.Cipher)
+	}
+	if b.CertVerify != "verified" || b.FailStage != "none" || b.FailCategory != "none" {
+		t.Fatalf("inspected must be verified/none/none: %+v", b)
+	}
+	if b.Host != "site.example" {
+		t.Fatalf("host not threaded: %q", b.Host)
+	}
+	if !b.CacheConsulted || b.ProfileID != "prof-fo" || b.CacheHit {
+		t.Fatalf("fail-open consulted-miss: consulted=%v profile=%q hit=%v", b.CacheConsulted, b.ProfileID, b.CacheHit)
+	}
+	if b.RuleID != "r1" || b.RuleName != "inspect-all" {
+		t.Fatalf("rule identity not carried: %+v", b)
+	}
+
+	// TLS 1.2 + skip-verify ⇒ CertVerify skipped; empty ALPN ⇒ the valid empty member.
+	dec2 := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
+	cs2 := tls.ConnectionState{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}
+	b2 := inspectedOutcome(dec2, "x", cs2, match).toBlock(false)
+	if b2.TLSVersion != "1.2" || b2.CertVerify != "skipped" || b2.ALPN != "" {
+		t.Fatalf("skip-verify/1.2/empty-alpn: tls=%s cert=%s alpn=%q", b2.TLSVersion, b2.CertVerify, b2.ALPN)
+	}
+	if !b2.CacheConsulted && b2.ProfileID != "" { // no fail-open scope ⇒ not consulted
+		t.Fatalf("no-scope must not be consulted: %+v", b2)
+	}
+}
+
+// TestInspectedOutcome_CertVerifyFromEffectiveSkip pins that CertVerify reflects the
+// EFFECTIVE upstream verification (resolveInspectSkipVerify) — a decryption profile's
+// CertVerification overrides the rule's inline dec.SkipVerify, so the recorded value must
+// match what the origin handshake actually did, not the raw inline flag (Codex #801).
+func TestInspectedOutcome_CertVerifyFromEffectiveSkip(t *testing.T) {
+	withProfiles(t,
+		DecryptionProfile{Name: "skip", CertVerification: "skip"},
+		DecryptionProfile{Name: "strict", CertVerification: "strict"},
+	)
+	cs := tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
+
+	// Profile "skip" overrides a rule with inline SkipVerify=false ⇒ verification WAS
+	// skipped, so the record must say skipped (not verified).
+	mSkip := matchWith(&PolicyRule{DecryptionProfile: "skip"})
+	decNoInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: false}
+	if b := inspectedOutcome(decNoInline, "h", cs, mSkip).toBlock(false); b.CertVerify != "skipped" {
+		t.Fatalf("profile skip over inline-false: cert_verify=%s want skipped", b.CertVerify)
+	}
+
+	// Profile "strict" overrides a rule with inline SkipVerify=true ⇒ verification RAN,
+	// so the record must say verified (not skipped).
+	mStrict := matchWith(&PolicyRule{DecryptionProfile: "strict"})
+	decInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
+	if b := inspectedOutcome(decInline, "h", cs, mStrict).toBlock(false); b.CertVerify != "verified" {
+		t.Fatalf("profile strict over inline-true: cert_verify=%s want verified", b.CertVerify)
+	}
+}
+
+// TestNonTLSFallbackOutcome pins the not_decrypted/non_tls_fallback classification for a
+// CONNECT whose client spoke a non-TLS protocol (raw relay fallback): TLS/cert/fail fields
+// stay at sentinels because no MITM handshake happened.
+func TestNonTLSFallbackOutcome(t *testing.T) {
+	b := nonTLSFallbackOutcome("ssh.example").toBlock(false)
+	if b.Outcome != "not_decrypted" || b.DecisionSource != "non_tls_fallback" {
+		t.Fatalf("outcome/source: %s/%s want not_decrypted/non_tls_fallback", b.Outcome, b.DecisionSource)
+	}
+	if b.Host != "ssh.example" {
+		t.Fatalf("host: %q", b.Host)
+	}
+	if b.TLSVersion != "unknown" || b.CertVerify != "not_checked" || b.ALPN != "" ||
+		b.FailStage != "none" || b.FailCategory != "none" {
+		t.Fatalf("non-TLS fallback must carry sentinels: %+v", b)
+	}
+	if b.CacheConsulted || b.CacheHit || b.Rescued {
+		t.Fatalf("non-TLS fallback carries no cache/rescue state: %+v", b)
+	}
+}
+
+// TestTLSVersionEnum_And_ALPNEnum pins the bounded mapping for the version/ALPN helpers,
+// including the coercion of out-of-vocabulary inputs to the sentinel/empty member.
+func TestTLSVersionEnum_And_ALPNEnum(t *testing.T) {
+	if tlsVersionEnum(tls.VersionTLS12) != decryptobs.TLSVersion12 ||
+		tlsVersionEnum(tls.VersionTLS13) != decryptobs.TLSVersion13 {
+		t.Fatal("1.2/1.3 mapping wrong")
+	}
+	// TLS 1.0/1.1 and 0 (no handshake) are out of the inspected vocabulary ⇒ unknown.
+	if tlsVersionEnum(tls.VersionTLS10) != decryptobs.TLSVersionUnknown ||
+		tlsVersionEnum(0) != decryptobs.TLSVersionUnknown {
+		t.Fatal("out-of-vocab version must coerce to unknown")
+	}
+	if alpnEnum("h2") != decryptobs.ALPNH2 || alpnEnum("http/1.1") != decryptobs.ALPNHTTP11 {
+		t.Fatal("h2/http1.1 mapping wrong")
+	}
+	if alpnEnum("") != decryptobs.ALPNNone || alpnEnum("spdy/3") != decryptobs.ALPNNone {
+		t.Fatal("empty/unknown ALPN must coerce to the empty member")
 	}
 }

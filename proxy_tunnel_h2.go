@@ -198,7 +198,9 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	// Both legs HTTP/1.1 (origin declined h2, or client offered only h1) — reuse
 	// the shared H1 inspection loop. One enforcement path for both protocols.
-	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id)
+	// decBlock is nil here: the native-ALPN path's own ADR-0011 inspected block
+	// (which would carry the h2 leg's TLS state) is a documented follow-up slice.
+	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, nil)
 }
 
 // relayPlaintextInspectFallback raw-relays a non-TLS CONNECT client to the
@@ -219,7 +221,11 @@ func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUps
 	rawClient.Close()   //nolint:errcheck // force peer unblock
 	rawUpstream.Close() //nolint:errcheck // force peer unblock
 	<-done
-	recordTunnelCloseGated(match, id, "CONNECT", hostOnly, toUp, toCl, start, "inspect")
+	// ADR-0011: the client spoke a non-TLS protocol, so no MITM happened — record the
+	// not_decrypted/non_tls_fallback outcome. Unlike the native path's inspected block
+	// (a documented follow-up needing the h2 leg's TLS state), this outcome is pure
+	// sentinels + host, so it is populated now for parity with the strip path.
+	recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUp, toCl, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), false)
 }
 
 // handshakeUpstreamALPN performs the upstream inspect-leg TLS handshake offering
