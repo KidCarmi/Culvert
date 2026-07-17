@@ -120,7 +120,7 @@ func appendStateFileChecks(checks map[string]*readinessCheck) {
 // cp_poll, node_cert) never gate it; the opt-in strict verdict (CHAOS-09,
 // /ready?strict=1) is layered on top by handleReady via strictVerdictFails,
 // since it depends on the incoming request and the collector has none.
-func computeReadiness() (readinessReport, int) {
+func computeReadiness() (report readinessReport, code int) {
 	checks := map[string]*readinessCheck{}
 	allOK := true
 

@@ -142,7 +142,7 @@ func compileScrubber() *Scrubber {
 // Scrub returns s with every recognized secret shape replaced by an
 // "[redacted:<kind>]" token, plus the number of redactions. The clean path (no
 // format runes, no match) returns s unchanged with no output allocation.
-func (sc *Scrubber) Scrub(s string) (string, int) {
+func (sc *Scrubber) Scrub(s string) (out string, n int) {
 	if s == "" {
 		return "", 0
 	}

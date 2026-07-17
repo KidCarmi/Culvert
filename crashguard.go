@@ -235,6 +235,7 @@ func withAdminPanicRecovery(next http.Handler) http.Handler {
 			recordCrash("admin", r.Header.Get("X-Request-ID"), v)
 			if !tw.wrote { // never double-commit / never inject into a streamed body
 				http.Error(tw.ResponseWriter, "Internal Server Error", http.StatusInternalServerError)
+				return
 			}
 		}()
 		next.ServeHTTP(tw, r)

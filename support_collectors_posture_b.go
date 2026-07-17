@@ -58,11 +58,7 @@ func (upstreamCollector) Collect(_ context.Context, in support.CollectInput, sin
 			URL: list[i].URL, Healthy: list[i].Healthy, Circuit: list[i].Circuit, Failures: list[i].Failures,
 		})
 	}
-	res := in.Redactor.Classify(sec)
-	if err := sink.WriteJSON(res.Value); err != nil {
-		return support.Result{Status: support.StatusFailed, Note: "write"}
-	}
-	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+	return classifyAndWriteSection(in, sink, sec)
 }
 
 // ── cdr / Sluice ─────────────────────────────────────────────────────────────

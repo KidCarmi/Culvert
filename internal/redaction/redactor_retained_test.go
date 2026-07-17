@@ -30,7 +30,7 @@ func hasRetained(ss []string, want string) bool {
 
 func TestRetained_SurfacesInternalFreeForm(t *testing.T) {
 	r := NewWithSalt([]byte("fixed-salt"))
-	bareSecret := "prod-db creds Xy9qKp2mLw7zBareValue" // shapeless — the scrubber leaves it
+	bareSecret := "prod-db creds Xy9qKp2mLw7zBareValue" // #nosec G101 -- test fixture, not a real credential; shapeless, the scrubber leaves it
 	msg := "dial tcp 10.0.0.5:443: connect: connection refused"
 	res := r.Classify(retSample{
 		Version: "1.2.3", RuleName: bareSecret, Message: msg, Secret: "s3kr3t-masked-value",

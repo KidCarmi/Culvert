@@ -173,11 +173,14 @@ func (s *Store) Load(ver int) (Meta, json.RawMessage, error) {
 	return env.Meta, env.Config, nil
 }
 
-// List returns all readable version metadata sorted descending by version.
-// Unreadable or unparseable files are skipped with a log line (D1.2-flag-F5:
-// the rollback UI never sees them otherwise) — never an error. The result is
-// always non-nil.
-func (s *Store) List() []Meta {
+// listMetas is the shared List/ListMeta implementation: it scans the version
+// dir, skips anything that isn't a version file, reads each candidate, and
+// decodes it via the caller-supplied decode func — the only difference
+// between List (full envelope, config included) and ListMeta (metaEnvelope,
+// config parse-skipped). Unreadable or unparseable files are skipped with a
+// log line (D1.2-flag-F5: the rollback UI never sees them otherwise) — never
+// an error. The result is always non-nil, sorted descending by version.
+func (s *Store) listMetas(decode func([]byte) (Meta, error)) []Meta {
 	dir := s.dirSnapshot()
 	metas := make([]Meta, 0)
 	entries, err := os.ReadDir(dir)
@@ -194,15 +197,27 @@ func (s *Store) List() []Meta {
 			obs.Printf("Loader: config_versions: skipping unreadable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), err)
 			continue
 		}
-		var env envelope
-		if jerr := json.Unmarshal(data, &env); jerr != nil {
-			obs.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), jerr)
+		meta, derr := decode(data)
+		if derr != nil {
+			obs.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), derr)
 			continue
 		}
-		metas = append(metas, env.Meta)
+		metas = append(metas, meta)
 	}
 	sort.Slice(metas, func(i, j int) bool { return metas[i].Version > metas[j].Version })
 	return metas
+}
+
+// List returns all readable version metadata sorted descending by version.
+// Unreadable or unparseable files are skipped with a log line (D1.2-flag-F5:
+// the rollback UI never sees them otherwise) — never an error. The result is
+// always non-nil.
+func (s *Store) List() []Meta {
+	return s.listMetas(func(data []byte) (Meta, error) {
+		var env envelope
+		err := json.Unmarshal(data, &env)
+		return env.Meta, err
+	})
 }
 
 // metaEnvelope decodes ONLY the meta half of a version file. Because the
@@ -218,31 +233,11 @@ type metaEnvelope struct {
 // copies up to `max` config snapshots into memory. Same descending order and
 // skip-on-error semantics as List; the result is always non-nil.
 func (s *Store) ListMeta() []Meta {
-	dir := s.dirSnapshot()
-	metas := make([]Meta, 0)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return metas
-	}
-	for _, e := range entries {
-		if _, ok := versionOf(e.Name()); !ok {
-			continue
-		}
-		fullPath := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			obs.Printf("Loader: config_versions: skipping unreadable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), err)
-			continue
-		}
+	return s.listMetas(func(data []byte) (Meta, error) {
 		var env metaEnvelope
-		if jerr := json.Unmarshal(data, &env); jerr != nil {
-			obs.Printf("Loader: config_versions: skipping unparseable %q: %v (D1.2-flag-F5)", obs.Sanitize(fullPath), jerr)
-			continue
-		}
-		metas = append(metas, env.Meta)
-	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Version > metas[j].Version })
-	return metas
+		err := json.Unmarshal(data, &env)
+		return env.Meta, err
+	})
 }
 
 // Seq returns the current sequence counter (the last assigned version).

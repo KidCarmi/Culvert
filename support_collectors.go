@@ -14,6 +14,18 @@ import (
 // mirroring the register*Routes wiring. They are thin adapters: gather via an
 // existing side-effect-free accessor, hand off to in.Redactor, write one section.
 
+// classifyAndWriteSection is the shared tail of a collector's Collect method:
+// redact sec via in.Redactor, write it to sink, and map the outcome to a
+// support.Result. Extracted so structurally-identical collectors (e.g.
+// configVersionsCollector/upstreamCollector) don't duplicate this boilerplate.
+func classifyAndWriteSection(in support.CollectInput, sink support.SectionSink, sec any) support.Result {
+	res := in.Redactor.Classify(sec)
+	if err := sink.WriteJSON(res.Value); err != nil {
+		return support.Result{Status: support.StatusFailed, Note: "write"}
+	}
+	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+}
+
 // productSection is the PUBLIC product/build/runtime identity. Every field is
 // PUBLIC by construction — no hostname/identity here (those live in manifest.node
 // and are classified INTERNAL there), so product.json stays a shareable ceiling

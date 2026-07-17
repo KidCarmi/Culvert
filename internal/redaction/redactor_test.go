@@ -1,6 +1,7 @@
 package redaction
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -26,9 +27,9 @@ type inner struct {
 }
 
 const (
-	plantedPassword = "hunter2-BCRYPT-$2a$10$plantedsecret"
+	plantedPassword = "hunter2-BCRYPT-$2a$10$plantedsecret" // #nosec G101 -- test fixture, not a real credential
 	plantedCAKey    = "-----BEGIN PRIVATE KEY-----AAAA-----END PRIVATE KEY-----"
-	plantedToken    = "eyJ-planted-bearer-token"
+	plantedToken    = "eyJ-planted-bearer-token" // #nosec G101 -- test fixture, not a real credential
 	plantedUser     = "alice@example.com"
 )
 
@@ -117,7 +118,7 @@ func TestDeterministicSameSalt(t *testing.T) {
 	b := NewWithSalt([]byte("s")).Struct(sampleFixture())
 	ja, _ := json.Marshal(a)
 	jb, _ := json.Marshal(b)
-	if string(ja) != string(jb) {
+	if !bytes.Equal(ja, jb) {
 		t.Fatalf("redaction not deterministic under a fixed salt:\n%s\n%s", ja, jb)
 	}
 }

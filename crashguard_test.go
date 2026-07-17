@@ -38,8 +38,9 @@ func (dummyAddr) String() string  { return "fake" }
 
 func countPanicAudits() int {
 	n := 0
-	for _, e := range auditGet() {
-		if e.Action == "panic_recovered" {
+	entries := auditGet()
+	for i := range entries {
+		if entries[i].Action == "panic_recovered" {
 			n++
 		}
 	}
@@ -146,7 +147,7 @@ func TestAdminGuard_Clean500WhenUnwritten(t *testing.T) {
 		panic("admin boom")
 	}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", http.NoBody))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("code=%d want 500", rec.Code)
 	}
@@ -163,7 +164,7 @@ func TestAdminGuard_NoDoubleCommit(t *testing.T) {
 		panic("after commit")
 	}))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("committed status changed to %d", rec.Code)
 	}

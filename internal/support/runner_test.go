@@ -23,10 +23,10 @@ func (f *fakeCollector) Collect(ctx context.Context, in CollectInput, sink Secti
 	return f.fn(ctx, in, sink)
 }
 
-func baseMeta(id string, min DebugLevel, maxClass redaction.DataClass) CollectorMeta {
+func baseMeta(id string, minLevel DebugLevel, maxClass redaction.DataClass) CollectorMeta {
 	return CollectorMeta{
 		ID: id, Path: "sections/" + id + ".json", Owner: "test", SchemaVersion: 1,
-		Timeout: time.Second, ByteBudget: 64 << 10, Mandatory: true, MinLevel: min,
+		Timeout: time.Second, ByteBudget: 64 << 10, Mandatory: true, MinLevel: minLevel,
 		MaxClass: maxClass, Sensitivity: maxClass,
 	}
 }

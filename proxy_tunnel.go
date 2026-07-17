@@ -665,7 +665,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, tlsSkipVerify b
 	// FD-leak guard: a panic between the hijack and relay spawn would otherwise
 	// leak the hijacked conn. Idempotent — the relay closes it on the happy path
 	// (this function blocks on relay completion), so this is a harmless 2nd close.
-	defer rawClient.Close() //nolint:errcheck
+	defer rawClient.Close() //nolint:errcheck // idempotent best-effort cleanup, see comment above
 
 	// 3b. Peek the first byte from the client to detect the protocol.
 	// TLS ClientHello starts with 0x16 (handshake record). If the client

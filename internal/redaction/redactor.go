@@ -103,8 +103,12 @@ func NewWithSalt(salt []byte) Redactor {
 	return &redactor{salt: append([]byte(nil), salt...), scrubber: defaultScrubber}
 }
 
+// Struct redacts v and returns only the redacted value, discarding the Result
+// metadata (a convenience wrapper over Classify for callers that don't need it).
 func (r *redactor) Struct(v any) any { return r.Classify(v).Value }
 
+// Classify redacts v and returns the full Result, including the derived
+// ClassMax and redaction/masking counters accumulated while walking v.
 func (r *redactor) Classify(v any) Result {
 	acc := Result{ClassMax: ClassPublic}
 	acc.Value = r.walk(reflect.ValueOf(v), ClassInternal, &acc)
@@ -147,39 +151,47 @@ func (r *redactor) walk(rv reflect.Value, ctx DataClass, acc *Result) any {
 		}
 		return out
 	case reflect.Map:
-		out := make(map[string]any, rv.Len())
-		keys := rv.MapKeys()
-		sort.Slice(keys, func(i, j int) bool {
-			return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
-		})
-		for _, k := range keys {
-			key := fmt.Sprint(k.Interface())
-			// A map KEY is a kept string too; scrub it so a secret can't hide in
-			// a key. Value is walked with the field's ctx as usual.
-			if ctx < ClassSensitive && r.scrubber != nil {
-				var n int
-				key, n = r.scrubber.Scrub(key)
-				acc.Scrubbed += n
-			}
-			// Two distinct keys can scrub to the same token; disambiguate with a
-			// secret-free "#N" suffix so no entry is silently overwritten. Keys
-			// are iterated in sorted order, so the suffix assignment is stable.
-			if _, dup := out[key]; dup {
-				base := key
-				for i := 2; ; i++ {
-					cand := fmt.Sprintf("%s#%d", base, i)
-					if _, taken := out[cand]; !taken {
-						key = cand
-						break
-					}
-				}
-			}
-			out[key] = r.walk(rv.MapIndex(k), ctx, acc)
-		}
-		return out
+		return r.walkMap(rv, ctx, acc)
 	default:
 		return r.leaf(rv, ctx, acc)
 	}
+}
+
+// walkMap redacts a map: keys are scrubbed like kept strings (a secret can hide
+// in a key, not just a value), de-duplicated deterministically if two distinct
+// keys scrub to the same token, and iterated in sorted order so the "#N"
+// disambiguation suffix stays stable run to run. Values are walked with ctx.
+func (r *redactor) walkMap(rv reflect.Value, ctx DataClass, acc *Result) any {
+	out := make(map[string]any, rv.Len())
+	keys := rv.MapKeys()
+	sort.Slice(keys, func(i, j int) bool {
+		return fmt.Sprint(keys[i].Interface()) < fmt.Sprint(keys[j].Interface())
+	})
+	for _, k := range keys {
+		key := fmt.Sprint(k.Interface())
+		// A map KEY is a kept string too; scrub it so a secret can't hide in
+		// a key. Value is walked with the field's ctx as usual.
+		if ctx < ClassSensitive && r.scrubber != nil {
+			var n int
+			key, n = r.scrubber.Scrub(key)
+			acc.Scrubbed += n
+		}
+		// Two distinct keys can scrub to the same token; disambiguate with a
+		// secret-free "#N" suffix so no entry is silently overwritten. Keys
+		// are iterated in sorted order, so the suffix assignment is stable.
+		if _, dup := out[key]; dup {
+			base := key
+			for i := 2; ; i++ {
+				cand := fmt.Sprintf("%s#%d", base, i)
+				if _, taken := out[cand]; !taken {
+					key = cand
+					break
+				}
+			}
+		}
+		out[key] = r.walk(rv.MapIndex(k), ctx, acc)
+	}
+	return out
 }
 
 func (r *redactor) walkStruct(rv reflect.Value, acc *Result) any {
@@ -260,10 +272,10 @@ func bytesOf(rv reflect.Value) string {
 	if rv.Kind() == reflect.Slice {
 		return string(rv.Bytes())
 	}
+	// rv is a [N]byte array here (Kind() != Slice, checked above); Copy moves
+	// the elements without a narrowing numeric conversion.
 	b := make([]byte, rv.Len())
-	for i := 0; i < rv.Len(); i++ {
-		b[i] = byte(rv.Index(i).Uint())
-	}
+	reflect.Copy(reflect.ValueOf(b), rv)
 	return string(b)
 }
 

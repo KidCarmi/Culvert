@@ -11,6 +11,8 @@ const (
 )
 
 // SupportBundleManifest is manifest.json — always the FIRST tar entry.
+//
+//nolint:revive // name is the established public bundle type; renaming breaks callers
 type SupportBundleManifest struct {
 	Format      string          `json:"format"`
 	BundleID    string          `json:"bundle_id"`
@@ -25,6 +27,7 @@ type SupportBundleManifest struct {
 	Collection  CollectionStats `json:"collection"`
 }
 
+// GeneratedBy identifies the product/build that produced the bundle.
 type GeneratedBy struct {
 	Product                string    `json:"product"`
 	Version                string    `json:"version"`
@@ -32,12 +35,14 @@ type GeneratedBy struct {
 	CollectorEngineVersion int       `json:"collector_engine_version"`
 }
 
+// BuildInfo is the compiled-binary provenance recorded in GeneratedBy.
 type BuildInfo struct {
 	Commit  string `json:"commit,omitempty"`
 	BuiltAt string `json:"built_at,omitempty"`
 	Go      string `json:"go"`
 }
 
+// NodeInfo describes the appliance node the bundle was collected from.
 type NodeInfo struct {
 	NodeID    string `json:"node_id"`
 	Role      string `json:"role"`
@@ -45,11 +50,13 @@ type NodeInfo struct {
 	ClusterID string `json:"cluster_id,omitempty"`
 }
 
+// ScopeInfo records the incident scope and capture level a bundle was built with.
 type ScopeInfo struct {
 	IncidentScope string `json:"incident_scope"`
 	DebugLevel    int    `json:"debug_level"`
 }
 
+// RedactionInfo records which redaction model/profile governed this bundle.
 type RedactionInfo struct {
 	ModelVersion int    `json:"model_version"`
 	Profile      string `json:"profile"`
@@ -74,11 +81,15 @@ type SectionEntry struct {
 	Note             string        `json:"note,omitempty"`
 }
 
+// IntegrityInfo carries the self-referential tamper-detect hashes checked by
+// validateBundleTar.
 type IntegrityInfo struct {
 	ManifestSHA256 string `json:"manifest_sha256"` // hash of manifest with integrity fields zeroed
 	BundleSHA256   string `json:"bundle_sha256"`   // hash of the whole tar
 }
 
+// CollectionStats summarizes one Build run: how many collectors ran, and with
+// what outcome.
 type CollectionStats struct {
 	EngineStartedAt string `json:"engine_started_at"`
 	EngineEndedAt   string `json:"engine_ended_at"`
@@ -108,6 +119,8 @@ type RedactionReport struct {
 	Totals       RedactionReportCounts    `json:"totals"`
 }
 
+// RedactionReportSection is one redaction-report.json sections[] row —
+// counts-only, never values (P4/P6).
 type RedactionReportSection struct {
 	ID       string `json:"id"`
 	ClassMax string `json:"class_max"`
@@ -116,6 +129,8 @@ type RedactionReportSection struct {
 	Scrubbed int    `json:"scrubbed"` // free-form secret shapes redacted in kept strings
 }
 
+// RedactionReportCounts is the redaction-report.json totals row, summed across
+// all sections.
 type RedactionReportCounts struct {
 	Masked   int `json:"masked"`
 	Dropped  int `json:"dropped"`
@@ -139,6 +154,8 @@ type RedactionPreview struct {
 	Sections     []RedactionPreviewSection `json:"sections"`
 }
 
+// RedactionPreviewSection is one redaction-preview.json sections[] row: the
+// bounded, deduped sample of retained INTERNAL free-form values for one section.
 type RedactionPreviewSection struct {
 	ID               string   `json:"id"`
 	RetainedFreeForm []string `json:"retained_freeform"`

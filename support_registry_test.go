@@ -58,45 +58,56 @@ func TestM2Wall_RosterLocked(t *testing.T) {
 	}
 }
 
+// assertCollectorMetaContract pins one collector's Meta() to the M2 contract:
+// non-empty snake_case ID, conventional + unique section path, ceiling within
+// the shareable class, and positive budget/timeout/schema/level bounds. Split
+// out of TestM2Wall_CollectorContract purely to keep it under the gocognit
+// ceiling; assertions are unchanged.
+func assertCollectorMetaContract(t *testing.T, m support.CollectorMeta, seenPath map[string]string) {
+	t.Helper()
+	if m.ID == "" {
+		t.Fatal("empty collector ID")
+	}
+	// snake_case id, used verbatim as the section id.
+	for _, r := range m.ID {
+		isSnakeChar := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
+		if !isSnakeChar {
+			t.Fatalf("collector ID %q is not snake_case", m.ID)
+		}
+	}
+	if want := "sections/" + m.ID + ".json"; m.Path != want {
+		t.Fatalf("collector %q path=%q want %q (convention)", m.ID, m.Path, want)
+	}
+	if prev, dup := seenPath[m.Path]; dup {
+		t.Fatalf("duplicate section path %q (%q and %q)", m.Path, prev, m.ID)
+	}
+	seenPath[m.Path] = m.ID
+	// The asserted ceiling must never exceed the shareable ceiling — a
+	// section that could exceed INTERNAL would be dropped by the runner,
+	// so declaring a higher ceiling is a contract error.
+	if m.MaxClass > redaction.ShareableCeiling {
+		t.Fatalf("collector %q MaxClass=%v exceeds shareable ceiling %v", m.ID, m.MaxClass, redaction.ShareableCeiling)
+	}
+	if m.ByteBudget <= 0 {
+		t.Fatalf("collector %q has non-positive ByteBudget %d", m.ID, m.ByteBudget)
+	}
+	if m.Timeout <= 0 {
+		t.Fatalf("collector %q has non-positive Timeout %v", m.ID, m.Timeout)
+	}
+	if m.SchemaVersion < 1 {
+		t.Fatalf("collector %q has SchemaVersion %d (< 1)", m.ID, m.SchemaVersion)
+	}
+	if m.MinLevel < support.L0 || m.MinLevel > support.L4 {
+		t.Fatalf("collector %q MinLevel %d out of range", m.ID, m.MinLevel)
+	}
+}
+
 func TestM2Wall_CollectorContract(t *testing.T) {
 	seenPath := map[string]string{}
 	for _, c := range support.Collectors() {
 		m := c.Meta()
 		t.Run(m.ID, func(t *testing.T) {
-			if m.ID == "" {
-				t.Fatal("empty collector ID")
-			}
-			// snake_case id, used verbatim as the section id.
-			for _, r := range m.ID {
-				if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
-					t.Fatalf("collector ID %q is not snake_case", m.ID)
-				}
-			}
-			if want := "sections/" + m.ID + ".json"; m.Path != want {
-				t.Fatalf("collector %q path=%q want %q (convention)", m.ID, m.Path, want)
-			}
-			if prev, dup := seenPath[m.Path]; dup {
-				t.Fatalf("duplicate section path %q (%q and %q)", m.Path, prev, m.ID)
-			}
-			seenPath[m.Path] = m.ID
-			// The asserted ceiling must never exceed the shareable ceiling — a
-			// section that could exceed INTERNAL would be dropped by the runner,
-			// so declaring a higher ceiling is a contract error.
-			if m.MaxClass > redaction.ShareableCeiling {
-				t.Fatalf("collector %q MaxClass=%v exceeds shareable ceiling %v", m.ID, m.MaxClass, redaction.ShareableCeiling)
-			}
-			if m.ByteBudget <= 0 {
-				t.Fatalf("collector %q has non-positive ByteBudget %d", m.ID, m.ByteBudget)
-			}
-			if m.Timeout <= 0 {
-				t.Fatalf("collector %q has non-positive Timeout %v", m.ID, m.Timeout)
-			}
-			if m.SchemaVersion < 1 {
-				t.Fatalf("collector %q has SchemaVersion %d (< 1)", m.ID, m.SchemaVersion)
-			}
-			if m.MinLevel < support.L0 || m.MinLevel > support.L4 {
-				t.Fatalf("collector %q MinLevel %d out of range", m.ID, m.MinLevel)
-			}
+			assertCollectorMetaContract(t, m, seenPath)
 		})
 	}
 }

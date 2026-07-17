@@ -77,80 +77,96 @@ type debugLevelSetReq struct {
 func apiSupportDebugLevel(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, RoleViewer) {
-			return
-		}
-		now := time.Now()
-		eff := effectiveDebugLevel(now)
-		view := debugLevelView{
-			EffectiveLevel: int(eff),
-			BaselineLevel:  int(debugLevelBaseline),
-			Elevated:       eff != debugLevelBaseline,
-			MinTTLSecs:     int64(debugLevelMinTTL / time.Second),
-			MaxTTLSecs:     int64(debugLevelMaxTTL / time.Second),
-		}
-		debugLevelMu.Lock()
-		st := readDebugLevelStateLocked()
-		debugLevelMu.Unlock()
-		if st.ExpiresAt != "" {
-			if exp, err := time.Parse(time.RFC3339, st.ExpiresAt); err == nil && now.Before(exp) {
-				view.ExpiresAt = st.ExpiresAt
-				view.RemainingSecs = int64(exp.Sub(now).Seconds())
-				view.SetBy = st.SetBy
-			}
-		}
-		jsonOK(w, view)
-
+		handleSupportDebugLevelGet(w, r)
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
-			return
-		}
-		var req debugLevelSetReq
-		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
-			return
-		}
-		if req.Level < 0 || req.Level > 4 {
-			http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
-			return
-		}
-		// Mandatory TTL: a positive, bounded window is required.
-		if req.TTLSeconds <= 0 {
-			http.Error(w, "ttl_seconds is required and must be positive", http.StatusBadRequest)
-			return
-		}
-		ttl := time.Duration(req.TTLSeconds) * time.Second
-		exp, err := setDebugLevel(support.DebugLevel(req.Level), ttl, sanitizeLog(auditActor(r)), time.Now())
-		if err != nil {
-			if errors.Is(err, errDebugTTL) {
-				http.Error(w, fmt.Sprintf("ttl_seconds must be between %d and %d",
-					int64(debugLevelMinTTL/time.Second), int64(debugLevelMaxTTL/time.Second)), http.StatusBadRequest)
-				return
-			}
-			logger.Printf("support: set debug level failed: %v", sanitizeLog(err.Error()))
-			http.Error(w, "could not set debug level", http.StatusInternalServerError)
-			return
-		}
-		auditEvent(r, "support.debug_level.set", "debug-level",
-			fmt.Sprintf("L%d until %s", req.Level, exp.Format(time.RFC3339)))
-		jsonOK(w, map[string]any{"level": req.Level, "expires_at": exp.Format(time.RFC3339)})
-
+		handleSupportDebugLevelPost(w, r)
 	case http.MethodDelete:
-		if !requireRole(w, r, RoleOperator) {
-			return
-		}
-		if err := clearDebugLevel(); err != nil {
-			logger.Printf("support: clear debug level failed: %v", sanitizeLog(err.Error()))
-			http.Error(w, "could not clear debug level", http.StatusInternalServerError)
-			return
-		}
-		auditEvent(r, "support.debug_level.clear", "debug-level", "reverted to baseline")
-		w.WriteHeader(http.StatusNoContent)
-
+		handleSupportDebugLevelDelete(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSupportDebugLevelGet reports the effective capture level, elevation
+// state, and remaining TTL (viewer).
+func handleSupportDebugLevelGet(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	now := time.Now()
+	eff := effectiveDebugLevel(now)
+	view := debugLevelView{
+		EffectiveLevel: int(eff),
+		BaselineLevel:  int(debugLevelBaseline),
+		Elevated:       eff != debugLevelBaseline,
+		MinTTLSecs:     int64(debugLevelMinTTL / time.Second),
+		MaxTTLSecs:     int64(debugLevelMaxTTL / time.Second),
+	}
+	debugLevelMu.Lock()
+	st := readDebugLevelStateLocked()
+	debugLevelMu.Unlock()
+	if st.ExpiresAt != "" {
+		if exp, err := time.Parse(time.RFC3339, st.ExpiresAt); err == nil && now.Before(exp) {
+			view.ExpiresAt = st.ExpiresAt
+			view.RemainingSecs = int64(exp.Sub(now).Seconds())
+			view.SetBy = st.SetBy
+		}
+	}
+	jsonOK(w, view)
+}
+
+// handleSupportDebugLevelPost elevates the default capture depth for a
+// BOUNDED window (admin). A positive, in-range ttl_seconds is MANDATORY (400
+// otherwise) — an elevation can never be open-ended.
+func handleSupportDebugLevelPost(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	var req debugLevelSetReq
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Level < 0 || req.Level > 4 {
+		http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
+		return
+	}
+	// Mandatory TTL: a positive, bounded window is required.
+	if req.TTLSeconds <= 0 {
+		http.Error(w, "ttl_seconds is required and must be positive", http.StatusBadRequest)
+		return
+	}
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	exp, err := setDebugLevel(support.DebugLevel(req.Level), ttl, sanitizeLog(auditActor(r)), time.Now())
+	if err != nil {
+		if errors.Is(err, errDebugTTL) {
+			http.Error(w, fmt.Sprintf("ttl_seconds must be between %d and %d",
+				int64(debugLevelMinTTL/time.Second), int64(debugLevelMaxTTL/time.Second)), http.StatusBadRequest)
+			return
+		}
+		logger.Printf("support: set debug level failed: %v", sanitizeLog(err.Error()))
+		http.Error(w, "could not set debug level", http.StatusInternalServerError)
+		return
+	}
+	auditEvent(r, "support.debug_level.set", "debug-level",
+		fmt.Sprintf("L%d until %s", req.Level, exp.Format(time.RFC3339)))
+	jsonOK(w, map[string]any{"level": req.Level, "expires_at": exp.Format(time.RFC3339)})
+}
+
+// handleSupportDebugLevelDelete reverts to the baseline capture level
+// immediately (operator).
+func handleSupportDebugLevelDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	if err := clearDebugLevel(); err != nil {
+		logger.Printf("support: clear debug level failed: %v", sanitizeLog(err.Error()))
+		http.Error(w, "could not clear debug level", http.StatusInternalServerError)
+		return
+	}
+	auditEvent(r, "support.debug_level.clear", "debug-level", "reverted to baseline")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // apiSupportBundleReport serves a persisted bundle's redaction report — the
@@ -290,78 +306,100 @@ type supportBundleSummary struct {
 func apiSupportBundles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, RoleViewer) {
-			return
-		}
-		// Optional ?case= filters the history to one support case. Validate the raw
-		// value (same grammar as creation) so a malformed filter 400s rather than
-		// silently matching nothing.
-		bundles := listSupportBundles()
-		if caseFilter := r.URL.Query().Get("case"); caseFilter != "" {
-			if !validSupportCaseID(caseFilter) {
-				http.Error(w, "invalid case id filter", http.StatusBadRequest)
-				return
-			}
-			bundles = filterBundlesByCase(bundles, caseFilter)
-		}
-		jsonOK(w, bundles)
+		handleSupportBundlesGet(w, r)
 	case http.MethodPost:
-		if !requireRole(w, r, RoleAdmin) {
-			return
-		}
-		// Optional ?scope= for an incident-focused bundle (default: standard = all).
-		scope := r.URL.Query().Get("scope")
-		if _, ok := resolveSupportScope(scope); !ok {
-			http.Error(w, "unknown incident scope", http.StatusBadRequest)
-			return
-		}
-		// Optional ?level= (0..4) explicitly overrides the capture depth. When
-		// absent, the effective controller level applies — the operator's bounded
-		// elevation (if any), else baseline L1.
-		var level support.DebugLevel
-		if r.URL.Query().Has("level") {
-			lv, ok := parseSupportLevel(r.URL.Query().Get("level"))
-			if !ok {
-				http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
-				return
-			}
-			level = lv
-		} else {
-			level = currentDebugLevel()
-		}
-		// Optional ?case= binds the bundle to a support case for triage/history.
-		// Validate the RAW value (no trimming): the grammar disallows whitespace, so
-		// a padded "%20CASE-7%20" or whitespace-only "%20" must 400, not be silently
-		// trimmed into a different/empty case. An absent-or-empty param = no case.
-		caseID := r.URL.Query().Get("case")
-		if caseID != "" && !validSupportCaseID(caseID) {
-			http.Error(w, "invalid case id (1..64 of letters/digits/._-, no whitespace)", http.StatusBadRequest)
-			return
-		}
-		res, err := createSupportBundle(r.Context(), scope, level, caseID)
-		if err != nil {
-			if errors.Is(err, errSupportLowDisk) {
-				logger.Printf("support: bundle build refused — insufficient disk headroom")
-				http.Error(w, "insufficient disk headroom for bundle", http.StatusInsufficientStorage)
-				return
-			}
-			logger.Printf("support: bundle build failed: %v", sanitizeLog(err.Error()))
-			http.Error(w, "bundle build failed", http.StatusInternalServerError)
-			return
-		}
-		if scope == "" {
-			scope = "standard"
-		}
-		detail := fmt.Sprintf("%s L%d", scope, int(level))
-		if caseID != "" {
-			detail += " case=" + caseID
-		}
-		auditEvent(r, "support.bundle.create", res.BundleID, detail)
-		jsonOK(w, res.Manifest)
+		handleSupportBundlesPost(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSupportBundlesGet lists persisted bundles, optionally filtered to one
+// support case (viewer).
+func handleSupportBundlesGet(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleViewer) {
+		return
+	}
+	// Optional ?case= filters the history to one support case. Validate the raw
+	// value (same grammar as creation) so a malformed filter 400s rather than
+	// silently matching nothing.
+	bundles := listSupportBundles()
+	if caseFilter := r.URL.Query().Get("case"); caseFilter != "" {
+		if !validSupportCaseID(caseFilter) {
+			http.Error(w, "invalid case id filter", http.StatusBadRequest)
+			return
+		}
+		bundles = filterBundlesByCase(bundles, caseFilter)
+	}
+	jsonOK(w, bundles)
+}
+
+// resolveSupportBundlesPostParams validates and resolves the POST ?scope=,
+// ?level=, and ?case= query params for handleSupportBundlesPost. ok is false
+// iff a 400 has already been written to w.
+func resolveSupportBundlesPostParams(w http.ResponseWriter, r *http.Request) (scope string, level support.DebugLevel, caseID string, ok bool) {
+	// Optional ?scope= for an incident-focused bundle (default: standard = all).
+	scope = r.URL.Query().Get("scope")
+	if _, valid := resolveSupportScope(scope); !valid {
+		http.Error(w, "unknown incident scope", http.StatusBadRequest)
+		return "", 0, "", false
+	}
+	// Optional ?level= (0..4) explicitly overrides the capture depth. When
+	// absent, the effective controller level applies — the operator's bounded
+	// elevation (if any), else baseline L1.
+	if r.URL.Query().Has("level") {
+		lv, valid := parseSupportLevel(r.URL.Query().Get("level"))
+		if !valid {
+			http.Error(w, "invalid debug level (0..4)", http.StatusBadRequest)
+			return "", 0, "", false
+		}
+		level = lv
+	} else {
+		level = currentDebugLevel()
+	}
+	// Optional ?case= binds the bundle to a support case for triage/history.
+	// Validate the RAW value (no trimming): the grammar disallows whitespace, so
+	// a padded "%20CASE-7%20" or whitespace-only "%20" must 400, not be silently
+	// trimmed into a different/empty case. An absent-or-empty param = no case.
+	caseID = r.URL.Query().Get("case")
+	if caseID != "" && !validSupportCaseID(caseID) {
+		http.Error(w, "invalid case id (1..64 of letters/digits/._-, no whitespace)", http.StatusBadRequest)
+		return "", 0, "", false
+	}
+	return scope, level, caseID, true
+}
+
+// handleSupportBundlesPost creates a redacted csb/1 bundle (admin). A standard
+// bundle can contain INTERNAL sections (COLLECTOR-CONTRACT §4).
+func handleSupportBundlesPost(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	scope, level, caseID, ok := resolveSupportBundlesPostParams(w, r)
+	if !ok {
+		return
+	}
+	res, err := createSupportBundle(r.Context(), scope, level, caseID)
+	if err != nil {
+		if errors.Is(err, errSupportLowDisk) {
+			logger.Printf("support: bundle build refused — insufficient disk headroom")
+			http.Error(w, "insufficient disk headroom for bundle", http.StatusInsufficientStorage)
+			return
+		}
+		logger.Printf("support: bundle build failed: %v", sanitizeLog(err.Error()))
+		http.Error(w, "bundle build failed", http.StatusInternalServerError)
+		return
+	}
+	if scope == "" {
+		scope = "standard"
+	}
+	detail := fmt.Sprintf("%s L%d", scope, int(level))
+	if caseID != "" {
+		detail += " case=" + caseID
+	}
+	auditEvent(r, "support.bundle.create", res.BundleID, detail)
+	jsonOK(w, res.Manifest)
 }
 
 // filterBundlesByCase returns only the bundles bound to caseID (exact match). A

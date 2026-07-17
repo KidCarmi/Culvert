@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // live-secret seed corpus: one real-shaped fixture per pattern. Each must be
@@ -134,7 +135,8 @@ func TestScrub_ZeroWidthEvasion(t *testing.T) {
 		evaded := "AKIA" + zwr + "IOSFODNN7EXAMPLE"
 		out, n := sc.Scrub(evaded)
 		if n == 0 || strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
-			t.Fatalf("zero-width evasion survived (%U): %q (n=%d)", []rune(zwr)[0], out, n)
+			r, _ := utf8.DecodeRuneInString(zwr)
+			t.Fatalf("zero-width evasion survived (%U): %q (n=%d)", r, out, n)
 		}
 	}
 }

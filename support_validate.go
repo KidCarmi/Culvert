@@ -48,6 +48,79 @@ type bundleValidation struct {
 	Error           string         `json:"error,omitempty"`
 }
 
+// untarSupportBundleFiles reads a bounded tar stream (the caller's
+// io.LimitReader defuses a decompression bomb) into an in-memory name→bytes
+// map. Returns a non-empty errMsg — pre-formatted exactly as validateBundleTar
+// used to inline it — on any read failure or duplicate entry name: a
+// well-formed csb/1 has no duplicates, and silently letting a later entry
+// override an earlier one would let an attacker append a second forged
+// manifest (or section) that the map read then compares against.
+func untarSupportBundleFiles(tr *tar.Reader) (files map[string][]byte, errMsg string) {
+	files = map[string][]byte{}
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "untar: " + err.Error()
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, "read: " + err.Error()
+		}
+		if _, dup := files[h.Name]; dup {
+			return nil, "duplicate tar entry: " + h.Name
+		}
+		files[h.Name] = b
+	}
+	return files, ""
+}
+
+// manifestSelfHashOK re-derives integrity.manifest_sha256 over the manifest
+// with its integrity fields zeroed (json.MarshalIndent, 2-space) — mirroring
+// how the runner computed it — and reports whether it matches. This is a
+// self-referential check, not a signature: it catches a manifest-only edit
+// (case_id, a section's status/class, collector metadata) even when every
+// section payload is byte-unchanged; cryptographic manifest signing is later.
+func manifestSelfHashOK(man support.SupportBundleManifest) bool {
+	expectedMH := man.Integrity.ManifestSHA256
+	if expectedMH == "" {
+		return false
+	}
+	manForHash := man
+	manForHash.Integrity = support.IntegrityInfo{}
+	preHash, err := json.MarshalIndent(manForHash, "", "  ")
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(preHash)
+	return hex.EncodeToString(sum[:]) == expectedMH
+}
+
+// checkBundleSection re-hashes one manifest-recorded section against its
+// actual tar bytes and reports the outcome as a sectionCheck plus whether it
+// passed. A section with no recorded SHA256 (failed/skipped — nothing was
+// written) has nothing to check and is reported via the ok bool alone.
+func checkBundleSection(s *support.SectionEntry, files map[string][]byte) (check sectionCheck, checked, ok bool) {
+	if s.SHA256 == "" {
+		return sectionCheck{}, false, false
+	}
+	content, present := files[s.Path]
+	if !present {
+		return sectionCheck{ID: s.ID, Path: s.Path, Status: "missing", ExpectedSHA: s.SHA256}, true, false
+	}
+	sum := sha256.Sum256(content)
+	actual := hex.EncodeToString(sum[:])
+	if actual != s.SHA256 {
+		return sectionCheck{ID: s.ID, Path: s.Path, Status: "mismatch", ExpectedSHA: s.SHA256, ActualSHA: actual}, true, false
+	}
+	return sectionCheck{}, true, true
+}
+
 // validateBundleTar re-hashes each manifest-recorded section against the tar's
 // actual bytes. Pure (no I/O beyond the in-memory reader) so it is fully testable.
 func validateBundleTar(tgz []byte) bundleValidation {
@@ -61,33 +134,11 @@ func validateBundleTar(tgz []byte) bundleValidation {
 
 	// Untar into a bounded in-memory map. LimitReader caps total decompressed size
 	// so a tampered tar cannot exhaust memory.
-	files := map[string][]byte{}
 	tr := tar.NewReader(io.LimitReader(gz, maxValidateDecompressed))
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			v.Error = "untar: " + err.Error()
-			return v
-		}
-		if h.Typeflag != tar.TypeReg {
-			continue
-		}
-		b, err := io.ReadAll(tr)
-		if err != nil {
-			v.Error = "read: " + err.Error()
-			return v
-		}
-		// Reject duplicate names: a well-formed csb/1 has none, and silently letting
-		// a later entry override an earlier one would let an attacker append a second
-		// forged manifest (or section) that the map read then compares against.
-		if _, dup := files[h.Name]; dup {
-			v.Error = "duplicate tar entry: " + h.Name
-			return v
-		}
-		files[h.Name] = b
+	files, errMsg := untarSupportBundleFiles(tr)
+	if errMsg != "" {
+		v.Error = errMsg
+		return v
 	}
 
 	mb, ok := files[support.ManifestName]
@@ -104,40 +155,23 @@ func validateBundleTar(tgz []byte) bundleValidation {
 	v.BundleID = man.BundleID
 	v.Format = man.Format
 	v.FormatOK = man.Format == support.BundleFormat
-
-	// Manifest self-hash: the runner records integrity.manifest_sha256 over the
-	// manifest with its integrity fields zeroed (json.MarshalIndent, 2-space).
-	// Re-derive it the same way so a manifest-only edit (case_id, a section's
-	// status/class, collector metadata) is caught even when every section payload
-	// is byte-unchanged. (This is a self-referential check, not a signature — it
-	// catches corruption/naive tampering; cryptographic manifest signing is later.)
-	expectedMH := man.Integrity.ManifestSHA256
-	manForHash := man
-	manForHash.Integrity = support.IntegrityInfo{}
-	preHash, mErr := json.MarshalIndent(manForHash, "", "  ")
-	if mErr == nil && expectedMH != "" {
-		sum := sha256.Sum256(preHash)
-		v.ManifestHashOK = hex.EncodeToString(sum[:]) == expectedMH
-	}
+	v.ManifestHashOK = manifestSelfHashOK(man)
 
 	for i := range man.Sections {
 		s := &man.Sections[i]
-		if s.SHA256 == "" {
+		check, checked, sectionOK := checkBundleSection(s, files)
+		if !checked {
 			continue // failed/skipped section — nothing was written, nothing to hash
 		}
 		v.SectionsChecked++
-		content, present := files[s.Path]
-		if !present {
-			v.Missing = append(v.Missing, sectionCheck{ID: s.ID, Path: s.Path, Status: "missing", ExpectedSHA: s.SHA256})
-			continue
+		switch {
+		case sectionOK:
+			v.SectionsOK++
+		case check.Status == "missing":
+			v.Missing = append(v.Missing, check)
+		default:
+			v.Mismatches = append(v.Mismatches, check)
 		}
-		sum := sha256.Sum256(content)
-		actual := hex.EncodeToString(sum[:])
-		if actual != s.SHA256 {
-			v.Mismatches = append(v.Mismatches, sectionCheck{ID: s.ID, Path: s.Path, Status: "mismatch", ExpectedSHA: s.SHA256, ActualSHA: actual})
-			continue
-		}
-		v.SectionsOK++
 	}
 	v.OK = v.FormatOK && v.ManifestPresent && v.ManifestHashOK && len(v.Mismatches) == 0 && len(v.Missing) == 0
 	return v

@@ -124,11 +124,7 @@ func (configVersionsCollector) Collect(_ context.Context, in support.CollectInpu
 			Actor: metas[i].Actor, Action: metas[i].Action,
 		})
 	}
-	res := in.Redactor.Classify(sec)
-	if err := sink.WriteJSON(res.Value); err != nil {
-		return support.Result{Status: support.StatusFailed, Note: "write"}
-	}
-	return support.Result{Status: support.StatusOK, ClassMax: res.ClassMax}
+	return classifyAndWriteSection(in, sink, sec)
 }
 
 // ── governance (C2/C3 control-plane) ─────────────────────────────────────────

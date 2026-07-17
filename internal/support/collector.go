@@ -16,6 +16,7 @@ import (
 // DebugLevel gates collectors (L0 always runs; richer levels unlock more).
 type DebugLevel int
 
+// DebugLevel values, from always-on to maximal capture depth.
 const (
 	L0 DebugLevel = iota // always-on: product, readiness
 	L1                   // standard bundle: diagnostics, config, policy, logs…
@@ -27,6 +28,7 @@ const (
 // SectionStatus is the per-section outcome recorded in the manifest.
 type SectionStatus string
 
+// SectionStatus values a collector run can end in.
 const (
 	StatusOK          SectionStatus = "ok"          // complete
 	StatusPartial     SectionStatus = "partial"     // budget/timeout-truncated but usable

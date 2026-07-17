@@ -86,5 +86,9 @@ func apiSupportBundleExportEncrypted(w http.ResponseWriter, r *http.Request) {
 	auditEvent(r, "support.bundle.download_encrypted", id, support.BundleFormat)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", id+".csb.enc"))
+	// #nosec G705 -- enc is opaque AES-256-GCM ciphertext (backupcrypt.EncryptBlob)
+	// served as application/octet-stream, not reflected HTML/script; gosec's taint
+	// tracker only sees that it transitively derives from request input (the
+	// passphrase), not that it is encrypted binary data, so this is a false positive.
 	_, _ = w.Write(enc)
 }

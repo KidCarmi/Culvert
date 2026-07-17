@@ -13,7 +13,7 @@ import (
 func TestTimelineSortKey(t *testing.T) {
 	a := timelineSortKey("2026-07-17T10:00:00Z")
 	b := timelineSortKey("2026-07-17T11:00:00Z")
-	if !(b > a) {
+	if b <= a {
 		t.Fatalf("later stamp should sort higher: a=%d b=%d", a, b)
 	}
 	if got := timelineSortKey("not-a-time"); got != 0 {

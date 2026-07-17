@@ -57,7 +57,7 @@ func TestSupportBundle_CaseIDBinds(t *testing.T) {
 		t.Fatal("bundle not in list")
 	}
 	// Survives approval (state rewrite preserves the binding).
-	ar := httptest.NewRequest(http.MethodPost, "/api/support/bundles/"+res.BundleID+"/approve", nil)
+	ar := httptest.NewRequest(http.MethodPost, "/api/support/bundles/"+res.BundleID+"/approve", http.NoBody)
 	ar.SetPathValue("id", res.BundleID)
 	arRec := httptest.NewRecorder()
 	apiSupportBundleApprove(arRec, withRoleCtx(ar, RoleAdmin))
@@ -88,7 +88,7 @@ func TestSupportBundles_CaseFilter(t *testing.T) {
 	}
 
 	get := func(q string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(http.MethodGet, "/api/support/bundles"+q, nil)
+		r := httptest.NewRequest(http.MethodGet, "/api/support/bundles"+q, http.NoBody)
 		rec := httptest.NewRecorder()
 		apiSupportBundles(rec, withRoleCtx(r, RoleViewer))
 		return rec
@@ -129,7 +129,7 @@ func TestSupportBundle_InvalidCaseIDRejected(t *testing.T) {
 	// Malformed values must 400 BEFORE any build — including whitespace-padded and
 	// whitespace-only (Codex #781: the raw value is validated, never trimmed).
 	for _, q := range []string{"case=bad%20id", "case=%20CASE-7%20", "case=%20", "case=a%2Fb"} {
-		r := httptest.NewRequest(http.MethodPost, "/api/support/bundles?"+q, nil)
+		r := httptest.NewRequest(http.MethodPost, "/api/support/bundles?"+q, http.NoBody)
 		rec := httptest.NewRecorder()
 		apiSupportBundles(rec, withRoleCtx(r, RoleAdmin))
 		if rec.Code != http.StatusBadRequest {

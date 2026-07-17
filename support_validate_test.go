@@ -217,7 +217,7 @@ func TestSupportBundleValidate_API(t *testing.T) {
 	}
 
 	// Clean bundle → ok.
-	r := httptest.NewRequest(http.MethodGet, "/api/support/bundles/"+res.BundleID+"/validate", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/support/bundles/"+res.BundleID+"/validate", http.NoBody)
 	r.SetPathValue("id", res.BundleID)
 	rec := httptest.NewRecorder()
 	apiSupportBundleValidate(rec, withRoleCtx(r, RoleViewer))
@@ -230,7 +230,7 @@ func TestSupportBundleValidate_API(t *testing.T) {
 	}
 
 	// Unknown-but-well-formed id → 404.
-	r2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	r2 := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	r2.SetPathValue("id", "csb_aaaaaaaaaaaaaaaaaaaaaaaaaa")
 	rec2 := httptest.NewRecorder()
 	apiSupportBundleValidate(rec2, withRoleCtx(r2, RoleViewer))
@@ -239,7 +239,7 @@ func TestSupportBundleValidate_API(t *testing.T) {
 	}
 
 	// Malformed id → 400.
-	r3 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	r3 := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	r3.SetPathValue("id", "../etc/passwd")
 	rec3 := httptest.NewRecorder()
 	apiSupportBundleValidate(rec3, withRoleCtx(r3, RoleViewer))

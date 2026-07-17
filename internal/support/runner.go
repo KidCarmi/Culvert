@@ -60,6 +60,156 @@ type tarEntry struct {
 	body []byte
 }
 
+// buildSectionState accumulates the per-collector outputs of one Build call
+// (sections, redaction report/preview entries, collection errors, packed tar
+// entries, and running stats) so collectSection can update them in place.
+type buildSectionState struct {
+	sections    []SectionEntry
+	reportSecs  []RedactionReportSection
+	previewSecs []RedactionPreviewSection // server-side consent preview; NOT packed into the tar
+	errs        []CollectionError
+	packed      []tarEntry
+	stats       CollectionStats
+}
+
+// collectSection runs one collector (respecting its scope/level gates) and
+// folds the outcome into st: a gated collector is recorded as skipped; a
+// collector error, unwritten section, or over-ceiling class is recorded as
+// failed; otherwise the section is packed and its report/preview entries
+// recorded. Mirrors the original inline Build loop body byte-for-byte.
+func (rn *Runner) collectSection(ctx context.Context, c Collector, opts BuildOptions, base redaction.Redactor, clock func() time.Time, scope string, st *buildSectionState) {
+	m := c.Meta()
+	st.stats.TotalCollectors++
+	startAt := clock().UTC().Format(time.RFC3339)
+	entry := SectionEntry{
+		ID: m.ID, Path: m.Path, Collector: m.ID, CollectorVersion: m.SchemaVersion,
+		Owner: m.Owner, StartedAt: startAt, ClassMax: redaction.ClassPublic.String(),
+	}
+
+	if len(opts.IncludeCollectors) > 0 && !opts.IncludeCollectors[m.ID] {
+		entry.Status = StatusSkipped
+		entry.Note = "gated:scope=" + scope
+		entry.EndedAt = clock().UTC().Format(time.RFC3339)
+		st.sections = append(st.sections, entry)
+		st.stats.Skipped++
+		return
+	}
+
+	if opts.Level < m.MinLevel {
+		entry.Status = StatusSkipped
+		entry.Note = fmt.Sprintf("gated:level<%d", m.MinLevel)
+		entry.EndedAt = clock().UTC().Format(time.RFC3339)
+		st.sections = append(st.sections, entry)
+		st.stats.Skipped++
+		return
+	}
+
+	cr := &countingRedactor{base: base}
+	sk := &sectionSink{budget: m.ByteBudget}
+	in := CollectInput{Level: opts.Level, Redactor: cr, Runtime: opts.Runtime, Clock: clock}
+	res, errClass := runOne(ctx, c, in, sk, m.Timeout)
+	entry.EndedAt = clock().UTC().Format(time.RFC3339)
+	entry.Truncated = res.Truncated || sk.truncated
+	entry.Note = res.Note
+
+	finishSection(m, entry, res, errClass, cr, sk, st)
+}
+
+// finishSection classifies a completed collector run — execute error,
+// terminal collector status, unwritten section, or over-ceiling class all
+// become a failed section; otherwise the section is packed and its
+// report/preview entries recorded — and appends the final entry to st.
+// Split out of collectSection purely to keep both functions under the
+// funlen/statement ceiling; behavior is identical to the original inline switch.
+func finishSection(m CollectorMeta, entry SectionEntry, res Result, errClass string, cr *countingRedactor, sk *sectionSink, st *buildSectionState) {
+	switch {
+	case errClass != "":
+		entry.Status = StatusFailed
+		st.errs = append(st.errs, CollectionError{
+			Collector: m.ID, Phase: "execute", ErrorClass: errClass,
+			Message: "collector " + m.ID + " " + errClass, Fatal: false,
+		})
+		st.stats.Failed++
+	case res.Status == StatusFailed || res.Status == StatusUnavailable:
+		entry.Status = res.Status
+		if res.Status == StatusFailed {
+			st.stats.Failed++
+		}
+	case !sk.wrote:
+		entry.Status = StatusFailed
+		st.errs = append(st.errs, CollectionError{
+			Collector: m.ID, Phase: "execute", ErrorClass: "budget",
+			Message: "collector " + m.ID + " wrote no section", Fatal: false,
+		})
+		st.stats.Failed++
+	default:
+		classMax := cr.classMax
+		if res.ClassMax > classMax {
+			classMax = res.ClassMax
+		}
+		if classMax > m.MaxClass {
+			// Defense-in-depth: a section exceeding its declared ceiling is
+			// dropped + errored, never emitted (REDACTION-MODEL §9).
+			entry.Status = StatusFailed
+			st.errs = append(st.errs, CollectionError{
+				Collector: m.ID, Phase: "redact", ErrorClass: "permission",
+				Message: fmt.Sprintf("section %s class %s exceeds ceiling %s", m.ID, classMax, m.MaxClass),
+				Fatal:   false,
+			})
+			st.stats.Failed++
+			break
+		}
+		sum := sha256.Sum256(sk.body)
+		entry.SHA256 = hex.EncodeToString(sum[:])
+		entry.SizeBytes = int64(len(sk.body))
+		entry.ClassMax = classMax.String()
+		if entry.Status = res.Status; entry.Status == "" {
+			entry.Status = StatusOK
+		}
+		st.packed = append(st.packed, tarEntry{name: m.Path, body: sk.body})
+		st.reportSecs = append(st.reportSecs, RedactionReportSection{
+			ID: m.ID, ClassMax: classMax.String(), Masked: cr.masked, Dropped: cr.dropped, Scrubbed: cr.scrubbed,
+		})
+		if len(cr.retained) > 0 {
+			st.previewSecs = append(st.previewSecs, RedactionPreviewSection{ID: m.ID, RetainedFreeForm: cr.retained})
+		}
+		st.stats.OK++
+	}
+	st.sections = append(st.sections, entry)
+}
+
+// buildBundleManifest assembles the manifest for one bundle build from the
+// resolved options and the per-collector state accumulated by collectSection,
+// then stamps manifest_sha256 (computed over the manifest with its integrity
+// fields empty — the self-hash validateBundleTar/manifestSelfHashOK re-derive).
+func buildBundleManifest(opts BuildOptions, bundleID, createdAt, scope, profile string, st *buildSectionState) SupportBundleManifest {
+	man := SupportBundleManifest{
+		Format:    BundleFormat,
+		BundleID:  bundleID,
+		CreatedAt: createdAt,
+		GeneratedBy: GeneratedBy{
+			Product: "culvert", Version: opts.Version,
+			Build:                  BuildInfo{Commit: opts.BuildCommit, BuiltAt: opts.BuildAt, Go: opts.GoVersion},
+			CollectorEngineVersion: CollectorEngineVer,
+		},
+		Node: NodeInfo{
+			NodeID: opts.Runtime.NodeID, Role: opts.Runtime.Role,
+			Runtime: opts.Runtime.Runtime, ClusterID: opts.ClusterID,
+		},
+		Scope:      ScopeInfo{IncidentScope: scope, DebugLevel: int(opts.Level)},
+		CaseID:     opts.CaseID,
+		Redaction:  RedactionInfo{ModelVersion: RedactionModelVer, Profile: profile, FailClosed: true},
+		Sections:   st.sections,
+		Collection: st.stats,
+	}
+	// manifest_sha256 is over the manifest with both integrity fields empty.
+	man.Integrity = IntegrityInfo{}
+	preHash, _ := json.MarshalIndent(man, "", "  ")
+	ms := sha256.Sum256(preHash)
+	man.Integrity.ManifestSHA256 = hex.EncodeToString(ms[:])
+	return man
+}
+
 // Build runs every eligible collector and assembles a csb/1 bundle. It never
 // returns an error for a collector failure (that becomes a failed section +
 // collection-errors entry); it errors only on an engine-level assembly failure.
@@ -86,146 +236,28 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 		base = redaction.New()
 	}
 
-	var (
-		sections    []SectionEntry
-		reportSecs  []RedactionReportSection
-		previewSecs []RedactionPreviewSection // server-side consent preview; NOT packed into the tar
-		errs        = []CollectionError{}
-		packed      []tarEntry
-		stats       CollectionStats
-	)
-
+	st := &buildSectionState{errs: []CollectionError{}}
 	for _, c := range Collectors() {
-		m := c.Meta()
-		stats.TotalCollectors++
-		startAt := clock().UTC().Format(time.RFC3339)
-		entry := SectionEntry{
-			ID: m.ID, Path: m.Path, Collector: m.ID, CollectorVersion: m.SchemaVersion,
-			Owner: m.Owner, StartedAt: startAt, ClassMax: redaction.ClassPublic.String(),
-		}
-
-		if len(opts.IncludeCollectors) > 0 && !opts.IncludeCollectors[m.ID] {
-			entry.Status = StatusSkipped
-			entry.Note = "gated:scope=" + scope
-			entry.EndedAt = clock().UTC().Format(time.RFC3339)
-			sections = append(sections, entry)
-			stats.Skipped++
-			continue
-		}
-
-		if opts.Level < m.MinLevel {
-			entry.Status = StatusSkipped
-			entry.Note = fmt.Sprintf("gated:level<%d", m.MinLevel)
-			entry.EndedAt = clock().UTC().Format(time.RFC3339)
-			sections = append(sections, entry)
-			stats.Skipped++
-			continue
-		}
-
-		cr := &countingRedactor{base: base}
-		sk := &sectionSink{budget: m.ByteBudget}
-		in := CollectInput{Level: opts.Level, Redactor: cr, Runtime: opts.Runtime, Clock: clock}
-		res, errClass := runOne(ctx, c, in, sk, m.Timeout)
-		entry.EndedAt = clock().UTC().Format(time.RFC3339)
-		entry.Truncated = res.Truncated || sk.truncated
-		entry.Note = res.Note
-
-		switch {
-		case errClass != "":
-			entry.Status = StatusFailed
-			errs = append(errs, CollectionError{
-				Collector: m.ID, Phase: "execute", ErrorClass: errClass,
-				Message: "collector " + m.ID + " " + errClass, Fatal: false,
-			})
-			stats.Failed++
-		case res.Status == StatusFailed || res.Status == StatusUnavailable:
-			entry.Status = res.Status
-			if res.Status == StatusFailed {
-				stats.Failed++
-			}
-		case !sk.wrote:
-			entry.Status = StatusFailed
-			errs = append(errs, CollectionError{
-				Collector: m.ID, Phase: "execute", ErrorClass: "budget",
-				Message: "collector " + m.ID + " wrote no section", Fatal: false,
-			})
-			stats.Failed++
-		default:
-			classMax := cr.classMax
-			if res.ClassMax > classMax {
-				classMax = res.ClassMax
-			}
-			if classMax > m.MaxClass {
-				// Defense-in-depth: a section exceeding its declared ceiling is
-				// dropped + errored, never emitted (REDACTION-MODEL §9).
-				entry.Status = StatusFailed
-				errs = append(errs, CollectionError{
-					Collector: m.ID, Phase: "redact", ErrorClass: "permission",
-					Message: fmt.Sprintf("section %s class %s exceeds ceiling %s", m.ID, classMax, m.MaxClass),
-					Fatal:   false,
-				})
-				stats.Failed++
-				break
-			}
-			sum := sha256.Sum256(sk.body)
-			entry.SHA256 = hex.EncodeToString(sum[:])
-			entry.SizeBytes = int64(len(sk.body))
-			entry.ClassMax = classMax.String()
-			if entry.Status = res.Status; entry.Status == "" {
-				entry.Status = StatusOK
-			}
-			packed = append(packed, tarEntry{name: m.Path, body: sk.body})
-			reportSecs = append(reportSecs, RedactionReportSection{
-				ID: m.ID, ClassMax: classMax.String(), Masked: cr.masked, Dropped: cr.dropped, Scrubbed: cr.scrubbed,
-			})
-			if len(cr.retained) > 0 {
-				previewSecs = append(previewSecs, RedactionPreviewSection{ID: m.ID, RetainedFreeForm: cr.retained})
-			}
-			stats.OK++
-		}
-		sections = append(sections, entry)
+		rn.collectSection(ctx, c, opts, base, clock, scope, st)
 	}
 
-	stats.EngineStartedAt = createdAt
-	stats.EngineEndedAt = clock().UTC().Format(time.RFC3339)
-	stats.ErrorCount = len(errs)
+	st.stats.EngineStartedAt = createdAt
+	st.stats.EngineEndedAt = clock().UTC().Format(time.RFC3339)
+	st.stats.ErrorCount = len(st.errs)
 
 	bundleID := makeBundleID(opts.Runtime.NodeID, createdAt, opts.Nonce)
 
 	report := RedactionReport{
 		ModelVersion: RedactionModelVer, Profile: profile, FailClosed: true,
-		Sections: reportSecs, Totals: totalCounts(reportSecs),
+		Sections: st.reportSecs, Totals: totalCounts(st.reportSecs),
 	}
 	// Consent preview: server-side only, deliberately NOT added to `entries`
 	// (the tar) below — it must never leave the box in the shareable bundle.
-	preview := RedactionPreview{ModelVersion: RedactionModelVer, Sections: previewSecs}
+	preview := RedactionPreview{ModelVersion: RedactionModelVer, Sections: st.previewSecs}
 	reportBytes, _ := json.MarshalIndent(report, "", "  ")
-	errBytes, _ := json.MarshalIndent(errs, "", "  ")
+	errBytes, _ := json.MarshalIndent(st.errs, "", "  ")
 
-	man := SupportBundleManifest{
-		Format:    BundleFormat,
-		BundleID:  bundleID,
-		CreatedAt: createdAt,
-		GeneratedBy: GeneratedBy{
-			Product: "culvert", Version: opts.Version,
-			Build:                  BuildInfo{Commit: opts.BuildCommit, BuiltAt: opts.BuildAt, Go: opts.GoVersion},
-			CollectorEngineVersion: CollectorEngineVer,
-		},
-		Node: NodeInfo{
-			NodeID: opts.Runtime.NodeID, Role: opts.Runtime.Role,
-			Runtime: opts.Runtime.Runtime, ClusterID: opts.ClusterID,
-		},
-		Scope:      ScopeInfo{IncidentScope: scope, DebugLevel: int(opts.Level)},
-		CaseID:     opts.CaseID,
-		Redaction:  RedactionInfo{ModelVersion: RedactionModelVer, Profile: profile, FailClosed: true},
-		Sections:   sections,
-		Collection: stats,
-	}
-	// manifest_sha256 is over the manifest with both integrity fields empty.
-	man.Integrity = IntegrityInfo{}
-	preHash, _ := json.MarshalIndent(man, "", "  ")
-	ms := sha256.Sum256(preHash)
-	man.Integrity.ManifestSHA256 = hex.EncodeToString(ms[:])
+	man := buildBundleManifest(opts, bundleID, createdAt, scope, profile, st)
 	manifestBytes, _ := json.MarshalIndent(man, "", "  ")
 
 	// Deterministic entry order: manifest first, then the required top-level
@@ -235,7 +267,7 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 		{name: RedactionReportName, body: reportBytes},
 		{name: CollectionErrorName, body: errBytes},
 	}
-	entries = append(entries, packed...)
+	entries = append(entries, st.packed...)
 
 	tgz, err := writeTarGz(entries, engineStart)
 	if err != nil {
@@ -252,7 +284,7 @@ func (rn *Runner) Build(ctx context.Context, opts BuildOptions) (*BuildResult, e
 
 // runOne executes one collector under a timeout with panic isolation. errClass is
 // "" on a clean return, else "panic"/"timeout".
-func runOne(parent context.Context, c Collector, in CollectInput, sk SectionSink, timeout time.Duration) (Result, string) {
+func runOne(parent context.Context, c Collector, in CollectInput, sk SectionSink, timeout time.Duration) (res Result, errClass string) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -293,6 +325,9 @@ type sectionSink struct {
 	wrote     bool
 }
 
+// WriteJSON marshals v as the section body (indented, deterministic key
+// order), truncating to a budget-exceeded placeholder if v's encoding is
+// larger than the collector's byte budget.
 func (s *sectionSink) WriteJSON(v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -322,12 +357,16 @@ type countingRedactor struct {
 // large section cannot balloon the server-side preview file.
 const maxRetainedPerSection = 64
 
+// Struct redacts v via the wrapped base redactor, tallies the section counters,
+// and returns only the redacted value.
 func (c *countingRedactor) Struct(v any) any {
 	r := c.base.Classify(v)
 	c.tally(r)
 	return r.Value
 }
 
+// Classify redacts v via the wrapped base redactor, tallies the section
+// counters, and returns the full Result.
 func (c *countingRedactor) Classify(v any) redaction.Result {
 	r := c.base.Classify(v)
 	c.tally(r)

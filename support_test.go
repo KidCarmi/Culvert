@@ -200,7 +200,7 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 	}
 
 	// Endpoint: valid id → 200 with the report.
-	req := httptest.NewRequest(http.MethodGet, "/api/support/bundles/"+res.BundleID+"/redaction-report", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/support/bundles/"+res.BundleID+"/redaction-report", http.NoBody)
 	req.SetPathValue("id", res.BundleID)
 	rec := httptest.NewRecorder()
 	apiSupportBundleReport(rec, req)
@@ -208,7 +208,7 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 		t.Fatalf("endpoint code=%d body=%q", rec.Code, rec.Body.String())
 	}
 	// Unknown-but-well-formed id → 404 (a pre-report bundle behaves the same).
-	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	req2.SetPathValue("id", "csb_aaaaaaaaaaaaaaaaaaaaaaaaaa")
 	rec2 := httptest.NewRecorder()
 	apiSupportBundleReport(rec2, req2)
@@ -216,7 +216,7 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 		t.Fatalf("missing report code=%d want 404", rec2.Code)
 	}
 	// Malformed id → 400.
-	req3 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req3 := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
 	req3.SetPathValue("id", "../etc/passwd")
 	rec3 := httptest.NewRecorder()
 	apiSupportBundleReport(rec3, req3)
@@ -228,7 +228,7 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 // supportRoleReq builds a path-valued request carrying an injected admin-UI role
 // (handlers are RBAC-gated; a bare request defaults to viewer).
 func supportRoleReq(method, id string, role UIRole) (*http.Request, *httptest.ResponseRecorder) {
-	req := httptest.NewRequest(method, "/x", nil)
+	req := httptest.NewRequest(method, "/x", http.NoBody)
 	req.SetPathValue("id", id)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, role))
 	return req, httptest.NewRecorder()

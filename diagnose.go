@@ -61,7 +61,7 @@ func probeWritable(dir string) (ok bool, detail string) {
 		return false, "create: " + err.Error()
 	}
 	name := f.Name()
-	_, wErr := f.Write([]byte("culvert-storage-probe"))
+	_, wErr := f.WriteString("culvert-storage-probe")
 	cErr := f.Close()
 	rmErr := os.Remove(name)
 	switch {
@@ -268,18 +268,28 @@ func validDiagnoseHost(h string) bool {
 		return false
 	}
 	for _, label := range strings.Split(h, ".") {
-		if len(label) == 0 || len(label) > 63 {
+		if !validDiagnoseLabel(label) {
 			return false
 		}
-		if label[0] == '-' || label[len(label)-1] == '-' {
+	}
+	return true
+}
+
+// validDiagnoseLabel enforces the LDH-label grammar for a single dot-separated
+// label of validDiagnoseHost: 1..63 bytes, no leading/trailing hyphen, and
+// letters/digits/hyphen only.
+func validDiagnoseLabel(label string) bool {
+	if label == "" || len(label) > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		isLDH := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
+		if !isLDH {
 			return false
-		}
-		for i := 0; i < len(label); i++ {
-			c := label[i]
-			isLDH := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-'
-			if !isLDH {
-				return false
-			}
 		}
 	}
 	return true
@@ -337,9 +347,9 @@ func diagnoseDNS(ctx context.Context, host string, now time.Time) dnsDiagnosis {
 // boundedErr caps a resolver error string so a pathological message can't bloat
 // the response (the diagnostic surfaces cause, not a novel).
 func boundedErr(s string) string {
-	const max = 256
-	if len(s) > max {
-		return s[:max] + "…"
+	const maxLen = 256
+	if len(s) > maxLen {
+		return s[:maxLen] + "…"
 	}
 	return s
 }
