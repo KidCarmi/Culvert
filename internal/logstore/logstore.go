@@ -90,6 +90,55 @@ type Entry struct {
 	AccessRuleID          string   `json:"access_rule_id,omitempty"`           // dormant Stage-2 auth-observability seam (unpopulated); forward-proxy decision attribution uses the top-level RuleID/ruleId field paired with RuleMatched
 	AuthSubjectMatchTypes []string `json:"auth_subject_match_types,omitempty"` // low-cardinality predicate type names (e.g. ["cidr"])
 	AuthSchemaVersion     int      `json:"auth_schema_version,omitempty"`      // matched rule's SubjectMatch schema version
+
+	// Normalized decryption-observability block (ADR-0011). Nested pointer, block-level
+	// omitempty: when no decryption decision occurred (plain non-CONNECT, feature-off)
+	// Dec is nil and the "dec" key is ABSENT — wire stays byte-identical. When present,
+	// every categorical/boolean/int field serializes EXPLICITLY (see DecryptionBlock),
+	// so a negative outcome (cache_consulted:false, fail_stage:"none", scope_rule_count:0)
+	// is queryable rather than indistinguishable from an old/forgotten record. Populated
+	// only on the decryption decision path (a later ADR-0011 slice); nil until then.
+	Dec *DecryptionBlock `json:"dec,omitempty"`
+}
+
+// DecryptionBlock is the nested "dec" object on Entry (ADR-0011 §2.1). Fields are plain
+// scalars (the enum .String() values) so logstore stays dependency-free and mirrors the
+// flat auth_* precedent; the typed, validated source is main.DecryptionOutcome, which
+// projects into this shape.
+//
+// SERIALIZATION RULE (ADR-0011 §2.1 + PR #758 red-team): once the block is present,
+// booleans, the required categorical enums, AND the int fields are NON-omitempty so an
+// explicit false / "none" / 0 always serializes and stays queryable. Only genuinely
+// optional strings (sni, cipher, cert_fingerprint, excl_scope, node_id, and the id/name
+// pairs that are absent when no rule/profile matched) keep omitempty. `host` and `alpn`
+// are non-omitempty: host is always known on a decisioned session (redacted by hashing
+// to a fixed-length token, never by omission), and "" is a VALID alpn member that must
+// serialize explicitly.
+type DecryptionBlock struct {
+	SchemaVersion   int    `json:"schema_version"`             // independent version for the dec block
+	Outcome         string `json:"outcome"`                    // decryptobs.Outcome
+	DecisionSource  string `json:"decision_source"`            // decryptobs.DecisionSource
+	RuleID          string `json:"rule_id,omitempty"`          // matched forward-proxy rule ULID
+	RuleName        string `json:"rule_name,omitempty"`        // matched rule display name
+	ProfileID       string `json:"profile_id,omitempty"`       // decryption-profile stable ID (autoexclude scopeID)
+	ProfileName     string `json:"profile_name,omitempty"`     // decryption-profile display name
+	Host            string `json:"host"`                       // CONNECT authority / normalized host (redactable by hashing)
+	SNI             string `json:"sni,omitempty"`              // client-hello SNI when available (redactable)
+	TLSVersion      string `json:"tls_version"`                // decryptobs.TLSVersion
+	Cipher          string `json:"cipher,omitempty"`           // IANA suite name (record-only, never a metric label)
+	ALPN            string `json:"alpn"`                       // decryptobs.ALPN ("" is a valid, explicit member)
+	CertVerify      string `json:"cert_verify"`                // decryptobs.CertVerify
+	FailStage       string `json:"fail_stage"`                 // decryptobs.FailStage ("none" when no failure)
+	FailCategory    string `json:"fail_category"`              // decryptobs.FailCategory ("none" when no failure)
+	ExclReason      string `json:"excl_reason"`                // autoexclude.Reason ("" = no exclusion — explicit)
+	ExclScope       string `json:"excl_scope,omitempty"`       // owning profile ID (present only when excluded)
+	CacheConsulted  bool   `json:"cache_consulted"`            // fail-open read path ran
+	CacheHit        bool   `json:"cache_hit"`                  // a learned entry bypassed this session
+	CacheLearned    bool   `json:"cache_learned"`              // this session's evidence was recorded
+	Rescued         bool   `json:"rescued"`                    // live-rescue fired for this session
+	ScopeRuleCount  int    `json:"scope_rule_count"`           // rules referencing the owning profile (explicit 0)
+	NodeID          string `json:"node_id,omitempty"`          // CP/DP NodeID; empty in single-binary mode
+	CertFingerprint string `json:"cert_fingerprint,omitempty"` // bounded SPKI/cert SHA-256 hash (privacy opt-in)
 }
 
 // LowPriority classifies an entry's storage priority by level. INFO, DEBUG,
