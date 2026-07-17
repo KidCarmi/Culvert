@@ -4431,6 +4431,7 @@ document.addEventListener('click', e => {
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
+    case 'supportExportEncrypted': supportExportEncrypted(arg); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
@@ -11877,7 +11878,8 @@ function renderSupportBundles(list) {
       let ops = '';
       if (canWrite) {
         ops += ready
-          ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>'
+          ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>' +
+            ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>'
           : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
         if (!ready && uiRole === 'admin') {
           ops += ' <button class="btn primary sm" data-click="supportApproveBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Approve</button>';
@@ -12146,6 +12148,28 @@ async function supportApproveBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Approve failed: ' + err.message, 'error');
+  }
+}
+
+async function supportExportEncrypted(id) {
+  if (!id) return;
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const pass = window.prompt('Passphrase to encrypt the bundle (12–512 chars). Keep it safe — it is never stored and is required to decrypt.');
+  if (pass === null) return; // cancelled
+  if (pass.length < 12) { toast('Passphrase must be at least 12 characters', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/support/bundles/' + encodeURIComponent(String(id)) + '/download-encrypted',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: pass }) });
+    if (!r.ok) { toast('Encrypt failed: ' + (await r.text()), 'error'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = String(id) + '.csb.enc';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast('Encrypted bundle downloaded — decrypt with your passphrase', 'success');
+  } catch (err) {
+    toast('Encrypt failed: ' + err.message, 'error');
   }
 }
 
