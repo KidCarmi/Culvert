@@ -20,12 +20,12 @@ import (
 
 var bundleIDRe = regexp.MustCompile(`^csb_[a-z2-7]{26}$`)
 
-func wireBundle(t *testing.T) (*BuildResult, map[string][]byte) {
+func wireBundle(t *testing.T) (res *BuildResult, files map[string][]byte) {
 	t.Helper()
 	// NOTE: ceilings are INTERNAL — an untagged map payload classifies to
 	// INTERNAL under the fail-closed default (SENSITIVE→masked→INTERNAL), so a
 	// PUBLIC ceiling would (correctly) drop the section via the class ceiling.
-	res := buildWith(t,
+	res = buildWith(t,
 		okCollector("alpha", redaction.ClassInternal, map[string]any{"a": 1}),
 		okCollector("beta", redaction.ClassInternal, map[string]any{"b": "x"}),
 	)
