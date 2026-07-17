@@ -102,6 +102,43 @@ func TestJournal_PersistsRollbackMode(t *testing.T) {
 	srv.opWG.Wait()
 }
 
+// TestJournal_ImageRollbackPersistsTargetRef pins the Codex #787 P2 fix: a
+// standalone image rollback's target is fixed and fully validated at admission,
+// and NO later stage folds it into the journal (journal_phases is
+// apply-specific) — so the admission write must persist TargetRef/TargetDigest
+// itself. Without it the record carries no actionable ref and the E1c trust
+// gate (validateReconcileRefs) can only mark it invalid, making an interrupted
+// image rollback permanently un-reconcilable (always loud-stop).
+func TestJournal_ImageRollbackPersistsTargetRef(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	peer := auth.PeerInfo{UID: 1000, Username: "cp"}
+	release := make(chan struct{})
+
+	const dig = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	ref := "ghcr.io/kidcarmi/culvert@sha256:" + dig
+	params := map[string]interface{}{"mode": "image", "image_ref": ref}
+	op, _, e := srv.startAsyncOp(nil, peer, ops.KindRollbackCreate, "", params, blockingStages(release))
+	if e != nil {
+		t.Fatalf("admit: %+v", e)
+	}
+	rec, found, err := jnl.Read(op.ID)
+	if err != nil || !found {
+		t.Fatalf("expected journal record: found=%v err=%v", found, err)
+	}
+	if rec.TargetRef != ref {
+		t.Errorf("record target_ref = %q, want %q", rec.TargetRef, ref)
+	}
+	if rec.TargetDigest != dig {
+		t.Errorf("record target_digest = %q, want %q", rec.TargetDigest, dig)
+	}
+	// And the E1c trust gate must now accept the record as actionable.
+	if ok, why := validateReconcileRefs(rec, "ghcr.io/kidcarmi/culvert"); !ok {
+		t.Errorf("admitted image-rollback record failed the reconcile trust gate: %s", why)
+	}
+	close(release)
+	srv.opWG.Wait()
+}
+
 // TestJournal_NonJournaledKindWritesNothing: a non-journaled kind (read-only
 // upgrades.check / backup.list) never touches the journal.
 func TestJournal_NonJournaledKindWritesNothing(t *testing.T) {

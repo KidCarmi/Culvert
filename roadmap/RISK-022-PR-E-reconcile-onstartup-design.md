@@ -110,12 +110,20 @@ by the apply *handler* (reconcile has none), and a future "local retag fast-path
 could bypass `validatePinnedDigestRef` entirely.
 **FIX (explicit invariant):** Every ref sourced from a record
 (`PriorRef`/`TargetRef`) is re-validated with `validatePinnedDigestRef(ref,
-proxyRepo)` AND re-checked against `image_allowlist`, AND its embedded digest
-must equal the record's bare-digest field (`PriorRef`⇔`PriorDigest`), before ANY
-`pull`/`tag`/`inspect`. Failure ⇒ loud-stop (`failed(interrupted,
-invalid_record_ref)`), never acted on. The local-first probe must use the
-**validated** ref. Reconcile acts ONLY on immutable `@sha256` digests already in
-the record — it never resolves a tag→digest at boot (hostile-registry-safe).
+proxyRepo)` AND its embedded digest must equal the record's bare-digest field
+(`PriorRef`⇔`PriorDigest`), before ANY `pull`/`tag`/`inspect`. Failure ⇒
+loud-stop (`failed(interrupted, invalid_record_ref)`), never acted on. The
+local-first probe must use the **validated** ref. Reconcile acts ONLY on
+immutable `@sha256` digests already in the record — it never resolves a
+tag→digest at boot (hostile-registry-safe). **Refinement (E1c, Codex-reviewed):**
+`image_allowlist` is deliberately NOT re-checked at reconcile. It is an
+ADMISSION-time policy matched by the apply handler against the operator's
+ORIGINAL ref (possibly a TAG), and the journal stores the RESOLVED `repo@sha256:`
+ref — so re-matching a tag-scoped allowlist against the digest ref would
+spuriously loud-stop a policy-admitted upgrade. Repo-binding + ref⇔digest is the
+sufficient reconcile-time gate: it blocks foreign-repo injection, and an attacker
+who can push a malicious digest to the configured proxyRepo has already
+compromised the source of truth (the allowlist would not have helped).
 
 ### P0-F — Shared rollback core has no write-ahead barrier
 `imageRollbackStages` calls `ComposeTagPinned` with **no `PhaseRestarting`

@@ -290,6 +290,16 @@ func validatePinnedDigestRef(ref, proxyRepo string) error {
 	return nil
 }
 
+// ValidatePinnedDigestRef is the exported form of validatePinnedDigestRef so
+// callers outside the runner — the PR-E reconcile re-validation (design §0 P0-E)
+// — can re-apply the EXACT repo-bound exact-digest gate to a ref sourced from an
+// (unauthenticated) journal record before feeding it to a root docker action.
+// Sharing the one implementation keeps the reconcile trust gate anti-drift with
+// the sudoers pattern.
+func ValidatePinnedDigestRef(ref, proxyRepo string) error {
+	return validatePinnedDigestRef(ref, proxyRepo)
+}
+
 // ComposePullDigest runs `docker pull <proxy_repo>@sha256:<digest>`. The ref
 // is validated as a repo-bound exact-digest pin (validatePinnedDigestRef)
 // before any argv is built. State-changing; no env overlay — the image is
