@@ -1,15 +1,22 @@
 # Enterprise Release Catalog Plan
 
-> **Status: Phases 1–5 implemented; legacy updater REMOVED.** The legacy Docker
-> updater sidecar was fully removed on 2026-07-11 (DEBT-008, ✅ CLOSED — see
+> **Status: legacy updater REMOVED; catalog trust live. Air-gapped/mirror
+> support (Phase 5) is NOT yet implemented.** The legacy Docker updater sidecar
+> was fully removed on 2026-07-11 (DEBT-008, ✅ CLOSED — see
 > `docs/engineering/TECHNICAL-DEBT-REGISTER.md`); there is no `updater/` module
 > or fallback path left in the tree. Catalog dispatch through the maintenance
 > agent (`release_dispatch*.go` → agent `/v1/upgrades/apply`) is the sole update
-> path. The "legacy updater stays available as a fallback" language below and
+> path, and enforce-by-default catalog trust (ed25519 + Sigstore keyless) is
+> live. The "legacy updater stays available as a fallback" language below and
 > the Phase 6 "keep the legacy Docker updater installed" step describe the
 > ORIGINAL plan and are now historical — treat them as superseded by the
-> DEBT-008 closure. For current day-2 operational guidance, see
-> [`release-management-agent.md`](release-management-agent.md).
+> DEBT-008 closure.
+>
+> **Air-gapped / internal-registry updates remain a deployment blocker**
+> (GAP-UPD-01/02/03: no turnkey offline bundle, `RepoRewrite` unwired) — see
+> `docs/enterprise/ENTERPRISE-DEPLOYMENT-GUIDE.md` §13. Do not treat the Phase 5
+> air-gapped/mirror section below as shipped. For current day-2 operational
+> guidance, see [`release-management-agent.md`](release-management-agent.md).
 
 This plan moves Culvert from a local integrity-only catalog to an enterprise-grade
 release channel that can safely replace the legacy Docker updater after it is
