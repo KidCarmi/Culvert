@@ -6,6 +6,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
 	"github.com/KidCarmi/Culvert/internal/decryptobs"
+	"github.com/KidCarmi/Culvert/internal/decryptprofile"
 )
 
 // decryption_populate_test.go — ADR-0011 Phase 1 (population). The CONNECT bypass path
@@ -107,7 +108,7 @@ func TestInspectedOutcome_FromTLSState(t *testing.T) {
 	}
 	// inspectedOutcome threads hostOnly through unchanged — the inspect path passes an
 	// already-port-stripped host, so the builder does no normalization of its own.
-	b := inspectedOutcome(dec, "site.example", cs, match).toBlock(false)
+	b := inspectedOutcome(dec, "site.example", cs, match, false).toBlock(false)
 	if b.Outcome != "inspected" || b.DecisionSource != "policy_inspect" {
 		t.Fatalf("outcome/source: %s/%s want inspected/policy_inspect", b.Outcome, b.DecisionSource)
 	}
@@ -133,7 +134,7 @@ func TestInspectedOutcome_FromTLSState(t *testing.T) {
 	// TLS 1.2 + skip-verify ⇒ CertVerify skipped; empty ALPN ⇒ the valid empty member.
 	dec2 := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
 	cs2 := tls.ConnectionState{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}
-	b2 := inspectedOutcome(dec2, "x", cs2, match).toBlock(false)
+	b2 := inspectedOutcome(dec2, "x", cs2, match, true).toBlock(false)
 	if b2.TLSVersion != "1.2" || b2.CertVerify != "skipped" || b2.ALPN != "" {
 		t.Fatalf("skip-verify/1.2/empty-alpn: tls=%s cert=%s alpn=%q", b2.TLSVersion, b2.CertVerify, b2.ALPN)
 	}
@@ -142,10 +143,12 @@ func TestInspectedOutcome_FromTLSState(t *testing.T) {
 	}
 }
 
-// TestInspectedOutcome_CertVerifyFromEffectiveSkip pins that CertVerify reflects the
-// EFFECTIVE upstream verification (resolveInspectSkipVerify) — a decryption profile's
-// CertVerification overrides the rule's inline dec.SkipVerify, so the recorded value must
-// match what the origin handshake actually did, not the raw inline flag (Codex #801).
+// TestInspectedOutcome_CertVerifyFromEffectiveSkip pins the END-TO-END data flow that
+// CertVerify reflects the EFFECTIVE upstream verification the origin handshake performed:
+// a decryption profile's CertVerification overrides the rule's inline dec.SkipVerify when
+// the handshake tls.Config is built (upstreamInspectTLSConfigForMatch), and the record
+// CAPTURES that config's InsecureSkipVerify (Codex #801). Threading the built config's
+// effective skip — not re-resolving — is what closes the TOCTOU (see the sibling test).
 func TestInspectedOutcome_CertVerifyFromEffectiveSkip(t *testing.T) {
 	withProfiles(t,
 		DecryptionProfile{Name: "skip", CertVerification: "skip"},
@@ -153,20 +156,55 @@ func TestInspectedOutcome_CertVerifyFromEffectiveSkip(t *testing.T) {
 	)
 	cs := tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
 
-	// Profile "skip" overrides a rule with inline SkipVerify=false ⇒ verification WAS
-	// skipped, so the record must say skipped (not verified).
+	// Profile "skip" overrides a rule with inline SkipVerify=false ⇒ the handshake config
+	// skips verification, so the captured-and-recorded value must say skipped.
 	mSkip := matchWith(&PolicyRule{DecryptionProfile: "skip"})
+	effSkip := upstreamInspectTLSConfigForMatch("h", false, mSkip).InsecureSkipVerify
 	decNoInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: false}
-	if b := inspectedOutcome(decNoInline, "h", cs, mSkip).toBlock(false); b.CertVerify != "skipped" {
+	if b := inspectedOutcome(decNoInline, "h", cs, mSkip, effSkip).toBlock(false); b.CertVerify != "skipped" {
 		t.Fatalf("profile skip over inline-false: cert_verify=%s want skipped", b.CertVerify)
 	}
 
-	// Profile "strict" overrides a rule with inline SkipVerify=true ⇒ verification RAN,
-	// so the record must say verified (not skipped).
+	// Profile "strict" overrides a rule with inline SkipVerify=true ⇒ the handshake config
+	// verifies, so the recorded value must say verified.
 	mStrict := matchWith(&PolicyRule{DecryptionProfile: "strict"})
+	effVerify := upstreamInspectTLSConfigForMatch("h", true, mStrict).InsecureSkipVerify
 	decInline := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect, SkipVerify: true}
-	if b := inspectedOutcome(decInline, "h", cs, mStrict).toBlock(false); b.CertVerify != "verified" {
+	if b := inspectedOutcome(decInline, "h", cs, mStrict, effVerify).toBlock(false); b.CertVerify != "verified" {
 		t.Fatalf("profile strict over inline-true: cert_verify=%s want verified", b.CertVerify)
+	}
+}
+
+// TestInspectedOutcome_CertVerifyCapturedNotRederived pins the TOCTOU fix: the recorded
+// cert_verify reflects the effectiveSkip CAPTURED from the handshake config, and a profile
+// mutation AFTER that config was built (admin edit / CP→DP config sync landing mid-handshake)
+// must NOT change the recorded value. Re-resolving the live store here would flip the audit
+// record to the opposite of what the session actually did (CWE-367 → CWE-778).
+func TestInspectedOutcome_CertVerifyCapturedNotRederived(t *testing.T) {
+	withProfiles(t, DecryptionProfile{Name: "p", CertVerification: "skip"})
+	m := matchWith(&PolicyRule{DecryptionProfile: "p"})
+	cs := tls.ConnectionState{Version: tls.VersionTLS13, CipherSuite: tls.TLS_AES_128_GCM_SHA256}
+
+	// Handshake config built while the profile says "skip" ⇒ the origin leg skipped verify.
+	effSkip := upstreamInspectTLSConfigForMatch("h", false, m).InsecureSkipVerify
+	if !effSkip {
+		t.Fatal("precondition: profile skip must skip upstream verification")
+	}
+
+	// The profile now mutates to "strict" DURING the handshake window.
+	globalDecryptionProfiles = decryptprofile.New()
+	if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "p", CertVerification: "strict"}); err != nil {
+		t.Fatalf("mutate profile: %v", err)
+	}
+
+	// A re-resolution would now yield "verified"; the captured value must still be "skipped".
+	if got := resolveInspectSkipVerify(m, false); got {
+		// resolveInspectSkipVerify now returns false (strict) — proving a re-derive would flip.
+		t.Fatal("test premise: post-mutation re-resolution should return verify=true (skip=false)")
+	}
+	dec := sslResolution{Action: SSLInspect, Source: decryptobs.DecisionPolicyInspect}
+	if b := inspectedOutcome(dec, "h", cs, m, effSkip).toBlock(false); b.CertVerify != "skipped" {
+		t.Fatalf("cert_verify must reflect the captured handshake posture (skipped), got %s", b.CertVerify)
 	}
 }
 

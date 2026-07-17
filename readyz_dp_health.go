@@ -108,9 +108,12 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 		since := dpCPPollFailingSince.Load()
 		if since != 0 && time.Since(time.Unix(0, since)) >= dpCPPollFailGrace {
 			cp.Status = "fail"
-			cp.Detail = fmt.Sprintf(
-				"control plane unreachable for %s — serving last-known-good config; policy/auth updates are not arriving",
-				time.Since(time.Unix(0, since)).Round(time.Second))
+			// /ready is UNAUTHENTICATED (served on the proxy port, main.go), so the
+			// detail must not quantify how long the CP has been unreachable — the
+			// outage duration is internal cluster state an anonymous prober should
+			// not learn. The fail status alone drives the readiness verdict;
+			// operators get the duration from logs / authenticated diagnostics.
+			cp.Detail = "control plane unreachable — serving last-known-good config; policy/auth updates are not arriving (see server logs)"
 		} else {
 			// Failing but inside the grace window (or a bare flag with no
 			// transition stamp): not yet a probe-visible failure.
@@ -120,14 +123,21 @@ func appendDPHealthChecks(checks map[string]*readinessCheck) {
 	checks["cp_poll"] = cp
 
 	cert := &readinessCheck{Status: "ok"}
-	if failing, days, lastErr := dpCertRenewalFailureSnapshot(); failing {
+	if failing, days, _ := dpCertRenewalFailureSnapshot(); failing {
 		cert.Status = "fail"
+		// The raw renewal error (lastErr) wraps gRPC dial failures that carry the
+		// internal Control-Plane IP:port and os.WriteFile errors that carry
+		// absolute on-disk paths — reconnaissance for an unauthenticated caller.
+		// /ready is unauthenticated, so the detail carries only the non-sensitive
+		// days-left signal and points at the server logs for the cause, mirroring
+		// appendStateFileChecks. The full error stays in logs + the CHAOS-12 alert.
+		// (CWE-209 / CWE-497.)
 		if days < 0 {
 			cert.Detail = fmt.Sprintf(
-				"node certificate EXPIRED %d day(s) ago and renewal is failing (last error: %s)", -days, lastErr)
+				"node certificate EXPIRED %d day(s) ago and renewal is failing — see server logs", -days)
 		} else {
 			cert.Detail = fmt.Sprintf(
-				"node certificate expires in %d day(s) and renewal is failing (last error: %s)", days, lastErr)
+				"node certificate expires in %d day(s) and renewal is failing — see server logs", days)
 		}
 	}
 	checks["node_cert"] = cert

@@ -41,6 +41,7 @@ import (
 const (
 	crashMsgMax        = 512         // bound the (attacker-shaped) panic value
 	crashStackMax      = 4096        // bound debug.Stack()
+	crashCorrIDMax     = 128         // bound the client-supplied X-Request-ID correlation id
 	maxCrashLabels     = 32          // component-label cardinality cap
 	crashThrottleEvery = time.Second // min interval per component for the floodable sinks
 )
@@ -104,6 +105,13 @@ func recordCrash(component, correlationID string, v any) {
 		msg = msg[:crashMsgMax] + "…(truncated)"
 	}
 	msg = sanitizeLog(msg) // CWE-117 control-char scrub (NOT secret masking)
+
+	// correlationID is the client-supplied X-Request-ID on the admin plane; bound
+	// it like the panic value/stack (it is otherwise stored verbatim in lastCrash,
+	// the ERROR log, and the audit ring — CWE-770 allocation without limits).
+	if len(correlationID) > crashCorrIDMax {
+		correlationID = correlationID[:crashCorrIDMax] + "…"
+	}
 
 	st := debug.Stack()
 	if len(st) > crashStackMax {

@@ -801,7 +801,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// entries are opt-in per rule (LogFullURI), so this projection is cheap and off the
 	// latency-critical handshake path. redact=false mirrors the bypass close path — the
 	// §4 host/SNI redaction config surface is a later slice.
-	decBlock := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match).toBlock(false)
+	// Capture cert_verify from the config the handshake ACTUALLY used
+	// (upstreamTLSCfg.InsecureSkipVerify), not a re-resolution against the live
+	// profile store — the store may have mutated during the handshake window (CWE-367).
+	decBlock := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match, upstreamTLSCfg.InsecureSkipVerify).toBlock(false)
 
 	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
 	// file-block via the shared inspection pipeline). Extracted so the native-ALPN

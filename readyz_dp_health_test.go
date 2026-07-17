@@ -145,6 +145,11 @@ func TestHandleReady_CPPollFailingSustained_ReportOnlyFailRow(t *testing.T) {
 	if !strings.Contains(row.Detail, "last-known-good") {
 		t.Errorf("cp_poll detail should explain the degraded mode, got %q", row.Detail)
 	}
+	// The unauthenticated /ready detail must not quantify the outage duration
+	// (internal cluster state — CWE-497). The fixed message carries no "for <dur>".
+	if strings.Contains(row.Detail, "unreachable for ") {
+		t.Errorf("cp_poll detail must not leak the outage duration on the unauthenticated /ready, got %q", row.Detail)
+	}
 	// Report-only: the DEFAULT verdict must not gate on it — a CP outage
 	// must not eject the whole DP fleet from a default-configured LB.
 	if code != http.StatusOK || status != "ready" {
@@ -204,8 +209,14 @@ func TestHandleReady_NodeCertRenewalFailing_FailRowAndRecovery(t *testing.T) {
 	if row == nil || row.Status != "fail" {
 		t.Fatalf("node_cert row = %+v, want fail while renewal is failing inside the window", row)
 	}
-	if !strings.Contains(row.Detail, "connection refused") || !strings.Contains(row.Detail, "day") {
-		t.Errorf("node_cert detail should carry days-left and the last error, got %q", row.Detail)
+	// /ready is unauthenticated: the row must carry the non-sensitive days-left
+	// signal but MUST NOT leak the raw renewal error, which wraps the internal
+	// Control-Plane IP:port and absolute on-disk paths (CWE-209/CWE-497).
+	if !strings.Contains(row.Detail, "day") {
+		t.Errorf("node_cert detail should carry days-left, got %q", row.Detail)
+	}
+	if strings.Contains(row.Detail, "connection refused") || strings.Contains(strings.ToLower(row.Detail), "last error") {
+		t.Errorf("node_cert detail must not leak the raw renewal error on the unauthenticated /ready, got %q", row.Detail)
 	}
 	if code != http.StatusOK || status != "ready" {
 		t.Fatalf("default verdict changed: code=%d status=%q, want 200/ready (report-only contract)", code, status)
