@@ -301,7 +301,10 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok", "target": "ui", "note": "restart required to activate"})
 }
 
-// GET/POST /api/default-action — read or update the default policy action at runtime.
+// apiContentScan manages DPI signature patterns.
+//
+//	GET/POST/DELETE /api/dpi             — canonical path (terminology governance T-10)
+//	GET/POST/DELETE /api/content-scan    — deprecated alias, retained for compat
 func apiContentScan(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -337,13 +340,13 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			logger.Printf("UI: content-scan pattern added %q", p)
+			logger.Printf("UI: DPI pattern added %q", p)
 			added++
 		}
 		dpiScanner.Save()
-		auditEvent(r, "content_scan.add", fmt.Sprintf("%d pattern(s)", added),
+		auditEvent(r, "dpi.add", fmt.Sprintf("%d pattern(s)", added),
 			strings.Join(body.Patterns, ", "))
-		saveConfigVersion(sessionAdmin(r), "content_scan.add")
+		saveConfigVersion(sessionAdmin(r), "dpi.add")
 		jsonOK(w, map[string]any{"added": added})
 
 	case http.MethodDelete:
@@ -357,9 +360,9 @@ func apiContentScan(w http.ResponseWriter, r *http.Request) {
 		}
 		dpiScanner.Remove(pattern)
 		dpiScanner.Save()
-		logger.Printf("UI: content-scan pattern removed %q", pattern)
-		auditEvent(r, "content_scan.remove", pattern, "")
-		saveConfigVersion(sessionAdmin(r), "content_scan.remove")
+		logger.Printf("UI: DPI pattern removed %q", pattern)
+		auditEvent(r, "dpi.remove", pattern, "")
+		saveConfigVersion(sessionAdmin(r), "dpi.remove")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -957,8 +960,8 @@ func apiSecScanExclusions(w http.ResponseWriter, r *http.Request) {
 
 // apiContentScanBypass exposes the DPI per-host bypass list.
 //
-//	GET /api/content-scan/bypass             — return current bypass hosts
-//	PUT /api/content-scan/bypass             — replace bypass hosts ({hosts})
+//	GET/PUT /api/dpi/bypass             — canonical path (terminology governance T-10)
+//	GET/PUT /api/content-scan/bypass    — deprecated alias, retained for compat
 //
 // Tier 3.4.
 func apiContentScanBypass(w http.ResponseWriter, r *http.Request) {
@@ -1320,7 +1323,8 @@ func registerSecurityRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ca-cert", apiCACert)
 	mux.HandleFunc("/api/certs/upload", apiCertsUpload)
 	mux.HandleFunc("/api/ssl-bypass", apiSSLBypass)
-	mux.HandleFunc("/api/content-scan", apiContentScan)
+	mux.HandleFunc("/api/content-scan", apiContentScan) // legacy alias; canonical path is /api/dpi (terminology governance T-10)
+	mux.HandleFunc("/api/dpi", apiContentScan)
 
 	// ── Security scanning (ClamAV / YARA / Threat Feeds) ─────────────────
 	mux.HandleFunc("/api/security-scan/status", apiSecScanStatus)                   // GET
@@ -1334,7 +1338,8 @@ func registerSecurityRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/security-scan/exclusions", apiSecScanExclusions)           // GET/PUT — scan exclusion hashes/hosts
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                      // GET — scan service mode info
 	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan hash cache stats & purge
-	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)                // GET/PUT — DPI bypass host list
+	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)                // GET/PUT — legacy alias; canonical path is /api/dpi/bypass (T-10)
+	mux.HandleFunc("/api/dpi/bypass", apiContentScanBypass)                         // GET/PUT — DPI bypass host list
 
 	// ── Alert webhooks ───────────────────────────────────────────────────
 	mux.HandleFunc("/api/alerts/webhooks", apiAlertsWebhooks)             // GET list / POST create

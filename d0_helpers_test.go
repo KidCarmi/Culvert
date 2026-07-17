@@ -149,6 +149,9 @@ var d0KnownRoutes = func() []string {
 //     (read-only list + evict/clear of the volatile fail-open learn cache).
 //   - 142 — F10 added /api/decryption-exclusions/tunables (GET defaults+bounds /
 //     PUT admin runtime tunables for the auto-exclusion cache).
+//   - 140 — Terminology governance T-10: added canonical /api/dpi and
+//     /api/dpi/bypass alongside the retained legacy /api/content-scan and
+//     /api/content-scan/bypass aliases (same handlers).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -165,7 +168,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 142
+	const want = 144
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

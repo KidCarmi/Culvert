@@ -332,7 +332,13 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/content-scan", Handler: "apiContentScan", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer, Note: "GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "GET", MinRole: RoleViewer, Note: "deprecated alias of /api/dpi (T-10); GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
+			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi (T-10)"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi (T-10)"},
+		}},
+	{Path: "/api/dpi", Handler: "apiContentScan", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "canonical path (T-10); GET branch protected by uiAuthMiddleware; no explicit requireRole call observed"},
 			{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
@@ -383,6 +389,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
 		}},
 	{Path: "/api/content-scan/bypass", Handler: "apiContentScanBypass", Domain: "security", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "deprecated alias of /api/dpi/bypass (T-10)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "deprecated alias of /api/dpi/bypass (T-10)"},
+		}},
+	{Path: "/api/dpi/bypass", Handler: "apiContentScanBypass", Domain: "security", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
