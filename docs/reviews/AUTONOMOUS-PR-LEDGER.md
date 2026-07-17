@@ -43,3 +43,29 @@ comments) alone is insufficient — it misses Codex review threads.
 - 2026-07-17: Inventoried 39 open PRs. Merged #762 (docs, verified). Caught a
   premature merge (missed Codex P2) → pushed banner correction to operator branch.
   Collected Codex review threads for all 17 standalone PRs (map above).
+
+### Codex findings — all standalone PRs addressed (fixed + replied + resolved)
+- #762 MERGED (7ec9921); follow-up banner correction on operator branch (5432150).
+- #733 — lease-mode 3/3 promotion wording → a6747b9.
+- #728 — live release-dispatch routes in Critical table + RISK-010 direct-agent
+  residual → 9bb5953 (both threads).
+- #758 — verified author's pre-landed Valid() compile-time-switch fix; resolved.
+- #738 — metrics.go:96 startup-window counter clobber → 58527ff (reorder
+  load→restore→start-saver; +3 regression tests). All 4 threads resolved.
+- #761 — reset s-syslog-drops on reconfigure/disable → 332c13a.
+- #736 — draft commit vs candidate version + dedup Cascade*Rename (2 dupl) →
+  ef82c23 (+regression test). All 3 threads resolved.
+- #737 — [agent] preserve draining status on expired-node re-enroll → 9160182
+  (+regression test). Diff reviewed.
+- #731 — [agent] drain geo-tracker goroutines in PreGate benches → e436961. Diff
+  reviewed.
+- #699 — [agent] nil-vs-len DPI-pattern precedence + validate() decomposition →
+  9f9f46b (+regression test). Both threads resolved. Diff reviewed.
+- Clean (no findings, review + merge): #734, #764, #765, #766, #767, #763.
+
+### Remaining
+- #759 — OPEN P1 (capture image config digest before PhaseRestarted). Part of the
+  `claude/culvert-gui-redesign-1qo2n8` branch (RISK-022 E-series).
+- Stacked TAC support-framework chain (#760, #768–#785): NEEDS OWNER DECISION —
+  large new subsystem, no root→main PR. Do not merge piecemeal.
+- MERGE PHASE: verify CI green + branch up-to-date, merge in dependency-safe order.
