@@ -4378,6 +4378,7 @@ document.addEventListener('click', e => {
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
+    case 'supportApproveBundle':   supportApproveBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -11778,23 +11779,37 @@ function renderSupportBundles(list) {
   // so gate dynamically-rendered controls imperatively (server enforces regardless).
   const canWrite = (uiRole === 'operator' || uiRole === 'admin');
   el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Bundle</th><th>Created</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
+    '<th>Bundle</th><th>Created</th><th>State</th><th>Sections</th><th>Size</th><th>Actions</th></tr></thead><tbody>' +
     list.map(b => {
       const sections = escHtml(String(b.ok)) + '/' + escHtml(String(b.total_collectors)) +
         (b.failed ? ' <span style="color:var(--red)">(' + escHtml(String(b.failed)) + ' failed)</span>' : '');
       const href = '/api/support/bundles/' + encodeURIComponent(String(b.bundle_id));
-      // Report preview is counts-only (viewer-safe); Download/Delete need operator+.
+      const ready = (b.state === 'ready');
+      const stateCell = ready
+        ? '<span style="color:var(--green)">ready</span>'
+        : '<span style="color:var(--orange)" title="Review the redaction report, then Approve to enable download">pending</span>';
+      // Report preview is counts-only (viewer-safe). Download needs operator+ AND
+      // an approved (ready) bundle. Approve is the admin mandatory-preview gate.
       const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>';
-      const actions = reportBtn + ' ' + (canWrite
-        ? '<a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a> ' +
-          '<button class="btn ghost sm" data-click="supportDeleteBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Delete</button>'
-        : '<span class="hint" title="Operator role required to download or delete">operator+</span>');
+      let ops = '';
+      if (canWrite) {
+        ops += ready
+          ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>'
+          : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
+        if (!ready && uiRole === 'admin') {
+          ops += ' <button class="btn primary sm" data-click="supportApproveBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Approve</button>';
+        }
+        ops += ' <button class="btn ghost sm" data-click="supportDeleteBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Delete</button>';
+      } else {
+        ops = ' <span class="hint" title="Operator role required to download or delete">operator+</span>';
+      }
       return '<tr>' +
         '<td style="font-family:monospace" title="' + escHtml(String(b.bundle_id)) + '">' + escHtml(String(b.bundle_id)) + '</td>' +
         '<td title="' + escHtml(String(b.created_at)) + '">' + escHtml(fmtProvTime(b.created_at)) + '</td>' +
+        '<td>' + stateCell + '</td>' +
         '<td>' + sections + '</td>' +
         '<td>' + escHtml(fmtBytes(b.size_bytes)) + '</td>' +
-        '<td>' + actions + '</td>' +
+        '<td>' + reportBtn + ops + '</td>' +
       '</tr>';
     }).join('') + '</tbody></table></div>';
 }
@@ -11812,7 +11827,7 @@ async function supportCreateBundle() {
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Collecting…'; }
   try {
     const man = await api('/api/support/bundles', { method: 'POST' });
-    toast('Bundle created: ' + String((man && man.bundle_id) || ''), 'success');
+    toast('Bundle created (pending) — review its Report, then Approve to enable download', 'success');
     await loadSupport();
   } catch (err) {
     toast('Bundle create failed: ' + err.message, 'error');
@@ -11835,6 +11850,24 @@ async function supportDeleteBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Bundle delete failed: ' + err.message, 'error');
+  }
+}
+
+async function supportApproveBundle(id) {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  if (!id) return;
+  const ok = await confirmAction(
+    'Approve bundle for download?',
+    'Confirm you have reviewed the redaction report for ' + String(id) + '. Approving marks the bundle downloadable (it may contain internal, non-secret operational detail).',
+    'Approve',
+    { okStyle: 'primary' });
+  if (!ok) return;
+  try {
+    await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/approve', { method: 'POST' });
+    toast('Bundle approved — download enabled', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Approve failed: ' + err.message, 'error');
   }
 }
 

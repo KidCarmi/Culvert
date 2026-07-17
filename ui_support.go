@@ -44,6 +44,7 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/bundles", apiSupportBundles)
 	mux.HandleFunc("/api/support/bundles/{id}", apiSupportBundleItem)
 	mux.HandleFunc("/api/support/bundles/{id}/redaction-report", apiSupportBundleReport)
+	mux.HandleFunc("/api/support/bundles/{id}/approve", apiSupportBundleApprove)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
 }
 
@@ -156,6 +157,7 @@ type supportBundleSummary struct {
 	OK              int    `json:"ok"`
 	Failed          int    `json:"failed"`
 	SizeBytes       int64  `json:"size_bytes"`
+	State           string `json:"state"` // pending|ready (mandatory-preview lifecycle)
 }
 
 // apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
@@ -219,17 +221,102 @@ func listSupportBundles() []supportBundleSummary {
 		out = append(out, supportBundleSummary{
 			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
 			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
-			Failed: man.Collection.Failed, SizeBytes: size,
+			Failed: man.Collection.Failed, SizeBytes: size, State: readBundleState(id).State,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out
 }
 
+// Bundle lifecycle (M2 PR3 — SUPPORT-BUNDLE-SPEC §6 mandatory preview): a created
+// bundle is PENDING until an admin reviews its redaction report and approves it;
+// only a READY bundle is downloadable. State lives in a sidecar so the immutable
+// tar/manifest are never touched.
+const (
+	bundleStatePending = "pending"
+	bundleStateReady   = "ready"
+)
+
+type supportBundleStateFile struct {
+	State      string `json:"state"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	ApprovedAt string `json:"approved_at,omitempty"`
+	ApprovedBy string `json:"approved_by,omitempty"`
+}
+
+func supportBundleStatePath(id string) string {
+	return filepath.Join(supportBundlesDir(), id, "state.json")
+}
+
+// readBundleState returns the lifecycle state. An ABSENT state file is a pre-gate
+// bundle (created before mandatory preview) and is grandfathered READY — the gate
+// never retroactively blocks an already-downloadable bundle. A PRESENT-but-corrupt
+// file fails closed to PENDING (never grant export on unreadable state).
+func readBundleState(id string) supportBundleStateFile {
+	b, err := os.ReadFile(supportBundleStatePath(id))
+	if os.IsNotExist(err) {
+		return supportBundleStateFile{State: bundleStateReady}
+	}
+	if err != nil {
+		return supportBundleStateFile{State: bundleStatePending}
+	}
+	var st supportBundleStateFile
+	if json.Unmarshal(b, &st) != nil || st.State == "" {
+		return supportBundleStateFile{State: bundleStatePending}
+	}
+	return st
+}
+
+func writeBundleState(id string, st supportBundleStateFile) error {
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := supportBundleStatePath(id) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, supportBundleStatePath(id))
+}
+
+// apiSupportBundleApprove marks a PENDING bundle READY for download after an admin
+// has reviewed its redaction report (the mandatory-preview gate). Admin-gated: the
+// approval is what authorizes export of a bundle's INTERNAL sections.
+func apiSupportBundleApprove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleAdmin) {
+		return
+	}
+	id := r.PathValue("id")
+	if !supportBundleIDRe.MatchString(id) {
+		http.Error(w, "invalid bundle id", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(filepath.Join(supportBundlesDir(), id, "manifest.json")); err != nil {
+		http.Error(w, "bundle not found", http.StatusNotFound)
+		return
+	}
+	st := readBundleState(id)
+	st.State = bundleStateReady
+	st.ApprovedAt = time.Now().UTC().Format(time.RFC3339)
+	st.ApprovedBy = auditActor(r)
+	if err := writeBundleState(id, st); err != nil {
+		logger.Printf("support: bundle approve failed: %v", err)
+		http.Error(w, "approve failed", http.StatusInternalServerError)
+		return
+	}
+	auditEvent(r, "support.bundle.approve", id, "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // apiSupportBundleItem downloads (GET, operator+) or deletes (DELETE, operator+)
 // a created bundle by id. Download is the exfil event for a bundle that may carry
-// INTERNAL sections, so it is audited like create is; DELETE is the in-product
-// reclaim path (no host FS access required).
+// INTERNAL sections, so it is audited like create is AND gated on approval; DELETE
+// is the in-product reclaim path (no host FS access required).
 func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !supportBundleIDRe.MatchString(id) {
@@ -239,6 +326,12 @@ func apiSupportBundleItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if !requireRole(w, r, RoleOperator) {
+			return
+		}
+		// Mandatory-preview gate: a bundle is downloadable only after an admin has
+		// reviewed its redaction report and approved it.
+		if readBundleState(id).State != bundleStateReady {
+			http.Error(w, "bundle pending approval — an admin must review the redaction report and approve before download", http.StatusConflict)
 			return
 		}
 		f, err := os.Open(filepath.Join(supportBundlesDir(), id, "bundle.csb.tgz"))
@@ -351,6 +444,12 @@ func createSupportBundle(ctx context.Context) (res *support.BuildResult, retErr 
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
+	}
+	// A newly created bundle is PENDING: not downloadable until an admin reviews
+	// the redaction report and approves it (mandatory-preview gate). Written after
+	// the manifest commit; a failure here still triggers the defer-cleanup.
+	if err := writeBundleState(res.BundleID, supportBundleStateFile{State: bundleStatePending, CreatedAt: res.Manifest.CreatedAt}); err != nil {
+		return nil, fmt.Errorf("write state: %w", err)
 	}
 	pruneSupportBundles(supportRetentionKeep)
 	return res, nil

@@ -624,4 +624,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/redaction-report", Handler: "apiSupportBundleReport", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "counts-only redaction report (masked/dropped/scrubbed + class_max per section); preview what a bundle redacted without downloading it"}}},
+	{Path: "/api/support/bundles/{id}/approve", Handler: "apiSupportBundleApprove", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+			Note: "approve a pending bundle for download after redaction-report review (mandatory-preview gate); admin; audited as support.bundle.approve"}}},
 }

@@ -225,6 +225,65 @@ func TestSupportReport_PersistedAndServed(t *testing.T) {
 	}
 }
 
+// supportRoleReq builds a path-valued request carrying an injected admin-UI role
+// (handlers are RBAC-gated; a bare request defaults to viewer).
+func supportRoleReq(method, id string, role UIRole) (*http.Request, *httptest.ResponseRecorder) {
+	req := httptest.NewRequest(method, "/x", nil)
+	req.SetPathValue("id", id)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, role))
+	return req, httptest.NewRecorder()
+}
+
+// TestSupportBundle_PreviewGate proves the mandatory-preview lifecycle: a new
+// bundle is PENDING (download 409) until an admin approves it, after which it is
+// READY (download 200). Absent state grandfathers to READY; approve on a missing
+// bundle 404s.
+func TestSupportBundle_PreviewGate(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	res, err := createSupportBundle(context.Background())
+	if err != nil {
+		t.Fatalf("createSupportBundle: %v", err)
+	}
+	download := func() int {
+		req, rec := supportRoleReq(http.MethodGet, res.BundleID, RoleOperator)
+		apiSupportBundleItem(rec, req)
+		return rec.Code
+	}
+	// Pending → download blocked with 409 (gate, not RBAC — operator is allowed).
+	if code := download(); code != http.StatusConflict {
+		t.Fatalf("pending download code=%d want 409", code)
+	}
+	// Approve (admin) → 204.
+	areq, arec := supportRoleReq(http.MethodPost, res.BundleID, RoleAdmin)
+	apiSupportBundleApprove(arec, areq)
+	if arec.Code != http.StatusNoContent {
+		t.Fatalf("approve code=%d body=%q", arec.Code, arec.Body.String())
+	}
+	// Ready → download 200.
+	if code := download(); code != http.StatusOK {
+		t.Fatalf("approved download code=%d want 200", code)
+	}
+	// An operator cannot approve (admin-gated).
+	oreq, orec := supportRoleReq(http.MethodPost, res.BundleID, RoleOperator)
+	apiSupportBundleApprove(orec, oreq)
+	if orec.Code != http.StatusForbidden {
+		t.Fatalf("operator approve code=%d want 403", orec.Code)
+	}
+	// Absent state file grandfathers to ready.
+	if st := readBundleState("csb_absentnostatefilehere00"); st.State != bundleStateReady {
+		t.Fatalf("absent-state grandfather=%q want ready", st.State)
+	}
+	// Approve on a well-formed but nonexistent bundle → 404.
+	nreq, nrec := supportRoleReq(http.MethodPost, "csb_aaaaaaaaaaaaaaaaaaaaaaaaaa", RoleAdmin)
+	apiSupportBundleApprove(nrec, nreq)
+	if nrec.Code != http.StatusNotFound {
+		t.Fatalf("approve missing code=%d want 404", nrec.Code)
+	}
+}
+
 // TestBundlePermissions0600 is the M1 security gate: a persisted bundle must live
 // in a 0700 dir with 0600 files — the bundle carries INTERNAL sections and must
 // not be world/group-readable on the appliance FS.
