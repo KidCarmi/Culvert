@@ -53,8 +53,20 @@ func apiPACSimulate(w http.ResponseWriter, r *http.Request) {
 // profile ID. "default" resolves to the legacy-backed default profile
 // synthesized from pacStore so the simulator can explain it too.
 func pacResolveProfileForEval(id string) (pac.Profile, map[string]pac.Pool, bool) {
-	pools := pacProfiles.PoolMap()
+	pools := pacProfiles.PoolMap() // fresh copy — safe to augment
 	if id == "" || id == pac.DefaultProfileID {
+		// The synthesized default profile routes non-excluded traffic through
+		// the legacy single-proxy config under the reserved "__legacy__" pool
+		// ID. Inject that pool from pacStore so the simulator resolves the real
+		// ProxyHost:ProxyPort; otherwise profileTerminal treats the pool as
+		// missing and returns the fail-closed placeholder, misrepresenting the
+		// live default PAC for every non-DIRECT destination.
+		if c := pacStore.Get(); c.ProxyHost != "" {
+			pools["__legacy__"] = pac.Pool{
+				ID: "__legacy__", Name: "Legacy PAC proxy",
+				Endpoints: []pac.PoolEndpoint{{Host: c.ProxyHost, Port: c.ProxyPort}},
+			}
+		}
 		return pacSyntheticDefaultProfile(), pools, true
 	}
 	p, ok := pacProfiles.ProfileByID(id)
@@ -231,6 +243,17 @@ func pacObservedDestinations() []string {
 
 func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draft pac.Profile, confirmDirect string) {
 	draft.ID = id
+
+	// Serialize the guardrail evaluation WITH the write under the profile
+	// mutation mutex: read the active state/pools, evaluate EvaluatePublish, and
+	// commit the replacement while holding the lock. Evaluating before taking
+	// the lock is a TOCTOU — a concurrent mutation could change the active
+	// profile or pools between the guardrail decision and the write, letting a
+	// publish slip past the typed-DIRECT confirmation or record a digest
+	// computed against stale pool endpoints.
+	pacProfilesAPIMu.Lock()
+	defer pacProfilesAPIMu.Unlock()
+
 	pools := pacProfiles.PoolMap()
 	active, hasActive := pacProfiles.ProfileByID(id)
 	chk := pac.EvaluatePublish(draft, pools, active, hasActive)
@@ -251,10 +274,6 @@ func pacLifecyclePublish(w http.ResponseWriter, r *http.Request, id string, draf
 		return
 	}
 
-	// Serialize with the profile mutation mutex — publish updates the active
-	// store just like a PUT.
-	pacProfilesAPIMu.Lock()
-	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
 	candidate := pacProfiles.Get()
 	ts := time.Now().UTC().Format(time.RFC3339)

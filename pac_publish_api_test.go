@@ -99,6 +99,17 @@ func TestAPIPACSimulate(t *testing.T) {
 		t.Errorf("default profile corp.local should be DIRECT, got %q", res.Directive)
 	}
 
+	// A non-excluded host under the default profile must resolve through the
+	// legacy proxy (synthetic __legacy__ pool), NOT the fail-closed placeholder.
+	rec = pacPost(t, "/api/pac/simulate", `{"profileId":"default","input":{"host":"www.example.com"}}`, RoleViewer, "198.51.100.130:0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("simulate default non-excluded: %d (%s)", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Directive != "PROXY proxy.example:8080" {
+		t.Errorf("default profile non-excluded host should route through the legacy proxy, got %q", res.Directive)
+	}
+
 	// unknown profile → 404.
 	rec = pacPost(t, "/api/pac/simulate", `{"profileId":"nope","input":{"host":"x"}}`, RoleViewer, "198.51.100.122:0")
 	if rec.Code != http.StatusNotFound {

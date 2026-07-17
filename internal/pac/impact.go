@@ -42,15 +42,21 @@ func DiffProfiles(old Profile, hasOld bool, next Profile) ProfileDiff {
 		return d
 	}
 
-	oldKeys := ruleKeySet(old.Rules)
-	newKeys := ruleKeySet(next.Rules)
+	// Added/removed use the SPEC-identity key (match tuple + action + pool
+	// override) so an in-place action or pool-override change surfaces as a
+	// removal of the old spec and an addition of the new one. Reorder and
+	// shadow detection below deliberately stay on the match-only ruleKey — a
+	// same-match rule with a different action still shadows a later rule and is
+	// still the "same slot" for ordering.
+	oldKeys := ruleSpecKeySet(old.Rules)
+	newKeys := ruleSpecKeySet(next.Rules)
 	for i := range next.Rules {
-		if !oldKeys[ruleKey(&next.Rules[i])] {
+		if !oldKeys[ruleSpecKey(&next.Rules[i])] {
 			d.RulesAdded = append(d.RulesAdded, ruleDesc(&next.Rules[i], i))
 		}
 	}
 	for i := range old.Rules {
-		if !newKeys[ruleKey(&old.Rules[i])] {
+		if !newKeys[ruleSpecKey(&old.Rules[i])] {
 			d.RulesRemoved = append(d.RulesRemoved, ruleDesc(&old.Rules[i], i))
 		}
 	}
@@ -77,6 +83,22 @@ func ruleKeySet(rules []Rule) map[string]bool {
 	m := make(map[string]bool, len(rules))
 	for i := range rules {
 		m[ruleKey(&rules[i])] = true
+	}
+	return m
+}
+
+// ruleSpecKey extends the match-only ruleKey with the routing spec (action +
+// pool override) so the added/removed diff distinguishes an in-place action or
+// pool-override change (same match tuple) that ruleKey alone would report as
+// "unchanged".
+func ruleSpecKey(r *Rule) string {
+	return ruleKey(r) + "|" + r.Action + "|" + r.PoolID
+}
+
+func ruleSpecKeySet(rules []Rule) map[string]bool {
+	m := make(map[string]bool, len(rules))
+	for i := range rules {
+		m[ruleSpecKey(&rules[i])] = true
 	}
 	return m
 }
