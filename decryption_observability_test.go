@@ -121,6 +121,38 @@ func TestDecBlock_ToBlockMapsEnumsAndRedaction(t *testing.T) {
 	}
 }
 
+// TestDecBlock_ZeroAndGarbageEnumsCoerceToSentinels pins the PR #786 Codex fix: an
+// under-populated (zero-value) or cast/garbage enum must project to its bounded sentinel,
+// never "" or an out-of-vocabulary token — so the record's categorical fields stay closed
+// even if a future caller forgets to set a field or the no-failure fields are left zero.
+func TestDecBlock_ZeroAndGarbageEnumsCoerceToSentinels(t *testing.T) {
+	// Fully zero-value outcome (the "only set fields on failure" trap Codex named).
+	z := DecryptionOutcome{}.toBlock(false)
+	if z.Outcome != "not_decrypted" || z.DecisionSource != "non_tls_fallback" ||
+		z.TLSVersion != "unknown" || z.ALPN != "" || z.CertVerify != "not_checked" ||
+		z.FailStage != "none" || z.FailCategory != "none" || z.ExclReason != "" {
+		t.Fatalf("zero-value outcome must coerce every enum to its sentinel, got %+v", z)
+	}
+
+	// Cast/garbage values (as if constructed from an untrusted source) coerce too.
+	g := DecryptionOutcome{
+		Outcome:      decryptobs.Outcome("bogus"),
+		FailStage:    decryptobs.FailStage("bogus"),
+		ALPN:         decryptobs.ALPN("bogus"),
+		ExclReason:   autoexclude.Reason("bogus"),
+		FailCategory: decryptobs.FailCategory("bogus"),
+	}.toBlock(false)
+	if g.Outcome != "not_decrypted" || g.FailStage != "none" || g.FailCategory != "none" ||
+		g.ALPN != "" || g.ExclReason != "" {
+		t.Fatalf("garbage enums must coerce to sentinels, got %+v", g)
+	}
+
+	// A VALID exclusion reason still passes through unchanged.
+	if got := decExclReason(autoexclude.ReasonClientPinned); got != "client_pinned" {
+		t.Fatalf("valid excl_reason must pass through, got %q", got)
+	}
+}
+
 // TestRedactHost pins the §4 redaction helper: off = passthrough, on = present
 // fixed-length hash token (never omission), empty stays empty, stable, collision-distinct.
 func TestRedactHost(t *testing.T) {

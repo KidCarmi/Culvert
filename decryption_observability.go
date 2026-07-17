@@ -63,28 +63,56 @@ type DecryptionOutcome struct {
 	CertFingerprint string // bounded SPKI/cert SHA-256 hash (already hashed by the caller; never a raw subject)
 }
 
-// toBlock projects the typed outcome into the plain-scalar wire block. Enum fields go
-// through String() so only bounded values ever reach a record; host/SNI pass through
-// redactHost when redaction is enabled. A block produced here is always fully populated,
-// so explicit false/none/0 fields are meaningful (never "path forgot to set it").
+// decEnum is any bounded decryptobs enum: it can validate its own membership and
+// render its wire form. Used by decEnumOr to keep only-bounded values on a record.
+type decEnum interface {
+	Valid() bool
+	String() string
+}
+
+// decEnumOr returns v.String() when v is a valid member, else the fallback's string.
+// This is the ADR-0011 bounded-SIEM guard at the projection boundary (PR #786 Codex
+// review): a zero-value or cast enum — e.g. a FailStage left at "" instead of "none" by
+// a caller that only sets fields on failure — would otherwise reach the record verbatim
+// and break dashboards/filters that expect a closed vocabulary. Coercing to the type's
+// sentinel keeps the wire vocabulary closed even if a future caller under-populates the
+// struct. (Outcome/failure/cert/tls fields all have a natural sentinel; ALPN's is the
+// valid empty member.)
+func decEnumOr(v, fallback decEnum) string {
+	if v.Valid() {
+		return v.String()
+	}
+	return fallback.String()
+}
+
+// toBlock projects the typed outcome into the plain-scalar wire block. Every enum passes
+// through decEnumOr so only BOUNDED values ever reach a record (an unset/invalid enum
+// coerces to its sentinel, never "" or a cast token); host/SNI pass through redactHost
+// when redaction is enabled. A block produced here is always fully populated, so explicit
+// false/none/0 fields are meaningful (never "path forgot to set it").
+//
+// DecisionSource has no neutral member (a block is only built on a real decision, so the
+// wiring always sets it); an invalid one coerces to non_tls_fallback — the most
+// conservative "not a real decrypt decision" source — so the field stays in-vocabulary
+// rather than emitting "".
 func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 	return &logstore.DecryptionBlock{
 		SchemaVersion:   decBlockSchemaVersion,
-		Outcome:         o.Outcome.String(),
-		DecisionSource:  o.DecisionSource.String(),
+		Outcome:         decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted),
+		DecisionSource:  decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback),
 		RuleID:          o.RuleID,
 		RuleName:        o.RuleName,
 		ProfileID:       o.ProfileID,
 		ProfileName:     o.ProfileName,
 		Host:            redactHost(o.Host, redact),
 		SNI:             redactHost(o.SNI, redact),
-		TLSVersion:      o.TLSVersion.String(),
+		TLSVersion:      decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown),
 		Cipher:          o.Cipher,
-		ALPN:            o.ALPN.String(),
-		CertVerify:      o.CertVerify.String(),
-		FailStage:       o.FailStage.String(),
-		FailCategory:    o.FailCategory.String(),
-		ExclReason:      string(o.ExclReason),
+		ALPN:            decEnumOr(o.ALPN, decryptobs.ALPNNone),
+		CertVerify:      decEnumOr(o.CertVerify, decryptobs.CertVerifyNotChecked),
+		FailStage:       decEnumOr(o.FailStage, decryptobs.FailStageNone),
+		FailCategory:    decEnumOr(o.FailCategory, decryptobs.FailCategoryNone),
+		ExclReason:      decExclReason(o.ExclReason),
 		ExclScope:       o.ExclScope,
 		CacheConsulted:  o.CacheConsulted,
 		CacheHit:        o.CacheHit,
@@ -94,6 +122,22 @@ func (o DecryptionOutcome) toBlock(redact bool) *logstore.DecryptionBlock {
 		NodeID:          o.NodeID,
 		CertFingerprint: o.CertFingerprint,
 	}
+}
+
+// decExclReason bounds the exclusion reason: autoexclude.Reason has no Valid method, so
+// membership is checked against the engine's canonical set. The empty value is the valid
+// "no exclusion" member (kept as ""); any other non-member coerces to "" as well, so a
+// cast/garbage reason never reaches the record.
+func decExclReason(r autoexclude.Reason) string {
+	if r == "" {
+		return "" // explicit "no exclusion"
+	}
+	for _, ok := range autoexclude.AllReasons() {
+		if r == ok {
+			return string(r)
+		}
+	}
+	return "" // non-member ⇒ treat as no exclusion rather than emit an unbounded token
 }
 
 // redactHost applies the ADR-0011 §4 host/SNI privacy posture. When redaction is OFF it

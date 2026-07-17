@@ -74,6 +74,17 @@ const (
 // cleanup on promotion (avoids an O(pending) map scan under the write lock).
 var allReasons = []Reason{ReasonClientCertRequired, ReasonUnsupportedParams, ReasonClientPinned}
 
+// AllReasons returns a copy of the canonical bounded reason set. Exported so callers
+// that must bound an untrusted Reason to the closed vocabulary (the ADR-0011
+// decryption-observability projection) can check membership without duplicating the
+// list — keeping them drift-free if a reason is ever added. Returns a fresh slice so
+// the canonical set stays immutable.
+func AllReasons() []Reason {
+	out := make([]Reason, len(allReasons))
+	copy(out, allReasons)
+	return out
+}
+
 // Defaults. TTL matches the PAN-OS local-cache default (12h) for the
 // server-observed reasons; PinnedTTL is shorter because the client signal is the
 // spoofable class. ConfirmN=2 distinct client-evidence tokens blocks
