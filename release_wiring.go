@@ -495,18 +495,41 @@ func loadReleaseManagement(cfg releaseStartupConfig) {
 			})
 		}
 	}
-	// Periodic production refresh (M1-2): started HERE — after the manager, its
-	// refresh seam, and the alert webhooks exist (RT-M1) — on the app lifecycle
-	// context, and only when a catalog origin is configured in enforce mode
-	// (RT-L2; in permissive mode a tick would be a pointless disk re-read).
-	// rm.refreshInterval is set ONLY when the loop actually starts, so
-	// /api/releases never advertises a cadence that does not exist.
-	if wantSeed && cfg.refreshInterval > 0 {
-		rm.refreshInterval = cfg.refreshInterval
-		go runCatalogRefreshLoop(resolveLifecycleCtx(), cfg.refreshInterval, currentReleaseManager)
-	}
+	// Periodic production refresh + freshness-watchdog driver (M1-2/M1-3):
+	// started HERE — after the manager, its refresh seam, and the alert
+	// webhooks exist (RT-M1) — on the app lifecycle context.
+	startReleaseDetectionLoop(cfg, wantSeed, rm)
 	logger.Printf("release management enabled: proxy_repo=%q verify=%s schemes=%s local_agent=%s",
 		sanitizeLog(cfg.proxyRepo), cfg.verifyMode, rm.trustSchemes, note)
+}
+
+// startReleaseDetectionLoop starts exactly ONE runtime driver for the M1-3
+// freshness watchdog:
+//
+//   - Catalog origin configured in enforce mode ⇒ the M1-2 periodic refresh
+//     loop (RT-L2), which runs evaluateCatalogFreshness on every tick via
+//     runRefresh. rm.refreshInterval is set ONLY on this path, so
+//     /api/releases never advertises a fetch cadence that does not exist.
+//   - Otherwise (outbound fetch disabled, or break-glass permissive/disabled
+//     verify mode) ⇒ the CHAOS-23 standalone stale watchdog at the same
+//     resolved cadence — detection-only, nothing fetched or reloaded. Without
+//     it, a disabled-fetch appliance crossing the 30-day stale threshold
+//     after boot stayed silent until the next restart or manual refresh.
+//
+// A non-positive interval starts nothing (bare test-constructed configs; the
+// production resolver never yields one).
+func startReleaseDetectionLoop(cfg releaseStartupConfig, wantSeed bool, rm *releaseManager) {
+	if cfg.refreshInterval <= 0 {
+		return
+	}
+	if wantSeed {
+		rm.refreshInterval = cfg.refreshInterval
+		go runCatalogRefreshLoop(resolveLifecycleCtx(), cfg.refreshInterval, currentReleaseManager)
+		return
+	}
+	go runCatalogStaleWatchdogLoop(resolveLifecycleCtx(), cfg.refreshInterval, currentReleaseManager)
+	logger.Printf("release catalog: standalone freshness watchdog started (no refresh loop: catalog_url_source=%s verify=%s); stale detection stays live at %s cadence",
+		cfg.catalogURLSource, cfg.verifyMode, cfg.refreshInterval)
 }
 
 // trustSchemes returns a compact log-safe description of the active trust schemes.
