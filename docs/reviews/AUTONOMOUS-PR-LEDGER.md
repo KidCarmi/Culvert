@@ -86,6 +86,34 @@ conflict, adds no unique coverage). Comment posted.
   model). Needs re-scoping against main (keep the draft-commit fix + draft-engaged
   predicate; drop the superseded cascade changes). Not a mechanical rebase.
 
+### Fleet verdict (11-agent workflow, 2026-07-17) + actions taken
+Ran a multi-lens fleet (4 subsystem mappers → 4 expert judges [product/arch/security/ops]
++ #759 assessor → adversarial red-team → synthesis) over the REAL code.
+
+- **#759 (RISK-022 E1b): SHIP → MERGED (ee3f934).** Verified independently: P1 fixed at
+  594a346 (TargetImageID captured before PhaseRestarted), `TestRestartWithBarrier_
+  CapturesTargetImageID` present, `reconcile_decision.go` pure + unwired, all required
+  gates + maint `-race` + install/upgrade e2e green. E3 boot hook stays owner-gated.
+- **TAC Support Framework (#760, #768–#785): HOLD-AND-SPLIT (verdict, not merged).** Two
+  structural blockers:
+  1. **Verified data-egress blocker** — `internal/support/manifest.go` `RedactionReport`
+     is counts-only + the scrubber has no entropy/length fallback ⇒ a bare secret in an
+     INTERNAL free-form string (rule name, endpoint URL, diag message) exports verbatim and
+     the consent gate can't see it. Recorded on #769. Must fix before the export path ships.
+  2. **Governance over-reach** — merging ratifies ADRs 0012/0018/0019–0022 (vendor cloud
+     tier, AI diagnosis, MCP infra-ops gateway, conversational operator, L0–L3 autonomy,
+     OpenTofu executor) as *Accepted*. That direction needs a separate architecture+security
+     board decision, not implicit ratification via a diagnostics stack.
+  Also: no root PR to main (a 19-PR/+11.2k stack is not reviewable as a unit); raw collectors
+  must be hard-gated; grandfather-ready state must fail closed.
+  Recommended path for the owner: split the M1–M4 appliance code (internal/redaction +
+  internal/support + collectors + diagnose verbs + record-only crashguard + /api/support &
+  /api/diagnose + SPA — clean, dep-free, no phone-home, enforcement untouched) into its own
+  PR set with a real root PR AFTER the redaction blocker is closed; drop the cloud/AI ADRs
+  from the merge (RFC/separate repo); add csb/1 contract test + no-outbound-network
+  regression test + C1/C1.5/C2 parity as merge gates. Route the cloud/AI/infra-ops ADRs to
+  an architecture+security board separately.
+
 ### NEEDS OWNER DECISION
 - #759 (RISK-022 E1b — capture image config digest) — OPEN Codex P1: the target
   config digest is only set in the post-restart verify stage, so a crash after
