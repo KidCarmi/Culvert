@@ -63,9 +63,40 @@ comments) alone is insufficient — it misses Codex review threads.
   9f9f46b (+regression test). Both threads resolved. Diff reviewed.
 - Clean (no findings, review + merge): #734, #764, #765, #766, #767, #763.
 
-### Remaining
-- #759 — OPEN P1 (capture image config digest before PhaseRestarted). Part of the
-  `claude/culvert-gui-redesign-1qo2n8` branch (RISK-022 E-series).
-- Stacked TAC support-framework chain (#760, #768–#785): NEEDS OWNER DECISION —
-  large new subsystem, no root→main PR. Do not merge piecemeal.
-- MERGE PHASE: verify CI green + branch up-to-date, merge in dependency-safe order.
+### Merge phase results (2026-07-17)
+MERGED (13 this session, squash): #762, #728, #733, #758, #761, #737, #731, #738,
+#765, #763, #766, #767, #699 (rebased onto main first — C1/D0 route-count 142→144
+for the +2 DPI routes; force-with-lease). Branch protection does NOT require
+up-to-date, so clean/unstable PRs merged without rebase; only conflicting ones
+needed a rebase.
+
+CLOSED as superseded: #764 (duplicate of the merged #731 — same geo-tracker
+gate-before-spawn optimization from a sibling awesome-dirac session; would only
+conflict, adds no unique coverage). Comment posted.
+
+### Deferred / blocked (need follow-up)
+- #734 (feat diagnostics: audit-persistence check) — content conflict with main
+  (observability globals moved); merge-grade in content (no findings, well-tested)
+  but needs a manual rebase. Local rebase mis-based (bad merge-base → full-history
+  replay); do a fresh `git checkout -B` off origin/main and cherry-pick the 1
+  commit, or reopen from a clean base.
+- #736 (security review 07-16 window) — Codex findings FIXED on-branch (draft
+  commit vs candidate version + Cascade dedup) but the base diff's Cascade*Rename
+  changes are SUPERSEDED by a newer version now on main (sortLocked + counter-cell
+  model). Needs re-scoping against main (keep the draft-commit fix + draft-engaged
+  predicate; drop the superseded cascade changes). Not a mechanical rebase.
+
+### NEEDS OWNER DECISION
+- #759 (RISK-022 E1b — capture image config digest) — OPEN Codex P1: the target
+  config digest is only set in the post-restart verify stage, so a crash after
+  PhaseRestarted but before verify leaves TargetImageID empty and reconcile falls
+  back to manifest digests (the multi-arch false-rollback the E-series exists to
+  prevent). Fix direction is clear (capture the target config digest before
+  writing PhaseRestarted). BUT this advances the maintenance-agent crash-recovery
+  E-series whose E3 boot hook is explicitly owner-sign-off-gated — escalate.
+- Stacked TAC support-framework chain (#760, #768–#785, 19 PRs) — large new
+  support/diagnostics subsystem (redaction scrubber, incident scopes, diagnose
+  verbs, encrypted export, case binding). Each PR's base is the previous PR's head;
+  NO open PR merges the root (`claude/culvert-tac-support-framework-vf4plr`) into
+  main. Cannot be merged piecemeal; the whole subsystem is a product/architecture
+  decision. Escalate as a unit.
