@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,5 +102,39 @@ func TestRetention_EvictionAudited(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no support.bundle.expire audit for evicted bundle %s", ids[0])
+	}
+}
+
+// TestSupportRetentionJanitor_BootSweep proves the background janitor enforces the
+// age cap independently of bundle creation (Codex #791): a pre-existing stale
+// bundle is evicted at boot even though createSupportBundle is never called.
+func TestSupportRetentionJanitor_BootSweep(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	// Seed a stale (40-day-old) bundle directly on disk — no create path involved.
+	id := "csb_aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	dir := filepath.Join(supportBundlesDir(), id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	old := time.Now().Add(-40 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	man := support.SupportBundleManifest{BundleID: id, Format: "csb/1", CreatedAt: old}
+	b, _ := json.Marshal(man)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), b, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if n := liveBundleCount(t); n != 1 {
+		t.Fatalf("seed not listed: %d", n)
+	}
+
+	// An already-cancelled context: the boot sweep runs, then the loop returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startSupportRetentionJanitor(ctx)
+
+	if n := liveBundleCount(t); n != 0 {
+		t.Fatalf("boot sweep did not evict the stale bundle: %d remain", n)
 	}
 }

@@ -682,6 +682,29 @@ func pruneSupportBundles(keep int) {
 	pruneSupportBundlesAt(keep, supportRetentionMaxAge, time.Now())
 }
 
+// supportRetentionSweepInterval is how often the background janitor enforces
+// retention on an idle appliance (one that isn't creating new bundles, whose
+// creation path would otherwise be the only trigger).
+const supportRetentionSweepInterval = 6 * time.Hour
+
+// startSupportRetentionJanitor enforces the retention policy independently of
+// bundle creation: once at boot (so a restart ages out stale bundles) and then
+// periodically, so an idle appliance still honors the age cap after the clock
+// crosses it. Parented to ctx; exits on shutdown.
+func startSupportRetentionJanitor(ctx context.Context) {
+	pruneSupportBundles(supportRetentionKeep)
+	t := time.NewTicker(supportRetentionSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pruneSupportBundles(supportRetentionKeep)
+		}
+	}
+}
+
 // pruneSupportBundlesAt is the testable core: now + maxAge are injected.
 func pruneSupportBundlesAt(keep int, maxAge time.Duration, now time.Time) {
 	if keep < 1 {
