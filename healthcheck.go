@@ -100,7 +100,7 @@ func appendStateFileChecks(checks map[string]*checkResult) {
 	}
 }
 
-func handleReady(w http.ResponseWriter, _ *http.Request) {
+func handleReady(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	checks := map[string]*checkResult{}
@@ -181,9 +181,21 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 		allOK = false
 	}
 
-	// 8. Quarantined state files (CHAOS-05/07): report-only like the ca row.
+	// 8+9. Quarantined state files (CHAOS-05/07) and DP dependency health
+	// (CHAOS-09, cp_poll + node_cert, DP mode only): report-only rows like ca.
 	appendStateFileChecks(checks)
+	appendDPHealthChecks(checks)
 
+	// Opt-in strict verdict (CHAOS-09) — see strictVerdictFails.
+	if strictVerdictFails(r, checks) {
+		allOK = false
+	}
+
+	writeReadyResponse(w, allOK, checks)
+}
+
+// writeReadyResponse renders the /ready verdict + checks map.
+func writeReadyResponse(w http.ResponseWriter, allOK bool, checks map[string]*checkResult) {
 	status := "ready"
 	code := http.StatusOK
 	if !allOK {
@@ -207,6 +219,29 @@ func handleReady(w http.ResponseWriter, _ *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Printf("handleReady encode: %v", err)
 	}
+}
+
+// strictVerdictFails implements the opt-in strict readiness verdict
+// (CHAOS-09): /ready?strict=1 (or strict=true) treats EVERY failing row as
+// gating, including the report-only rows (ca, policy_loaded, state_file_*,
+// cp_poll, node_cert) that never gate the default verdict. The default
+// posture is deliberately unchanged: gating on CP-poll failure by default
+// would let a CP outage eject the entire DP fleet from the load balancer at
+// once. A load balancer that SHOULD eject dependency-degraded nodes points
+// its probe at the strict URL instead. Nil-request tolerant (tests).
+func strictVerdictFails(r *http.Request, checks map[string]*checkResult) bool {
+	if r == nil {
+		return false
+	}
+	if s := r.URL.Query().Get("strict"); s != "1" && s != "true" {
+		return false
+	}
+	for _, c := range checks {
+		if c.Status == "fail" {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
