@@ -1,3 +1,6 @@
+> **STATUS: PROPOSED — NOT ADOPTED.** This is an exploratory RFC for a possible cloud/AI/infra-ops direction. It is NOT an accepted architectural decision and is not ratified by merging the appliance support code. Adopting this direction requires a separate, explicitly-recorded architecture + security board decision.
+>
+
 # ADR-0022: Durable operation state outside the conversation (session-loss safety)
 
 - **Status:** Proposed (design recorded 2026-07-13; no code moved)
