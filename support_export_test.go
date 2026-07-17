@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/backupcrypt"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
@@ -52,14 +52,14 @@ func TestSupportExportEncrypted_RoundTrip(t *testing.T) {
 		t.Fatalf("content-type=%q", ct)
 	}
 	blob := rec.Body.Bytes()
-	if !ca.HasBundleMagic(blob) {
-		t.Fatal("exported blob is not a PSCA envelope")
+	if !backupcrypt.IsEncryptedBlob(blob) {
+		t.Fatal("exported blob is not the documented backup/support envelope")
 	}
 	// The passphrase must NOT survive anywhere in the ciphertext.
 	if bytes.Contains(blob, []byte(pass)) {
 		t.Fatal("passphrase leaked into the ciphertext")
 	}
-	dec, err := ca.DecryptBundle(blob, []byte(pass))
+	dec, err := backupcrypt.DecryptBlob(blob, pass)
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSupportExportEncrypted_RoundTrip(t *testing.T) {
 		t.Fatal("decrypted bundle does not match the original tar")
 	}
 	// A wrong passphrase fails to decrypt.
-	if _, err := ca.DecryptBundle(blob, []byte("wrong passphrase here")); err == nil {
+	if _, err := backupcrypt.DecryptBlob(blob, "wrong passphrase here"); err == nil {
 		t.Fatal("decrypt succeeded with the wrong passphrase")
 	}
 }

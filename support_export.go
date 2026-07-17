@@ -6,17 +6,20 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/backupcrypt"
 	"github.com/KidCarmi/Culvert/internal/support"
 )
 
 // Encrypted support-bundle export (M4). An operator can download a support bundle
-// wrapped in the FROZEN PSCA envelope (ca.EncryptBundle — PBKDF2-SHA256 → AES-256-GCM,
-// random salt+nonce, versioned magic) under a passphrase they choose, so the
-// redacted diagnostics can be handed to TAC over an untrusted channel without ever
-// sharing a stored key. The passphrase is used once to derive the key and is NEVER
-// logged, persisted, or echoed. Recipient public-key (E2E) encryption is a later
-// slice; this is the symmetric, air-gap-friendly path.
+// wrapped in the DOCUMENTED support/backup envelope (backupcrypt.EncryptBlob —
+// "CVRTBK01": PBKDF2-SHA256 → AES-256-GCM with the fixed header AAD-bound to the
+// ciphertext, so header tampering incl. a KDF-iteration downgrade fails auth) under
+// a passphrase they choose, so the redacted diagnostics can be handed to TAC over
+// an untrusted channel without ever sharing a stored key. This is the same envelope
+// the backup/restore path uses, so a TAC/CLI validator recognises the blob
+// (backupcrypt.IsEncryptedBlob). The passphrase is used once to derive the key and
+// is NEVER logged, persisted, or echoed. Recipient public-key (E2E) encryption is a
+// later slice; this is the symmetric, air-gap-friendly path.
 
 const (
 	// supportPassphraseMin defends against trivially brute-forceable passphrases.
@@ -70,7 +73,7 @@ func apiSupportBundleExportEncrypted(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bundle not found", http.StatusNotFound)
 		return
 	}
-	enc, err := ca.EncryptBundle(tgz, []byte(req.Passphrase))
+	enc, err := backupcrypt.EncryptBlob(tgz, req.Passphrase)
 	if err != nil {
 		// The error from the codec never contains key material, but keep the client
 		// message generic regardless.
