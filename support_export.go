@@ -178,5 +178,9 @@ func apiSupportBundleExportSealed(w http.ResponseWriter, r *http.Request) {
 	auditEvent(r, "support.bundle.download_sealed", id, support.BundleFormat)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", id+".csb.sealed"))
+	// #nosec G705 -- sealed is opaque NaCl sealed-box ciphertext (sealbox.Seal)
+	// served as application/octet-stream, not reflected HTML/script; gosec's taint
+	// tracker only sees that it transitively derives from request input (the
+	// recipient public key), not that it is sealed binary data, so this is a false positive.
 	_, _ = w.Write(sealed)
 }
