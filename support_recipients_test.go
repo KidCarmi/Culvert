@@ -209,3 +209,96 @@ func TestSealByRegisteredRecipient(t *testing.T) {
 		t.Fatalf("both-selectors code=%d want 400", rec3.Code)
 	}
 }
+
+// TestRecipientRotation covers in-place key rotation: the fingerprint changes, the
+// name binding + created metadata are preserved, lookup returns the NEW key, a
+// low-order key is refused, and an unknown name is 404.
+func TestRecipientRotation(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	oldB64, oldPub := genRecipientKey(t)
+	orig, err := addSupportRecipient("tac", oldB64, "creator")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newB64, newPub := genRecipientKey(t)
+	rot, err := updateSupportRecipientKey("tac", newB64, "rotator")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rot.Fingerprint == orig.Fingerprint {
+		t.Fatal("fingerprint did not change on rotation")
+	}
+	if rot.CreatedAt != orig.CreatedAt || rot.CreatedBy != "creator" {
+		t.Fatalf("created metadata not preserved: %+v", rot)
+	}
+	if rot.RotatedBy != "rotator" || rot.RotatedAt == "" {
+		t.Fatalf("rotation metadata not set: %+v", rot)
+	}
+	// lookup now resolves to the NEW key, not the old one.
+	got, err := lookupSupportRecipientKey("tac")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if *got != *newPub {
+		t.Fatal("lookup returned the pre-rotation key")
+	}
+	if *got == *oldPub {
+		t.Fatal("lookup still returns the old key after rotation")
+	}
+
+	// Low-order key is refused on rotation too.
+	zero := base64.StdEncoding.EncodeToString(make([]byte, sealbox.KeyLen))
+	if _, err := updateSupportRecipientKey("tac", zero, ""); err == nil {
+		t.Fatal("rotated to a low-order key")
+	}
+	// Unknown name → errRecipientNotFound.
+	if _, err := updateSupportRecipientKey("nope", newB64, ""); err == nil {
+		t.Fatal("rotated a missing recipient")
+	}
+}
+
+// TestRecipientRotation_API covers method + RBAC on the PUT branch of the item
+// handler.
+func TestRecipientRotation_API(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	oldB64, _ := genRecipientKey(t)
+	if _, err := addSupportRecipient("tac", oldB64, ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	newB64, _ := genRecipientKey(t)
+
+	// PUT as operator → 403 (rotation is admin-only).
+	oRec := httptest.NewRecorder()
+	or := roleReq(RoleOperator, http.MethodPut, "/api/support/recipients/tac",
+		map[string]any{"public_key": newB64})
+	or.SetPathValue("name", "tac")
+	apiSupportRecipientItem(oRec, or)
+	if oRec.Code != http.StatusForbidden {
+		t.Fatalf("operator PUT code=%d want 403", oRec.Code)
+	}
+	// PUT as admin → 200.
+	aRec := httptest.NewRecorder()
+	ar := roleReq(RoleAdmin, http.MethodPut, "/api/support/recipients/tac",
+		map[string]any{"public_key": newB64})
+	ar.SetPathValue("name", "tac")
+	apiSupportRecipientItem(aRec, ar)
+	if aRec.Code != http.StatusOK {
+		t.Fatalf("admin PUT code=%d want 200 (body=%q)", aRec.Code, aRec.Body.String())
+	}
+	// PUT an unknown name → 404.
+	nRec := httptest.NewRecorder()
+	nr := roleReq(RoleAdmin, http.MethodPut, "/api/support/recipients/nope",
+		map[string]any{"public_key": newB64})
+	nr.SetPathValue("name", "nope")
+	apiSupportRecipientItem(nRec, nr)
+	if nRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown PUT code=%d want 404", nRec.Code)
+	}
+}

@@ -149,10 +149,17 @@ by name thereafter.
 
 **UI:** Support panel → **Sealing recipients** → enter a name + the recipient's
 base64 public key → **Register** (admin). The card lists each recipient with its
-**SHA-256 fingerprint** for out-of-band verification; **Remove** deletes one.
+**SHA-256 fingerprint** for out-of-band verification; **Rotate** replaces a
+recipient's key in place (admin), **Remove** deletes one.
 **API:** `GET /api/support/recipients` (viewer, list), `POST /api/support/recipients`
-(admin, body `{"name","public_key"}`), `DELETE /api/support/recipients/{name}`
+(admin, body `{"name","public_key"}`), `PUT /api/support/recipients/{name}` (admin,
+body `{"public_key"}` — in-place key rotation), `DELETE /api/support/recipients/{name}`
 (operator).
+
+- **Key rotation** (`PUT`) keeps the name binding while swapping the key +
+  fingerprint (re-validated with the low-order guard), so a rotated TAC key needs
+  no delete/re-add and every reference to the name keeps working. Verify the **new**
+  fingerprint out-of-band after rotating.
 
 - The key is **validated on registration** with the same low-order-point guard the
   seal path uses, so the registry can never hold a key that would break the E2E
