@@ -73,7 +73,7 @@ import (
 //   - 177 — ADR-0011 §4 added /api/decryption/redaction (GET viewer / PUT admin
 //     host/SNI redaction toggle).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 177
+	const want = 178
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -191,7 +191,10 @@ var helperSourceFiles = []string{
 func scanRegisteredRoutes() (map[string]string, error) {
 	out := make(map[string]string)
 	for _, name := range helperSourceFiles {
-		data, err := os.ReadFile(filepath.Clean(name))
+		// Absolute path anchored to the package source dir — NOT CWD — so a
+		// concurrent test's os.Chdir cannot make this scan read a wrong/partial
+		// file set (the CWD-race flake that intermittently breaks C1 reverse parity).
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
 		if err != nil {
 			return nil, err
 		}

@@ -471,7 +471,7 @@ func TestDiagnoseTLS_API(t *testing.T) {
 // TestNoShellInDiagnose is the structural no-shell wall (DIAGNOSTIC-COMMAND-FRAMEWORK
 // §Absolute rule): the diagnose surface must never import os/exec or spawn a shell.
 func TestNoShellInDiagnose(t *testing.T) {
-	src, err := os.ReadFile("diagnose.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "diagnose.go"))
 	if err != nil {
 		t.Fatalf("read diagnose.go: %v", err)
 	}

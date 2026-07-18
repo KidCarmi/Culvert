@@ -406,7 +406,7 @@ func TestLastHitWritersAreMonotonic(t *testing.T) {
 // cells over a non-empty hit_counters.json. Source-scanned so a future reorder
 // of loadPersistentAdminState re-fails here.
 func TestPersistentAdminState_RestoreBeforePersistenceLoop(t *testing.T) {
-	src, err := os.ReadFile("persistent_admin_state_startup.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "persistent_admin_state_startup.go"))
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}

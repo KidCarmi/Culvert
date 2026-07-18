@@ -15,9 +15,18 @@ import (
 // though the real file is intact. Anchoring the read to the source dir makes it
 // CWD-independent and deterministic.
 func staticIndexHTMLPath() string {
+	return filepath.Join(pkgSourceDir(), "static", "index.html")
+}
+
+// pkgSourceDir returns the ABSOLUTE path to this package's source directory,
+// anchored via runtime.Caller — NOT the process working directory. Test file/asset
+// reads (static/index.html, the source-scanning parity walls) must resolve through
+// here so a CONCURRENT test's os.Chdir cannot flake them (the CWD-race class the
+// determinism/-race gates catch). Falls back to "." only if runtime.Caller fails.
+func pkgSourceDir() string {
 	_, self, _, ok := runtime.Caller(0)
 	if !ok {
-		return filepath.Join("static", "index.html") // fall back to the CWD-relative path
+		return "."
 	}
-	return filepath.Join(filepath.Dir(self), "static", "index.html")
+	return filepath.Dir(self)
 }

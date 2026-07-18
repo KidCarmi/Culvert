@@ -106,7 +106,7 @@ func TestSupportSurface_NoOutboundCallSites(t *testing.T) {
 	}
 
 	// diagnose.go: the two audited seams, pinned by exact count.
-	b, err := os.ReadFile("diagnose.go")
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "diagnose.go"))
 	if err != nil {
 		t.Fatalf("read diagnose.go: %v", err)
 	}
