@@ -751,6 +751,56 @@ func apiSecYARASettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// scanSettingsMap returns the scan-orchestrator runtime config (CHAOS-10).
+func scanSettingsMap() map[string]any {
+	return map[string]any{
+		"on_error": secscanGetOnScanError(),
+	}
+}
+
+// GET /api/security-scan/settings — read the scan-orchestrator posture.
+// PUT /api/security-scan/settings — update it (admin). Governs what happens
+// when a configured scanner cannot scan (ClamAV daemon error, remote sidecar
+// failure) and no other engine produced a verdict: fail_closed (default)
+// blocks, fail_open_with_alert forwards with counter + alert.
+func apiSecScanSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireRole(w, r, RoleViewer) {
+			return
+		}
+		jsonOK(w, scanSettingsMap())
+
+	case http.MethodPut:
+		if !requireRole(w, r, RoleAdmin) {
+			return
+		}
+		var body struct {
+			OnError string `json:"on_error"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.OnError != scanFailClosed && body.OnError != scanFailOpenWithAlert {
+			http.Error(w, fmt.Sprintf("on_error must be %q or %q", scanFailClosed, scanFailOpenWithAlert), http.StatusBadRequest)
+			return
+		}
+		prev := scanSettingsMap()
+		secscanSetOnScanError(body.OnError)
+		auditEventDiff(r, "security.scan_settings", "scan_orchestrator", "", prev, scanSettingsMap())
+		adminSettingsSave()
+		// Intentionally NOT calling saveConfigVersion: the scan-error posture
+		// follows the YARA-settings precedent (D-sec, CONFIG-VERSIONING-TRIAGE.md
+		// §4.2) — rolling back must not silently un-harden a scanner posture the
+		// operator chose to tighten.
+		jsonOK(w, scanSettingsMap())
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // "name" in the path / body always refers to the *file stem* (no extension).
 // Rule files may bundle many YARA rules; the `file_rules` field in the GET
 // response maps each file to its contained rule identifiers for display.
@@ -1335,6 +1385,7 @@ func registerSecurityRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/security-scan/yara/rules/", apiSecYARARules)               // PUT/DELETE /api/security-scan/yara/rules/{name}
 	mux.HandleFunc("/api/security-scan/yara/validate", apiSecYARAValidate)          // POST — dry-run validate a YARA rule source
 	mux.HandleFunc("/api/security-scan/yara/settings", apiSecYARASettings)          // GET/PUT — YARA engine runtime config
+	mux.HandleFunc("/api/security-scan/settings", apiSecScanSettings)               // GET/PUT — scan orchestrator posture (CHAOS-10)
 	mux.HandleFunc("/api/security-scan/exclusions", apiSecScanExclusions)           // GET/PUT — scan exclusion hashes/hosts
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                      // GET — scan service mode info
 	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan hash cache stats & purge

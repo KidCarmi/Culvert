@@ -125,6 +125,8 @@ type scanSection struct {
 	ThreatFeedBlocked int64  `json:"threat_feed_blocked" redact:"internal"`
 	ScanTimeout       int64  `json:"scan_timeout" redact:"internal"`
 	ScanSkipped       int64  `json:"scan_skipped" redact:"internal"`
+	ScanError         int64  `json:"scan_error" redact:"internal"`
+	ScanOnError       string `json:"scan_on_error" redact:"internal"`
 }
 
 type scanCollector struct{}
@@ -170,6 +172,8 @@ func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink su
 		ThreatFeedBlocked: c.ThreatFeedBlocked,
 		ScanTimeout:       c.ScanTimeout,
 		ScanSkipped:       c.ScanSkipped,
+		ScanError:         c.ScanError,
+		ScanOnError:       secscanGetOnScanError(),
 	}
 	res := in.Redactor.Classify(sec)
 	if err := sink.WriteJSON(res.Value); err != nil {

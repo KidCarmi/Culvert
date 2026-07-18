@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // maxRequestBody is the largest body we'll forward for non-tunnel requests.
@@ -156,8 +158,12 @@ func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http
 // polyglot, ClamAV/YARA) over a plain-HTTP response. It returns true if the
 // response was blocked (block page served; caller must return). On a clean scan
 // it reassembles resp.Body (buffered prefix + any bytes beyond the scan limit)
-// so the caller streams it unchanged; when scanning does not apply — or the
-// body cannot be read — it leaves resp.Body as-is and returns false.
+// so the caller streams it unchanged; when scanning does not apply it leaves
+// resp.Body as-is and returns false. A mid-body read error fails the exchange
+// with a 502 (CHAOS-17): nothing has been written to the client yet, and the
+// old behavior — returning false — silently streamed the truncated prefix as a
+// cacheable 200 with the tail unscanned, the exact class the inspect path's
+// scanReadError contract exists to prevent.
 func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Response) bool {
 	// Skip buffering if Content-Length signals the response exceeds the scan
 	// limit — avoids wasting memory and I/O on oversized bodies.
@@ -177,7 +183,13 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 
 	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 	if readErr != nil {
-		return false
+		// Upstream broke mid-body while we were buffering for the scan. Align
+		// with the inspect path (scanReadError): fail the exchange instead of
+		// forwarding a truncated, unscanned prefix as a clean 200.
+		secscan.AddScanError()
+		logger.Printf("HTTP scan: body read error for %q: %v — failing exchange (was silent truncation)", sanitizeLog(r.Host), readErr)
+		http.Error(w, "Bad Gateway: upstream body could not be read for scanning", http.StatusBadGateway)
+		return true
 	}
 	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
 	// signatures match the actual content.

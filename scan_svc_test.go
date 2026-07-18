@@ -232,14 +232,26 @@ func TestRemoteScanner_ScanBody_Blocked(t *testing.T) {
 	}
 }
 
-func TestRemoteScanner_ScanBody_FailOpen(t *testing.T) {
-	// Remote service is unreachable → fail-open (return nil).
+func TestRemoteScanner_ScanBody_UnreachablePosture(t *testing.T) {
+	// CHAOS-10: an unreachable sidecar is governed by the on-scan-error
+	// posture — blocked under the fail_closed default (the pre-fix behavior,
+	// silent fail-open, let an attacker who crashed the sidecar pass
+	// unscanned), nil only under the explicit fail_open_with_alert opt-out.
+	prev := secscanGetOnScanError()
+	t.Cleanup(func() { secscanSetOnScanError(prev) })
+
 	rs := &RemoteScanner{}
 	rs.Init("http://127.0.0.1:1") // unlikely to be listening
 
+	secscanSetOnScanError(scanFailClosed)
 	result := rs.ScanBody([]byte("data"), "")
-	if result != nil {
-		t.Errorf("expected nil (fail-open) when remote unreachable, got %+v", result)
+	if result == nil || !result.Blocked || result.Source != "scan_error" {
+		t.Errorf("default posture must fail closed when remote unreachable, got %+v", result)
+	}
+
+	secscanSetOnScanError(scanFailOpenWithAlert)
+	if result := rs.ScanBody([]byte("data"), ""); result != nil {
+		t.Errorf("fail_open_with_alert must return nil when remote unreachable, got %+v", result)
 	}
 }
 

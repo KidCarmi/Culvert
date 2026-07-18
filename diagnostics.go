@@ -151,6 +151,7 @@ func buildOperatorContract() OperatorContract {
 		checkSAMLBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
+		checkScanErrorPosture(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
 		checkConfigVersionsReadable(cv),
@@ -599,6 +600,26 @@ func checkYARAEnginePosture() OperatorContractCheck {
 		Code:    "yara_engine_posture",
 		Status:  diagOK,
 		Message: "YARA engine posture: fail-closed on timeout and saturation",
+	}
+}
+
+// checkScanErrorPosture warns when the scan-orchestrator on-error posture is
+// fail_open_with_alert (CHAOS-10): a valid operator choice, but it means a
+// failing ClamAV daemon or scan sidecar forwards content unscanned, so it
+// requires explicit visibility — mirroring checkYARAEnginePosture.
+func checkScanErrorPosture() OperatorContractCheck {
+	if secscanGetOnScanError() == scanFailOpenWithAlert {
+		return OperatorContractCheck{
+			Code:           "scan_error_posture",
+			Status:         diagWarn,
+			Message:        "Scan-error posture: on_error=fail_open_with_alert — content passes UNSCANNED while a configured scanner is failing",
+			OperatorAction: "Review Scanner Failure Posture under Security Scanning; set fail_closed to restore Zero Trust posture, and ensure scan_error/scan_svc_down alerting is operational while fail-open.",
+		}
+	}
+	return OperatorContractCheck{
+		Code:    "scan_error_posture",
+		Status:  diagOK,
+		Message: "Scan-error posture: fail-closed on scanner failure",
 	}
 }
 

@@ -21,7 +21,8 @@
 //     Applied in handleHTTP and handleTunnelInspect after reading the body.
 //
 // All components are optional:
-//   - ClamAV is skipped when no address is configured or daemon is unreachable.
+//   - ClamAV is skipped when no address is configured. A configured-but-failing
+//     daemon is governed by the on-scan-error posture (default fail-closed).
 //   - YARA is skipped when no matcher is injected or it reports not loaded.
 //   - Threat feeds are skipped when no checker is injected or it is disabled.
 package secscan
@@ -37,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/clamav"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -60,6 +62,34 @@ var zstdDecoderPool = sync.Pool{
 // If the combined scan doesn't finish in time, the content is blocked (fail-closed).
 const ScanBodyTimeout = 10 * time.Second
 
+// ── Scan-error posture (CHAOS-10) ────────────────────────────────────────────
+// What happens when a configured scanner CANNOT scan (ClamAV daemon error
+// mid-stream, remote scan sidecar unreachable) and no other engine produced a
+// verdict. The scan TIMEOUT is a separate, unconditionally fail-closed path;
+// this posture governs scanner-infrastructure errors only. Default fail_closed
+// matches the timeout posture and the YARA on_timeout/on_saturation defaults:
+// an attacker who can crash the scanner must not thereby pass unscanned.
+
+// Posture values (same vocabulary as internal/yara).
+const (
+	FailClosed        = "fail_closed"
+	FailOpenWithAlert = "fail_open_with_alert"
+)
+
+// scanOnErrorVar holds the current posture ("" is treated as FailClosed).
+var scanOnErrorVar atomic.Value // string
+
+// GetOnScanError returns the on-scan-error posture (FailClosed | FailOpenWithAlert).
+func GetOnScanError() string {
+	if v, ok := scanOnErrorVar.Load().(string); ok && v != "" {
+		return v
+	}
+	return FailClosed
+}
+
+// SetOnScanError sets the on-scan-error posture (FailClosed | FailOpenWithAlert).
+func SetOnScanError(v string) { scanOnErrorVar.Store(v) }
+
 // ── Counters ─────────────────────────────────────────────────────────────────
 // Package-owned atomics; package main reads them via Counters() (Prometheus,
 // OTLP, SSE events, status APIs) and increments the two main-side events via
@@ -71,7 +101,8 @@ var (
 	statThreatFeedBlocked int64 // requests blocked by threat intel feeds
 	statScanTimeout       int64 // body scans that hit ScanBodyTimeout (fail-closed)
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
-	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
+	statRemoteScanFail    int64 // remote scan sidecar failures (posture-governed)
+	statScanError         int64 // scanner-infrastructure errors (ClamAV error + remote fail), CHAOS-10
 )
 
 // CounterSnapshot is a point-in-time copy of the scan counters.
@@ -82,6 +113,7 @@ type CounterSnapshot struct {
 	ScanTimeout       int64
 	ScanSkipped       int64
 	RemoteScanFail    int64
+	ScanError         int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -93,6 +125,7 @@ func Counters() CounterSnapshot {
 		ScanTimeout:       atomic.LoadInt64(&statScanTimeout),
 		ScanSkipped:       atomic.LoadInt64(&statScanSkipped),
 		RemoteScanFail:    atomic.LoadInt64(&statRemoteScanFail),
+		ScanError:         atomic.LoadInt64(&statScanError),
 	}
 }
 
@@ -103,6 +136,12 @@ func AddScanSkipped() { atomic.AddInt64(&statScanSkipped, 1) }
 // AddRemoteScanFail records a remote scan sidecar failure (incremented by the
 // remote scanner client in package main).
 func AddRemoteScanFail() { atomic.AddInt64(&statRemoteScanFail, 1) }
+
+// AddScanError records a scanner-infrastructure error (a configured scanner
+// could not scan). Incremented by the in-process pipeline (ClamAV error) and
+// the remote scan client; exported for the plain-HTTP scan path in package
+// main. Feeds culvert_scan_errors_total (CHAOS-10/17).
+func AddScanError() { atomic.AddInt64(&statScanError, 1) }
 
 // ── Collaborator contracts (ADR-0006) ────────────────────────────────────────
 // The orchestrator owns the narrow interfaces it needs; the engines stay
@@ -496,16 +535,35 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 }
 
 // scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
+//
+// CHAOS-10: a ClamAV daemon error mid-stream no longer degrades silently. The
+// remaining engines still run first — a real YARA verdict beats a generic
+// error block and remains valid (and cacheable) regardless of which engine
+// missed its turn. But when NO real engine produced a verdict under a failed
+// scanner, the outcome is posture-governed (GetOnScanError, default
+// fail-closed — consistent with the scan-timeout path) and NEVER cached:
+// caching "clean" here poisoned the hash cache for the TTL, so content that
+// slipped past a crashed daemon stayed unscanned even after recovery.
 func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()
 
+	scanErrored := false
+	scanErrDetail := ""
+
 	// ClamAV scan.
 	if clam != nil {
 		name, found, err := clam.Scan(data)
 		if err != nil {
+			atomic.AddInt64(&statScanError, 1)
+			scanErrored = true
+			scanErrDetail = "clamav error: " + strings.ReplaceAll(err.Error(), "\n", " ")
 			obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+			go alerts.Fire("scan_error", alerts.Payload{
+				Source: "clamav",
+				Detail: scanErrDetail + " — posture: " + GetOnScanError(),
+			})
 		} else if found {
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
@@ -521,6 +579,17 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: reason, Source: "yara"})
 			return &Result{Blocked: true, Reason: reason, Source: "yara", Hash: hash}
 		}
+	}
+
+	if scanErrored {
+		// A configured scanner failed and nothing else blocked. The verdict is
+		// posture-decided and deliberately NOT cached in either direction: a
+		// transient daemon failure must neither poison the cache with a false
+		// "clean" nor pin a hash as blocked after the daemon recovers.
+		if GetOnScanError() != FailOpenWithAlert {
+			return &Result{Blocked: true, Reason: scanErrDetail, Source: "scan_error", Hash: hash}
+		}
+		return nil
 	}
 
 	// Content is clean — cache the negative result.

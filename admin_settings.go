@@ -120,6 +120,12 @@ type AdminSettings struct {
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 
+	// Scan-error posture (CHAOS-10): what happens when a configured scanner
+	// cannot scan (ClamAV daemon error, remote sidecar failure) and no other
+	// engine produced a verdict. Empty = unset (engine default fail_closed);
+	// a string field needs no sentinel.
+	ScanOnError string `json:"scan_on_error,omitempty"`
+
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
 	// on load, so a zero-value field can't override the engine defaults on settings
@@ -200,6 +206,7 @@ func LoadAdminSettings(path string) {
 	applyAdminServices(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminScanOnError(&s)
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
@@ -376,6 +383,22 @@ func applyAdminYARA(s *AdminSettings) {
 		yaraSetOnSaturation(s.YARAOnSaturation)
 	}
 	yaraSetAlertDegraded(s.YARAAlertDegraded)
+}
+
+// applyAdminScanOnError restores the scan-orchestrator on-error posture
+// (CHAOS-10). Gated on emptiness rather than the YARA sentinel — a string
+// field needs no sentinel. An invalid persisted value (hand-edited file) is
+// refused and the engine keeps its fail-closed default rather than silently
+// landing on an unintended posture.
+func applyAdminScanOnError(s *AdminSettings) {
+	if s.ScanOnError == "" {
+		return
+	}
+	if s.ScanOnError != scanFailClosed && s.ScanOnError != scanFailOpenWithAlert {
+		logger.Printf("AdminSettings: ignoring invalid scan_on_error %q — keeping %q", s.ScanOnError, secscanGetOnScanError())
+		return
+	}
+	secscanSetOnScanError(s.ScanOnError)
 }
 
 // applyAdminAutoExcludeTunables restores the adaptive decryption-exclusion tunables
@@ -563,6 +586,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	s.YARAOnTimeout = yaraGetOnTimeout()
 	s.YARAOnSaturation = yaraGetOnSaturation()
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
+	s.ScanOnError = secscanGetOnScanError()
 
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps

@@ -34,6 +34,17 @@ const (
 	scanBodyTimeout    = secscan.ScanBodyTimeout
 )
 
+// Scan-error posture (CHAOS-10) re-exposed for admin_settings / API / UI wiring.
+const (
+	scanFailClosed        = secscan.FailClosed
+	scanFailOpenWithAlert = secscan.FailOpenWithAlert
+)
+
+var (
+	secscanGetOnScanError = secscan.GetOnScanError
+	secscanSetOnScanError = secscan.SetOnScanError
+)
+
 // ── Production adapters (ADR-0006) ──────────────────────────────────────────
 
 // yaraRuleSetMatcher adapts the process-wide YARARuleSet plus the runtime
@@ -215,6 +226,9 @@ func secScanStatusMap() map[string]interface{} {
 		m["threat_feed_allowlist_masked"] = globalThreatFeed.AllowlistMaskedTotal()
 		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
 		m["stat_remote_scan_fail"] = counters.RemoteScanFail
+		// CHAOS-10: sidecar failures are governed by the same posture.
+		m["stat_scan_error"] = counters.ScanError
+		m["scan_on_error"] = secscanGetOnScanError()
 		return m
 	}
 
@@ -248,6 +262,8 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_timeout":        counters.ScanTimeout,    // Tier 1.2
 		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
+		"stat_scan_error":          counters.ScanError,      // CHAOS-10
+		"scan_on_error":            secscanGetOnScanError(), // CHAOS-10 posture
 
 		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}

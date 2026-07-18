@@ -78,20 +78,32 @@ func (rs *RemoteScanner) URL() string {
 	return rs.baseURL
 }
 
-// remoteScanFail increments the fail counter and fires a webhook alert (via
-// the alerts seam) so admins see when the sidecar starts dropping scans.
-// Tier 2.2: every fail-open return path routes through this helper.
-func remoteScanFail(reason string) {
+// remoteScanFail increments the fail counters, fires a webhook alert (via the
+// alerts seam), and returns the posture-decided result for a sidecar failure.
+// Tier 2.2: every sidecar-failure return path routes through this helper.
+//
+// CHAOS-10: the sidecar being down is governed by the same on-scan-error
+// posture as an in-process ClamAV error (default fail-closed). Process
+// isolation is the sidecar's purpose — but an attacker who can crash it (e.g.
+// catastrophic regex backtracking) must not thereby open an unscanned window.
+// Operators who prefer availability opt into fail_open_with_alert.
+func remoteScanFail(reason string) *Result {
 	AddRemoteScanFail()
+	AddScanError()
 	go alerts.Fire("scan_svc_down", alerts.Payload{
 		Source: "remote_scan",
-		Detail: reason,
+		Detail: reason + " — posture: " + GetOnScanError(),
 	})
+	if GetOnScanError() != FailOpenWithAlert {
+		return &Result{Blocked: true, Reason: "scan service unavailable: " + reason, Source: "scan_error"}
+	}
+	return nil
 }
 
 // ScanBody sends data to the remote scan service and returns the result.
-// Returns nil when the content is clean or the service is unreachable (fail-open
-// on network errors to avoid blocking all traffic when the sidecar is down).
+// Returns nil when the content is clean. A sidecar failure (network error,
+// non-200, unparseable reply) is posture-governed via remoteScanFail: blocked
+// under the default fail_closed, nil under fail_open_with_alert (CHAOS-10).
 func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	rs.mu.RLock()
 	if !rs.enabled {
@@ -108,8 +120,7 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/scan", bytes.NewReader(data))
 	if err != nil {
 		obs.Printf("ScanSvc: request error: %v", err)
-		remoteScanFail("request build error: " + err.Error())
-		return nil // fail-open
+		return remoteScanFail("request build error: " + err.Error())
 	}
 	if contentType != "" {
 		req.Header.Set("X-Content-Type", contentType)
@@ -119,29 +130,25 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	resp, err := client.Do(req)
 	if err != nil {
 		obs.Printf("ScanSvc: remote scan error: %v", err)
-		remoteScanFail("transport error: " + err.Error())
-		return nil // fail-open
+		return remoteScanFail("transport error: " + err.Error())
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		obs.Printf("ScanSvc: remote scan HTTP %d", resp.StatusCode)
-		remoteScanFail(fmt.Sprintf("sidecar returned HTTP %d", resp.StatusCode))
-		return nil // fail-open
+		return remoteScanFail(fmt.Sprintf("sidecar returned HTTP %d", resp.StatusCode))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
 		obs.Printf("ScanSvc: read response error: %v", err)
-		remoteScanFail("response read error: " + err.Error())
-		return nil
+		return remoteScanFail("response read error: " + err.Error())
 	}
 
 	var sr ScanResponse
 	if err := json.Unmarshal(body, &sr); err != nil {
 		obs.Printf("ScanSvc: parse response error: %v", err)
-		remoteScanFail("response parse error: " + err.Error())
-		return nil
+		return remoteScanFail("response parse error: " + err.Error())
 	}
 
 	if sr.Blocked {

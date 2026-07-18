@@ -361,6 +361,9 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnSaturation"}}},
 	{ID: "yara_alert_degraded", Kind: kindConfig, Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
+	{ID: "scan_on_error", Kind: kindConfig, Owner: "secscan", AdminDurable: true,
+		Note:     "CHAOS-10 scanner-failure posture; empty = engine default (fail_closed), no sentinel; off rollback by the yara_* precedent (rollback must not un-harden a scanner posture)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "ScanOnError"}}},
 
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
 	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,

@@ -1295,7 +1295,11 @@ tr.dragging  { opacity: .4; }
           </div>
 
           <!-- Runtime health metrics (Tier 1.2 / 1.3 / 2.2) -->
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px">
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Scan errors</div>
+              <div id="sec-scan-errors" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Scan timeouts</div>
               <div id="sec-scan-timeout" style="font-weight:600;font-size:.85rem">0</div>
@@ -1390,6 +1394,27 @@ tr.dragging  { opacity: .4; }
             <div style="display:flex;gap:8px;align-items:center">
               <button class="btn ghost sm" data-click="saveYARASettings">Save YARA Settings</button>
               <div id="yara-settings-status" style="font-size:.78rem;display:none"></div>
+            </div>
+          </div>
+
+          <!-- Scanner failure posture (CHAOS-10) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Scanner Failure Posture</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">What happens when a configured scanner cannot scan (ClamAV daemon error, remote scan sidecar unreachable) and no other engine produced a verdict. The secure default blocks the content; every failure raises the scan-error counter and a scan_error / scan_svc_down alert either way.</div>
+            <div id="scan-settings-warn" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.78rem;color:var(--yellow)">
+              Warning: fail_open_with_alert forwards content UNSCANNED whenever the scanner is failing — an attacker who can crash the scanner can then pass malware. This weakens Zero Trust posture. Ensure alerting is operational before using this mode.
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:10px">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">On Scanner Error
+                <select id="scan-setting-onerror" data-change="scanSettingCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+                  <option value="fail_closed">fail_closed (secure default)</option>
+                  <option value="fail_open_with_alert">fail_open_with_alert</option>
+                </select>
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn ghost sm" data-click="saveScanSettings">Save Scanner Posture</button>
+              <div id="scan-settings-status" style="font-size:.78rem;display:none"></div>
             </div>
           </div>
 
@@ -4534,6 +4559,7 @@ document.addEventListener('click', e => {
     case 'deleteYARARule':    deleteYARARule(); break;
     case 'selectYARARule':    selectYARARule(arg); break;
     case 'saveYARASettings':  saveYARASettings(); break;
+    case 'saveScanSettings':  saveScanSettings(); break;
     case 'saveScanExclusions': saveScanExclusions(); break;
     case 'saveDPIBypass':     saveDPIBypass(); break;
     case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
@@ -4844,6 +4870,7 @@ document.addEventListener('change', e => {
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
+    case 'scanSettingCheckWarn': scanSettingCheckWarn(); break;
     case 'toggleDecRedaction': toggleDecRedaction(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
@@ -7582,6 +7609,7 @@ async function loadSecurity() {
   loadTFAllowlist();
   loadYARARules();
   loadYARASettings();
+  loadScanSettings();
   loadScanExclusions();
   loadDPIBypass();
 }
@@ -7818,6 +7846,7 @@ async function loadSecScanStatus() {
         el.style.color = 'var(--text)';
       }
     };
+    setMetric('sec-scan-errors', s.stat_scan_error, 1, 10);
     setMetric('sec-scan-timeout', s.stat_scan_timeout, 1, 10);
     setMetric('sec-scan-skipped', s.stat_scan_skipped, 1, null);
     setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
@@ -7898,6 +7927,41 @@ async function saveYARASettings() {
       alert_degraded: get('yara-setting-alertdegraded') === 'true',
     };
     await api('/api/security-scan/yara/settings', { method: 'PUT', body: JSON.stringify(body) });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Saved.';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
+    loadSecScanStatus();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── Scanner failure posture (CHAOS-10) ────────────────────────────────────
+async function loadScanSettings() {
+  try {
+    const s = await api('/api/security-scan/settings');
+    const el = document.getElementById('scan-setting-onerror');
+    if (el) el.value = String(s.on_error);
+    scanSettingCheckWarn();
+  } catch(e) { console.error('loadScanSettings:', e); }
+}
+
+function scanSettingCheckWarn() {
+  const oe = document.getElementById('scan-setting-onerror');
+  const warn = document.getElementById('scan-settings-warn');
+  if (!warn) return;
+  warn.style.display = (oe && oe.value === 'fail_open_with_alert') ? 'block' : 'none';
+}
+
+async function saveScanSettings() {
+  const statusEl = document.getElementById('scan-settings-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Saving…';
+  try {
+    const body = { on_error: document.getElementById('scan-setting-onerror')?.value };
+    await api('/api/security-scan/settings', { method: 'PUT', body: JSON.stringify(body) });
     statusEl.style.color = 'var(--green)';
     statusEl.textContent = 'Saved.';
     setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
@@ -16061,6 +16125,16 @@ function resetBlockPage() {
              = expired-node re-enrollment (CHAOS-12 recovery path). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
+        <!-- Scan-degradation events (same exact-name filter class): scan_error =
+             CHAOS-10 scanner-infrastructure failure (posture-governed);
+             scan_timeout / scan_skipped / scan_svc_down / yara_degraded predate it
+             but were missing here (parity gap — GUI-managed webhooks could never
+             subscribe to them). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_error"> Scan error (scanner failing)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_timeout"> Scan timeout</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_skipped"> Scan skipped (oversize)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_svc_down"> Scan sidecar down</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="yara_degraded"> YARA degraded</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

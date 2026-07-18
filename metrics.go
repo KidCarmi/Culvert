@@ -588,6 +588,28 @@ culvert_auth_sso_required_total %d
 		atomic.LoadInt64(&statAuthSSORequired),
 	)
 
+	// CHAOS-10/17 — scanner-infrastructure failure visibility. scan_errors
+	// counts every event where a configured scanner could not scan (ClamAV
+	// daemon error, remote sidecar failure, plain-HTTP mid-body read abort);
+	// timeout/skipped complete the "content not scanned by an engine" family
+	// that previously lived only in the JSON status API.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_scan_errors_total Scanner-infrastructure errors (configured scanner could not scan; outcome governed by the on-error posture)
+# TYPE culvert_scan_errors_total counter
+culvert_scan_errors_total %d
+
+# HELP culvert_scan_timeouts_total Body scans that hit the scan timeout (fail-closed block)
+# TYPE culvert_scan_timeouts_total counter
+culvert_scan_timeouts_total %d
+
+# HELP culvert_scan_skipped_total Responses forwarded unscanned because they exceeded the scan size limit
+# TYPE culvert_scan_skipped_total counter
+culvert_scan_skipped_total %d
+`,
+		scanCounters.ScanError,
+		scanCounters.ScanTimeout,
+		scanCounters.ScanSkipped,
+	)
+
 	// Config-snapshot cluster-sync cap utilization is emitted for ALL capped
 	// slices by writeConfigSnapshotSizeMetrics (cluster_metrics.go), sourced from
 	// the sizes cached at publish — no per-scrape snapshot rebuild.
