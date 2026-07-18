@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
@@ -24,6 +25,17 @@ type (
 
 // pacStore is the process-wide PAC store, loaded by the startup slice.
 var pacStore = &PACStore{}
+
+// pacProfiles is the process-wide profiles/pools store (initiative PR 2),
+// loaded by the startup slice from <dataDir>/pac_profiles.json. The
+// "default" profile is NOT stored here — it is the virtual legacy-backed
+// view over pacStore (see internal/pac/profiles.go).
+var pacProfiles = &pac.ProfileStore{}
+
+// pacArtifactCache memoizes compiled PAC artifacts keyed on store mod-time,
+// so the unauthenticated /proxy.pac and /pac/{id}.pac endpoints do not
+// recompile a ~1 MB artifact on every request (Palo perf/security review).
+var pacArtifactCache = &pac.ArtifactCache{}
 
 // ---------------------------------------------------------------------------
 // HTTP handlers
@@ -84,6 +96,11 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 		auditEvent(r, "pac.update", "pac-config", fmt.Sprintf("host=%s port=%d exclusions=%d",
 			sanitizeLog(canonical.ProxyHost), canonical.ProxyPort, len(canonical.Exclusions)))
 		saveConfigVersion(actor, "pac.update")
+		// Republish the cluster snapshot so DPs converge on the next poll —
+		// without this, an exclusions change (including a wipe) waits for an
+		// UNRELATED mutation to bump the snapshot version (Palo fleet review,
+		// ops finding 1).
+		publishCurrentConfigSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(struct { //nolint:errcheck // best-effort response write
 			PACConfig
@@ -94,7 +111,35 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// servePACFile handles GET /proxy.pac — serves the dynamically generated PAC file.
+// routeProxyListenerBuiltin dispatches the proxy listener's non-proxied
+// built-in endpoints (health/ready/metrics/PAC). It returns true when it
+// handled the request; false means the caller must forward to handleRequest.
+// PAC endpoints share the plain-HTTP contract of the proxy port (clients
+// fetch without TLS); the r.URL.Host guard keeps PROXIED absolute-URI
+// requests (which carry a Host in the URL) out of the PAC handler so a
+// client that proxies `GET http://origin/pac/x.pac` is forwarded, not
+// hijacked into serving the local PAC.
+func routeProxyListenerBuiltin(w http.ResponseWriter, r *http.Request) bool {
+	switch {
+	case r.URL.Path == "/health":
+		handleHealth(w, r)
+	case r.URL.Path == "/ready":
+		handleReady(w, r)
+	case r.URL.Path == "/metrics":
+		handleMetrics(w, r)
+	case r.URL.Path == "/proxy.pac" && r.URL.Host == "":
+		servePACFile(w, r)
+	case strings.HasPrefix(r.URL.Path, "/pac/") && r.URL.Host == "":
+		servePACProfileFile(w, r)
+	default:
+		return false
+	}
+	return true
+}
+
+// servePACFile handles GET /proxy.pac — serves the dynamically generated PAC
+// file for the default (legacy-backed) profile. /pac/default.pac is the
+// stable alias for the same artifact.
 func servePACFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -113,31 +158,90 @@ func servePACFile(w http.ResponseWriter, r *http.Request) {
 		}
 		return -1
 	}, r.Host)
-	art := pacStore.Compile(reqHost)
-	etag := `"` + art.Digest + `"`
+	art := pacArtifactCache.Legacy(pacStore, reqHost)
+	writePACResponse(w, r, art, pacStore.ModTime(), pac.DefaultProfileID)
+	// #nosec G705 -- host is character-whitelisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
+}
 
+// servePACProfileFile handles GET /pac/{id}.pac — the stable per-profile PAC
+// endpoints. "/pac/default.pac" aliases the legacy-backed default profile
+// (byte-identical with /proxy.pac); other IDs resolve enabled custom
+// profiles. Unauthenticated by design, like /proxy.pac.
+func servePACProfileFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/pac/")
+	id := strings.TrimSuffix(name, ".pac")
+	if !strings.HasSuffix(name, ".pac") || id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if id == pac.DefaultProfileID {
+		servePACFile(w, r)
+		return
+	}
+	if !pac.ValidIdentifier(id) {
+		http.NotFound(w, r)
+		return
+	}
+	profile, ok := pacProfiles.ProfileByID(id)
+	if !ok || !profile.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+	art := pacArtifactCache.Profile(pacProfiles, profile)
+	writePACResponse(w, r, art, pacProfiles.ModTime(), id)
+}
+
+// writePACResponse writes a compiled PAC artifact with the shared
+// caching/versioning contract: strong ETag over the actual bytes,
+// If-None-Match → 304, and the two cache modes (host-fallback bodies vary
+// per request Host and must not be shared-cached).
+func writePACResponse(w http.ResponseWriter, r *http.Request, art pac.Artifact, modTime time.Time, profileID string) {
+	etag := `"` + art.Digest + `"`
 	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
 	w.Header().Set("ETag", etag)
 	w.Header().Set("X-Culvert-PAC-Version", art.CompilerVersion+"-"+art.Digest[:16])
 	if art.HostFallback {
-		// The body embeds the request-derived proxy host, so it varies per
-		// Host header — a shared cache serving it cross-host would poison
-		// clients. Keep the legacy no-store posture in fallback mode.
 		w.Header().Set("Cache-Control", "no-cache, no-store")
 	} else {
-		// Configured proxy host: the body is request-independent, so clients
-		// may cache but must revalidate (cheap 304 via the strong ETag).
 		w.Header().Set("Cache-Control", "max-age=0, must-revalidate")
-		if mt := pacStore.ModTime(); !mt.IsZero() {
-			w.Header().Set("Last-Modified", mt.UTC().Format(http.TimeFormat))
+		if !modTime.IsZero() {
+			w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
 		}
 	}
-	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatches(inm, etag) {
+	if pacNotModified(r, etag, art, modTime) {
+		pacObserveServe(profileID, art, true)
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+	if r.Method == http.MethodHead {
+		pacObserveServe(profileID, art, false)
+		return // headers already set; HEAD carries no body
+	}
+	pacObserveServe(profileID, art, false)
 	fmt.Fprint(w, art.JS) //nolint:errcheck,gosec // best-effort response write
-	// #nosec G705 -- host is character-whitelisted above; PAC output is %q-quoted JS served as application/x-ns-proxy-autoconfig
+}
+
+// pacNotModified reports whether the request revalidates to 304. ETag
+// (strong) is the primary validator; If-Modified-Since is the date fallback
+// for WinHTTP/WinINET clients, honored only in configured (cacheable) mode
+// where Last-Modified is sent.
+func pacNotModified(r *http.Request, etag string, art pac.Artifact, modTime time.Time) bool {
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		return etagMatches(inm, etag)
+	}
+	if art.HostFallback || modTime.IsZero() {
+		return false
+	}
+	ims := r.Header.Get("If-Modified-Since")
+	if ims == "" {
+		return false
+	}
+	t, err := http.ParseTime(ims)
+	return err == nil && !modTime.Truncate(time.Second).After(t)
 }
 
 // etagMatches implements If-None-Match comparison for a single strong ETag:
@@ -158,11 +262,19 @@ func etagMatches(ifNoneMatch, etag string) bool {
 	return false
 }
 
-// registerPACRoutes wires the PAC file endpoint and its admin config API.
-// /proxy.pac is intentionally unauthenticated (Windows PAC clients cannot
-// send credentials) and is on the public-route allowlist in
-// uiAuthMiddleware. /api/pac-config is gated like every other /api/*.
+// registerPACRoutes wires the PAC file endpoints and their admin config API.
+// /proxy.pac and the /pac/{id}.pac profile endpoints are intentionally
+// unauthenticated (Windows PAC clients cannot send credentials) and are on
+// the public-route allowlist in uiAuthMiddleware. The /api/pac/* routes are
+// gated like every other /api/*.
 func registerPACRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/proxy.pac", servePACFile) // served on the UI port
+	mux.HandleFunc("/proxy.pac", servePACFile) // legacy alias for /pac/default.pac
+	mux.HandleFunc("/pac/", servePACProfileFile)
 	mux.HandleFunc("/api/pac-config", apiPACConfig)
+	mux.HandleFunc("/api/pac/profiles", apiPACProfiles)
+	mux.HandleFunc("/api/pac/profiles/", apiPACProfileItem)
+	mux.HandleFunc("/api/pac/pools", apiPACPools)
+	mux.HandleFunc("/api/pac/pools/", apiPACPoolItem)
+	mux.HandleFunc("/api/pac/simulate", apiPACSimulate)
+	mux.HandleFunc("/api/pac/analyze", apiPACAnalyze)
 }

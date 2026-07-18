@@ -18,7 +18,7 @@ func TestValidateConfig_Table(t *testing.T) {
 			Exclusions: []string{"corp.local", "*.internal.corp", "10.0.0.0/8", "192.0.2.7"}}, ""},
 		{"valid empty", Config{}, ""},
 		{"valid ipv4 proxy host", Config{ProxyHost: "192.0.2.1", ProxyPort: 8080}, ""},
-		{"valid ipv6 proxy host", Config{ProxyHost: "[2001:db8::1]", ProxyPort: 8080}, ""},
+		{"ipv6 proxy host rejected (unportable)", Config{ProxyHost: "[2001:db8::1]", ProxyPort: 8080}, IssueInvalidProxyHost},
 		{"valid idn exclusion", Config{Exclusions: []string{"münchen.example"}}, ""},
 
 		{"port negative", Config{ProxyPort: -1}, IssueInvalidPort},

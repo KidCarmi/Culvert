@@ -132,3 +132,204 @@ deliberate:
   `corp.local` now also matches `Corp.LOCAL` and `corp.local.` (the legacy
   exact-`===` compare missed both), and a trailing-dot plain name (`foo.`)
   is treated as a plain hostname (DIRECT).
+
+---
+
+# PAC Traffic Steering — Profiles & Proxy Pools (Part 2)
+
+## Steering profiles
+
+A **profile** is a named PAC configuration served at a stable URL:
+
+```
+/pac/<profile-id>.pac
+```
+
+`/proxy.pac` remains a permanent alias for the **default** profile
+(`/pac/default.pac`), which is the legacy configuration (proxy host/port +
+exclusions) — managed exactly as before via the PAC panel / `/api/pac-config`,
+byte-identical output. Custom profiles are managed in the PAC panel's
+Steering Profiles section (`/api/pac/profiles`, admin-only mutations) and
+persist in `<dataDir>/pac_profiles.json` (on the backup surface).
+
+Each profile carries:
+
+- a **proxy pool** reference — an ordered failover chain of 1–3 endpoints,
+  rendered as `PROXY primary:port; PROXY secondary:port; …`;
+- **ordered routing rules** (first match wins): kinds `domain` (exact +
+  subdomains), `suffix` (subdomains only), `wildcard` (`shExpMatch` glob),
+  `cidr4` (IPv4 CIDR against the resolved IP); optional `scheme` and
+  explicit-`port` guards (default ports are omitted by clients and cannot be
+  matched — documented limitation); actions `use_pool` (optionally naming an
+  override pool) or `direct`;
+- an **availability mode** (explicit, never implicit):
+  - `secure` — pool chain only, **no DIRECT anywhere** (plain dotless
+    hostnames excepted). DIRECT rules and `privateNetworks: direct` are
+    rejected in this mode; if no proxy endpoint resolves, the generated PAC
+    fails **closed** via an unresolvable placeholder, never open.
+  - `balanced` — pool-chain terminal without DIRECT, but explicit `direct`
+    rules are permitted where authored.
+  - `availability` — pool chain then `DIRECT` (fail open).
+- a **private-networks behavior** replacing the legacy hardcode: `direct`
+  (loopback + RFC-1918 bypass, the legacy default) or `proxy` (private
+  ranges follow rules/pool). The default profile keeps `direct`.
+
+DNS in profile PACs is resolved at most once per evaluation (a nested ES3
+helper). With `privateNetworks: proxy` the resolution is fully lazy — rule
+chains that answer before any `cidr4` rule never pay for a lookup. With
+`privateNetworks: direct` the private-network bypass must run before the
+rules to keep its guarantee, so every evaluation resolves once up front (the
+same cost profile as the legacy generator). Rules are emitted in exactly the
+authored order — with `use_pool` actions, order is semantic and is never
+reordered by the compiler. Explicit-port rule guards compare the URL
+authority tail, never a substring of the full URL.
+
+Profile PACs are served unauthenticated on both listeners (PAC clients
+cannot send credentials) — including plain HTTP on the proxy port, like
+`/proxy.pac`. Treat profile PAC contents (pool hostnames, routing rules) as
+**public information**: anyone who can reach a listener and guess an enabled
+profile ID can read them.
+
+## Distribution
+
+Profiles and pools participate in every config surface: export/import
+(import never wipes; merge upserts by ID), config versioning + rollback
+(nil = pre-feature snapshot skips; `[]` = explicit wipe), cluster CP→DP sync
+(wire-wipe capable — clearing the last profile clears DP state; this PR also
+fixes the pre-existing gap where clearing all legacy *exclusions* never
+reached DPs), backup/restore, and audit (`pac.profile_*`, `pac.pool_*`).
+
+## Observability
+
+PAC serving is instrumented (`/metrics`): `culvert_pac_serves_total`,
+`culvert_pac_not_modified_total` (304 revalidations),
+`culvert_pac_compile_warnings_total` (degraded compiles surfaced at serve
+time), and the gauges `culvert_pac_profiles`, `culvert_pac_profiles_enabled`,
+`culvert_pac_pools`. A degraded compile — a dropped rule, an unresolvable
+pool, or a secure-mode conflict in a replayed/synced config — is logged and
+fires the `pac_profile_degraded` alert once per profile (the latch resets
+when the profile is next mutated). A secure-mode profile whose pool becomes
+unresolvable fails **closed** (an unresolvable placeholder), so the alert is
+the operator's signal before the helpdesk queue is.
+
+## Propagation to the fleet
+
+Every control-plane PAC mutation — `/api/pac-config`, profile/pool CRUD,
+config import, and config-version rollback — republishes the cluster
+snapshot immediately; data-plane nodes converge on their next poll (≤~30 s).
+Data-plane-local PAC mutation is refused (409, "managed by the control
+plane"): the profile store on a DP is control-plane-owned, so a local edit
+would silently diverge until the next snapshot overwrote it.
+
+## Downgrade
+
+`pac_profiles.json` is unknown to older binaries and ignored; the legacy
+default profile keeps working. Clients pointed at `/pac/<id>.pac` receive
+404 from a downgraded binary — **and a PAC fetch that 404s makes clients
+fall back to DIRECT, so a `secure`-mode fleet silently bypasses the proxy
+for the entire downgrade window.** Repoint clients at `/proxy.pac` (the
+legacy default) before downgrading.
+
+> **Downgrade + edit hazard:** the CWD→dataDir migration is one-way. If you
+> downgrade, edit PAC config (the downgraded binary writes the legacy CWD
+> file), then re-upgrade, the re-upgraded binary reads `<dataDir>/pac_config.json`
+> and the downgrade-window edits are silently ignored. Re-apply them, or copy
+> the CWD file over `<dataDir>/pac_config.json` before re-upgrading.
+
+---
+
+# PAC Traffic Steering — Simulation & Safe Publishing (Part 3)
+
+## Simulator
+
+`POST /api/pac/simulate` (viewer) answers "what would profile P return for
+URL/host X?" using the **same** normalized rule evaluation the compiler
+emits — not a second engine (a parity test pins agreement). It returns the
+directive, the matched rule (index + kind + pattern), a human reason, the
+selected pool, the failover chain, whether DIRECT is possible, the compiler
+version, and the profile revision.
+
+**No live DNS.** The API never resolves hostnames (it is viewer-reachable).
+Supply an optional `resolvedIp` to evaluate `cidr4` and private-network
+rules definitively; without one, those rules return an explicit
+`undetermined_dns` outcome rather than a guess. The `default` profile is
+simulatable too (its legacy exclusions are expressed as DIRECT rules).
+
+## Draft → Publish → Rollback lifecycle
+
+Each custom profile carries a mutable **draft** and an append-only stack of
+**immutable published revisions** (`<dataDir>/pac_profiles_lifecycle.json`,
+node-local operator history — the ACTIVE spec still cluster-syncs via the
+Part 2 surface). The **mutating** lifecycle endpoint is
+`POST /api/pac/profiles/{id}/lifecycle` (admin) with actions `save_draft`,
+`publish`, `rollback` (plus an optional `reason` recorded on the published
+revision); `GET` (viewer) returns the draft/active/history. The **read-only**
+diff/impact analysis lives on its own viewer route, `POST /api/pac/analyze`
+(actions `diff`, `impact`) — kept off the mutating, audited lifecycle route so
+its audit-completion signal stays meaningful.
+
+> **HA / failover note.** The revision history and drafts are **node-local**:
+> they are not cluster-synced and are not on the backup-rollback config
+> surface (they ARE included in `culvert backup`). After a control-plane
+> failover, the promoted node serves the correct ACTIVE spec (that syncs) but
+> starts with its own revision timeline — rollback targets published on the
+> former leader are not present until you restore `pac_profiles_lifecycle.json`
+> from a backup on the promoted node. Revision numbers are per-node.
+
+Publishing validates + compiles the draft, then **fails closed** when any of
+these hold: validation fails, no valid proxy route exists, the referenced
+pool is missing, secure mode could emit DIRECT, compilation/digest fails, or
+rule conflicts violate the documented invariants. Publishing a change that
+introduces **new DIRECT paths** — a new DIRECT rule, switching to availability
+mode, **or flipping private-networks to `direct`** (which sends the entire
+RFC-1918/loopback space DIRECT) — is refused with `409` until the admin
+retypes the profile ID in `confirmDirect` (a high-friction typed
+confirmation). **Rollback is gated the same way:** rolling back to a revision
+whose DIRECT footprint exceeds the currently-active one also requires the
+typed confirmation, so the guardrail cannot be laundered through a rollback.
+
+Each published revision records the exact spec, the compiled **artifact
+digest** (a local restore/verify anchor — see the pool-mutability caveat
+below; convergence itself is guaranteed by the deterministic compiler, not a
+cross-node digest check), author, reason, and timestamp. Revision numbers are
+**monotonic** and never reused; the history is bounded (oldest revisions are
+trimmed past the per-profile cap, mirroring the config-version store). A
+rollback does not rewrite history — it re-activates a prior revision's spec as
+a NEW revision. The active profile's own `revision` field is the Part-2 PUT
+optimistic-concurrency token and advances independently of the lifecycle
+revision number.
+
+> **Pool-mutability caveat.** A revision captures the profile *spec* (which
+> references pools by ID) and the artifact digest computed at publish time.
+> Pools are separate, mutable objects: editing a pool's endpoints after a
+> revision is published changes the compiled `/pac/{id}.pac` bytes for every
+> revision that references it, so re-serving or rolling back to an older
+> revision reproduces the recorded *spec* but not necessarily the recorded
+> *digest*. The digest therefore verifies "same spec + same referenced pool
+> definitions", not "same spec regardless of later pool edits". Treat pool
+> edits as their own change event (they are audited and cluster-synced
+> independently); to freeze a routing outcome end-to-end, avoid mutating a
+> pool a published revision depends on.
+
+## Change diff & impact analysis
+
+`diff` reports rules added/removed/reordered, pool/mode/private-network
+changes, and DIRECT-path deltas, flagging security-sensitive widenings.
+
+`impact` replays a sample of destinations through the active vs candidate
+revision and categorizes each: `unchanged`, `pool_changed`, `became_direct`,
+`no_longer_direct`, `lost_proxy_path`, `undetermined_dns`. The sample is
+either admin-supplied test vectors or (`useObserved`) a bounded snapshot of
+the in-memory top-hosts counter — **real observed destination hostnames, no
+fabricated telemetry**. Because observed samples carry no resolved IPs,
+`cidr4`/private-network outcomes are reported `undetermined_dns`, not
+guessed; full historical request-log replay is a documented future
+extension. Impact also statically flags shadowed, duplicate, and unreachable
+rules independent of the sample.
+
+## Rollback
+
+`{"action":"rollback","targetN":N}` re-activates published revision N: it
+mints a new revision, updates the active served profile, audits
+(`pac.profile_rollback`), snapshots config, and republishes the cluster
+snapshot so DPs converge — restoring the exact prior artifact digest.

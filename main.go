@@ -889,20 +889,10 @@ func buildAndStartProxyServer(s *startupState) *http.Server {
 	// for CONNECT requests (HTTPS tunnels). Using a plain HandlerFunc avoids
 	// the redirect and lets handleRequest receive every proxy request directly.
 	proxyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/health":
-			handleHealth(w, r)
-		case "/ready":
-			handleReady(w, r)
-		case "/metrics":
-			handleMetrics(w, r)
-		case "/proxy.pac":
-			// Serve PAC over plain HTTP so Windows/macOS clients can fetch it
-			// without TLS — the proxy port is always HTTP.
-			servePACFile(w, r)
-		default:
-			handleRequest(w, r)
+		if routeProxyListenerBuiltin(w, r) {
+			return
 		}
+		handleRequest(w, r)
 	})
 
 	proxySrv := &http.Server{

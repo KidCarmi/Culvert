@@ -18,6 +18,13 @@ type pacStartupConfig struct {
 	// does, the loader one-way migrates it (the legacy file is left in place,
 	// frozen — a downgraded binary reads it stale).
 	LegacyConfigPath string
+	// ProfilesPath is the JSON file persisting PAC steering profiles and
+	// proxy pools (<dataDir>/pac_profiles.json, initiative PR 2).
+	ProfilesPath string
+	// LifecyclePath is the JSON file persisting per-profile draft/revision
+	// lifecycle metadata (<dataDir>/pac_profiles_lifecycle.json, PR 3).
+	// Node-local operator history (not cluster-synced).
+	LifecyclePath string
 	// DefaultProxyPort is the proxy listener's *effective* port after
 	// flag/file-config resolution. /proxy.pac auto-generates a PROXY
 	// directive pointing at this port when no explicit host:port is
@@ -33,6 +40,8 @@ func resolvePACStartupConfig(dir string, proxyPort int) pacStartupConfig {
 	return pacStartupConfig{
 		ConfigPath:       filepath.Join(dir, "pac_config.json"),
 		LegacyConfigPath: "pac_config.json",
+		ProfilesPath:     filepath.Join(dir, "pac_profiles.json"),
+		LifecyclePath:    filepath.Join(dir, "pac_profiles_lifecycle.json"),
 		DefaultProxyPort: proxyPort,
 	}
 }

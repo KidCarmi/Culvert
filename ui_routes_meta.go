@@ -312,10 +312,51 @@ var uiRoutes = []uiRouteMetadata{
 	// ── PAC file ──────────────────────────────────────────────────────────
 	{Path: "/proxy.pac", Handler: "servePACFile", Domain: "pac", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "Windows PAC clients cannot send credentials"}}},
+	{Path: "/pac/", Handler: "servePACProfileFile", Domain: "pac", Public: true,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic, Note: "per-profile PAC endpoints; PAC clients cannot send credentials"}}},
 	{Path: "/api/pac-config", Handler: "apiPACConfig", Domain: "pac", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
-			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "no direct requireRole; gating delegated"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles", Handler: "apiPACProfiles", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/profiles/", Handler: "apiPACProfileItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "/{id}/lifecycle sub-resource: save-draft/publish/rollback (initiative PR 3)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools", Handler: "apiPACPools", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/pools/", Handler: "apiPACPoolItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
+	{Path: "/api/pac/simulate", Handler: "apiPACSimulate", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Semantically read-only (no state change, no live DNS); POST only
+			// to carry a JSON body. Mutating flag follows the POST convention
+			// (informational — CSRF/body-limit key on the method) and
+			// AuditExpected stays false since nothing is mutated.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only PAC steering simulation; POST carries the query body"},
+		}},
+	{Path: "/api/pac/analyze", Handler: "apiPACAnalyze", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only diff/impact for a candidate draft. POST only to carry a
+			// JSON body; Mutating follows the POST convention (informational).
+			// AuditExpected stays false so C2c's audit-completion signal on the
+			// mutating lifecycle route remains a meaningful drift indicator.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only PAC steering diff/impact analysis; POST carries the query body"},
 		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────

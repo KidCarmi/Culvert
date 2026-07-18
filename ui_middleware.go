@@ -234,7 +234,8 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 			r.URL.Path == "/api/auth/status" ||
 			strings.HasPrefix(r.URL.Path, "/api/auth/totp") ||
 			strings.HasPrefix(r.URL.Path, "/auth/") ||
-			r.URL.Path == "/proxy.pac" {
+			r.URL.Path == "/proxy.pac" ||
+			strings.HasPrefix(r.URL.Path, "/pac/") {
 			next.ServeHTTP(w, r)
 			return
 		}
