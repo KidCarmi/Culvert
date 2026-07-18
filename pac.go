@@ -275,4 +275,6 @@ func registerPACRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/pac/profiles/", apiPACProfileItem)
 	mux.HandleFunc("/api/pac/pools", apiPACPools)
 	mux.HandleFunc("/api/pac/pools/", apiPACPoolItem)
+	mux.HandleFunc("/api/pac/simulate", apiPACSimulate)
+	mux.HandleFunc("/api/pac/analyze", apiPACAnalyze)
 }

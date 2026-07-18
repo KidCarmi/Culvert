@@ -1855,6 +1855,28 @@ tr.dragging  { opacity: .4; }
         </div>
 
       </div>
+
+      <!-- ── Steering Simulator (PAC initiative PR 3) ── -->
+      <div class="panel" style="margin-top:18px">
+        <div class="panel-header"><span class="panel-title">Steering Simulator</span></div>
+        <div class="panel-body">
+          <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+            Explain what a profile would return for a destination — the same rule
+            evaluation the compiler emits. No live DNS: supply a resolved IP to
+            evaluate CIDR/private-network rules definitively.
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 2fr 1fr 90px 120px auto;gap:8px;align-items:end">
+            <div><label class="form-label">Profile</label><select id="pacsim-profile" class="input"></select></div>
+            <div><label class="form-label">URL or Host</label><input id="pacsim-host" class="input" placeholder="https://intranet.corp.example/"></div>
+            <div><label class="form-label">Resolved IP (optional)</label><input id="pacsim-ip" class="input" placeholder="10.1.2.3"></div>
+            <div><label class="form-label">Port</label><input id="pacsim-port" class="input" placeholder="443"></div>
+            <div><label class="form-label">Scheme</label>
+              <select id="pacsim-scheme" class="input"><option value="">auto</option><option value="http">http</option><option value="https">https</option></select></div>
+            <button class="btn primary" data-click="runPACSimulate">Simulate</button>
+          </div>
+          <div id="pacsim-result" style="display:none;margin-top:14px;padding:12px;background:var(--bg);border-radius:8px;font-size:.82rem;line-height:1.7"></div>
+        </div>
+      </div>
     </div><!-- /view-pac -->
 
     <!-- ── CERTIFICATES ───────────────────────────────────────────────────── -->
@@ -4388,6 +4410,7 @@ document.addEventListener('click', e => {
     case 'cancelPACPoolEdit': cancelPACPoolEdit(); break;
     case 'addPACEndpointRow': addPACEndpointRow(); break;
     case 'removePACEndpoint': removePACEndpoint(el); break;
+    case 'runPACSimulate':    runPACSimulate(); break;
 
     // ── Certificates ──
     case 'loadCACertInfo':    loadCACertInfo(); break;
@@ -11770,6 +11793,7 @@ function renderPACProfilesList() {
   }
   box.innerHTML = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Mode</th><th></th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="4" style="color:var(--muted)">No custom profiles yet</td></tr>') + '</tbody></table>';
+  refreshPACSimProfiles();
   applySessionRoleVisibility();
 }
 
@@ -12044,6 +12068,49 @@ async function deletePACPool(id) {
     toast('Pool deleted', 'success');
     loadPACProfiles();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// ── Steering simulator (PAC initiative PR 3) ──────────────────────────────
+
+function refreshPACSimProfiles() {
+  const sel = document.getElementById('pacsim-profile');
+  if (!sel) return;
+  let opts = '<option value="default">default (legacy)</option>';
+  for (const p of (pacProfilesData.profiles || [])) {
+    opts += '<option value="' + escHtml(p.id) + '">' + escHtml(p.id) + '</option>';
+  }
+  sel.innerHTML = opts;
+}
+
+async function runPACSimulate() {
+  const profileId = document.getElementById('pacsim-profile').value;
+  const raw = document.getElementById('pacsim-host').value.trim();
+  const input = {};
+  if (raw.indexOf('://') !== -1) input.url = raw; else input.host = raw;
+  const ip = document.getElementById('pacsim-ip').value.trim();
+  if (ip) input.resolvedIp = ip;
+  const port = parseInt(document.getElementById('pacsim-port').value);
+  if (port) input.port = port;
+  const scheme = document.getElementById('pacsim-scheme').value;
+  if (scheme) input.scheme = scheme;
+  const box = document.getElementById('pacsim-result');
+  try {
+    const res = await api('/api/pac/simulate', { method: 'POST', body: { profileId, input } });
+    let warn = '';
+    if (res.outcome === 'undetermined_dns') {
+      warn = '<div style="color:var(--amber,#f5a623)">⚠ Depends on DNS — supply a resolved IP for a definite answer.</div>';
+    }
+    box.innerHTML =
+      '<div><strong>Directive:</strong> <code>' + escHtml(res.directive) + '</code></div>' +
+      '<div><strong>Matched:</strong> ' + escHtml(res.matchedRule.kind) +
+        (res.matchedRule.pattern ? ' <code>' + escHtml(res.matchedRule.pattern) + '</code>' : '') + '</div>' +
+      '<div><strong>Reason:</strong> ' + escHtml(res.reason) + '</div>' +
+      (res.poolId ? '<div><strong>Pool:</strong> ' + escHtml(res.poolId) + '</div>' : '') +
+      '<div><strong>DIRECT possible:</strong> ' + (res.directPossible ? 'yes' : 'no') + '</div>' +
+      '<div style="color:var(--muted)">compiler v' + escHtml(res.compilerVersion) + ' · revision ' + (res.revision || 0) + '</div>' +
+      warn;
+    box.style.display = '';
+  } catch(e) { box.innerHTML = '<span style="color:var(--red,#e5484d)">' + escHtml(e.message) + '</span>'; box.style.display = ''; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

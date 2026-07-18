@@ -148,8 +148,14 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiPACProfileItem handles GET/PUT/DELETE /api/pac/profiles/{id}.
+// apiPACProfileItem handles GET/PUT/DELETE /api/pac/profiles/{id} and, for
+// the "/lifecycle" sub-resource, delegates to the safe-publishing handler
+// (initiative PR 3) — one registered prefix, one uiRoutes entry.
 func apiPACProfileItem(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/lifecycle") {
+		apiPACProfileLifecycle(w, r)
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/pac/profiles/")
 	if id == "" || strings.Contains(id, "/") {
 		http.NotFound(w, r)
@@ -198,6 +204,10 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if pacApplyProfilesMutation(w, r, "pac.profile_delete", id, before, candidate) {
+		// Drop the node-local lifecycle history for the deleted profile.
+		if err := pacLifecycle.Delete(id); err != nil {
+			logger.Printf("PAC: lifecycle delete for %s: %v", sanitizeLog(id), err)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

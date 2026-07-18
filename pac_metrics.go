@@ -19,7 +19,22 @@ var (
 	pacServesTotal      atomic.Int64 // successful PAC bodies served (200)
 	pacNotModifiedTotal atomic.Int64 // 304 revalidations
 	pacCompileWarnTotal atomic.Int64 // total compile warnings surfaced at serve time
+
+	// Lifecycle observability (Palo review, ops finding: publish/rollback and
+	// guardrail blocks shipped with no counters).
+	pacPublishesTotal              atomic.Int64 // successful publishes
+	pacRollbacksTotal              atomic.Int64 // successful rollbacks
+	pacPublishBlockedTotal         atomic.Int64 // publishes/rollbacks refused by a guardrail
+	pacPublishConfirmRequiredTotal atomic.Int64 // publishes/rollbacks that returned "confirmation required"
 )
+
+// pacMaxReasonLen bounds the operator-supplied change-reason recorded on a
+// published revision.
+const pacMaxReasonLen = 500
+
+// pacMaxAnalyzeSample bounds the number of destinations replayed by the
+// viewer-reachable /api/pac/analyze impact route (DoS guard).
+const pacMaxAnalyzeSample = 1000
 
 // pacProfileAlertOnce latches "degraded compile" alerts per profile ID so a
 // steady-state degraded profile alerts once, not on every fetch. Reset on
@@ -95,4 +110,8 @@ func pacWritePrometheus(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP culvert_pac_profiles Custom PAC steering profiles configured\n# TYPE culvert_pac_profiles gauge\nculvert_pac_profiles %d\n", len(cfg.Profiles))
 	fmt.Fprintf(b, "# HELP culvert_pac_profiles_enabled Enabled custom PAC steering profiles\n# TYPE culvert_pac_profiles_enabled gauge\nculvert_pac_profiles_enabled %d\n", enabled)
 	fmt.Fprintf(b, "# HELP culvert_pac_pools PAC proxy pools configured\n# TYPE culvert_pac_pools gauge\nculvert_pac_pools %d\n", len(cfg.Pools))
+	fmt.Fprintf(b, "# HELP culvert_pac_publishes_total PAC profile publishes committed\n# TYPE culvert_pac_publishes_total counter\nculvert_pac_publishes_total %d\n", pacPublishesTotal.Load())
+	fmt.Fprintf(b, "# HELP culvert_pac_rollbacks_total PAC profile rollbacks committed\n# TYPE culvert_pac_rollbacks_total counter\nculvert_pac_rollbacks_total %d\n", pacRollbacksTotal.Load())
+	fmt.Fprintf(b, "# HELP culvert_pac_publish_blocked_total PAC publishes/rollbacks refused by a safe-publish guardrail\n# TYPE culvert_pac_publish_blocked_total counter\nculvert_pac_publish_blocked_total %d\n", pacPublishBlockedTotal.Load())
+	fmt.Fprintf(b, "# HELP culvert_pac_publish_confirm_required_total PAC publishes/rollbacks that returned new-DIRECT confirmation-required\n# TYPE culvert_pac_publish_confirm_required_total counter\nculvert_pac_publish_confirm_required_total %d\n", pacPublishConfirmRequiredTotal.Load())
 }
