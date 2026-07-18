@@ -46,6 +46,8 @@ func TestApiDecryptionHealth_AggregatesAndShape(t *testing.T) {
 		} `json:"failures"`
 		Coverage struct {
 			Inspected      int64   `json:"inspected"`
+			Bypassed       int64   `json:"bypassed"`
+			Failed         int64   `json:"failed"`
 			InspectedRatio float64 `json:"inspected_ratio"`
 		} `json:"coverage"`
 		Autoexclude map[string]any `json:"autoexclude"`
@@ -70,6 +72,11 @@ func TestApiDecryptionHealth_AggregatesAndShape(t *testing.T) {
 	if got.Coverage.InspectedRatio <= 0 || got.Coverage.InspectedRatio > 1 {
 		t.Fatalf("inspected_ratio out of range: %v", got.Coverage.InspectedRatio)
 	}
+	// The three coverage buckets must PARTITION the sessions (no double-count of failures).
+	if got.Coverage.Inspected+got.Coverage.Bypassed+got.Coverage.Failed != got.Sessions.Total {
+		t.Fatalf("coverage buckets do not partition sessions: %d+%d+%d != %d",
+			got.Coverage.Inspected, got.Coverage.Bypassed, got.Coverage.Failed, got.Sessions.Total)
+	}
 	if got.Autoexclude["active"] == nil || got.Autoexclude["fail_open_profiles"] == nil {
 		t.Fatalf("autoexclude posture missing: %+v", got.Autoexclude)
 	}
@@ -89,6 +96,24 @@ func TestApiDecryptionHealth_RBACAndMethod(t *testing.T) {
 	// Non-GET ⇒ 405 (read-only endpoint).
 	if w := decHealthReq(t, RoleAdmin, http.MethodPost); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST status = %d, want 405", w.Code)
+	}
+}
+
+// TestInspectionCoverageRatio pins the ADR-0011 §3 semantics: failures are excluded from
+// the denominator (they are not a deliberate coverage gap), and the 0/0 guard.
+func TestInspectionCoverageRatio(t *testing.T) {
+	// 1 inspected, 0 bypassed, however many failures → ratio is 1.0 (failures excluded).
+	if r := inspectionCoverageRatio(1, 0); r != 1.0 {
+		t.Fatalf("inspected-only ratio = %v, want 1.0 (failures must not dilute)", r)
+	}
+	if r := inspectionCoverageRatio(1, 1); r != 0.5 {
+		t.Fatalf("1 inspected / 1 bypassed = %v, want 0.5", r)
+	}
+	if r := inspectionCoverageRatio(3, 1); r != 0.75 {
+		t.Fatalf("3/(3+1) = %v, want 0.75", r)
+	}
+	if r := inspectionCoverageRatio(0, 0); r != 0 {
+		t.Fatalf("0/0 guard = %v, want 0", r)
 	}
 }
 

@@ -55,13 +55,15 @@ func apiDecryptionHealth(w http.ResponseWriter, r *http.Request) {
 		failureTotal += f.Count
 	}
 
-	// Coverage split: inspected vs every non-inspected outcome. inspected_ratio is the
-	// headline "decryption coverage" number (inspected / all decisioned sessions).
+	// Coverage split: the three buckets PARTITION every session — inspected, bypassed
+	// (all bypass/exclusion: manual + learned + rescued + not_decrypted), and failed.
+	// Per ADR-0011 §3 the headline coverage number is inspected ÷ (inspected + bypass/
+	// exclusion) — failures are a SEPARATE widget and must NOT dilute the denominator or
+	// be folded into the bypassed bucket (Codex #814).
 	inspected := byOutcome[decryptobs.OutcomeInspected.String()]
-	var inspectedRatio float64
-	if sessionTotal > 0 {
-		inspectedRatio = float64(inspected) / float64(sessionTotal)
-	}
+	failed := byOutcome[decryptobs.OutcomeFailed.String()]
+	bypassed := sessionTotal - inspected - failed
+	inspectedRatio := inspectionCoverageRatio(inspected, bypassed)
 
 	foProfiles, foRules := failOpenFootprint()
 	aeStats := autoExclude().Stats()
@@ -81,8 +83,8 @@ func apiDecryptionHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		"coverage": map[string]any{
 			"inspected":       inspected,
-			"not_inspected":   sessionTotal - inspected,
-			"failed":          byOutcome[decryptobs.OutcomeFailed.String()],
+			"bypassed":        bypassed, // all bypass/exclusion outcomes (NOT failures)
+			"failed":          failed,   // separate bucket, excluded from inspected_ratio
 			"inspected_ratio": inspectedRatio,
 		},
 		"autoexclude": map[string]any{
@@ -95,6 +97,19 @@ func apiDecryptionHealth(w http.ResponseWriter, r *http.Request) {
 			"fail_open_rules":    foRules,
 		},
 	})
+}
+
+// inspectionCoverageRatio is the ADR-0011 §3 headline coverage number:
+// inspected ÷ (inspected + bypass/exclusion). Failures are deliberately NOT in the
+// denominator — a decryption that was attempted and failed is a failure to triage, not a
+// deliberate coverage gap, so counting it against coverage would understate how much
+// traffic policy actually chose to bypass. Returns 0 when nothing was decisioned.
+func inspectionCoverageRatio(inspected, bypassed int64) float64 {
+	denom := inspected + bypassed
+	if denom <= 0 {
+		return 0
+	}
+	return float64(inspected) / float64(denom)
 }
 
 // topFailures returns the highest-count failure series (category+stage), descending, capped
