@@ -116,7 +116,7 @@ items:
     title: "YouTube: What is Culvert (product intro, 3-4 min)"
     type: yt
     priority: high
-    status: todo
+    status: done
     audience: [evaluator, security-engineer]
     path: content/youtube/01-what-is-culvert/
     evidence_areas: [C-001]

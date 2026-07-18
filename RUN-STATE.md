@@ -16,10 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-014** — YouTube package: "What is Culvert" (product intro). Next.
+- **H-015** — YouTube package: "Deploy Culvert in 5 minutes". Next.
 
 ## Recently completed
 
+- **H-014** — YouTube "What is Culvert"
+  (`content/youtube/01-what-is-culvert/package.md`). Full package: objective,
+  titles, thumbnail brief, narration script (every claim mapped to C-001
+  evidence), demo plan (no synthetic screenshots), chapters, description, pinned
+  comment, short-form, claim-evidence ledger. Link check pass. Committed.
 - **H-013** — Observability (`content/docs/06-observability/observability.md`) +
   evidence ledger. Metrics families + `/metrics` bearer, SSE dashboard, JSONL
   logs, async syslog (RFC 3164/5424), OTLP, signed webhook alerts, audit ring.
