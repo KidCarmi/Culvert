@@ -8,12 +8,50 @@ package pac
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+// TestDurability_LoadReadErrorNonFatal covers the read-error arm of Load (a path
+// that exists but can't be read as a file — here a directory). It must return a
+// (non-fatal) error and leave a usable, empty store — never panic or brick.
+func TestDurability_LoadReadErrorNonFatal(t *testing.T) {
+	dir := t.TempDir() // a directory, not a file → ReadFile errors (not IsNotExist)
+	var s ExceptionStore
+	if err := s.Load(dir); err == nil {
+		t.Error("Load of a directory path should return a read error")
+	}
+	if len(s.All()) != 0 {
+		t.Error("store must be empty after a read error")
+	}
+	// No quarantine for a read error (only a parse error quarantines).
+	if _, err := os.Stat(dir + ".corrupt"); err == nil {
+		t.Error("a read error must not quarantine")
+	}
+}
+
+// TestDurability_PersistMarshalErrorPropagates forces the otherwise-unreachable
+// marshal-error path in persistLocked (a map[string]ExceptionRecord always
+// marshals) via the exceptionsMarshal seam, proving Put surfaces the error
+// rather than silently succeeding.
+func TestDurability_PersistMarshalErrorPropagates(t *testing.T) {
+	orig := exceptionsMarshal
+	t.Cleanup(func() { exceptionsMarshal = orig })
+	exceptionsMarshal = func(any) ([]byte, error) { return nil, errors.New("forced marshal failure") }
+
+	path := filepath.Join(t.TempDir(), "pac_exceptions.json")
+	var s ExceptionStore
+	if err := s.Load(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := s.Put(ExceptionRecord{ProfileID: "a", Owner: "o", Reason: "r"}); err == nil {
+		t.Error("Put must propagate a marshal error")
+	}
+}
 
 // TestDurability_PutWritesValidAtomic0600 proves every Put lands a valid,
 // re-parseable JSON file with 0600 perms (governance metadata is 0600-class).

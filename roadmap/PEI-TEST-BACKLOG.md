@@ -39,6 +39,25 @@ The self-review identified five coverage gaps; four were code and are now closed
   (ModeFull) into a distinct `/data`, then reloads the restored file and asserts
   the record + status survived.
 
+## Coverage: 100% of PEI functions
+
+Every function in `internal/pac/exceptions.go`, `internal/pac/inventory.go`,
+`pac_exceptions_api.go`, and `pac_posture_api.go` reports **100.0%** statement
+coverage. The last three defensive/dead branches were closed honestly (not by
+gaming the metric):
+
+- `Load` read-error arm — exercised with a directory path (`ReadFile` errors,
+  not `IsNotExist`).
+- `persistLocked` marshal-error arm — a `map[string]ExceptionRecord` always
+  marshals, so a minimal `exceptionsMarshal` seam lets a test force the failure
+  and prove `Put` propagates it (real behavior, not just a covered line).
+- `pacDirectInventory` non-default skip — the redundant early `break` was
+  removed so the loop exercises the skip; correctness is unchanged (only the
+  default profile matches the id).
+- `apiPACExceptions` non-capable skip — the join was extracted into the pure
+  `pacGovernanceViews`, unit-tested directly with a non-capable entry.
+- `lastReviewedAt` RFC3339 validation — a bad value now has a 400 test.
+
 ## Found & reconciled (not PEI-specific)
 
 - **PEI-BL-001  medium  route-metadata walls  — main's route-count locks were

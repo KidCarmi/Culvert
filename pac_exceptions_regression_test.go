@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
@@ -220,6 +221,34 @@ func TestRegression_InvalidJSONAndUnknownFieldsRejected(t *testing.T) {
 		}
 	}
 	// Nothing should have been persisted.
+	if _, ok := pacExceptions.Get("hq"); ok {
+		t.Error("a rejected write persisted a record")
+	}
+}
+
+// TestRegression_GovernanceViewsSkipNonCapable covers the defensive filter in
+// the governance join: a profile that is not DIRECT-capable carries no
+// governance and must be dropped from the list.
+func TestRegression_GovernanceViewsSkipNonCapable(t *testing.T) {
+	capable := map[string]pac.ProfileDirectInventory{
+		"cap":   {ProfileID: "cap", Name: "Cap", Serving: true, DirectCapable: true},
+		"nocap": {ProfileID: "nocap", Name: "NoCap", DirectCapable: false},
+	}
+	out := pacGovernanceViews(capable, map[string]pac.ExceptionRecord{}, time.Now().UTC())
+	if len(out) != 1 || out[0].ProfileID != "cap" {
+		t.Fatalf("non-capable profile must be skipped from governance views; got %+v", out)
+	}
+}
+
+// TestRegression_BadLastReviewedRejected covers the lastReviewedAt RFC3339
+// validation branch (400, no persistence).
+func TestRegression_BadLastReviewedRejected(t *testing.T) {
+	peiResetGlobals(t)
+	seedDirectCapableProfile(t, "hq")
+	rec := peiExcItem(t, http.MethodPut, "hq", `{"owner":"o","reason":"r","lastReviewedAt":"not-a-date"}`, RoleAdmin)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad lastReviewedAt = %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
 	if _, ok := pacExceptions.Get("hq"); ok {
 		t.Error("a rejected write persisted a record")
 	}
