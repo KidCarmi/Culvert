@@ -641,11 +641,13 @@ certificate rotation.
 The `extractSAMLIdentity` function in `auth_saml.go` applies the following precedence when
 extracting identity data from an assertion:
 
-**Email** — matched against (first wins):
-1. The value of `cfg.EmailAttribute` (admin-configured)
-2. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress` (Entra ID / ADFS long-form URI)
-3. `urn:oid:0.9.2342.19200300.100.1.3` (eduPerson `mail` OID)
-4. Stable NameID value, if it contains `@`
+**Email** — the stable NameID is checked first and, if it qualifies, wins outright
+before any attribute is examined; only if it doesn't set the email does the code
+fall through to attribute matching (first matching attribute wins):
+1. Stable NameID value, if it contains `@`
+2. The value of `cfg.EmailAttribute` (admin-configured)
+3. `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress` (Entra ID / ADFS long-form URI)
+4. `urn:oid:0.9.2342.19200300.100.1.3` (eduPerson `mail` OID)
 
 **Display name** — matched against (first wins):
 1. The value of `cfg.NameAttribute` (admin-configured)
@@ -659,6 +661,8 @@ extracting identity data from an assertion:
 3. `Role`
 4. `http://schemas.microsoft.com/ws/2008/06/identity/claims/groups`
 5. `http://schemas.xmlsoap.org/claims/Group`
+6. `eduPersonAffiliation`
+7. `urn:oid:1.3.6.1.4.1.5923.1.1.1.1` (eduPerson `eduPersonAffiliation` OID)
 
 For Entra ID and ADFS, the built-in long-form URI fallbacks mean that `emailAttribute` and
 `groupsAttribute` can be left empty and attribute extraction will still work correctly with

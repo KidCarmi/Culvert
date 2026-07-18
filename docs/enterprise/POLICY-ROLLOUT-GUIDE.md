@@ -55,7 +55,7 @@ Deploying egress policy safely: the model, staged rollout, validation, rollback,
 
 ## 7. Approval, ownership, emergency access
 
-- **Approval workflow:** not built in. Use the export JSON as the change-control artifact (attach to the ticket); the config-version + audit trail is the after-the-fact record. Operator role can reorder/move; admin role gates default-action/import/rollback — use the role split to separate authoring from promotion.
+- **Approval workflow:** not built in. Use the export JSON as the change-control artifact (attach to the ticket); the config-version + audit trail is the after-the-fact record. Operator role can reorder/move/set default-action (`ui_policy.go:2009`); admin role gates import/rollback (`ui_config.go:915`, `configversion.go:162`) — use the role split to separate authoring from promotion.
 - **Emergency access (open the gate fast):** `POST /api/default-action` with header `Content-Type: application/json` and body `{"action":"allow"}` (operator role) opens *unmatched* traffic; or a top-priority broad `Allow` rule. Revert via config-version rollback. (The handler decodes an `action` field and rejects anything other than `"allow"`/`"deny"` with 400 — `ui_policy.go:1363-1372`.)
 
 ## 8. Audit evidence
