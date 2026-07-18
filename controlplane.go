@@ -42,6 +42,7 @@ package main
 //   replace the JSON codec with generated protobuf for efficiency.
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -101,7 +102,11 @@ type getConfigDeltaReply struct {
 	Epoch         int64            `json:"epoch,omitempty"`
 	Deltas        []blocklistDelta `json:"deltas,omitempty"`
 	TargetFP      string           `json:"target_fp,omitempty"`
-	Remainder     *ConfigSnapshot  `json:"remainder,omitempty"`
+	// Remainder is the target snapshot MINUS BlockedHosts (which rides as the
+	// delta chain), pre-marshaled so the CP shares one remainder marshal across
+	// the fleet instead of re-marshaling the host-scale non-blocklist slices per
+	// DP. The DP unmarshals it into a ConfigSnapshot.
+	Remainder json.RawMessage `json:"remainder,omitempty"`
 }
 
 // getConfigRequest is the GetConfig request body (P0-3). The DP reports the

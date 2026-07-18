@@ -581,6 +581,18 @@ func publishCurrentConfigSnapshot() error {
 	return globalConfigStore.Update(CurrentConfigSnapshot())
 }
 
+// seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
+// WITHOUT advancing the version, marking published, or notifying subscribers. Its
+// sole purpose is to give the delta ring a correct oldHosts baseline for the
+// first post-promotion Update (Dur-F4). A promoted standby's version is still
+// established by armVersionPersistence (seeded above the replicated leader
+// version), and distribution is still gated by ServableConfig/published.
+func (s *ConfigStore) seedReplicatedSnapshot(snap ConfigSnapshot) {
+	s.mu.Lock()
+	s.snap = snap
+	s.mu.Unlock()
+}
+
 // Get returns the current snapshot.
 func (s *ConfigStore) Get() ConfigSnapshot {
 	s.mu.RLock()

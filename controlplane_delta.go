@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
@@ -86,15 +87,27 @@ func hostSliceBytes(hosts []string) int {
 // epoch is the issuing CP's fencing epoch. A non-contiguous target clears the
 // ring first (the existing chain is no longer valid).
 func (r *blocklistDeltaRing) record(base, target int64, oldHosts, newHosts []string, fp string, epoch int64) {
-	added, removed := diffHosts(oldHosts, newHosts)
 	d := blocklistDelta{Version: target, Base: base, FP: fp, Epoch: epoch}
-	d.bytes = hostSliceBytes(added) + hostSliceBytes(removed)
-	if d.bytes > maxSingleDeltaBytes {
-		// Too large to retain; a DP traversing this version resyncs.
+	// A nil oldHosts means there was NO prior published snapshot to diff against
+	// (fresh CP start, or an HA-promoted standby whose ConfigStore.snap was never
+	// seeded). Diffing nil→newHosts would record a bogus "add-everything" delta
+	// whose Base equals the seeded version — normally unreachable, but on a
+	// seed==DP-version collision (clock rollback / HA promotion) a DP could match
+	// it and apply a redundant full add. Mark it a resync marker instead so any DP
+	// at that base cleanly full-syncs. (oldHosts is non-nil — []string{} — after
+	// any real publish, so a genuinely-empty published blocklist still deltas.)
+	if oldHosts == nil {
 		d.Resync = true
-		d.bytes = 0
 	} else {
-		d.Added, d.Removed = added, removed
+		added, removed := diffHosts(oldHosts, newHosts)
+		d.bytes = hostSliceBytes(added) + hostSliceBytes(removed)
+		if d.bytes > maxSingleDeltaBytes {
+			// Too large to retain; a DP traversing this version resyncs.
+			d.Resync = true
+			d.bytes = 0
+		} else {
+			d.Added, d.Removed = added, removed
+		}
 	}
 
 	r.mu.Lock()
@@ -172,17 +185,40 @@ func (r *blocklistDeltaRing) stats() (entries, bytes int, oldest, newest int64) 
 	return entries, bytes, oldest, newest
 }
 
+// newestFP returns the fingerprint of the newest retained version, and whether
+// that version equals want. Used by GetConfigDelta's unchanged path to honor the
+// DP's KnownFP without an O(N) re-hash of the full list on every idle poll.
+func (r *blocklistDeltaRing) newestFP(want int64) (fp string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.entries) == 0 {
+		return "", false
+	}
+	newest := r.entries[len(r.entries)-1]
+	if newest.Version != want {
+		return "", false
+	}
+	return newest.FP, true
+}
+
 // diffHosts returns the hosts added and removed going from prev to next. Both
-// inputs are treated as sets (deduped). Order of the result is unspecified.
+// inputs are NORMALIZED (lower/trim) and treated as sets (deduped) so the diff,
+// the advertised fingerprint (feedSetFingerprint, same normalization), and the DP
+// apply (ApplyDelta, same normalization) share ONE normalization contract — not a
+// hidden dependency on every caller passing a pre-normalized bl.List(). Order of
+// the result is unspecified.
 func diffHosts(prev, next []string) (added, removed []string) {
-	oldSet := make(map[string]struct{}, len(prev))
-	for _, h := range prev {
-		oldSet[h] = struct{}{}
+	norm := func(hosts []string) map[string]struct{} {
+		m := make(map[string]struct{}, len(hosts))
+		for _, h := range hosts {
+			if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+				m[h] = struct{}{}
+			}
+		}
+		return m
 	}
-	newSet := make(map[string]struct{}, len(next))
-	for _, h := range next {
-		newSet[h] = struct{}{}
-	}
+	oldSet := norm(prev)
+	newSet := norm(next)
 	for h := range newSet {
 		if _, ok := oldSet[h]; !ok {
 			added = append(added, h)
@@ -219,10 +255,23 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 	for i := range chain {
 		bl.ApplyDelta(chain[i].Added, chain[i].Removed)
 	}
-	bl.Save()
+	// Delta-path memory-DoS cap (mirrors validateConfigSnapshot's BlockedHosts cap
+	// on the full path). The added hosts ride in the chain, NOT in the remainder's
+	// BlockedHosts, so the full-path cap would evaluate to 0 and pass — a buggy or
+	// compromised CP could push millions of hosts via deltas past the 2 M ceiling
+	// and OOM the DP. Enforce the ceiling on the realized set. Reject BEFORE Save so
+	// an over-cap set is never persisted; the caller full-resyncs (the CP's own
+	// commit-time cap keeps the full snapshot within bounds).
+	if n := bl.Count(); n > maxSnapBlockedHosts {
+		return fmt.Errorf("blocklist delta apply exceeds cap: %d > %d", n, maxSnapBlockedHosts)
+	}
+	// Verify convergence BEFORE persisting: on drift, do not durably write an
+	// unverified blocklist to disk (the in-memory mutation is healed by the
+	// caller's full resync; a persisted bad set would outlive the process).
 	if got := bl.SyncedFingerprint(); got != targetFP {
 		return fmt.Errorf("blocklist drift after delta apply (have %s, want %s)", got, targetFP)
 	}
+	bl.Save()
 	// Everything except the blocklist, in the same order as the full path.
 	applySnapshotTrafficExceptBlocklist(remainder)
 	applySnapshotClusterRuntime(remainder)
@@ -233,12 +282,71 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 	return nil
 }
 
+// gcDeltaRemainderCache shares ONE marshaled remainder (target snapshot minus the
+// host-scale blocklist) across all DPs polling the same version, so a config
+// change does not force N per-DP marshals of the non-blocklist slices (threat
+// feeds + URL-category hosts are still host-scale) the way the full path's
+// gcMarshalCache avoids re-marshaling the whole snapshot.
+var gcDeltaRemainderCache deltaRemainderCache
+
+type deltaRemainderCache struct {
+	mu       sync.Mutex
+	version  int64
+	caFP     string
+	enrolled bool
+	bytes    json.RawMessage
+}
+
+// serve returns the marshaled remainder for (version, caFP, enrolled), marshaling
+// (and caching) once per change. The enrolled variant dominates (a DP polls delta
+// only after it holds a version, i.e. post-enrollment); the rare unenrolled
+// bootstrap variant occasionally recomputes. Lock order is cache→store.
+func (c *deltaRemainderCache) serve(version int64, caFP string, enrolled bool) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.bytes != nil && c.version == version && c.caFP == caFP && c.enrolled == enrolled {
+		return c.bytes, nil
+	}
+	snap := globalConfigStore.Get()
+	snap.BlockedHosts = nil // the blocklist rides as the delta chain
+	if caFP != "" {
+		snap.CAFingerprint = caFP
+	}
+	if !enrolled {
+		redactUnenrolledSnapshot(&snap)
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal remainder: %v", err)
+	}
+	c.version, c.caFP, c.enrolled, c.bytes = version, caFP, enrolled, b
+	return b, nil
+}
+
+func (c *deltaRemainderCache) reset() {
+	c.mu.Lock()
+	c.version, c.caFP, c.enrolled, c.bytes = 0, "", false, nil
+	c.mu.Unlock()
+}
+
+// chainPayloadBytes approximates the wire size of a delta chain's host slices.
+func chainPayloadBytes(chain []blocklistDelta) int {
+	n := 0
+	for i := range chain {
+		n += hostSliceBytes(chain[i].Added) + hostSliceBytes(chain[i].Removed)
+	}
+	return n
+}
+
 // GetConfigDelta serves the incremental blocklist catch-up path (T3 P1). A DP
 // reports the blocklist version it holds; the CP returns the ordered {added,
-// removed} chain to the newest version plus the small non-blocklist remainder,
-// or a resync directive when the DP is too far behind to be caught up
-// incrementally. The blocklist is ~95%+ of the snapshot bytes at scale, so this
-// turns a routine config change from a full ~60 MiB re-pull into a few-KB delta.
+// removed} chain to the newest version plus the non-blocklist remainder, or a
+// resync directive when the DP is too far behind to be caught up incrementally.
+// The blocklist is ~95%+ of the snapshot bytes at scale, so this turns a routine
+// config change from a full ~60 MiB re-pull into a few-KB delta. (The remainder
+// is NOT tiny — it still carries the host-scale threat-feed and URL-category
+// slices; it is cached and shared across the fleet, and the assembled reply is
+// frame-bounded below.)
 //
 // Same guards as GetConfig: refuse when no valid config is servable; throttle
 // unenrolled callers per peer IP (the delta reveals blocklist changes); redact
@@ -259,11 +367,17 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 	}
 
 	epoch := globalHA.CurrentEpoch()
-	// Bind cur to the snapshot we would actually return so the chain, remainder,
-	// and target version are all the same version (no torn read across a publish).
-	snap := globalConfigStore.Get()
-	cur := snap.Version
+	cur := globalConfigStore.Version()
 	if dreq.KnownVersion == cur {
+		// Idle-drift detection: if the DP reports a fingerprint for the current
+		// version that disagrees with ours, it has drifted (e.g. a half-applied
+		// prior delta or on-disk corruption) — force a resync instead of confirming
+		// "unchanged". Cheap: read the ring's newest FP, no O(N) re-hash.
+		if dreq.KnownFP != "" {
+			if fp, ok := globalConfigStore.deltaRing.newestFP(cur); ok && fp != dreq.KnownFP {
+				return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
+			}
+		}
 		return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: cur, Epoch: epoch})
 	}
 
@@ -274,15 +388,18 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
 	}
 
-	// Remainder = the target snapshot minus the blocklist (which rides as the
-	// delta chain). Redact secrets from unenrolled callers, mirroring GetConfig.
-	snap.BlockedHosts = nil
-	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
-		snap.CAFingerprint = fp
+	caFP := globalClusterCA.CACertFingerprint()
+	remainder, err := gcDeltaRemainderCache.serve(cur, caFP, enrolled)
+	if err != nil {
+		return nil, err
 	}
-	if !enrolled {
-		snap.SessionHMAC = ""
-		snap.IdPProfiles = nil
+	// Frame bound: the assembled reply (chain host slices + remainder) must fit the
+	// CP↔DP frame. Estimate BEFORE marshaling the full reply so an oversized
+	// catch-up degrades to a resync (a full pull) instead of allocating a >128 MiB
+	// blob that gRPC would reject anyway. The chain is ring-bounded (≤32 MiB) and
+	// the remainder ≤ the full snapshot; their sum can exceed the frame.
+	if chainPayloadBytes(chain)+len(remainder) > maxSnapshotWireBytes {
+		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
 	}
 	targetFP := ""
 	if n := len(chain); n > 0 {
@@ -295,6 +412,6 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		Epoch:         epoch,
 		Deltas:        chain,
 		TargetFP:      targetFP,
-		Remainder:     &snap,
+		Remainder:     remainder,
 	})
 }

@@ -13,10 +13,34 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// mustRemainder marshals a remainder snapshot to the wire RawMessage form.
+func mustRemainder(t *testing.T, snap ConfigSnapshot) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal remainder: %v", err)
+	}
+	return b
+}
+
+// restoreBlAndIPF snapshots the shared blocklist + IP-filter globals the client
+// apply tests mutate, restoring them on cleanup so the determinism gate
+// (-shuffle -count=2) can't observe wiped state in a later test.
+func restoreBlAndIPF(t *testing.T) {
+	t.Helper()
+	feed := bl.FeedList()
+	oldIPF := ipf
+	t.Cleanup(func() {
+		bl.ReplaceFeedEntries(feed)
+		ipf = oldIPF
+	})
+}
+
 // TestApplyBlocklistDeltaSnapshot_ConvergesAndAppliesRemainder: the DP delta
 // apply advances the blocklist incrementally, verifies convergence, and applies
 // the non-blocklist remainder.
 func TestApplyBlocklistDeltaSnapshot_ConvergesAndAppliesRemainder(t *testing.T) {
+	restoreBlAndIPF(t)
 	origRules := policyStore.List()
 	t.Cleanup(func() { policyStore.ReplaceAll(origRules) })
 
@@ -54,6 +78,7 @@ func TestApplyBlocklistDeltaSnapshot_ConvergesAndAppliesRemainder(t *testing.T) 
 // missed/misapplied delta) is detected and returns an error WITHOUT applying the
 // remainder — the caller then full-resyncs.
 func TestApplyBlocklistDeltaSnapshot_DriftRejected(t *testing.T) {
+	restoreBlAndIPF(t)
 	origRules := policyStore.List()
 	t.Cleanup(func() { policyStore.ReplaceAll(origRules) })
 
@@ -75,6 +100,7 @@ func TestApplyBlocklistDeltaSnapshot_DriftRejected(t *testing.T) {
 // TestDataPlaneClient_DeltaSyncApplies drives the full client path: fetchAndApply
 // tries the delta first, applies it, and advances lastVersion.
 func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
+	restoreBlAndIPF(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	oldDataDir := dataDir
@@ -96,7 +122,7 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 			TargetVersion: 6,
 			Deltas:        []blocklistDelta{{Added: []string{"c.example"}}},
 			TargetFP:      blocklist.FeedSetFingerprint(v2),
-			Remainder:     &ConfigSnapshot{},
+			Remainder:     mustRemainder(t, ConfigSnapshot{}),
 		}
 		b, _ := json.Marshal(reply)
 		return b, nil
@@ -140,6 +166,7 @@ func TestDataPlaneClient_DeltaUnchanged(t *testing.T) {
 // TestDataPlaneClient_DeltaResyncFallsThrough: a resync directive makes the DP
 // fall through to the full GetConfig path, which applies the full snapshot.
 func TestDataPlaneClient_DeltaResyncFallsThrough(t *testing.T) {
+	restoreBlAndIPF(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	oldDataDir := dataDir
@@ -175,6 +202,7 @@ func TestDataPlaneClient_DeltaResyncFallsThrough(t *testing.T) {
 // Unimplemented for GetConfigDelta makes the DP mark delta unsupported and use
 // the full path (both this cycle and without re-probing until reconnect).
 func TestDataPlaneClient_DeltaUnsupportedFallsThrough(t *testing.T) {
+	restoreBlAndIPF(t)
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
 	oldDataDir := dataDir
@@ -204,5 +232,156 @@ func TestDataPlaneClient_DeltaUnsupportedFallsThrough(t *testing.T) {
 	c.fetchAndApply(context.Background())
 	if deltaCalls != 1 {
 		t.Fatalf("delta was re-probed after Unimplemented; got %d delta calls", deltaCalls)
+	}
+}
+
+// TestDataPlaneClient_DeltaFencedRejected: a delta stamped with an epoch BELOW
+// the DP's ratchet (a fenced-out zombie CP) is rejected before any mutation and
+// does not advance lastVersion. (Roll-F2 coverage: the delta-path epoch fence.)
+func TestDataPlaneClient_DeltaFencedRejected(t *testing.T) {
+	restoreBlAndIPF(t)
+	restore := resetDPLastSeenEpochForTest()
+	dpLastSeenEpoch.Store(5) // DP has seen epoch 5 from the real leader
+	t.Cleanup(restore)
+	oldDataDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = oldDataDir })
+
+	bl.ReplaceFeedEntries([]string{"a.example"})
+	before := bl.SyncedFingerprint()
+	c := &DataPlaneClient{lastVersion: 5}
+	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		if method != methodGetConfigDelta {
+			return nil, fmt.Errorf("fenced delta must NOT fall through to %s", method)
+		}
+		reply := getConfigDeltaReply{
+			Mode: "delta", BaseVersion: 5, TargetVersion: 6, Epoch: 3, // stale epoch
+			Deltas:    []blocklistDelta{{Added: []string{"evil.example"}}},
+			TargetFP:  blocklist.FeedSetFingerprint([]string{"a.example", "evil.example"}),
+			Remainder: mustRemainder(t, ConfigSnapshot{}),
+		}
+		b, _ := json.Marshal(reply)
+		return b, nil
+	}
+	c.fetchAndApply(context.Background())
+	if c.lastVersion != 5 {
+		t.Fatalf("fenced delta advanced lastVersion to %d", c.lastVersion)
+	}
+	if bl.IsBlocked("evil.example") || bl.SyncedFingerprint() != before {
+		t.Fatal("fenced delta mutated the blocklist")
+	}
+}
+
+// TestDataPlaneClient_DeltaBaseMovedFallsThrough: a delta whose BaseVersion does
+// not match the DP's lastVersion forces the full path. (Roll-F2 coverage.)
+func TestDataPlaneClient_DeltaBaseMovedFallsThrough(t *testing.T) {
+	restoreBlAndIPF(t)
+	restore := resetDPLastSeenEpochForTest()
+	t.Cleanup(restore)
+	oldDataDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = oldDataDir })
+	bl.ReplaceFeedEntries([]string{"stale.example"})
+
+	c := &DataPlaneClient{lastVersion: 3}
+	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		switch method {
+		case methodGetConfigDelta:
+			reply := getConfigDeltaReply{Mode: "delta", BaseVersion: 99, TargetVersion: 100, // base != 3
+				Deltas: []blocklistDelta{{Added: []string{"x.example"}}}, Remainder: mustRemainder(t, ConfigSnapshot{})}
+			b, _ := json.Marshal(reply)
+			return b, nil
+		case methodGetConfig:
+			b, _ := json.Marshal(ConfigSnapshot{Version: 5, BlockedHosts: []string{"fresh.example"}})
+			return b, nil
+		default:
+			return nil, fmt.Errorf("unexpected %s", method)
+		}
+	}
+	c.fetchAndApply(context.Background())
+	if c.lastVersion != 5 || !bl.IsBlocked("fresh.example") {
+		t.Fatalf("base-moved delta did not fall through to the full path (lastVersion=%d)", c.lastVersion)
+	}
+}
+
+// TestDataPlaneClient_DeltaDriftHealsViaFull: a delta whose TargetFP does not
+// match after apply (missed/misapplied) falls through to the full path, which
+// heals the blocklist wholesale. (Roll-F2: client-level drift→resync contract.)
+func TestDataPlaneClient_DeltaDriftHealsViaFull(t *testing.T) {
+	restoreBlAndIPF(t)
+	restore := resetDPLastSeenEpochForTest()
+	t.Cleanup(restore)
+	oldDataDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = oldDataDir })
+	bl.ReplaceFeedEntries([]string{"v1.example"})
+
+	full := []string{"healed1.example", "healed2.example"}
+	c := &DataPlaneClient{lastVersion: 4}
+	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		switch method {
+		case methodGetConfigDelta:
+			reply := getConfigDeltaReply{Mode: "delta", BaseVersion: 4, TargetVersion: 5,
+				Deltas:   []blocklistDelta{{Added: []string{"partial.example"}}},
+				TargetFP: "wrongfp-triggers-drift", Remainder: mustRemainder(t, ConfigSnapshot{})}
+			b, _ := json.Marshal(reply)
+			return b, nil
+		case methodGetConfig:
+			b, _ := json.Marshal(ConfigSnapshot{Version: 5, BlockedHosts: full})
+			return b, nil
+		default:
+			return nil, fmt.Errorf("unexpected %s", method)
+		}
+	}
+	c.fetchAndApply(context.Background())
+	if c.lastVersion != 5 {
+		t.Fatalf("drift did not heal via full resync (lastVersion=%d)", c.lastVersion)
+	}
+	if !bl.IsBlocked("healed1.example") || bl.IsBlocked("partial.example") {
+		t.Fatal("full resync did not replace the drifted blocklist")
+	}
+}
+
+// TestApplyBlocklistDeltaSnapshot_ManualSurvivesEndToEnd is the F3 end-to-end
+// invariant: a CP delta that removes a host which is ALSO a DP-local manual block
+// keeps it enforced AND still converges the fingerprint to the CP's feed-only
+// target — verified on the real bl through the actual apply path (not just the
+// primitive), including the SyncedFingerprint()==targetFP gate.
+func TestApplyBlocklistDeltaSnapshot_ManualSurvivesEndToEnd(t *testing.T) {
+	restoreBlAndIPF(t)
+	origRules := policyStore.List()
+	t.Cleanup(func() { policyStore.ReplaceAll(origRules) })
+
+	bl.ReplaceFeedEntries([]string{"shared.example", "other.example"})
+	bl.AddManual("shared.example") // also a DP-local manual block
+	// CP publishes a version that drops shared.example from the feed.
+	chain := []blocklistDelta{{Removed: []string{"shared.example"}}}
+	targetFP := blocklist.FeedSetFingerprint([]string{"other.example"})
+	if err := applyBlocklistDeltaSnapshot(ConfigSnapshot{}, chain, targetFP); err != nil {
+		t.Fatalf("apply must converge (manual host dropped from fp, kept in enforcement): %v", err)
+	}
+	if !bl.IsBlocked("shared.example") {
+		t.Fatal("a CP delta removed a DP-local manual block through the real apply path")
+	}
+}
+
+// TestDataPlaneClient_DeltaReprobeAfterCooldown: after latching deltaUnsupported,
+// the DP re-probes exactly once every deltaReprobeInterval polls (covers the
+// in-place-CP-upgrade case where connect() never runs). (Roll-F1 coverage.)
+func TestDataPlaneClient_DeltaReprobeAfterCooldown(t *testing.T) {
+	c := &DataPlaneClient{lastVersion: 3, deltaUnsupported: true}
+	deltaCalls := 0
+	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
+		if method == methodGetConfigDelta {
+			deltaCalls++
+			return nil, status.Errorf(codes.Unimplemented, "still old")
+		}
+		return nil, fmt.Errorf("unexpected %s", method)
+	}
+	for i := 0; i < deltaReprobeInterval; i++ {
+		_ = c.tryDeltaSync(context.Background())
+	}
+	if deltaCalls != 1 {
+		t.Fatalf("want exactly 1 re-probe over %d polls, got %d", deltaReprobeInterval, deltaCalls)
 	}
 }

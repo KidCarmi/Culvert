@@ -30,6 +30,8 @@ lockout.go             80
 policy.go              60
 autoexclude.go         85
 autoexclude_resolve.go 80
+controlplane_delta.go  80
+controlplane_client.go 55
 "
 
 FUNC=$(go tool cover -func="$COVERAGE_OUT")

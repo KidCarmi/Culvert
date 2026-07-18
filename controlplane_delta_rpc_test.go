@@ -19,9 +19,10 @@ import (
 func setupDeltaStore(t *testing.T, lists ...[]string) *controlPlaneServer {
 	t.Helper()
 	orig := globalConfigStore
-	t.Cleanup(func() { globalConfigStore = orig; gcMarshalCache.reset() })
+	t.Cleanup(func() { globalConfigStore = orig; gcMarshalCache.reset(); gcDeltaRemainderCache.reset() })
 	globalConfigStore = &ConfigStore{}
 	gcMarshalCache.reset()
+	gcDeltaRemainderCache.reset()
 	for _, l := range lists {
 		if err := globalConfigStore.Update(ConfigSnapshot{BlockedHosts: l}); err != nil {
 			t.Fatalf("publish: %v", err)
@@ -74,10 +75,14 @@ func TestGetConfigDelta_DeltaChainConverges(t *testing.T) {
 	if reply.Mode != "delta" || reply.BaseVersion != 1 || reply.TargetVersion != 3 {
 		t.Fatalf("got mode=%q base=%d target=%d, want delta/1/3", reply.Mode, reply.BaseVersion, reply.TargetVersion)
 	}
-	if reply.Remainder == nil {
+	if len(reply.Remainder) == 0 {
 		t.Fatal("delta reply must carry a remainder")
 	}
-	if reply.Remainder.BlockedHosts != nil {
+	var rem ConfigSnapshot
+	if err := json.Unmarshal(reply.Remainder, &rem); err != nil {
+		t.Fatalf("unmarshal remainder: %v", err)
+	}
+	if rem.BlockedHosts != nil {
 		t.Fatal("remainder must omit BlockedHosts (it rides as the delta chain)")
 	}
 	if reply.TargetFP != blocklist.FeedSetFingerprint(v3) {
@@ -111,23 +116,14 @@ func TestGetConfigDelta_FreshDPResyncs(t *testing.T) {
 	ip := "203.0.113.13"
 	clearUnenrolledPull(ip)
 	t.Cleanup(func() { clearUnenrolledPull(ip) })
-	// Publish enough versions that base=0 falls before the oldest retained Base.
-	lists := make([][]string, 0, 3)
-	lists = append(lists, []string{"a"}, []string{"a", "b"}, []string{"a", "b", "c"})
-	svc := setupDeltaStore(t, lists...) // versions 1,2,3; oldest delta Base=0 though
-	// With a small ring, base=0 IS retained here (oldest.Base==0), so a fresh DP
-	// actually gets a delta from 0. Assert that path is coherent: mode delta and
-	// applying the chain from an empty store converges.
+	svc := setupDeltaStore(t, []string{"a"}, []string{"a", "b"}, []string{"a", "b", "c"}) // versions 1,2,3
+	// A fresh DP (base 0) traverses the FIRST published version, which is recorded
+	// as a nil-baseline resync marker (no prior published snapshot to diff against
+	// — the Dur-F3 fix), so it correctly gets a resync directive and does a full
+	// GetConfig rather than a bogus "add-everything" delta.
 	reply := callDelta(t, svc, deltaCtx(ip), 0)
-	if reply.Mode != "delta" {
-		t.Fatalf("fresh DP within ring range: got mode=%q, want delta", reply.Mode)
-	}
-	store := blocklist.New()
-	for _, d := range reply.Deltas {
-		store.ApplyDelta(d.Added, d.Removed)
-	}
-	if store.SyncedFingerprint() != reply.TargetFP {
-		t.Fatal("chain from empty did not converge to target FP")
+	if reply.Mode != "resync" {
+		t.Fatalf("fresh DP crossing the nil-baseline marker: got mode=%q, want resync", reply.Mode)
 	}
 }
 
@@ -169,10 +165,14 @@ func TestGetConfigDelta_RedactsSecretsFromUnenrolled(t *testing.T) {
 	}
 	svc := &controlPlaneServer{}
 	reply := callDelta(t, svc, deltaCtx(ip), 1)
-	if reply.Mode != "delta" || reply.Remainder == nil {
+	if reply.Mode != "delta" || len(reply.Remainder) == 0 {
 		t.Fatalf("want delta with remainder, got mode=%q", reply.Mode)
 	}
-	if reply.Remainder.SessionHMAC != "" {
+	var rem ConfigSnapshot
+	if err := json.Unmarshal(reply.Remainder, &rem); err != nil {
+		t.Fatalf("unmarshal remainder: %v", err)
+	}
+	if rem.SessionHMAC != "" {
 		t.Fatal("SessionHMAC must be redacted from an unenrolled caller's remainder")
 	}
 }

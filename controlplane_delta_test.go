@@ -162,7 +162,9 @@ func TestDeltaRing_CountEviction(t *testing.T) {
 	var r blocklistDeltaRing
 	total := int64(maxDeltaRingEntries + 50)
 	for v := int64(1); v <= total; v++ {
-		r.record(v-1, v, nil, []string{"a"}, "fp", 0)
+		// Non-nil oldHosts so each entry is a real delta (not a nil-baseline
+		// resync marker); this test exercises count eviction + servability.
+		r.record(v-1, v, []string{"prev"}, []string{"a"}, "fp", 0)
 	}
 	ents, _, oldest, newest := r.stats()
 	if ents != maxDeltaRingEntries {
@@ -199,5 +201,42 @@ func TestDeltaRing_NonContiguousClears(t *testing.T) {
 	// The old versions are no longer servable.
 	if _, _, ok := r.chain(1); ok {
 		t.Fatal("versions before a non-contiguous jump must not be servable")
+	}
+}
+
+// TestDeltaRing_ByteEviction exercises the byte-budget bound (a memory-DoS
+// control): recording enough sub-maxSingleDeltaBytes deltas to exceed the 32 MiB
+// total must evict oldest-first while keeping totalBytes within budget and ≥1
+// entry retained.
+func TestDeltaRing_ByteEviction(t *testing.T) {
+	var r blocklistDeltaRing
+	// Each delta ~1 MiB of added hosts (well under maxSingleDeltaBytes) so it is
+	// retained (not a resync marker); ~40 of them exceed the 32 MiB total.
+	perDelta := 1 << 20
+	mk := func(seed int) []string {
+		hosts := make([]string, 0, perDelta/24)
+		for b := 0; b < perDelta; b += 24 {
+			hosts = append(hosts, "host-"+padNum(seed)+"-"+padNum(b)+".example.com")
+		}
+		return hosts
+	}
+	total := int64(40)
+	for v := int64(1); v <= total; v++ {
+		r.record(v-1, v, []string{"prev"}, mk(int(v)), "fp", 0)
+	}
+	ents, bytes, oldest, newest := r.stats()
+	if bytes > maxDeltaRingBytes {
+		t.Fatalf("totalBytes=%d exceeds byte budget %d after eviction", bytes, maxDeltaRingBytes)
+	}
+	if ents < 1 || ents >= int(total) || newest != total {
+		t.Fatalf("byte eviction should drop oldest and retain newest; ents=%d newest=%d", ents, newest)
+	}
+	// A base in the byte-evicted range (v1 was recorded first and evicted) resyncs;
+	// the oldest retained delta's base (oldest-1) is still servable.
+	if _, _, ok := r.chain(1); ok {
+		t.Fatal("a base in the byte-evicted range must resync")
+	}
+	if _, _, ok := r.chain(oldest - 1); !ok {
+		t.Fatalf("the oldest retained delta's base (%d) must be servable", oldest-1)
 	}
 }

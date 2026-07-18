@@ -148,19 +148,29 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	// Redact secrets from unenrolled callers. We are already in the unenrolled
 	// branch (the enrolled case returned above), so this guard is always true
 	// here — it is kept as an explicit !callerIsEnrolledNode block as
-	// defense-in-depth AND so the redaction-parity test
-	// (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) can
-	// statically verify every Sensitive ConfigSnapshot field is zeroed on this
-	// path. Do NOT collapse it into an unconditional assignment.
+	// defense-in-depth. The actual field zeroing lives in redactUnenrolledSnapshot
+	// (shared with GetConfigDelta) so the redaction-parity test
+	// (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) pins ONE
+	// place both unenrolled-reachable surfaces route through.
 	if !callerIsEnrolledNode(ctx) {
-		snap.SessionHMAC = ""
-		snap.IdPProfiles = nil
+		redactUnenrolledSnapshot(&snap)
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return b, nil
+}
+
+// redactUnenrolledSnapshot zeroes every Sensitive ConfigSnapshot field before the
+// snapshot is served to an UNENROLLED caller. It is the single source of truth for
+// unenrolled redaction, shared by GetConfig and GetConfigDelta so the redaction-
+// parity test (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) pins
+// one place and every unenrolled-reachable surface stays covered. When a new
+// Sensitive synced field is added, zero it HERE and both surfaces are protected.
+func redactUnenrolledSnapshot(snap *ConfigSnapshot) {
+	snap.SessionHMAC = ""
+	snap.IdPProfiles = nil
 }
 
 // peerSourceIP returns the client IP of the gRPC peer, or "" when unavailable.
