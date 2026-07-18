@@ -28,6 +28,14 @@ import (
 const (
 	supportMinFreeBytes  = 256 << 20 // refuse a new bundle build below this free headroom
 	supportRetentionKeep = 10        // keep the newest N persisted bundles, evict oldest-first
+
+	// supportRetentionMaxAge bounds how long a persisted bundle lives on disk. The
+	// count-based prune runs only when a NEW bundle is built, so an idle appliance
+	// (one that stopped creating bundles) would otherwise keep stale bundles
+	// forever; the background janitor evicts anything older than this.
+	supportRetentionMaxAge = 30 * 24 * time.Hour
+	// supportRetentionTick is the age-sweep cadence.
+	supportRetentionTick = 6 * time.Hour
 )
 
 // errSupportLowDisk is the fail-closed preflight sentinel: the POST handler maps
@@ -261,10 +269,11 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"`          // selectable incident scopes
-	RetentionKeep         int                    `json:"retention_keep"`  // newest-N persisted bundles kept (oldest evicted)
-	RecipientCount        int                    `json:"recipient_count"` // registered sealing recipients
-	RecipientMax          int                    `json:"recipient_max"`   // registry cap
+	Scopes                []string               `json:"scopes"`                 // selectable incident scopes
+	RetentionKeep         int                    `json:"retention_keep"`         // count cap: newest N persisted bundles kept
+	RetentionMaxAgeDays   int                    `json:"retention_max_age_days"` // age cap: idle-appliance background sweep
+	RecipientCount        int                    `json:"recipient_count"`        // registered sealing recipients
+	RecipientMax          int                    `json:"recipient_max"`          // registry cap
 }
 
 // apiSupportStatus reports the support subsystem's contract + current state: engine
@@ -296,6 +305,7 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
 		RetentionKeep:         supportRetentionKeep,
+		RetentionMaxAgeDays:   int(supportRetentionMaxAge / (24 * time.Hour)),
 		RecipientCount:        len(listSupportRecipients()),
 		RecipientMax:          maxSupportRecipients,
 	})
@@ -318,6 +328,13 @@ type supportBundleSummary struct {
 	SizeBytes       int64  `json:"size_bytes"`
 	State           string `json:"state"`             // pending|ready (mandatory-preview lifecycle)
 	CaseID          string `json:"case_id,omitempty"` // operator-bound support case (M4)
+
+	// dirName is the ON-DISK directory name this summary was scanned from. It is
+	// deliberately distinct from BundleID (which is manifest CONTENT): a corrupt
+	// or hand-copied manifest can carry a bundle_id that differs from the directory
+	// it lives in, so any filesystem eviction MUST target dirName — never BundleID,
+	// which could name a different, valid bundle. Unexported ⇒ never serialized.
+	dirName string
 }
 
 // apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
@@ -464,6 +481,7 @@ func listSupportBundles() []supportBundleSummary {
 			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
 			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
 			Failed: man.Collection.Failed, SizeBytes: size, State: st.State, CaseID: st.CaseID,
+			dirName: id,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -767,18 +785,74 @@ func pruneSupportBundles(keep int) {
 	if len(sums) <= keep {
 		return
 	}
-	for _, s := range sums[keep:] {
-		// Defense-in-depth: BundleID here comes from manifest content, so re-guard
-		// against the path-traversal shape before any os.RemoveAll.
-		if !supportBundleIDRe.MatchString(s.BundleID) {
+	// Index-based range: supportBundleSummary is 128 bytes (gocritic rangeValCopy).
+	for i := keep; i < len(sums); i++ {
+		s := &sums[i]
+		// Evict the ON-DISK directory (dirName), NEVER the manifest's BundleID: a
+		// corrupt/hand-copied manifest can carry a bundle_id naming a DIFFERENT
+		// valid bundle. Defense-in-depth: re-guard the path-traversal shape.
+		if !supportBundleIDRe.MatchString(s.dirName) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.dirName)); err != nil {
 			logger.Printf("support: retention evict failed for %q: %v",
-				strings.ReplaceAll(s.BundleID, "\n", ""), err)
+				strings.ReplaceAll(s.dirName, "\n", ""), err)
 			continue
 		}
-		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+		auditSystem("support.bundle.expire", s.dirName, "retention cap")
+	}
+}
+
+// pruneSupportBundlesByAge evicts persisted bundles whose manifest CreatedAt is
+// older than maxAge. The count-based prune runs ONLY on a new build, so this is
+// what protects an IDLE appliance from accumulating stale bundles on disk. now is
+// injected for deterministic tests. FAIL-SAFE: a bundle whose CreatedAt is
+// absent/unparseable is KEPT (a parse failure must never trigger an eviction).
+// Best-effort: an eviction failure is logged and skipped, never fatal.
+func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+	// Index-based range: supportBundleSummary is 128 bytes (gocritic rangeValCopy).
+	sums := listSupportBundles()
+	for i := range sums {
+		s := &sums[i]
+		// Evict the ON-DISK directory (dirName), NEVER the manifest's BundleID: a
+		// corrupt/hand-copied manifest can carry a bundle_id naming a DIFFERENT
+		// valid bundle. Defense-in-depth: re-guard the path-traversal shape.
+		if !supportBundleIDRe.MatchString(s.dirName) {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, s.CreatedAt)
+		if err != nil {
+			continue // fail-safe: unparseable/absent timestamp ⇒ keep
+		}
+		if now.Sub(created) <= maxAge {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.dirName)); err != nil {
+			logger.Printf("support: age-retention evict failed for %q: %v",
+				strings.ReplaceAll(s.dirName, "\n", ""), err)
+			continue
+		}
+		auditSystem("support.bundle.expire", s.dirName, "retention max-age")
+	}
+}
+
+// startSupportRetentionJanitor runs the age-based sweep once at boot and then on a
+// fixed cadence, so an idle appliance still evicts stale bundles. Parented to ctx;
+// it exits on shutdown.
+func startSupportRetentionJanitor(ctx context.Context) {
+	pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
+	t := time.NewTicker(supportRetentionTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
+		}
 	}
 }
 
