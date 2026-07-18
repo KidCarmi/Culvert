@@ -433,3 +433,23 @@ func TestBackup_PACConfig_IncludedWithContent(t *testing.T) {
 		t.Error("data/pac_config.json missing from backup manifest")
 	}
 }
+
+func TestBackup_PACProfiles_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"profiles":[{"id":"hq","name":"HQ","enabled":true,"poolId":"p1","privateNetworks":"direct","availabilityMode":"secure","revision":1}],"pools":[{"id":"p1","name":"P1","endpoints":[{"host":"proxy.example","port":8080}]}]}`)
+	seedFile(t, dataDir, "pac_profiles.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/pac_profiles.json"]
+	if !ok {
+		t.Fatalf("data/pac_profiles.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("pac_profiles.json content mismatch in backup")
+	}
+}

@@ -1777,6 +1777,84 @@ tr.dragging  { opacity: .4; }
         </div>
 
       </div>
+
+      <!-- ── Steering Profiles + Proxy Pools (PAC initiative PR 2) ── -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;margin-top:18px">
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Steering Profiles</span>
+            <button class="btn primary sm" data-click="newPACProfile" data-min-role="admin">+ New Profile</button>
+          </div>
+          <div class="panel-body">
+            <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+              Each profile serves its own PAC at <code>/pac/&lt;id&gt;.pac</code> with an ordered proxy-failover pool,
+              ordered routing rules, and an explicit availability mode. The <strong>default</strong> profile is the
+              legacy configuration above (served at <code>/proxy.pac</code>).
+            </p>
+            <div id="pac-profiles-list" style="font-size:.82rem">Loading…</div>
+            <div id="pac-profile-editor" style="display:none;margin-top:14px;border-top:1px solid var(--surface2);padding-top:12px">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div><label class="form-label">Profile ID (URL-safe)</label><input id="pacp-id" class="input" placeholder="hq-israel"></div>
+                <div><label class="form-label">Name</label><input id="pacp-name" class="input" placeholder="HQ Israel"></div>
+                <div><label class="form-label">Proxy Pool</label><select id="pacp-pool" class="input"></select></div>
+                <div><label class="form-label">Availability Mode</label>
+                  <select id="pacp-mode" class="input">
+                    <option value="secure">Secure — no DIRECT fallback ever</option>
+                    <option value="balanced">Balanced — DIRECT only via explicit rules</option>
+                    <option value="availability">Availability — fail open to DIRECT</option>
+                  </select></div>
+                <div><label class="form-label">Private Networks (RFC-1918)</label>
+                  <select id="pacp-private" class="input">
+                    <option value="direct">DIRECT (bypass proxy)</option>
+                    <option value="proxy">PROXY (follow rules/pool)</option>
+                  </select></div>
+                <div><label class="form-label">Enabled</label>
+                  <select id="pacp-enabled" class="input"><option value="true">Yes</option><option value="false">No (404)</option></select></div>
+              </div>
+              <label class="form-label" style="margin-top:10px">Description</label>
+              <input id="pacp-desc" class="input">
+              <label class="form-label" style="margin-top:10px">Ordered Rules <span style="color:var(--muted);font-weight:400">(first match wins)</span></label>
+              <div id="pacp-rules"></div>
+              <button class="btn ghost sm" data-click="addPACRuleRow" style="margin-top:6px">+ Add Rule</button>
+              <div id="pac-profile-errors" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.8rem;line-height:1.5"></div>
+              <div style="display:flex;gap:8px;margin-top:12px">
+                <button class="btn primary" data-click="savePACProfile">Save Profile</button>
+                <button class="btn ghost" data-click="cancelPACProfileEdit">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">Proxy Pools</span>
+            <button class="btn primary sm" data-click="newPACPool" data-min-role="admin">+ New Pool</button>
+          </div>
+          <div class="panel-body">
+            <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+              An ordered failover chain (primary → secondary → tertiary). Clients try each
+              <code>PROXY host:port</code> in order and quarantine dead proxies automatically.
+            </p>
+            <div id="pac-pools-list" style="font-size:.82rem">Loading…</div>
+            <div id="pac-pool-editor" style="display:none;margin-top:14px;border-top:1px solid var(--surface2);padding-top:12px">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div><label class="form-label">Pool ID (URL-safe)</label><input id="pacpl-id" class="input" placeholder="israel-production"></div>
+                <div><label class="form-label">Name</label><input id="pacpl-name" class="input" placeholder="Israel Production"></div>
+              </div>
+              <label class="form-label" style="margin-top:10px">Endpoints <span style="color:var(--muted);font-weight:400">(1–3, ordered)</span></label>
+              <div id="pacpl-endpoints"></div>
+              <button class="btn ghost sm" data-click="addPACEndpointRow" style="margin-top:6px">+ Add Endpoint</button>
+              <div id="pac-pool-errors" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.8rem;line-height:1.5"></div>
+              <div style="display:flex;gap:8px;margin-top:12px">
+                <button class="btn primary" data-click="savePACPool">Save Pool</button>
+                <button class="btn ghost" data-click="cancelPACPoolEdit">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </div><!-- /view-pac -->
 
     <!-- ── CERTIFICATES ───────────────────────────────────────────────────── -->
@@ -4294,6 +4372,22 @@ document.addEventListener('click', e => {
     case 'downloadPAC':       downloadPAC(); break;
     case 'copyPACURL':        copyPACURL(); break;
     case 'refreshPACPreview': refreshPACPreview(); break;
+    case 'newPACProfile':     newPACProfile(); break;
+    case 'editPACProfile':    editPACProfile(arg); break;
+    case 'deletePACProfile':  deletePACProfile(arg); break;
+    case 'savePACProfile':    savePACProfile(); break;
+    case 'cancelPACProfileEdit': cancelPACProfileEdit(); break;
+    case 'copyPACProfileURL': copyPACProfileURL(arg); break;
+    case 'addPACRuleRow':     addPACRuleRow(); break;
+    case 'movePACRule':       movePACRule(arg, el); break;
+    case 'removePACRule':     removePACRule(el); break;
+    case 'newPACPool':        newPACPool(); break;
+    case 'editPACPool':       editPACPool(arg); break;
+    case 'deletePACPool':     deletePACPool(arg); break;
+    case 'savePACPool':       savePACPool(); break;
+    case 'cancelPACPoolEdit': cancelPACPoolEdit(); break;
+    case 'addPACEndpointRow': addPACEndpointRow(); break;
+    case 'removePACEndpoint': removePACEndpoint(el); break;
 
     // ── Certificates ──
     case 'loadCACertInfo':    loadCACertInfo(); break;
@@ -4984,6 +5078,7 @@ let uiRole = '';
 let uiUsername = '';
 
 function applySession(user, role) {
+  window.currentRole = role || '';
   uiRole     = role || '';
   uiUsername = user || '';
 
@@ -11563,6 +11658,7 @@ async function loadPACConfig() {
     document.getElementById('pac-url-display').textContent = pacHTTPURL();
     refreshPACPreview();
   } catch(e) { /* first load may fail */ }
+  loadPACProfiles();
 }
 
 // renderPACIssues shows the server's structured validation issues (or hides
@@ -11634,6 +11730,320 @@ function copyPACURL() {
     () => toast('PAC URL copied to clipboard', 'success'),
     () => toast('Copy failed - URL: ' + url, 'error')
   );
+}
+
+// ── PAC Steering Profiles + Proxy Pools (initiative PR 2) ──────────────────
+
+let pacProfilesData = { profiles: [], pools: [], defaultProfile: null };
+let pacEditingProfile = null; // null = closed, '' = new, else = editing id
+let pacEditingPool = null;
+
+async function loadPACProfiles() {
+  try {
+    pacProfilesData = await api('/api/pac/profiles');
+    renderPACProfilesList();
+    renderPACPoolsList();
+  } catch(e) { /* first load may fail */ }
+}
+
+function pacProfileURL(id) {
+  const proxyPort = parseInt(document.getElementById('pac-port').value) || 8080;
+  return 'http://' + window.location.hostname + ':' + proxyPort + '/pac/' + id + '.pac';
+}
+
+function renderPACProfilesList() {
+  const box = document.getElementById('pac-profiles-list');
+  const d = pacProfilesData.defaultProfile;
+  let rows = '';
+  if (d) {
+    rows += '<tr><td><code>' + escHtml(d.id) + '</code> <span class="badge">default</span></td>' +
+      '<td>' + escHtml(d.name) + '</td><td>' + escHtml(d.availabilityMode) + '</td>' +
+      '<td><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="default">Copy URL</button></td></tr>';
+  }
+  for (const p of (pacProfilesData.profiles || [])) {
+    rows += '<tr><td><code>' + escHtml(p.id) + '</code>' + (p.enabled ? '' : ' <span class="badge">disabled</span>') + '</td>' +
+      '<td>' + escHtml(p.name) + ' <span style="color:var(--muted)">r' + (p.revision || 0) + '</span></td>' +
+      '<td>' + escHtml(p.availabilityMode) + '</td>' +
+      '<td style="white-space:nowrap"><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="' + escHtml(p.id) + '">Copy URL</button> ' +
+      '<button class="btn ghost sm" data-click="editPACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Edit</button> ' +
+      '<button class="btn ghost sm" data-click="deletePACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Delete</button></td></tr>';
+  }
+  box.innerHTML = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Mode</th><th></th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="4" style="color:var(--muted)">No custom profiles yet</td></tr>') + '</tbody></table>';
+  applySessionRoleVisibility();
+}
+
+function renderPACPoolsList() {
+  const box = document.getElementById('pac-pools-list');
+  let rows = '';
+  for (const pl of (pacProfilesData.pools || [])) {
+    const chain = (pl.endpoints || []).map(ep => escHtml(ep.host + ':' + ep.port)).join(' &rarr; ');
+    rows += '<tr><td><code>' + escHtml(pl.id) + '</code></td><td>' + escHtml(pl.name) + '</td>' +
+      '<td style="font-size:.76rem">' + chain + '</td>' +
+      '<td style="white-space:nowrap"><button class="btn ghost sm" data-click="editPACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Edit</button> ' +
+      '<button class="btn ghost sm" data-click="deletePACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Delete</button></td></tr>';
+  }
+  box.innerHTML = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Failover Chain</th><th></th></tr></thead><tbody>' +
+    (rows || '<tr><td colspan="4" style="color:var(--muted)">No pools yet — create one first</td></tr>') + '</tbody></table>';
+  applySessionRoleVisibility();
+}
+
+// applySessionRoleVisibility re-applies data-min-role hiding to freshly
+// rendered elements (applySession only runs on session changes).
+function applySessionRoleVisibility() {
+  const roleLevel = { admin: 3, operator: 2, viewer: 1 };
+  const myLevel = roleLevel[window.currentRole] || 0;
+  document.querySelectorAll('#view-pac [data-min-role]').forEach(el => {
+    const required = roleLevel[el.getAttribute('data-min-role')] || 0;
+    el.style.display = myLevel >= required ? '' : 'none';
+  });
+}
+
+function copyPACProfileURL(id) {
+  const url = pacProfileURL(id);
+  navigator.clipboard.writeText(url).then(
+    () => toast('Profile PAC URL copied', 'success'),
+    () => toast('Copy failed - URL: ' + url, 'error')
+  );
+}
+
+function pacRuleRowHTML(rule) {
+  rule = rule || { kind: 'domain', pattern: '', scheme: '', port: '', action: 'use_pool', poolId: '' };
+  const kinds = ['domain','suffix','wildcard','cidr4'];
+  const kindOpts = kinds.map(k => '<option value="' + k + '"' + (rule.kind === k ? ' selected' : '') + '>' + k + '</option>').join('');
+  const poolOpts = '<option value="">(profile pool)</option>' + (pacProfilesData.pools || []).map(pl =>
+    '<option value="' + escHtml(pl.id) + '"' + (rule.poolId === pl.id ? ' selected' : '') + '>' + escHtml(pl.id) + '</option>').join('');
+  return '<div class="pacp-rule" style="display:grid;grid-template-columns:90px 1fr 70px 70px 100px 110px auto;gap:6px;margin-top:6px;align-items:center">' +
+    '<select class="input pacp-rule-kind">' + kindOpts + '</select>' +
+    '<input class="input pacp-rule-pattern" placeholder="pattern" value="' + escHtml(rule.pattern) + '">' +
+    '<select class="input pacp-rule-scheme"><option value=""' + (!rule.scheme ? ' selected' : '') + '>any</option><option value="http"' + (rule.scheme === 'http' ? ' selected' : '') + '>http</option><option value="https"' + (rule.scheme === 'https' ? ' selected' : '') + '>https</option></select>' +
+    '<input class="input pacp-rule-port" placeholder="port" value="' + (rule.port || '') + '">' +
+    '<select class="input pacp-rule-action"><option value="use_pool"' + (rule.action === 'use_pool' ? ' selected' : '') + '>use pool</option><option value="direct"' + (rule.action === 'direct' ? ' selected' : '') + '>DIRECT</option></select>' +
+    '<select class="input pacp-rule-pool">' + poolOpts + '</select>' +
+    '<span style="white-space:nowrap"><button class="btn ghost sm" data-click="movePACRule" data-arg="up">&uarr;</button>' +
+    '<button class="btn ghost sm" data-click="movePACRule" data-arg="down">&darr;</button>' +
+    '<button class="btn ghost sm" data-click="removePACRule">&times;</button></span></div>';
+}
+
+function addPACRuleRow() {
+  document.getElementById('pacp-rules').insertAdjacentHTML('beforeend', pacRuleRowHTML(null));
+}
+
+function movePACRule(dir, el) {
+  const row = el.closest('.pacp-rule');
+  if (!row) return;
+  if (dir === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+  if (dir === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+}
+
+function removePACRule(el) {
+  const row = el.closest('.pacp-rule');
+  if (row) row.remove();
+}
+
+function newPACProfile() { openPACProfileEditor(null); }
+
+function editPACProfile(id) {
+  const p = (pacProfilesData.profiles || []).find(x => x.id === id);
+  if (p) openPACProfileEditor(p);
+}
+
+let pacEditingRevision = 0; // revision of the profile loaded into the editor (0 = new)
+
+function openPACProfileEditor(p) {
+  pacEditingProfile = p ? p.id : '';
+  pacEditingRevision = p ? (p.revision || 0) : 0;
+  document.getElementById('pac-profile-editor').style.display = '';
+  document.getElementById('pacp-id').value = p ? p.id : '';
+  document.getElementById('pacp-id').disabled = !!p;
+  document.getElementById('pacp-name').value = p ? p.name : '';
+  document.getElementById('pacp-desc').value = p ? (p.description || '') : '';
+  // New-profile defaults: secure mode is the safe default, but secure forbids
+  // the private-direct bypass — so default private networks to PROXY (a valid
+  // secure combination) rather than direct, which would fail validation.
+  document.getElementById('pacp-mode').value = p ? p.availabilityMode : 'secure';
+  document.getElementById('pacp-private').value = p ? p.privateNetworks : 'proxy';
+  document.getElementById('pacp-enabled').value = p ? String(!!p.enabled) : 'true';
+  const poolSel = document.getElementById('pacp-pool');
+  poolSel.innerHTML = (pacProfilesData.pools || []).map(pl =>
+    '<option value="' + escHtml(pl.id) + '"' + (p && p.poolId === pl.id ? ' selected' : '') + '>' + escHtml(pl.id) + '</option>').join('');
+  const rules = document.getElementById('pacp-rules');
+  rules.innerHTML = '';
+  for (const r of (p && p.rules ? p.rules : [])) rules.insertAdjacentHTML('beforeend', pacRuleRowHTML(r));
+  renderPACPanelIssues('pac-profile-errors', null);
+}
+
+function cancelPACProfileEdit() {
+  pacEditingProfile = null;
+  document.getElementById('pac-profile-editor').style.display = 'none';
+}
+
+function collectPACRules() {
+  const out = [];
+  document.querySelectorAll('#pacp-rules .pacp-rule').forEach(row => {
+    const rule = {
+      kind: row.querySelector('.pacp-rule-kind').value,
+      pattern: row.querySelector('.pacp-rule-pattern').value.trim(),
+      action: row.querySelector('.pacp-rule-action').value,
+    };
+    const scheme = row.querySelector('.pacp-rule-scheme').value;
+    if (scheme) rule.scheme = scheme;
+    const port = parseInt(row.querySelector('.pacp-rule-port').value);
+    if (port) rule.port = port;
+    const poolId = row.querySelector('.pacp-rule-pool').value;
+    if (poolId && rule.action === 'use_pool') rule.poolId = poolId;
+    out.push(rule);
+  });
+  return out;
+}
+
+function renderPACPanelIssues(boxId, issues) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  if (!issues || !issues.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = '<strong>Validation failed — nothing was saved:</strong><ul style="margin:6px 0 0 18px;padding:0">' +
+    issues.map(i => '<li>' + (i.entry ? '<code>' + escHtml(i.entry) + '</code>: ' : '') + escHtml(i.message) + '</li>').join('') +
+    '</ul>';
+  box.style.display = '';
+}
+
+async function savePACProfile() {
+  const body = {
+    id: document.getElementById('pacp-id').value.trim(),
+    name: document.getElementById('pacp-name').value.trim(),
+    description: document.getElementById('pacp-desc').value.trim(),
+    enabled: document.getElementById('pacp-enabled').value === 'true',
+    poolId: document.getElementById('pacp-pool').value,
+    availabilityMode: document.getElementById('pacp-mode').value,
+    privateNetworks: document.getElementById('pacp-private').value,
+    rules: collectPACRules(),
+  };
+  const isNew = pacEditingProfile === '';
+  // Send the loaded revision on edits so the server's optimistic-concurrency
+  // guard rejects a stale overwrite instead of silently clobbering a
+  // concurrent admin's change.
+  if (!isNew) body.revision = pacEditingRevision;
+  const path = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
+  try {
+    const resp = await apiFetch(path, {
+      method: isNew ? 'POST' : 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (resp.status === 409) {
+      toast(await resp.text(), 'error'); // stale revision or conflict
+      return;
+    }
+    if (resp.status === 400) {
+      const data = await resp.json().catch(() => null);
+      renderPACPanelIssues('pac-profile-errors', data && data.issues);
+      toast('Profile validation failed', 'error');
+      return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    cancelPACProfileEdit();
+    toast('Profile saved', 'success');
+    loadPACProfiles();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deletePACProfile(id) {
+  if (!await confirmAction('Delete profile?', 'Delete profile "' + id + '"? Clients using /pac/' + id + '.pac will get 404.')) return;
+  try {
+    const resp = await apiFetch('/api/pac/profiles/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
+    toast('Profile deleted', 'success');
+    loadPACProfiles();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+function pacEndpointRowHTML(ep) {
+  ep = ep || { host: '', port: '' };
+  return '<div class="pacpl-ep" style="display:grid;grid-template-columns:1fr 110px auto;gap:6px;margin-top:6px">' +
+    '<input class="input pacpl-ep-host" placeholder="proxy-il.example.com" value="' + escHtml(ep.host) + '">' +
+    '<input class="input pacpl-ep-port" placeholder="8080" value="' + (ep.port || '') + '">' +
+    '<button class="btn ghost sm" data-click="removePACEndpoint">&times;</button></div>';
+}
+
+function addPACEndpointRow() {
+  const box = document.getElementById('pacpl-endpoints');
+  if (box.querySelectorAll('.pacpl-ep').length >= 3) { toast('Maximum 3 endpoints', 'error'); return; }
+  box.insertAdjacentHTML('beforeend', pacEndpointRowHTML(null));
+}
+
+function removePACEndpoint(el) {
+  const row = el.closest('.pacpl-ep');
+  if (row) row.remove();
+}
+
+function newPACPool() { openPACPoolEditor(null); }
+
+function editPACPool(id) {
+  const pl = (pacProfilesData.pools || []).find(x => x.id === id);
+  if (pl) openPACPoolEditor(pl);
+}
+
+function openPACPoolEditor(pl) {
+  pacEditingPool = pl ? pl.id : '';
+  document.getElementById('pac-pool-editor').style.display = '';
+  document.getElementById('pacpl-id').value = pl ? pl.id : '';
+  document.getElementById('pacpl-id').disabled = !!pl;
+  document.getElementById('pacpl-name').value = pl ? pl.name : '';
+  const eps = document.getElementById('pacpl-endpoints');
+  eps.innerHTML = '';
+  for (const ep of (pl && pl.endpoints ? pl.endpoints : [{ host: '', port: '' }])) {
+    eps.insertAdjacentHTML('beforeend', pacEndpointRowHTML(ep));
+  }
+  renderPACPanelIssues('pac-pool-errors', null);
+}
+
+function cancelPACPoolEdit() {
+  pacEditingPool = null;
+  document.getElementById('pac-pool-editor').style.display = 'none';
+}
+
+async function savePACPool() {
+  const endpoints = [];
+  document.querySelectorAll('#pacpl-endpoints .pacpl-ep').forEach(row => {
+    const host = row.querySelector('.pacpl-ep-host').value.trim();
+    const port = parseInt(row.querySelector('.pacpl-ep-port').value);
+    if (host || port) endpoints.push({ host, port: port || 0 });
+  });
+  const body = {
+    id: document.getElementById('pacpl-id').value.trim(),
+    name: document.getElementById('pacpl-name').value.trim(),
+    endpoints,
+  };
+  const isNew = pacEditingPool === '';
+  const path = isNew ? '/api/pac/pools' : '/api/pac/pools/' + encodeURIComponent(pacEditingPool);
+  try {
+    const resp = await apiFetch(path, {
+      method: isNew ? 'POST' : 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (resp.status === 400) {
+      const data = await resp.json().catch(() => null);
+      renderPACPanelIssues('pac-pool-errors', data && data.issues);
+      toast('Pool validation failed', 'error');
+      return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    cancelPACPoolEdit();
+    toast('Pool saved', 'success');
+    loadPACProfiles();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+async function deletePACPool(id) {
+  if (!await confirmAction('Delete pool?', 'Delete pool "' + id + '"? Profiles referencing it block deletion.')) return;
+  try {
+    const resp = await apiFetch('/api/pac/pools/' + encodeURIComponent(id), { method: 'DELETE' });
+    if (resp.status === 409) { toast(await resp.text(), 'error'); return; }
+    if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
+    toast('Pool deleted', 'success');
+    loadPACProfiles();
+  } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
