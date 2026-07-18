@@ -237,6 +237,22 @@ func TestMITM_NativeH2_BlocksFileDownload(t *testing.T) {
 	if len(body) == 0 || resp.Header.Get("Content-Type") == "" {
 		t.Fatalf("expected a 403 block body with content-type, got %q ct=%q", body, resp.Header.Get("Content-Type"))
 	}
+
+	// ADR-0011 (Codex #828): the BLOCK-log row — the highest-value dec.* drill-down
+	// target — must carry the inspected dec block, not just the delivered path.
+	var blocked *DecryptionBlock
+	for _, e := range logGet() {
+		if e.Status == "FILE_BLOCKED" && e.Dec != nil {
+			blocked = e.Dec
+			break
+		}
+	}
+	if blocked == nil {
+		t.Fatal("FILE_BLOCKED row on the native-H2 path has no dec block — block rows are not filterable by dec.*")
+	}
+	if blocked.Outcome != "inspected" || blocked.ALPN != "h2" {
+		t.Fatalf("blocked dec block = outcome %q alpn %q, want inspected/h2", blocked.Outcome, blocked.ALPN)
+	}
 }
 
 // recordingRW is a minimal http.ResponseWriter that records headers/status/body

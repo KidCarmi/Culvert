@@ -873,6 +873,7 @@ relayLoop:
 			id:        id,
 			host:      hostOnly,
 			clientIP:  clientIP,
+			dec:       decBlock, // ADR-0011: rides block-log rows too
 			responder: h1BlockResponder{w: clientTLS},
 			// H1 upstream leg: serialize the request and parse the response over
 			// the persistent TLS conn pair. req.Body is closed after the write
@@ -997,6 +998,10 @@ type inspectExchange struct {
 	responder blockResponder
 	roundTrip func(*http.Request) (*http.Response, error)
 	deliver   func(*http.Response) error
+	// dec is the ADR-0011 inspected decryption block for this tunnel (built once per
+	// session). It rides the BLOCK-log rows too — a blocked inspected session is the
+	// highest-value dec.* drill-down target — not just the delivered LogFullURI entry.
+	dec *DecryptionBlock
 }
 
 // runInspectExchange applies the protocol-neutral inspection pipeline to one
@@ -1020,7 +1025,7 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 
 	// File blocking (inner request) runs before any response byte reaches the
 	// client, so a clean 403 is safe to emit.
-	if inspectFileBlocked(ex.responder, ex.req, resp, ex.match, ex.host, ex.clientIP) {
+	if inspectFileBlocked(ex.responder, ex.req, resp, ex.match, ex.host, ex.clientIP, ex.dec) {
 		return exchangeOutcome{kind: exBlocked}
 	}
 
@@ -1033,7 +1038,7 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 	// Unified scan buffer: magic/polyglot + CDR + DPI + ClamAV + YARA. Buffers up
 	// to maxScanBufferBytes() before forwarding so any match blocks the response
 	// entirely (true prevention).
-	switch scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP) {
+	switch scanInspectBody(ex.outer, ex.req, resp, ex.responder, ex.match, ex.id, ex.host, ex.clientIP, ex.dec) {
 	case scanBlocked:
 		return exchangeOutcome{kind: exBlocked}
 	case scanReadError:
@@ -1062,12 +1067,12 @@ func runInspectExchange(ex *inspectExchange) exchangeOutcome {
 // Content-Type MIME. On a match it records the block, closes resp.Body, writes
 // the block page to the client, and returns true — the caller must stop serving
 // the tunnel. Returns false (resp.Body left open) when nothing is blocked.
-func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string, dec *DecryptionBlock) bool {
 	// 1. Global file extension blocklist — inner request URL.
 	if ext := fileBlocker.CheckPath(req.URL.Path); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "global ext")
 		return true
@@ -1077,13 +1082,13 @@ func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Respons
 	if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(req.URL.Path) {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, string(match.Rule.FileProfile), "policy profile")
 		return true
 	}
 	// 3. Content-Disposition header — generic URL but declared filename.
-	if inspectCDBlocked(br, req, resp, match, hostOnly, clientIP) {
+	if inspectCDBlocked(br, req, resp, match, hostOnly, clientIP, dec) {
 		return true
 	}
 	// 4. Content-Type MIME — renamed executables where the server still reports
@@ -1091,7 +1096,7 @@ func inspectFileBlocked(br blockResponder, req *http.Request, resp *http.Respons
 	if ext := fileBlocker.CheckContentType(resp.Header.Get("Content-Type")); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "content-type")
 		return true
@@ -1114,7 +1119,7 @@ func emitFileBlock(br blockResponder, hostOnly, urlPath, ext, source string) {
 // on the global blocklist, or whose filename matches the matched rule's file
 // profile (catches SourceForge-style /files/latest/download URLs). Returns true
 // if it blocked (resp.Body closed, block page written).
-func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string) bool {
+func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response, match *PolicyMatch, hostOnly, clientIP string, dec *DecryptionBlock) bool {
 	cd := resp.Header.Get("Content-Disposition")
 	if cd == "" {
 		return false
@@ -1122,7 +1127,7 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 	if ext := fileBlocker.CheckContentDisposition(cd); ext != "" {
 		atomic.AddInt64(&statFileBlocked, 1)
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "FILE_BLOCKED", ext, "", hostOnly, req.URL.Path, match, dec)
 		resp.Body.Close()
 		emitFileBlock(br, hostOnly, req.URL.Path, ext, "content-disposition")
 		return true
@@ -1136,7 +1141,7 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 	}
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match)
+	recordInspectBlock(clientIP, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, hostOnly, req.URL.Path, match, dec)
 	resp.Body.Close()
 	emitFileBlock(br, hostOnly, fn, string(match.Rule.FileProfile), "policy profile (content-disposition)")
 	return true
@@ -1148,11 +1153,11 @@ func inspectCDBlocked(br blockResponder, req *http.Request, resp *http.Response,
 // the block page. status is the request-log status ("FILE_BLOCKED"/
 // "POLYGLOT_BLOCKED"), detail the matched type/reason, source the BlockConn
 // label ("magic bytes"/"polyglot").
-func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyMatch, status, detail, source, hostOnly, clientIP, path string) {
+func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyMatch, status, detail, source, hostOnly, clientIP, path string, dec *DecryptionBlock) {
 	origBody.Close()
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordInspectBlock(clientIP, status, detail, "", hostOnly, path, match)
+	recordInspectBlock(clientIP, status, detail, "", hostOnly, path, match, dec)
 	emitFileBlock(br, hostOnly, path, detail, source)
 }
 
@@ -1172,7 +1177,7 @@ func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyM
 //     let this surface as a clean, empty success. Conflating it with scanBlocked
 //     produced a silent empty 200 on the H2 path (an on-path origin reset became a
 //     cacheable success); keeping it distinct is the fail-closed contract.
-func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string) scanBodyOutcome {
+func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly, clientIP string, dec *DecryptionBlock) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
 	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
 	if globalScanExclusions.IsHostExcluded(hostOnly) || !bodyNeedsBuffering(ct) {
@@ -1194,13 +1199,13 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	// File blocking: magic byte detection — block archives even if the
 	// URL/Content-Disposition doesn't reveal the format.
 	if archType := IsBlockedArchive(scanBody); archType != "" {
-		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path)
+		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, clientIP, req.URL.Path, dec)
 		return scanBlocked
 	}
 	// File blocking: polyglot detection — block files whose Content-Type
 	// doesn't match their actual magic bytes.
 	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
-		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path)
+		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, clientIP, req.URL.Path, dec)
 		return scanBlocked
 	}
 
@@ -1226,7 +1231,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	if !remoteScan && !dpiScanner.IsBypassHost(hostOnly) && dpiScanner.Enabled() && isTextContentType(ct) {
 		if pattern, matched := safeDPIScan(scanBody); matched {
 			origBody.Close()
-			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match)
+			recordInspectBlock(clientIP, "DPI_BLOCKED", "", pattern, hostOnly, req.URL.Path, match, dec)
 			dpiBlock(br, hostOnly, pattern)
 			return scanBlocked
 		}
@@ -1247,7 +1252,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		}
 		origBody.Close()
 		atomic.AddInt64(&statBlocked, 1)
-		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match)
+		recordInspectBlock(clientIP, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, hostOnly, req.URL.Path, match, dec)
 		scanBlockConn(br, hostOnly, scanResult.Reason, scanResult.Source)
 		return scanBlocked
 	}

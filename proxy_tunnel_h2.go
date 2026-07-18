@@ -433,6 +433,7 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		id:        id,
 		host:      hostOnly,
 		clientIP:  clientIP,
+		dec:       decBlock, // ADR-0011: rides block-log rows too
 		responder: &h2BlockResponder{w: w},
 		roundTrip: func(rq *http.Request) (*http.Response, error) {
 			resp, err := upstreamCC.RoundTrip(rq)

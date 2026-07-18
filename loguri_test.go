@@ -76,9 +76,9 @@ func TestRecordInspectBlock_URIGatedOnLogFullURI(t *testing.T) {
 	t.Cleanup(func() { globalLogStore.Store(oldLS) })
 
 	recordInspectBlock("1.2.3.4", "FILE_BLOCKED", "exe", "", "h.example.com", "/d/app.exe",
-		&PolicyMatch{Rule: &PolicyRule{Name: "r", LogFullURI: true}})
+		&PolicyMatch{Rule: &PolicyRule{Name: "r", LogFullURI: true}}, nil)
 	recordInspectBlock("1.2.3.4", "SCAN_BLOCKED", "clam", "eicar", "h2.example.com", "/x",
-		&PolicyMatch{Rule: &PolicyRule{Name: "r2"}}) // LogFullURI off
+		&PolicyMatch{Rule: &PolicyRule{Name: "r2"}}, nil) // LogFullURI off
 
 	entries := logGet()
 	var fileURI, scanURI string
