@@ -375,9 +375,11 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 		// "unchanged". Cheap: read the ring's newest FP, no O(N) re-hash.
 		if dreq.KnownFP != "" {
 			if fp, ok := globalConfigStore.deltaRing.newestFP(cur); ok && fp != dreq.KnownFP {
+				statConfigDeltaResync.Add(1)
 				return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
 			}
 		}
+		statConfigDeltaUnchanged.Add(1)
 		return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: cur, Epoch: epoch})
 	}
 
@@ -385,6 +387,7 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 	if !ok || latest != cur {
 		// Gap, resync marker, or the ring lags the store version (the brief
 		// record-after-unlock window, or a non-contiguous publish). Full resync.
+		statConfigDeltaResync.Add(1)
 		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
 	}
 
@@ -399,12 +402,15 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 	// blob that gRPC would reject anyway. The chain is ring-bounded (≤32 MiB) and
 	// the remainder ≤ the full snapshot; their sum can exceed the frame.
 	if chainPayloadBytes(chain)+len(remainder) > maxSnapshotWireBytes {
+		statConfigDeltaFrameSkips.Add(1)
+		statConfigDeltaResync.Add(1)
 		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
 	}
 	targetFP := ""
 	if n := len(chain); n > 0 {
 		targetFP = chain[n-1].FP
 	}
+	statConfigDeltaServed.Add(1)
 	return json.Marshal(getConfigDeltaReply{
 		Mode:          "delta",
 		BaseVersion:   dreq.KnownVersion,

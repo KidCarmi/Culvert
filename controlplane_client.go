@@ -336,6 +336,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.lastVersion = snap.Version
+	dpAppliedConfigVersion.Store(snap.Version)
 }
 
 // tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
@@ -451,6 +452,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	dpMarkCPPollHealthy()
 	c.resetBackoff()
 	c.lastVersion = reply.TargetVersion
+	dpAppliedConfigVersion.Store(reply.TargetVersion)
 	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
 	return true
 }
@@ -464,11 +466,13 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 			return
 		case <-ticker.C:
 			report := MetricsReport{
-				NodeID:   c.nodeID,
-				Total:    atomic.LoadInt64(&statTotal),
-				Blocked:  atomic.LoadInt64(&statBlocked),
-				AuthFail: atomic.LoadInt64(&statAuthFail),
-				Uptime:   uptime(),
+				NodeID:        c.nodeID,
+				Total:         atomic.LoadInt64(&statTotal),
+				Blocked:       atomic.LoadInt64(&statBlocked),
+				AuthFail:      atomic.LoadInt64(&statAuthFail),
+				Uptime:        uptime(),
+				ConfigVersion: dpAppliedConfigVersion.Load(),
+				SyncedFP:      bl.SyncedFingerprint(),
 			}
 			b, _ := json.Marshal(report)
 			raw, err := c.call(ctx, methodPushMetrics, b)
@@ -649,6 +653,12 @@ const (
 // connect() (which clears the latch) never runs. At the default poll interval
 // this re-probes a few minutes after an upgrade — cheap, and self-correcting.
 const deltaReprobeInterval = 20
+
+// dpAppliedConfigVersion is the config version this DP currently enforces,
+// published for the metrics loop to read WITHOUT racing c.lastVersion (which is
+// single-goroutine on the config loop). Every path that advances c.lastVersion
+// also stores it here.
+var dpAppliedConfigVersion atomic.Int64
 
 // dpLastFullSnapshotBytes is the size of the most recent FULL config snapshot
 // the DP received (not the tiny version-unchanged sentinel). It predicts how big

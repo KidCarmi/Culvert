@@ -613,6 +613,8 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleAdmin, Mutating: true, AuditExpected: true}}},
 	{Path: "/api/cluster/metrics", Handler: "apiClusterMetrics", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
+	{Path: "/api/cluster/convergence", Handler: "apiClusterConvergence", Domain: "cluster", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},
 	{Path: "/api/cluster/ca", Handler: "apiClusterCA", Domain: "cluster", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

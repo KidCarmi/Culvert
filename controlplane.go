@@ -132,6 +132,11 @@ type MetricsReport struct {
 	Blocked  int64  `json:"blocked"`
 	AuthFail int64  `json:"auth_fail"`
 	Uptime   string `json:"uptime"`
+	// T3 P1 reverse telemetry: the config version + blocklist synced fingerprint
+	// this DP currently enforces, so the CP can surface fleet convergence and
+	// stragglers. omitempty keeps an old DP's report shape unchanged.
+	ConfigVersion int64  `json:"config_version,omitempty"`
+	SyncedFP      string `json:"synced_fp,omitempty"`
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.

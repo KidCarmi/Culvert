@@ -72,8 +72,10 @@ import (
 //     GET, admin PUT/DELETE).
 //   - 177 — ADR-0011 §4 added /api/decryption/redaction (GET viewer / PUT admin
 //     host/SNI redaction toggle).
+//   - 178 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
+//     convergence / straggler view; viewer).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 178
+	const want = 179
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
