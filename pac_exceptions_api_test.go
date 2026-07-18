@@ -195,6 +195,40 @@ func TestAPIPACExceptions_PutGetDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAPIPACExceptions_ClearedOnProfileDelete pins the Codex finding fix:
+// deleting a profile must clear its governance record so a later profile
+// recreated under the same id cannot inherit stale attestation.
+func TestAPIPACExceptions_ClearedOnProfileDelete(t *testing.T) {
+	resetPACProfilesGlobals(t)
+	oe := pacExceptions.Snapshot()
+	t.Cleanup(func() { pacExceptions.Restore(oe) })
+	pacExceptions.Restore(pac.ExceptionState{ByID: map[string]pac.ExceptionRecord{}, Path: filepath.Join(t.TempDir(), "pac_exceptions.json")})
+
+	if err := pacProfiles.Set(pac.ProfilesConfig{
+		Pools: []pac.Pool{{ID: "p", Name: "P", Endpoints: []pac.PoolEndpoint{{Host: "px.example", Port: 8080}}}},
+		Profiles: []pac.Profile{
+			{ID: "hq", Name: "HQ", Enabled: true, PoolID: "p", PrivateNetworks: pac.PrivateProxy, AvailabilityMode: pac.ModeBalanced, Revision: 1,
+				Rules: []pac.Rule{{Kind: pac.RuleKindWildcard, Pattern: "*.cdn.example", Action: pac.ActionDirect}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pacExceptions.Put(pac.ExceptionRecord{ProfileID: "hq", Owner: "neteng", Reason: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pacExceptions.Get("hq"); !ok {
+		t.Fatal("precondition: exception should exist")
+	}
+
+	rec := pacAPIReq(t, http.MethodDelete, "/api/pac/profiles/hq", "", RoleAdmin, "198.51.100.90:0")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete profile: %d (%s)", rec.Code, rec.Body.String())
+	}
+	if _, ok := pacExceptions.Get("hq"); ok {
+		t.Error("exception record must be cleared when its profile is deleted (stale-attestation guard)")
+	}
+}
+
 func TestAPIPACExceptions_MethodNotAllowed(t *testing.T) {
 	pacExcTestSetup(t)
 	rec := pacExcReq(t, http.MethodPost, "/api/pac/posture/exceptions", "", RoleViewer)

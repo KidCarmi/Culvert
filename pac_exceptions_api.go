@@ -204,7 +204,10 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 	auditEvent(r, "pac.exception_set", id,
 		fmt.Sprintf("owner=%q app=%q expires=%q cadence=%d",
 			sanitizeLog(rec.Owner), sanitizeLog(rec.BusinessApp), sanitizeLog(rec.ExpiresAt), rec.ReviewCadenceDays))
-	saveConfigVersion(actor, "pac.exception_set")
+	// Intentionally NOT saveConfigVersion: this store is node-local and is not
+	// on the config-version capture/apply surface, so a version snapshot could
+	// neither record nor restore this change — it would be a misleading no-op
+	// rollback point. The change is audited above instead.
 	jsonOK(w, rec)
 }
 
@@ -219,8 +222,7 @@ func pacExceptionDelete(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	actor := sessionAdmin(r)
 	auditEvent(r, "pac.exception_clear", id, "governance cleared")
-	saveConfigVersion(actor, "pac.exception_clear")
+	// Not versioned — node-local store, see pacExceptionPut.
 	w.WriteHeader(http.StatusNoContent)
 }
