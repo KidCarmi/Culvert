@@ -543,7 +543,10 @@ func (s *standbyLoopState) stepStreak(outcome reachabilityOutcome) (atThreshold 
 		s.syncRecovered()
 		return false
 	case outcomeLocalFailure:
-		s.warnLocalClientFault(errLocalTLSPreflight)
+		// Reached only when syncFromLeader mapped a valid-response-but-local-apply
+		// failure to LocalFailure (preflight/construction faults warn earlier and
+		// never reach stepStreak). Hold + warn; never reset, never advance.
+		s.warnLocalClientFault(errLocalApplyFailed)
 		return false
 	case outcomeAmbiguous:
 		if !s.h.leaseConfigured() {
@@ -592,7 +595,7 @@ func (s *standbyLoopState) syncRecovered() {
 // never evidence the leader is unreachable (A3, owner #1/#4). Warn-once per
 // episode to avoid 5s-tick spam.
 func (s *standbyLoopState) warnLocalClientFault(err error) {
-	logger.Printf("HA: local fault (TLS material / preflight / client) — staying read-only, NOT promoting: %v", err)
+	logger.Printf("HA: local fault (TLS preflight / client construction / leader-state apply) — staying read-only, NOT promoting: %v", err)
 	if s.localFaultWarned {
 		return
 	}
@@ -712,7 +715,22 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
 		h.promote("planned handoff requested by leader")
 	}
-	return ok, outcomeLeaderReachable
+	if !ok {
+		logger.Printf("HA: leader reachable but local apply of HA state failed — holding, NOT promoting")
+	}
+	return ok, responseOutcome(ok)
+}
+
+// responseOutcome maps the result of applying a valid, epoch-verified leader
+// bundle to a reachability outcome. The leader is reachable in both cases (it
+// answered): a successful apply is LeaderReachable (reset); a LOCAL apply failure
+// (CA persist, config snapshot, decrypt, disk) is LocalFailure (hold + warn) —
+// never a healthy sync that would reset the streak and clear the warn latches.
+func responseOutcome(applied bool) reachabilityOutcome {
+	if applied {
+		return outcomeLeaderReachable
+	}
+	return outcomeLocalFailure
 }
 
 // reachabilityOutcome is the typed, layered classification of one HASync attempt
@@ -752,6 +770,10 @@ var (
 	errNoLeaderClient = errors.New("no leader client (local construction failed)")
 	// errLocalTLSPreflight wraps a failed local TLS-material preflight.
 	errLocalTLSPreflight = errors.New("local TLS preflight failed")
+	// errLocalApplyFailed marks a LOCAL failure to apply a valid leader bundle
+	// (CA persist, config snapshot, decrypt, disk). The leader is reachable; the
+	// fault is local, so it holds the streak and warns rather than resetting.
+	errLocalApplyFailed = errors.New("local apply of leader HA state failed")
 )
 
 // classifyLeaderReachability maps an HASync RPC error to a typed reachability
@@ -787,8 +809,15 @@ func classifyLeaderReachability(err error) reachabilityOutcome {
 var preflightLocalTLS = defaultPreflightLocalTLS
 
 func defaultPreflightLocalTLS(certFile, keyFile, caFile string) error {
-	if certFile == "" || keyFile == "" {
+	switch {
+	case certFile == "" && keyFile == "":
 		return nil // insecure/dev mode — no local client material to validate
+	case certFile == "" || keyFile == "":
+		// Partial material: only one of cert/key configured. NewDataPlaneClient
+		// enables TLS only when BOTH are set, so this would otherwise silently dial
+		// PLAINTEXT (or fail the handshake and be misread as remote ambiguity). It
+		// is a LOCAL misconfiguration — fail the preflight so it is held + alerted.
+		return fmt.Errorf("%w: incomplete client TLS material — need both cert and key (cert set=%t, key set=%t)", errLocalTLSPreflight, certFile != "", keyFile != "")
 	}
 	cert, err := loadDPNodeKeyPair(certFile, keyFile) // readable + cert/key match (+ KEK decrypt)
 	if err != nil {

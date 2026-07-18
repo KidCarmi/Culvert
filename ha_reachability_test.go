@@ -17,6 +17,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -284,5 +285,63 @@ func writeTestCert(t *testing.T, certPath, keyPath string, notBefore, notAfter t
 	}
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --- Review fix 1: partial local TLS material is a LOCAL fault, not "ok". ---
+
+func TestPreflight_PartialMaterialIsLocalFault(t *testing.T) {
+	// Both empty = dev/insecure mode → pass.
+	if err := defaultPreflightLocalTLS("", "", ""); err != nil {
+		t.Fatalf("both-empty (dev) preflight = %v, want nil", err)
+	}
+	// Exactly one of cert/key set = partial material → NewDataPlaneClient would
+	// silently dial plaintext; the preflight must reject it as a local fault.
+	if err := defaultPreflightLocalTLS("/tmp/only-cert.pem", "", ""); !errors.Is(err, errLocalTLSPreflight) {
+		t.Fatalf("cert-only preflight = %v, want errLocalTLSPreflight", err)
+	}
+	if err := defaultPreflightLocalTLS("", "/tmp/only-key.pem", ""); !errors.Is(err, errLocalTLSPreflight) {
+		t.Fatalf("key-only preflight = %v, want errLocalTLSPreflight", err)
+	}
+}
+
+// --- Review fix 2: a valid response with a local apply failure is LocalFailure. ---
+
+func TestResponseOutcome_ApplyFailureIsLocalNotReachable(t *testing.T) {
+	if got := responseOutcome(true); got != outcomeLeaderReachable {
+		t.Fatalf("applied=true → %v, want outcomeLeaderReachable", got)
+	}
+	if got := responseOutcome(false); got != outcomeLocalFailure {
+		t.Fatalf("applied=false (local apply failed) → %v, want outcomeLocalFailure", got)
+	}
+}
+
+// TestLocalApplyFailure_HoldsStreakAndWarns proves the downstream policy: a local
+// apply failure HOLDS the streak (does not reset) and fires the local-fault warn,
+// unlike outcomeLeaderReachable which would reset the streak and clear latches
+// (the hidden-unhealthy-standby regression the review flagged).
+func TestLocalApplyFailure_HoldsStreakAndWarns(t *testing.T) {
+	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: 2}
+	if s.handleSyncResult(false, outcomeLocalFailure) {
+		t.Fatal("local apply failure promoted the standby")
+	}
+	if s.failCount != 2 {
+		t.Fatalf("local apply failure changed the streak: failCount=%d, want 2 (held, not reset)", s.failCount)
+	}
+	if !s.localFaultWarned {
+		t.Fatal("local apply failure was not made operator-visible")
+	}
+	if s.h.IsLeader() {
+		t.Fatal("local apply failure promoted the standby")
+	}
+
+	// Contrast: a genuine reachable sync resets the streak (this is exactly why
+	// mapping an apply failure to LeaderReachable would have hidden the fault).
+	r := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: 2}
+	if r.handleSyncResult(false, outcomeLeaderReachable) {
+		t.Fatal("reachable outcome unexpectedly promoted")
+	}
+	if r.failCount != 0 {
+		t.Fatalf("reachable outcome should reset the streak: failCount=%d, want 0", r.failCount)
 	}
 }
