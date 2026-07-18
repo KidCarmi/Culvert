@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -183,7 +184,7 @@ func TestCDRHygiene_PolicyRemove_NoConfigVersion(t *testing.T) {
 // This structural test catches the enroll case AND any future CDR
 // handler that drifts back into the misleading pattern.
 func TestCDRHygiene_NoLiveSaveConfigVersionCallsInCDRUI(t *testing.T) {
-	data, err := os.ReadFile("cdr_ui.go")
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "cdr_ui.go"))
 	if err != nil {
 		t.Fatalf("read cdr_ui.go: %v", err)
 	}

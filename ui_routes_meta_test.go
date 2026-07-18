@@ -195,7 +195,10 @@ var helperSourceFiles = []string{
 func scanRegisteredRoutes() (map[string]string, error) {
 	out := make(map[string]string)
 	for _, name := range helperSourceFiles {
-		data, err := os.ReadFile(filepath.Clean(name))
+		// Absolute path anchored to the package source dir — NOT CWD — so a
+		// concurrent test's os.Chdir cannot make this scan read a wrong/partial
+		// file set (the CWD-race flake that intermittently breaks C1 reverse parity).
+		data, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
 		if err != nil {
 			return nil, err
 		}

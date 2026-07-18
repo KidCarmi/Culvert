@@ -357,10 +357,10 @@ func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {
 	swapProfiles(t)
 	fo, _ := bindFailOpenProfile(t, "fo", "fail-open")
 	id := ProxyIdentity{ClientIP: "1.2.3.4", Identity: "u1"}
-	if !maybeFailOpenOrigin("cc.example", fo, id, errors.New("remote error: tls: certificate required")) {
+	if _, rescue := maybeFailOpenOrigin("cc.example", fo, id, errors.New("remote error: tls: certificate required")); !rescue {
 		t.Fatal("client-cert-required must rescue the triggering session")
 	}
-	if maybeFailOpenOrigin("unsup.example", fo, id, errors.New("tls: server selected unsupported protocol version 301")) {
+	if _, rescue := maybeFailOpenOrigin("unsup.example", fo, id, errors.New("tls: server selected unsupported protocol version 301")); rescue {
 		t.Fatal("unsupported-params must NOT rescue the triggering session (learn-only)")
 	}
 	// ...but it DID learn (confirmN=1) — next session self-heals.
@@ -370,7 +370,7 @@ func TestMaybeFailOpenOrigin_RescueOnlyClientCert(t *testing.T) {
 	}
 	// A fail-close rule never learns/rescues.
 	fc, _ := bindFailOpenProfile(t, "fc", "fail-close")
-	if maybeFailOpenOrigin("x.example", fc, id, errors.New("remote error: tls: certificate required")) {
+	if _, rescue := maybeFailOpenOrigin("x.example", fc, id, errors.New("remote error: tls: certificate required")); rescue {
 		t.Fatal("fail-close rule must never rescue")
 	}
 }

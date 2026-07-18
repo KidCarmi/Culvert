@@ -219,6 +219,23 @@ func clientInspectFailureOutcome(err error, hostOnly string, dec sslResolution, 
 	return o
 }
 
+// withLearn annotates a FAILURE outcome with the auto-exclusion learner fields
+// when this session actually fed the cache (maybeFailOpen* returned a non-empty
+// reason). ADR-0011 cache-lifecycle accuracy (Codex #840): the DECRYPT_FAILED
+// drill-down row must show cache_learned/excl_reason/excl_scope for the exact
+// learn-only failures that populate the cache — not a blanket cache_learned:false
+// with empty exclusion fields. Empty reason ⇒ no learn ⇒ outcome unchanged.
+// Returns o so it composes inline at the failure call sites.
+func withLearn(o *DecryptionOutcome, reason AutoExcludeReason, scope string) *DecryptionOutcome {
+	if o == nil || reason == "" {
+		return o
+	}
+	o.CacheLearned = true
+	o.ExclReason = reason
+	o.ExclScope = scope
+	return o
+}
+
 // classifyOriginFailure maps an upstream (origin-leg) inspect-handshake error to the
 // bounded ADR-0011 (FailStage, FailCategory, DecisionSource). It reuses isOriginCertVerifyErr
 // for the certificate class (a Block decision) and matches the same narrow, deliberate TLS

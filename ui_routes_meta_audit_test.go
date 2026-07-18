@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -155,7 +156,10 @@ func doScanHandlers() (map[string]*handlerBehavior, error) {
 	fset := token.NewFileSet()
 	out := make(map[string]*handlerBehavior, 256)
 
-	entries, err := os.ReadDir(".")
+	// Absolute package source dir — NOT CWD — so a concurrent test's os.Chdir
+	// cannot make this AST scan enumerate a different directory (the CWD-race flake).
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +168,7 @@ func doScanHandlers() (map[string]*handlerBehavior, error) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", name, err)
 		}

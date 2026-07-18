@@ -166,8 +166,8 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		// Learn-only on the native path: the 200 is already sent, so the current
 		// session cannot be rescued (unlike the strip path). A qualifying failure
 		// still learns the host so the NEXT session self-heals via the cache.
-		maybeFailOpenOrigin(hostOnly, match, id, err)
-		recordDecryptFailure(originInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
+		learned, _ := maybeFailOpenOrigin(hostOnly, match, id, err)
+		recordDecryptFailureEntry(withLearn(originInspectFailureOutcome(err, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("SSL_INSPECT(native) upstream TLS handshake %q: %v", sanitizeLog(targetHost), err)
 		return
 	}
@@ -180,10 +180,10 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, newMITMClientConfigForALPN(downstreamProtos))
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                                                            //nolint:errcheck // best-effort cleanup
-		upstreamTLS.Close()                                                          //nolint:errcheck // best-effort cleanup
-		maybeFailOpenClient(hostOnly, match, id, err)                                // learn a pinning rejection (learn-only)
-		recordDecryptFailure(clientInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
+		clientTLS.Close()                                                                                                                                         //nolint:errcheck // best-effort cleanup
+		upstreamTLS.Close()                                                                                                                                       //nolint:errcheck // best-effort cleanup
+		learned := maybeFailOpenClient(hostOnly, match, id, err)                                                                                                  // learn a pinning rejection (learn-only)
+		recordDecryptFailureEntry(withLearn(clientInspectFailureOutcome(err, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("SSL_INSPECT(native) client TLS handshake %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}

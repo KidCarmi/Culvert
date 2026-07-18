@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ import (
 // would be a misleading no-op rollback point. Source-scan guard (mirrors the
 // CDR-hygiene structural test) so re-adding the call anywhere in the file fails.
 func TestRegression_GovernanceHandlerNeverVersions(t *testing.T) {
-	src, err := os.ReadFile("pac_exceptions_api.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "pac_exceptions_api.go"))
 	if err != nil {
 		t.Fatalf("read handler source: %v", err)
 	}
