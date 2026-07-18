@@ -606,6 +606,30 @@ func (b *Store) List() []string {
 	return out
 }
 
+// FeedList returns the CP-authoritative (non-manual) entries — the synced set —
+// with wildcards rendered as "*.example.com". The delta path persists this as the
+// last-good BlockedHosts so a cold restart reconstructs a fingerprint-consistent
+// synced set: List() would fold in DP-local manual blocks the CP set never had,
+// which on reload would poison syncedFP relative to the CP's feed-only target.
+// (Enforcement of manual blocks is unaffected — ReplaceFeedEntries re-injects
+// b.manual on every apply.)
+func (b *Store) FeedList() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.exact)+len(b.wildcards))
+	for h := range b.exact {
+		if !b.manual[h] {
+			out = append(out, h)
+		}
+	}
+	for suffix := range b.wildcards {
+		if h := "*" + suffix; !b.manual[h] {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // ListWithSource returns all blocklist entries annotated with their origin:
 // "manual" if added by an admin via the UI/API, "feed" if imported from a feed.
 func (b *Store) ListWithSource() []Entry {

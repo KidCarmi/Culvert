@@ -100,32 +100,66 @@ func (b *Store) SyncedFingerprint() string {
 	return hex.EncodeToString(b.syncedFP[:])
 }
 
-// ApplyDelta adds and removes hosts in place. Removes are processed first so an
-// entry appearing in both sets ends up ADDED (re-add wins), matching the
-// feed-refresh precedence. A removed host that is an admin MANUAL block is left
-// in ENFORCEMENT (invariant 1) but is still XORed out of the synced fingerprint
-// (invariant 2 — the CP's authoritative set dropped it). Normalization mirrors
-// Add/ReplaceFeedEntries.
+// ApplyDelta adds and removes hosts in place. A removed host that is an admin
+// MANUAL block is left in ENFORCEMENT (invariant 1) but is still dropped from the
+// synced fingerprint (invariant 2 — the CP's authoritative set dropped it).
+// Normalization mirrors Add/ReplaceFeedEntries.
 //
-// The synced fingerprint is maintained assuming a WELL-FORMED delta: each
-// removed host was present in the base version's synced set and each added host
-// absent from it (the CP computes added/removed as true set differences between
-// consecutive versions, and the strict base_version==KnownVersion gate on the
-// DP admits only gap-free, in-order deltas). A malformed/duplicated delta can
-// double-toggle a token and corrupt the fingerprint — which is caught by the
-// post-apply fingerprint comparison and forces a resync, never silent
-// divergence.
+// Two properties are load-bearing:
+//
+//   - DEDUP / at-most-once (a CORRECTNESS control, not an optimization). The
+//     syncedFP is a symmetric-difference (XOR-toggle) model; the enforcement maps
+//     are idempotent set-assignment. The two agree ONLY when each token is applied
+//     at most once. A corrupted/duplicated delta that toggled a token an EVEN
+//     number of times would cancel in the fingerprint while the map changed once —
+//     a SILENT divergence that the post-apply fingerprint comparison could not
+//     catch (proven by adversarial review). Deduping added/removed here (a host in
+//     BOTH ends up added — re-add wins) forces at-most-once, so any spurious change
+//     is a VISIBLE fingerprint delta → caught → full resync, never silent.
+//
+//   - HASH-BEFORE-LOCK. The O(N) SHA-256 fingerprint folding runs OUTSIDE the
+//     write lock into a local accumulator (XOR is commutative/associative), and
+//     only a single 32-byte XOR merge + the map splice run under b.mu — mirroring
+//     ReplaceFeedEntries' discipline so a large delta never stalls the IsBlocked
+//     hot path for the duration of the hashing.
+//
+// The fingerprint is NOT an authenticity control (it is linear over the token
+// hashes — trivially forgeable by a party that controls delta content); the
+// delta path's tamper-resistance rests on mTLS + the epoch fence. The fingerprint
+// detects transport corruption, missed/duplicated deltas, and misapplication.
 func (b *Store) ApplyDelta(added, removed []string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	addSet := make(map[string]struct{}, len(added))
+	for _, h := range added {
+		if tok, ok := normDeltaHost(h); ok {
+			addSet[tok] = struct{}{}
+		}
+	}
+	remSet := make(map[string]struct{}, len(removed))
 	for _, h := range removed {
 		tok, ok := normDeltaHost(h)
 		if !ok {
 			continue
 		}
-		// The CP-authoritative set no longer contains this host — drop it from
-		// the synced fingerprint regardless of manual protection.
-		fpXOR(&b.syncedFP, tok)
+		if _, dup := addSet[tok]; dup {
+			continue // host in both sets → re-add wins, drop from removed
+		}
+		remSet[tok] = struct{}{}
+	}
+
+	// Fold the fingerprint delta outside the lock.
+	var acc [32]byte
+	for tok := range remSet {
+		fpXOR(&acc, tok)
+	}
+	for tok := range addSet {
+		fpXOR(&acc, tok)
+	}
+
+	b.mu.Lock()
+	for i := range b.syncedFP {
+		b.syncedFP[i] ^= acc[i]
+	}
+	for tok := range remSet {
 		if b.manual[tok] {
 			continue // never delete an admin manual block from ENFORCEMENT
 		}
@@ -138,16 +172,12 @@ func (b *Store) ApplyDelta(added, removed []string) {
 			delete(b.feedSrc, tok)
 		}
 	}
-	for _, h := range added {
-		tok, ok := normDeltaHost(h)
-		if !ok {
-			continue
-		}
-		fpXOR(&b.syncedFP, tok)
+	for tok := range addSet {
 		if strings.HasPrefix(tok, "*.") {
 			b.wildcards[tok[1:]] = true
 		} else {
 			b.exact[tok] = true
 		}
 	}
+	b.mu.Unlock()
 }

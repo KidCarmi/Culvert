@@ -82,6 +82,47 @@ func TestApplyDelta_ConvergesToFingerprint(t *testing.T) {
 	}
 }
 
+// TestApplyDelta_EvenMultiplicityCorruptionIsDetected is the regression for the
+// silent-divergence break the red-team found: a corrupted delta that removes the
+// SAME host twice (removed:[X,X]) must NOT cancel in the fingerprint while the
+// enforcement map drops X once. Dedup forces at-most-once, so the spurious drop
+// shows up as a fingerprint that no longer matches the CP's target for the
+// intended set → the DP would resync rather than silently unblock X.
+func TestApplyDelta_EvenMultiplicityCorruptionIsDetected(t *testing.T) {
+	b := New()
+	b.ReplaceFeedEntries([]string{"evil.example", "ok.example"})
+	// The CP's INTENDED delta for the next version only adds new.example; it does
+	// NOT remove evil.example. targetFP is over {evil, ok, new}.
+	targetFP := FeedSetFingerprint([]string{"evil.example", "ok.example", "new.example"})
+	// A corrupted delta arrives with a duplicated (even-count) removal of evil.
+	b.ApplyDelta([]string{"new.example"}, []string{"evil.example", "evil.example"})
+	if b.SyncedFingerprint() == targetFP {
+		t.Fatal("even-multiplicity corruption cancelled in the fingerprint — silent divergence (the exact break dedup must prevent)")
+	}
+	// And crucially the fingerprint must stay CONSISTENT with the (wrong) realized
+	// set, so the mismatch-vs-target is what triggers the resync — not a random hash.
+	if b.IsBlocked("evil.example") {
+		// dedup applied the removal exactly once; evil is gone from enforcement.
+		t.Fatal("evil should have been removed exactly once by the deduped delta")
+	}
+	if b.SyncedFingerprint() != FeedSetFingerprint([]string{"ok.example", "new.example"}) {
+		t.Fatal("fingerprint must equal the realized set so drift is detectable against the CP target")
+	}
+}
+
+// TestApplyDelta_AddMultiplicityNoOp: adding the same host twice must be a single
+// add (idempotent), not a fingerprint toggle-to-absent.
+func TestApplyDelta_AddMultiplicityNoOp(t *testing.T) {
+	b := New()
+	b.ApplyDelta([]string{"c.example", "c.example"}, nil)
+	if !b.IsBlocked("c.example") {
+		t.Fatal("duplicated add must leave the host blocked (not toggled off)")
+	}
+	if b.SyncedFingerprint() != FeedSetFingerprint([]string{"c.example"}) {
+		t.Fatal("duplicated add must fingerprint as a single-element set")
+	}
+}
+
 // TestReplaceFeedEntries_EstablishesFingerprint: a full apply sets the synced
 // fingerprint to the CP list's fingerprint (ground-truth reset), healing any
 // prior delta drift.
