@@ -16,10 +16,14 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-026** — Administrator training curriculum. Next.
+- **L-030** — Supply-chain integrity / release management. Next (low priority).
 
 ## Recently completed
 
+- **M-026** — Admin training curriculum (`content/training/admin-curriculum.md`).
+  9-module course mapping to the published, verified articles: objectives, labs,
+  checkpoints, capstone. No new product claims. **All medium items complete.**
+  Link check pass. Committed.
 - **M-025** — YouTube "Zero-Trust egress policy demo"
   (`content/youtube/03-zero-trust-policy/package.md`). Full package grounded in
   H-010; safe rollout order (author → test → enforce → verify), Policy Tester

@@ -16,7 +16,7 @@ evidence from but does not mirror.
 |---|---|
 | `docs/` | Documentation-website articles, grouped by topic area. |
 | `youtube/` | YouTube video packages (one directory per video). |
-| `training/` | Administrator-training outlines and curricula. |
+| `training/` | Administrator-training outlines and curricula ([admin curriculum](training/admin-curriculum.md)). |
 | `evidence/` | Claim-evidence ledgers for content units (when kept separate). |
 
 ## Documentation map

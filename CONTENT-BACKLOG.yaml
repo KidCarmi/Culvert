@@ -199,7 +199,7 @@ items:
     title: "Administrator training outline: Culvert operations curriculum"
     type: train
     priority: medium
-    status: todo
+    status: done
     audience: [admin]
     path: content/training/admin-curriculum.md
     evidence_areas: [C-001, C-003, H-010, H-011, H-012, H-013]
