@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,8 +46,17 @@ const (
 
 // Enum value sets. The empty string always means "inherit the engine/rule
 // default" (back-compat: an absent choice never changes today's behavior).
+//
+// certVerification note: "permissive" is DELIBERATELY ABSENT. Earlier builds
+// accepted it and documented it as "verify, allow on failure, and log", but that
+// allow-on-failure enforcement was never implemented — the runtime always
+// verified like "strict" (fail-closed). Rather than ship a misleading operator
+// contract, the value is retired: every write path rejects it, and any existing
+// persisted/synced profile carrying it is fail-closed-migrated to "strict" (see
+// migrateLegacyCertVerification). Re-introducing allow-on-failure requires a
+// separate approved design, not this map.
 var (
-	validCertVerification = map[string]bool{"": true, "strict": true, "permissive": true, "skip": true}
+	validCertVerification = map[string]bool{"": true, "strict": true, "skip": true}
 	validOnUnsupported    = map[string]bool{"": true, "fail-close": true, "fail-open": true}
 	validOnInspectError   = map[string]bool{"": true, "fail-close": true, "fail-open": true}
 	validTLSVersion       = map[string]bool{"": true, "1.2": true, "1.3": true}
@@ -54,6 +64,50 @@ var (
 	// UI); keep it to printable identifier-ish characters to avoid surprises.
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9 ._-]{1,64}$`)
 )
+
+// certVerification migration constants. The retired value verified like the
+// fail-closed strict posture, so the migration is byte-identical at runtime — it
+// only corrects the stored contract so the operator-visible value matches the
+// enforced behavior.
+const (
+	legacyCertVerification = "permissive"
+	strictCertVerification = "strict"
+)
+
+// certMigrationSink, when published, is invoked once per profile whose
+// unsupported certVerification=="permissive" was fail-closed-migrated to
+// "strict" on a BULK install path (disk Load, config import, config-version
+// rollback, CP→DP snapshot apply). package main wires it at startup to emit an
+// audit-ring diagnostic; nil = no-op (the obs.Warnf warning fires regardless).
+// Guarded by an atomic pointer (publish-once at startup, read under replace()
+// which runs concurrently on the CP→DP sync path). Mirrors the obs.SetSink /
+// audit.SetSIEM seam pattern — the engine stays free of a package-main import.
+var certMigrationSink atomic.Pointer[func(profileName string)]
+
+// SetCertMigrationSink publishes the migration-notice callback (see
+// certMigrationSink). A nil fn clears it. Call once at startup, before the store
+// is loaded or any CP→DP sync begins.
+func SetCertMigrationSink(fn func(profileName string)) {
+	if fn == nil {
+		certMigrationSink.Store(nil)
+		return
+	}
+	certMigrationSink.Store(&fn)
+}
+
+// migrateLegacyCertVerification rewrites the retired "permissive" posture to the
+// fail-closed "strict" posture and reports whether it changed the profile.
+// Applied on bulk install paths BEFORE Validate so a legacy entry survives
+// fail-closed instead of being dropped as invalid. The interactive Add/Update
+// paths intentionally do NOT call this — a caller actively submitting the retired
+// value gets an explicit validation error, not a silent rewrite.
+func migrateLegacyCertVerification(p *Profile) bool {
+	if p.CertVerification == legacyCertVerification {
+		p.CertVerification = strictCertVerification
+		return true
+	}
+	return false
+}
 
 // Profile is a named decryption profile. Zero/empty fields mean "inherit the
 // default" so an absent or partially-filled profile never silently changes
@@ -68,7 +122,12 @@ type Profile struct {
 
 	// CertVerification of the upstream (origin) cert on the inspect leg:
 	// "" inherit (rule's TLSSkipVerify) | "strict" (verify, block untrusted/expired)
-	// | "permissive" (verify, allow+log — DEFERRED enforcement) | "skip".
+	// | "skip" (no verification).
+	//
+	// The retired "permissive" value is no longer accepted (its documented
+	// allow-on-failure semantics were never implemented; it verified like
+	// "strict"). A legacy persisted "permissive" is fail-closed-migrated to
+	// "strict" on load/sync — see migrateLegacyCertVerification.
 	CertVerification string `json:"certVerification,omitempty"`
 
 	// OnUnsupported posture when the origin TLS can't be inspected (version/cipher
@@ -172,18 +231,24 @@ func (s *Store) Load(path string) error {
 		obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
 		return err
 	}
-	migrated, skipped := s.replace(profiles, true)
+	migrated, skipped, certMigrated := s.replace(profiles, true)
 	obs.Printf("DecryptionProfiles: loaded %d profile(s) from %s", len(profiles), path)
-	// Persist backfilled IDs so ?id= addressing is stable across restart
-	// (idempotent: a second load finds all IDs present and writes nothing).
+	// Persist backfilled IDs (?id= stability) and any fail-closed
+	// certVerification migration so the on-disk file stops carrying the retired
+	// value across restarts (idempotent: a clean reload finds nothing to change).
 	// Only when NOTHING was skipped: a Save here rewrites the file with just the
 	// accepted profiles, so persisting while invalid/dup entries were skipped
 	// would permanently delete them (Load's contract is to log-and-leave them on
-	// disk). With skipped entries present we keep the backfilled IDs in-memory
-	// only for this session; a later clean load persists them stably.
-	if migrated > 0 && skipped == 0 {
+	// disk). With skipped entries present we keep the changes in-memory only for
+	// this session; a later clean load persists them stably.
+	if (migrated > 0 || certMigrated > 0) && skipped == 0 {
 		s.Save()
-		obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+		if migrated > 0 {
+			obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+		}
+		if certMigrated > 0 {
+			obs.Printf("DecryptionProfiles: migrated %d profile(s) from certVerification=permissive to strict", certMigrated)
+		}
 	}
 	return nil
 }
@@ -356,15 +421,24 @@ func (s *Store) ReplaceAll(profiles []Profile) { s.replace(profiles, false) }
 
 // replace is the shared install path. skipInvalidLog controls whether skipped
 // entries are logged (Load logs; ReplaceAll stays quiet on the hot sync path).
-// Returns the number of profiles that had a stable ID backfilled (migrated) and
-// the number skipped as invalid/duplicate (skipped) — Load persists the backfill
-// only when migrated>0 AND skipped==0, so a rewrite never drops skipped entries.
-func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped int) {
+// Returns the number of profiles that had a stable ID backfilled (migrated), the
+// number skipped as invalid/duplicate (skipped), and the number whose retired
+// certVerification=permissive was fail-closed-migrated to strict (certMigrated).
+// Load persists (migrated>0 || certMigrated>0) only when skipped==0, so a rewrite
+// never drops skipped entries.
+func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped, certMigrated int) {
 	built := make(map[string]*Profile, len(profiles))
 	order := make([]string, 0, len(profiles))
 	for i := range profiles {
 		p := profiles[i]
 		p.Name = strings.TrimSpace(p.Name)
+		// Fail-closed rewrite of the retired "permissive" cert-verification value
+		// to "strict" BEFORE Validate, so a legacy entry is corrected rather than
+		// dropped as invalid. The migration NOTICE (warn/audit/counter) is deferred
+		// until the profile is actually installed below — a profile that carries
+		// permissive AND an independently-invalid field (or is a duplicate) is
+		// still skipped, and must not be reported as "migrated & retained".
+		wasCertMigrated := migrateLegacyCertVerification(&p)
 		if err := Validate(&p); err != nil {
 			if logSkips {
 				obs.Printf("DecryptionProfiles: skipping invalid profile %q: %v", p.Name, err)
@@ -381,6 +455,17 @@ func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped in
 			p.ID = uuid.NewString()[:12]
 			migrated++
 		}
+		// Profile is committed to the new store — now (and only now) report the
+		// certVerification migration for it. Always warns (Load and the sync
+		// paths) and, when wired, emits an audit-ring diagnostic.
+		if wasCertMigrated {
+			certMigrated++
+			obs.Warnf("DecryptionProfiles: profile %q used unsupported certVerification=%q; migrated to fail-closed %q (permissive contract removed)",
+				p.Name, legacyCertVerification, strictCertVerification)
+			if sink := certMigrationSink.Load(); sink != nil {
+				(*sink)(p.Name)
+			}
+		}
 		np := p
 		built[key] = &np
 		order = append(order, key)
@@ -389,7 +474,7 @@ func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped in
 	s.profiles = built
 	s.order = order
 	s.mu.Unlock()
-	return migrated, skipped
+	return migrated, skipped, certMigrated
 }
 
 // GetByID returns a copy of the profile with the given stable ID, or nil.
