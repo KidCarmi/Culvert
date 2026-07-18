@@ -443,7 +443,9 @@ func pacLifecycleRollback(w http.ResponseWriter, r *http.Request, id string, tar
 		http.Error(w, "profile rolled back but revision-history persistence failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	logger.Printf("PAC: rolled back profile %q to revision %d (new revision %d)", sanitizeLog(id), targetN, n)
+	// targetN is a user-supplied body value; route it through sanitizeLog so
+	// CodeQL sees the sanitiser on the log sink (CWE-117). n is engine-derived.
+	logger.Printf("PAC: rolled back profile %q to revision %s (new revision %d)", sanitizeLog(id), sanitizeLog(fmt.Sprintf("%d", targetN)), n)
 	pacRollbacksTotal.Add(1)
 	jsonOK(w, map[string]any{"rolledBack": true, "toRevision": targetN, "newRevision": n})
 }
