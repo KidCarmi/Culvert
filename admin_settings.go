@@ -165,13 +165,34 @@ func LoadAdminSettings(path string) {
 	adminSettingsPath = path
 	adminSettingsMu.Unlock()
 
+	// Re-surface an unreconciled quarantine from a prior boot (CHAOS-05 pattern): after
+	// a corrupt load we default and the next save writes a clean file, so the /readyz
+	// row + alert would otherwise vanish while every GUI-saved admin setting stays lost.
+	noteResidualQuarantine("admin_settings", path)
+
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return // first run — no settings file yet; components keep their config defaults
+	}
 	if err != nil {
-		return // first run or missing file — use config defaults
+		// Read error on an EXISTING file (EACCES/EIO): the content may be intact, so do
+		// NOT quarantine (a rename could move a healthy file aside on a transient
+		// permission blip — the documented state-corruption posture). Surface it
+		// loudly — every durable admin setting silently reverts to its default until
+		// this is fixed — but keep booting.
+		logger.Printf("AdminSettings: cannot read %q (%v) — every GUI-saved admin setting is using its default until the file is readable and the node is restarted", sanitizeLog(path), err)
+		return
 	}
 	var s AdminSettings
-	if json.Unmarshal(data, &s) != nil {
-		logger.Printf("AdminSettings: unmarshal error from %s — using defaults", path)
+	if err := json.Unmarshal(data, &s); err != nil {
+		// Present-but-corrupt settings. Previously this logged and returned — and the
+		// NEXT SaveAdminSettings (any admin mutation) then atomically OVERWROTE the
+		// corrupt file with a defaults-only snapshot, destroying the only copy of the
+		// operator's durable GUI config with one log line as the trace. Route it
+		// through the CHAOS-05/07 quarantine-don't-overwrite mechanism (shared with
+		// ui_users.json / cluster.json): rename the corrupt file aside so no save can
+		// clobber it, fire the state_file_corrupt alert, and record a /readyz fail row.
+		quarantineCorruptStateFile("admin_settings", path, err)
 		return
 	}
 
