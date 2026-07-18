@@ -149,6 +149,29 @@ func runClientCertRescueE2E(t *testing.T, verName string, verNum uint16) {
 	if entry.SSLAction != "bypass" {
 		t.Errorf("%s: feed SSLAction = %q, want bypass (the rescue is a bypass)", verName, entry.SSLAction)
 	}
+	// ADR-0011 dec block: the rescue projects its OWN outcome onto the feed row.
+	// Asserted here because the rescue DecryptionOutcome is hand-built inline (no
+	// tested factory), so without this a regression that mislabels the projected
+	// fields — the class of bug that motivated this slice — would ship green.
+	if entry.Dec == nil {
+		t.Fatalf("%s: rescue feed entry missing its dec block", verName)
+	}
+	if entry.Dec.Outcome != "rescued" || entry.Dec.DecisionSource != "autoexclude_rescue" {
+		t.Errorf("%s: rescue dec outcome/source = %q/%q, want rescued/autoexclude_rescue", verName, entry.Dec.Outcome, entry.Dec.DecisionSource)
+	}
+	if !entry.Dec.Rescued || !entry.Dec.CacheLearned {
+		t.Errorf("%s: rescue dec must set rescued+cache_learned, got rescued=%v cache_learned=%v", verName, entry.Dec.Rescued, entry.Dec.CacheLearned)
+	}
+	if entry.Dec.ExclReason != "client_cert_required" || entry.Dec.FailCategory != "client_cert_required" {
+		t.Errorf("%s: rescue dec excl_reason/fail_category = %q/%q, want client_cert_required", verName, entry.Dec.ExclReason, entry.Dec.FailCategory)
+	}
+	// Scope attribution (the primary fix): a rescue is scoped to its fail-open
+	// profile, so profile_id AND excl_scope must carry the same non-empty scope —
+	// otherwise a per-scope blast-radius/SIEM query misses every rescued session.
+	if entry.Dec.ProfileID == "" || entry.Dec.ExclScope == "" || entry.Dec.ProfileID != entry.Dec.ExclScope {
+		t.Errorf("%s: rescue dec must carry a consistent non-empty scope, got profile_id=%q excl_scope=%q",
+			verName, entry.Dec.ProfileID, entry.Dec.ExclScope)
+	}
 }
 
 // TestMITM_OptionalClientCertOrigin_StaysInspected is the guard for the review
