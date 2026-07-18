@@ -328,6 +328,13 @@ type supportBundleSummary struct {
 	SizeBytes       int64  `json:"size_bytes"`
 	State           string `json:"state"`             // pending|ready (mandatory-preview lifecycle)
 	CaseID          string `json:"case_id,omitempty"` // operator-bound support case (M4)
+
+	// dirName is the ON-DISK directory name this summary was scanned from. It is
+	// deliberately distinct from BundleID (which is manifest CONTENT): a corrupt
+	// or hand-copied manifest can carry a bundle_id that differs from the directory
+	// it lives in, so any filesystem eviction MUST target dirName — never BundleID,
+	// which could name a different, valid bundle. Unexported ⇒ never serialized.
+	dirName string
 }
 
 // apiSupportBundles lists (GET, viewer) or creates (POST, admin) support bundles.
@@ -474,6 +481,7 @@ func listSupportBundles() []supportBundleSummary {
 			BundleID: man.BundleID, CreatedAt: man.CreatedAt, Format: man.Format,
 			TotalCollectors: man.Collection.TotalCollectors, OK: man.Collection.OK,
 			Failed: man.Collection.Failed, SizeBytes: size, State: st.State, CaseID: st.CaseID,
+			dirName: id,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
@@ -777,18 +785,21 @@ func pruneSupportBundles(keep int) {
 	if len(sums) <= keep {
 		return
 	}
-	for _, s := range sums[keep:] {
-		// Defense-in-depth: BundleID here comes from manifest content, so re-guard
-		// against the path-traversal shape before any os.RemoveAll.
-		if !supportBundleIDRe.MatchString(s.BundleID) {
+	// Index-based range: supportBundleSummary is 128 bytes (gocritic rangeValCopy).
+	for i := keep; i < len(sums); i++ {
+		s := &sums[i]
+		// Evict the ON-DISK directory (dirName), NEVER the manifest's BundleID: a
+		// corrupt/hand-copied manifest can carry a bundle_id naming a DIFFERENT
+		// valid bundle. Defense-in-depth: re-guard the path-traversal shape.
+		if !supportBundleIDRe.MatchString(s.dirName) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.dirName)); err != nil {
 			logger.Printf("support: retention evict failed for %q: %v",
-				strings.ReplaceAll(s.BundleID, "\n", ""), err)
+				strings.ReplaceAll(s.dirName, "\n", ""), err)
 			continue
 		}
-		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+		auditSystem("support.bundle.expire", s.dirName, "retention cap")
 	}
 }
 
@@ -802,10 +813,14 @@ func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
 	if maxAge <= 0 {
 		return
 	}
-	for _, s := range listSupportBundles() {
-		// Defense-in-depth: BundleID comes from manifest content — re-guard the
-		// path-traversal shape before any os.RemoveAll.
-		if !supportBundleIDRe.MatchString(s.BundleID) {
+	// Index-based range: supportBundleSummary is 128 bytes (gocritic rangeValCopy).
+	sums := listSupportBundles()
+	for i := range sums {
+		s := &sums[i]
+		// Evict the ON-DISK directory (dirName), NEVER the manifest's BundleID: a
+		// corrupt/hand-copied manifest can carry a bundle_id naming a DIFFERENT
+		// valid bundle. Defense-in-depth: re-guard the path-traversal shape.
+		if !supportBundleIDRe.MatchString(s.dirName) {
 			continue
 		}
 		created, err := time.Parse(time.RFC3339, s.CreatedAt)
@@ -815,12 +830,12 @@ func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
 		if now.Sub(created) <= maxAge {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.dirName)); err != nil {
 			logger.Printf("support: age-retention evict failed for %q: %v",
-				strings.ReplaceAll(s.BundleID, "\n", ""), err)
+				strings.ReplaceAll(s.dirName, "\n", ""), err)
 			continue
 		}
-		auditSystem("support.bundle.expire", s.BundleID, "retention max-age")
+		auditSystem("support.bundle.expire", s.dirName, "retention max-age")
 	}
 }
 
