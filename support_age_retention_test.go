@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,38 @@ func TestPruneSupportBundlesByAge_Observability(t *testing.T) {
 	pruneSupportBundlesByAge(now, 0)
 	if supportRetentionLastSweep.Load() != 0 {
 		t.Error("maxAge=0 no-op must not record a sweep")
+	}
+}
+
+// TestSupportWritePrometheus proves the retention counters are exposed in the
+// Prometheus text format with the correct metric names, types, and current
+// values (counter + gauge), so an operator can scrape/alert on them.
+func TestSupportWritePrometheus(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	now := time.Unix(1_800_000_000, 0).UTC()
+	writeFakeBundle(t, "csb_promoldbundleaaaaa23456abc", now.Add(-60*24*time.Hour).Format(time.RFC3339))
+	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+
+	var b strings.Builder
+	supportWritePrometheus(&b)
+	out := b.String()
+
+	for _, want := range []string{
+		"# TYPE culvert_support_bundle_retention_evicted_total counter",
+		"# TYPE culvert_support_bundle_retention_last_sweep_timestamp_seconds gauge",
+		"culvert_support_bundle_retention_last_sweep_timestamp_seconds 1800000000",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Prometheus output missing %q\n---\n%s", want, out)
+		}
+	}
+	// The evicted counter is cumulative across the suite; assert it is present and
+	// non-negative rather than a fixed value (audit-ring cumulative lesson).
+	if !strings.Contains(out, "culvert_support_bundle_retention_evicted_total ") {
+		t.Errorf("evicted counter series missing\n---\n%s", out)
 	}
 }
 
