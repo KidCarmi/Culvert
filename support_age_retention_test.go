@@ -77,6 +77,37 @@ func TestPruneSupportBundlesByAge(t *testing.T) {
 	}
 }
 
+// TestPruneSupportBundlesByAge_Observability proves a real sweep records the
+// last-sweep time and increments the since-boot evicted counter. Absolute values
+// are cumulative across the suite, so assert DELTAS (audit-ring lesson).
+func TestPruneSupportBundlesByAge_Observability(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	now := time.Unix(1_800_000_000, 0).UTC()
+	beforeEvicted := supportRetentionEvicted.Load()
+
+	writeFakeBundle(t, "csb_obsoldbundleaaaaa234567abc", now.Add(-60*24*time.Hour).Format(time.RFC3339))
+	writeFakeBundle(t, "csb_obsnewbundleaaaaa234567abc", now.Add(-1*24*time.Hour).Format(time.RFC3339))
+
+	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+
+	if got := supportRetentionLastSweep.Load(); got != now.Unix() {
+		t.Errorf("last-sweep not recorded: got %d want %d", got, now.Unix())
+	}
+	if delta := supportRetentionEvicted.Load() - beforeEvicted; delta != 1 {
+		t.Errorf("evicted counter delta = %d, want 1 (only the old bundle)", delta)
+	}
+
+	// A no-op sweep (maxAge=0) must NOT touch the last-sweep marker.
+	supportRetentionLastSweep.Store(0)
+	pruneSupportBundlesByAge(now, 0)
+	if supportRetentionLastSweep.Load() != 0 {
+		t.Error("maxAge=0 no-op must not record a sweep")
+	}
+}
+
 // TestPruneSupportBundlesByAge_ManifestIDDivergence proves the sweep evicts the
 // ON-DISK directory it scanned, never the (possibly different) bundle_id inside
 // the manifest. A corrupt/hand-copied manifest naming a different valid bundle

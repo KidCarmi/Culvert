@@ -13073,9 +13073,13 @@ function renderSupportStatus(s) {
   const cols = s.collectors || [];
   let retention = '';
   if (s.retention_keep || s.retention_max_age_days) {
+    const swept = s.retention_last_sweep
+      ? ' · last swept ' + escHtml(String(s.retention_last_sweep))
+      : ' · not yet swept';
     retention = '<p class="hint">Retention: newest <b>' + escHtml(String(s.retention_keep || 0)) +
       '</b> bundles kept · bundles older than <b>' + escHtml(String(s.retention_max_age_days || 0)) +
-      ' days</b> swept automatically</p>';
+      ' days</b> swept automatically · <b>' + escHtml(String(s.retention_evicted_total || 0)) +
+      '</b> evicted' + swept + '</p>';
   }
   const hdr = '<p class="hint">Format <code>' + escHtml(String(s.bundle_format || '')) +
     '</code> · engine v' + escHtml(String(s.collector_engine_version || '')) +
