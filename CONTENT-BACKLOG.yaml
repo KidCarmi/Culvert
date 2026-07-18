@@ -220,7 +220,7 @@ items:
     title: "Configuration reference (verified field-by-field)"
     type: doc
     priority: low
-    status: todo
+    status: done
     audience: [admin]
     path: content/docs/12-reference/configuration.md
     evidence_areas: [config.go, config.example.yaml]

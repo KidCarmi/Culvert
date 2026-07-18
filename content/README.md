@@ -36,6 +36,7 @@ evidence from but does not mirror.
 | PAC | [PAC traffic steering](docs/09-pac/pac-traffic-steering.md) | published |
 | Operations | [Backup & restore](docs/10-operations/backup-and-restore.md) | published |
 | Supply chain | [Release management & signed catalog](docs/11-supply-chain/release-management.md) | published |
+| Reference | [Configuration reference](docs/12-reference/configuration.md) | published |
 
 ## YouTube packages
 

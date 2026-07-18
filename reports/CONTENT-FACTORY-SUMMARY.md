@@ -1,8 +1,9 @@
 # Culvert Content Factory — Session Summary
 
-Autonomous content-engineering session. Stop reached at **stop condition #1**:
-every unblocked critical and high-priority backlog item is complete. Medium and
-low-priority items remain and are unblocked for a subsequent run.
+Autonomous content-engineering session. **The entire backlog is complete** —
+every critical, high, medium, and low-priority item is done (0 `todo` remaining).
+Stop conditions #1 (all critical + high done) and #2 (no productive unblocked
+work remains) are both satisfied.
 
 - **Branch:** `claude/culvert-content-foundation-5geqkh`
 - **Base revision:** `ca60d83`
@@ -11,94 +12,97 @@ low-priority items remain and are unblocked for a subsequent run.
 
 ---
 
+## What was produced
+
+- **14 documentation articles**, each with a co-located claim-evidence ledger
+  (`*.evidence.md`) — 28 files.
+- **3 YouTube packages** (full narration, demo plan, chapters, description,
+  pinned comment, short-form, claim-evidence ledger).
+- **1 administrator training curriculum** (9 modules + capstone).
+- **Reusable tooling:** `content/tools/check-links.sh` (relative-link checker
+  with a forward-reference allowlist).
+
 ## Completed items
 
 | ID | Priority | Type | Deliverable |
 |---|---|---|---|
-| C-001 | critical | doc | Product overview — `content/docs/01-overview/what-is-culvert.md` |
-| C-002 | critical | doc | Architecture — `content/docs/01-overview/architecture.md` |
-| C-003 | critical | doc | Quick start & first boot — `content/docs/02-getting-started/quick-start.md` |
-| H-010 | high | doc | Policy engine & Zero-Trust — `content/docs/03-policy/policy-engine.md` |
-| H-011 | high | doc | TLS inspection administration — `content/docs/04-tls-inspection/tls-inspection.md` |
-| H-012 | high | doc | Identity & access — `content/docs/05-identity/identity-and-access.md` |
-| H-013 | high | doc | Observability — `content/docs/06-observability/observability.md` |
-| H-014 | high | yt | YouTube: What is Culvert — `content/youtube/01-what-is-culvert/package.md` |
-| H-015 | high | yt | YouTube: Deploy in 5 minutes — `content/youtube/02-deploy-in-5-minutes/package.md` |
-
-Each documentation article ships with a co-located **claim-evidence ledger**
-(`*.evidence.md`); each YouTube package embeds one. Reusable tooling:
-`content/tools/check-links.sh` (relative-link checker with a forward-reference
-allowlist).
+| C-001 | critical | doc | Product overview |
+| C-002 | critical | doc | Architecture |
+| C-003 | critical | doc | Quick start & first boot |
+| H-010 | high | doc | Policy engine & Zero-Trust |
+| H-011 | high | doc | TLS inspection administration |
+| H-012 | high | doc | Identity & access |
+| H-013 | high | doc | Observability |
+| H-014 | high | yt | YouTube: What is Culvert |
+| H-015 | high | yt | YouTube: Deploy in 5 minutes |
+| M-020 | medium | doc | Content security |
+| M-021 | medium | doc | Control Plane / Data Plane |
+| M-022 | medium | doc | PAC traffic steering |
+| M-023 | medium | doc | High availability (etcd fencing lease) |
+| M-024 | medium | doc | Backup & restore |
+| M-025 | medium | yt | YouTube: Zero-Trust policy demo |
+| M-026 | medium | train | Administrator training curriculum |
+| L-030 | low | doc | Supply-chain & release management |
+| L-031 | low | doc | Configuration reference |
 
 ## Commits created
 
-| Hash | Summary |
-|---|---|
-| `5a4aa90` | bootstrap content foundation scaffolding |
-| `9176e99` | product overview (C-001) |
-| `ba90a4d` | architecture overview (C-002) |
-| `8acf32d` | quick-start & first-boot (C-003) |
-| `939ed62` | policy engine & Zero-Trust (H-010) |
-| `4466469` | TLS inspection administration (H-011) |
-| `3c4ec1d` | identity & access (H-012) |
-| `6b01b96` | observability (H-013) |
-| `65b448a` | YouTube: What is Culvert (H-014) |
-| _this commit_ | YouTube: Deploy in 5 minutes (H-015) + this summary |
+`5a4aa90` bootstrap · `9176e99` C-001 · `ba90a4d` C-002 · `8acf32d` C-003 ·
+`939ed62` H-010 · `4466469` H-011 · `3c4ec1d` H-012 · `6b01b96` H-013 ·
+`65b448a` H-014 · `5bd5a33` H-015+summary · `27af46a` M-020 · `e2d3793` M-021 ·
+`4fdfff3` M-023 · `9bfc4b6` M-024 · `f5ec7fb` M-022 · `6621bee` M-025 ·
+`bcacc0e` M-026 · `6c8469b` L-030 · (this commit) L-031 + finalization.
 
 ## Validation performed
 
-- **Evidence verification:** every material capability claim was checked against
-  runtime source, tests, API/config contracts, or an architecture decision — via
-  three parallel research agents plus direct source inspection. Ledgers cite
-  `file:line`, test names, routes, and metrics.
-- **Reproduced lab run:** the built binary was executed and real `/health` and
-  `/ready` output captured (`content/evidence/quick-start-lab-run.md`), used in
+- **Evidence verification:** every material claim checked against runtime source,
+  tests, API/config contracts, or an ADR — via three parallel research agents and
+  direct source inspection. Each article's ledger cites `file:line`, tests,
+  routes, and metrics.
+- **Reproduced lab run:** the built binary was executed and real `/health` +
+  `/ready` output captured (`content/evidence/quick-start-lab-run.md`); used in
   C-003 and H-015.
-- **Link integrity:** `content/tools/check-links.sh` passes (exit 0) over the
-  whole `content/` tree; forward references to not-yet-built pages are tracked in
-  `content/.forward-refs`.
-- **Markdown structure:** single H1 per page, balanced code fences, no trailing
-  whitespace; Mermaid diagrams use quoted labels with `<br/>`.
+- **Link integrity:** `check-links.sh` passes over the whole tree; **zero
+  forward references remain** — the content set is fully internally linked.
+- **Structure:** single H1 per page (fence-aware sweep), balanced code fences,
+  no trailing whitespace, Mermaid diagrams use quoted labels with `<br/>`.
 - **Build:** `go build .` succeeds on the base revision.
 
 ## Corrections made during verification (honesty over marketing)
 
-1. **"Tamper-evident audit trail" → "append-only, not tamper-evident."**
-   `internal/audit` has no hash-chain or signature; it is a bounded ring
-   (`MaxRing = 500`). Corrected in C-001, reinforced in H-013.
-2. **CDR → "external Sluice engine (companion)."** `cdr.go` is a gRPC/mTLS
-   client; the disarm/reconstruct algorithm is not in-binary.
-3. **Pipeline order in the website architecture doc** follows the code
-   (`proxy.go:handleRequest`), which differs from the in-repo ASCII diagram.
+1. **"Tamper-evident audit trail" → "append-only, not tamper-evident."** No
+   hash-chain/signature in `internal/audit` (bounded ring, `MaxRing = 500`).
+2. **CDR → external Sluice engine (companion).** `cdr.go` is a gRPC/mTLS client;
+   the disarm algorithm is not in-binary.
+3. **Website architecture pipeline order** follows the code
+   (`proxy.go:handleRequest`), not the drifted in-repo ASCII diagram.
+4. **"Rolling upgrades"** documented as node-level (drain + handoff), not a
+   cluster-wide orchestrator (verified in M-021).
 
-## Product gaps / uncertainties discovered (for human decision)
+## Product gaps / uncertainties (for human decision)
 
-| ID | Finding | Recommended decision |
+| ID | Finding | Status / recommended decision |
 |---|---|---|
-| G-01 | Audit trail is not cryptographically tamper-evident despite README/architecture wording | Add a hash-chain/signature, or correct the README wording |
-| G-02 | `internal/halease/halease.go:7` doc comment ("S1 primitive only, nothing consumes it yet") conflicts with CLAUDE.md "PROGRAM COMPLETE" and root `ha_lease.go`/`ha_failover.go` | Confirm integration state; refresh the stale comment. To be resolved when building M-023 (HA article) |
-| G-03 | "Rolling upgrades" is partial — per-node dispatch + leadership handoff exist, but no cluster-wide orchestrator found | Scope/label accurately; deferred to M-021 (distributed article) |
-| G-04 | CDR requires an external engine (deployment prerequisite, like the ClamAV sidecar) | Document the prerequisite clearly (done in content) |
-| G-05 | `docs/architecture.md` pipeline diagram places plugins before auth and omits rate-limit + IDNA gate | Update the in-repo diagram to match code (product doc; flagged, not edited) |
+| G-01 | Audit trail not cryptographically tamper-evident despite README/architecture wording | **Open** — add hash-chain/signature, or correct the README |
+| G-02 | `internal/halease` "nothing consumes it yet" comment | **Resolved** (M-023): it's a package slice-history note; runtime consumes the lease. Suggest refreshing the comment |
+| G-03 | "Rolling upgrades" partial | **Documented** (M-021) as node-level; decide whether to build a cluster orchestrator |
+| G-04 | CDR requires external Sluice engine | **Documented** (M-020) as a deployment prerequisite |
+| G-05 | `docs/architecture.md` pipeline diagram drift (plugin before auth; missing rate-limit + IDNA gate) | **Open** — update the in-repo product diagram to match code |
 
-## Recommended next content items (all unblocked)
+## Recommended next content items
 
-Ordered by leverage:
+The backlog is exhausted. Suggested additions for a future run:
 
-1. **M-020** Content security (ClamAV/YARA/threat feeds/DPI/file-block/CDR) —
-   completes the security-capability trilogy with policy + TLS inspection.
-2. **M-021** Distributed deployment (Control Plane / Data Plane, mTLS,
-   enrollment) — resolves G-02/G-03 against code.
-3. **M-023** High availability (etcd fencing lease) — depends on M-021;
-   resolves the G-02 uncertainty.
-4. **M-024** Backup & restore (compose operator contract).
-5. **M-022** PAC traffic steering.
-6. **M-025 / M-026** Zero-Trust YouTube demo; administrator training curriculum.
-7. **L-030 / L-031** Supply-chain/release management; configuration reference.
-
-When resuming, clear the remaining `content/.forward-refs`
-(`../08-distributed/high-availability.md`) by building M-023, and add reciprocal
-links from the new medium-priority pages back into the published set.
+1. **Reciprocal deep-linking pass** — add "see also" cross-links from the
+   medium/low articles back into the core set for stronger site navigation.
+2. **Screenshots / recorded demos** — the three YouTube packages are scripted and
+   evidence-backed but not recorded; produce them against a real instance
+   (no synthetic screens, per the standard).
+3. **New capability articles** as the product grows: adaptive decryption
+   exclusions (deep dive), config versioning & rollback, bandwidth/QoS, threat-
+   feed operations, support bundles & diagnostics.
+4. **Resolve G-01/G-05** with the product team, then update the audit and
+   architecture wording in lockstep across `docs/` and this content set.
 
 ## Repository state
 

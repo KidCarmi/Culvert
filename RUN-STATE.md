@@ -16,10 +16,18 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **L-031** — Configuration reference (last backlog item). Next.
+- **None — ENTIRE BACKLOG COMPLETE.** 0 todo items remain (stop conditions #1
+  and #2). 14 doc articles + 14 evidence ledgers, 3 YouTube packages, 1 training
+  curriculum. Content tree fully internally linked (0 forward-refs); link check
+  and single-H1 sweep pass. All 5 product gaps recorded (G-02 resolved).
 
 ## Recently completed
 
+- **L-031** — Configuration reference
+  (`content/docs/12-reference/configuration.md`) + evidence ledger. Precedence
+  model (flag > config > default), validation bounds (`config.go:411,416`),
+  section map, structure gotchas. Deliberately not a per-field dump. Link check
+  pass.
 - **L-030** — Supply-chain / release management
   (`content/docs/11-supply-chain/release-management.md`) + evidence ledger.
   Signed catalog (Ed25519 + Sigstore keyless), enforce-by-default posture,
