@@ -30,6 +30,7 @@ evidence from but does not mirror.
 | TLS inspection | [TLS inspection administration](docs/04-tls-inspection/tls-inspection.md) | published |
 | Identity | [Identity & access (SSO, 2FA, RBAC)](docs/05-identity/identity-and-access.md) | published |
 | Observability | [Metrics, dashboard, logs, audit](docs/06-observability/observability.md) | published |
+| Content security | [ClamAV, YARA, threat feeds, DPI, file blocking, CDR](docs/07-content-security/content-security.md) | published |
 
 ## YouTube packages
 

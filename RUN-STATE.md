@@ -16,12 +16,16 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **None** — all critical + high-priority items complete (stop condition #1).
-  Remaining backlog is medium/low priority (M-020…M-026, L-030, L-031), all
-  unblocked and available for a subsequent run.
+- **M-021** — Distributed deployment (Control Plane / Data Plane, mTLS). Next.
+  (User asked to continue past the stop-condition milestone into medium items.)
 
 ## Recently completed
 
+- **M-020** — Content security (`content/docs/07-content-security/content-security.md`)
+  + evidence ledger. Key insight documented: host/URL controls run
+  pre-decryption; body scanning (DPI/ClamAV/YARA/magic/CDR) requires `Inspect`,
+  so `Bypass` is a body-scan blind spot. Full API surface + ClamAV gating
+  readiness + CDR-external-engine caveat. Link check pass. Committed.
 - **H-015** — YouTube "Deploy in 5 minutes"
   (`content/youtube/02-deploy-in-5-minutes/package.md`). Full package; `/health`
   + `/ready` output shown is the reproduced lab run; the `docker compose` flow is

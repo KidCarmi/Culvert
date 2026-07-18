@@ -139,7 +139,7 @@ items:
     title: "Content security: ClamAV, YARA, threat feeds, DPI, file blocking, CDR"
     type: doc
     priority: medium
-    status: todo
+    status: done
     audience: [security-engineer]
     path: content/docs/07-content-security/content-security.md
     evidence_areas: [scanner.go, "internal/clamav", "internal/yara", threatfeed.go, "internal/fileblock"]
