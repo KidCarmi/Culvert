@@ -169,7 +169,7 @@ items:
     title: "High availability: etcd fencing lease & failover"
     type: doc
     priority: medium
-    status: todo
+    status: done
     audience: [admin, sre, architect]
     path: content/docs/08-distributed/high-availability.md
     evidence_areas: ["internal/halease", ha_lease.go, ha_failover.go, docs/operator/ha-lease-failover.md]

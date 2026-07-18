@@ -16,11 +16,16 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-023** — High availability (etcd fencing lease). Next; resolves G-02 by
-  reading `ha_lease.go`/`ha_failover.go` directly.
+- **M-024** — Backup & restore (compose operator contract). Next.
 
 ## Recently completed
 
+- **M-023** — High availability (`content/docs/08-distributed/high-availability.md`)
+  + evidence ledger. Legacy-vs-lease models, fencing-lease mechanics (epoch,
+  Acquire-gated promotion, self-fence, WriteAllowed), guarded failover
+  (hysteresis/freshness/resync/ghost-lease), etcd mTLS flags. **Resolved G-02**
+  (comment is package-slice-scoped; runtime consumes the lease). Cleared the
+  last forward-ref — content tree fully internally linked. Committed.
 - **M-021** — Distributed CP/DP (`content/docs/08-distributed/control-plane-data-plane.md`)
   + evidence ledger. Roles, enrollment (token + CA-fingerprint pinning, Mermaid),
   mTLS flags, config-snapshot sync + redaction, node groups/labels/drain,
@@ -127,11 +132,13 @@ _(none yet)_
   append-only JSONL ring with oldest-eviction — **no hash-chain or signature**.
   Content downgrades the claim to "bounded, append-only". _Human decision:_ add
   a hash-chain/signature to justify "tamper-evident", or correct the README.
-- **[G-02] `internal/halease` doc comment appears stale.** `halease.go:7` says
-  "S1 ships the primitive ONLY — nothing in the runtime consumes it yet," which
-  conflicts with CLAUDE.md ("ADR-0005 PROGRAM COMPLETE S0–S5") and the root
-  `ha_lease.go`/`ha_failover.go` that consume it. Overview keeps "Supported";
-  the HA article (M-023) must confirm the real integration state from code.
+- **[G-02] RESOLVED (M-023).** The `internal/halease/halease.go:7` comment ("S1
+  ships the primitive ONLY — nothing in the runtime consumes it yet") is a
+  **package slice-history** note describing that package's own scope, not the
+  feature state. Runtime consumption is in package `main` (`armHALease`
+  `cluster_startup.go:43`, `HAState.Acquire`/`WriteAllowed`/`selfFence`
+  `ha_lease.go`, `leaseAutoPromote` `ha_failover.go`). The lease is wired;
+  "Supported" stands. Not a defect — a potentially confusing scoped comment.
 - **[G-03] "Rolling upgrades" is partial.** Per-node digest dispatch
   (`release_dispatch_exec.go`) and CP leadership handoff exist, but no
   cluster-wide rolling-upgrade orchestrator was found. Excluded from the

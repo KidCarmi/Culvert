@@ -32,6 +32,7 @@ evidence from but does not mirror.
 | Observability | [Metrics, dashboard, logs, audit](docs/06-observability/observability.md) | published |
 | Content security | [ClamAV, YARA, threat feeds, DPI, file blocking, CDR](docs/07-content-security/content-security.md) | published |
 | Distributed | [Control Plane / Data Plane](docs/08-distributed/control-plane-data-plane.md) | published |
+| Distributed | [High availability (etcd fencing lease)](docs/08-distributed/high-availability.md) | published |
 
 ## YouTube packages
 
