@@ -1,149 +1,153 @@
-# T3 — CP↔DP config-sync at 10M+ host scale
+# T3 — CP↔DP config-sync scale program (REVISED after red-team)
 
-**Status:** DRAFT for adversarial review. Not yet implemented.
-**Goal:** scale CP→DP blocklist/IP/URL-category distribution to **10M+ entries**
-without the current per-change O(full-snapshot) transfer, without the 128 MiB
-frame ceiling, and without the DP full-rebuild memory peak.
+**Status:** REVISED design after a 6-axis Palo red-team broke draft-1 (verdict:
+major_rework, all six axes). This version resolves the fatal breaks. Sequenced,
+not one-shot.
 
-## 0. Where we are after T1/T2
+**Honest target (draft-1 claimed 10M; corrected):**
+- **~2–3M today** (roughly the current `maxSnapBlockedHosts` cap) — the `map[string]bool`
+  exact set (~700 MiB–1 GiB) + the mandatory `feedSrc` host→URL map (~1.3–1.6 GiB
+  of non-interned URL copies) ≈ 2.2–2.5 GiB steady, ~3.5–4 GiB with rebuild
+  transients — an OOM on a 4–8 GiB DP co-resident with the proxy.
+- **~3–5M** after the compact host set alone.
+- **~10M only** after BOTH (a) a compact packed/sorted host set AND (b)
+  **feed-count-scoped attribution** (per-host `uint32` feed-id + a tiny
+  `feedID→URL` table, ~40 MB instead of ~1.5 GB). Draft-1's P4 addressed only
+  `map[string]bool` and never the attribution map — so even "fixed" P4 was ~1.5 GB
+  over budget. **10M requires the attribution redesign; without it the honest
+  hard ceiling is ~3–5M.**
+- **A concrete per-DP RAM budget is a design input, not an afterthought** (below).
 
-- The CP distributes one monolithic `ConfigSnapshot`; each DP polls `GetConfig`.
-- **Version-conditional (P0-3):** an unchanged poll returns a tiny sentinel.
-- **Marshal cache (T2):** N enrolled DPs polling the same change share ONE
-  CP-side marshal.
-- **Still O(full) on a change:** any config change ships the WHOLE snapshot
-  (~60 MiB @ 2M hosts) to every DP, which applies it via `bl.ReplaceFeedEntries`
-  (full build-then-swap, ~410 MiB transient @ 2M).
-- Hard bounds: `maxSnapBlockedHosts = 2M`, `maxClusterGRPCMsgSize = 128 MiB`,
-  `maxSnapshotWireBytes = 120 MiB`.
+## Why draft-1 failed (the load-bearing breaks)
 
-The blocklist store (`internal/blocklist`) already tracks **per-host feed-source
-attribution** (`feedSrc: host→URL`), supports `RemoveByFeedSource`, `Add`,
-`Remove`, `ReplaceFeedEntries`, `Count`, `List`, and `MergeFromLines`. Existing
-feed machinery: `internal/feedsync`, `internal/threatfeed`,
-`internal/blocklistfeed`.
+1. **Reconciliation was self-contradictory.** One fleet-wide content hash over
+   feed+manual (draft §5) cannot coexist with per-DP local feed fetch (Mechanism
+   A): a rotating feed (URLhaus) fetched 90 s apart yields different sets, so no
+   DP ever matches the CP hash → the anti-drift spine fires a continuous
+   fleet-wide resync storm against the CP mirror.
+2. **Memory phasing backwards.** P1–P3 distribute + apply 10M while the DP
+   physically cannot hold it → a green sync is a delayed OOM-kill of the proxy.
+3. **`bl.Remove` deletes manual blocks.** A compromised-CP delta
+   `{removed:[admin-blocked-C2]}` unblocks admin manual blocks (reintroduces the
+   PR #249 defect on every incremental apply), and `bl.Add` adds are unattributed
+   and eaten by `RemoveUnattributedFeedEntries`.
+4. **Integrity anchored at the attacker.** `content_hash`/version hash are all
+   CP-supplied → zero defense against the H5 compromised-but-authenticated CP the
+   plan names. The one real control (signature vs. offline root) was "ideally".
+5. **New RPCs bypassed ADR-0005 fencing** and `dpLastSeenEpoch` resets to 0 on DP
+   restart → a zombie mTLS-authenticated CP poisons the incremental base, which
+   (unlike a self-healing monolithic snapshot) compounds forever.
+6. **No base-version linkage, torn durability, no reverse telemetry** → silent
+   divergence and unobservable convergence.
 
-## 1. The core problem at 10M
+## P0 — design decisions that MUST land before any code
 
-10M hosts ≈ **~300 MiB** serialized — past the frame, past every cap. Three
-distinct costs must be removed, not just relocated:
+**D1. Two disjoint reconciliation checks (resolves break 1).**
+- **Drift hash:** a cryptographic **SHA-256 over the CP-AUTHORITATIVE set only**
+  (manual/admin hosts), computed over a *canonical* encoding, fleet-wide,
+  delta-covered. **Feed-derived hosts are explicitly EXCLUDED.**
+- **Feed freshness:** compared per-feed by **descriptor `content_hash`/etag
+  equality** — "did the DP fetch the same feed *version* the descriptor names" —
+  NEVER by re-hashing an independently-fetched expansion. Forbid rolling/additive
+  hashes.
 
-1. **Wire (per change):** N × full snapshot. A one-host edit re-ships everything.
-2. **Apply memory (per change):** full map rebuild (build-then-swap peak).
-3. **Local footprint (steady):** 10M in a Go `map[string]bool` ≈ **~900 MiB–1 GiB**
-   RAM — a problem *even standalone*, independent of sync.
+**D2. Canonical host-set encoding (versioned wire contract).** Pin exactly:
+dedup, comment-strip, wildcard `*.`↔`.` normalization, IDN→punycode, case-fold,
+trailing-dot strip, sort order. The drift hash is defined over this. Any change
+is a wire-contract version bump.
 
-## 2. Design — two complementary mechanisms + reconciliation
+**D3. Integrity anchored off the CP (resolves break 4).** MANDATORY signature
+(reuse the in-tree Sigstore/ed25519 release-catalog trust roots) over (a) each
+published CP-authoritative host-set hash and (b) feed content, verified on the DP
+against an **offline admin/release trust root**. A CP-supplied SHA-256 defends
+only transport corruption and is documented as NOT an H5 control.
 
-### Mechanism A — Feed-source distribution (the 10M enabler)
+**D4. Epoch-fence the new RPCs (resolves break 5).** Every delta/stream RPC
+carries the issuing CP's lease epoch and is subject to the same puller-side epoch
+verify + no-live-holder reject + monotonic `dpLastSeenEpoch` ratchet as
+`GetConfig`. **Persist `dpLastSeenEpoch` durably** so restart cannot reopen the
+epoch-0 window; on any epoch advance, force a base-integrity re-check.
 
-The CP distributes **feed descriptors**, NOT expanded hosts:
+**D5. Per-DP RAM budget + honest target stated in the plan.** e.g. "a DP node
+holds ≤ N M hosts within a B GiB budget co-resident with the proxy" — the number
+gates every growth phase.
 
-```
-FeedDescriptor{ id, url, format, refresh_interval, content_hash/etag, enabled }
-```
+## Phasing (REORDERED — memory precondition moved up)
 
-- Each DP runs the existing feedsync machinery locally to fetch + expand each
-  feed, attributing hosts to their source (the `feedSrc` map already does this).
-- The config wire carries **O(feed_count)** — a handful of descriptors —
-  regardless of host count. 10M feed-derived hosts cost ~nothing on CP↔DP.
-- **Network-restricted DPs:** many DP nodes have no outbound egress (the reason
-  the CP-central-fetch model exists). Mitigation: the CP acts as a **feed
-  mirror** — it fetches once and serves the feed content at a CP endpoint; DPs
-  fetch from the CP via a **chunked/streamed bulk download** (not a gRPC
-  snapshot), SSRF-guarded, integrity-checked by `content_hash`.
+### P1 — CP-authoritative delta sync ONLY, at today's scale (the smallest valuable slice)
 
-### Mechanism B — Delta sync (CP-authoritative incremental changes)
+No feeds, no memory rework. Delivers real per-change wire savings on the churny
+admin set at today's caps; touches neither of the two hardest subsystems.
 
-For the **CP-authoritative** host set (manual/admin adds+removes) and for
-feed-mirror deltas:
+- `GetConfigDelta(base_version, known_hash) → { mode: unchanged|delta|resync,
+  base_version, target_version, added[], removed[], cp_authoritative_hash, epoch, sig }`.
+- **Strict sequential apply:** the DP REJECTS and falls back to full sync unless
+  `base_version == its current KnownVersion`. Gap-free, no reorder/duplicate.
+- **`bl.ApplyDelta` (new):** never removes a host present in `b.manual`; stamps
+  CP-authoritative adds with a reserved `"cp-authoritative"` source that
+  `RemoveUnattributedFeedEntries`/`RemoveByFeedSource` both exempt; tracks
+  feed-derived vs CP-authoritative membership **separately** (a remove drops a
+  host only if no feed source still covers it). Fix `bl.Add` to persist the main
+  file. **Atomic (version, content) commit:** write-ahead delta → apply → fsync →
+  advance version; never advance KnownVersion until content is durable.
+- **Cryptographic CP-authoritative-only hash** (D1), signed (D3), epoch-fenced (D4).
+- **Reverse telemetry:** heartbeat carries `{config_version, cp_authoritative_hash}`;
+  CP exposes a fleet-convergence API + panel + straggler alert.
+- Regression tests: "a CP delta can NEVER delete a manual block"; "a CP-pushed add
+  survives unattributed-cleanup"; reorder/duplicate/SIGKILL-mid-apply → resync,
+  never divergence.
 
-- The CP computes a diff `{added[], removed[]}` between the DP's `KnownVersion`
-  and current, and ships only that.
-- The DP applies via `bl.Add`/`bl.Remove` — **incremental, no full rebuild** →
-  the apply memory peak disappears.
-- The CP keeps a **bounded ring of per-version deltas** (last K versions). A DP
-  whose `KnownVersion` predates the ring falls back to full/chunked sync.
+### P2 — Compact 10M local representation + feed-count-scoped attribution (memory PRECONDITION)
 
-### Reconciliation — the anti-drift spine
+Its own design doc. A chosen compact structure (packed/sorted set), a per-host
+`uint32` feed-id + `feedID→URL` table (`RemoveByFeedSource` rewritten against
+feed-ids), explicit wildcard + false-positive semantics for `IsBlocked`, and a
+**p99 `IsBlocked` hot-path benchmark gate** (must not regress). **Gates any growth
+past ~2–3M.** Incremental content hash maintained on Add/Remove/ApplyDelta (not an
+O(N log N) recompute under the blocklist lock).
 
-Every published version carries a **content hash** of the canonical host set
-(sorted rolling hash / Merkle root). The DP recomputes its local hash after
-applying a delta and compares:
+### P3 — Feed-source distribution (only AFTER memory is bounded), egress-capable DPs first
 
-- **match** → healthy.
-- **mismatch** → the DP requests a **full/chunked resync** (a missed or
-  misapplied delta can never silently persist).
+- **Operator-approved, admin-signed descriptor allowlist** — NOT CP-pushed
+  arbitrary URLs.
+- DP-side fail-closed caps BEFORE trusting content: response-body byte cap
+  (`io.LimitReader`), max-line-count, decompression-ratio limit, per-DP total-host
+  ceiling checked incrementally, refresh jitter, per-DP fetch-rate/concurrency cap.
+- Bounded per-source **delete-on-drop** (diff old-vs-new → Add/Remove) — do NOT
+  rely on `blocklistfeed` (add-only) or claim `feedsync` reuse (it is the UT1
+  category-tarball→catdb syncer — wrong package).
+- ALLOW-mode apply MUST be atomic build-then-swap (a partially-visible set denies
+  all traffic → fleet outage).
+- Staged/canary descriptor rollout + per-descriptor max-delta guardrail;
+  descriptor rollback = force re-fetch + `RemoveByFeedSource` cascade.
 
-A periodic reconciliation tick verifies the hash even with no version change.
+### P4 — Bulk / mirror / chunked full sync
 
-### Initial / full sync at scale (chunked stream)
+- Chunked/streamed full/initial sync applied **incrementally into the compact
+  arena** (approach 1× not 2× steady footprint).
+- CP mirror as a first-class component: rides mTLS (not raw-URL SSRF-checked as
+  public), redirects disabled, content independently signed, served from a single
+  mmap/on-disk artifact, rate-limited + concurrency-capped, HA-replicated, with an
+  **offline sideload path for air-gapped fleets**.
+- **Fleet-wide concurrent-resync cap + jitter** so failover/forced-resync cannot
+  thunder. Replicate the delta ring + per-version hashes to the standby; on
+  promotion, version-rebind when content hash equals what DPs already hold (avoid
+  the failover resync stampede); bound the CP delta ring by TOTAL BYTES and
+  collapse an oversized single delta to a resync marker.
 
-A brand-new or drifted DP needs the full set once (300 MiB @ 10M — past the
-frame). Full sync becomes a **server-streaming RPC** (or HTTP range download
-from the CP mirror): host set shipped in bounded chunks, applied incrementally.
-No single 300 MiB frame.
+## Non-negotiable invariants (red-team-derived)
 
-## 3. Local footprint at 10M (separate scaling axis)
+- A CP delta can never delete a manual/admin block.
+- Feed-derived and CP-authoritative membership are tracked separately.
+- The drift hash covers ONLY the CP-authoritative set; feeds are checked by etag.
+- Integrity is signed against an offline root; a CP-asserted hash is not an H5 control.
+- Every new sync RPC is epoch-fenced; `dpLastSeenEpoch` is durable.
+- Deltas carry base+target version; apply is sequential/gap-free/atomic-with-version.
+- No phase advertises a host count its own memory model cannot hold.
+- ALLOW-mode set changes are atomic build-then-swap.
 
-10M in `map[string]bool` ≈ ~1 GiB. Independent of sync — even a standalone box
-hits it. Options (P4): a compact packed/sorted set with binary search, a
-succinct structure, or a bloom-prefilter + on-disk exact set. **Called out so
-"10M sync" is not mistaken for "10M is free to hold."**
+## Open items still requiring a decision (down from draft-1)
 
-## 4. Protocol
-
-- Extend the config service with:
-  - `GetConfigDelta(KnownVersion, KnownHash) → { mode: unchanged|delta|full|resync, version, hash, added[], removed[], feed_descriptors[] }`
-  - `StreamConfigHosts(FromVersion) → stream<HostChunk>` for full/initial sync.
-- `GetConfig` (full snapshot) stays for the small non-host config
-  (policy/PAC/etc.) and as the compat path for old DPs.
-- Backward compatible: an old DP keeps using `GetConfig` full; a new DP prefers
-  the delta RPC and falls back to full on `Unimplemented` (CP-first, mirrors the
-  gzip migration).
-
-## 5. Blocklist API additions
-
-- `bl.ApplyDelta(added, removed []string, source string)` — incremental under lock.
-- `bl.ContentHash() string` — deterministic hash of the current feed+manual set.
-- Feed-descriptor wiring: DP starts feedsync from distributed descriptors.
-
-## 6. Phasing
-
-- **P1 — Feed-source distribution.** Descriptors over the wire; DP fetches
-  (direct or via CP mirror). Biggest single win; reuses feedsync + feedSrc.
-- **P2 — Delta sync + content-hash drift detection** for the CP-authoritative set.
-- **P3 — Chunked/streamed full sync** (removes the frame ceiling for initial/resync).
-- **P4 — Compact 10M local blocklist representation** (memory).
-
-## 7. Failure handling (the contract)
-
-- Delta ring miss → full/chunked sync (never a partial apply).
-- Hash mismatch → resync (drift never persists).
-- Feed fetch failure on a DP → keep last-good feed content; alert; the DP is
-  degraded-but-serving, not empty.
-- CP mirror unavailable → DPs keep last-good; a network-restricted DP without a
-  reachable mirror is a hard dependency (documented; matches PAN-OS EDL reality).
-- HA: the delta ring + per-version hashes must survive failover (or a promoted
-  standby forces a full resync of the fleet — safe default).
-
-## 8. Security
-
-- **Feed descriptors are attacker-relevant:** a malicious/compromised CP could
-  point DPs at an SSRF target or a poisoned feed. The DP fetch MUST SSRF-guard
-  the URL and verify `content_hash` (ideally a signature). This is a NEW trust
-  surface the monolithic model did not have (the CP fetched, DPs never did).
-- Delta application must be bounded (a malicious delta can't exceed caps/aggregate).
-- Content hash must be collision-resistant (SHA-256 class), not a weak checksum.
-
-## 9. Open questions for review
-
-1. Is feed-source distribution acceptable given network-restricted DPs, or must
-   the CP-mirror path be mandatory (making the CP a bulk-serving bottleneck)?
-2. Delta-ring memory on the CP vs. history depth vs. resync frequency — sizing?
-3. Content-hash cost at 10M (rehash per change) — incremental Merkle vs. full rehash?
-4. Consistency window: DPs fetch feeds at different times → transient divergence.
-   Acceptable bound? How does it interact with the reconciliation hash (which
-   would flag legitimately-in-flight feeds as "drift")?
-5. Does P4 (compact local structure) gate the others, or ship independently?
-6. HA/fencing interaction with the delta ring and streaming full-sync.
+- The compact-structure choice + concurrency model (P2 design doc).
+- CP delta-ring byte bound + published resync-frequency SLO.
+- Air-gap story for feed distribution (mandatory CP mirror vs. offline sideload).
