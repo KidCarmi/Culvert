@@ -837,12 +837,17 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 		mode = "replace"
 	}
 	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	// Surface the DIRECT (full security-path bypass) delta the real import would
+	// demand confirmation for, so the admin sees it in the dry-run before committing.
+	newDirect := importPACDirectPaths(b, replaceMode)
 	jsonOK(w, map[string]any{
-		"dryRun":     true,
-		"mode":       mode,
-		"exportedAt": b.ExportedAt,
-		"sections":   sections,
-		"settings":   settings,
+		"dryRun":                true,
+		"mode":                  mode,
+		"exportedAt":            b.ExportedAt,
+		"sections":              sections,
+		"settings":              settings,
+		"newDirectPaths":        newDirect,
+		"requiresConfirmDirect": len(newDirect) > 0,
 	})
 }
 
@@ -945,6 +950,14 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// live entries are untouched by this gate — only the incoming payload is
 	// judged, and the tolerant apply below never rejects.
 	if !importPACPreValidationOK(w, &b, replaceMode) {
+		return
+	}
+
+	// PAC DIRECT-bypass guardrail (before ANY store mutation): an import that
+	// newly makes DIRECT (full security-path bypass) reachable requires an
+	// explicit confirmDirect=true, the same friction the CRUD/publish/rollback
+	// paths impose. Fail-closed — a silent untrusted-backup bypass is refused.
+	if !importPACDirectGuardOK(w, r, &b, replaceMode) {
 		return
 	}
 
@@ -1166,6 +1179,80 @@ func importPACPreValidationOK(w http.ResponseWriter, b *configBackup, replaceMod
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
 		"error":  "PAC configuration in import failed validation",
 		"issues": issues,
+	})
+	return false
+}
+
+// importPACDirectPaths returns, for the profiles this import would install, the
+// list of NEW DIRECT (full security-path bypass) paths each ENABLED candidate
+// profile introduces relative to the currently-live revision of that same profile
+// — using the identical pac.EvaluatePublish engine the CRUD/publish/rollback
+// guardrails use. It is the delta an operator must consciously acknowledge before
+// an imported (possibly untrusted / hand-edited) backup can steer client traffic
+// around the secure gateway. Empty ⇒ the import introduces no new bypass.
+func importPACDirectPaths(b *configBackup, replaceMode bool) []string {
+	if len(b.PACProfiles) == 0 {
+		return nil
+	}
+	candidate := importPACProfilesCandidate(pacProfiles.Get(), b, replaceMode)
+	pools := make(map[string]pac.Pool, len(candidate.Pools))
+	for i := range candidate.Pools {
+		pools[candidate.Pools[i].ID] = candidate.Pools[i]
+	}
+	live := pacProfiles.Get()
+	var newDirect []string
+	for i := range candidate.Profiles {
+		p := candidate.Profiles[i]
+		if !p.Enabled {
+			// A disabled profile serves nothing; enabling it later re-trips the
+			// guard on the CRUD/publish path (EvaluatePublish normalizes a dormant
+			// active to no-baseline), so it is not a bypass at import time.
+			continue
+		}
+		var active pac.Profile
+		hasActive := false
+		for j := range live.Profiles {
+			if live.Profiles[j].ID == p.ID {
+				active, hasActive = live.Profiles[j], true
+				break
+			}
+		}
+		chk := pac.EvaluatePublish(p, pools, active, hasActive)
+		if chk.RequiresConfirmation {
+			for _, d := range chk.NewDirectPaths {
+				newDirect = append(newDirect, "profile "+p.ID+": "+d)
+			}
+		}
+	}
+	return newDirect
+}
+
+// importPACDirectGuardOK enforces on the config-IMPORT path the same typed-DIRECT
+// confirmation the CRUD (POST/PUT), publish, and rollback paths already enforce.
+// Import was the one mutation path that installed steering profiles behind only a
+// STRUCTURAL check, so a tampered/hand-authored backup could quietly enable a
+// profile that routes traffic DIRECT — a fleet-wide inspection/policy bypass that
+// is then cluster-synced to every DP. This closes that governance asymmetry
+// fail-closed: an import that introduces new DIRECT paths is rejected (409) unless
+// the admin opts in with confirmDirect=true, mirroring the high-friction typed
+// confirmation on the interactive paths. Security-regression fix.
+func importPACDirectGuardOK(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool) bool {
+	newDirect := importPACDirectPaths(b, replaceMode)
+	if len(newDirect) == 0 {
+		return true
+	}
+	if r.URL.Query().Get("confirmDirect") == "true" {
+		logger.Printf("ConfigImport: DIRECT-introducing PAC import confirmed by %s (%d new bypass path(s))",
+			sanitizeLog(auditActor(r)), len(newDirect))
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort body
+		"error":          "this import introduces new DIRECT (full security-path bypass) PAC paths; re-submit with confirmDirect=true to acknowledge",
+		"newDirectPaths": newDirect,
+		"confirmField":   "confirmDirect",
+		"confirmValue":   "true",
 	})
 	return false
 }

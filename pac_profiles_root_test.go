@@ -416,7 +416,10 @@ func TestConfigExportImport_PACProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(exported) //nolint:errcheck // fixed shape cannot fail
-	ireq := httptest.NewRequest(http.MethodPost, "/api/config/import", bytes.NewReader(body))
+	// The round-tripped profile is an enabled availability-mode/DIRECT profile;
+	// restoring it re-introduces DIRECT into an empty store, so the import DIRECT
+	// guardrail requires the typed confirmDirect=true acknowledgement.
+	ireq := httptest.NewRequest(http.MethodPost, "/api/config/import?confirmDirect=true", bytes.NewReader(body))
 	ireq.Header.Set("Content-Type", "application/json")
 	ireq.RemoteAddr = "198.51.100.74:0"
 	ireq = ireq.WithContext(context.WithValue(ireq.Context(), uiRoleKey{}, RoleAdmin))

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -278,6 +279,17 @@ func handleRecipientRotate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Capture the fingerprint being replaced BEFORE the rotate so the audit
+	// records old→new. In-place rotation preserves the name binding while the key
+	// silently changes underneath every future seal-by-name, so this entry is the
+	// only control on a compromised-admin key-swap — it must state what was replaced.
+	oldFP := ""
+	for _, rc := range listSupportRecipients() {
+		if rc.Name == strings.TrimSpace(name) {
+			oldFP = rc.Fingerprint
+			break
+		}
+	}
 	rec, err := updateSupportRecipientKey(name, req.PublicKey, auditActor(r))
 	if err != nil {
 		if errors.Is(err, errRecipientNotFound) {
@@ -287,7 +299,8 @@ func handleRecipientRotate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	auditEvent(r, "support.recipient.rotate", rec.Name, rec.Fingerprint)
+	auditEventDiff(r, "support.recipient.rotate", rec.Name,
+		fmt.Sprintf("fp %s -> %s", oldFP, rec.Fingerprint), oldFP, rec.Fingerprint)
 	jsonOK(w, rec)
 }
 

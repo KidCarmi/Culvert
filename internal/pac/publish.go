@@ -175,6 +175,21 @@ func EvaluatePublish(draft Profile, pools map[string]Pool, activeSpec Profile, h
 		return chk
 	}
 
+	// A disabled active profile is NOT a live DIRECT baseline: servePACProfileFile
+	// 404s a disabled profile, so it serves nothing. Enabling a dormant DIRECT
+	// profile (disabled → ENABLED draft) makes its DIRECT path reachable to clients
+	// for the first time and must trip the typed confirmation. Normalize here — in
+	// the SHARED engine — so publish, rollback, config-import, and the CRUD guard
+	// all treat this uniformly; otherwise the confirmation is launderable through
+	// any call site that reaches EvaluatePublish without pre-normalizing (the CRUD
+	// guard did this itself, the lifecycle paths did not). Gated on draft.Enabled:
+	// a disabled draft exposes nothing, so its delta is judged against the real
+	// baseline (matching the CRUD guard, which only normalizes for an enabled
+	// candidate). Security-regression fix.
+	if draft.Enabled && hasActive && !activeSpec.Enabled {
+		activeSpec, hasActive = Profile{}, false
+	}
+
 	// New-DIRECT-path detection: if the draft can yield DIRECT where the
 	// active revision could not, require a typed confirmation.
 	chk.NewDirectPaths = newDirectPaths(draft, activeSpec, hasActive)

@@ -211,7 +211,18 @@ func apiSupportBundleExportSealed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auditEvent(r, "support.bundle.download_sealed", id, support.BundleFormat)
+	// Record WHO the bundle was sealed to. The sealed path is the governed exfil
+	// channel; without the recipient identity in the audit trail, a "sealed to
+	// tac-prod" export is indistinguishable from "sealed to an attacker's own key"
+	// after the fact, defeating the admin-gated recipient registry. Name + full
+	// key fingerprint are both non-secret (the registry publishes the fingerprint
+	// as its trust anchor). Security-regression fix.
+	recipient := "(unregistered)"
+	if name := strings.TrimSpace(req.RecipientName); name != "" {
+		recipient = name
+	}
+	auditEvent(r, "support.bundle.download_sealed", id,
+		fmt.Sprintf("format=%s recipient=%s fp=%s", support.BundleFormat, recipient, recipientFingerprint(pub)))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", id+".csb.sealed"))
 	// #nosec G705 -- sealed is opaque NaCl sealed-box ciphertext (sealbox.Seal)

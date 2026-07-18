@@ -245,5 +245,9 @@ func recordDecryptFailureEntry(o *DecryptionOutcome, id ProxyIdentity, hostOnly 
 	auth := AuthLogFields{RuleID: ruleID, Dec: o.toBlock(redact)}
 	// CONNECT method, "inspect" SSLAction, no bytes/duration/uri — a terminal
 	// handshake failure, mirroring recordInspectBlock's block row minus the stats.
+	// The §4 redaction posture applies to the nested dec.host/dec.sni sub-fields
+	// (o.toBlock(redact) above); the top-level Host column is left as-is here,
+	// deliberately consistent with every other feed row (tunnel-close, inspect) —
+	// see decryption_redaction.go for the precise, documented scope of the toggle.
 	persistLogEntry(id.ClientIP, "CONNECT", hostOnly, decFailedStatus, ruleName, "", id.Identity, 0, 0, 0, "inspect", "", auth)
 }

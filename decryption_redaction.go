@@ -5,6 +5,19 @@ package main
 // (redactHost → "h_"+12hex) instead of recording the plaintext. OFF by default (the
 // historical behavior), so upgrading changes nothing until an operator opts in.
 //
+// Scope of redaction when ON (precise — this is a structured-observability posture,
+// NOT a blanket log-scrub): it hashes the nested dec.host / dec.sni sub-fields of
+// the decryption block on every projected record (bypass, rescue, inspect-success,
+// non-TLS fallback, and the DECRYPT_FAILED feed row). It does NOT alter the
+// top-level request-log Host column or the LogFullURI URI field — those are left
+// byte-identical to the non-redacted path, deliberately consistent across ALL feed
+// rows (a per-rule LogFullURI opt-in is an independent verbose-logging choice that
+// this node-level posture does not override). Operators who need the primary Host
+// column suppressed must not enable LogFullURI and should treat the request log as
+// host-bearing; this toggle governs the decryption-block detail only. The hash is a
+// correlation-privacy control, not a cryptographic secret: the 48-bit digest is
+// reversible against a known host list by design.
+//
 // The flag is read at PROJECTION time (toBlock) on the decision/close path, so it must be
 // a lock-free atomic read. It is DURABLE in admin_settings.json but node-local — off
 // export/import, version-rollback, and CP→DP sync (an AdminDurable-only config_surfaces
