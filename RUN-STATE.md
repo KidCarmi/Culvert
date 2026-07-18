@@ -16,10 +16,16 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **L-030** — Supply-chain integrity / release management. Next (low priority).
+- **L-031** — Configuration reference (last backlog item). Next.
 
 ## Recently completed
 
+- **L-030** — Supply-chain / release management
+  (`content/docs/11-supply-chain/release-management.md`) + evidence ledger.
+  Signed catalog (Ed25519 + Sigstore keyless), enforce-by-default posture,
+  freshness/rollback gate, verified auto-seed, digest-pinned dispatch,
+  maintenance agent, SLSA/Cosign (CI). Env-only GUI-parity deferral stated
+  honestly. Link check pass. Committed.
 - **M-026** — Admin training curriculum (`content/training/admin-curriculum.md`).
   9-module course mapping to the published, verified articles: objectives, labs,
   checkpoints, capstone. No new product claims. **All medium items complete.**

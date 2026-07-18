@@ -210,7 +210,7 @@ items:
     title: "Supply-chain integrity: signed release catalog & release management"
     type: doc
     priority: low
-    status: todo
+    status: done
     audience: [security-engineer, admin]
     path: content/docs/11-supply-chain/release-management.md
     evidence_areas: [release_wiring.go, "docs/operator/enterprise-release-catalog-plan.md"]

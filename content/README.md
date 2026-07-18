@@ -35,6 +35,7 @@ evidence from but does not mirror.
 | Distributed | [High availability (etcd fencing lease)](docs/08-distributed/high-availability.md) | published |
 | PAC | [PAC traffic steering](docs/09-pac/pac-traffic-steering.md) | published |
 | Operations | [Backup & restore](docs/10-operations/backup-and-restore.md) | published |
+| Supply chain | [Release management & signed catalog](docs/11-supply-chain/release-management.md) | published |
 
 ## YouTube packages
 
