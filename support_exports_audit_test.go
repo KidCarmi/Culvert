@@ -4,18 +4,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
 	"testing"
 )
 
-// TestBundleExportEvents seeds export audit events for a distinctive bundle id and
+// exportTestSeq gives each test invocation a UNIQUE bundle id, so a rerun in the
+// same process (e.g. the determinism gate's `-count=2`) does not accumulate the
+// prior run's seeded events in the global audit ring (the CLAUDE.md audit-ring
+// pitfall — never assert on a fixed id's cumulative count).
+var exportTestSeq atomic.Int64
+
+func uniqueExportBundleID(prefix string) string {
+	return "csb_" + prefix + strconv.FormatInt(exportTestSeq.Add(1), 10)
+}
+
+// TestBundleExportEvents seeds export audit events for a UNIQUE bundle id and
 // confirms the scan surfaces exactly those (actor/action), ignoring non-export
-// actions and other bundles. It asserts on CONTENT (not ring length) per the
-// audit-ring test-authoring rule.
+// actions and other bundles.
 func TestBundleExportEvents(t *testing.T) {
-	// A valid, distinctive bundle id (charset [a-z2-7], 26 chars) unlikely to
-	// collide with another test's audit entries.
-	id := "csb_exportauditzzz234567abc"
-	other := "csb_otherbundlezzz234567abc"
+	id := uniqueExportBundleID("exportaudit")
+	other := uniqueExportBundleID("otherbundle")
 
 	seed := func(action, object string) {
 		r := roleReq(RoleOperator, http.MethodPost, "/seed", nil)
