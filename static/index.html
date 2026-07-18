@@ -505,6 +505,7 @@ tr.dragging  { opacity: .4; }
   <symbol id="i-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
   <symbol id="i-rss" viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-alert-triangle" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></symbol>
 </svg>
 
@@ -701,7 +702,7 @@ tr.dragging  { opacity: .4; }
       <!-- C2 shadow-mode warning - hidden unless admin-API RBAC enforcement is log-only -->
       <div id="c2-shadow-banner" data-click="switchView" data-arg="governance" role="button" tabindex="0"
            style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500;cursor:pointer;background:rgba(255,193,7,.15);border:1px solid rgba(255,193,7,.4);color:#b8860b">
-        ⚠ Admin-API RBAC enforcement is in shadow (log-only) mode - role checks are not blocking. Click for details on the Governance page.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Admin-API RBAC enforcement is in shadow (log-only) mode - role checks are not blocking. Click for details on the Governance page.
       </div>
 
       <!-- Getting Started banner - shown when no traffic yet -->
@@ -1471,7 +1472,7 @@ tr.dragging  { opacity: .4; }
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
       <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
-        ⚠ <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
     </div>
@@ -2258,7 +2259,7 @@ Firefox (all platforms):
             <strong>Open unmatched traffic</strong> - unmatched traffic is admitted without credentials (authSource <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code>). This is <strong>not Allow</strong>: Stage-2 policy still decides access and <strong>default-deny still applies</strong>.
           </p>
           <div id="s-default-auth-enforce-warn" style="display:none;margin-top:6px;padding:8px 12px;border-radius:6px;font-size:.78rem;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24">
-            ⚠ Open unmatched traffic is selected and scoped CredentialRequired/SSORequired rules exist - those rules still enforce for matching traffic. See <strong>Diagnostics</strong> for details.
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Open unmatched traffic is selected and scoped CredentialRequired/SSORequired rules exist - those rules still enforce for matching traffic. See <strong>Diagnostics</strong> for details.
           </div>
         </div>
       </div>
@@ -2668,7 +2669,7 @@ Firefox (all platforms):
                 <input type="checkbox" id="pol-file-filter"> Enable File Filtering
               </label>
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Skip upstream TLS certificate verification for this rule. Use only for internal sites with self-signed certs.">
-                <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700">⚠</span></span>
+                <input type="checkbox" id="pol-tls-skip"> <span>Skip TLS Verify <span style="color:#f59e0b;font-weight:700"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span></span>
               </label>
               <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:.85rem" title="Log the full request URL (path only, no query string) for traffic matching this rule. For HTTPS the path is only visible when SSL Action is Inspect - otherwise only the host is logged.">
                 <input type="checkbox" id="pol-log-uri"> <span>Log full URL</span>
@@ -2780,7 +2781,7 @@ Firefox (all platforms):
             title="When ON, rule edits are staged in a draft and require an explicit commit before they go live (Palo Alto-style candidate config). When OFF, edits apply immediately.">Commit mode: <span id="pol-commit-mode-state">off</span></button>
         </div>
         <div id="pol-reorder-bar" class="banner warn reorder-bar" style="display:none" role="status">
-          <span>⚠ Rule order edited - <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
+          <span><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Rule order edited - <strong>not yet applied</strong>. The proxy still evaluates the previous order.</span>
           <span style="flex:1"></span>
           <button class="btn sm primary" data-click="polApplyOrder">Apply order</button>
           <button class="btn ghost sm" data-click="polRevertOrder">Revert</button>
@@ -2833,7 +2834,7 @@ Firefox (all platforms):
     <div class="view" id="view-authpolicy">
       <div class="panel" style="margin-bottom:14px">
         <div class="panel-body" style="font-size:.85rem;color:var(--muted)">
-          ⚠ <strong style="color:var(--text)">Stage-1 outcome ≠ Allow.</strong>
+          <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong style="color:var(--text)">Stage-1 outcome ≠ Allow.</strong>
           Auth Policy rules decide <em>how a client authenticates</em> - they never allow traffic.
           Stage-2 policy still decides access and default-deny still applies. Creating, editing,
           deleting and reordering these rules requires the <strong>admin</strong> role.
@@ -2853,7 +2854,7 @@ Firefox (all platforms):
             are reported under <strong>Diagnostics</strong>.
           </div>
           <div id="ap-default-allow-warn" style="display:none;margin-top:8px;color:#fbbf24">
-            ⚠ The default policy action is <strong>Allow</strong> while auth rules exist - exemptions add
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> The default policy action is <strong>Allow</strong> while auth rules exist - exemptions add
             little over an allow-all default. Set the default action to deny (Zero Trust).
           </div>
         </div>
@@ -3046,7 +3047,7 @@ Firefox (all platforms):
                   <option value="">Inherit (rule setting)</option>
                   <option value="strict">Strict (block untrusted/expired)</option>
                   <option value="permissive" disabled>Permissive (verify, allow + log) - coming soon</option>
-                  <option value="skip">Skip (no verification ⚠)</option>
+                  <option value="skip">Skip (no verification <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>)</option>
                 </select>
               </div>
               <div>
@@ -3059,7 +3060,7 @@ Firefox (all platforms):
                 <div class="hint" style="font-size:.7rem;margin-top:2px">TLS parameter negotiation only (version/cipher below floor).</div>
               </div>
               <div>
-                <label class="form-label">On Inspect Failure ⚠</label>
+                <label class="form-label">On Inspect Failure <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg></label>
                 <select class="select" style="width:100%" id="dp-oninspecterr" data-change="syncDecProfFailOpenHint">
                   <option value="">Inherit (fail-close)</option>
                   <option value="fail-close">Fail-close (502)</option>
@@ -3090,7 +3091,7 @@ Firefox (all platforms):
             </div>
             <div class="hint" id="dp-failopen-hint" style="display:none;margin-bottom:12px">
               <p style="color:var(--red);margin:0 0 4px">
-                ⚠ <strong>Fail-open disables SSL inspection for hosts it can't decrypt.</strong> After a confirm-count
+                <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Fail-open disables SSL inspection for hosts it can't decrypt.</strong> After a confirm-count
                 of distinct clients, an incompatible host is auto-excluded and later sessions <strong>bypass
                 inspection</strong> until it expires (12h; 1h pinned). Untrusted/expired certs are <strong>never</strong>
                 excluded - they stay blocked. Learning is scoped to <em>this</em> profile only.
@@ -5564,7 +5565,7 @@ function decProfSummary(p) {
   else if (p.inspectHttp2 === false) bits.push('Force HTTP/1.1');
   if (p.certVerification) bits.push('cert: ' + p.certVerification);
   if (p.onUnsupported) bits.push(p.onUnsupported);
-  if (p.onInspectError === 'fail-open') bits.push('⚠ fail-open (auto-exclude)');
+  if (p.onInspectError === 'fail-open') bits.push('<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> fail-open (auto-exclude)');
   else if (p.onInspectError) bits.push('on-fail: ' + p.onInspectError);
   if (p.minTlsVersion) bits.push('min TLS ' + p.minTlsVersion);
   if (p.maxTlsVersion) bits.push('max TLS ' + p.maxTlsVersion);
@@ -5726,7 +5727,7 @@ function renderDecExclusions(stats, failOpenProfiles, failOpenRules) {
     s.innerHTML = `<div style="margin-bottom:6px;font-weight:600;color:${off ? 'var(--green,#16a34a)' : 'var(--red)'}">` +
       (off
         ? 'Fail-open is not configured - SSL inspection cannot be auto-disabled on this node.'
-        : `⚠ ${failOpenProfiles} fail-open profile(s), referenced by ${failOpenRules} policy rule(s) - those rules can auto-disable inspection.`) +
+        : `<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ${failOpenProfiles} fail-open profile(s), referenced by ${failOpenRules} policy rule(s) - those rules can auto-disable inspection.`) +
       '</div>' +
       escHtml(`Active: ${stats.active ?? 0} · Pending (unconfirmed): ${stats.pending ?? 0} · ` +
       `Confirm-count: ${stats.confirm_n ?? '?'} distinct clients (identity, else IP) · TTL: ${Math.round((stats.ttl_secs ?? 0)/3600)}h ` +
@@ -6490,7 +6491,7 @@ function describeLogPersistence(s) {
     const parts = [];
     if (f.req) parts.push('request log');
     if (f.audit) parts.push('audit log');
-    return '⚠ ' + parts.join(' + ') + ' in-memory only - restart wipes history';
+    return '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + parts.join(' + ') + ' in-memory only - restart wipes history';
   }
   const persisted = [];
   if (s.requestLogConfigured) persisted.push('request log');
@@ -6577,7 +6578,7 @@ async function checkCACertExpiry() {
     banner.style.background = isCritical ? 'rgba(220,53,69,.15)' : 'rgba(255,193,7,.15)';
     banner.style.border      = `1px solid ${isCritical ? 'rgba(220,53,69,.4)' : 'rgba(255,193,7,.4)'}`;
     banner.style.color       = isCritical ? '#e74c3c' : '#b8860b';
-    banner.textContent       = `⚠ CA certificate expires in ${days} day${days===1?'':'s'} (${info.notAfter}) - renew via the Certificates page`;
+    banner.innerHTML         = `<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> CA certificate expires in ${days} day${days===1?'':'s'} (${escHtml(info.notAfter)}) - renew via the Certificates page`;
     banner.style.display     = 'block';
   } catch(e) { console.error(e); setPosture('ca', 'unknown', 'Unavailable'); }
 }
@@ -6812,11 +6813,11 @@ async function loadRetention() {
       if (d.retentionMaxGB > 0 && perDay > 0 && d.retentionDays > 0) {
         const daysToCap = (d.retentionMaxGB * (1 << 30)) / perDay;
         if (daysToCap < d.retentionDays) {
-          usageEl.innerHTML += `<br><span class="text-red">⚠ At this rate the ${d.retentionMaxGB} GB cap fills in ~${daysToCap.toFixed(0)} days - before your ${d.retentionDays}-day window. Raise the cap or shorten the days.</span>`;
+          usageEl.innerHTML += `<br><span class="text-red"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> At this rate the ${d.retentionMaxGB} GB cap fills in ~${daysToCap.toFixed(0)} days - before your ${d.retentionDays}-day window. Raise the cap or shorten the days.</span>`;
         }
       }
     } else if (d.configurable === false) {
-      usageEl.innerHTML = '⚠ Log saving can’t be enabled (no data directory configured).';
+      usageEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Log saving can’t be enabled (no data directory configured).';
     } else {
       usageEl.innerHTML = 'Saving is off - only the live 5,000-entry memory feed is kept. Flip the switch to start saving to disk.';
     }
@@ -6837,7 +6838,7 @@ function renderDiskGuard(g) {
   badge.style.color = minimal ? 'var(--red)' : 'var(--green)';
 
   const gw = document.getElementById('guard-warning');
-  if (g.warning) { gw.textContent = '⚠ ' + g.warning; gw.style.display = ''; }
+  if (g.warning) { gw.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + escHtml(g.warning); gw.style.display = ''; }
   else { gw.style.display = 'none'; }
 
   let s = '';
@@ -8109,7 +8110,7 @@ function sslBadge(ssl, skipVerify) {
   if (!ssl) return '<span style="color:var(--muted);font-size:.75rem">-</span>';
   const cls = ssl === 'Inspect' ? 'inspect' : 'bypass';
   let badge = `<span class="badge ${cls}">${ssl}</span>`;
-  if (skipVerify) badge += ' <span style="font-size:.72rem;color:var(--warn);font-weight:700" title="TLS certificate verification disabled">⚠ NO-VERIFY</span>';
+  if (skipVerify) badge += ' <span style="font-size:.72rem;color:var(--warn);font-weight:700" title="TLS certificate verification disabled"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> NO-VERIFY</span>';
   return badge;
 }
 
@@ -8344,7 +8345,7 @@ function renderDraftState(st) {
       // differs, or our own identity is unknown), treat it as another admin's.
       const other = !!st.actor && st.actor !== uiUsername;
       actor.textContent = st.actor
-        ? (other ? '⚠ opened by ' + st.actor + ' - committing/discarding acts on their staged changes' : 'opened by you')
+        ? (other ? '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> opened by ' + st.actor + ' - committing/discarding acts on their staged changes' : 'opened by you')
         : '';
       actor.style.color = other ? 'var(--warn)' : 'var(--muted)';
     }
@@ -8399,7 +8400,7 @@ async function polCommitDraft() {
   let shadowWarn = '';
   if (Array.isArray(st.shadows) && st.shadows.length) {
     const s = st.shadows;
-    shadowWarn = '⚠ ' + s.length + ' possibly-shadowed rule' + (s.length === 1 ? '' : 's') + ': ' +
+    shadowWarn = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + s.length + ' possibly-shadowed rule' + (s.length === 1 ? '' : 's') + ': ' +
       s.map(x => x.rule + ' (by ' + x.shadowedBy + ')').join(', ') +
       ' - may never match; verify with the tester.  ';
   }
@@ -8892,7 +8893,7 @@ function renderSyslogDrops(drops) {
   const n = drops || 0;
   dropsEl.style.display = '';
   if (n > 0) {
-    dropsEl.textContent = '⚠ ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started - check collector connectivity/capacity';
+    dropsEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + n + ' message' + (n === 1 ? '' : 's') + ' dropped since forwarding started - check collector connectivity/capacity';
     dropsEl.style.color = 'var(--warn,#b8860b)';
   } else {
     dropsEl.textContent = 'No delivery drops since forwarding started';
@@ -9286,7 +9287,7 @@ async function blCleanupUnattributed() {
   if (!await confirmAction('Clean Up Unattributed Entries',
     `Remove ${n} entries whose origin is unknown (not added via this admin UI, not attributed to any configured feed)? ` +
     `In feed-driven setups these are stale imports from before per-feed tracking existed; any host still carried by a feed returns (with attribution) on its next sync. ` +
-    `⚠ If you maintain blocklist entries OUTSIDE this UI - a static blocklist file or restored config snapshots - do NOT use this: those entries look identical and will be removed too.`,
+    `<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> If you maintain blocklist entries OUTSIDE this UI - a static blocklist file or restored config snapshots - do NOT use this: those entries look identical and will be removed too.`,
     `Remove ${n} Entries`)) return;
   try {
     const d = await api('/api/blocklist?scope=unattributed', {method: 'DELETE'});
@@ -12426,7 +12427,7 @@ async function runPACSimulate() {
     const res = await api('/api/pac/simulate', { method: 'POST', body: { profileId, input } });
     let warn = '';
     if (res.outcome === 'undetermined_dns') {
-      warn = '<div style="color:var(--amber,#f5a623)">⚠ Depends on DNS - supply a resolved IP for a definite answer.</div>';
+      warn = '<div style="color:var(--amber,#f5a623)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Depends on DNS - supply a resolved IP for a definite answer.</div>';
     }
     box.innerHTML =
       '<div><strong>Directive:</strong> <code>' + escHtml(res.directive) + '</code></div>' +
@@ -12789,7 +12790,7 @@ function renderAuthPolicy() {
   tbody.innerHTML = apRules.map((r, i) => {
     const enabled = r.enabled === undefined || r.enabled === null || r.enabled;
     const warn = (r.warnings || []).length
-      ? `<span title="${escHtml((r.warnings||[]).join('\n'))}" style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem">⚠ ${r.warnings.length}</span>`
+      ? `<span title="${escHtml((r.warnings||[]).join('\n'))}" style="background:rgba(251,191,36,.15);color:#fbbf24;padding:2px 8px;border-radius:12px;font-size:.72rem"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ${r.warnings.length}</span>`
       : '<span style="color:var(--muted)">-</span>';
     return `<tr data-priority="${r.priority}" data-rule-id="${escHtml(r.id || '')}" style="${enabled ? '' : 'opacity:.45'}">
       <td>${r.priority}</td>
@@ -13725,7 +13726,7 @@ async function supportShowReport(id) {
       }).join('');
       if (pblocks) {
         previewHtml = '<div style="margin-top:14px;padding:10px;border:1px solid var(--warn,#b8860b);border-radius:6px">' +
-          '<div style="font-weight:700;color:var(--warn,#b8860b)">⚠ Review before approving - retained free-form values</div>' +
+          '<div style="font-weight:700;color:var(--warn,#b8860b)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Review before approving - retained free-form values</div>' +
           '<p class="hint" style="margin:4px 0">These INTERNAL free-form strings are KEPT in the shareable bundle. ' +
           'Automated redaction cannot catch a bare secret embedded here (e.g. a credential typed into a rule name or endpoint). ' +
           'Confirm none contains a secret before you approve.</p>' + pblocks + '</div>';
@@ -13877,7 +13878,7 @@ function renderReleaseTrustBadge(d) {
   const detail = mode === 'disabled'
     ? 'Signature verification is DISABLED - catalogs load without any authenticity check.'
     : 'Signature verification is PERMISSIVE - unsigned catalogs are accepted (a present-but-invalid signature is still rejected).';
-  warn.textContent = '⚠ ' + detail + ' Set CULVERT_RELEASE_CATALOG_VERIFY=enforce (and configure trust roots) to restore full verification.';
+  warn.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' + escHtml(detail) + ' Set CULVERT_RELEASE_CATALOG_VERIFY=enforce (and configure trust roots) to restore full verification.';
   warn.style.display = '';
 }
 
@@ -13911,7 +13912,7 @@ function renderReleaseOrigin(d) {
     const stale = days < 30;
     const label = days < 0 ? 'EXPIRED ' + escHtml(String(-days)) + 'd ago' : escHtml(String(days)) + ' days';
     rows.push('<div><strong>Catalog expires in:</strong> <span style="color:' + (stale ? 'var(--warn,#f59e0b)' : 'var(--muted)') + '">' + label
-      + (stale ? ' ⚠ (stale threshold 30d - check the re-sign pipeline)' : '') + '</span></div>');
+      + (stale ? ' <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> (stale threshold 30d - check the re-sign pipeline)' : '') + '</span></div>');
   }
   const lr = d.last_refresh;
   if (lr && lr.last_at) {
