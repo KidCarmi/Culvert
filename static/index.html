@@ -289,6 +289,16 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .btn.ghost:hover { color: var(--text); border-color: var(--border-hi); background: var(--surface2); }
 .btn.sm      { padding: 5px 10px; font-size: .75rem; }
+/* row-actions: a flex cell so table row-action buttons share the same 8px
+   rhythm as every deliberate button row (no whitespace-collapse spacing). */
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+/* PAC tab: collapse the two-column and simulator grids on narrow viewports so
+   inputs/selects never crush (the inline grid-template-columns is desktop-only;
+   the media !important wins at ≤860px). */
+@media (max-width: 860px) {
+  #view-pac .pac-2col,
+  #view-pac .pac-sim-grid { grid-template-columns: 1fr !important; }
+}
 /* variants referenced by markup - previously undefined (see CURRENT-UI-AUDIT.md §4) */
 .btn.primary { background: var(--accent); color: #fff; }
 .btn.primary:hover { background: var(--accent-hover); }
@@ -1781,10 +1791,26 @@ tr.dragging  { opacity: .4; }
           </p>
           <div id="pac-posture-summary" style="font-size:.85rem;margin-bottom:10px"></div>
           <div id="pac-posture-body"></div>
+
+          <!-- PAC Exception Intelligence P3: DIRECT-surface change preview -->
+          <details style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+            <summary id="pac-diff-summary" style="cursor:pointer;font-weight:600;font-size:.85rem">Change preview - what a config change would add, remove, or broaden</summary>
+            <p style="font-size:.8rem;color:var(--muted);margin:8px 0;line-height:1.6">
+              Paste or edit a candidate steering config below (pre-filled with the current one) and preview how its
+              <strong>DIRECT full-bypass surface</strong> differs from what is active now - added, removed, or broadened bypasses.
+              Read-only and config-derived: no change is applied, and nothing is published.
+            </p>
+            <textarea id="pac-diff-input" class="input" style="width:100%;height:150px;font-family:monospace;font-size:.72rem" spellcheck="false" placeholder='{"profiles":[...],"pools":[...]}'></textarea>
+            <div style="display:flex;gap:8px;margin:8px 0">
+              <button class="btn ghost sm" data-click="loadPacDiffCurrent">Reset to Current Config</button>
+              <button class="btn primary sm" data-click="runPacDiff">Preview DIRECT Changes</button>
+            </div>
+            <div id="pac-diff-result" style="font-size:.82rem"></div>
+          </details>
         </div>
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
+      <div class="pac-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
 
         <!-- Left: PAC config -->
         <div class="panel">
@@ -1831,7 +1857,7 @@ tr.dragging  { opacity: .4; }
       </div>
 
       <!-- ── Steering Profiles + Proxy Pools (PAC initiative PR 2) ── -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;margin-top:18px">
+      <div class="pac-2col" style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;margin-top:18px">
 
         <div class="panel">
           <div class="panel-header">
@@ -1839,7 +1865,7 @@ tr.dragging  { opacity: .4; }
             <button class="btn primary sm" data-click="newPACProfile" data-min-role="admin">+ New Profile</button>
           </div>
           <div class="panel-body">
-            <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+            <p style="font-size:.8rem;color:var(--muted);margin-bottom:10px;line-height:1.6">
               Each profile serves its own PAC at <code>/pac/&lt;id&gt;.pac</code> with an ordered proxy-failover pool,
               ordered routing rules, and an explicit availability mode. The <strong>default</strong> profile is the
               legacy configuration above (served at <code>/proxy.pac</code>).
@@ -1884,7 +1910,7 @@ tr.dragging  { opacity: .4; }
             <button class="btn primary sm" data-click="newPACPool" data-min-role="admin">+ New Pool</button>
           </div>
           <div class="panel-body">
-            <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+            <p style="font-size:.8rem;color:var(--muted);margin-bottom:10px;line-height:1.6">
               An ordered failover chain (primary → secondary → tertiary). Clients try each
               <code>PROXY host:port</code> in order and quarantine dead proxies automatically.
             </p>
@@ -1912,12 +1938,12 @@ tr.dragging  { opacity: .4; }
       <div class="panel" style="margin-top:18px">
         <div class="panel-header"><span class="panel-title">Steering Simulator</span></div>
         <div class="panel-body">
-          <p style="font-size:.78rem;color:var(--muted);margin-bottom:10px;line-height:1.5">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:10px;line-height:1.6">
             Explain what a profile would return for a destination - the same rule
             evaluation the compiler emits. No live DNS: supply a resolved IP to
             evaluate CIDR/private-network rules definitively.
           </p>
-          <div style="display:grid;grid-template-columns:1fr 2fr 1fr 90px 120px auto;gap:8px;align-items:end">
+          <div class="pac-sim-grid" style="display:grid;grid-template-columns:1fr 2fr 1fr 90px 120px auto;gap:8px;align-items:end">
             <div><label class="form-label">Profile</label><select id="pacsim-profile" class="input"></select></div>
             <div><label class="form-label">URL or Host</label><input id="pacsim-host" class="input" placeholder="https://intranet.corp.example/"></div>
             <div><label class="form-label">Resolved IP (optional)</label><input id="pacsim-ip" class="input" placeholder="10.1.2.3"></div>
@@ -4556,6 +4582,8 @@ document.addEventListener('click', e => {
     case 'closePacGovModal':  closePacGovModal(); break;
     case 'savePacGov':        savePacGov(); break;
     case 'clearPacGov':       clearPacGov(arg); break;
+    case 'loadPacDiffCurrent': loadPacDiffCurrent(); break;
+    case 'runPacDiff':        runPacDiff(); break;
 
     // ── Certificates ──
     case 'loadCACertInfo':    loadCACertInfo(); break;
@@ -12170,10 +12198,10 @@ async function loadPACPosture() {
       if (meta.length) govCell += '<br><span style="color:var(--muted);font-size:.72rem">' + meta.join(' · ') + '</span>';
       const hasRec = !!rec.owner;
       const actions = isAdmin
-        ? '<td style="white-space:nowrap">' +
-            '<button class="btn ghost" style="padding:2px 8px;font-size:.72rem" data-click="openPacGovModal" data-arg="' + escHtml(p.profileId) + '">' + (hasRec ? 'Edit' : 'Govern') + '</button>' +
-            (hasRec ? ' <button class="btn ghost" style="padding:2px 8px;font-size:.72rem" data-click="clearPacGov" data-arg="' + escHtml(p.profileId) + '">Clear</button>' : '') +
-          '</td>'
+        ? '<td><div class="row-actions">' +
+            '<button class="btn ghost sm" data-click="openPacGovModal" data-arg="' + escHtml(p.profileId) + '">' + (hasRec ? 'Edit' : 'Govern') + '</button>' +
+            (hasRec ? '<button class="btn ghost sm" data-click="clearPacGov" data-arg="' + escHtml(p.profileId) + '">Clear</button>' : '') +
+          '</div></td>'
         : '';
       html += '<tr><td><strong>' + escHtml(p.name || p.profileId) + '</strong><br>' +
         '<span style="color:var(--muted);font-size:.75rem">' + escHtml(p.profileId) + '</span></td>' +
@@ -12182,9 +12210,74 @@ async function loadPACPosture() {
     }
     html += '</tbody></table>';
     body.innerHTML = html;
+    // Pre-fill the P3 change-preview editor with the current config (once).
+    const diffIn = document.getElementById('pac-diff-input');
+    if (diffIn && !diffIn.value.trim()) loadPacDiffCurrent();
   } catch(e) {
     body.innerHTML = '<div style="color:var(--muted);font-size:.82rem">Inventory unavailable: ' + escHtml(e.message) + '</div>';
     sum.innerHTML = '';
+  }
+}
+
+// loadPacDiffCurrent fills the change-preview editor with the current steering
+// config ({profiles, pools}) so an operator edits from a real baseline.
+async function loadPacDiffCurrent() {
+  const el = document.getElementById('pac-diff-input');
+  if (!el) return;
+  try {
+    const cfg = await api('/api/pac/profiles');
+    el.value = JSON.stringify({ profiles: cfg.profiles || [], pools: cfg.pools || [] }, null, 2);
+  } catch(e) { /* leave editor as-is on failure */ }
+}
+
+// runPacDiff previews how the edited candidate config would change the DIRECT
+// full-bypass surface vs the active config. Read-only (POST carries the body).
+async function runPacDiff() {
+  const out = document.getElementById('pac-diff-result');
+  const raw = (document.getElementById('pac-diff-input') || {}).value || '';
+  if (!out) return;
+  let candidate;
+  try { candidate = JSON.parse(raw); }
+  catch(e) { out.innerHTML = '<div style="color:var(--red,#e5484d)">Invalid JSON: ' + escHtml(e.message) + '</div>'; return; }
+  try {
+    const resp = await apiFetch('/api/pac/posture/diff', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(candidate),
+    });
+    if (resp.status === 400) {
+      const data = await resp.json().catch(() => null);
+      if (data && data.issues) { renderPACIssues(data.issues); out.innerHTML = '<div style="color:var(--red,#e5484d)">Invalid candidate config (see errors above).</div>'; return; }
+      out.innerHTML = '<div style="color:var(--red,#e5484d)">' + escHtml(await resp.text()) + '</div>'; return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    renderPACIssues(null);
+    const d = await resp.json();
+    const risk = d.riskIncreased
+      ? '<span style="color:var(--red,#e5484d);font-weight:700">RISK INCREASED</span>'
+      : '<span style="color:var(--ok,#22c55e);font-weight:700">no new bypass surface</span>';
+    let h = '<div style="margin:8px 0">' + risk + ' · ' +
+      '<strong>+' + (d.pathsAdded||0) + '</strong> added (' +
+      '<span style="color:var(--red,#e5484d)">' + (d.broadPathsAdded||0) + ' broad</span>), ' +
+      '<strong>-' + (d.pathsRemoved||0) + '</strong> removed · ' +
+      (d.profilesGainedDirect||0) + ' gained / ' + (d.profilesLostDirect||0) + ' lost DIRECT · ' +
+      '<span style="color:var(--muted)">evidence: config</span></div>';
+    const deltas = d.deltas || [];
+    if (deltas.length) {
+      h += '<table class="tbl" style="width:100%;font-size:.8rem"><thead><tr><th>Profile</th><th>Change</th><th>DIRECT source</th></tr></thead><tbody>';
+      for (const x of deltas) {
+        const add = x.change === 'path_added' || x.change === 'profile_gained_direct' || x.change === 'profile_served';
+        const color = add ? 'var(--red,#e5484d)' : 'var(--ok,#22c55e)';
+        const broad = x.broad ? ' <span style="color:var(--amber,#f5a623);font-size:.72rem">(broad)</span>' : '';
+        h += '<tr><td>' + escHtml(x.name || x.profileId) + '</td>' +
+          '<td style="color:' + color + '">' + escHtml(x.change) + '</td>' +
+          '<td>' + escHtml(x.detail || x.kind || '') + broad + '</td></tr>';
+      }
+      h += '</tbody></table>';
+    } else {
+      h += '<div style="color:var(--muted)">No DIRECT-surface change.</div>';
+    }
+    out.innerHTML = h;
+  } catch(e) {
+    out.innerHTML = '<div style="color:var(--red,#e5484d)">Diff failed: ' + escHtml(e.message) + '</div>';
   }
 }
 
@@ -12366,9 +12459,9 @@ function renderPACProfilesList() {
     rows += '<tr><td><code>' + escHtml(p.id) + '</code>' + (p.enabled ? '' : ' <span class="badge">disabled</span>') + '</td>' +
       '<td>' + escHtml(p.name) + ' <span style="color:var(--muted)">r' + (p.revision || 0) + '</span></td>' +
       '<td>' + escHtml(p.availabilityMode) + '</td>' +
-      '<td style="white-space:nowrap"><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="' + escHtml(p.id) + '">Copy URL</button> ' +
-      '<button class="btn ghost sm" data-click="editPACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Edit</button> ' +
-      '<button class="btn ghost sm" data-click="deletePACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Delete</button></td></tr>';
+      '<td><div class="row-actions"><button class="btn ghost sm" data-click="copyPACProfileURL" data-arg="' + escHtml(p.id) + '">Copy URL</button>' +
+      '<button class="btn ghost sm" data-click="editPACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Edit</button>' +
+      '<button class="btn ghost sm" data-click="deletePACProfile" data-arg="' + escHtml(p.id) + '" data-min-role="admin">Delete</button></div></td></tr>';
   }
   box.innerHTML = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Mode</th><th></th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="4" style="color:var(--muted)">No custom profiles yet</td></tr>') + '</tbody></table>';
@@ -12383,8 +12476,8 @@ function renderPACPoolsList() {
     const chain = (pl.endpoints || []).map(ep => escHtml(ep.host + ':' + ep.port)).join(' &rarr; ');
     rows += '<tr><td><code>' + escHtml(pl.id) + '</code></td><td>' + escHtml(pl.name) + '</td>' +
       '<td style="font-size:.76rem">' + chain + '</td>' +
-      '<td style="white-space:nowrap"><button class="btn ghost sm" data-click="editPACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Edit</button> ' +
-      '<button class="btn ghost sm" data-click="deletePACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Delete</button></td></tr>';
+      '<td><div class="row-actions"><button class="btn ghost sm" data-click="editPACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Edit</button>' +
+      '<button class="btn ghost sm" data-click="deletePACPool" data-arg="' + escHtml(pl.id) + '" data-min-role="admin">Delete</button></div></td></tr>';
   }
   box.innerHTML = '<table class="table"><thead><tr><th>ID</th><th>Name</th><th>Failover Chain</th><th></th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="4" style="color:var(--muted)">No pools yet - create one first</td></tr>') + '</tbody></table>';

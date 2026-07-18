@@ -76,8 +76,10 @@ import (
 //     /api/decryption/redaction landed together; both carry metadata (parity
 //     green) but the const bump for one was overwritten, leaving actual=178 and
 //     the lock at 177 (main's Fast Gate was red on this). Bumped to match.
+//   - 180 — PAC Exception Intelligence P3 added /api/pac/posture/diff (read-only
+//     candidate DIRECT change-diff; viewer POST), on top of main's 179.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 179
+	const want = 180
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
