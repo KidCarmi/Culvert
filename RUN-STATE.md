@@ -16,10 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-012** — Identity & access (SSO/2FA/RBAC). Next high-pri doc.
+- **H-013** — Observability (metrics/dashboard/logs/syslog/alerts/audit). Next.
 
 ## Recently completed
 
+- **H-012** — Identity & access (`content/docs/05-identity/identity-and-access.md`)
+  + evidence ledger. Identity sources, multi-IdP email-domain routing, TOTP
+  step-up flow (Mermaid), 3-role RBAC (two-layer), session security, brute-force
+  lockout. LDAP single-group limitation surfaced honestly. Link check pass.
+  Committed.
 - **H-011** — TLS inspection admin (`content/docs/04-tls-inspection/tls-inspection.md`)
   + evidence ledger. CA lifecycle, passphrase/persistence, client trust
   distribution, per-host bypass, Decryption Profiles + adaptive exclusions
@@ -64,8 +69,10 @@ phase transition. Newest activity at the top of each section.
 - **C-003** — Quick start + evidence ledger + reproduced lab run (critical).
 - **H-010** — Policy engine & Zero-Trust authoring + evidence ledger (high).
 - **H-011** — TLS inspection administration + evidence ledger (high).
+- **H-012** — Identity & access + evidence ledger (high).
 
-**All critical items complete.** High-priority in progress (H-010, H-011 done).
+**All critical items complete.** High-priority docs done (H-010/011/012);
+remaining high-pri are the two YouTube packages (H-014, H-015) + H-013.
 
 ## Commits created
 
@@ -74,7 +81,8 @@ phase transition. Newest activity at the top of each section.
 - `ba90a4d` docs(content): add verified architecture overview.
 - `8acf32d` docs(content): add verified quick-start & first-boot guide.
 - `939ed62` docs(content): add verified policy engine & Zero-Trust guide.
-- _(H-011 commit — hash recorded next cycle)_
+- `4466469` docs(content): add verified TLS inspection administration guide.
+- _(H-012 commit — hash recorded next cycle)_
 
 ## Blocked items
 

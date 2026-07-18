@@ -94,7 +94,7 @@ items:
     title: "Identity & access: OIDC, SAML, LDAP, TOTP 2FA, admin RBAC"
     type: doc
     priority: high
-    status: todo
+    status: done
     audience: [security-engineer, admin]
     path: content/docs/05-identity/identity-and-access.md
     evidence_areas: [auth_oidc.go, auth_saml.go, auth_ldap.go, "internal/totp", ui_rbac.go]
