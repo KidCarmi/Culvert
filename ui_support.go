@@ -28,6 +28,14 @@ import (
 const (
 	supportMinFreeBytes  = 256 << 20 // refuse a new bundle build below this free headroom
 	supportRetentionKeep = 10        // keep the newest N persisted bundles, evict oldest-first
+
+	// supportRetentionMaxAge bounds how long a persisted bundle lives on disk. The
+	// count-based prune runs only when a NEW bundle is built, so an idle appliance
+	// (one that stopped creating bundles) would otherwise keep stale bundles
+	// forever; the background janitor evicts anything older than this.
+	supportRetentionMaxAge = 30 * 24 * time.Hour
+	// supportRetentionTick is the age-sweep cadence.
+	supportRetentionTick = 6 * time.Hour
 )
 
 // errSupportLowDisk is the fail-closed preflight sentinel: the POST handler maps
@@ -261,10 +269,11 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"`          // selectable incident scopes
-	RetentionKeep         int                    `json:"retention_keep"`  // newest-N persisted bundles kept (oldest evicted)
-	RecipientCount        int                    `json:"recipient_count"` // registered sealing recipients
-	RecipientMax          int                    `json:"recipient_max"`   // registry cap
+	Scopes                []string               `json:"scopes"`                 // selectable incident scopes
+	RetentionKeep         int                    `json:"retention_keep"`         // count cap: newest N persisted bundles kept
+	RetentionMaxAgeDays   int                    `json:"retention_max_age_days"` // age cap: idle-appliance background sweep
+	RecipientCount        int                    `json:"recipient_count"`        // registered sealing recipients
+	RecipientMax          int                    `json:"recipient_max"`          // registry cap
 }
 
 // apiSupportStatus reports the support subsystem's contract + current state: engine
@@ -296,6 +305,7 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
 		RetentionKeep:         supportRetentionKeep,
+		RetentionMaxAgeDays:   int(supportRetentionMaxAge / (24 * time.Hour)),
 		RecipientCount:        len(listSupportRecipients()),
 		RecipientMax:          maxSupportRecipients,
 	})
@@ -779,6 +789,55 @@ func pruneSupportBundles(keep int) {
 			continue
 		}
 		auditSystem("support.bundle.expire", s.BundleID, "retention cap")
+	}
+}
+
+// pruneSupportBundlesByAge evicts persisted bundles whose manifest CreatedAt is
+// older than maxAge. The count-based prune runs ONLY on a new build, so this is
+// what protects an IDLE appliance from accumulating stale bundles on disk. now is
+// injected for deterministic tests. FAIL-SAFE: a bundle whose CreatedAt is
+// absent/unparseable is KEPT (a parse failure must never trigger an eviction).
+// Best-effort: an eviction failure is logged and skipped, never fatal.
+func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+	for _, s := range listSupportBundles() {
+		// Defense-in-depth: BundleID comes from manifest content — re-guard the
+		// path-traversal shape before any os.RemoveAll.
+		if !supportBundleIDRe.MatchString(s.BundleID) {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339, s.CreatedAt)
+		if err != nil {
+			continue // fail-safe: unparseable/absent timestamp ⇒ keep
+		}
+		if now.Sub(created) <= maxAge {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(supportBundlesDir(), s.BundleID)); err != nil {
+			logger.Printf("support: age-retention evict failed for %q: %v",
+				strings.ReplaceAll(s.BundleID, "\n", ""), err)
+			continue
+		}
+		auditSystem("support.bundle.expire", s.BundleID, "retention max-age")
+	}
+}
+
+// startSupportRetentionJanitor runs the age-based sweep once at boot and then on a
+// fixed cadence, so an idle appliance still evicts stale bundles. Parented to ctx;
+// it exits on shutdown.
+func startSupportRetentionJanitor(ctx context.Context) {
+	pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
+	t := time.NewTicker(supportRetentionTick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
+		}
 	}
 }
 

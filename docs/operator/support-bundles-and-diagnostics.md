@@ -37,8 +37,16 @@ then **Create bundle**.
 - **case id** — optional, binds the bundle to a support case for triage/history
   (letters/digits/`._-`, ≤64, no whitespace).
 
-The bundle is written under `<dataDir>/support/bundles/<id>/` and its oldest
-entries beyond the retention cap are evicted automatically.
+The bundle is written under `<dataDir>/support/bundles/<id>/`. Two retention
+bounds keep the bundle store from growing without limit (both audited as
+`support.bundle.expire`, both surfaced read-only on `/api/support/status`):
+
+- **Count cap** — only the newest *N* bundles are kept; the oldest are evicted
+  when a new bundle is built.
+- **Age cap** — a background janitor evicts any bundle older than the max age
+  (default 30 days), so an **idle** appliance (one that has stopped creating
+  bundles, and so never triggers the count cap) still ages out stale bundles.
+  A bundle whose timestamp can't be read is kept (fail-safe).
 
 ---
 

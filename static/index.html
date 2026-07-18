@@ -12986,11 +12986,16 @@ function renderSupportStatus(s) {
     if (s.scopes.indexOf(cur) >= 0) scopeSel.value = cur;
   }
   const cols = s.collectors || [];
+  let retention = '';
+  if (s.retention_keep || s.retention_max_age_days) {
+    retention = '<p class="hint">Retention: newest <b>' + escHtml(String(s.retention_keep || 0)) +
+      '</b> bundles kept · bundles older than <b>' + escHtml(String(s.retention_max_age_days || 0)) +
+      ' days</b> swept automatically</p>';
+  }
   const hdr = '<p class="hint">Format <code>' + escHtml(String(s.bundle_format || '')) +
     '</code> · engine v' + escHtml(String(s.collector_engine_version || '')) +
     ' · redaction model v' + escHtml(String(s.redaction_model_version || '')) +
-    ' · keeps newest ' + escHtml(String(s.retention_keep || 0)) + ' bundles' +
-    ' · ' + escHtml(String(s.recipient_count || 0)) + '/' + escHtml(String(s.recipient_max || 0)) + ' recipients</p>';
+    ' · ' + escHtml(String(s.recipient_count || 0)) + '/' + escHtml(String(s.recipient_max || 0)) + ' recipients</p>' + retention;
   if (!cols.length) { el.innerHTML = hdr + '<p class="hint">No collectors registered.</p>'; return; }
   el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Collector</th><th>Owner</th><th>Level</th><th>Max class</th><th>Mandatory</th></tr></thead><tbody>' +

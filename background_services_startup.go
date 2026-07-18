@@ -23,4 +23,8 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// M3: support debug capture-level auto-revert watchdog (active auto-stop; the
 	// on-read expiry check already guarantees restart-surviving revert without it).
 	go startDebugLevelWatchdog(ctx)
+
+	// M5: support-bundle age-retention janitor — evicts stale bundles on an idle
+	// appliance (the count-based prune only runs on a new build).
+	go startSupportRetentionJanitor(ctx)
 }
