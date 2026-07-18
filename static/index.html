@@ -12264,7 +12264,7 @@ async function runPacDiff() {
     if (deltas.length) {
       h += '<table class="tbl" style="width:100%;font-size:.8rem"><thead><tr><th>Profile</th><th>Change</th><th>DIRECT source</th></tr></thead><tbody>';
       for (const x of deltas) {
-        const add = x.change === 'path_added' || x.change === 'profile_gained_direct';
+        const add = x.change === 'path_added' || x.change === 'profile_gained_direct' || x.change === 'profile_served';
         const color = add ? 'var(--red,#e5484d)' : 'var(--ok,#22c55e)';
         const broad = x.broad ? ' <span style="color:var(--amber,#f5a623);font-size:.72rem">(broad)</span>' : '';
         h += '<tr><td>' + escHtml(x.name || x.profileId) + '</td>' +

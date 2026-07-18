@@ -25,6 +25,13 @@ const (
 	ChangePathAdded = "path_added"
 	// ChangePathRemoved: a DIRECT source removed from an existing profile.
 	ChangePathRemoved = "path_removed"
+	// ChangeProfileServed: an already-DIRECT-capable profile went from disabled
+	// (404) to enabled, so its bypass PAC is now REACHABLE by clients even though
+	// its DIRECT paths are unchanged — a newly-live bypass surface.
+	ChangeProfileServed = "profile_served"
+	// ChangeProfileUnserved: a DIRECT-capable profile was disabled, taking its
+	// bypass offline (404). Risk-reducing.
+	ChangeProfileUnserved = "profile_unserved"
 )
 
 // DirectPathDelta is one change to the DIRECT bypass surface.
@@ -68,7 +75,10 @@ type DirectInventoryDiff struct {
 // scheme+port so a pattern change reads as remove+add (which surfaces a
 // broadening as an added broad path).
 func pathKey(e DirectEntry) string {
-	return e.Kind + "|" + e.Pattern + "|" + e.Scheme + "|" + fmt.Sprintf("%d", e.Port)
+	// RuleKind is included so a same-pattern rule-kind flip (e.g. suffix→domain
+	// for "example.com", which broadens subdomains-only to apex+subdomains) reads
+	// as remove+add, not identical. Kind alone is "direct_rule" for every rule.
+	return e.Kind + "|" + e.RuleKind + "|" + e.Pattern + "|" + e.Scheme + "|" + fmt.Sprintf("%d", e.Port)
 }
 
 // DiffDirectInventory computes the before→after DIRECT-surface change. Pure and
@@ -102,6 +112,25 @@ func DiffDirectInventory(before, after DirectInventory) DirectInventoryDiff {
 			diff.addPathDeltas(id, b.Name, b.DirectPaths, nil)
 		default:
 			diff.addPathDeltas(id, a.Name, b.DirectPaths, a.DirectPaths)
+			// A DIRECT-capable profile that flips disabled→enabled becomes
+			// REACHABLE (its /pac/<id>.pac moves 404 → serving the bypass) even
+			// when its DIRECT paths are unchanged — a risk-increasing surface the
+			// path-set diff alone misses. The reverse (enabled→disabled) takes the
+			// bypass offline (risk-reducing).
+			if a.DirectCapable && b.Serving != a.Serving {
+				if a.Serving {
+					diff.RiskIncreased = true
+					diff.Deltas = append(diff.Deltas, DirectPathDelta{
+						ProfileID: id, Name: a.Name, Change: ChangeProfileServed,
+						Detail: "profile enabled — its DIRECT bypass PAC is now served (was 404)", RiskIncreasing: true,
+					})
+				} else {
+					diff.Deltas = append(diff.Deltas, DirectPathDelta{
+						ProfileID: id, Name: a.Name, Change: ChangeProfileUnserved,
+						Detail: "profile disabled — its DIRECT bypass PAC is no longer served",
+					})
+				}
+			}
 		}
 	}
 	return diff

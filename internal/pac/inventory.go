@@ -47,9 +47,15 @@ type DirectEntry struct {
 	Kind      DirectBypassKind `json:"kind"`
 	Detail    string           `json:"detail"`
 	RuleIndex int              `json:"ruleIndex,omitempty"` // 1-based, for BypassRule
-	Pattern   string           `json:"pattern,omitempty"`
-	Scheme    string           `json:"scheme,omitempty"`
-	Port      int              `json:"port,omitempty"`
+	// RuleKind is the routing-rule kind (domain/suffix/wildcard/cidr4) for a
+	// BypassRule entry — distinct from Kind (always "direct_rule" for rules).
+	// Carried structurally so the change-diff can tell a same-pattern kind flip
+	// (e.g. suffix→domain, which broadens subdomains-only to apex+subdomains)
+	// apart, which Kind alone cannot.
+	RuleKind string `json:"ruleKind,omitempty"`
+	Pattern  string `json:"pattern,omitempty"`
+	Scheme   string `json:"scheme,omitempty"`
+	Port     int    `json:"port,omitempty"`
 	// Broad flags a wide-reaching bypass (wildcard, broad IPv4 CIDR, or an
 	// all-destinations mode/private bypass) — a config-only heuristic, not an
 	// observation of scope.
@@ -173,6 +179,7 @@ func directEntriesFor(p *Profile) []DirectEntry {
 			Kind:      BypassRule,
 			Detail:    "rule " + itoa(i+1) + " (" + r.Kind + " " + r.Pattern + ") → DIRECT",
 			RuleIndex: i + 1,
+			RuleKind:  r.Kind,
 			Pattern:   r.Pattern,
 			Scheme:    r.Scheme,
 			Port:      r.Port,

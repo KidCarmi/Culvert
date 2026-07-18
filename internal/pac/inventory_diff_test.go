@@ -134,6 +134,71 @@ func TestDiff_PathAddedAndRemovedOnExistingProfile(t *testing.T) {
 	}
 }
 
+// TestDiff_RuleKindFlipIsDetected pins the Codex fix: a same-pattern rule-kind
+// change (suffix→domain, which broadens subdomains-only to apex+subdomains) must
+// read as remove+add, not identical.
+func TestDiff_RuleKindFlipIsDetected(t *testing.T) {
+	before := invOf(prof("a", ModeBalanced, PrivateProxy,
+		Rule{Kind: RuleKindSuffix, Pattern: "example.com", Action: ActionDirect}))
+	after := invOf(prof("a", ModeBalanced, PrivateProxy,
+		Rule{Kind: RuleKindDomain, Pattern: "example.com", Action: ActionDirect}))
+	d := DiffDirectInventory(before, after)
+	if d.PathsAdded != 1 || d.PathsRemoved != 1 || !d.RiskIncreased {
+		t.Fatalf("suffix→domain (same pattern) must be 1 add + 1 remove + risk: %+v", d)
+	}
+	var addedDomain, removedSuffix bool
+	for _, x := range d.Deltas {
+		if x.Change == ChangePathAdded && x.Kind == BypassRule {
+			addedDomain = true
+		}
+		if x.Change == ChangePathRemoved && x.Kind == BypassRule {
+			removedSuffix = true
+		}
+	}
+	if !addedDomain || !removedSuffix {
+		t.Errorf("want added + removed rule deltas for the kind flip: %+v", d.Deltas)
+	}
+}
+
+// TestDiff_ServingFlipIsRiskIncreasing pins the Codex fix: enabling a disabled
+// DIRECT-capable profile (404 → served) is a newly-reachable bypass surface even
+// with unchanged DIRECT paths; disabling it is risk-reducing.
+func TestDiff_ServingFlipIsRiskIncreasing(t *testing.T) {
+	disabled := prof("a", ModeAvailability, PrivateProxy)
+	disabled.Enabled = false
+	enabled := prof("a", ModeAvailability, PrivateProxy) // same paths, Enabled=true
+
+	// disabled → enabled: risk-increasing "served".
+	d := DiffDirectInventory(invOf(disabled), invOf(enabled))
+	if !d.RiskIncreased {
+		t.Errorf("disabled→enabled DIRECT-capable profile must flag risk increased: %+v", d)
+	}
+	var served bool
+	for _, x := range d.Deltas {
+		if x.Change == ChangeProfileServed && x.RiskIncreasing {
+			served = true
+		}
+	}
+	if !served {
+		t.Errorf("want a risk-increasing profile_served delta: %+v", d.Deltas)
+	}
+
+	// enabled → disabled: risk-reducing "unserved".
+	d2 := DiffDirectInventory(invOf(enabled), invOf(disabled))
+	if d2.RiskIncreased {
+		t.Errorf("enabled→disabled must not flag risk increased: %+v", d2)
+	}
+	var unserved bool
+	for _, x := range d2.Deltas {
+		if x.Change == ChangeProfileUnserved && !x.RiskIncreasing {
+			unserved = true
+		}
+	}
+	if !unserved {
+		t.Errorf("want a non-risk profile_unserved delta: %+v", d2.Deltas)
+	}
+}
+
 // TestDiff_Deterministic proves the delta ordering is stable across runs.
 func TestDiff_Deterministic(t *testing.T) {
 	before := invOf(prof("a", ModeBalanced, PrivateProxy))
