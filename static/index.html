@@ -2009,10 +2009,10 @@ tr.dragging  { opacity: .4; }
 
       </div>
 
-      <!-- SSL Inspection Bypass (logically grouped with certificates) -->
+      <!-- SSL Bypass (logically grouped with certificates) -->
       <div class="panel" style="margin-top:18px">
         <div class="panel-header">
-          <span class="panel-title">SSL Inspection Bypass</span>
+          <span class="panel-title">SSL Bypass</span>
         </div>
         <div class="panel-body">
           <p class="hint">
@@ -4233,6 +4233,7 @@ Firefox (all platforms):
             <div style="display:flex;align-items:center;margin-bottom:8px;gap:8px">
               <div style="font-size:.78rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Release Catalog</div>
               <span id="rel-trust-badge" style="font-size:.7rem;font-weight:700;padding:2px 8px;border-radius:99px" title="Catalog signature verification mode"></span>
+              <span id="rel-trust-schemes" style="font-size:.72rem;color:var(--muted)" title="Signature trust scheme(s) currently active"></span>
               <span id="rel-catalog-meta" style="margin-left:auto;color:var(--muted);font-size:.72rem"></span>
             </div>
             <div id="rel-trust-warning" style="display:none;font-size:.78rem;color:var(--warn,#f59e0b);background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:6px;padding:6px 10px;margin-bottom:8px"></div>
@@ -14377,6 +14378,12 @@ function renderReleaseTrustBadge(d) {
   badge.textContent = 'Trust: ' + mode.toUpperCase() + (breakGlass ? ' (break-glass)' : '');
   badge.style.background = breakGlass ? 'rgba(239,68,68,.15)' : 'rgba(34,197,94,.15)';
   badge.style.color = breakGlass ? 'var(--red)' : 'var(--green)';
+  const schemesEl = document.getElementById('rel-trust-schemes');
+  if (schemesEl) {
+    const schemeLabels = { ed25519: 'ed25519 keys', sigstore: 'Sigstore identity', 'ed25519+sigstore': 'ed25519 keys + Sigstore identity', none: 'none' };
+    const raw = d && d.trust_schemes;
+    schemesEl.textContent = raw ? ('via ' + (schemeLabels[raw] || raw)) : '';
+  }
   if (!warn) return;
   if (!breakGlass) { warn.style.display = 'none'; warn.textContent = ''; return; }
   const detail = mode === 'disabled'
@@ -14981,11 +14988,11 @@ async function loadGovernance() {
     const noPolicy = num(ctr.no_policy);
     const auditMissing = num(ctr.audit_missing);
     document.getElementById('gov-counters').innerHTML = `
-      <div>would_deny:     <strong>${wouldDeny}</strong></div>
-      <div>enforce_denied: <strong>${enforceDenied}</strong></div>
-      <div>missing_meta:   <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
-      <div>no_policy:      <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
-      <div>audit_missing:  <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
+      <div title="would_deny">Would deny (role below required): <strong>${wouldDeny}</strong></div>
+      <div title="enforce_denied">Enforced denials (403s): <strong>${enforceDenied}</strong></div>
+      <div title="missing_meta">Routes missing metadata: <strong style="color:${missingMeta?'#ef4444':''}">${missingMeta}</strong></div>
+      <div title="no_policy">Unmatched method policy: <strong style="color:${noPolicy?'#ef4444':''}">${noPolicy}</strong></div>
+      <div title="audit_missing">Audit not recorded: <strong style="color:${auditMissing?'#f59e0b':''}">${auditMissing}</strong></div>
     `;
 
     const byRole = routes.by_min_role || {};
@@ -14995,9 +15002,10 @@ async function loadGovernance() {
     }).join('');
 
     const axes = ['metadata_parity', 'audit_completion', 'enforce_consistency'];
+    const axisLabels = { metadata_parity: 'Metadata parity', audit_completion: 'Audit completion', enforce_consistency: 'Enforcement consistency' };
     document.getElementById('gov-health-axes').innerHTML = axes.map(k => {
       const v = palette[health[k]] || palette.ok;
-      return `<span style="padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;background:${v.bg};color:${v.fg}">${escHtml(k)}: ${v.label}</span>`;
+      return `<span title="${escHtml(k)}" style="padding:3px 9px;border-radius:999px;font-size:.7rem;font-weight:600;background:${v.bg};color:${v.fg}">${escHtml(axisLabels[k] || k)}: ${v.label}</span>`;
     }).join('');
 
     const issues = Array.isArray(health.issues) ? health.issues : [];
@@ -15134,7 +15142,7 @@ async function loadCluster() {
     } else {
       noNodes.style.display = '';
       noNodes.textContent = r.role === 'data-plane'
-        ? 'This node is a Data Plane worker. Manage enrollment from the Control Plane.'
+        ? 'This node is a Data Plane node. Manage enrollment from the Control Plane.'
         : 'Enable Control Plane mode above to start managing Data Plane nodes.';
       table.style.display = 'none';
     }
