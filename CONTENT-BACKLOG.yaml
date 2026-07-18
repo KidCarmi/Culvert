@@ -31,7 +31,7 @@ items:
     title: "Product overview: what Culvert is and its verified capabilities"
     type: doc
     priority: critical
-    status: todo
+    status: done
     audience: [evaluator, security-engineer, admin]
     path: content/docs/01-overview/what-is-culvert.md
     evidence_areas: [README.md, main.go, "internal/*", docs/architecture.md]

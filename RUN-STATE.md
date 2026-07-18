@@ -16,7 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **None** — bootstrap complete; selecting first item (C-001).
+- **C-002** — Architecture overview (website edition). Selecting; next.
+
+## Recently completed
+
+- **C-001** — Product overview (`content/docs/01-overview/what-is-culvert.md`)
+  + evidence ledger. All ~55 capability claims verified against code via 3
+  parallel research agents + direct greps. Two overclaims corrected
+  (tamper-evident audit → append-only; CDR → external engine). Link check and
+  markdown structure pass. Committed.
 
 ## Execution plan
 
@@ -32,11 +40,12 @@ phase transition. Newest activity at the top of each section.
 
 ## Completed items
 
-_(none yet)_
+- **C-001** — Product overview + claim-evidence ledger (critical).
 
 ## Commits created
 
-_(none yet)_
+- `5a4aa90` docs(content): bootstrap autonomous content foundation scaffolding.
+- _(C-001 commit — recorded on push)_
 
 ## Blocked items
 
@@ -44,11 +53,34 @@ _(none yet)_
 
 ## Product gaps / uncertainties discovered
 
-_(none yet)_
+- **[G-01] "Tamper-evident audit trail" is an overclaim.** README and
+  `docs/architecture.md` describe the audit trail as tamper-evident, but
+  `internal/audit/audit.go` implements only a bounded (`MaxRing = 500`),
+  append-only JSONL ring with oldest-eviction — **no hash-chain or signature**.
+  Content downgrades the claim to "bounded, append-only". _Human decision:_ add
+  a hash-chain/signature to justify "tamper-evident", or correct the README.
+- **[G-02] `internal/halease` doc comment appears stale.** `halease.go:7` says
+  "S1 ships the primitive ONLY — nothing in the runtime consumes it yet," which
+  conflicts with CLAUDE.md ("ADR-0005 PROGRAM COMPLETE S0–S5") and the root
+  `ha_lease.go`/`ha_failover.go` that consume it. Overview keeps "Supported";
+  the HA article (M-023) must confirm the real integration state from code.
+- **[G-03] "Rolling upgrades" is partial.** Per-node digest dispatch
+  (`release_dispatch_exec.go`) and CP leadership handoff exist, but no
+  cluster-wide rolling-upgrade orchestrator was found. Excluded from the
+  verified overview table; to be scoped in the distributed article (M-021).
+- **[G-04] CDR requires an external engine.** `cdr.go` is a gRPC/mTLS client to
+  an external "Sluice" CDR engine; the disarm/reconstruct algorithm is not
+  in-binary. Content labels CDR "Supported (companion engine)". Not a defect —
+  a deployment prerequisite to document clearly (parallels the ClamAV sidecar).
 
 ## Verification log
 
 - Bootstrap: `go build -o …/culvert .` → exit 0 (toolchain + module compile OK).
+- C-001: `content/tools/check-links.sh` → OK (forward-refs allowlisted in
+  `content/.forward-refs`). Markdown structure: 1 H1, balanced fences, no
+  trailing whitespace. Corrected claims re-verified against source
+  (`internal/audit/audit.go:49` `MaxRing = 500`, no hash-chain;
+  decryption-profiles "coming soon"; `metrics.go:332` metric name).
 
 ## Notes
 

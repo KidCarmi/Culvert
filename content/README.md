@@ -23,7 +23,7 @@ evidence from but does not mirror.
 
 | Section | Article | Status |
 |---|---|---|
-| Overview | What is Culvert | _in progress_ |
+| Overview | [What is Culvert](docs/01-overview/what-is-culvert.md) | published |
 | Overview | Architecture | _planned_ |
 | Getting started | Quick start & first boot | _planned_ |
 | Policy | Policy engine & Zero-Trust authoring | _planned_ |
