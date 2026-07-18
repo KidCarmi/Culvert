@@ -133,6 +133,12 @@ type AdminSettings struct {
 	AutoExcludePinnedTTLSecs int  `json:"autoexclude_pinned_ttl_secs,omitempty"`
 	AutoExcludeWindowSecs    int  `json:"autoexclude_window_secs,omitempty"`
 	AutoExcludeMaxEntries    int  `json:"autoexclude_max_entries,omitempty"`
+
+	// ADR-0011 §4 host/SNI redaction posture. When true, the projected decryption
+	// blocks hash host/SNI instead of recording plaintext. Default false (record
+	// plaintext); a plain bool needs no sentinel (false is both "off" and "unset").
+	// Node-local like the auto-exclusion tunables — OFF export/import, rollback, CP→DP.
+	DecryptionRedactHosts bool `json:"decryption_redact_hosts,omitempty"`
 }
 
 var (
@@ -163,6 +169,7 @@ func LoadAdminSettings(path string) {
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
+	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	logger.Printf("AdminSettings: loaded from %s", path)
 }
@@ -500,6 +507,7 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
 
 	snapshotAutoExcludeTunables(&s, ae)
+	s.DecryptionRedactHosts = decRedactHosts() // ADR-0011 §4 host/SNI redaction posture
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
