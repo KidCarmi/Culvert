@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	_ "google.golang.org/grpc/encoding/gzip" // registers the gzip compressor for the config stream
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -686,7 +687,17 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		return err
 	}
 
-	srv := grpc.NewServer(serverOpt)
+	srv := grpc.NewServer(
+		serverOpt,
+		// Match the DP client's frame budget so an enterprise-scale
+		// ConfigSnapshot (1 M blocked hosts + IP list + URL categories) fits.
+		// gRPC's 4 MiB default receive limit is what capped the old snapshot
+		// at ~200 k hosts. Importing google.golang.org/grpc/encoding/gzip
+		// (blank import above) registers the compressor so the server both
+		// decompresses gzip requests and echoes gzip on its responses.
+		grpc.MaxRecvMsgSize(maxClusterGRPCMsgSize),
+		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
+	)
 	svc := &controlPlaneServer{}
 
 	srv.RegisterService(&grpc.ServiceDesc{

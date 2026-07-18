@@ -103,10 +103,12 @@ func TestConfigSurfaces_ReflectionParity(t *testing.T) {
 // ─── 2. Snapshot cap parity (H5) ──────────────────────────────────────
 
 // snapshotCapCeiling bounds any single ConfigSnapshot per-slice cap. The
-// current maximum is 200k; 1M gives headroom without letting a cap grow so
-// large the H5 memory-DoS bound stops meaning anything (DEBT-006 residual:
-// magnitude, not just existence).
-const snapshotCapCeiling = 1_000_000
+// current maximum is 1M (blocked_hosts/ip_list/url_categories, raised for
+// enterprise-scale threat feeds); 2M gives headroom without letting a cap grow
+// so large the H5 memory-DoS bound stops meaning anything (DEBT-006 residual:
+// magnitude, not just existence). The CP↔DP frame is independently bounded by
+// maxClusterGRPCMsgSize, so the transport cannot be abused even at cap.
+const snapshotCapCeiling = 2_000_000
 
 func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	snapType := csrStructTypes()["ConfigSnapshot"]
@@ -127,8 +129,8 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 			}
 			// Magnitude, not just existence (DEBT-006 residual): a cap set to
 			// MaxInt or an absurd value passes the existence check but leaves
-			// the H5 DoS bound toothless. The current max is 200k
-			// (maxSnapBlockedHosts/IPList/URLCategories); ceiling gives 5×
+			// the H5 DoS bound toothless. The current max is 1M
+			// (maxSnapBlockedHosts/IPList/URLCategories); ceiling gives 2×
 			// headroom while still bounding a single field well under a
 			// pathological allocation. A field that legitimately needs more is
 			// a design smell that should be reviewed, not silently capped huge.

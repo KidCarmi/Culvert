@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/encoding/gzip"
 )
 
 // ─── Data Plane gRPC client ───────────────────────────────────────────────────
@@ -95,7 +96,20 @@ func (c *DataPlaneClient) connect(addr string) error {
 		logger.Printf("DataPlane: connecting to %s (insecure — dev only!)", addr)
 	}
 
-	conn, err := grpc.NewClient(addr, dialOpt)
+	conn, err := grpc.NewClient(addr, dialOpt,
+		grpc.WithDefaultCallOptions(
+			// GetConfig responses carry the full ConfigSnapshot; an
+			// enterprise blocklist (1 M hosts) is ~30 MiB decompressed, far
+			// past gRPC's 4 MiB default receive limit. maxClusterGRPCMsgSize
+			// matches the CP server's frame budget. UseCompressor gzips the
+			// stream (both directions — the CP echoes the request's
+			// compressor), so the on-wire snapshot stays a few MiB; the size
+			// limit is checked on the decompressed bytes.
+			grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
+			grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
+			grpc.UseCompressor(gzip.Name),
+		),
+	)
 	if err != nil {
 		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}
