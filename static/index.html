@@ -4792,6 +4792,7 @@ document.addEventListener('change', e => {
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
+    case 'toggleDecRedaction': toggleDecRedaction(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
