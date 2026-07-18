@@ -4077,6 +4077,7 @@ Firefox (all platforms):
             <div style="font-weight:600;margin-bottom:6px">Diagnostics</div>
             <p class="hint">Local, read-only checks — no network, no shell.</p>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
+              <button class="btn ghost sm" data-click="diagnoseAll" data-min-role="operator" title="Run every no-input local check (storage, upstream, cluster, config) at once">Run all local checks</button>
               <button class="btn ghost sm" data-click="diagnoseStorage" data-min-role="operator" title="Probe data-dir writability + free space">Run storage check</button>
               <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
               <button class="btn ghost sm" data-click="diagnoseCluster" data-min-role="operator" title="Cluster/HA posture — role, fencing lease, node counts, write authority (no network, no secrets)">Run cluster check</button>
@@ -4493,6 +4494,7 @@ document.addEventListener('click', e => {
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
+    case 'diagnoseAll':            diagnoseAll(); break;
     case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
     case 'diagnoseCluster':        diagnoseCluster(); break;
@@ -12375,6 +12377,41 @@ async function supportCreateBundle() {
   } finally {
     if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
   }
+}
+
+async function diagnoseAll() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseAll"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running all local checks…</p>';
+  try {
+    const d = await api('/api/diagnose/all', { method: 'POST' });
+    renderDiagnoseAll(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Local checks failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseAll(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const st = d.storage || {}, up = d.upstream || {}, cl = d.cluster || {}, cf = d.config || {};
+  const dot = ok => '<strong style="color:' + (ok ? 'var(--green)' : 'var(--red)') + '">' + (ok ? 'OK' : 'DEGRADED') + '</strong>';
+  const rows = [
+    ['Storage', st.ok, 'free ' + escHtml(String(Math.round((st.free_bytes || 0) / (1 << 20)))) + ' MiB'],
+    ['Upstream', up.ok, up.enabled ? (escHtml(String(up.usable_count || 0)) + '/' + escHtml(String(up.count || 0)) + ' usable') : 'direct'],
+    ['Cluster', cl.ok, escHtml(String(cl.role || 'unknown'))],
+    ['Config', cf.ok, cf.ok ? 'valid' : escHtml(String(cf.error || 'invalid'))],
+  ];
+  const body = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + dot(r[1]) + '</td><td class="hint">' + r[2] + '</td></tr>').join('');
+  el.innerHTML = '<p class="hint">Local health <strong style="color:' + (d.ok ? 'var(--green)' : 'var(--red)') + '">' +
+    (d.ok ? 'OK' : 'DEGRADED') + '</strong></p><div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>' + body + '</tbody></table></div>';
 }
 
 async function diagnoseStorage() {

@@ -697,4 +697,7 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/diagnose/config", Handler: "apiDiagnoseConfig", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "live config-snapshot validity (same cap validation that gates a CP→DP sync) + non-secret collection sizes; no snapshot values; operator+; no network, no shell; audited as diagnose.config"}}},
+	{Path: "/api/diagnose/all", Handler: "apiDiagnoseAll", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+			Note: "aggregate of the no-input local verbs (storage+upstream+cluster+config) in one call; excludes dns/tls (need a host); operator+; no network, no shell; audited as diagnose.all"}}},
 }
