@@ -1,6 +1,6 @@
 package blocklist
 
-// delta.go — T3 P1: incremental delta application + a canonical content hash.
+// delta.go — T3 P1: incremental delta application + a wire-fed synced fingerprint.
 //
 // The cluster delta-sync path (CP→DP) ships {added, removed} host sets between
 // config versions instead of the full list. ApplyDelta mutates the enforcement
@@ -10,79 +10,144 @@ package blocklist
 //  1. A delta MUST NEVER remove an admin-managed MANUAL block. b.manual is the
 //     attribution set for hosts an operator added locally; ReplaceFeedEntries
 //     already re-injects it on every apply (PR #249). ApplyDelta mirrors that:
-//     a `removed` entry that is in b.manual is skipped.
-//  2. The content hash for drift detection is a CANONICAL, deterministic digest
-//     of the enforcement set, so a DP can confirm it converged to exactly the CP
-//     version it applied a delta toward — a missed/misapplied/reordered delta is
-//     caught and forces a full resync rather than silently persisting.
+//     a `removed` entry that is in b.manual is skipped for ENFORCEMENT — but is
+//     still XORed OUT of the synced fingerprint (invariant 2), because the CP's
+//     authoritative set no longer contains it. Enforcement (with manual
+//     protection) and the synced fingerprint (pure CP intent) are decoupled.
+//
+//  2. The drift-detection control is a SYNCED FINGERPRINT: a 256-bit
+//     XOR-of-SHA256 over the CP-AUTHORITATIVE host set, fed ONLY by CP-supplied
+//     data. It lets a DP confirm it converged to exactly the CP version it
+//     applied a delta toward, independent of any DP-local manual blocks. Two
+//     properties make it the right tool here:
+//       - order-independent (XOR is commutative) — the CP and DP need not agree
+//         on iteration order;
+//       - incrementally maintainable in O(delta) — XOR is its own inverse, so a
+//         remove is XORed out and an add XORed in, with no full-set storage and
+//         no O(N log N) sort under the blocklist lock.
+//     It is NOT a security/authenticity control (a semi-trusted CP asserts the
+//     target fingerprint; authenticity is the mTLS + epoch fence + signing,
+//     tracked separately). It detects transport corruption, missed/duplicated
+//     deltas, and misapplication — any of which forces a full resync rather than
+//     silently persisting divergent state.
+//
+// Why XOR and not a sorted digest: the DP must maintain the fingerprint of the
+// CP's set WITHOUT re-deriving it from its own enforcement maps (which carry
+// DP-local manual blocks the CP set never had). A sorted digest cannot be
+// updated incrementally and, recomputed over enforcement-minus-manual, breaks
+// whenever a manual block overlaps the CP feed. An XOR accumulator fed purely
+// from the wire stream sidesteps both problems.
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"strings"
 )
+
+// normDeltaHost normalizes a host token to the canonical form used by every
+// blocklist ingest path (Add / ReplaceFeedEntries / AddManual): lower-case,
+// trimmed. Wildcards keep their full "*.example.com" token. Returns ok=false
+// for an empty token so callers can skip it.
+func normDeltaHost(h string) (string, bool) {
+	h = strings.ToLower(strings.TrimSpace(h))
+	if h == "" {
+		return "", false
+	}
+	return h, true
+}
+
+// fpXOR folds one host token into a 256-bit XOR-of-SHA256 accumulator. XOR is
+// commutative (order-independent) and its own inverse (a later XOR of the same
+// token removes it), which is exactly what incremental delta maintenance needs.
+func fpXOR(acc *[32]byte, token string) {
+	sum := sha256.Sum256([]byte(token))
+	for i := range acc {
+		acc[i] ^= sum[i]
+	}
+}
+
+// feedSetFingerprint computes the synced fingerprint over a full host list.
+// Used on the CP side to advertise the target fingerprint for a version, and on
+// the DP side by ReplaceFeedEntries to establish ground truth on a full apply.
+// Both sides MUST feed identically-normalized tokens (normDeltaHost) so the
+// fingerprints are comparable.
+func feedSetFingerprint(hosts []string) [32]byte {
+	var acc [32]byte
+	for _, h := range hosts {
+		if tok, ok := normDeltaHost(h); ok {
+			fpXOR(&acc, tok)
+		}
+	}
+	return acc
+}
+
+// FeedSetFingerprint returns the hex synced fingerprint of a host list. The CP
+// calls this over the BlockedHosts it publishes to advertise the target a DP
+// must converge to. It is a pure function of the (normalized) set — no Store
+// state involved.
+func FeedSetFingerprint(hosts []string) string {
+	fp := feedSetFingerprint(hosts)
+	return hex.EncodeToString(fp[:])
+}
+
+// SyncedFingerprint returns the hex fingerprint of the CP-authoritative set this
+// Store has currently applied. A DP compares this to the CP's advertised target
+// after a delta apply; a mismatch forces a full resync. Decoupled from
+// enforcement + DP-local manual by construction (fed only by CP data).
+func (b *Store) SyncedFingerprint() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return hex.EncodeToString(b.syncedFP[:])
+}
 
 // ApplyDelta adds and removes hosts in place. Removes are processed first so an
 // entry appearing in both sets ends up ADDED (re-add wins), matching the
 // feed-refresh precedence. A removed host that is an admin MANUAL block is left
-// in place (invariant 1). Normalization mirrors Add/ReplaceFeedEntries.
+// in ENFORCEMENT (invariant 1) but is still XORed out of the synced fingerprint
+// (invariant 2 — the CP's authoritative set dropped it). Normalization mirrors
+// Add/ReplaceFeedEntries.
+//
+// The synced fingerprint is maintained assuming a WELL-FORMED delta: each
+// removed host was present in the base version's synced set and each added host
+// absent from it (the CP computes added/removed as true set differences between
+// consecutive versions, and the strict base_version==KnownVersion gate on the
+// DP admits only gap-free, in-order deltas). A malformed/duplicated delta can
+// double-toggle a token and corrupt the fingerprint — which is caught by the
+// post-apply fingerprint comparison and forces a resync, never silent
+// divergence.
 func (b *Store) ApplyDelta(added, removed []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, h := range removed {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h == "" || b.manual[h] {
-			continue // never delete an admin manual block
+		tok, ok := normDeltaHost(h)
+		if !ok {
+			continue
 		}
-		if strings.HasPrefix(h, "*.") {
-			delete(b.wildcards, h[1:])
+		// The CP-authoritative set no longer contains this host — drop it from
+		// the synced fingerprint regardless of manual protection.
+		fpXOR(&b.syncedFP, tok)
+		if b.manual[tok] {
+			continue // never delete an admin manual block from ENFORCEMENT
+		}
+		if strings.HasPrefix(tok, "*.") {
+			delete(b.wildcards, tok[1:])
 		} else {
-			delete(b.exact, h)
+			delete(b.exact, tok)
 		}
 		if b.feedSrc != nil {
-			delete(b.feedSrc, h)
+			delete(b.feedSrc, tok)
 		}
 	}
 	for _, h := range added {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h == "" {
+		tok, ok := normDeltaHost(h)
+		if !ok {
 			continue
 		}
-		if strings.HasPrefix(h, "*.") {
-			b.wildcards[h[1:]] = true
+		fpXOR(&b.syncedFP, tok)
+		if strings.HasPrefix(tok, "*.") {
+			b.wildcards[tok[1:]] = true
 		} else {
-			b.exact[h] = true
+			b.exact[tok] = true
 		}
 	}
-}
-
-// ContentHash returns a canonical SHA-256 over the enforcement set (exact +
-// wildcards), independent of insertion order. Used for cluster drift detection:
-// after applying a delta, a DP compares this to the version's advertised hash;
-// a mismatch triggers a full resync. It is NOT a security/authenticity control
-// (the CP asserts the target hash — authenticity is the mTLS + epoch fence, and
-// signing is a separate cross-cutting hardening); it detects transport
-// corruption, missed deltas, and misapplication.
-//
-// The host slice is copied under the read lock and then sorted+hashed OUTSIDE
-// the lock so the O(N log N) work never stalls the IsBlocked hot path.
-func (b *Store) ContentHash() string {
-	b.mu.RLock()
-	hosts := make([]string, 0, len(b.exact)+len(b.wildcards))
-	for h := range b.exact {
-		hosts = append(hosts, h)
-	}
-	for w := range b.wildcards {
-		hosts = append(hosts, "*"+w) // wildcards are keyed by ".example.com" → "*.example.com"
-	}
-	b.mu.RUnlock()
-
-	sort.Strings(hosts)
-	sum := sha256.New()
-	for _, h := range hosts {
-		_, _ = sum.Write([]byte(h))
-		_, _ = sum.Write([]byte{0}) // separator: disambiguate "a"+"bc" from "ab"+"c"
-	}
-	return hex.EncodeToString(sum.Sum(nil))
 }
