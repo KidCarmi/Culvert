@@ -254,6 +254,9 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if err := json.Unmarshal(raw, &probe); err == nil && probe.ConfigUnchanged {
 		return // CP confirmed our version is current; nothing to do
 	}
+	// A full snapshot: record its size so the next poll's deadline is budgeted
+	// for a transfer this large even if that poll turns out to be unchanged.
+	dpLastFullSnapshotBytes.Store(int64(len(raw)))
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
@@ -458,7 +461,7 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	if c.callForTest != nil {
 		return c.callForTest(ctx, method, req)
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, callDeadline(method))
 	defer cancel()
 	c.mu.Lock()
 	conn := c.conn
@@ -466,6 +469,51 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	var resp json.RawMessage
 	err := conn.Invoke(callCtx, method, req, &resp)
 	return resp, err
+}
+
+// Config-poll deadline model (P1 #4). A fixed 5s deadline was fine for the old
+// ~4 MiB-capped snapshot, but a 2 M-host config (~60 MiB) can legitimately take
+// far longer to transfer on a thin WAN — a timeout there increments failCount
+// and triggers spurious failover churn against a HEALTHY leader. The
+// snapshot-carrying RPCs (GetConfig, HASync) therefore get a deadline that
+// SCALES with the last full snapshot size at a conservative WAN throughput
+// floor; all other RPCs keep the tight 5s.
+const (
+	dpTightCallDeadline  = 5 * time.Second
+	dpConfigBaseDeadline = 15 * time.Second
+	dpConfigMaxDeadline  = 300 * time.Second
+	dpConfigWANFloorBps  = 512 * 1024 // 512 KiB/s (~4 Mbit/s) — a starved-link floor
+)
+
+// dpLastFullSnapshotBytes is the size of the most recent FULL config snapshot
+// the DP received (not the tiny version-unchanged sentinel). It predicts how big
+// the next change will be, so an unchanged poll still budgets enough time for a
+// potential full transfer. Exposed as culvert_dp_config_last_snapshot_bytes.
+var dpLastFullSnapshotBytes atomic.Int64
+
+// callDeadline picks the per-RPC deadline. GetConfig/HASync carry the snapshot,
+// so they scale with the last full size; everything else stays tight.
+func callDeadline(method string) time.Duration {
+	switch method {
+	case methodGetConfig, methodHASync:
+		return scaledConfigDeadline(dpLastFullSnapshotBytes.Load())
+	default:
+		return dpTightCallDeadline
+	}
+}
+
+// scaledConfigDeadline = base + lastBytes / WAN-floor, clamped. With no history
+// (first poll) it is just the base, generous enough for a moderate initial
+// snapshot on a slow link; once a full snapshot is seen it tracks that size.
+func scaledConfigDeadline(lastBytes int64) time.Duration {
+	d := dpConfigBaseDeadline
+	if lastBytes > 0 {
+		d += time.Duration(lastBytes/dpConfigWANFloorBps) * time.Second
+	}
+	if d > dpConfigMaxDeadline {
+		d = dpConfigMaxDeadline
+	}
+	return d
 }
 
 // activeDPClient is a reference to the running DP client so that config sync
