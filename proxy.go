@@ -95,9 +95,9 @@ func policyLogURI(host, path string) string {
 // LogFullURI — so a blocked download keeps its full URL, the events that matter
 // most for investigation. Blocks are always logged (no LogTraffic gate); only
 // the URI is conditional. Counting matches the prior recordRequest path.
-func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch) {
+func recordInspectBlock(clientIP, status, ruleMatched, actionTaken, hostOnly, path string, match *PolicyMatch, dec *DecryptionBlock) {
 	uri := ""
-	auth := AuthLogFields{}
+	auth := AuthLogFields{Dec: dec} // ADR-0011: block rows carry the inspected dec block too
 	if match != nil && match.Rule != nil {
 		if match.Rule.LogFullURI {
 			uri = policyLogURI(hostOnly, path)
