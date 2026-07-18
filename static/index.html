@@ -6937,8 +6937,12 @@ function renderDecHealth(d) {
 }
 
 // drillDec sets the one-shot dec.* filter, switches to the Live Feed, and applies it.
+// logHistOffset is reset so a drill-down that lands on the Saved-logs source starts at
+// page 1 — otherwise a stale offset from a prior deep page could show an empty result even
+// though matches exist on the first page (Codex #823).
 function drillDec(field, value) {
   logDecFilter = { field, value };
+  logHistOffset = 0;
   switchView('livefeed');
   renderDecDrillBanner();
   fetchLogs();
@@ -6946,6 +6950,7 @@ function drillDec(field, value) {
 
 function clearDecDrill() {
   logDecFilter = null;
+  logHistOffset = 0;
   renderDecDrillBanner();
   fetchLogs();
 }
