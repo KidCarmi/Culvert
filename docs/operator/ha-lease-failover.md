@@ -10,12 +10,28 @@ down", and guessing wrong means split-brain. The lease adds the missing third
 authority: leadership belongs to whoever holds the lease in etcd, and **only**
 that node may promote or accept cluster writes.
 
+> **⚠️ Behavior change (accepted owner decision) — legacy/unfenced HA now prioritizes
+> split-brain prevention over automatic recovery.**
+>
+> A standby now promotes automatically **only when it can prove the leader is unavailable**. gRPC
+> transport failures, TLS/certificate failures, DNS failures, timeouts, and connection resets are all
+> **ambiguous** — they cannot be distinguished from a slow-but-alive leader or a local/TLS fault — so in
+> legacy/unfenced mode the standby **stays passive (read-only)** and raises an operator alert instead of
+> promoting. The operator-facing signal is: *"automatic HA promotion is suspended because leader
+> unavailability could not be proven safely — verify the leader and promote manually, or enable
+> lease-fenced failover."*
+>
+> **Automatic failover is fully supported only with an independently verifiable promotion authority**
+> (this etcd fencing lease; equivalently quorum/witness). Culvert does **not** present legacy two-node
+> failover as strongly safe or fully automatic when no witness or fence exists. To keep automatic
+> failover, configure the lease (below). See `docs/architecture/HA-REACHABILITY-CLASSIFICATION.md`.
+
 ## What the lease changes
 
 | Behavior | Legacy (no lease) | Lease mode |
 |---|---|---|
-| Automatic failover | Opt-in flag, unsafe (15s timeout guess); split-brain possible | Always on, fence-gated: the standby promotes only after **acquiring the lease**, which etcd denies while the leader lives |
-| `--ha-auto-failover` flag | Governs the 15s trigger | **Ignored** (logged); the lease arbitrates |
+| Automatic failover | **Suspended for ambiguous leader loss** — the standby now HOLDS and stays read-only on any transport/TLS/DNS/timeout error, because none of those can *prove* the leader is unavailable (they cannot be told apart from a slow-but-alive leader or a local/TLS fault). Promotion requires operator action. | Always on, fence-gated: the standby promotes only after **acquiring the lease**, which etcd denies while the leader lives |
+| `--ha-auto-failover` flag | Now governs only the (rare) case of *positively-attributed* leader-down evidence; **it no longer promotes on ambiguous gRPC/TLS/DNS/timeout errors** | **Ignored** (logged); the lease arbitrates |
 | Partitioned leader | Keeps leading (split-brain) | **Self-fences**: demotes itself to read-only standby the moment it can no longer confirm the lease, then resyncs from the new leader |
 | Cluster writes (enroll, cert renewal, revocations, config push) | Role-based only | Additionally **epoch-fenced**: a fenced ex-leader's writes are refused by Data Planes and the bundle verifier |
 | HA term on `/healthz` | Incremented counter | Collapsed to the etcd lease **epoch** (strictly monotonic across all leadership changes) |
