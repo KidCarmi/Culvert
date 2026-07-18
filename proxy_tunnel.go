@@ -611,6 +611,21 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		if isDNSError(err) {
 			go fireAlert("dns_failure", AlertPayload{Host: targetHost, Detail: err.Error(), Source: "proxy"})
 		}
+		// ADR-0011: an inspect rule whose ORIGIN is unreachable is a FAILED
+		// decryption attempt (fail_stage=tcp_connect) — count it toward coverage +
+		// the failure taxonomy and write the drill-down row, instead of vanishing.
+		// This site is BEFORE the native/strip split, so it covers both paths. NO
+		// maybeFailOpen* — a dial failure is a transport error, not a learn signal.
+		//
+		// Record ONLY a genuine unreachable-origin failure. A client abort mid-dial
+		// (the request context ended → r.Context().Err() != nil) and an ssrfControl
+		// security rejection (DNS-rebinding/private-IP block, errSSRFBlocked) are NOT
+		// decryption attempts against the upstream, so they must not pollute the
+		// Decryption Health coverage/failure metrics (Codex #846). The dialer's own
+		// 10s Timeout does not cancel r.Context(), so a real dial timeout still records.
+		if shouldRecordConnectFailure(r.Context().Err(), err) {
+			recordDecryptFailureEntry(upstreamConnectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}
