@@ -16,10 +16,14 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-022** — PAC traffic steering. Next.
+- **M-025** — YouTube package: Zero-Trust egress policy demo. Next.
 
 ## Recently completed
 
+- **M-022** — PAC traffic steering (`content/docs/09-pac/pac-traffic-steering.md`)
+  + evidence ledger. WinINET-compatible PAC generation (PROXY/DIRECT only, DNS
+  ≤1/eval), exclusions → DIRECT, unauthenticated `/proxy.pac`, config surface.
+  Link check pass. Committed.
 - **M-024** — Backup & restore (`content/docs/10-operations/backup-and-restore.md`)
   + evidence ledger. Compose `cli` operator contract, encrypted backup
   (AES-256-GCM/PBKDF2-600k), runtime-safe dry-run vs offline-only commit,

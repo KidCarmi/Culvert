@@ -159,7 +159,7 @@ items:
     title: "PAC traffic steering"
     type: doc
     priority: medium
-    status: todo
+    status: done
     audience: [admin]
     path: content/docs/09-pac/pac-traffic-steering.md
     evidence_areas: ["internal/pac", pac.go, docs/operator/pac-traffic-steering.md]
