@@ -140,9 +140,11 @@ These are safe to run opt-in but should be understood before enabling widely:
   HTTP/1.1 + HTTP/2** hardening item, not an H2-only one.
 - **TLS session resumption** for native tunnels is disabled (a perf optimization,
   not a correctness gap) — native tunnels use a per-connection forged-leaf config.
-- **Configurability** — the stall timeout and `MaxConcurrentStreams` are currently
-  compile-time constants. Exposing them as admin-tunable decryption-profile settings
-  (PAN-OS-style) is a planned follow-up.
+- **Configurability** — the per-stream stall timeout is an admin-tunable
+  decryption-profile field (`StallTimeoutSecs`, clamped `[5, 3600]`; see
+  [`decryption-profiles.md`](decryption-profiles.md)). `MaxConcurrentStreams`
+  (32) remains a compile-time constant; exposing it as a tunable is a planned
+  follow-up.
 
 ## Recommendation
 

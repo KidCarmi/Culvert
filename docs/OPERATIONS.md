@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/KidCarmi/Culvert/main/scripts/insta
 ```
 
 After the installer finishes, follow the three post-install steps in the
-[README](../README.md#after-its-running): setup wizard, `/ready` check,
+[README](../README.md#first-run-checklist): setup wizard, `/ready` check,
 and **Infrastructure → Diagnostics**. The rest of this guide assumes
 those steps are complete.
 
