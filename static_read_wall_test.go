@@ -3,37 +3,38 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestStaticIndexReadsAreCWDIndependent is an ANTI-REGRESSION WALL. Tests must read
-// the SPA via staticIndexHTMLPath() (an absolute path anchored to the package source
-// dir), NEVER via a CWD-relative os.ReadFile("static/index.html"). A relative read
-// intermittently picks up the wrong file when a concurrent test changes the working
-// directory (os.Chdir), which the determinism and -race gates catch as a flaky
-// "static/index.html missing …" failure. That class cost real debugging time to
-// track down; this wall keeps it from creeping back.
+// TestTestFileReadsAreCWDIndependent is an ANTI-REGRESSION WALL. Tests must read the
+// SPA and package source files via ABSOLUTE paths anchored to the package source dir
+// (staticIndexHTMLPath() / pkgSourceDir()), NEVER via a CWD-relative os.ReadFile /
+// os.ReadDir("."). A relative read picks up the wrong file when a concurrent test
+// changes the working directory (os.Chdir), which the determinism and -race gates
+// catch as a flaky "static/index.html missing …" or a spurious route-count/parity
+// divergence. That whole class cost real debugging time to track down; this wall
+// keeps it from creeping back.
 //
-// The check scans every *_test.go file, ignoring comment lines so the helper's own
-// doc comment does not trip it.
-func TestStaticIndexReadsAreCWDIndependent(t *testing.T) {
-	const forbidden = `ReadFile("static/index.html")`
-	// Anchor the scan to the package source dir, NOT the process CWD — otherwise
-	// this wall falls to the very os.Chdir race it exists to catch: with a drifted
-	// CWD it would enumerate a temp dir, find no *_test.go, and pass vacuously.
-	dir := pkgSourceDir()
+// The check scans every *_test.go file, ignoring comment lines so doc comments that
+// mention the patterns do not trip it, and skips this wall file (which names them).
+func TestTestFileReadsAreCWDIndependent(t *testing.T) {
+	// Forbidden CWD-relative patterns:
+	//   1. the SPA read                       → staticIndexHTMLPath()
+	//   2. a bare package .go source read     → filepath.Join(pkgSourceDir(), "x.go")
+	//   3. enumerating the CWD                → os.ReadDir(pkgSourceDir())
+	bareGoRead := regexp.MustCompile(`os\.(?:ReadFile|Open|Stat)\("[^"/]+\.go"\)`)
+	forbiddenLiterals := []string{`ReadFile("static/index.html")`, `os.ReadDir(".")`}
+
+	dir := pkgSourceDir() // anchor the scan itself, or it falls to the race it guards
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		// This wall file names the forbidden pattern in its own const/doc; skip it.
-		if name == "static_read_wall_test.go" {
+		if e.IsDir() || !strings.HasSuffix(name, "_test.go") || name == "static_read_wall_test.go" {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -45,8 +46,19 @@ func TestStaticIndexReadsAreCWDIndependent(t *testing.T) {
 			if idx := strings.Index(code, "//"); idx >= 0 {
 				code = code[:idx] // drop the trailing comment
 			}
-			if strings.Contains(code, forbidden) {
-				t.Errorf("%s:%d reads static/index.html via a CWD-relative path — use staticIndexHTMLPath() so a concurrent os.Chdir cannot flake the read", name, i+1)
+			var hit string
+			for _, f := range forbiddenLiterals {
+				if strings.Contains(code, f) {
+					hit = f
+				}
+			}
+			if hit == "" {
+				if m := bareGoRead.FindString(code); m != "" {
+					hit = m
+				}
+			}
+			if hit != "" {
+				t.Errorf("%s:%d: %q is a CWD-relative read — anchor it to pkgSourceDir()/staticIndexHTMLPath() so a concurrent os.Chdir cannot flake it", name, i+1, hit)
 			}
 		}
 	}

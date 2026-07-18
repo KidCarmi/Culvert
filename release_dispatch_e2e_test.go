@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -512,7 +513,7 @@ func TestReleaseCatalogDispatch_CIGate_LegacyUpdaterNotRequiredOrCalled(t *testi
 			t.Fatalf("%s must not dispatch tag refs; use catalog repo@sha256 pins only", file)
 		}
 	}
-	execText, err := os.ReadFile("release_dispatch_exec.go")
+	execText, err := os.ReadFile(filepath.Join(pkgSourceDir(), "release_dispatch_exec.go"))
 	if err != nil {
 		t.Fatalf("read release_dispatch_exec.go: %v", err)
 	}
@@ -521,7 +522,7 @@ func TestReleaseCatalogDispatch_CIGate_LegacyUpdaterNotRequiredOrCalled(t *testi
 			t.Fatalf("release dispatch must use maintenance-agent endpoint %s", required)
 		}
 	}
-	if _, err := os.Stat("release_dispatch_api.go"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(pkgSourceDir(), "release_dispatch_api.go")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale parallel release_dispatch_api.go should not exist; err=%v", err)
 	}
 }
