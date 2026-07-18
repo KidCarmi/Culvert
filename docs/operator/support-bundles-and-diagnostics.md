@@ -235,6 +235,7 @@ input or reach a host binary.
 | `upstream` | upstream pool health + circuit state (from the existing health loop) | none (no new dial) |
 | `cluster` | cluster/HA posture — role, fencing-lease validity/epoch, write authority, enrolled-node counts, standby sync health | none (in-memory state only) |
 | `config` | live config-snapshot validity — the same cap validation that gates a CP→DP sync — plus non-secret collection sizes (policy rules, blocklist, categories, …); never the snapshot values | none (in-memory assembly) |
+| `support` | support-bundle **store** health — bundle count, aggregate size, age spread, the retention bounds in force, and the janitor's last-sweep time + evicted total; counts + a timestamp only, never bundle content. Answers "why did a bundle disappear?" | none (reads bundle manifests) |
 | `dns <host>` | bounded resolution of a bare hostname | resolves; **refuses** private/internal targets |
 | `tls <host:port>` | bounded handshake + leaf identity + chain/expiry (no MITM) | connects; **refuses** private/internal targets; verification deferred then reported |
 

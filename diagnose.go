@@ -860,6 +860,168 @@ func apiDiagnoseConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose support ────────────────────────────────────────────────────────
+
+// supportDiagnosis reports support-bundle STORE health: how many bundles are
+// persisted, their aggregate on-disk size, the age spread, the retention bounds
+// in force, and the janitor's activity (last sweep + evictions since boot). It
+// answers "is my support-bundle store healthy, and why did a bundle disappear?"
+// — counts, sizes, and a timestamp only, never bundle content. Read-only, no
+// network, no shell.
+type supportDiagnosis struct {
+	SchemaVersion       int            `json:"schema_version"`
+	GeneratedAt         string         `json:"generated_at"`
+	OK                  bool           `json:"ok"`
+	BundleCount         int            `json:"bundle_count"`
+	PendingCount        int            `json:"pending_count"` // created but not yet approved
+	TotalBytes          int64          `json:"total_bytes"`   // aggregate bundle.csb.tgz size
+	OldestAgeHours      int64          `json:"oldest_age_hours,omitempty"`
+	NewestAgeHours      int64          `json:"newest_age_hours,omitempty"`
+	RetentionKeep       int            `json:"retention_keep"`
+	RetentionMaxAgeDays int            `json:"retention_max_age_days"`
+	RetentionEvicted    int64          `json:"retention_evicted_total"`
+	LastSweep           string         `json:"retention_last_sweep,omitempty"`
+	Checks              []storageCheck `json:"checks"`
+}
+
+// countBundleDirs returns how many csb_-shaped subdirectories exist under the
+// bundle store (the RAW on-disk bundle count, before manifest parsing). An absent
+// store is (0, nil) — a healthy empty store, created on the first bundle. A
+// present-but-unreadable directory returns the ReadDir error so the caller can
+// fault the diagnosis instead of silently reporting empty.
+func countBundleDirs() (int, error) {
+	entries, err := os.ReadDir(supportBundlesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // no bundle written yet
+		}
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() && supportBundleIDRe.MatchString(e.Name()) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// diagnoseSupport inspects the persisted support-bundle store. now is injected for
+// deterministic timestamps in tests. It only reads bundle summaries (secret-free by
+// construction) and the retention observability atoms — it never opens a bundle.
+func diagnoseSupport(now time.Time) supportDiagnosis {
+	d := supportDiagnosis{
+		SchemaVersion:       diagnoseSchemaVersion,
+		GeneratedAt:         now.UTC().Format(time.RFC3339),
+		RetentionKeep:       supportRetentionKeep,
+		RetentionMaxAgeDays: int(supportRetentionMaxAge / (24 * time.Hour)),
+		RetentionEvicted:    supportRetentionEvicted.Load(),
+	}
+	if u := supportRetentionLastSweep.Load(); u > 0 {
+		d.LastSweep = time.Unix(u, 0).UTC().Format(time.RFC3339)
+	}
+
+	sums := listSupportBundles() // newest-first, path-guarded, secret-free
+	d.BundleCount = len(sums)
+	var oldest, newest time.Time
+	for i := range sums {
+		s := &sums[i]
+		d.TotalBytes += s.SizeBytes
+		if s.State == bundleStatePending {
+			d.PendingCount++
+		}
+		if t, err := time.Parse(time.RFC3339, s.CreatedAt); err == nil {
+			if oldest.IsZero() || t.Before(oldest) {
+				oldest = t
+			}
+			if t.After(newest) {
+				newest = t
+			}
+		}
+	}
+	if !oldest.IsZero() {
+		d.OldestAgeHours = int64(now.Sub(oldest).Hours())
+		d.NewestAgeHours = int64(now.Sub(newest).Hours())
+	}
+
+	d.Checks = supportStoreChecks(now, oldest, d.BundleCount)
+
+	d.OK = true
+	for i := range d.Checks {
+		if !d.Checks[i].OK {
+			d.OK = false
+			break
+		}
+	}
+	return d
+}
+
+// supportStoreChecks builds the health checks for the bundle store. Split out of
+// diagnoseSupport to keep it under the cyclop threshold. now/oldest are injected;
+// bundleCount is the PARSED-summary count from listSupportBundles.
+func supportStoreChecks(now, oldest time.Time, bundleCount int) []storageCheck {
+	dir := supportBundlesDir()
+	var checks []storageCheck
+
+	// Store readability + manifest integrity. listSupportBundles is deliberately
+	// LENIENT — empty on a ReadDir error, silently skips unreadable/corrupt
+	// manifests — so a broken store would otherwise read as a healthy EMPTY store
+	// (Codex #834). Cross-check the raw csb_-shaped subdir count against the parsed
+	// count: a ReadDir failure or a shortfall (a dir present but not parsed) faults.
+	rawDirs, readErr := countBundleDirs()
+	switch {
+	case readErr != nil:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false, Detail: "readdir: " + readErr.Error()})
+	case rawDirs > bundleCount:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false,
+			Detail: strconv.Itoa(rawDirs-bundleCount) + " bundle dir(s) unreadable/corrupt (present on disk but not parsed)"})
+	default:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: true})
+	}
+
+	// Count cap honored. The janitor evicts oldest-first on a new build and on the
+	// age tick, so an overflow beyond keep signals a stuck/failing janitor. keep==0
+	// disables the cap.
+	if supportRetentionKeep > 0 {
+		overCap := bundleCount > supportRetentionKeep
+		detail := ""
+		if overCap {
+			detail = "count " + strconv.Itoa(bundleCount) + " exceeds keep cap " + strconv.Itoa(supportRetentionKeep)
+		}
+		checks = append(checks, storageCheck{Name: "within_count_cap", Path: dir, OK: !overCap, Detail: detail})
+	}
+
+	// Age cap honored. A store can sit under the count cap with only a few bundles
+	// yet still hold ones older than max-age if the background janitor is stopped or
+	// failing (Codex #834) — the count cap alone can't catch that. maxAge<=0 disables.
+	if supportRetentionMaxAge > 0 && !oldest.IsZero() {
+		overAge := now.Sub(oldest) > supportRetentionMaxAge
+		detail := ""
+		if overAge {
+			detail = "oldest bundle age " + strconv.FormatInt(int64(now.Sub(oldest).Hours())/24, 10) + "d exceeds max-age " +
+				strconv.Itoa(int(supportRetentionMaxAge/(24*time.Hour))) + "d — the age janitor may be stopped or failing"
+		}
+		checks = append(checks, storageCheck{Name: "within_age_cap", Path: dir, OK: !overAge, Detail: detail})
+	}
+	return checks
+}
+
+// apiDiagnoseSupport reports support-bundle store health (POST, operator).
+// Read-only, no network, no shell, no bundle content.
+func apiDiagnoseSupport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseSupport(time.Now())
+	auditEvent(r, "diagnose.support", "support", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // ── diagnose all ──────────────────────────────────────────────────────────────
 
 // allDiagnosis aggregates every NO-INPUT local diagnostic into one snapshot so an
@@ -919,5 +1081,6 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
 	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
+	mux.HandleFunc("/api/diagnose/support", apiDiagnoseSupport)
 	mux.HandleFunc("/api/diagnose/all", apiDiagnoseAll)
 }

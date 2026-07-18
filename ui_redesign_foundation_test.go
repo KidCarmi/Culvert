@@ -40,7 +40,7 @@ func TestFoundation_CSPHasNoExternalOrigins(t *testing.T) {
 }
 
 func TestFoundation_ShellMarkupIsAirGapped(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestFoundation_ChartAssetEmbeddedAndCached(t *testing.T) {
 // ── 2/3. Shared component layer + native-dialog ban ─────────────────────────
 
 func TestFoundation_SharedComponentLayerPresent(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestFoundation_PolicyTraceContractFrozen(t *testing.T) {
 // ── M3 S5: drag must never POST — the commit bar owns the reorder ───────────
 
 func TestFoundation_DragReorderIsStaged(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestFoundation_DragReorderIsStaged(t *testing.T) {
 }
 
 func TestFoundation_NoInlineEventHandlers(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestFoundation_NoInlineEventHandlers(t *testing.T) {
 }
 
 func TestFoundation_NoNativeBrowserDialogs(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestFoundation_NoNativeBrowserDialogs(t *testing.T) {
 // ── 4. Danger-tier coverage stays wired ──────────────────────────────────────
 
 func TestFoundation_TypedConfirmationsCoverLockoutClassActions(t *testing.T) {
-	data, err := os.ReadFile("static/index.html")
+	data, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read static/index.html: %v", err)
 	}
