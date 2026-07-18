@@ -37,16 +37,29 @@ then **Create bundle**.
 - **case id** — optional, binds the bundle to a support case for triage/history
   (letters/digits/`._-`, ≤64, no whitespace).
 
-The bundle is written under `<dataDir>/support/bundles/<id>/`. Two retention
-bounds keep the bundle store from growing without limit (both audited as
-`support.bundle.expire`, both surfaced read-only on `/api/support/status`):
+The bundle is written under `<dataDir>/support/bundles/<id>/`. Three retention
+bounds keep the bundle store from growing without limit (all audited as
+`support.bundle.expire`, and surfaced read-only on `/api/support/status`):
 
-- **Count cap** — only the newest *N* bundles are kept; the oldest are evicted
-  when a new bundle is built.
-- **Age cap** — a background janitor evicts any bundle older than the max age
-  (default 30 days), so an **idle** appliance (one that has stopped creating
+- **Count cap** — only the newest *N* evictable bundles are kept; the oldest are
+  evicted when a new bundle is built.
+- **Age cap** — a background janitor evicts any evictable bundle older than the max
+  age (default 30 days), so an **idle** appliance (one that has stopped creating
   bundles, and so never triggers the count cap) still ages out stale bundles.
   A bundle whose timestamp can't be read is kept (fail-safe).
+- **Size cap** — a hard ceiling on the total store size (default 2 GiB); the oldest
+  evictable bundles are reclaimed above it. Without this, a store of large bundles
+  could wedge bundle creation — the free-disk preflight only *refuses* a new build,
+  it never reclaims.
+
+**Evidence is never auto-deleted.** A bundle bound to a support **case** (a
+`case=<id>` on creation) is exempt from *all three* caps — it is forensic evidence
+for an open case, so retention will never delete it. A bundle still awaiting
+approval (**pending**) is additionally exempt from the count cap, so building a
+fresh bundle can never evict one an admin is mid-review on. (Consequence: if the
+store fills entirely with case-bound bundles, retention cannot reclaim space —
+unbind or delete them manually.) Retention is **one-way**: a deleted bundle is
+gone; nothing restores it.
 
 If a bundle you expected is missing, `/api/support/status` (and the Support panel
 header) shows retention observability: how many bundles have been evicted since
