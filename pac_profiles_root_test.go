@@ -234,6 +234,25 @@ func TestPACProfilesAPI_DirectGuardrail(t *testing.T) {
 	if _, exists := pacProfiles.ProfileByID("byp"); !exists {
 		t.Error("confirmed DIRECT create must persist the profile")
 	}
+
+	// Dormant-enable: a DISABLED profile that already carries DIRECT serves
+	// nothing, so creating it needs no confirmation — but flipping it to
+	// enabled makes the DIRECT path reachable for the first time and MUST
+	// require the typed confirmation (the disabled spec is not a live baseline).
+	dormant := `{"id":"dorm","name":"Dorm","enabled":false,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"z.example","action":"direct"}]}`
+	rec = pacAPIReq(t, http.MethodPost, "/api/pac/profiles", dormant, RoleAdmin, "198.51.100.82:0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disabled DIRECT create should not require confirmation: %d (%s)", rec.Code, rec.Body.String())
+	}
+	enable := `{"id":"dorm","name":"Dorm","enabled":true,"poolId":"p","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"domain","pattern":"z.example","action":"direct"}]}`
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/dorm", enable, RoleAdmin, "198.51.100.82:0")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("enabling a dormant DIRECT profile must require confirmation (409), got %d (%s)", rec.Code, rec.Body.String())
+	}
+	rec = pacAPIReq(t, http.MethodPut, "/api/pac/profiles/dorm?confirmDirect=dorm", enable, RoleAdmin, "198.51.100.82:0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmed dormant-enable: %d (%s)", rec.Code, rec.Body.String())
+	}
 }
 
 // ─── Alias + serving ──────────────────────────────────────────────────────────

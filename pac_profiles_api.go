@@ -132,6 +132,18 @@ func pacGuardDirectCRUD(w http.ResponseWriter, r *http.Request, candidate pac.Pr
 		writePACIssues(w, "validation failed", issues)
 		return false
 	}
+	// A disabled candidate serves nothing (servePACProfileFile 404s a disabled
+	// profile), so it cannot make any DIRECT path reachable — no confirmation.
+	if !p.Enabled {
+		return true
+	}
+	// A disabled active spec is NOT a live DIRECT baseline: enabling a dormant
+	// DIRECT profile (disabled → enabled, e.g. one created pre-guard or via a
+	// tolerant import) makes its DIRECT path reachable to clients for the first
+	// time, so treat it as introducing DIRECT with no prior footprint.
+	if hasActive && !active.Enabled {
+		active, hasActive = pac.Profile{}, false
+	}
 	pools := make(map[string]pac.Pool, len(candidate.Pools))
 	for i := range candidate.Pools {
 		pools[candidate.Pools[i].ID] = candidate.Pools[i]
