@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
@@ -116,11 +117,41 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	// the snapshot carries secrets (SessionHMAC) that must NOT leak to
 	// unenrolled callers. We redact those fields unless the peer's TLS cert
 	// serial matches an enrolled, non-revoked node. (C1 fix.)
+	fp := globalClusterCA.CACertFingerprint()
+
+	// T2 CP-side marshal cache: on a config change every enrolled DP polls once
+	// for the new version and the CP re-marshaled the full (~60 MiB at 2 M hosts)
+	// snapshot PER DP. The cache marshals it ONCE per (version, CA-fingerprint)
+	// and serves all enrolled pollers from the shared bytes. Only the ENROLLED
+	// (full) variant is cached; the rare unenrolled bootstrap path is never
+	// cached, so the redacted-response path can never serve a secret-bearing
+	// cached blob (defense-in-depth over the redaction below).
+	if callerIsEnrolledNode(ctx) {
+		return gcMarshalCache.serve(fp)
+	}
+
+	// T2 exfil hardening: the config is non-secret but reveals the org's
+	// blocklist, policy rules, and threat-intel sources. The design serves it to
+	// UNENROLLED callers (the bootstrap contract — C1: redacted, no SessionHMAC),
+	// and the cheap version-conditional poll made bulk pulls low-cost. Throttle
+	// the unenrolled FULL-snapshot pull per peer IP: a legitimate node pulls the
+	// config a handful of times before enrolling, then polls as an enrolled peer;
+	// an exfil loop is rate-limited. Enrolled peers (above) are never throttled.
+	if ip := peerSourceIP(ctx); ip != "" && !unenrolledConfigPullAllow(ip) {
+		return nil, status.Errorf(codes.ResourceExhausted, "unenrolled config-pull rate exceeded; enroll to poll without limit")
+	}
+
 	snap := globalConfigStore.Get()
-	// Include cluster CA fingerprint so DP nodes detect CA rotation.
-	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
+	if fp != "" {
 		snap.CAFingerprint = fp
 	}
+	// Redact secrets from unenrolled callers. We are already in the unenrolled
+	// branch (the enrolled case returned above), so this guard is always true
+	// here — it is kept as an explicit !callerIsEnrolledNode block as
+	// defense-in-depth AND so the redaction-parity test
+	// (config_surfaces_test.go: TestConfigSurfaces_SnapshotRedaction) can
+	// statically verify every Sensitive ConfigSnapshot field is zeroed on this
+	// path. Do NOT collapse it into an unconditional assignment.
 	if !callerIsEnrolledNode(ctx) {
 		snap.SessionHMAC = ""
 		snap.IdPProfiles = nil
@@ -130,6 +161,95 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
 	return b, nil
+}
+
+// peerSourceIP returns the client IP of the gRPC peer, or "" when unavailable.
+func peerSourceIP(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p.Addr == nil {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+		return host
+	}
+	return ""
+}
+
+// unenrolledConfigPull throttles unenrolled full-snapshot pulls per peer IP.
+var unenrolledConfigPull = struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
+}{attempts: map[string][]time.Time{}}
+
+// unenrolledConfigPullAllow reports whether ip may pull the full unenrolled
+// config now, sliding-window rate-limited. Generous enough for a bootstrapping
+// node's retries, tight enough to make bulk exfiltration slow.
+func unenrolledConfigPullAllow(ip string) bool {
+	const (
+		maxPulls = 10
+		window   = time.Minute
+	)
+	unenrolledConfigPull.mu.Lock()
+	defer unenrolledConfigPull.mu.Unlock()
+	now := time.Now()
+	recent := unenrolledConfigPull.attempts[ip][:0]
+	for _, t := range unenrolledConfigPull.attempts[ip] {
+		if now.Sub(t) < window {
+			recent = append(recent, t)
+		}
+	}
+	unenrolledConfigPull.attempts[ip] = recent
+	if len(recent) >= maxPulls {
+		return false
+	}
+	unenrolledConfigPull.attempts[ip] = append(unenrolledConfigPull.attempts[ip], now)
+	return true
+}
+
+// gcMarshalCache caches the marshaled FULL (enrolled) config snapshot keyed on
+// (version, CA-fingerprint) so N enrolled DPs polling the same config change
+// share ONE marshal instead of forcing N. It never holds a redacted variant, so
+// it cannot leak a secret-bearing blob to an unenrolled caller.
+var gcMarshalCache configMarshalCache
+
+type configMarshalCache struct {
+	mu      sync.Mutex
+	version int64
+	caFP    string
+	bytes   json.RawMessage
+}
+
+// serve returns the marshaled full snapshot for the current published version
+// and CA fingerprint, marshaling (and caching) exactly once per change. The
+// marshal runs under the lock so concurrent first-pollers on a fresh version
+// produce ONE marshal (bounding transient memory to a single copy) rather than
+// N; subsequent pollers return the cached bytes. Lock order is cache→store
+// (Get takes the store RLock); nothing takes the store lock then this one.
+func (c *configMarshalCache) serve(fp string) (json.RawMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap := globalConfigStore.Get()
+	if fp != "" {
+		snap.CAFingerprint = fp
+	}
+	if c.bytes != nil && c.version == snap.Version && c.caFP == fp {
+		return c.bytes, nil
+	}
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
+	}
+	c.version, c.caFP, c.bytes = snap.Version, fp, b
+	return b, nil
+}
+
+// reset clears the cache. Production never needs it (globalConfigStore is a
+// version-monotonic singleton); tests that swap globalConfigStore call it so a
+// version number reused by a fresh store cannot serve a prior store's bytes.
+func (c *configMarshalCache) reset() {
+	c.mu.Lock()
+	c.version, c.caFP, c.bytes = 0, "", nil
+	c.mu.Unlock()
 }
 
 // callerIsEnrolledNode returns true when the gRPC peer presented a TLS
