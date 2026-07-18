@@ -207,6 +207,17 @@ func TestClassifyClientFailure(t *testing.T) {
 	if s, cat := classifyClientFailure(errors.New("read tcp: i/o timeout")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryTimeout {
 		t.Fatalf("timeout: %s/%s", s, cat)
 	}
+	// Native-ALPN reachable case: h2-only client forced to http/1.1 vs an h1-only origin
+	// fails the forged-leaf handshake with an ALPN alert — protocol, not other (Codex #812).
+	if s, cat := classifyClientFailure(errors.New("tls: no application protocol")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryProtocol {
+		t.Fatalf("alpn no_application_protocol: %s/%s want client_hello/protocol", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("tls: client requested unsupported application protocols h2")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryProtocol {
+		t.Fatalf("alpn unsupported protocols: %s/%s want client_hello/protocol", s, cat)
+	}
+	if s, cat := classifyClientFailure(errors.New("tls: protocol version not supported")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryVersion {
+		t.Fatalf("client version mismatch: %s/%s want client_hello/version", s, cat)
+	}
 	if s, cat := classifyClientFailure(errors.New("some unrecognised abort")); s != decryptobs.FailStageClientHello || cat != decryptobs.FailCategoryOther {
 		t.Fatalf("default: %s/%s", s, cat)
 	}

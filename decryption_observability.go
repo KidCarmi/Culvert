@@ -252,8 +252,13 @@ func classifyOriginFailure(err error) (decryptobs.FailStage, decryptobs.FailCate
 
 // classifyClientFailure maps a client-leg (forged-leaf) handshake error to the bounded
 // ADR-0011 (FailStage, FailCategory). It reuses classifyClientInspectFailure for the
-// pinning class; anything else fails safe to (client_hello, other). The DecisionSource is
-// always no_fail_open_502 on this leg, so the builder sets it directly.
+// pinning class, then mirrors the origin classifier's protocol/version/timeout buckets so
+// a known client-leg failure is not lost to `other`: the native-ALPN path can force an
+// h2-only client onto http/1.1 against an h1-only origin, whose handshake then fails with
+// `no application protocol` / `requested unsupported application protocols` — a genuine
+// PROTOCOL failure, not other (Codex #812). Anything unrecognised still fails safe to
+// (client_hello, other). The DecisionSource is always no_fail_open_502 on this leg, so the
+// builder sets it directly.
 func classifyClientFailure(err error) (decryptobs.FailStage, decryptobs.FailCategory) {
 	if err == nil {
 		return decryptobs.FailStageClientHello, decryptobs.FailCategoryOther
@@ -261,8 +266,15 @@ func classifyClientFailure(err error) (decryptobs.FailStage, decryptobs.FailCate
 	if _, pinned := classifyClientInspectFailure(err); pinned {
 		return decryptobs.FailStageClientLeafReject, decryptobs.FailCategoryClientPinned
 	}
-	if containsAny(strings.ToLower(err.Error()), "i/o timeout", "deadline exceeded", "timed out") {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case containsAny(msg, "i/o timeout", "deadline exceeded", "timed out"):
 		return decryptobs.FailStageClientHello, decryptobs.FailCategoryTimeout
+	case containsAny(msg, "no supported versions satisfy", "protocol version not supported"):
+		return decryptobs.FailStageClientHello, decryptobs.FailCategoryVersion
+	case containsAny(msg, "no application protocol", "unsupported application protocol",
+		"requested unsupported application protocols", "handshake failure", "unexpected message"):
+		return decryptobs.FailStageClientHello, decryptobs.FailCategoryProtocol
 	}
 	return decryptobs.FailStageClientHello, decryptobs.FailCategoryOther
 }
