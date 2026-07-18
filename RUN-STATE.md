@@ -16,10 +16,14 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-025** — YouTube package: Zero-Trust egress policy demo. Next.
+- **M-026** — Administrator training curriculum. Next.
 
 ## Recently completed
 
+- **M-025** — YouTube "Zero-Trust egress policy demo"
+  (`content/youtube/03-zero-trust-policy/package.md`). Full package grounded in
+  H-010; safe rollout order (author → test → enforce → verify), Policy Tester
+  demo, claim-evidence ledger. Link check pass. Committed.
 - **M-022** — PAC traffic steering (`content/docs/09-pac/pac-traffic-steering.md`)
   + evidence ledger. WinINET-compatible PAC generation (PROXY/DIRECT only, DNS
   ≤1/eval), exclusions → DIRECT, unauthenticated `/proxy.pac`, config surface.

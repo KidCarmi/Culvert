@@ -189,7 +189,7 @@ items:
     title: "YouTube: Zero-Trust egress policy in the admin UI"
     type: yt
     priority: medium
-    status: todo
+    status: done
     audience: [security-engineer, admin]
     path: content/youtube/03-zero-trust-policy/
     evidence_areas: [H-010]

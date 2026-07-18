@@ -42,6 +42,7 @@ evidence from but does not mirror.
 |---|---|
 | [What is Culvert (intro)](youtube/01-what-is-culvert/package.md) | published |
 | [Deploy in 5 minutes (quick-start demo)](youtube/02-deploy-in-5-minutes/package.md) | published |
+| [Zero-Trust egress policy demo](youtube/03-zero-trust-policy/package.md) | published |
 
 The authoritative, prioritized queue is [`../CONTENT-BACKLOG.yaml`](../CONTENT-BACKLOG.yaml);
 live progress is in [`../RUN-STATE.md`](../RUN-STATE.md); the session summary is
