@@ -261,11 +261,16 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"` // selectable incident scopes
+	Scopes                []string               `json:"scopes"`          // selectable incident scopes
+	RetentionKeep         int                    `json:"retention_keep"`  // newest-N persisted bundles kept (oldest evicted)
+	RecipientCount        int                    `json:"recipient_count"` // registered sealing recipients
+	RecipientMax          int                    `json:"recipient_max"`   // registry cap
 }
 
-// apiSupportStatus reports the support subsystem's static contract: engine +
-// redaction versions and the registered collector inventory (viewer, read-only).
+// apiSupportStatus reports the support subsystem's contract + current state: engine
+// + redaction versions, the registered collector inventory, selectable scopes, the
+// bundle-retention window, and the sealing-recipient registry size (viewer,
+// read-only; no secrets — counts and capabilities only).
 func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -290,6 +295,9 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		RedactionModelVersion: support.RedactionModelVer,
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
+		RetentionKeep:         supportRetentionKeep,
+		RecipientCount:        len(listSupportRecipients()),
+		RecipientMax:          maxSupportRecipients,
 	})
 }
 
