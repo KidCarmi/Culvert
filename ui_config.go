@@ -262,6 +262,16 @@ func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
 	filterLevel := strings.ToUpper(q.Get("level"))
 	filterMethod := strings.ToUpper(q.Get("method"))
 	filterIdentity := strings.ToLower(q.Get("identity"))
+	// ADR-0011 Phase 3 drill-down: structured dec.* filters on the nested decryption block.
+	// The enum fields (outcome/decision_source/fail_category) are bounded lowercase tokens,
+	// so an exact case-folded match is right; profile_id is an opaque ID, matched exactly.
+	// A record with no dec block never matches ANY dec.* filter — those select decryption
+	// sessions specifically. The predicate is shared by the in-memory ring and the history
+	// store, so both drill-down paths stay consistent.
+	filterDecOutcome := q.Get("dec_outcome")
+	filterDecSource := q.Get("dec_decision_source")
+	filterDecFailCat := q.Get("dec_fail_category")
+	filterDecProfile := q.Get("dec_profile_id")
 	return func(e *LogEntry) bool {
 		if filterHost != "" && !strings.Contains(strings.ToLower(e.Host), filterHost) &&
 			!strings.Contains(strings.ToLower(e.IP), filterHost) {
@@ -277,6 +287,18 @@ func buildLogFilterPredicate(q url.Values) func(*LogEntry) bool {
 			return false
 		}
 		if filterIdentity != "" && !strings.Contains(strings.ToLower(e.Identity), filterIdentity) {
+			return false
+		}
+		if filterDecOutcome != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.Outcome, filterDecOutcome)) {
+			return false
+		}
+		if filterDecSource != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.DecisionSource, filterDecSource)) {
+			return false
+		}
+		if filterDecFailCat != "" && (e.Dec == nil || !strings.EqualFold(e.Dec.FailCategory, filterDecFailCat)) {
+			return false
+		}
+		if filterDecProfile != "" && (e.Dec == nil || e.Dec.ProfileID != filterDecProfile) {
 			return false
 		}
 		return true
