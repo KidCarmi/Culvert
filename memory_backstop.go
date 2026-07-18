@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // memory_backstop.go — GOMEMLIMIT soft memory backstop (panel review P0-2).
@@ -36,16 +38,53 @@ import (
 
 const memoryBackstopFraction = 80 // percent of the container limit
 
+// Outcome enums for memoryBackstopStatus.Mode, surfaced read-only via
+// checkMemoryBackstop (the /api/diagnostics operator contract).
+const (
+	memBackstopOperatorPinned = "operator_pinned"
+	memBackstopActive         = "active"
+	memBackstopNotDetected    = "not_detected"
+	memBackstopCapTooSmall    = "cap_too_small"
+)
+
+// memoryBackstopStatus is the outcome of the one-shot initMemoryBackstop
+// decision, cached for the diagnostics handler. The zero value (Mode=="")
+// means the startup probe has not run yet (e.g. a unit-test process).
+type memoryBackstopStatus struct {
+	Mode         string
+	SoftMiB      int64  // populated only for memBackstopActive
+	ContainerMiB int64  // populated for memBackstopActive and memBackstopCapTooSmall
+	Pinned       string // raw operator-set GOMEMLIMIT value, only for memBackstopOperatorPinned
+}
+
+// memoryBackstopState holds the cached result of initMemoryBackstop.
+// atomic.Value gives race-free reads from the diagnostics handler without
+// locking, mirroring storageWritableState (diagnostics.go).
+var memoryBackstopState atomic.Value
+
+// loadMemoryBackstopStatus returns the cached startup decision, or the zero
+// value if initMemoryBackstop has not run yet. Read-only; never re-probes.
+func loadMemoryBackstopStatus() memoryBackstopStatus {
+	if v := memoryBackstopState.Load(); v != nil {
+		if s, ok := v.(memoryBackstopStatus); ok {
+			return s
+		}
+	}
+	return memoryBackstopStatus{}
+}
+
 // initMemoryBackstop wires the soft memory limit. Safe to call once at startup.
 func initMemoryBackstop() {
 	if v := strings.TrimSpace(os.Getenv("GOMEMLIMIT")); v != "" {
 		// Operator set it explicitly; the runtime already applied it.
 		logger.Printf("MemoryBackstop: GOMEMLIMIT=%s set by operator; leaving runtime limit as-is", sanitizeLog(v))
+		memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopOperatorPinned, Pinned: v})
 		return
 	}
 	limit, ok := detectContainerMemoryLimit()
 	if !ok {
 		logger.Printf("MemoryBackstop: no finite container memory limit detected; soft limit not set (set GOMEMLIMIT to enable)")
+		memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopNotDetected})
 		return
 	}
 	soft := limit / 100 * memoryBackstopFraction
@@ -54,11 +93,57 @@ func initMemoryBackstop() {
 	const minSoftLimit = 128 << 20 // 128 MiB
 	if soft < minSoftLimit {
 		logger.Printf("MemoryBackstop: container limit %d MiB too small for a safe soft limit; not set", limit>>20)
+		memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopCapTooSmall, ContainerMiB: limit >> 20})
 		return
 	}
 	debug.SetMemoryLimit(soft)
 	logger.Printf("MemoryBackstop: soft memory limit set to %d MiB (%d%% of the %d MiB container limit) — config-apply pressure degrades to GC, not OOM",
 		soft>>20, memoryBackstopFraction, limit>>20)
+	memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopActive, SoftMiB: soft >> 20, ContainerMiB: limit >> 20})
+}
+
+// checkMemoryBackstop reports the outcome of the GOMEMLIMIT soft memory
+// backstop decision made once at startup (initMemoryBackstop) as an
+// OperatorContract row. Read-only — it never re-probes cgroup files or
+// touches debug.SetMemoryLimit; it only reflects the cached decision so an
+// admin can confirm backstop posture from the Diagnostics panel instead of
+// grepping startup logs.
+func checkMemoryBackstop() OperatorContractCheck {
+	st := loadMemoryBackstopStatus()
+	switch st.Mode {
+	case memBackstopOperatorPinned:
+		return OperatorContractCheck{
+			Code:    "memory_backstop",
+			Status:  diagOK,
+			Message: fmt.Sprintf("operator-pinned GOMEMLIMIT=%s in effect (Culvert leaves it as-is)", st.Pinned),
+		}
+	case memBackstopActive:
+		return OperatorContractCheck{
+			Code:   "memory_backstop",
+			Status: diagOK,
+			Message: fmt.Sprintf("soft memory limit set to %d MiB (%d%% of the %d MiB detected container limit)",
+				st.SoftMiB, memoryBackstopFraction, st.ContainerMiB),
+		}
+	case memBackstopCapTooSmall:
+		return OperatorContractCheck{
+			Code:           "memory_backstop",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("detected container memory limit (%d MiB) is too small for a safe soft backstop; none was set", st.ContainerMiB),
+			OperatorAction: "Raise the container memory limit, or set GOMEMLIMIT explicitly if a smaller pinned limit is intentional.",
+		}
+	case memBackstopNotDetected:
+		return OperatorContractCheck{
+			Code:    "memory_backstop",
+			Status:  diagOK,
+			Message: "no finite container memory limit detected; soft backstop not set (expected outside a memory-capped container — set GOMEMLIMIT to opt in)",
+		}
+	default:
+		return OperatorContractCheck{
+			Code:    "memory_backstop",
+			Status:  diagOK,
+			Message: "memory backstop status unavailable — startup probe has not run",
+		}
+	}
 }
 
 // detectContainerMemoryLimit returns the cgroup memory limit in bytes, or
