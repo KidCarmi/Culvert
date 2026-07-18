@@ -27,10 +27,18 @@ const (
 	// destinations DIRECT.
 	BypassPrivate DirectBypassKind = "private_networks"
 	// BypassPlainHost is the unconditional dotless-intranet-hostname DIRECT
-	// guard the compiler emits in EVERY profile (including secure mode; only
-	// IPv6 literals are excluded). Every PAC profile therefore bypasses for
-	// plain single-label hostnames.
+	// guard the compiler emits in EVERY profile (including secure mode). Every
+	// PAC profile therefore bypasses for plain single-label hostnames. (The
+	// profile compiler additionally excludes IPv6 literals; the legacy default
+	// compiler does not — so the detail text does not promise IPv6 exclusion.)
 	BypassPlainHost DirectBypassKind = "plain_host"
+	// BypassFailOpen is the legacy default PAC failing OPEN to DIRECT for ALL
+	// traffic when no proxy host is configured (and the fetching client
+	// supplies no resolvable Host). It applies only to the synthesized legacy
+	// default profile and is injected by the root inventory builder, since the
+	// static profile model cannot otherwise express the request-dependent
+	// terminal of the legacy compiler.
+	BypassFailOpen DirectBypassKind = "fail_open"
 )
 
 // DirectEntry is one config-derived path by which a profile fully bypasses
@@ -128,7 +136,7 @@ func directEntriesFor(p *Profile) []DirectEntry {
 	// intranet hostnames DIRECT (IPv6 literals excluded), in every mode.
 	out := []DirectEntry{{
 		Kind:   BypassPlainHost,
-		Detail: "plain (dotless) intranet hostnames are sent DIRECT (unconditional; IPv6 literals excluded)",
+		Detail: "plain (dotless) intranet hostnames are sent DIRECT (unconditional, every mode)",
 	}}
 	if p.AvailabilityMode == ModeSecure {
 		// Secure mode neutralizes DIRECT rules, the private-network bypass, and
@@ -152,6 +160,13 @@ func directEntriesFor(p *Profile) []DirectEntry {
 	for i := range p.Rules {
 		r := &p.Rules[i]
 		if r.Action != ActionDirect {
+			continue
+		}
+		// Only inventory a rule the compiler would actually emit. An invalid
+		// pattern (bad glob/CIDR/domain, unknown kind) is dropped by
+		// ruleCondition, so no DIRECT is produced — reporting it anyway would
+		// over-count the DIRECT footprint (and mis-flag broad).
+		if _, ok := ruleCondition(r); !ok {
 			continue
 		}
 		out = append(out, DirectEntry{

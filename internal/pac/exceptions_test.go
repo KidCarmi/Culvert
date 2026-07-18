@@ -35,6 +35,16 @@ func TestExceptionRecord_Status(t *testing.T) {
 			ExceptionRecord{Owner: "a", Reason: "b", ExpiresAt: rfc(now.AddDate(0, 0, 30)), ReviewCadenceDays: 30, LastReviewedAt: rfc(now.AddDate(0, 0, -1))}, true, GovGoverned},
 		{"governed: owned + justified, no expiry, no cadence",
 			ExceptionRecord{Owner: "a", Reason: "b"}, true, GovGoverned},
+		// Fail-safe: whitespace-only owner/reason (reachable via hand-edit /
+		// restore of pac_exceptions.json) must NOT read as governed.
+		{"ungoverned: whitespace-only owner",
+			ExceptionRecord{Owner: "   ", Reason: "b"}, true, GovUngoverned},
+		{"ungoverned: tab/newline-only reason",
+			ExceptionRecord{Owner: "a", Reason: "\t\n"}, true, GovUngoverned},
+		// Fail-safe: a negative cadence is invalid config; treat as review-due,
+		// never as "review disabled".
+		{"review_due: negative cadence",
+			ExceptionRecord{Owner: "a", Reason: "b", ReviewCadenceDays: -1, LastReviewedAt: rfc(now.AddDate(0, 0, -1))}, true, GovReviewDue},
 	}
 	for _, c := range cases {
 		if got := c.rec.Status(now, c.directCapable); got != c.want {

@@ -84,3 +84,54 @@ func TestAPIPACPostureInventory(t *testing.T) {
 		t.Errorf("POST inventory: %d, want 405", rec2.Code)
 	}
 }
+
+// TestAPIPACPostureInventory_FailOpen pins the F1 fix: when no proxy host is
+// configured, the legacy /proxy.pac fails OPEN to DIRECT for all traffic, so
+// the default profile must carry a broad fail_open DIRECT path in the
+// inventory (the static profile model cannot otherwise express it).
+func TestAPIPACPostureInventory_FailOpen(t *testing.T) {
+	oc := pacStore.Snapshot()
+	op := pacProfiles.Snapshot()
+	t.Cleanup(func() { pacStore.Restore(oc); pacProfiles.Restore(op) })
+
+	// Empty ProxyHost = the fail-open case.
+	if err := pacStore.Set(PACConfig{ProxyPort: 8080}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pacProfiles.Set(pac.ProfilesConfig{}); err != nil {
+		t.Fatal(err)
+	}
+
+	inv := pacDirectInventory()
+	var def *pac.ProfileDirectInventory
+	for i := range inv.Profiles {
+		if inv.Profiles[i].ProfileID == pac.DefaultProfileID {
+			def = &inv.Profiles[i]
+		}
+	}
+	if def == nil {
+		t.Fatal("default profile missing from inventory")
+	}
+	var failOpen *pac.DirectEntry
+	for i := range def.DirectPaths {
+		if def.DirectPaths[i].Kind == pac.BypassFailOpen {
+			failOpen = &def.DirectPaths[i]
+		}
+	}
+	if failOpen == nil || !failOpen.Broad {
+		t.Errorf("empty ProxyHost must surface a broad fail_open DIRECT path: %+v", def.DirectPaths)
+	}
+
+	// With a proxy host configured, there is NO fail-open path.
+	if err := pacStore.Set(PACConfig{ProxyHost: "proxy.example", ProxyPort: 8080}); err != nil {
+		t.Fatal(err)
+	}
+	inv2 := pacDirectInventory()
+	for _, p := range inv2.Profiles {
+		for _, d := range p.DirectPaths {
+			if d.Kind == pac.BypassFailOpen {
+				t.Errorf("configured ProxyHost must NOT produce a fail_open path: %+v", p)
+			}
+		}
+	}
+}

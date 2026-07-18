@@ -356,15 +356,22 @@ it read-only as **DIRECT Bypass Inventory**.
 
 Each profile (including the synthesized legacy default) is walked for the DIRECT
 sources: the always-present plain-host guard (`plain_host` — dotless intranet
-hostnames go DIRECT in **every** profile, IPv6 literals excluded; the compiler
-emits it unconditionally, so even a secure/proxy-only profile bypasses for
-single-label names), an explicit `direct` rule (`direct_rule`), availability
-mode (`availability_mode` — appends DIRECT to the terminal, fail-open), and
-`private-networks=direct` (`private_networks` — RFC-1918/loopback DIRECT).
-Secure mode neutralizes the rule/private/availability sources but **not** the
-plain-host guard. Wildcards and broad IPv4 CIDRs (≤ /16), plus the
-all-destination mode/private bypasses, are flagged `broad` (the plain-host
-guard is not).
+hostnames go DIRECT in **every** profile; the compiler emits it unconditionally,
+so even a secure/proxy-only profile bypasses for single-label names — the
+profile compiler additionally excludes IPv6 literals, the legacy default
+compiler does not, so the source is reported without promising IPv6 exclusion),
+an explicit `direct` rule (`direct_rule` — only rules the compiler would
+actually emit; a rule with an invalid pattern is dropped by the compiler and is
+**not** inventoried), availability mode (`availability_mode` — appends DIRECT to
+the terminal, fail-open), `private-networks=direct` (`private_networks` —
+RFC-1918/loopback DIRECT), and, for the legacy default only, `fail_open` — when
+**no proxy host is configured**, `/proxy.pac` fails OPEN to DIRECT for all
+traffic if the fetching client supplies no resolvable Host (the request-
+dependent terminal the static profile model cannot otherwise express, injected
+so the whole-traffic bypass is never hidden). Secure mode neutralizes the
+rule/private/availability sources but **not** the plain-host guard. Wildcards
+and broad IPv4 CIDRs (≤ /16), plus the all-destination mode/private/fail-open
+bypasses, are flagged `broad` (the plain-host guard is not).
 
 **Evidence class: `config` (Observable).** The inventory reports what the
 configuration makes *reachable* — it never claims a bypass was *used*. Culvert

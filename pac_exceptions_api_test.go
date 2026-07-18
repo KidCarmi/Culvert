@@ -116,6 +116,13 @@ func TestAPIPACExceptions_PutValidation(t *testing.T) {
 		t.Fatalf("bad expiry: %d, want 400 (%s)", rec.Code, rec.Body.String())
 	}
 
+	// Over-long field → 400 (defense-in-depth length cap).
+	long := strings.Repeat("x", pacExceptionFieldMax+1)
+	rec = pacExcReq(t, http.MethodPut, "/api/pac/posture/exceptions/hq", `{"owner":"`+long+`","reason":"b"}`, RoleAdmin)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("over-long owner: %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+
 	// Viewer cannot PUT.
 	rec = pacExcReq(t, http.MethodPut, "/api/pac/posture/exceptions/hq", `{"owner":"a","reason":"b"}`, RoleViewer)
 	if rec.Code != http.StatusForbidden {

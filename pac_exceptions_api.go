@@ -36,16 +36,16 @@ var pacExceptions = &pac.ExceptionStore{}
 // (preserve CreatedAt/CreatedBy across an update).
 var pacExceptionsMu sync.Mutex
 
+// pacExceptionFieldMax bounds a free-text governance field (owner/reason/
+// businessApp/ticket) — defense-in-depth beyond the middleware body cap.
+const pacExceptionFieldMax = 512
+
 // pacDirectCapableMap builds profileID → (directCapable, serving, name) over
 // the synthesized legacy default + all custom profiles, reusing the P0
 // inventory so governance status can only apply to genuinely DIRECT-capable
 // profiles.
 func pacDirectCapableMap() map[string]pac.ProfileDirectInventory {
-	cfg := pacProfiles.Get()
-	full := pac.ProfilesConfig{Pools: cfg.Pools}
-	full.Profiles = append(full.Profiles, pacSyntheticDefaultProfile())
-	full.Profiles = append(full.Profiles, cfg.Profiles...)
-	inv := pac.BuildDirectInventory(full)
+	inv := pacDirectInventory()
 	m := make(map[string]pac.ProfileDirectInventory, len(inv.Profiles))
 	for i := range inv.Profiles {
 		m[inv.Profiles[i].ProfileID] = inv.Profiles[i]
@@ -141,12 +141,28 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "unknown profile: "+sanitizeLog(id), http.StatusNotFound)
 		return
 	}
+	// Normalize free-text fields up front: trim surrounding whitespace so the
+	// stored record is clean and the empty check below is authoritative.
+	in.Owner = strings.TrimSpace(in.Owner)
+	in.Reason = strings.TrimSpace(in.Reason)
+	in.BusinessApp = strings.TrimSpace(in.BusinessApp)
+	in.Ticket = strings.TrimSpace(in.Ticket)
 	// Required governance fields (this is the whole point of the feature).
-	if strings.TrimSpace(in.Owner) == "" || strings.TrimSpace(in.Reason) == "" {
+	if in.Owner == "" || in.Reason == "" {
 		writePACIssues(w, "validation failed", []pac.ValidationIssue{
 			{Field: "owner", Message: "owner and reason are required to govern a DIRECT exception"},
 		})
 		return
+	}
+	// Bound field lengths (defense-in-depth beyond the 1 MiB body cap): this is
+	// admin-only node-local metadata, not free-form storage.
+	for _, f := range []struct {
+		name, val string
+	}{{"owner", in.Owner}, {"reason", in.Reason}, {"businessApp", in.BusinessApp}, {"ticket", in.Ticket}} {
+		if len(f.val) > pacExceptionFieldMax {
+			http.Error(w, fmt.Sprintf("%s too long (max %d chars)", f.name, pacExceptionFieldMax), http.StatusBadRequest)
+			return
+		}
 	}
 	if in.ReviewCadenceDays < 0 || in.ReviewCadenceDays > 3650 {
 		http.Error(w, "reviewCadenceDays must be between 0 and 3650", http.StatusBadRequest)
@@ -186,7 +202,7 @@ func pacExceptionPut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	auditEvent(r, "pac.exception_set", id,
-		fmt.Sprintf("owner=%s app=%s expires=%s cadence=%d",
+		fmt.Sprintf("owner=%q app=%q expires=%q cadence=%d",
 			sanitizeLog(rec.Owner), sanitizeLog(rec.BusinessApp), sanitizeLog(rec.ExpiresAt), rec.ReviewCadenceDays))
 	saveConfigVersion(actor, "pac.exception_set")
 	jsonOK(w, rec)

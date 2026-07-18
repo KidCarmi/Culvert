@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +64,11 @@ func (e ExceptionRecord) Status(now time.Time, directCapable bool) string {
 	if !directCapable {
 		return ""
 	}
-	if e.Owner == "" || e.Reason == "" {
+	// Trim before the empty check so a whitespace-only owner/reason (reachable
+	// via a hand-edited or restored pac_exceptions.json — the API write path
+	// already rejects it) reads as ungoverned, not governed. The pure function
+	// must be self-sufficiently fail-safe rather than rely on the caller.
+	if strings.TrimSpace(e.Owner) == "" || strings.TrimSpace(e.Reason) == "" {
 		return GovUngoverned
 	}
 	if e.ExpiresAt != "" {
@@ -72,7 +77,10 @@ func (e ExceptionRecord) Status(now time.Time, directCapable bool) string {
 			return GovExpired
 		}
 	}
-	if e.ReviewCadenceDays > 0 {
+	// A non-zero cadence is active. A NEGATIVE cadence is invalid config (the
+	// API rejects it; only the load/restore path can carry it) — treat it as
+	// review-due (fail-safe nudge) rather than silently disabling review.
+	if e.ReviewCadenceDays != 0 {
 		last, err := time.Parse(time.RFC3339, e.LastReviewedAt)
 		if err != nil || now.After(last.AddDate(0, 0, e.ReviewCadenceDays)) {
 			return GovReviewDue
