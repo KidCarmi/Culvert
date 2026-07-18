@@ -611,6 +611,12 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		if isDNSError(err) {
 			go fireAlert("dns_failure", AlertPayload{Host: targetHost, Detail: err.Error(), Source: "proxy"})
 		}
+		// ADR-0011: an inspect rule whose origin is unreachable is a FAILED
+		// decryption attempt (fail_stage=tcp_connect) — count it toward coverage +
+		// the failure taxonomy and write the drill-down row, instead of vanishing.
+		// This site is BEFORE the native/strip split, so it covers both paths. NO
+		// maybeFailOpen* — a dial failure is a transport error, not a learn signal.
+		recordDecryptFailureEntry(upstreamConnectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
 	}

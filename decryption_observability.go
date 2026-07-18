@@ -236,6 +236,53 @@ func withLearn(o *DecryptionOutcome, reason AutoExcludeReason, scope string) *De
 	return o
 }
 
+// classifyConnectFailure maps an upstream TCP-dial error (BEFORE any TLS handshake)
+// to the bounded ADR-0011 (FailStage, FailCategory). The stage is always
+// tcp_connect — the origin was unreachable, so no handshake was ever attempted. A
+// dial timeout is `timeout`; connection-refused / reset / DNS / no-route all fall
+// SAFE to `other` (there is no dedicated category, and they are transport errors,
+// not decryption-incompatibility signals). The raw string never leaves here.
+func classifyConnectFailure(err error) (decryptobs.FailStage, decryptobs.FailCategory) {
+	if err == nil {
+		return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryOther
+	}
+	msg := strings.ToLower(err.Error())
+	if containsAny(msg, "i/o timeout", "deadline exceeded", "timed out") {
+		return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryTimeout
+	}
+	return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryOther
+}
+
+// upstreamConnectFailureOutcome builds the ADR-0011 DecryptionOutcome for an
+// inspect rule whose upstream TCP dial FAILED before any TLS handshake — the
+// origin was unreachable, so a session matched-to-inspect could not be decrypted.
+// It makes that attempt VISIBLE to the coverage denominator and the failure
+// taxonomy (fail_stage=tcp_connect); previously the dial-error path 502'd and
+// recorded nothing, so an all-failing inspect target left Decryption Health clean.
+// It deliberately does NOT feed the auto-exclusion learner: a dial failure is a
+// transport error, not a decryption-incompatibility signal, so it must never
+// learn or promote a bypass (no maybeFailOpen* at the call site). Sentinels stand
+// for the TLS fields (no negotiated session); ProfileID/CacheConsulted carry the
+// fail-open scope read, matching the handshake-failure builders.
+func upstreamConnectFailureOutcome(err error, hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
+	stage, category := classifyConnectFailure(err)
+	o := &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeFailed,
+		DecisionSource: decryptobs.DecisionNoFailOpen502,
+		Host:           hostOnly,
+		CertVerify:     decryptobs.CertVerifyNotChecked,
+		FailStage:      stage,
+		FailCategory:   category,
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
 // classifyOriginFailure maps an upstream (origin-leg) inspect-handshake error to the
 // bounded ADR-0011 (FailStage, FailCategory, DecisionSource). It reuses isOriginCertVerifyErr
 // for the certificate class (a Block decision) and matches the same narrow, deliberate TLS
