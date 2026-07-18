@@ -74,8 +74,11 @@ func (rawCodec) Unmarshal(data mem.BufferSlice, v any) error {
 func clusterClientCallOptions() []grpc.CallOption {
 	opts := []grpc.CallOption{
 		grpc.ForceCodecV2(rawCodec{}),
+		// Asymmetric: the client RECEIVES the big snapshot (GetConfig / HASync
+		// responses) but only SENDS tiny requests, so recv gets the full frame
+		// and send is pinned to the tight inbound bound (mirror of the server).
 		grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
-		grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
+		grpc.MaxCallSendMsgSize(maxClusterInboundMsgSize),
 	}
 	// gzip is OPT-IN and default-off (clusterGRPCCompression). See connect()
 	// and CULVERT_CLUSTER_GRPC_COMPRESSION for the CP-first migration rationale.

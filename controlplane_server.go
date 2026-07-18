@@ -717,7 +717,11 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		// CP-first migration: an upgraded CP handles both compressed and
 		// uncompressed DPs, so enabling compression never depends on rollout
 		// order the way an unconditional client-side compressor would.
-		grpc.MaxRecvMsgSize(maxClusterGRPCMsgSize),
+		// Asymmetric by direction: the big config snapshot only flows OUTBOUND
+		// (GetConfig / HASync responses), so the server SENDS large but RECEIVES
+		// tight — every inbound RPC is small, so a 16 MiB recv cap shrinks the
+		// CP's inbound allocation surface instead of inheriting the 128 MiB frame.
+		grpc.MaxRecvMsgSize(maxClusterInboundMsgSize),
 		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
 	)
 	registerConfigService(srv)

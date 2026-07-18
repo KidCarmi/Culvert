@@ -83,6 +83,46 @@ func TestValidateConfigSnapshot_RejectsThreatFeedURLsOverflow(t *testing.T) {
 	}
 }
 
+// TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow covers the P1 inner-
+// dimension bound: url_categories has a small ENTRY cap, but each entry carries a
+// Hosts list — a few entries must not smuggle millions of hosts past it.
+func TestValidateConfigSnapshot_RejectsURLCategoryHostOverflow(t *testing.T) {
+	// Two entries whose Hosts together exceed the aggregate host cap.
+	half := maxSnapURLCategoryHosts/2 + 1
+	snap := ConfigSnapshot{URLCategories: []CategoryEntry{
+		{Name: "a", Hosts: make([]string, half)},
+		{Name: "b", Hosts: make([]string, half)},
+	}}
+	err := validateConfigSnapshot(snap)
+	if err == nil || !strings.Contains(err.Error(), "url_category_hosts") {
+		t.Fatalf("expected url_category_hosts overflow, got %v", err)
+	}
+}
+
+// TestValidateConfigSnapshot_RejectsAggregateOverflow covers the P1 aggregate
+// bound: individually-valid host-scale slices whose SUM exceeds the frame's
+// capacity must be rejected with a clear named error (not left to overflow the
+// wire). Two 2 M slices are each under their own cap but sum past the aggregate.
+func TestValidateConfigSnapshot_RejectsAggregateOverflow(t *testing.T) {
+	snap := ConfigSnapshot{
+		BlockedHosts: make([]string, maxSnapBlockedHosts),
+		IPList:       make([]string, maxSnapIPList),
+	}
+	err := validateConfigSnapshot(snap)
+	if err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("expected aggregate overflow (2M+2M > %d), got %v", maxSnapAggregateEntries, err)
+	}
+}
+
+// TestValidateConfigSnapshot_AllowsSingleMaxedSlice confirms the aggregate bound
+// does NOT reject the legitimate largest single-slice case (a 2 M blocklist).
+func TestValidateConfigSnapshot_AllowsSingleMaxedSlice(t *testing.T) {
+	snap := ConfigSnapshot{BlockedHosts: make([]string, maxSnapBlockedHosts)}
+	if err := validateConfigSnapshot(snap); err != nil {
+		t.Fatalf("a single maxed slice (2M blocked hosts) must validate; got %v", err)
+	}
+}
+
 // TestApplyConfigSnapshot_RejectsOversizedSnapshot wires the validator
 // into the apply path: an over-cap snapshot must NOT mutate the local
 // blocklist.

@@ -38,7 +38,8 @@ func startBufconnCP(t *testing.T) func(t *testing.T, callOpts ...grpc.CallOption
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer(
-		grpc.MaxRecvMsgSize(maxClusterGRPCMsgSize),
+		// Mirror production's asymmetric bounds: tight inbound, large outbound.
+		grpc.MaxRecvMsgSize(maxClusterInboundMsgSize),
 		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
 	)
 	registerConfigService(srv) // exact production registration (nil impl)
@@ -176,6 +177,34 @@ func TestCPGRPC_VersionConditional(t *testing.T) {
 	var oldSnap ConfigSnapshot
 	if err := json.Unmarshal(old, &oldSnap); err != nil || oldSnap.Version != curVer {
 		t.Errorf("old DP (known=0): expected full snapshot v%d, got v%d (err=%v)", curVer, oldSnap.Version, err)
+	}
+}
+
+// TestCPGRPC_ServerInboundBoundTight proves the P1 asymmetric bound: the server
+// receives tight (maxClusterInboundMsgSize) even though it sends large. A client
+// permitted to send a request bigger than the inbound cap is rejected by the
+// server with ResourceExhausted — the CP's inbound allocation surface stays
+// small regardless of the 128 MiB response frame.
+func TestCPGRPC_ServerInboundBoundTight(t *testing.T) {
+	dial := startBufconnCP(t)
+	publishLargeSnapshot(1000)
+	// Client with a deliberately large SEND limit so the oversize request leaves
+	// the client and is rejected by the SERVER, not the client-side send guard.
+	conn := dial(t,
+		grpc.ForceCodecV2(rawCodec{}),
+		grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
+		grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
+	)
+	// A GetConfig request padded just past the inbound cap.
+	pad := make([]byte, maxClusterInboundMsgSize+1<<20)
+	for i := range pad {
+		pad[i] = 'x'
+	}
+	body, _ := json.Marshal(map[string]string{"pad": string(pad)})
+	var resp json.RawMessage
+	err := conn.Invoke(context.Background(), methodGetConfig, json.RawMessage(body), &resp)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Errorf("oversize inbound request: got err=%v (code %s), want ResourceExhausted", err, status.Code(err))
 	}
 }
 

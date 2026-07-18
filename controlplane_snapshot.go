@@ -119,12 +119,13 @@ type ConfigSnapshot struct {
 // Control Plane that pushes a snapshot exceeding ANY one of these
 // causes the entire snapshot to be rejected (no partial application).
 //
-// The blocklist/IP/URL-category caps are 2 M (raised from 200 k) so the
-// cluster keeps pace with enterprise-scale aggregated threat feeds and
-// exceeds the largest single-list limits of comparable appliances
-// (PAN-OS domain EDLs top out ~4 M box-wide; a single feed there is far
-// under 2 M). URLhaus + abuse.ch + firebog-class aggregations routinely
-// reach 500 k–1 M hosts, so 2 M leaves genuine headroom. The cap remains
+// The blocklist/IP caps are 2 M (raised from 200 k) so the cluster keeps
+// pace with enterprise-scale aggregated threat feeds and exceeds the largest
+// single-list limits of comparable appliances (PAN-OS domain EDLs top out
+// ~4 M box-wide; a single feed there is far under 2 M). URLhaus + abuse.ch +
+// firebog-class aggregations routinely reach 500 k–1 M hosts, so 2 M leaves
+// genuine headroom. url_categories is host-scale via its inner Hosts lists
+// (maxSnapURLCategoryHosts), not its entry count. The cap remains
 // a real memory-DoS bound: the CP↔DP gRPC channel is sized to
 // maxClusterGRPCMsgSize (below) and the config stream is gzip-compressed,
 // so a 2 M-host snapshot (~60 MiB JSON, ~6–8 MiB on the wire) transfers
@@ -132,11 +133,16 @@ type ConfigSnapshot struct {
 // blocklist matching is an O(1) map[string]bool (internal/blocklist), so
 // these sizes cost lookups nothing at request time.
 const (
-	maxSnapBlockedHosts        = 2_000_000
-	maxSnapIPList              = 2_000_000
-	maxSnapPolicyRules         = 10_000
+	maxSnapBlockedHosts = 2_000_000
+	maxSnapIPList       = 2_000_000
+	maxSnapPolicyRules  = 10_000
+	// url_categories is a list of category DEFINITIONS (named groups), not hosts —
+	// the realistic entry count is hundreds to low-thousands. The host volume
+	// lives in each entry's Hosts list and is bounded separately by
+	// maxSnapURLCategoryHosts, so the entry cap is a modest structural bound
+	// (a 2 M entry cap was an over-broad copy of the host-scale slices).
+	maxSnapURLCategories       = 200_000
 	maxSnapSSLBypassPatterns   = 10_000
-	maxSnapURLCategories       = 2_000_000
 	maxSnapFileProfiles        = 1_000
 	maxSnapFileBlockExtensions = 10_000
 	maxSnapRewriteRules        = 5_000
@@ -170,6 +176,34 @@ const (
 // compression. The per-slice validateConfigSnapshot caps remain the primary
 // entry-count DoS bound; this is the independent transport-frame bound.
 const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
+
+// maxClusterInboundMsgSize bounds every CP↔DP message in the SMALL direction:
+// the CP server's inbound RPCs (GetConfig req, PushMetrics, PushAuditEvents,
+// Enroll, SyncRateLimits/Revocations, RenewCert, HASync req) are all tiny —
+// none carries a snapshot (the big config only flows OUTBOUND as a response).
+// So the server's receive limit and the client's send limit are pinned tight
+// here (16 MiB, ~60× the largest observed inbound batch) instead of inheriting
+// the 128 MiB frame — shrinking the CP's inbound allocation surface. Only the
+// snapshot-carrying direction (server send / client receive) uses the full
+// maxClusterGRPCMsgSize.
+const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
+
+// maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
+// entries. The entry count is small (maxSnapURLCategories), but each entry
+// carries a Hosts list; without this a handful of categories could smuggle
+// millions of hosts past the per-entry cap. Sized host-scale (matches the
+// blocked-host order) so category-based blocking stays enterprise-capable.
+const maxSnapURLCategoryHosts = 2_000_000
+
+// maxSnapAggregateEntries bounds the SUM of the memory-dominant host-scale
+// slices. Each per-slice cap fits the frame alone, but several maxed slices
+// together exceed the 128 MiB CP↔DP frame and would overflow it as an opaque
+// gRPC ResourceExhausted. This makes the 3×2 M-class case infeasible-by-design
+// and, more usefully, rejected at commit with a clear named error. Sized just
+// under the frame's physical entry capacity (~128 MiB / ~35 B per entry) so it
+// admits the largest configs that CAN sync (e.g. a 2 M blocklist plus threat
+// feeds) and only rejects those that genuinely cannot.
+const maxSnapAggregateEntries = 3_000_000
 
 // snapshotSliceCap is the live size and hard cap of one capped ConfigSnapshot
 // slice/map. It is the single source of truth shared by validateConfigSnapshot
@@ -220,6 +254,26 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		if c.Size > c.Cap {
 			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.Name, c.Size, c.Cap)
 		}
+	}
+	// Inner-dimension bound: url_categories has a small entry cap, but each entry
+	// carries a Hosts list — bound the aggregate so a few categories cannot
+	// smuggle millions of hosts past the per-entry cap.
+	urlCatHosts := 0
+	for i := range snap.URLCategories {
+		urlCatHosts += len(snap.URLCategories[i].Hosts)
+	}
+	if urlCatHosts > maxSnapURLCategoryHosts {
+		return fmt.Errorf("config snapshot url_category_hosts=%d exceeds cap %d", urlCatHosts, maxSnapURLCategoryHosts)
+	}
+	// Aggregate bound: several individually-valid host-scale slices can together
+	// exceed the CP↔DP frame. Reject the sum here with a clear named error rather
+	// than letting the wire fail with an opaque ResourceExhausted.
+	agg := len(snap.BlockedHosts) + len(snap.IPList) + len(snap.SSLBypassPatterns) +
+		len(snap.PACExclusions) + len(snap.RateLimitExempt) + len(snap.DPIPatterns) +
+		len(snap.ThreatFeedURLs) + len(snap.ThreatFeedDomains) + len(snap.ThreatDomainAllowlist) +
+		urlCatHosts
+	if agg > maxSnapAggregateEntries {
+		return fmt.Errorf("config snapshot aggregate host-scale entries=%d exceeds cap %d (too large to sync in one CP↔DP frame)", agg, maxSnapAggregateEntries)
 	}
 	return nil
 }
@@ -806,7 +860,12 @@ func mergeCPAddresses(primary string, peers []string) string {
 }
 
 func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
-	data, err := json.MarshalIndent(snap, "", "  ")
+	// Compact Marshal, not MarshalIndent: this runs at the peak-overlap moment of
+	// a config apply (new blocklist maps built while the old are still live), and
+	// MarshalIndent double-buffers (compact + indented copies) a snapshot that can
+	// be ~60 MiB at 2 M hosts — needless transient memory on the exact path P0-2
+	// hardens against OOM. The last-good file is machine-read, not human-edited.
+	data, err := json.Marshal(snap)
 	if err != nil {
 		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
 		logger.Printf("DataPlane: last-known-good config marshal failed: %v", err)

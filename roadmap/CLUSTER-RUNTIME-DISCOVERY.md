@@ -371,7 +371,7 @@ Declared at `controlplane.go:137–155` (per agent inventory, line-precise const
 | `maxSnapIPList` | 2_000_000 |
 | `maxSnapPolicyRules` | 10_000 |
 | `maxSnapSSLBypassPatterns` | 10_000 |
-| `maxSnapURLCategories` | 2_000_000 |
+| `maxSnapURLCategories` | 200_000 (entries; hosts bounded by `maxSnapURLCategoryHosts` = 2_000_000) |
 | `maxSnapFileProfiles` | 1_000 |
 | `maxSnapFileBlockExtensions` | 10_000 |
 | `maxSnapRewriteRules` | 5_000 |
