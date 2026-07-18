@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,11 @@ import (
 // doc comment does not trip it.
 func TestStaticIndexReadsAreCWDIndependent(t *testing.T) {
 	const forbidden = `ReadFile("static/index.html")`
-	entries, err := os.ReadDir(".")
+	// Anchor the scan to the package source dir, NOT the process CWD — otherwise
+	// this wall falls to the very os.Chdir race it exists to catch: with a drifted
+	// CWD it would enumerate a temp dir, find no *_test.go, and pass vacuously.
+	dir := pkgSourceDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
@@ -31,7 +36,7 @@ func TestStaticIndexReadsAreCWDIndependent(t *testing.T) {
 		if name == "static_read_wall_test.go" {
 			continue
 		}
-		b, err := os.ReadFile(name)
+		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
