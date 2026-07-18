@@ -98,6 +98,13 @@ func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage)
 	// field (KnownVersion 0) and always gets the full snapshot, and an old CP
 	// ignores the request body and always returns full — so this is
 	// backward-compatible in both rollout directions.
+	// Refuse to distribute an empty config when the initial publish was rejected
+	// (nothing valid was ever published) — a fresh DP must not be handed a zero
+	// snapshot. The DP treats Unavailable as a poll failure and keeps its
+	// last-good; the operator sees the reason and trims the oversized config.
+	if ok, reason := globalConfigStore.ServableConfig(); !ok {
+		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
+	}
 	var greq getConfigRequest
 	_ = json.Unmarshal(req, &greq) // tolerate empty/"{}"/garbage → KnownVersion 0
 	if greq.KnownVersion > 0 && greq.KnownVersion >= globalConfigStore.Version() {
@@ -627,6 +634,13 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 	// Verify HA token.
 	if !globalHA.VerifyToken(req.Token) {
 		return nil, status.Errorf(codes.PermissionDenied, "invalid HA token")
+	}
+
+	// Refuse to replicate an empty config to a standby when the leader's initial
+	// publish was rejected (nothing valid ever published) — applyHABundle would
+	// otherwise apply the zero snapshot and wipe the standby's config.
+	if ok, reason := globalConfigStore.ServableConfig(); !ok {
+		return nil, status.Errorf(codes.Unavailable, "leader has no valid config to replicate: %s", reason)
 	}
 
 	// ADR-0005 S0: record the standby's advertised address as the failback

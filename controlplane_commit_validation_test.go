@@ -46,6 +46,42 @@ func TestConfigStore_Update_RejectsByteOversizeAtCommit(t *testing.T) {
 	}
 }
 
+// TestConfigStore_ServableConfig covers the rejected-initial-publish guard: a
+// store whose FIRST publish was rejected must report un-servable (so cluster
+// RPCs refuse rather than distribute the zero snapshot), and a store that has
+// published at least once stays servable even after a later rejection.
+func TestConfigStore_ServableConfig(t *testing.T) {
+	// Fresh store, no publish yet → servable (nothing rejected; normal startup
+	// transient, and every existing GetConfig test relies on this default).
+	fresh := &ConfigStore{}
+	if ok, _ := fresh.ServableConfig(); !ok {
+		t.Fatal("a fresh store with no rejection must be servable")
+	}
+
+	// Rejected initial publish → NOT servable, reason surfaced.
+	rej := &ConfigStore{}
+	if err := rej.Update(ConfigSnapshot{BlockedHosts: make([]string, maxSnapBlockedHosts+1)}); err == nil {
+		t.Fatal("over-cap publish should have been rejected")
+	}
+	if ok, reason := rej.ServableConfig(); ok || reason == "" {
+		t.Fatalf("after a rejected initial publish the store must be un-servable with a reason; got ok=%v reason=%q", ok, reason)
+	}
+
+	// A successful publish makes it servable; a later rejection keeps the last
+	// valid snapshot servable (the fleet stays on last-good).
+	ok := &ConfigStore{}
+	if err := ok.Update(ConfigSnapshot{BlockedHosts: []string{"a.example"}}); err != nil {
+		t.Fatalf("valid publish rejected: %v", err)
+	}
+	if servable, _ := ok.ServableConfig(); !servable {
+		t.Fatal("store must be servable after a successful publish")
+	}
+	_ = ok.Update(ConfigSnapshot{BlockedHosts: make([]string, maxSnapBlockedHosts+1)}) // rejected
+	if servable, _ := ok.ServableConfig(); !servable {
+		t.Fatal("store must STAY servable (last valid config) after a later rejection")
+	}
+}
+
 // TestConfigSnapshotSizeMetrics_AllSlices pins that the utilization metric emits
 // EVERY capped slice (not just blocked_hosts) plus the aggregate and
 // url_category_hosts bounds, sourced from the sizes cached at publish.

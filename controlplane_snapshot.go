@@ -309,6 +309,11 @@ type ConfigStore struct {
 	// operators via LastPublishError() (diagnose/health).
 	lastPublishErr string
 	lastPublishTS  string
+	// published is true once a VALID snapshot has been published at least once.
+	// It stays false if the CP's initial publish was rejected at commit — in
+	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
+	// must refuse rather than distribute an empty config (see ServableConfig).
+	published bool
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -454,6 +459,7 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.snap = snap
+	s.published = true
 	s.lastPublishErr = ""
 	s.lastPublishTS = ""
 	s.persistVersionLocked()
@@ -520,6 +526,24 @@ func recordPublishedSnapshotSizes(snap ConfigSnapshot) {
 		Aggregate:      agg,
 		AggregateCap:   maxSnapAggregateEntries,
 	})
+}
+
+// ServableConfig reports whether the store holds a config the cluster RPCs may
+// distribute. It is false ONLY in the rejected-initial-publish case: a publish
+// was attempted and rejected AND nothing valid was ever published, so s.snap is
+// still the zero ConfigSnapshot. In that state GetConfig/HASync must refuse
+// rather than serve an empty config to a fresh DP or HA standby (which would
+// apply the empty state). After any successful publish, a later rejection keeps
+// the last valid snapshot in s.snap, which stays servable (the "fleet stays on
+// last valid config" contract). Returns the rejection reason for the caller's
+// error message.
+func (s *ConfigStore) ServableConfig() (ok bool, reason string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.published && s.lastPublishErr != "" {
+		return false, s.lastPublishErr
+	}
+	return true, ""
 }
 
 // LastPublishError returns the reason the most recent config publish was
