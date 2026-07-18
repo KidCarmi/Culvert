@@ -288,6 +288,17 @@ confirmation). **Rollback is gated the same way:** rolling back to a revision
 whose DIRECT footprint exceeds the currently-active one also requires the
 typed confirmation, so the guardrail cannot be laundered through a rollback.
 
+**The direct CRUD path enforces the same gate.** Creating or updating a
+profile through `POST /api/pac/profiles` / `PUT /api/pac/profiles/{id}` (the
+Steering Profiles editor's Save) runs the identical guardrail: a candidate
+that introduces a new DIRECT path is refused with `409` until the caller
+retypes the profile ID in the `?confirmDirect=<id>` query parameter (the
+editor prompts for it). This closes the bypass where the safe-publish
+confirmation could be sidestepped by saving through the editor/API instead of
+the publish lifecycle — both paths share one guardrail. (A brand-new profile
+has no prior revision, so *any* DIRECT capability counts as new and prompts
+once at creation; proxy-only profiles save without a prompt.)
+
 Each published revision records the exact spec, the compiled **artifact
 digest** (a local restore/verify anchor — see the pool-mutability caveat
 below; convergence itself is guaranteed by the deterministic compiler, not a

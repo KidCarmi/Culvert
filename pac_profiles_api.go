@@ -111,6 +111,46 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 	return true
 }
 
+// pacGuardDirectCRUD enforces the SAME safe-publish guardrail on the direct
+// CRUD create/update path as the publish lifecycle (pac_publish_api.go), so the
+// typed-DIRECT confirmation cannot be bypassed by saving a profile through the
+// editor/API instead of the lifecycle. A candidate that introduces a NEW
+// full-security-path bypass (DIRECT) — a DIRECT rule, availability mode, or
+// private-networks=direct that the active revision did not have — is refused
+// with 409 until the caller retypes the profile ID in the ?confirmDirect=
+// query parameter. Hard guardrail failures (missing/empty pool, secure-mode
+// could-emit-DIRECT, compile/digest) block with 400 regardless of confirmation.
+// Returns true if the mutation may proceed. Must be called under
+// pacProfilesAPIMu, on the candidate being committed.
+func pacGuardDirectCRUD(w http.ResponseWriter, r *http.Request, candidate pac.ProfilesConfig, p, active pac.Profile, hasActive bool) bool {
+	// Structural validation runs first so an invalid candidate (e.g. unknown
+	// pool) returns the canonical validation issues rather than a spurious
+	// DIRECT-confirmation prompt. pacApplyProfilesMutation validates again
+	// (the lifecycle path reaches it without this guard) — the repeat is
+	// idempotent.
+	if issues := pac.ValidateProfilesConfig(candidate); len(issues) > 0 {
+		writePACIssues(w, "validation failed", issues)
+		return false
+	}
+	pools := make(map[string]pac.Pool, len(candidate.Pools))
+	for i := range candidate.Pools {
+		pools[candidate.Pools[i].ID] = candidate.Pools[i]
+	}
+	chk := pac.EvaluatePublish(p, pools, active, hasActive)
+	if chk.RequiresConfirmation && r.URL.Query().Get("confirmDirect") != p.ID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort body
+			"error":          "this change introduces new DIRECT (full security-path bypass) paths; retype the profile ID in the confirmDirect query parameter to proceed",
+			"newDirectPaths": chk.NewDirectPaths,
+			"confirmField":   "confirmDirect",
+			"confirmValue":   p.ID,
+		})
+		return false
+	}
+	return true
+}
+
 // apiPACProfiles handles GET (list) and POST (create) /api/pac/profiles.
 func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -140,6 +180,11 @@ func apiPACProfiles(w http.ResponseWriter, r *http.Request) {
 		before := pacProfiles.Get()
 		candidate := pacProfiles.Get() // independent deep copy (audit diff keeps before intact)
 		candidate.Profiles = append(candidate.Profiles, p)
+		// A brand-new profile has no active spec, so any DIRECT capability is
+		// "new" and requires the typed confirmation — same gate as publish.
+		if !pacGuardDirectCRUD(w, r, candidate, p, pac.Profile{}, false) {
+			return
+		}
 		if pacApplyProfilesMutation(w, r, "pac.profile_create", p.ID, before, candidate) {
 			jsonOK(w, p)
 		}
@@ -227,6 +272,7 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 	defer pacProfilesAPIMu.Unlock()
 	before := pacProfiles.Get()
 	candidate := pacProfiles.Get() // independent deep copy (audit diff keeps before intact)
+	var activeSpec pac.Profile
 	found := false
 	for i := range candidate.Profiles {
 		if candidate.Profiles[i].ID != id {
@@ -239,6 +285,7 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, fmt.Sprintf("stale revision %d (current %d) — reload and retry", p.Revision, candidate.Profiles[i].Revision), http.StatusConflict)
 			return
 		}
+		activeSpec = candidate.Profiles[i] // the spec being replaced, for the DIRECT-delta guardrail
 		p.Revision = candidate.Profiles[i].Revision + 1
 		candidate.Profiles[i] = p
 		found = true
@@ -246,6 +293,11 @@ func pacProfilePut(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if !found {
 		http.NotFound(w, r)
+		return
+	}
+	// Same guardrail as publish: an update that introduces a new DIRECT path
+	// vs the spec it replaces requires the typed confirmation.
+	if !pacGuardDirectCRUD(w, r, candidate, p, activeSpec, true) {
 		return
 	}
 	if pacApplyProfilesMutation(w, r, "pac.profile_update", id, before, candidate) {

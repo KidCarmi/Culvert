@@ -12171,16 +12171,40 @@ async function savePACProfile() {
   // guard rejects a stale overwrite instead of silently clobbering a
   // concurrent admin's change.
   if (!isNew) body.revision = pacEditingRevision;
-  const path = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
-  try {
-    const resp = await apiFetch(path, {
+  const basePath = isNew ? '/api/pac/profiles' : '/api/pac/profiles/' + encodeURIComponent(pacEditingProfile);
+  const profileId = isNew ? body.id : pacEditingProfile;
+  // doSave optionally carries the typed ?confirmDirect= confirmation that the
+  // unified safe-publish guardrail requires for a new full-security-path
+  // bypass (DIRECT).
+  const doSave = (confirmDirect) => apiFetch(
+    confirmDirect ? basePath + '?confirmDirect=' + encodeURIComponent(confirmDirect) : basePath,
+    {
       method: isNew ? 'POST' : 'PUT',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body),
     });
+  try {
+    let resp = await doSave(null);
     if (resp.status === 409) {
-      toast(await resp.text(), 'error'); // stale revision or conflict
-      return;
+      const data = await resp.clone().json().catch(() => null);
+      if (data && data.confirmField === 'confirmDirect') {
+        // New DIRECT path — high-friction typed confirmation (type the profile
+        // ID), mirroring the publish lifecycle. DIRECT is a FULL bypass, not a
+        // TLS-decryption bypass.
+        const paths = (data.newDirectPaths || []).join('  •  ');
+        const ok = await confirmDanger({
+          title: 'New DIRECT bypass — confirm',
+          msg: 'This profile introduces new DIRECT path(s): ' + paths,
+          impact: 'DIRECT is a FULL security-path bypass — matching traffic skips TLS inspection, DLP, CDR, URL filtering, threat inspection, authentication, policy, and all proxy logging (it never reaches Culvert).',
+          confirmWord: profileId,
+          okLabel: 'Publish bypass',
+        });
+        if (!ok) return;
+        resp = await doSave(profileId);
+      } else {
+        toast(await resp.text(), 'error'); // stale revision or other conflict
+        return;
+      }
     }
     if (resp.status === 400) {
       const data = await resp.json().catch(() => null);
