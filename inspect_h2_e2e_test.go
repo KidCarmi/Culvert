@@ -127,6 +127,70 @@ func TestMITM_NativeH2_InspectsAndProxies(t *testing.T) {
 	}
 }
 
+// TestMITM_NativeH2_AttachesDecBlock proves the native-ALPN/H2 inspect path now attaches
+// the ADR-0011 inspected dec block to the per-request log entry (the piece the earlier
+// nil-block follow-up left out): the block carries the h2 leg's negotiated TLS state and
+// the policy_inspect decision.
+func TestMITM_NativeH2_AttachesDecBlock(t *testing.T) {
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	origin.EnableHTTP2 = true
+	origin.StartTLS()
+	defer origin.Close()
+
+	proxyURL := startTestProxy(t)
+	// Native inspect rule WITH LogFullURI so the per-request entry (carrying the dec block)
+	// is emitted.
+	f := false
+	policyStore.rules = nil
+	policyStore.Add(PolicyRule{
+		Priority: 1, Name: "inspect-native-logfull", DestFQDN: "*",
+		Action: ActionAllow, SSLAction: SSLInspect, TLSSkipVerify: true, StripALPN: &f, LogFullURI: true,
+	})
+
+	target := origin.Listener.Addr().String()
+	tc, proto := connectTLSWithProto(t, proxyURL.Host, target, "origin.test", proxyRoots, []string{"h2", "http/1.1"})
+	if proto != "h2" {
+		t.Fatalf("downstream ALPN = %q, want h2", proto)
+	}
+	cc, err := (&http2.Transport{}).NewClientConn(tc)
+	if err != nil {
+		t.Fatalf("h2 client conn: %v", err)
+	}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/hello", http.NoBody)
+	resp, err := cc.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("h2 round-trip: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck // test cleanup
+
+	// Scan the ring for the inspected inner-request entry and assert its dec block.
+	var found *DecryptionBlock
+	for _, e := range logGet() {
+		if e.SSLAction == "inspect" && e.Status == "OK" && e.Dec != nil {
+			found = e.Dec
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no inspected inner-request entry with a dec block found for the native-H2 session")
+	}
+	if found.Outcome != "inspected" || found.DecisionSource != "policy_inspect" {
+		t.Fatalf("dec block outcome/source = %s/%s, want inspected/policy_inspect", found.Outcome, found.DecisionSource)
+	}
+	if found.ALPN != "h2" {
+		t.Fatalf("dec block ALPN = %q, want h2 (native H2 leg state)", found.ALPN)
+	}
+	if found.CertVerify != "skipped" { // rule set TLSSkipVerify
+		t.Fatalf("dec block cert_verify = %q, want skipped", found.CertVerify)
+	}
+}
+
 // TestMITM_NativeH2_BlocksFileDownload proves the shared enforcement pipeline
 // BLOCKS on the H2 path (not merely proxies): a native-inspect rule with an
 // Executables file profile turns an h2 request for a .exe into a 403 emitted by

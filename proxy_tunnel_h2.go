@@ -194,29 +194,28 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
-	// ADR-0011 coverage: count the native inspected session ONCE here — both handshakes
-	// succeeded, and both dispatches (native H2 and native H1-fallback) are inspect-
-	// success terminals that never reach the strip path's counter or the close seam, so
-	// without this native-ALPN rules would silently under-report in
-	// culvert_decrypt_sessions_total (Codex #803). The per-request dec BLOCK on native
-	// paths stays a documented follow-up; only the session COUNT lands here.
-	recordDecryptSession(inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match))
-	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, match, id)
+	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, dec, match, id)
 }
 
-// dispatchNativeInspect routes an established native-ALPN inspected tunnel to the H2 or H1
-// enforcement loop by the negotiated protocols — both are inspect-success terminals over
-// the shared pipeline. Extracted from handleInspectNativeALPN to keep that orchestrator
-// under the funlen threshold. The H1 leg passes a nil dec block: the native path's own
-// ADR-0011 inspected block (carrying the h2 leg's TLS state) is a documented follow-up.
-func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
+// dispatchNativeInspect finalises an established native-ALPN inspected tunnel: it builds
+// the ADR-0011 inspected outcome ONCE from the completed origin TLS state, counts the
+// session (both the H2 and H1-fallback dispatches are inspect-success terminals that never
+// reach the strip path's counter or the close seam — without this native-ALPN rules
+// under-report in culvert_decrypt_sessions_total), then routes to the H2 or H1 enforcement
+// loop, threading the projected dec block onto both paths' per-request log entries. The
+// block carries the native (h2 or h1) leg's negotiated TLS state — the piece the earlier
+// nil-block follow-up left out. redact=false mirrors the strip path.
+func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
+	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match)
+	recordDecryptSession(inspected)
+	decBlock := inspected.toBlock(false)
 	if up == "h2" && down == "h2" {
-		handleInspectH2(r, clientTLS, upstreamTLS, hostOnly, match, id)
+		handleInspectH2(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
 		return
 	}
 	// Both legs HTTP/1.1 (origin declined h2, or client offered only h1) — reuse the
 	// shared H1 inspection loop. One enforcement path for both protocols.
-	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, nil)
+	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
 }
 
 // relayPlaintextInspectFallback raw-relays a non-TLS CONNECT client to the
@@ -307,7 +306,7 @@ func newMITMClientConfigForALPN(protos []string) *tls.Config {
 // upstream http2.ClientConn and deliver via the stream's ResponseWriter.
 // ServeConn blocks until the client connection is done; both conns are closed on
 // return.
-func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
+func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	defer clientTLS.Close()   //nolint:errcheck // best-effort cleanup at tunnel end
 	defer upstreamTLS.Close() //nolint:errcheck // best-effort cleanup at tunnel end
 
@@ -351,7 +350,7 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	clientIP, _, _ := net.SplitHostPort(outer.RemoteAddr)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		h2InspectStream(outer, w, req, upstreamCC, hostOnly, clientIP, match, id)
+		h2InspectStream(outer, w, req, upstreamCC, hostOnly, clientIP, match, id, decBlock)
 	})
 
 	// Serve on the SHARED, ConfigureServer'd server (PR3d) so this tunnel's
@@ -385,7 +384,7 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 // for an upstream round-trip and runs the shared inspection pipeline. The pipeline
 // is protocol-agnostic; only the roundTrip (upstream http2 RoundTrip) and deliver
 // (h2 ResponseWriter) hooks and the block responder are H2-specific.
-func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Request, upstreamCC *http2.ClientConn, hostOnly, clientIP string, match *PolicyMatch, id ProxyIdentity) {
+func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Request, upstreamCC *http2.ClientConn, hostOnly, clientIP string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	// Per-request debug log, parity with the H1 loop's SSL_INNER line so admins can
 	// trace file-block/scan decisions on H2 tunnels too. Logged before the reshape
 	// (req.URL.Path is unchanged by it).
@@ -458,12 +457,12 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 	if ctx.Err() != nil && out.kind != exDelivered {
 		panic(http.ErrAbortHandler)
 	}
-	handleH2StreamOutcome(w, out, req, hostOnly, reqPath, clientIP, match, id)
+	handleH2StreamOutcome(w, out, req, hostOnly, reqPath, clientIP, match, id, decBlock)
 }
 
 // handleH2StreamOutcome maps an inspection outcome to the H2 stream's terminal
 // action. Extracted from h2InspectStream to keep it under the complexity cap.
-func handleH2StreamOutcome(w http.ResponseWriter, out exchangeOutcome, req *http.Request, hostOnly, reqPath, clientIP string, match *PolicyMatch, id ProxyIdentity) {
+func handleH2StreamOutcome(w http.ResponseWriter, out exchangeOutcome, req *http.Request, hostOnly, reqPath, clientIP string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	switch out.kind {
 	case exRoundTripError:
 		// Upstream failed before any byte was delivered — emit a clean 502.
@@ -488,7 +487,7 @@ func handleH2StreamOutcome(w http.ResponseWriter, out exchangeOutcome, req *http
 		// Per-rule "log full URL" parity with the H1 path (log-only; the enclosing
 		// CONNECT was already counted at allow time).
 		if match != nil && match.Rule != nil && match.Rule.LogFullURI && ruleLogsTraffic(match.Rule) {
-			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, reqPath), AuthLogFields{RuleID: match.Rule.ID})
+			recordRequestLogOnly(clientIP, req.Method, hostOnly, "OK", match.Rule.Name, string(ActionAllow), id.Identity, "inspect", policyLogURI(hostOnly, reqPath), AuthLogFields{RuleID: match.Rule.ID, Dec: decBlock})
 		}
 	case exBlocked:
 		// The h2 block responder already wrote the 403 to the stream.
