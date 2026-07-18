@@ -36,6 +36,7 @@ func TestUIAuthMiddleware_PublicPaths(t *testing.T) {
 		"/api/auth/totp/setup",
 		"/auth/callback",
 		"/proxy.pac",
+		"/pac/default.pac",
 	}
 
 	for _, path := range publicPaths {

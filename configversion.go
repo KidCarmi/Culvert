@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/configver"
+	"github.com/KidCarmi/Culvert/internal/pac"
 )
 
 // ConfigVersion is metadata for a stored config snapshot.
@@ -41,6 +42,7 @@ func initConfigVersioning() {
 // captureConfigBackup takes a point-in-time snapshot of all config stores.
 func captureConfigBackup() *configBackup {
 	pc := pacStore.Get()
+	profCfg := pacProfiles.Get() // single Get: a torn two-call capture could carry dangling pool refs
 	return &configBackup{
 		Version:             1,
 		ExportedAt:          time.Now().UTC().Format(time.RFC3339),
@@ -87,7 +89,27 @@ func captureConfigBackup() *configBackup {
 		// round-trips through apply as a wipe. Sibling RateLimitRPM is already
 		// captured above (rl.Limit()).
 		RateLimitExempt: rl.ListExemptions(),
+		// PACProfiles/PACPools: rollback-surface extension (PAC initiative
+		// PR 2). Captured non-nil so a zero-object state serializes as []
+		// and round-trips through apply as a wipe (nil = pre-extension
+		// snapshot, apply skips).
+		PACProfiles: nonNilProfiles(profCfg.Profiles),
+		PACPools:    nonNilPools(profCfg.Pools),
 	}
+}
+
+func nonNilProfiles(p []pac.Profile) []pac.Profile {
+	if p == nil {
+		return []pac.Profile{}
+	}
+	return p
+}
+
+func nonNilPools(p []pac.Pool) []pac.Pool {
+	if p == nil {
+		return []pac.Pool{}
+	}
+	return p
 }
 
 // saveConfigVersionMu serializes capture→Save so version numbers are
@@ -422,6 +444,20 @@ func applyConfigBackup(b *configBackup) {
 		ProxyPort:  b.PACProxyPort,
 		Exclusions: b.PACExclusions,
 	})
+
+	// PAC profiles/pools (PAC initiative PR 2): nil → snapshot predates the
+	// feature, skip; [] → explicit wipe; populated → wholesale replace.
+	// Tolerant Set — rollback must never reject historical data.
+	if b.PACProfiles != nil || b.PACPools != nil {
+		cur := pacProfiles.Get()
+		if b.PACProfiles != nil {
+			cur.Profiles = b.PACProfiles
+		}
+		if b.PACPools != nil {
+			cur.Pools = b.PACPools
+		}
+		_ = pacProfiles.Set(cur)
+	}
 }
 
 // configChange is a single field-level difference between two config versions.
@@ -526,6 +562,12 @@ func diffConfigs(a, b *configBackup) []configChange {
 	}
 	if b.URLCategories != nil {
 		diffURLCategories(a.URLCategories, b.URLCategories, &changes)
+	}
+	if b.PACProfiles != nil {
+		diffPACProfiles(a.PACProfiles, b.PACProfiles, &changes)
+	}
+	if b.PACPools != nil {
+		diffPACPools(a.PACPools, b.PACPools, &changes)
 	}
 
 	return changes
@@ -645,6 +687,92 @@ func diffRewriteRules(a, b []RewriteRule, out *[]configChange) {
 			To:    map[string]any{"count": len(b), "added": added},
 		})
 	}
+}
+
+// diffPACObjects is the shared ID-keyed differ for PAC profiles and pools
+// (PAC initiative PR 2). ids/same abstract the concrete slice so the two
+// surfaces cannot drift (and dupl stays quiet).
+func diffPACObjects(field string, aIDs, bIDs []string, same func(ai, bi int) bool, out *[]configChange) {
+	mapA := make(map[string]int, len(aIDs))
+	for i, id := range aIDs {
+		mapA[id] = i
+	}
+	var added, removed, changed []string
+	seen := make(map[string]bool, len(bIDs))
+	for i, id := range bIDs {
+		seen[id] = true
+		ai, ok := mapA[id]
+		switch {
+		case !ok:
+			added = append(added, id)
+		case !same(ai, i):
+			changed = append(changed, id)
+		}
+	}
+	for _, id := range aIDs {
+		if !seen[id] {
+			removed = append(removed, id)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		*out = append(*out, configChange{
+			Field: field,
+			From:  map[string]any{"count": len(aIDs), "removed": removed, "changed": changed},
+			To:    map[string]any{"count": len(bIDs), "added": added},
+		})
+	}
+}
+
+// diffPACProfiles compares PAC steering profiles by ID.
+func diffPACProfiles(a, b []pac.Profile, out *[]configChange) {
+	aIDs := make([]string, len(a))
+	for i := range a {
+		aIDs[i] = a[i].ID
+	}
+	bIDs := make([]string, len(b))
+	for i := range b {
+		bIDs[i] = b[i].ID
+	}
+	diffPACObjects("pac_profiles", aIDs, bIDs, func(ai, bi int) bool { return samePACProfile(&a[ai], &b[bi]) }, out)
+}
+
+func samePACProfile(x, y *pac.Profile) bool {
+	if x.Name != y.Name || x.Description != y.Description || x.Enabled != y.Enabled ||
+		x.PoolID != y.PoolID || x.PrivateNetworks != y.PrivateNetworks ||
+		x.AvailabilityMode != y.AvailabilityMode || len(x.Rules) != len(y.Rules) {
+		return false
+	}
+	for i := range x.Rules {
+		if x.Rules[i] != y.Rules[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// diffPACPools compares PAC proxy pools by ID.
+func diffPACPools(a, b []pac.Pool, out *[]configChange) {
+	aIDs := make([]string, len(a))
+	for i := range a {
+		aIDs[i] = a[i].ID
+	}
+	bIDs := make([]string, len(b))
+	for i := range b {
+		bIDs[i] = b[i].ID
+	}
+	diffPACObjects("pac_pools", aIDs, bIDs, func(ai, bi int) bool { return samePACPool(&a[ai], &b[bi]) }, out)
+}
+
+func samePACPool(x, y *pac.Pool) bool {
+	if x.Name != y.Name || len(x.Endpoints) != len(y.Endpoints) {
+		return false
+	}
+	for i := range x.Endpoints {
+		if x.Endpoints[i] != y.Endpoints[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // diffCategoryGroups compares category groups by name (case-insensitive,

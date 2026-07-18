@@ -62,8 +62,11 @@ import (
 //     `const want` below for the current authoritative total.
 //   - 164 — ADR-0011 P2 added /api/decryption/health (read-only decryption
 //     coverage + failure-taxonomy aggregate; viewer).
+//   - 173 — PAC Traffic Steering PR2+PR3 integration: +7 routes over main's 166
+//     (/pac/ per-profile PAC file; /api/pac/profiles, /profiles/, /pools,
+//     /pools/, /simulate, /analyze).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 166
+	const want = 173
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

@@ -37,6 +37,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
+
 	"github.com/KidCarmi/Culvert/internal/blocklist"
 	"github.com/KidCarmi/Culvert/internal/decryptprofile"
 )
@@ -139,8 +141,8 @@ func TestConfigSurfaces_SnapshotCapParity(t *testing.T) {
 	// validateConfigSnapshot (controlplane.go) enforces exactly this many
 	// per-slice caps. If you add a capped field there, register it here (and
 	// vice versa) — the two tables must move in lockstep.
-	if capped != 20 {
-		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 20 — the tables drifted", capped)
+	if capped != 22 {
+		t.Errorf("registry declares %d capped ConfigSnapshot fields; validateConfigSnapshot enforces 22 — the tables drifted", capped)
 	}
 }
 
@@ -209,6 +211,19 @@ func csrNilGuardCases() map[string]struct {
 		"content_scan_bypass_hosts": {
 			populate: func(c *configBackup) { c.ContentScanBypassHosts = []string{"csr-bypass.example.com"} },
 			wipe:     func(c *configBackup) { c.ContentScanBypassHosts = []string{} },
+		},
+		"pac_profiles": {
+			populate: func(c *configBackup) {
+				c.PACProfiles = []pac.Profile{{ID: "csr-prof", Name: "CSR", Enabled: true, PoolID: "csr-pool",
+					PrivateNetworks: pac.PrivateDirect, AvailabilityMode: pac.ModeBalanced}}
+			},
+			wipe: func(c *configBackup) { c.PACProfiles = []pac.Profile{} },
+		},
+		"pac_pools": {
+			populate: func(c *configBackup) {
+				c.PACPools = []pac.Pool{{ID: "csr-pool", Name: "CSR", Endpoints: []pac.PoolEndpoint{{Host: "csr.example", Port: 8080}}}}
+			},
+			wipe: func(c *configBackup) { c.PACPools = []pac.Pool{} },
 		},
 	}
 }
@@ -320,6 +335,14 @@ func csrDiffMutators() map[string]func(a, b *configBackup) {
 		"url_categories": func(a, b *configBackup) {
 			a.URLCategories = []CategoryEntry{}
 			b.URLCategories = []CategoryEntry{{Name: "csr-diff-c"}}
+		},
+		"pac_profiles": func(a, b *configBackup) {
+			a.PACProfiles = []pac.Profile{}
+			b.PACProfiles = []pac.Profile{{ID: "csr-diff-prof", Name: "CSR"}}
+		},
+		"pac_pools": func(a, b *configBackup) {
+			a.PACPools = []pac.Pool{}
+			b.PACPools = []pac.Pool{{ID: "csr-diff-pool", Name: "CSR"}}
 		},
 	}
 }

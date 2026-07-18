@@ -34,6 +34,7 @@ var d0PublicPaths = []string{
 	"/auth/logout",
 	"/auth/some-future-callback", // prefix allowlist /auth/
 	"/proxy.pac",
+	"/pac/default.pac",
 	"/healthz", // non-/api/, passes the prefix check
 }
 

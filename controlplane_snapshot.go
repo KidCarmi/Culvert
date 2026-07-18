@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
@@ -54,7 +55,16 @@ type ConfigSnapshot struct {
 	CPAddresses []string `json:"cp_addresses,omitempty"`
 
 	// PAC distribution: sync PAC exclusions from CP to DPs.
-	PACExclusions []string `json:"pac_exclusions,omitempty"`
+	// NO omitempty (WireWipeCapable): an admin-cleared empty list must
+	// serialize as [] and propagate as an explicit wipe — pac.Store.Get
+	// returns nil-for-empty, so capture forces non-nil (mirrors
+	// RateLimitExempt; closes the stale-DP-exclusions gap).
+	PACExclusions []string `json:"pac_exclusions"`
+	// PAC steering profiles/pools (PAC initiative PR 2): NO omitempty
+	// (WireWipeCapable) — a last-object delete must clear DP state
+	// (mirrors decryption_profiles).
+	PACProfiles []pac.Profile `json:"pac_profiles"`
+	PACPools    []pac.Pool    `json:"pac_pools"`
 
 	// Threat feed sync: include feed data so DPs don't fetch independently.
 	// ThreatDomainAllowlist deliberately has NO omitempty: an admin-cleared
@@ -125,6 +135,8 @@ const (
 	maxSnapDPIPatterns         = 5_000
 	maxSnapCPAddresses         = 100
 	maxSnapPACExclusions       = 10_000
+	maxSnapPACProfiles         = 64
+	maxSnapPACPools            = 64
 	maxSnapRateLimitExempt     = 10_000
 	maxSnapThreatFeedURLs      = 500_000
 	maxSnapThreatFeedDomains   = 500_000
@@ -157,6 +169,8 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"dpi_patterns", len(snap.DPIPatterns), maxSnapDPIPatterns},
 		{"cp_addresses", len(snap.CPAddresses), maxSnapCPAddresses},
 		{"pac_exclusions", len(snap.PACExclusions), maxSnapPACExclusions},
+		{"pac_profiles", len(snap.PACProfiles), maxSnapPACProfiles},
+		{"pac_pools", len(snap.PACPools), maxSnapPACPools},
 		{"rate_limit_exempt", len(snap.RateLimitExempt), maxSnapRateLimitExempt},
 		{"threat_feed_urls", len(snap.ThreatFeedURLs), maxSnapThreatFeedURLs},
 		{"threat_feed_domains", len(snap.ThreatFeedDomains), maxSnapThreatFeedDomains},
@@ -516,6 +530,20 @@ func applySnapshotClusterRuntime(snap ConfigSnapshot) {
 			logger.Printf("DataPlane: PAC exclusions: %v", err)
 		}
 	}
+	// PAC profiles/pools (PAC initiative PR 2): nil-skip (old CP), non-nil
+	// replace — [] is an explicit wipe. Tolerant Set (never rejects).
+	if snap.PACProfiles != nil || snap.PACPools != nil {
+		cur := pacProfiles.Get()
+		if snap.PACProfiles != nil {
+			cur.Profiles = snap.PACProfiles
+		}
+		if snap.PACPools != nil {
+			cur.Pools = snap.PACPools
+		}
+		if err := pacProfiles.Set(cur); err != nil {
+			logger.Printf("DataPlane: PAC profiles: %v", err)
+		}
+	}
 
 	if snap.ThreatDomainAllowlist != nil {
 		// Allowlist masking happens at LOOKUP time (CheckURL/CheckDomain);
@@ -752,9 +780,17 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 	// HA: include all CP addresses so DPs auto-discover failover targets.
 	snap.CPAddresses = buildCPAddressList()
 
-	// PAC exclusions.
+	// PAC exclusions + profiles/pools. All three are WireWipeCapable: force
+	// non-nil so an admin-cleared empty state serializes as [] and reaches
+	// DPs as an explicit wipe.
 	pacCfg := pacStore.Get()
 	snap.PACExclusions = pacCfg.Exclusions
+	if snap.PACExclusions == nil {
+		snap.PACExclusions = []string{}
+	}
+	pacProfCfg := pacProfiles.Get()
+	snap.PACProfiles = nonNilProfiles(pacProfCfg.Profiles)
+	snap.PACPools = nonNilPools(pacProfCfg.Pools)
 	snap.RateLimitExempt = rl.ListExemptions()
 
 	// Threat feed data.
