@@ -127,10 +127,11 @@ When there is no shared secret to establish, seal the bundle to the recipient's
 **public key** instead — the appliance holds **no** decryption capability, so
 only the recipient's private key can ever open it.
 
-**UI:** Support panel → **Seal** on a ready bundle → paste the recipient's base64
-X25519 public key → the `.csb.sealed` downloads.
+**UI:** Support panel → **Seal** on a ready bundle → enter a registered recipient
+**name** (see below) or paste a raw base64 X25519 public key → the `.csb.sealed`
+downloads.
 **API:** `POST /api/support/bundles/{id}/download-sealed` (operator, body
-`{"recipient_public_key":"<base64 X25519>"}`).
+`{"recipient_name":"<name>"}` **or** `{"recipient_public_key":"<base64 X25519>"}`).
 
 - The bundle is wrapped in a NaCl anonymous sealed box (`CVRTSB01`: X25519 key
   agreement + XSalsa20-Poly1305). The operator supplies the recipient's public key
@@ -139,6 +140,27 @@ X25519 public key → the `.csb.sealed` downloads.
 - Same approval gate as plain download — a pending bundle is refused.
 - Anonymous boxes carry no sender identity by design; the bundle's **own** manifest
   hashes remain the integrity/authenticity anchor for the contents.
+
+#### Recipient registry (register once, seal by name)
+
+Pasting a raw key on every seal is error-prone, and an invalid (low-order) key
+would silently defeat the guarantee, so register a recipient once and seal to it
+by name thereafter.
+
+**UI:** Support panel → **Sealing recipients** → enter a name + the recipient's
+base64 public key → **Register** (admin). The card lists each recipient with its
+**SHA-256 fingerprint** for out-of-band verification; **Remove** deletes one.
+**API:** `GET /api/support/recipients` (viewer, list), `POST /api/support/recipients`
+(admin, body `{"name","public_key"}`), `DELETE /api/support/recipients/{name}`
+(operator).
+
+- The key is **validated on registration** with the same low-order-point guard the
+  seal path uses, so the registry can never hold a key that would break the E2E
+  guarantee. The stored key is re-validated again at seal time.
+- A recipient's public key and fingerprint are **not secret** — they are listed
+  openly; the fingerprint is the trust anchor you verify with TAC once.
+- The registry is **node-local** operational state (`<dataDir>/support/recipients.json`):
+  it is never included in export/import, config-version rollback, or CP→DP sync.
 
 ---
 
