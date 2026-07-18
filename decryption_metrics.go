@@ -211,3 +211,38 @@ func recordDecryptFailure(o *DecryptionOutcome) {
 		decEnumOr(o.FailStage, decryptobs.FailStageUpstreamHandshake),
 	)
 }
+
+// decFailedStatus is the request-log status stamped on a decryption-handshake
+// failure feed row. It has no explicit LevelForStatus case, so it maps to ERROR
+// (the default) — landing the row in the feed's "Auth & Errors" tab, where a
+// decryption error belongs.
+const decFailedStatus = "DECRYPT_FAILED"
+
+// recordDecryptFailureEntry records a FAILED decryption BOTH to the taxonomy
+// metric (recordDecryptFailure — coverage + culvert_decrypt_failures_total) AND
+// as a request-log feed row carrying the ADR-0011 dec block, so the Decryption
+// Health "view sessions → failed" drill-down resolves to the offending sessions
+// instead of an empty feed (the per-session record projection deferred from the
+// metrics slice). The row is written LOG-ONLY via persistLogEntry — NOT through
+// the recordRequest* fan-out — because the CONNECT was already stats-counted at
+// POLICY_ALLOW time; re-running recordStats would double-count statTotal for the
+// same tunnel (same reasoning as recordTunnelCloseGatedDec's log-only close).
+// A decryption failure is an ERROR, so — like a block — it is written
+// UNCONDITIONALLY, never gated by the rule's log-traffic flag: an operator must
+// see decryption errors regardless of quiet-rule settings. hostOnly/SNI are
+// projected under the §4 redaction posture via toBlock(redact). nil is a no-op.
+func recordDecryptFailureEntry(o *DecryptionOutcome, id ProxyIdentity, hostOnly string, match *PolicyMatch, redact bool) {
+	recordDecryptFailure(o) // metric + coverage (unchanged; nil-tolerant)
+	if o == nil {
+		return
+	}
+	ruleName, ruleID := "", ""
+	if match != nil && match.Rule != nil {
+		ruleName = match.Rule.Name
+		ruleID = match.Rule.ID
+	}
+	auth := AuthLogFields{RuleID: ruleID, Dec: o.toBlock(redact)}
+	// CONNECT method, "inspect" SSLAction, no bytes/duration/uri — a terminal
+	// handshake failure, mirroring recordInspectBlock's block row minus the stats.
+	persistLogEntry(id.ClientIP, "CONNECT", hostOnly, decFailedStatus, ruleName, "", id.Identity, 0, 0, 0, "inspect", "", auth)
+}

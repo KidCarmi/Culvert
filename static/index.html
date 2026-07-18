@@ -6672,6 +6672,7 @@ function badgeHTML(status) {
   if (status === 'POLICY_DEFAULT_DENY') return '<span class="badge blocked" title="No matching policy rule">POLICY DENY</span>';
   if (status === 'AUTH_FAIL')       return '<span class="badge auth">AUTH FAIL</span>';
   if (status === 'TUNNEL_CLOSED')   return '<span class="badge bypass" title="Raw tunnel closed - bytes/duration accounted (WebSocket / CONNECT / SOCKS5)">TUNNEL</span>';
+  if (status === 'DECRYPT_FAILED')  return '<span class="badge auth" title="TLS decryption handshake failed - session not inspected (fail-closed 502)">DECRYPT FAIL</span>';
   return '<span class="badge auth">' + escHtml(status) + '</span>';
 }
 

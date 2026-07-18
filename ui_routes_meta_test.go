@@ -73,7 +73,7 @@ import (
 //   - 177 — ADR-0011 §4 added /api/decryption/redaction (GET viewer / PUT admin
 //     host/SNI redaction toggle).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 177
+	const want = 178
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

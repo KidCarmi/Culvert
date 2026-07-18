@@ -167,7 +167,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		// session cannot be rescued (unlike the strip path). A qualifying failure
 		// still learns the host so the NEXT session self-heals via the cache.
 		maybeFailOpenOrigin(hostOnly, match, id, err)
-		recordDecryptFailure(originInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
+		recordDecryptFailureEntry(originInspectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row
 		logger.Printf("SSL_INSPECT(native) upstream TLS handshake %q: %v", sanitizeLog(targetHost), err)
 		return
 	}
@@ -180,10 +180,10 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, newMITMClientConfigForALPN(downstreamProtos))
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                                                            //nolint:errcheck // best-effort cleanup
-		upstreamTLS.Close()                                                          //nolint:errcheck // best-effort cleanup
-		maybeFailOpenClient(hostOnly, match, id, err)                                // learn a pinning rejection (learn-only)
-		recordDecryptFailure(clientInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
+		clientTLS.Close()                                                                                                        //nolint:errcheck // best-effort cleanup
+		upstreamTLS.Close()                                                                                                      //nolint:errcheck // best-effort cleanup
+		maybeFailOpenClient(hostOnly, match, id, err)                                                                            // learn a pinning rejection (learn-only)
+		recordDecryptFailureEntry(clientInspectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row
 		logger.Printf("SSL_INSPECT(native) client TLS handshake %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
