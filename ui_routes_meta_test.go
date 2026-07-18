@@ -71,7 +71,7 @@ import (
 //     (governance list; viewer) + /api/pac/posture/exceptions/ (item: viewer
 //     GET, admin PUT/DELETE).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 176
+	const want = 177
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

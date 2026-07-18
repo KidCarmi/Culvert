@@ -4276,6 +4276,7 @@ Firefox (all platforms):
               <button class="btn ghost sm" data-click="diagnoseUpstream" data-min-role="operator" title="Upstream pool health + circuit state (no new dial)">Run upstream check</button>
               <button class="btn ghost sm" data-click="diagnoseCluster" data-min-role="operator" title="Cluster/HA posture - role, fencing lease, node counts, write authority (no network, no secrets)">Run cluster check</button>
               <button class="btn ghost sm" data-click="diagnoseConfig" data-min-role="operator" title="Live config-snapshot validity + collection sizes (no snapshot values)">Run config check</button>
+              <button class="btn ghost sm" data-click="diagnoseSupport" data-min-role="operator" title="Support-bundle store health — count, size, age spread, retention bounds + last sweep (no bundle content)">Run support check</button>
               <input id="support-dns-host" class="input sm" type="text" placeholder="host to resolve" style="width:180px" title="Bare hostname (no scheme/port/path)">
               <button class="btn ghost sm" data-click="diagnoseDNS" data-min-role="operator" title="Bounded DNS resolution probe (private targets refused)">Resolve DNS</button>
               <input id="support-tls-host" class="input sm" type="text" placeholder="host:port for TLS" style="width:180px" title="host[:port] (default 443); private targets refused">
@@ -4718,6 +4719,7 @@ document.addEventListener('click', e => {
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
     case 'diagnoseCluster':        diagnoseCluster(); break;
     case 'diagnoseConfig':         diagnoseConfig(); break;
+    case 'diagnoseSupport':        diagnoseSupport(); break;
     case 'diagnoseDNS':            diagnoseDNS(); break;
     case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
@@ -13571,6 +13573,42 @@ function renderDiagnoseConfig(d) {
     '<tr><td class="hint">' + escHtml(String(s.name)) + '</td><td>' + escHtml(String(s.size)) + '</td></tr>').join('');
   el.innerHTML = hdr + err + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Collection</th><th>Size</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+async function diagnoseSupport() {
+  if (uiRole !== 'operator' && uiRole !== 'admin') { toast('Operator role required', 'error'); return; }
+  const el = document.getElementById('support-diagnose');
+  const btn = document.querySelector('[data-click="diagnoseSupport"]');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Checking…'; }
+  if (el) el.innerHTML = '<p class="hint">Running…</p>';
+  try {
+    const d = await api('/api/diagnose/support', { method: 'POST' });
+    renderDiagnoseSupport(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Support check failed: ' + escHtml(err.message) + '</p>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = prev; }
+  }
+}
+
+function renderDiagnoseSupport(d) {
+  const el = document.getElementById('support-diagnose');
+  if (!el) return;
+  d = d || {};
+  const color = d.ok ? 'var(--green)' : 'var(--red)';
+  const sweep = d.retention_last_sweep ? escHtml(String(d.retention_last_sweep)) : 'never';
+  const hdr = '<p class="hint">Support store <strong style="color:' + color + '">' + (d.ok ? 'HEALTHY' : 'CHECK') +
+    '</strong> · ' + escHtml(String(d.bundle_count || 0)) + ' bundles (' + escHtml(String(d.pending_count || 0)) + ' pending) · ' +
+    escHtml(String(d.total_bytes || 0)) + ' bytes</p>' +
+    '<p class="hint">Retention: keep ' + escHtml(String(d.retention_keep || 0)) + ' · max age ' +
+    escHtml(String(d.retention_max_age_days || 0)) + 'd · ' + escHtml(String(d.retention_evicted_total || 0)) +
+    ' evicted · last swept ' + sweep + '</p>';
+  const rows = (d.checks || []).map(c =>
+    '<tr><td class="hint">' + escHtml(String(c.name)) + '</td><td style="color:' + (c.ok ? 'var(--green)' : 'var(--red)') +
+    '">' + (c.ok ? 'ok' : 'CHECK') + '</td><td class="hint">' + escHtml(String(c.detail || '')) + '</td></tr>').join('');
+  el.innerHTML = hdr + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    '<th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function diagnoseDNS() {

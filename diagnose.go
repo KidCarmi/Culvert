@@ -860,6 +860,109 @@ func apiDiagnoseConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose support ────────────────────────────────────────────────────────
+
+// supportDiagnosis reports support-bundle STORE health: how many bundles are
+// persisted, their aggregate on-disk size, the age spread, the retention bounds
+// in force, and the janitor's activity (last sweep + evictions since boot). It
+// answers "is my support-bundle store healthy, and why did a bundle disappear?"
+// — counts, sizes, and a timestamp only, never bundle content. Read-only, no
+// network, no shell.
+type supportDiagnosis struct {
+	SchemaVersion       int            `json:"schema_version"`
+	GeneratedAt         string         `json:"generated_at"`
+	OK                  bool           `json:"ok"`
+	BundleCount         int            `json:"bundle_count"`
+	PendingCount        int            `json:"pending_count"` // created but not yet approved
+	TotalBytes          int64          `json:"total_bytes"`   // aggregate bundle.csb.tgz size
+	OldestAgeHours      int64          `json:"oldest_age_hours,omitempty"`
+	NewestAgeHours      int64          `json:"newest_age_hours,omitempty"`
+	RetentionKeep       int            `json:"retention_keep"`
+	RetentionMaxAgeDays int            `json:"retention_max_age_days"`
+	RetentionEvicted    int64          `json:"retention_evicted_total"`
+	LastSweep           string         `json:"retention_last_sweep,omitempty"`
+	Checks              []storageCheck `json:"checks"`
+}
+
+// diagnoseSupport inspects the persisted support-bundle store. now is injected for
+// deterministic timestamps in tests. It only reads bundle summaries (secret-free by
+// construction) and the retention observability atoms — it never opens a bundle.
+func diagnoseSupport(now time.Time) supportDiagnosis {
+	d := supportDiagnosis{
+		SchemaVersion:       diagnoseSchemaVersion,
+		GeneratedAt:         now.UTC().Format(time.RFC3339),
+		RetentionKeep:       supportRetentionKeep,
+		RetentionMaxAgeDays: int(supportRetentionMaxAge / (24 * time.Hour)),
+		RetentionEvicted:    supportRetentionEvicted.Load(),
+	}
+	if u := supportRetentionLastSweep.Load(); u > 0 {
+		d.LastSweep = time.Unix(u, 0).UTC().Format(time.RFC3339)
+	}
+
+	sums := listSupportBundles() // newest-first, path-guarded, secret-free
+	d.BundleCount = len(sums)
+	var oldest, newest time.Time
+	for i := range sums {
+		s := &sums[i]
+		d.TotalBytes += s.SizeBytes
+		if s.State == bundleStatePending {
+			d.PendingCount++
+		}
+		if t, err := time.Parse(time.RFC3339, s.CreatedAt); err == nil {
+			if oldest.IsZero() || t.Before(oldest) {
+				oldest = t
+			}
+			if t.After(newest) {
+				newest = t
+			}
+		}
+	}
+	if !oldest.IsZero() {
+		d.OldestAgeHours = int64(now.Sub(oldest).Hours())
+		d.NewestAgeHours = int64(now.Sub(newest).Hours())
+	}
+
+	// Check: the count cap is being honored. The janitor evicts oldest-first on a
+	// new build and on the age tick, so a persistent overflow beyond keep+1 signals
+	// a stuck janitor or a failing eviction — surface it rather than let the store
+	// grow silently. keep==0 disables the cap (no check).
+	if supportRetentionKeep > 0 {
+		overCap := d.BundleCount > supportRetentionKeep
+		detail := ""
+		if overCap {
+			detail = "count " + strconv.Itoa(d.BundleCount) + " exceeds keep cap " + strconv.Itoa(supportRetentionKeep)
+		}
+		d.Checks = append(d.Checks, storageCheck{
+			Name: "within_count_cap", Path: supportBundlesDir(), OK: !overCap, Detail: detail,
+		})
+	}
+
+	d.OK = true
+	for i := range d.Checks {
+		if !d.Checks[i].OK {
+			d.OK = false
+			break
+		}
+	}
+	return d
+}
+
+// apiDiagnoseSupport reports support-bundle store health (POST, operator).
+// Read-only, no network, no shell, no bundle content.
+func apiDiagnoseSupport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseSupport(time.Now())
+	auditEvent(r, "diagnose.support", "support", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // ── diagnose all ──────────────────────────────────────────────────────────────
 
 // allDiagnosis aggregates every NO-INPUT local diagnostic into one snapshot so an
@@ -919,5 +1022,6 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
 	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
+	mux.HandleFunc("/api/diagnose/support", apiDiagnoseSupport)
 	mux.HandleFunc("/api/diagnose/all", apiDiagnoseAll)
 }
