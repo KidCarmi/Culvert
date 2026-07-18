@@ -16,6 +16,29 @@ records it.
 _(none in the PEI feature itself — the behavioral suite passes; the feature does
 what it is intended to do.)_
 
+## Review gaps — CLOSED
+
+The self-review identified five coverage gaps; four were code and are now closed
+(the fifth, "not enforced until merged", is a PR-open action):
+
+- **G1 finite matrix → seeded generator.** `inventory_generated_test.go` fuzzes
+  600 reproducibly-seeded random profiles through the evaluator and asserts the
+  no-under-report invariant on all of them.
+- **G2 uncovered error branches.** `atoiPrefix` 72.7%→100% (direct branch test);
+  `pacExceptionDelete` 80%→100% and `pacExceptionPut`→95.8% via a persist-failure
+  handler test (unwritable backing dir → 500). The only remaining sub-100 lines
+  are an unreachable `json.MarshalIndent` error (a `map[string]struct` always
+  marshals) and the `os.ReadFile` read-error arm of `Load` (needs an injected FS
+  fault) — documented, not forced.
+- **G3 UI untested here.** `pac_exceptions_uicontract_test.go` pins the
+  governance panel/modal identifiers, CSP-safe dispatch cases, endpoint calls,
+  and the admin-gate (string-scan, matching the auth-policy UI test pattern).
+  Full interaction stays on the Playwright e2e lane.
+- **G4 no full backup→restore cycle.** `pac_exceptions_infra_test.go` seeds a
+  governance file into a real-CA backup, `runBackup`, `runRestoreCommit`
+  (ModeFull) into a distinct `/data`, then reloads the restored file and asserts
+  the record + status survived.
+
 ## Found & reconciled (not PEI-specific)
 
 - **PEI-BL-001  medium  route-metadata walls  — main's route-count locks were
