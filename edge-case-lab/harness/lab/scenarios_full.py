@@ -187,28 +187,24 @@ class FullGen(Gen):
                 "Selective do-not-decrypt is required for privacy/regulated destinations.",
                 "TLS bypass", ["tls_inspection", "manual_ssl_bypass", "https_connect"],
                 intent2, [_v("b", "https", host)], _fp("F-bypass", host))
-        # cert-verification profile variants
-        for verify, cert_state, expect in [("skip", "untrusted", "intercept"),
-                                           ("permissive", "untrusted", "intercept")]:
+        # cert-verification profile variants.
+        #
+        # certVerification='permissive' was RETIRED (#716): its documented
+        # "verify, allow+log" semantics were never implemented (it verified like
+        # 'strict'), and the value is now rejected on every write path (HTTP 400)
+        # and fail-closed-migrated to 'strict' on load/sync. Generating it here
+        # would fail profile setup and re-surface the now-CLOSED SWG-0069
+        # configuration-contract gap. The retired-value contract (reject +
+        # migrate) is covered by the Go tests (internal/decryptprofile/
+        # decryptprofile_cert_migration_test.go, decryptprofile_cert_contract_test.go);
+        # the historical SWG-0069 evidence is retained under representative_evidence/.
+        for verify, cert_state, expect in [("skip", "untrusted", "intercept")]:
             prof = {"api": {"certVerification": verify}}
             intent = {"default_action": "allow", "default_auth": "Exempt",
                       "objects": {"decryption_profiles": {"prof-" + verify: prof}},
                       "rules": [{"name": "inspect-prof", "priority": 1, "kind": "access",
                                  "match": {"fqdn": H_APP}, "action": "allow", "ssl": "inspect",
                                  "decryption_profile": "prof-" + verify}]}
-            # 'permissive' is accepted by profile validation but its documented
-            # "verify, allow+log" semantics are DEFERRED in the implementation
-            # (decryptprofile_resolve.go maps strict+permissive to the same verify
-            # path), so it blocks an untrusted upstream exactly like strict. An admin
-            # selecting permissive expecting allow-on-fail gets a hard block =>
-            # configuration-contract gap between the option's name and its behavior.
-            if verify == "permissive":
-                intent["triage"] = {"class": "CONFIGURATION_CONTRACT_GAP",
-                                    "note": "certVerification='permissive' is accepted but behaves like "
-                                            "'strict' (blocks untrusted upstream); its documented allow+log "
-                                            "semantics are deferred/unimplemented (decryptprofile.go:71, "
-                                            "decryptprofile_resolve.go:170). The named option does not deliver "
-                                            "its stated contract."}
             self.add(
                 f"Decryption profile certVerification={verify}",
                 f"Use a named decryption profile with certVerification='{verify}' to inspect '{H_APP}' when "
