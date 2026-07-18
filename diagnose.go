@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/halease"
 )
 
 // Diagnostic command framework (M3). Product-level, typed operations — NEVER a
@@ -888,6 +890,98 @@ func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose etcd ─────────────────────────────────────────────────────────────
+
+// etcdProbeTimeout hard-bounds the fencing-lease reachability Read so a wedged or
+// unreachable etcd endpoint cannot hang the handler. Generous enough for a
+// cross-AZ round-trip; the etcd client's own dial is lazy so an unreachable
+// endpoint surfaces as a deadline, not a stall.
+const etcdProbeTimeout = 5 * time.Second
+
+// etcdDiagnosis is the raw reachability fact for the HA fencing-lease (etcd)
+// backend: is it reachable from THIS node, and what lease state does it report.
+// Read-only and verdict-free beyond reachable/not — split-brain/quorum ANALYSIS
+// is the TAC Cloud tier's job, not the appliance's. The etcd endpoints are never
+// echoed (operator infra detail); only the lease's own holder/epoch (already
+// surfaced on /api/cluster/ha) and a bounded transport error are returned.
+type etcdDiagnosis struct {
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Configured    bool   `json:"configured"`             // an etcd fencing lease is armed on this node
+	OK            bool   `json:"ok"`                     // reachable (or n/a when not configured)
+	Status        string `json:"status"`                 // ok|error|n/a
+	Reachable     bool   `json:"reachable,omitempty"`    // the bounded Read returned
+	Holder        string `json:"holder,omitempty"`       // current lease holder candidate ID ("" = free)
+	Epoch         int64  `json:"epoch,omitempty"`        // fencing epoch reported by the backend
+	ValidForMs    int64  `json:"valid_for_ms,omitempty"` // remaining lease time per the backend
+	LatencyMs     int64  `json:"latency_ms,omitempty"`   // probe round-trip
+	Error         string `json:"error,omitempty"`        // bounded transport error when unreachable
+	Note          string `json:"note,omitempty"`
+}
+
+// classifyEtcdProbe turns a probe outcome into the typed diagnosis. Pure (no
+// I/O), so tests drive not-configured / reachable / unreachable without an etcd.
+func classifyEtcdProbe(configured bool, st halease.Status, latency time.Duration, err error, now time.Time) etcdDiagnosis {
+	d := etcdDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Configured:    configured,
+	}
+	if !configured {
+		d.Status, d.OK = "n/a", true
+		d.Note = "no etcd fencing lease configured on this node (legacy manual-failover or standalone HA); nothing to probe"
+		return d
+	}
+	d.LatencyMs = latency.Milliseconds()
+	if err != nil {
+		d.Status, d.OK, d.Error = "error", false, boundedErr(err.Error())
+		d.Note = "etcd fencing-lease backend is unreachable from this node — leadership is denied fail-closed until it recovers"
+		return d
+	}
+	d.Reachable, d.OK, d.Status = true, true, "ok"
+	d.Holder = st.Holder
+	d.Epoch = st.Epoch
+	if st.ValidFor > 0 {
+		d.ValidForMs = st.ValidFor.Milliseconds()
+	}
+	if st.Holder == "" {
+		d.Note = "etcd reachable; the fencing lease is currently free (no live leader holds it)"
+	}
+	return d
+}
+
+// diagnoseEtcd runs the bounded, read-only reachability probe against the
+// configured etcd fencing-lease backend and classifies the result. The Read
+// never mutates lease state (Provider.Read contract).
+func diagnoseEtcd(ctx context.Context, now time.Time) etcdDiagnosis {
+	start := time.Now()
+	configured, st, err := globalHA.probeLeaseBackend(ctx)
+	latency := time.Since(start)
+	return classifyEtcdProbe(configured, st, latency, err, now)
+}
+
+// apiDiagnoseEtcd probes the HA fencing-lease (etcd) backend's reachability from
+// this node (POST, operator). Read-only: a bounded, no-mutation Read against the
+// operator-configured etcd endpoints. The endpoints are STARTUP config, never
+// attacker-controllable, so the outbound is not SSRF-relevant and (unlike
+// dns/tls) is deliberately NOT isPrivateHost-guarded — a fencing etcd normally
+// lives on a private address; the context timeout is the only bound needed.
+func apiDiagnoseEtcd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), etcdProbeTimeout)
+	defer cancel()
+	d := diagnoseEtcd(ctx, time.Now())
+	auditEvent(r, "diagnose.etcd", "etcd", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // diagnoseConfig assembles the live config snapshot and diagnoses it. The snapshot
 // build is a read-only assembly over the config stores; the snapshot VALUES never
 // leave this function (only counts + the verdict are returned).
@@ -1158,6 +1252,7 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/dns", apiDiagnoseDNS)
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
+	mux.HandleFunc("/api/diagnose/etcd", apiDiagnoseEtcd)
 	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
 	mux.HandleFunc("/api/diagnose/support", apiDiagnoseSupport)
 	mux.HandleFunc("/api/diagnose/all", apiDiagnoseAll)
