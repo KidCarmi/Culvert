@@ -860,6 +860,57 @@ func apiDiagnoseConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, d)
 }
 
+// ── diagnose all ──────────────────────────────────────────────────────────────
+
+// allDiagnosis aggregates every NO-INPUT local diagnostic into one snapshot so an
+// operator/TAC can run a single "local health" check. It deliberately excludes the
+// dns/tls verbs (they require a target host and touch the network); all four
+// members here are local + in-memory (storage does only its own create+remove
+// writability probe). OK is the AND of the members — a single degraded check makes
+// the aggregate degraded.
+type allDiagnosis struct {
+	SchemaVersion int               `json:"schema_version"`
+	GeneratedAt   string            `json:"generated_at"`
+	OK            bool              `json:"ok"`
+	Storage       storageDiagnosis  `json:"storage"`
+	Upstream      upstreamDiagnosis `json:"upstream"`
+	Cluster       clusterDiagnosis  `json:"cluster"`
+	Config        configDiagnosis   `json:"config"`
+}
+
+// diagnoseAll runs the no-input local verbs and aggregates them. now is injected
+// for deterministic timestamps in tests. No verb here audits on its own (the
+// per-verb audit lives in the individual handlers), so the caller emits one
+// diagnose.all event.
+func diagnoseAll(now time.Time) allDiagnosis {
+	d := allDiagnosis{
+		SchemaVersion: diagnoseSchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Storage:       diagnoseStorage(now),
+		Upstream:      diagnoseUpstream(now),
+		Cluster:       diagnoseCluster(now),
+		Config:        diagnoseConfig(now),
+	}
+	d.OK = d.Storage.OK && d.Upstream.OK && d.Cluster.OK && d.Config.OK
+	return d
+}
+
+// apiDiagnoseAll runs every no-input local diagnostic in one call (POST, operator).
+// Read-only (bar the storage writability probe), no network, no shell.
+func apiDiagnoseAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requireRole(w, r, RoleOperator) {
+		return
+	}
+	d := diagnoseAll(time.Now())
+	auditEvent(r, "diagnose.all", "all", boolResult(d.OK))
+	jsonOK(w, d)
+}
+
 // registerDiagnoseRoutes wires the diagnose verb surface.
 func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/storage", apiDiagnoseStorage)
@@ -868,4 +919,5 @@ func registerDiagnoseRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/diagnose/tls", apiDiagnoseTLS)
 	mux.HandleFunc("/api/diagnose/cluster", apiDiagnoseCluster)
 	mux.HandleFunc("/api/diagnose/config", apiDiagnoseConfig)
+	mux.HandleFunc("/api/diagnose/all", apiDiagnoseAll)
 }

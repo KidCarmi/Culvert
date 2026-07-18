@@ -175,6 +175,7 @@ input or reach a host binary.
 
 | Verb | What it checks | Network |
 |---|---|---|
+| `all` | one-shot aggregate of every no-input local verb (`storage` + `upstream` + `cluster` + `config`); overall ok = all pass. Excludes `dns`/`tls` (they need a target host) | none (in-memory + the storage probe) |
 | `storage` | data-dir writability (real create+remove probe), free space, support-tree stat | none |
 | `upstream` | upstream pool health + circuit state (from the existing health loop) | none (no new dial) |
 | `cluster` | cluster/HA posture — role, fencing-lease validity/epoch, write authority, enrolled-node counts, standby sync health | none (in-memory state only) |
