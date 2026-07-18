@@ -63,7 +63,7 @@ import (
 //   - 164 — ADR-0011 P2 added /api/decryption/health (read-only decryption
 //     coverage + failure-taxonomy aggregate; viewer).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 164
+	const want = 166
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
