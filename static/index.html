@@ -1755,6 +1755,8 @@ tr.dragging  { opacity: .4; }
             <textarea id="pac-exclusions" class="input" rows="7" style="width:100%;font-family:monospace;font-size:.82rem;resize:vertical"
               placeholder="*.corp.local&#10;internal.mycompany.com&#10;192.168.0.0/16&#10;10.0.0.0/8"></textarea>
 
+            <div id="pac-validation-errors" style="display:none;margin-top:12px;padding:10px 12px;border:1px solid var(--red,#e5484d);border-radius:8px;font-size:.82rem;line-height:1.5"></div>
+
             <div style="display:flex;gap:8px;margin-top:14px">
               <button class="btn" data-click="savePACConfig">💾 Save Configuration</button>
               <button class="btn ghost" data-click="downloadPAC">⬇ Download PAC</button>
@@ -11584,17 +11586,42 @@ async function loadPACConfig() {
   } catch(e) { /* first load may fail */ }
 }
 
+// renderPACIssues shows the server's structured validation issues (or hides
+// the box when null/empty). Each issue names the offending entry + reason.
+function renderPACIssues(issues) {
+  const box = document.getElementById('pac-validation-errors');
+  if (!box) return;
+  if (!issues || !issues.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = '<strong>Validation failed — nothing was saved:</strong><ul style="margin:6px 0 0 18px;padding:0">' +
+    issues.map(i => '<li>' + (i.entry ? '<code>' + escHtml(i.entry) + '</code>: ' : '') + escHtml(i.message) + '</li>').join('') +
+    '</ul>';
+  box.style.display = '';
+}
+
 async function savePACConfig() {
   const proxyHost = document.getElementById('pac-host').value.trim();
   const proxyPort = parseInt(document.getElementById('pac-port').value) || 8080;
   const exclRaw = document.getElementById('pac-exclusions').value;
   const exclusions = exclRaw.split('\n').map(s => s.trim()).filter(Boolean);
   try {
-    await api('/api/pac-config', {
+    const resp = await apiFetch('/api/pac-config', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ proxyHost, proxyPort, exclusions }),
     });
+    if (resp.status === 400) {
+      const data = await resp.json().catch(() => null);
+      renderPACIssues(data && data.issues);
+      toast('PAC validation failed', 'error');
+      return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    renderPACIssues(null);
+    const saved = await resp.json().catch(() => null);
+    if (saved && Array.isArray(saved.exclusions)) {
+      // Reflect the canonical (deduped, punycoded, normalized) form back.
+      document.getElementById('pac-exclusions').value = saved.exclusions.join('\n');
+    }
     toast('PAC configuration saved', 'success');
     refreshPACPreview();
   } catch(e) { toast('Error: ' + e.message, 'error'); }

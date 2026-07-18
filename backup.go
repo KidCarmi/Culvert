@@ -77,7 +77,11 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		{SrcPath: p("blocklist.txt.mode"), TarPath: "data/blocklist.txt.mode"},
 		{SrcPath: p("blocklist.txt.manual"), TarPath: "data/blocklist.txt.manual"},
 		{SrcPath: p("blocklist.txt.exceptions"), TarPath: "data/blocklist.txt.exceptions"},
-		{SrcPath: p("pac.json"), TarPath: "data/pac.json"},
+		// PAC config lives at <dataDir>/pac_config.json (migrated from a CWD
+		// pac_config.json by the pac startup slice; the old "pac.json" entry
+		// here never matched anything and PAC was silently absent from
+		// backups).
+		{SrcPath: p("pac_config.json"), TarPath: "data/pac_config.json"},
 		{SrcPath: p("scan_exclusions.json"), TarPath: "data/scan_exclusions.json"},
 		{SrcPath: p("alert_settings.json"), TarPath: "data/alert_settings.json"},
 		{SrcPath: p("admin_settings.json"), TarPath: "data/admin_settings.json"},

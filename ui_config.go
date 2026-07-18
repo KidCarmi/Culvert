@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/pac"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/secscan"
 	"github.com/KidCarmi/Culvert/internal/session"
@@ -901,6 +902,15 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PAC pre-validation (before ANY store mutation): strictly validate the
+	// IMPORTED PAC fields themselves so a malformed backup is rejected whole
+	// with actionable errors instead of silently importing junk. Pre-existing
+	// live entries are untouched by this gate — only the incoming payload is
+	// judged, and the tolerant apply below never rejects.
+	if !importPACPreValidationOK(w, &b) {
+		return
+	}
+
 	// Blocklist. Feed attribution is carried across a replace-mode
 	// rebuild — ClearAll+Add would otherwise strand every feed entry as
 	// unattributed (Codex P1, PR #447).
@@ -1068,6 +1078,31 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// survives a restart — import previously left it runtime-only.
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
+}
+
+// importPACPreValidationOK strictly validates the PAC fields of an import
+// payload BEFORE any store mutation, writing a structured 400 and returning
+// false on failure. Only the incoming payload is judged; the tolerant apply
+// path never rejects.
+func importPACPreValidationOK(w http.ResponseWriter, b *configBackup) bool {
+	if b.PACProxyHost == "" && b.PACProxyPort == 0 && len(b.PACExclusions) == 0 {
+		return true
+	}
+	_, issues := pac.ValidateConfig(PACConfig{
+		ProxyHost:  b.PACProxyHost,
+		ProxyPort:  b.PACProxyPort,
+		Exclusions: b.PACExclusions,
+	})
+	if len(issues) == 0 {
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort error body
+		"error":  "PAC configuration in import failed validation",
+		"issues": issues,
+	})
+	return false
 }
 
 // importCategoryTaxonomy applies URL categories then category groups from an
