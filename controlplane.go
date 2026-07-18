@@ -92,6 +92,14 @@ type MetricsReport struct {
 	Blocked  int64  `json:"blocked"`
 	AuthFail int64  `json:"auth_fail"`
 	Uptime   string `json:"uptime"`
+	// M5 PR-A: raw version facts so the CP (and TAC Cloud) can tell which
+	// config each DP actually applied without correlating on the box. All
+	// additive + omitempty: a mixed-version cluster where an older DP omits
+	// them degrades to the zero value, never errors (the snapshot discipline).
+	ConfigVersion  int64  `json:"config_version,omitempty"`  // applied config-snapshot version (DP-side c.lastVersion)
+	PolicyVersion  int64  `json:"policy_version,omitempty"`  // running policy-store generation on the node
+	Epoch          int64  `json:"epoch,omitempty"`           // highest fencing epoch the node has observed
+	CulvertVersion string `json:"culvert_version,omitempty"` // build version string on the node
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.
