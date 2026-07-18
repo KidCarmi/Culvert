@@ -641,11 +641,22 @@ func resolveLoadedDefaultAuthOutcome(env uiUsersFileEnvelope) AuthOutcome {
 
 // ─── UI multi-user admin management ──────────────────────────────────────────
 
+// bcryptMaxPasswordBytes mirrors bcrypt's hard limit (golang.org/x/crypto/bcrypt):
+// GenerateFromPassword errors on any password over 72 bytes. Rejecting it here
+// turns that into a normal 400 validation error everywhere a password is set
+// (first-time setup, user management, password change, config import) instead
+// of a raw bcrypt error surfacing as a 500.
+const bcryptMaxPasswordBytes = 72
+
 // validatePasswordComplexity enforces minimum password strength:
-// at least 8 characters, one uppercase letter, one lowercase letter, one digit.
+// at least 8 characters, one uppercase letter, one lowercase letter, one digit,
+// and no more than bcryptMaxPasswordBytes bytes (bcrypt's hard limit).
 func validatePasswordComplexity(password string) error {
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
+	}
+	if len(password) > bcryptMaxPasswordBytes {
+		return fmt.Errorf("password must be at most %d bytes", bcryptMaxPasswordBytes)
 	}
 	var hasUpper, hasLower, hasDigit bool
 	for _, ch := range password {
