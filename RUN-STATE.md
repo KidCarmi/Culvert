@@ -16,11 +16,17 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-021** — Distributed deployment (Control Plane / Data Plane, mTLS). Next.
-  (User asked to continue past the stop-condition milestone into medium items.)
+- **M-023** — High availability (etcd fencing lease). Next; resolves G-02 by
+  reading `ha_lease.go`/`ha_failover.go` directly.
 
 ## Recently completed
 
+- **M-021** — Distributed CP/DP (`content/docs/08-distributed/control-plane-data-plane.md`)
+  + evidence ledger. Roles, enrollment (token + CA-fingerprint pinning, Mermaid),
+  mTLS flags, config-snapshot sync + redaction, node groups/labels/drain,
+  per-DP bandwidth, cluster ops surface. **Verified G-03**: no cluster-wide
+  rolling-upgrade orchestrator (node-level drain + handoff only) — documented as
+  a known limitation. Link check pass. Committed.
 - **M-020** — Content security (`content/docs/07-content-security/content-security.md`)
   + evidence ledger. Key insight documented: host/URL controls run
   pre-decryption; body scanning (DPI/ClamAV/YARA/magic/CDR) requires `Inspect`,

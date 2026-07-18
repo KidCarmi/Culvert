@@ -149,7 +149,7 @@ items:
     title: "Distributed deployment: Control Plane / Data Plane with mTLS"
     type: doc
     priority: medium
-    status: todo
+    status: done
     audience: [admin, architect]
     path: content/docs/08-distributed/control-plane-data-plane.md
     evidence_areas: [controlplane.go, enrollment.go, dp_enrollment.go, controlplane_tls.go]
