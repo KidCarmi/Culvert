@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
@@ -47,17 +49,18 @@ func readClusterGRPCCompression() bool {
 // When multiple CP addresses are configured (HA mode), the client automatically
 // fails over to the next address on connection failure, trying each in order.
 type DataPlaneClient struct {
-	nodeID      string
-	conn        *grpc.ClientConn
-	addrs       []string // all CP addresses (for HA failover)
-	activeIdx   int      // index into addrs of current connection
-	certFile    string   // TLS cert for reconnection
-	keyFile     string   // TLS key for reconnection
-	caFile      string   // CA cert for reconnection
-	mu          sync.Mutex
-	lastVersion int64
-	failCount   int // consecutive fetch failures for exponential backoff
-	callForTest func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	nodeID           string
+	conn             *grpc.ClientConn
+	addrs            []string // all CP addresses (for HA failover)
+	activeIdx        int      // index into addrs of current connection
+	certFile         string   // TLS cert for reconnection
+	keyFile          string   // TLS key for reconnection
+	caFile           string   // CA cert for reconnection
+	mu               sync.Mutex
+	lastVersion      int64
+	failCount        int  // consecutive fetch failures for exponential backoff
+	deltaUnsupported bool // set when a CP returns Unimplemented for GetConfigDelta; cleared on reconnect
+	callForTest      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -135,6 +138,10 @@ func (c *DataPlaneClient) connect(addr string) error {
 		_ = c.conn.Close()
 	}
 	c.conn = conn
+	// A new connection may be a different (possibly newer) CP — re-probe delta
+	// support. Safe under the callers' locking: connect runs pre-goroutine in
+	// NewDataPlaneClient and under c.mu in reconnectActive/failover.
+	c.deltaUnsupported = false
 	logger.Printf("DataPlane: connected to ControlPlane at %s", addr)
 	return nil
 }
@@ -253,6 +260,14 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// T3 P1: when we already hold a version, try the incremental blocklist delta
+	// first. tryDeltaSync returns true when it fully handled this cycle (nothing
+	// changed, or the delta applied and verified); false falls through to the
+	// full-snapshot path below (fresh DP, resync directive, old CP, or any error
+	// — the full path owns backoff/failover).
+	if c.lastVersion > 0 && c.tryDeltaSync(ctx) {
+		return
+	}
 	raw, ok := c.pollConfig(ctx)
 	if !ok {
 		return
@@ -313,6 +328,93 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.lastVersion = snap.Version
+}
+
+// tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
+// fully handled (unchanged, delta applied+verified, or a fenced-out CP we skip);
+// false to fall through to the full-snapshot path. Never touches failCount — the
+// full path owns backoff/failover, so a delta error costs at most one wasted RPC
+// before the full poll runs.
+func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
+	c.mu.Lock()
+	unsupported := c.deltaUnsupported
+	c.mu.Unlock()
+	if unsupported {
+		return false // known-old CP: skip straight to the full path
+	}
+
+	req, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: c.lastVersion, KnownFP: bl.SyncedFingerprint()})
+	raw, err := c.call(ctx, methodGetConfigDelta, req)
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			c.mu.Lock()
+			c.deltaUnsupported = true
+			c.mu.Unlock()
+			logger.Printf("DataPlane: control plane has no GetConfigDelta — using full config sync")
+		}
+		return false // fall back to the full path (which handles backoff/failover)
+	}
+	var reply getConfigDeltaReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		logger.Printf("DataPlane: parse config delta error: %v", err)
+		return false
+	}
+	switch reply.Mode {
+	case "unchanged":
+		c.resetBackoff()
+		dpMarkCPPollHealthy()
+		return true
+	case "delta":
+		return c.applyDeltaReply(reply)
+	default: // "resync" or unknown → full path
+		return false
+	}
+}
+
+// applyDeltaReply applies a delta-mode reply. Returns true when applied+verified
+// (lastVersion advanced), false to fall through to a full resync. Mirrors the
+// full path's ordering: epoch fence first, then external-auth/IdP before the
+// remaining slices.
+func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
+	// ADR-0005 S3: fence before ANY mutation. A fenced-out zombie CP's delta is
+	// rejected; skip the cycle rather than fall through to a full pull that would
+	// re-fence identically.
+	if !dpObserveEpoch("config delta", reply.Epoch) {
+		return true
+	}
+	if reply.Remainder == nil || reply.BaseVersion != c.lastVersion {
+		return false // malformed, or our base moved under us → full resync
+	}
+	remainder := *reply.Remainder
+	if err := validateConfigSnapshot(remainder); err != nil {
+		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
+		return false
+	}
+	// External auth + IdP first (SAML/OIDC metadata must use the public origin
+	// before IdP profiles compile) — same as the full path. snapForDisk keeps the
+	// IdP profiles for the last-good file; the applied copy nils them so the
+	// remainder apply below does not re-sync them.
+	snapForDisk := remainder
+	applyExternalAuthSnapshotSettings(remainder)
+	if err := syncSnapshotIdPProfiles(remainder); err != nil {
+		logger.Printf("DataPlane: delta v%d IdP sync failed: %v — full resync", reply.TargetVersion, err)
+		return false
+	}
+	remainder.IdPProfiles = nil
+	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
+		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
+		return false
+	}
+	// Persist a RECONSTRUCTED full last-good: the remainder omits BlockedHosts,
+	// so a cold restart would otherwise re-apply an empty blocklist. bl.List()
+	// gives the just-converged full set.
+	snapForDisk.BlockedHosts = bl.List()
+	persistDPLastGoodConfigSnapshot(snapForDisk)
+	dpMarkCPPollHealthy()
+	c.resetBackoff()
+	c.lastVersion = reply.TargetVersion
+	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
+	return true
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {

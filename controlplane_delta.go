@@ -29,6 +29,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
@@ -200,6 +201,36 @@ func diffHosts(prev, next []string) (added, removed []string) {
 // naturally.
 func blocklistSyncedFingerprint(hosts []string) string {
 	return blocklist.FeedSetFingerprint(hosts)
+}
+
+// applyBlocklistDeltaSnapshot applies a delta-mode reply on the DP: it advances
+// the blocklist incrementally via bl.ApplyDelta, verifies the result converged
+// to the CP's advertised target fingerprint, then applies the non-blocklist
+// remainder wholesale. The caller MUST have already epoch-fenced (dpObserveEpoch
+// on reply.Epoch) and validated the remainder's caps — this function does the
+// blocklist-substituting apply only.
+//
+// On a fingerprint mismatch it returns an error WITHOUT applying the remainder,
+// so only the blocklist is left mutated (and the caller's fall-through to a full
+// resync heals it via the wholesale ReplaceFeedEntries) — the other stores are
+// never advanced to a version whose blocklist we could not verify. This is the
+// "detect divergence → resync, never silently persist it" contract.
+func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelta, targetFP string) error {
+	for i := range chain {
+		bl.ApplyDelta(chain[i].Added, chain[i].Removed)
+	}
+	bl.Save()
+	if got := bl.SyncedFingerprint(); got != targetFP {
+		return fmt.Errorf("blocklist drift after delta apply (have %s, want %s)", got, targetFP)
+	}
+	// Everything except the blocklist, in the same order as the full path.
+	applySnapshotTrafficExceptBlocklist(remainder)
+	applySnapshotClusterRuntime(remainder)
+	if err := syncSnapshotIdPProfiles(remainder); err != nil {
+		return fmt.Errorf("idp sync: %w", err)
+	}
+	applySnapshotExtendedState(remainder)
+	return nil
 }
 
 // GetConfigDelta serves the incremental blocklist catch-up path (T3 P1). A DP

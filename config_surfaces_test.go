@@ -806,14 +806,17 @@ func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
 // `snap.Field` selector inside them is a read = a consumed field. Enumerated
 // here so the scan survives further gocognit splits (add the new function).
 var snapshotApplyFuncs = map[string]bool{
-	"applyConfigSnapshot":               true, // controlplane_snapshot.go
-	"applySnapshotPolicyAndTraffic":     true,
-	"applySnapshotClusterRuntime":       true,
-	"applySnapshotSessionSecret":        true,
-	"applySnapshotExtendedState":        true,
-	"applyExternalAuthSnapshotSettings": true,
-	"syncSnapshotIdPProfiles":           true,
-	"fetchAndApply":                     true, // controlplane_client.go (DP poller)
+	"applyConfigSnapshot":                 true, // controlplane_snapshot.go
+	"applySnapshotPolicyAndTraffic":       true,
+	"applySnapshotBlocklist":              true, // T3 P1: blocklist step, split out of applySnapshotPolicyAndTraffic
+	"applySnapshotTrafficExceptBlocklist": true, // T3 P1: the rest, shared by the full + delta apply paths
+	"applySnapshotClusterRuntime":         true,
+	"applySnapshotSessionSecret":          true,
+	"applySnapshotExtendedState":          true,
+	"applyExternalAuthSnapshotSettings":   true,
+	"syncSnapshotIdPProfiles":             true,
+	"fetchAndApply":                       true, // controlplane_client.go (DP poller)
+	"applyBlocklistDeltaSnapshot":         true, // T3 P1: DP-side delta apply (controlplane_delta.go)
 }
 
 func snapshotApplyFuncNames() string {

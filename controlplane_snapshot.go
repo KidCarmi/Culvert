@@ -664,17 +664,33 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 // slices of a snapshot (split from applyConfigSnapshot for gocognit; order
 // preserved verbatim).
 func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
-	// Blocklist — in-place feed-entry replacement preserves the
-	// package-global bl's path / mode / manual / exceptions (the
-	// DP-local state that isn't in the cluster snapshot). The
-	// previous wholesale `bl = newBL` pattern zeroed those local
-	// fields and orphaned the persistence path so caller-side Save
-	// became a no-op (CL-1 final gap, P3.4). ReplaceFeedEntries
-	// touches only exact + wildcards under bl.mu.Lock; bl.Save()
-	// then persists via the Bucket-4-hardened atomicWriteFile path.
+	applySnapshotBlocklist(snap)
+	applySnapshotTrafficExceptBlocklist(snap)
+}
+
+// applySnapshotBlocklist replaces the feed-pushed blocklist entries from a FULL
+// snapshot. Split from applySnapshotPolicyAndTraffic (T3 P1) so the incremental
+// delta path can substitute bl.ApplyDelta for this wholesale replace while
+// reusing applySnapshotTrafficExceptBlocklist for everything else. The full
+// path's order and semantics are byte-identical to before the split.
+func applySnapshotBlocklist(snap ConfigSnapshot) {
+	// In-place feed-entry replacement preserves the package-global bl's path /
+	// mode / manual / exceptions (the DP-local state that isn't in the cluster
+	// snapshot). The previous wholesale `bl = newBL` pattern zeroed those local
+	// fields and orphaned the persistence path so caller-side Save became a
+	// no-op (CL-1 final gap, P3.4). ReplaceFeedEntries touches only exact +
+	// wildcards under bl.mu.Lock (and resets the synced fingerprint to the CP
+	// list's fingerprint); bl.Save() then persists via the Bucket-4-hardened
+	// atomicWriteFile path.
 	bl.ReplaceFeedEntries(snap.BlockedHosts)
 	bl.Save()
+}
 
+// applySnapshotTrafficExceptBlocklist applies every traffic/policy slice EXCEPT
+// the blocklist (IP filter, rate limiter + exemptions, external auth, default
+// action, policy rules, SSL bypass, URL categories, file profiles, rewrite, DPI,
+// connection limits). Shared by the full-snapshot path and the delta path.
+func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 	// IP filter.
 	newIPF := &IPFilter{single: map[string]bool{}}
 	newIPF.SetMode(snap.IPFilterMode)
