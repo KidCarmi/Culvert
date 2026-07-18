@@ -5,10 +5,14 @@
 #
 # Usage: content/tools/check-links.sh [root]   (default root: content)
 # Exit: 0 if all relative links resolve, 1 otherwise. Missing targets are listed.
-set -euo pipefail
+#
+# Note: -e is deliberately NOT set — grep returns non-zero on a file with no
+# links, which is normal (e.g. a lab-evidence page of code blocks). Errors are
+# handled explicitly instead.
+set -uo pipefail
 
 root="${1:-content}"
-fail=0
+missing=0
 
 # Optional allowlist of planned (not-yet-built) link targets, one per line,
 # written as they appear in the link ( e.g. ../03-policy/policy-engine.md ).
@@ -20,33 +24,32 @@ is_allowed() {
   grep -qxF "$1" "$allowlist"
 }
 
-# Iterate every markdown file under root.
 while IFS= read -r -d '' md; do
   dir="$(dirname "$md")"
-  # Extract [text](target) link targets, one per line.
-  grep -oE '\]\([^)]+\)' "$md" 2>/dev/null | sed -E 's/^\]\(//; s/\)$//' | while IFS= read -r target; do
-    # Strip any anchor fragment.
-    path="${target%%#*}"
-    # Skip empty (pure anchor), external, and mailto links.
+  # Extract [text](target) link targets, one per line; tolerate no matches.
+  targets="$(grep -oE '\]\([^)]+\)' "$md" 2>/dev/null | sed -E 's/^\]\(//; s/\)$//' || true)"
+  [ -z "$targets" ] && continue
+  while IFS= read -r target; do
+    [ -z "$target" ] && continue
+    # Skip external, anchor-only, and mailto links.
     case "$target" in
       \#*|http://*|https://*|mailto:*) continue ;;
     esac
+    path="${target%%#*}"   # strip any anchor fragment
     [ -z "$path" ] && continue
-    # Resolve relative to the file's directory.
     if [ ! -e "$dir/$path" ]; then
       if is_allowed "$target"; then
         echo "PLANNED (allowlisted forward ref): $md -> $target"
       else
         echo "MISSING: $md -> $target"
-        echo "1" > /tmp/culvert_linkcheck_fail
+        missing=$((missing + 1))
       fi
     fi
-  done
+  done <<< "$targets"
 done < <(find "$root" -name '*.md' -print0)
 
-if [ -f /tmp/culvert_linkcheck_fail ]; then
-  rm -f /tmp/culvert_linkcheck_fail
-  echo "Link check: FAILED (missing targets above)"
+if [ "$missing" -gt 0 ]; then
+  echo "Link check: FAILED ($missing missing target(s) above)"
   exit 1
 fi
 echo "Link check: OK (all relative links resolve under $root)"

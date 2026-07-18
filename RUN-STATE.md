@@ -16,15 +16,19 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **C-003** — Getting started / quick start. Selecting; next.
+- **H-010** — Policy engine & Zero-Trust authoring. Selecting; next high-pri.
 
 ## Recently completed
 
+- **C-003** — Quick start (`content/docs/02-getting-started/quick-start.md`) +
+  evidence ledger + **reproduced lab run** (`content/evidence/quick-start-lab-run.md`:
+  real `/health` + `/ready` output from the built binary). Readiness gating
+  (session_secret, config_snapshot_validator) vs report-only (ca, policy_loaded)
+  documented from `healthcheck.go`. Hardened `check-links.sh` (pipefail bug on
+  link-less files). Committed.
 - **C-002** — Architecture (`content/docs/01-overview/architecture.md`) +
   evidence ledger. Request pipeline **re-verified from `proxy.go:handleRequest`**
-  (14-stage order), not mirrored — caught doc-drift (G-05: plugin runs after
-  auth, not before; rate-limit + IDNA gate omitted from the old diagram).
-  3 Mermaid diagrams. Link check + structure pass. Committed.
+  (14-stage order), not mirrored — caught doc-drift (G-05). Committed `ba90a4d`.
 - **C-001** — Product overview + evidence ledger. ~55 capability claims verified
   via 3 parallel research agents + direct greps. Two overclaims corrected
   (tamper-evident audit → append-only; CDR → external engine). Committed
@@ -46,12 +50,16 @@ phase transition. Newest activity at the top of each section.
 
 - **C-001** — Product overview + claim-evidence ledger (critical).
 - **C-002** — Architecture overview + claim-evidence ledger (critical).
+- **C-003** — Quick start + evidence ledger + reproduced lab run (critical).
+
+**All critical-priority items complete.** Proceeding to high-priority (H-01x).
 
 ## Commits created
 
 - `5a4aa90` docs(content): bootstrap autonomous content foundation scaffolding.
 - `9176e99` docs(content): add verified product overview (what is Culvert).
-- _(C-002 commit — hash recorded next cycle)_
+- `ba90a4d` docs(content): add verified architecture overview.
+- _(C-003 commit — hash recorded next cycle)_
 
 ## Blocked items
 
@@ -95,6 +103,13 @@ _(none yet)_
   trailing whitespace. Corrected claims re-verified against source
   (`internal/audit/audit.go:49` `MaxRing = 500`, no hash-chain;
   decryption-profiles "coming soon"; `metrics.go:332` metric name).
+- C-002: link check OK; pipeline order re-read from `proxy.go:handleRequest`
+  (`preDispatchBlocked` `:401`, `pluginDecision` `:435`).
+- C-003: **reproduced run** of the built binary — `/health` `status:ok`,
+  `/ready` HTTP 200 `ready`; readiness gating logic read from
+  `healthcheck.go:135-233`; setup gate from `ui_auth.go:371-411`. Link check OK
+  after hardening `check-links.sh` (dropped `-e`; `-uo pipefail` + `|| true` so
+  a link-less evidence page no longer aborts the run).
 
 ## Notes
 

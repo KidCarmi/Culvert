@@ -25,7 +25,7 @@ evidence from but does not mirror.
 |---|---|---|
 | Overview | [What is Culvert](docs/01-overview/what-is-culvert.md) | published |
 | Overview | [Architecture](docs/01-overview/architecture.md) | published |
-| Getting started | Quick start & first boot | _planned_ |
+| Getting started | [Quick start & first boot](docs/02-getting-started/quick-start.md) | published |
 | Policy | Policy engine & Zero-Trust authoring | _planned_ |
 | TLS inspection | TLS inspection administration | _planned_ |
 | Identity | Identity & access (SSO, 2FA, RBAC) | _planned_ |

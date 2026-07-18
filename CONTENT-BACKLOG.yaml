@@ -58,7 +58,7 @@ items:
     title: "Getting started: first boot, setup wizard, readiness verification"
     type: doc
     priority: critical
-    status: todo
+    status: done
     audience: [admin]
     path: content/docs/02-getting-started/quick-start.md
     evidence_areas: [README.md, scripts/install.sh, docker-compose.yml, healthcheck.go]
