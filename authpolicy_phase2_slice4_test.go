@@ -283,14 +283,14 @@ func TestP2S4_UI_OutcomeSelectorAndCopy(t *testing.T) {
 	s := string(html)
 	// Assert on stable identifiers (not whole sentences) so copy edits don't break.
 	mustContain := []string{
-		`id="ap-outcome"`,              // outcome selector exists
-		`value="CredentialRequired"`,   // CR is selectable
-		`value="Exempt"`,               // Exempt is selectable
-		`apOutcomeChanged`,             // broad-exemption gating handler
-		`getElementById('ap-outcome')`, // apSave reads the selector (no hardcoded Exempt)
-		`🔐 CredentialRequired`,         // simulator + list render CR distinctly
-		`for reference only`,           // CR note clarifies the unauth Stage-2 block is not the post-auth decision
-		`Auth Policy`,                  // nav/panel renamed from "Auth Exempt"
+		`id="ap-outcome"`,                     // outcome selector exists
+		`value="CredentialRequired"`,          // CR is selectable
+		`value="Exempt"`,                      // Exempt is selectable
+		`apOutcomeChanged`,                    // broad-exemption gating handler
+		`getElementById('ap-outcome')`,        // apSave reads the selector (no hardcoded Exempt)
+		`#i-lock"/></svg> CredentialRequired`, // simulator + list render CR distinctly (lock icon)
+		`for reference only`,                  // CR note clarifies the unauth Stage-2 block is not the post-auth decision
+		`Auth Policy`,                         // nav/panel renamed from "Auth Exempt"
 	}
 	for _, sub := range mustContain {
 		if !strings.Contains(s, sub) {

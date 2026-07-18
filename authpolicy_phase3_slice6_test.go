@@ -36,7 +36,7 @@ func TestP3S6_UI_ExposesSSORequiredAndProviderRefs(t *testing.T) {
 		`id="ap-providerrefs-help"`,       // help text for the selector
 		`function apPopulateProviderRefs`, // fills the selector from enabled OIDC/SAML IdPs
 		`function apOutcomeChanged`,       // gating handler reveals the selector
-		`🌐 SSORequired`,                   // distinct badge for the outcome
+		`#i-globe"/></svg> SSORequired`,   // distinct badge for the outcome (globe icon)
 		`_policyIdPList`,                  // IdP list reused for the selector
 		`api('/api/idp')`,                 // viewer-readable source for the selector (no new route)
 	}
