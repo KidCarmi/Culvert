@@ -90,6 +90,22 @@ manifest all report **not ok**. The verdict is integrity metadata only (section 
 
 ---
 
+## 4b. Inspect a bundle without downloading
+
+See a bundle's section inventory, sizes, data classes, collection outcome, and
+integrity anchor before deciding to download or approve it.
+
+**UI:** Support panel → **Manifest** on a bundle row.
+**API:** `GET /api/support/bundles/{id}/manifest` (viewer).
+
+It returns the bundle's manifest metadata verbatim — secret-free by construction
+(section ids/paths/sizes/classes/status + `manifest_sha256`/`bundle_sha256`
+integrity hashes, never any values). Complements the counts-only redaction report
+(§3) and the hash-recompute `validate` (§4) with "what does this bundle contain,
+and how big is it" — no tarball download required.
+
+---
+
 ## 4a. Export (exfiltration) history
 
 Every way a bundle leaves the appliance — plain download, passphrase-encrypted,

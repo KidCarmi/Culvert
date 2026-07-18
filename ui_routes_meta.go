@@ -670,6 +670,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/exports", Handler: "apiSupportBundleExports", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
 			Note: "recent export/exfiltration history for one bundle (actor/time/action) scanned from the audit ring; read-only, no bundle content; viewer+"}}},
+	{Path: "/api/support/bundles/{id}/manifest", Handler: "apiSupportBundleManifest", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "bundle manifest metadata (section inventory/sizes/classes/status + integrity hashes) without downloading the tarball; secret-free by construction; read-only; viewer+"}}},
 	{Path: "/api/support/recipients", Handler: "apiSupportRecipients", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "list registered sealing recipients (name + public key + fingerprint; nothing secret)"},

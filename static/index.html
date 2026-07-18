@@ -4506,6 +4506,7 @@ document.addEventListener('click', e => {
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
     case 'supportShowExports':     supportShowExports(arg); break;
+    case 'supportShowManifest':    supportShowManifest(arg); break;
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
     case 'supportExportSealed':    supportExportSealed(arg); break;
@@ -12346,7 +12347,8 @@ function renderSupportBundles(list) {
       // an approved (ready) bundle. Approve is the admin mandatory-preview gate.
       const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>' +
         ' <button class="btn ghost sm" data-click="supportValidateBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Re-derive + check section hashes (tamper detection)">Validate</button>' +
-        ' <button class="btn ghost sm" data-click="supportShowExports" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Recent export history — who took this bundle off the box, and how">Exports</button>';
+        ' <button class="btn ghost sm" data-click="supportShowExports" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Recent export history — who took this bundle off the box, and how">Exports</button>' +
+        ' <button class="btn ghost sm" data-click="supportShowManifest" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Section inventory + sizes + integrity, without downloading">Manifest</button>';
       let ops = '';
       if (canWrite) {
         ops += ready
@@ -12979,6 +12981,38 @@ async function supportShowExports(id) {
     }
   } catch (err) {
     toast('Export history unavailable: ' + err.message, 'error');
+  }
+}
+
+async function supportShowManifest(id) {
+  if (!id) return;
+  try {
+    const m = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/manifest');
+    const secs = (m && m.sections) || [];
+    const rows = secs.map(s =>
+      '<tr><td style="font-family:monospace">' + escHtml(String(s.id)) + '</td>' +
+      '<td>' + escHtml(String(s.status || '')) + '</td>' +
+      '<td>' + escHtml(String(s.class_max || '')) + '</td>' +
+      '<td>' + escHtml(String(s.size_bytes || 0)) + '</td></tr>').join('');
+    const c = (m && m.collection) || {};
+    const integ = (m && m.integrity && m.integrity.manifest_sha256) || '';
+    const hdr = '<p class="hint">Format <code>' + escHtml(String(m.format || '')) + '</code> · ' +
+      escHtml(String(c.ok || 0)) + ' ok · ' + escHtml(String(c.failed || 0)) + ' failed · ' +
+      escHtml(String(c.skipped || 0)) + ' skipped · manifest sha256 ' +
+      '<span style="font-family:monospace">' + escHtml(integ.slice(0, 16)) + '…</span></p>';
+    const table = secs.length
+      ? '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+        '<th>Section</th><th>Status</th><th>Class</th><th>Bytes</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="hint">No sections in manifest.</p>';
+    const el = document.getElementById('support-bundles');
+    if (el) {
+      let box = document.getElementById('support-manifest-box');
+      if (!box) { box = document.createElement('div'); box.id = 'support-manifest-box'; box.style.marginTop = '12px'; el.appendChild(box); }
+      box.innerHTML = '<div style="font-weight:600;margin:6px 0">Manifest — ' + escHtml(String(id)) + '</div>' + hdr + table;
+      box.scrollIntoView({ block: 'nearest' });
+    }
+  } catch (err) {
+    toast('Manifest unavailable: ' + err.message, 'error');
   }
 }
 
