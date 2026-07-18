@@ -25,6 +25,10 @@ type pacStartupConfig struct {
 	// lifecycle metadata (<dataDir>/pac_profiles_lifecycle.json, PR 3).
 	// Node-local operator history (not cluster-synced).
 	LifecyclePath string
+	// ExceptionsPath is the JSON file persisting per-profile DIRECT-exception
+	// governance metadata (<dataDir>/pac_exceptions.json, PAC Exception
+	// Intelligence P2). Node-local operator metadata (not cluster-synced).
+	ExceptionsPath string
 	// DefaultProxyPort is the proxy listener's *effective* port after
 	// flag/file-config resolution. /proxy.pac auto-generates a PROXY
 	// directive pointing at this port when no explicit host:port is
@@ -42,6 +46,7 @@ func resolvePACStartupConfig(dir string, proxyPort int) pacStartupConfig {
 		LegacyConfigPath: "pac_config.json",
 		ProfilesPath:     filepath.Join(dir, "pac_profiles.json"),
 		LifecyclePath:    filepath.Join(dir, "pac_profiles_lifecycle.json"),
+		ExceptionsPath:   filepath.Join(dir, "pac_exceptions.json"),
 		DefaultProxyPort: proxyPort,
 	}
 }

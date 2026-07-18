@@ -373,3 +373,46 @@ impact are out of scope here and are the subject of later phases (an endpoint
 agent or imported firewall/DNS evidence). `serving` marks enabled profiles,
 whose bypass is reachable by clients now; a disabled profile is inventoried but
 serves nothing (404).
+
+## DIRECT exception governance
+
+The inventory answers *"which profiles can bypass?"*. Governance answers
+*"is each bypass owned, justified, and time-bounded?"* — so a full-security-path
+bypass is never an anonymous, permanent hole.
+
+- `GET  /api/pac/posture/exceptions` (viewer) — one row per DIRECT-capable
+  profile, joining the inventory (`directCapable`, `serving`, `name`) with its
+  governance record and a computed **status**.
+- `GET  /api/pac/posture/exceptions/{id}` (viewer) — one record + status.
+- `PUT  /api/pac/posture/exceptions/{id}` (admin) — set governance. `owner` and
+  `reason` are required; `expiresAt`/`lastReviewedAt` are RFC3339;
+  `reviewCadenceDays` is `0`–`3650` (`0` = no cadence). The server preserves
+  `createdAt`/`createdBy` across updates, stamps `updatedAt`, and both
+  `auditEvent`s and `saveConfigVersion`s the change.
+- `DELETE /api/pac/posture/exceptions/{id}` (admin) — clear governance (the
+  DIRECT bypass itself is unchanged; the row reverts to `ungoverned`).
+
+**Status** is a pure function of the record + the current time, evaluated only
+for genuinely DIRECT-capable profiles (a profile that cannot emit DIRECT carries
+no status):
+
+| status       | meaning                                                        |
+|--------------|----------------------------------------------------------------|
+| `ungoverned` | DIRECT-capable but missing an owner or a reason                |
+| `expired`    | `expiresAt` is in the past (a **malformed** `expiresAt` is treated as expired — fail-safe) |
+| `review_due` | past `reviewCadenceDays` since `lastReviewedAt` (or never reviewed) |
+| `governed`   | owned, justified, not expired, and review-current              |
+
+**Node-local, not cluster-synced.** Governance records live in
+`<dataDir>/pac_exceptions.json` (`0600`), are on the backup surface, and never
+propagate CP→DP (a DP node does not need who-owns-this metadata to serve a PAC).
+A corrupt file is quarantined to `pac_exceptions.json.corrupt` and the store
+starts empty — governance metadata must never brick startup. After a failover,
+restore the file on the promoted node. The PAC panel's **DIRECT Bypass
+Inventory** card renders the status per row and (for admins) an inline
+**Govern / Edit / Clear** editor.
+
+**Evidence class: `config` (Observable) for the bypass; operator-attested for
+ownership.** Governance metadata is asserted by an admin, not observed from
+traffic — it says who *claims* this bypass and why, and it is only ever
+attached to a bypass the configuration genuinely makes reachable.

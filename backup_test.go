@@ -473,3 +473,23 @@ func TestBackup_PACProfilesLifecycle_IncludedWithContent(t *testing.T) {
 		t.Errorf("pac_profiles_lifecycle.json content mismatch in backup")
 	}
 }
+
+func TestBackup_PACExceptions_IncludedWithContent(t *testing.T) {
+	dataDir := t.TempDir()
+	seedFile(t, dataDir, "ui_users.json", []byte(`{}`), 0o600)
+	body := []byte(`{"hq":{"profileId":"hq","owner":"neteng","reason":"vendor SaaS bypass","expiresAt":"2026-12-31T00:00:00Z","reviewCadenceDays":90}}`)
+	seedFile(t, dataDir, "pac_exceptions.json", body, 0o600)
+
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := runBackup(out, dataDir); err != nil {
+		t.Fatalf("runBackup: %v", err)
+	}
+	_, files, _ := readBackupTarball(t, out)
+	got, ok := files["data/pac_exceptions.json"]
+	if !ok {
+		t.Fatalf("data/pac_exceptions.json missing from tarball: %v", sortedNames(files))
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("pac_exceptions.json content mismatch in backup")
+	}
+}

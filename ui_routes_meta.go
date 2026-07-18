@@ -364,6 +364,17 @@ var uiRoutes = []uiRouteMetadata{
 			// Exception Intelligence P0). Observable evidence class only.
 			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
 		}},
+	{Path: "/api/pac/posture/exceptions", Handler: "apiPACExceptions", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// DIRECT-exception governance list (PAC Exception Intelligence P2).
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+		}},
+	{Path: "/api/pac/posture/exceptions/", Handler: "apiPACExceptionItem", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+			{Method: "DELETE", MinRole: RoleAdmin, Mutating: true, AuditExpected: true},
+		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────
 	{Path: "/api/security", Handler: "apiSecurity", Domain: "security", Public: false,

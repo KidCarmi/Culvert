@@ -4487,6 +4487,10 @@ document.addEventListener('click', e => {
     case 'addPACEndpointRow': addPACEndpointRow(); break;
     case 'removePACEndpoint': removePACEndpoint(el); break;
     case 'runPACSimulate':    runPACSimulate(); break;
+    case 'openPacGovModal':   openPacGovModal(arg); break;
+    case 'closePacGovModal':  closePacGovModal(); break;
+    case 'savePacGov':        savePacGov(); break;
+    case 'clearPacGov':       clearPacGov(arg); break;
 
     // ── Certificates ──
     case 'loadCACertInfo':    loadCACertInfo(); break;
@@ -11926,20 +11930,60 @@ async function loadPACConfig() {
   loadPACPosture();
 }
 
+// _pacGovRecords caches the latest governance records by profileId so the
+// edit modal can pre-fill without a second round-trip.
+let _pacGovRecords = {};
+
+// pacGovBadge maps a governance status string to a coloured pill.
+function pacGovBadge(status) {
+  const map = {
+    governed:   ['rgba(34,197,94,.15)',  '#22c55e', 'GOVERNED'],
+    ungoverned: ['rgba(239,68,68,.15)',  '#e5484d', 'UNGOVERNED'],
+    expired:    ['rgba(239,68,68,.15)',  '#e5484d', 'EXPIRED'],
+    review_due: ['rgba(245,166,35,.15)', '#f5a623', 'REVIEW DUE'],
+  };
+  const m = map[status] || ['rgba(156,163,175,.15)', '#9ca3af', (status||'—').toUpperCase()];
+  return '<span style="background:' + m[0] + ';color:' + m[1] + ';border-radius:4px;' +
+    'padding:1px 6px;font-size:.7rem;font-weight:700">' + m[2] + '</span>';
+}
+
 // loadPACPosture renders the read-only, config-derived DIRECT (full
-// security-path bypass) inventory. Observable evidence only — never claims a
-// bypass was used.
+// security-path bypass) inventory, joined with the P2 governance layer
+// (owner/reason/expiry/review). Observable evidence only — never claims a
+// bypass was used. Governance is node-local operator metadata; it does not
+// change what the served PAC returns.
 async function loadPACPosture() {
   const sum = document.getElementById('pac-posture-summary');
   const body = document.getElementById('pac-posture-body');
   if (!sum || !body) return;
+  const isAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
   try {
     const inv = await api('/api/pac/posture/inventory');
+    // Governance is best-effort: an older node without the P2 endpoint still
+    // renders the inventory.
+    let govRows = [];
+    try {
+      const g = await api('/api/pac/posture/exceptions');
+      govRows = (g && g.exceptions) || [];
+    } catch(_) { govRows = []; }
+    const govByID = {};
+    _pacGovRecords = {};
+    for (const row of govRows) {
+      govByID[row.profileId] = row;
+      _pacGovRecords[row.profileId] = row.record || {};
+    }
+    const ungov = govRows.filter(r => r.status === 'ungoverned').length;
+    const expired = govRows.filter(r => r.status === 'expired').length;
+    const due = govRows.filter(r => r.status === 'review_due').length;
     sum.innerHTML =
       '<strong>' + (inv.directCapableProfiles||0) + '</strong> of ' + (inv.totalProfiles||0) +
       ' profiles can emit DIRECT · <strong>' + (inv.servingDirectProfiles||0) + '</strong> serving now · ' +
       (inv.totalDirectPaths||0) + ' DIRECT path(s), ' +
-      '<span style="color:var(--red,#e5484d)">' + (inv.broadDirectPaths||0) + ' broad</span> · ' +
+      '<span style="color:var(--red,#e5484d)">' + (inv.broadDirectPaths||0) + ' broad</span><br>' +
+      '<span style="font-size:.8rem">Governance: ' +
+      '<span style="color:#e5484d">' + ungov + ' ungoverned</span> · ' +
+      '<span style="color:#e5484d">' + expired + ' expired</span> · ' +
+      '<span style="color:#f5a623">' + due + ' review due</span></span> · ' +
       '<span style="color:var(--muted)">evidence: config (what the config makes reachable, not observed usage)</span>';
     const capable = (inv.profiles||[]).filter(p => p.directCapable);
     if (!capable.length) {
@@ -11947,7 +11991,8 @@ async function loadPACPosture() {
       return;
     }
     let html = '<table class="tbl" style="width:100%;font-size:.82rem"><thead><tr>' +
-      '<th>Profile</th><th>Serving</th><th>Mode</th><th>DIRECT paths (full bypass)</th></tr></thead><tbody>';
+      '<th>Profile</th><th>Serving</th><th>Mode</th><th>DIRECT paths (full bypass)</th>' +
+      '<th>Governance</th>' + (isAdmin ? '<th></th>' : '') + '</tr></thead><tbody>';
     for (const p of capable) {
       const paths = (p.directPaths||[]).map(d => {
         const badge = '<span style="background:var(--crit-tint,rgba(239,68,68,.15));color:var(--red,#e5484d);border:1px solid rgba(239,68,68,.4);border-radius:4px;padding:1px 6px;font-size:.7rem;font-weight:600;margin-right:6px">FULL BYPASS</span>';
@@ -11957,15 +12002,105 @@ async function loadPACPosture() {
       const serving = p.serving
         ? '<span style="color:var(--red,#e5484d)">yes</span>'
         : '<span style="color:var(--muted)">no (disabled)</span>';
+      const gov = govByID[p.profileId] || {};
+      const rec = gov.record || {};
+      let govCell = pacGovBadge(gov.status || 'ungoverned');
+      const meta = [];
+      if (rec.owner) meta.push('owner: ' + escHtml(rec.owner));
+      if (rec.expiresAt) meta.push('expires: ' + escHtml(rec.expiresAt.slice(0,10)));
+      if (meta.length) govCell += '<br><span style="color:var(--muted);font-size:.72rem">' + meta.join(' · ') + '</span>';
+      const hasRec = !!rec.owner;
+      const actions = isAdmin
+        ? '<td style="white-space:nowrap">' +
+            '<button class="btn ghost" style="padding:2px 8px;font-size:.72rem" data-click="openPacGovModal" data-arg="' + escHtml(p.profileId) + '">' + (hasRec ? 'Edit' : 'Govern') + '</button>' +
+            (hasRec ? ' <button class="btn ghost" style="padding:2px 8px;font-size:.72rem" data-click="clearPacGov" data-arg="' + escHtml(p.profileId) + '">Clear</button>' : '') +
+          '</td>'
+        : '';
       html += '<tr><td><strong>' + escHtml(p.name || p.profileId) + '</strong><br>' +
         '<span style="color:var(--muted);font-size:.75rem">' + escHtml(p.profileId) + '</span></td>' +
-        '<td>' + serving + '</td><td>' + escHtml(p.availabilityMode || '') + '</td><td>' + paths + '</td></tr>';
+        '<td>' + serving + '</td><td>' + escHtml(p.availabilityMode || '') + '</td><td>' + paths + '</td>' +
+        '<td>' + govCell + '</td>' + actions + '</tr>';
     }
     html += '</tbody></table>';
     body.innerHTML = html;
   } catch(e) {
     body.innerHTML = '<div style="color:var(--muted);font-size:.82rem">Inventory unavailable: ' + escHtml(e.message) + '</div>';
     sum.innerHTML = '';
+  }
+}
+
+// openPacGovModal opens the governance editor for a DIRECT-capable profile,
+// pre-filled from the cached record (empty for a first-time govern).
+function openPacGovModal(profileId) {
+  const rec = _pacGovRecords[profileId] || {};
+  document.getElementById('pac-gov-profile').value = profileId;
+  document.getElementById('pac-gov-title').textContent = 'Govern DIRECT bypass — ' + profileId;
+  document.getElementById('pac-gov-owner').value = rec.owner || '';
+  document.getElementById('pac-gov-reason').value = rec.reason || '';
+  document.getElementById('pac-gov-app').value = rec.businessApp || '';
+  document.getElementById('pac-gov-ticket').value = rec.ticket || '';
+  document.getElementById('pac-gov-expires').value = rec.expiresAt ? rec.expiresAt.slice(0,10) : '';
+  document.getElementById('pac-gov-cadence').value = rec.reviewCadenceDays || '';
+  document.getElementById('pac-gov-reviewed').value = rec.lastReviewedAt ? rec.lastReviewedAt.slice(0,10) : '';
+  const err = document.getElementById('pac-gov-err');
+  err.style.display = 'none'; err.textContent = '';
+  const modal = document.getElementById('pac-gov-modal');
+  modalOpen(modal, '#pac-gov-owner', closePacGovModal);
+}
+
+function closePacGovModal() {
+  modalClose(document.getElementById('pac-gov-modal'));
+}
+
+// _dateToRFC3339 converts a yyyy-mm-dd date input to an RFC3339 UTC midnight
+// string (the server requires RFC3339); empty stays empty.
+function _dateToRFC3339(v) {
+  return v ? (v + 'T00:00:00Z') : '';
+}
+
+async function savePacGov() {
+  const err = document.getElementById('pac-gov-err');
+  err.style.display = 'none';
+  const profileId = document.getElementById('pac-gov-profile').value;
+  const cadenceRaw = document.getElementById('pac-gov-cadence').value.trim();
+  const payload = {
+    owner: document.getElementById('pac-gov-owner').value.trim(),
+    reason: document.getElementById('pac-gov-reason').value.trim(),
+    businessApp: document.getElementById('pac-gov-app').value.trim(),
+    ticket: document.getElementById('pac-gov-ticket').value.trim(),
+    expiresAt: _dateToRFC3339(document.getElementById('pac-gov-expires').value),
+    reviewCadenceDays: cadenceRaw ? parseInt(cadenceRaw, 10) : 0,
+    lastReviewedAt: _dateToRFC3339(document.getElementById('pac-gov-reviewed').value),
+  };
+  if (!payload.owner || !payload.reason) {
+    err.textContent = 'Owner and reason are required to govern a DIRECT exception.';
+    err.style.display = ''; return;
+  }
+  try {
+    const resp = await apiFetch('/api/pac/posture/exceptions/' + encodeURIComponent(profileId), {
+      method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    closePacGovModal();
+    toast('DIRECT exception governed', 'success');
+    loadPACPosture();
+  } catch(e) {
+    err.textContent = e.message || 'Save failed'; err.style.display = '';
+  }
+}
+
+async function clearPacGov(profileId) {
+  const ok = await confirmAction('Clear governance?',
+    'Remove owner/justification/expiry for ' + profileId + '. The DIRECT bypass itself is unchanged — it will show as ungoverned.',
+    'Clear');
+  if (!ok) return;
+  try {
+    const resp = await apiFetch('/api/pac/posture/exceptions/' + encodeURIComponent(profileId), { method: 'DELETE' });
+    if (!resp.ok && resp.status !== 204) throw new Error(await resp.text());
+    toast('Governance cleared', 'success');
+    loadPACPosture();
+  } catch(e) {
+    toast(e.message || 'Clear failed', 'error');
   }
 }
 
@@ -15576,8 +15711,60 @@ function resetBlockPage() {
   </div>
 </div>
 
+<!-- ── PAC DIRECT-exception governance modal (PEI P2) ───────────────────── -->
+<div id="pac-gov-modal" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center">
+  <div class="setup-card" style="width:440px;max-width:94vw">
+    <h2 id="pac-gov-title" style="font-size:1.1rem;margin-bottom:4px">Govern DIRECT bypass</h2>
+    <p style="font-size:.8rem;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      Attach an owner, justification, and (optionally) an expiry + review cadence to this
+      full-security-path bypass. This is operator metadata — it does <em>not</em> change what
+      the PAC returns, and it is node-local (not cluster-synced).
+    </p>
+    <input type="hidden" id="pac-gov-profile">
+    <div class="form-group">
+      <label class="form-label">Owner <span style="color:#e5484d">*</span></label>
+      <input id="pac-gov-owner" type="text" class="input" style="width:100%" maxlength="128" placeholder="team or person accountable">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Reason / justification <span style="color:#e5484d">*</span></label>
+      <input id="pac-gov-reason" type="text" class="input" style="width:100%" maxlength="512" placeholder="why this bypass exists">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="form-group">
+        <label class="form-label">Business app <span style="color:var(--muted)">(optional)</span></label>
+        <input id="pac-gov-app" type="text" class="input" style="width:100%" maxlength="128">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Ticket <span style="color:var(--muted)">(optional)</span></label>
+        <input id="pac-gov-ticket" type="text" class="input" style="width:100%" maxlength="128">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div class="form-group">
+        <label class="form-label">Expires</label>
+        <input id="pac-gov-expires" type="date" class="input" style="width:100%">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Review every (days)</label>
+        <input id="pac-gov-cadence" type="number" min="0" max="3650" class="input" style="width:100%" placeholder="0 = none">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Last reviewed</label>
+        <input id="pac-gov-reviewed" type="date" class="input" style="width:100%">
+      </div>
+    </div>
+    <div class="setup-err" id="pac-gov-err" style="margin-bottom:10px;display:none"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn primary" data-click="savePacGov">Save governance</button>
+      <button class="btn ghost" data-click="closePacGovModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── User Modal / Role Badges ─────────────────────────────────────────── -->
 <style>
+#pac-gov-modal { display:none }
+#pac-gov-modal.open { display:flex }
 .role-badge-admin    { background:rgba(239,68,68,.15);  color:#f87171; }
 .role-badge-operator { background:rgba(20,184,166,.15); color:#2dd4bf; }
 .role-badge-viewer   { background:rgba(156,163,175,.15);color:#9ca3af; }

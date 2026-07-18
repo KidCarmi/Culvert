@@ -67,8 +67,11 @@ import (
 //     /pools/, /simulate, /analyze).
 //   - 174 — PAC Exception Intelligence P0 added /api/pac/posture/inventory
 //     (read-only config-derived DIRECT full-bypass inventory; viewer).
+//   - 176 — PAC Exception Intelligence P2 added /api/pac/posture/exceptions
+//     (governance list; viewer) + /api/pac/posture/exceptions/ (item: viewer
+//     GET, admin PUT/DELETE).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 174
+	const want = 176
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
