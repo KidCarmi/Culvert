@@ -276,7 +276,7 @@ func TestP2S4_Routes_NoNewAuthPolicyRoutes(t *testing.T) {
 // ── Static UI: the panel exposes the outcome selector, gating, and CR copy ───
 
 func TestP2S4_UI_OutcomeSelectorAndCopy(t *testing.T) {
-	html, err := os.ReadFile("static/index.html")
+	html, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
 		t.Fatalf("read index.html: %v", err)
 	}
