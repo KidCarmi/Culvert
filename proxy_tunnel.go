@@ -691,8 +691,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		// next session self-heals) and returns false; cert-verify and generic/origin-
 		// emitted alerts never learn. No rescue here (client-cert is handled above,
 		// structurally, before this branch).
-		maybeFailOpenOrigin(hostOnly, match, id, herr)
-		recordDecryptFailureEntry(originInspectFailureOutcome(herr, hostOnly, dec, match), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row
+		learned, _ := maybeFailOpenOrigin(hostOnly, match, id, herr)
+		recordDecryptFailureEntry(withLearn(originInspectFailureOutcome(herr, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), herr, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -786,10 +786,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// stable across connections and clients can resume.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, mitmClientTLSConfig)
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                                                                                                        //nolint:errcheck // best-effort cleanup on handshake failure
-		upstreamTLS.Close()                                                                                                      //nolint:errcheck // best-effort cleanup on handshake failure
-		maybeFailOpenClient(hostOnly, match, id, err)                                                                            // learn a pinning rejection (learn-only; next session self-heals)
-		recordDecryptFailureEntry(clientInspectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row
+		clientTLS.Close()                                                                                                                                         //nolint:errcheck // best-effort cleanup on handshake failure
+		upstreamTLS.Close()                                                                                                                                       //nolint:errcheck // best-effort cleanup on handshake failure
+		learned := maybeFailOpenClient(hostOnly, match, id, err)                                                                                                  // learn a pinning rejection (learn-only; next session self-heals)
+		recordDecryptFailureEntry(withLearn(clientInspectFailureOutcome(err, hostOnly, dec, match), learned, dec.ScopeID), id, hostOnly, match, decRedactHosts()) // ADR-0011 failure taxonomy + feed row (learner fields when this session fed the cache)
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
