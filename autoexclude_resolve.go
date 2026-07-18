@@ -473,25 +473,62 @@ func (c *autoExcludeHitScopeCounter) writePrometheus(w *strings.Builder) {
 	}
 }
 
-// writeAutoExcludeActiveByScope emits the culvert_decrypt_autoexclude_active{scope} gauge
-// — the current live-exclusion occupancy per profile scope (F6). Read path only (scrape
-// time), computed from the engine snapshot; emits nothing when the cache is empty (no
-// zero-noise), matching the labeled learn/hit series. Scopes are sorted for deterministic
-// output.
-func writeAutoExcludeActiveByScope(w *strings.Builder) {
-	byScope := autoExclude().ActiveByScope()
+// scopeGauge is one capped active-by-scope series.
+type scopeGauge struct {
+	scope string
+	n     int
+}
+
+// cappedActiveScopes orders the per-scope active counts (count desc, then scope name) and
+// bounds the distinct series at maxAutoExcludeLabels, folding the tail into a single
+// _other_ aggregate. The cache can hold up to maxEntries (tunable, default 4096) entries
+// across arbitrarily many admin-created profiles, so without the cap a scrape could emit
+// thousands of Prometheus series (Codex #817); this mirrors the hit counter's fold. The
+// count-desc order keeps the highest-occupancy scopes (the ones eroding coverage most) as
+// their own series and buckets the long tail.
+func cappedActiveScopes(byScope map[string]int) []scopeGauge {
 	if len(byScope) == 0 {
-		return
+		return nil
 	}
 	scopes := make([]string, 0, len(byScope))
 	for s := range byScope {
 		scopes = append(scopes, s)
 	}
-	sort.Strings(scopes)
+	sort.Slice(scopes, func(i, j int) bool {
+		if byScope[scopes[i]] != byScope[scopes[j]] {
+			return byScope[scopes[i]] > byScope[scopes[j]]
+		}
+		return scopes[i] < scopes[j]
+	})
+	out := make([]scopeGauge, 0, len(scopes))
+	other := 0
+	for i, s := range scopes {
+		if i >= maxAutoExcludeLabels {
+			other += byScope[s]
+			continue
+		}
+		out = append(out, scopeGauge{s, byScope[s]})
+	}
+	if other > 0 {
+		out = append(out, scopeGauge{"_other_", other})
+	}
+	return out
+}
+
+// writeAutoExcludeActiveByScope emits the culvert_decrypt_autoexclude_active{scope} gauge
+// — the current live-exclusion occupancy per profile scope (F6). Read path only (scrape
+// time), computed from the engine snapshot; emits nothing when the cache is empty (no
+// zero-noise), matching the labeled learn/hit series. Cardinality-capped via
+// cappedActiveScopes.
+func writeAutoExcludeActiveByScope(w *strings.Builder) {
+	rows := cappedActiveScopes(autoExclude().ActiveByScope())
+	if len(rows) == 0 {
+		return
+	}
 	w.WriteString("# HELP culvert_decrypt_autoexclude_active Current active learned decryption exclusions (inspection is OFF for these hosts), by profile scope\n")
 	w.WriteString("# TYPE culvert_decrypt_autoexclude_active gauge\n")
-	for _, s := range scopes {
-		fmt.Fprintf(w, "culvert_decrypt_autoexclude_active{scope=%q} %d\n", strings.ReplaceAll(s, `"`, ""), byScope[s])
+	for _, r := range rows {
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_active{scope=%q} %d\n", strings.ReplaceAll(r.scope, `"`, ""), r.n)
 	}
 }
 

@@ -76,6 +76,42 @@ func TestF6_HitByScope_CapFolds(t *testing.T) {
 	}
 }
 
+// TestF6_ActiveByScope_CapFolds proves the active{scope} gauge bounds its series at
+// maxAutoExcludeLabels and folds the tail into _other_ (Codex #817), keeping the
+// highest-occupancy scopes as their own series.
+func TestF6_ActiveByScope_CapFolds(t *testing.T) {
+	byScope := make(map[string]int, maxAutoExcludeLabels+50)
+	for i := 0; i < maxAutoExcludeLabels+50; i++ {
+		// Give each scope a distinct count so ordering is deterministic; the 50 lowest
+		// counts (scope-0..scope-49) must land in _other_.
+		byScope["scope-"+strconv.Itoa(i)] = i + 1
+	}
+	rows := cappedActiveScopes(byScope)
+	if len(rows) != maxAutoExcludeLabels+1 {
+		t.Fatalf("rows = %d, want %d (cap + _other_)", len(rows), maxAutoExcludeLabels+1)
+	}
+	last := rows[len(rows)-1]
+	if last.scope != "_other_" {
+		t.Fatalf("tail not folded into _other_: %+v", last)
+	}
+	// _other_ must sum the 50 lowest counts (1..50).
+	wantOther := 0
+	for i := 0; i < 50; i++ {
+		wantOther += i + 1
+	}
+	if last.n != wantOther {
+		t.Fatalf("_other_ sum = %d, want %d", last.n, wantOther)
+	}
+	// Highest-count scope leads (count desc).
+	if rows[0].n <= rows[1].n {
+		t.Fatalf("not count-descending: %+v %+v", rows[0], rows[1])
+	}
+	// Empty input ⇒ no rows.
+	if cappedActiveScopes(nil) != nil {
+		t.Fatal("empty input must yield nil")
+	}
+}
+
 // TestF6_ActiveByScope_Emission proves the active{scope} gauge reflects the live cache and
 // emits nothing when empty.
 func TestF6_ActiveByScope_Emission(t *testing.T) {
