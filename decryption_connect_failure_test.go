@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/decryptobs"
@@ -26,13 +28,35 @@ func TestClassifyConnectFailure(t *testing.T) {
 		{"nil", nil, decryptobs.FailCategoryOther},
 	}
 	for _, c := range cases {
-		stage, cat := classifyConnectFailure(c.err)
-		if stage != decryptobs.FailStageTCPConnect {
-			t.Errorf("%s: stage = %q, want tcp_connect (a dial error precedes any handshake)", c.name, stage)
-		}
-		if cat != c.cat {
+		if cat := classifyConnectFailure(c.err); cat != c.cat {
 			t.Errorf("%s: category = %q, want %q", c.name, cat, c.cat)
 		}
+	}
+	// The stage is fixed (tcp_connect) — asserted via the builder projection below.
+}
+
+// TestShouldRecordConnectFailure gates the Codex #846 fix: only a genuine
+// unreachable-origin dial failure is recorded — a client abort (request context
+// ended) and an ssrfControl security block are excluded.
+func TestShouldRecordConnectFailure(t *testing.T) {
+	refused := errors.New("dial tcp 10.0.0.9:443: connect: connection refused")
+	if !shouldRecordConnectFailure(nil, refused) {
+		t.Error("a genuine unreachable-origin dial error must be recorded")
+	}
+	if !shouldRecordConnectFailure(nil, errors.New("i/o timeout")) {
+		t.Error("a real dial timeout (request context still live) must be recorded")
+	}
+	// Client abort: the request context ended mid-dial.
+	if shouldRecordConnectFailure(context.Canceled, refused) {
+		t.Error("a client-cancelled dial must NOT be recorded (not an origin failure)")
+	}
+	if shouldRecordConnectFailure(context.DeadlineExceeded, refused) {
+		t.Error("a request-context deadline abort must NOT be recorded")
+	}
+	// SSRF security block (DNS-rebinding/private-IP) wrapped by errSSRFBlocked.
+	ssrfErr := fmt.Errorf("dial: %w: refusing tcp dial to private address 10.0.0.1", errSSRFBlocked)
+	if shouldRecordConnectFailure(nil, ssrfErr) {
+		t.Error("an ssrfControl rejection must NOT be recorded (security block, not an origin failure)")
 	}
 }
 

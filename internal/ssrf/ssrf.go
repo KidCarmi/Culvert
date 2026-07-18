@@ -11,12 +11,18 @@ package ssrf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// ErrBlocked is the sentinel every connect-time Control rejection wraps, so a
+// caller can errors.Is() an SSRF security block (a DNS-rebinding/private-IP
+// target refused at connect) apart from a genuine unreachable-origin dial error.
+var ErrBlocked = errors.New("ssrf control: destination blocked")
 
 // privateCIDRs lists every non-routable / internal-infrastructure range that
 // must never be exposed to an untrusted client (SSRF guard) and must never be
@@ -120,14 +126,14 @@ func PrivateHost(hostport string) error {
 func Control(network, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return fmt.Errorf("ssrf control: invalid address %q: %w", address, err)
+		return fmt.Errorf("%w: invalid address %q: %v", ErrBlocked, address, err)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return fmt.Errorf("ssrf control: unexpected non-IP %q in dial", host)
+		return fmt.Errorf("%w: unexpected non-IP %q in dial", ErrBlocked, host)
 	}
 	if PrivateIP(ip) {
-		return fmt.Errorf("ssrf control: refusing %s dial to private address %s", network, ip)
+		return fmt.Errorf("%w: refusing %s dial to private address %s", ErrBlocked, network, ip)
 	}
 	return nil
 }

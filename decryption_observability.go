@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
@@ -236,21 +237,34 @@ func withLearn(o *DecryptionOutcome, reason AutoExcludeReason, scope string) *De
 	return o
 }
 
+// shouldRecordConnectFailure reports whether an inspect-path dial error is a
+// genuine unreachable-ORIGIN failure worth recording to decryption coverage. It
+// EXCLUDES a client abort (the request context ended mid-dial → ctxErr != nil)
+// and an ssrfControl security rejection (a DNS-rebinding/private-IP block,
+// errSSRFBlocked) — neither is a decryption attempt against the upstream, so
+// counting them would pollute the Decryption Health coverage/failure metrics
+// (Codex #846). ctxErr is r.Context().Err(); the dialer's own 10s Timeout does
+// not cancel the request context, so a real dial timeout still records.
+func shouldRecordConnectFailure(ctxErr, dialErr error) bool {
+	return ctxErr == nil && !errors.Is(dialErr, errSSRFBlocked)
+}
+
 // classifyConnectFailure maps an upstream TCP-dial error (BEFORE any TLS handshake)
-// to the bounded ADR-0011 (FailStage, FailCategory). The stage is always
-// tcp_connect — the origin was unreachable, so no handshake was ever attempted. A
-// dial timeout is `timeout`; connection-refused / reset / DNS / no-route all fall
-// SAFE to `other` (there is no dedicated category, and they are transport errors,
-// not decryption-incompatibility signals). The raw string never leaves here.
-func classifyConnectFailure(err error) (decryptobs.FailStage, decryptobs.FailCategory) {
+// to the bounded ADR-0011 FailCategory. The STAGE is always FailStageTCPConnect
+// (the origin was unreachable, so no handshake was ever attempted), so the builder
+// pairs it directly rather than round-tripping it through this function. A dial
+// timeout is `timeout`; connection-refused / reset / DNS / no-route all fall SAFE
+// to `other` (no dedicated category, and they are transport errors, not
+// decryption-incompatibility signals). The raw error string never leaves here.
+func classifyConnectFailure(err error) decryptobs.FailCategory {
 	if err == nil {
-		return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryOther
+		return decryptobs.FailCategoryOther
 	}
 	msg := strings.ToLower(err.Error())
 	if containsAny(msg, "i/o timeout", "deadline exceeded", "timed out") {
-		return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryTimeout
+		return decryptobs.FailCategoryTimeout
 	}
-	return decryptobs.FailStageTCPConnect, decryptobs.FailCategoryOther
+	return decryptobs.FailCategoryOther
 }
 
 // upstreamConnectFailureOutcome builds the ADR-0011 DecryptionOutcome for an
@@ -265,14 +279,13 @@ func classifyConnectFailure(err error) (decryptobs.FailStage, decryptobs.FailCat
 // for the TLS fields (no negotiated session); ProfileID/CacheConsulted carry the
 // fail-open scope read, matching the handshake-failure builders.
 func upstreamConnectFailureOutcome(err error, hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
-	stage, category := classifyConnectFailure(err)
 	o := &DecryptionOutcome{
 		Outcome:        decryptobs.OutcomeFailed,
 		DecisionSource: decryptobs.DecisionNoFailOpen502,
 		Host:           hostOnly,
 		CertVerify:     decryptobs.CertVerifyNotChecked,
-		FailStage:      stage,
-		FailCategory:   category,
+		FailStage:      decryptobs.FailStageTCPConnect,
+		FailCategory:   classifyConnectFailure(err),
 		ProfileID:      dec.ScopeID,
 		CacheConsulted: dec.Consulted,
 	}
