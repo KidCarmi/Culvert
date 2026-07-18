@@ -624,7 +624,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// this flow: reordering here would change the strip path's 502-before-200
 	// semantics. It takes ownership of the freshly-dialled rawUpstream.
 	if !resolveStripALPN(match) {
-		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec.SkipVerify, match, id)
+		handleInspectNativeALPN(w, r, rawUpstream, targetHost, hostOnly, dec, match, id)
 		return
 	}
 
@@ -796,12 +796,16 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	recordActiveConn(1)
 	defer recordActiveConn(-1)
 
-	// ADR-0011: build the inspected decryption-observability block ONCE from the
-	// completed origin TLS state and reuse it for every inner-request log entry. The
-	// entries are opt-in per rule (LogFullURI), so this projection is cheap and off the
-	// latency-critical handshake path. redact=false mirrors the bypass close path — the
-	// §4 host/SNI redaction config surface is a later slice.
-	decBlock := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match).toBlock(false)
+	// ADR-0011: build the inspected decryption-observability outcome ONCE from the
+	// completed origin TLS state, count the session (this is the inspect-success
+	// terminal — it logs per-inner-request and never reaches the close seam that counts
+	// the other paths), then project the block for reuse across every inner-request log
+	// entry. The entries are opt-in per rule (LogFullURI), so the projection is cheap and
+	// off the latency-critical handshake path. redact=false mirrors the bypass close path
+	// — the §4 host/SNI redaction config surface is a later slice.
+	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match)
+	recordDecryptSession(inspected)
+	decBlock := inspected.toBlock(false)
 
 	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
 	// file-block via the shared inspection pipeline). Extracted so the native-ALPN

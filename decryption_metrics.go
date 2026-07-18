@@ -1,0 +1,105 @@
+package main
+
+// decryption_metrics.go — ADR-0011 Phase 2 (Metrics): the decryption coverage counter.
+//
+// culvert_decrypt_sessions_total counts every decryption DECISION once per session,
+// labelled by the bounded (outcome, decision_source, tls_version) enums. It is the
+// coverage series operators alert on ("what fraction of TLS is actually inspected, and
+// why is the rest bypassed"). All three labels are CLOSED enum sets (6 × 8 × 3 = 144 max
+// combinations), so — unlike autoExcludeLearns, whose scope label is admin-created — this
+// counter needs NO cardinality cap: the label space is bounded by construction, and every
+// label value is coerced through decEnumOr so only in-vocabulary tokens ever reach a label.
+//
+// Wiring (exactly once per session): recordDecryptSession is called from the two session-
+// terminal points — recordTunnelCloseGatedDec (bypass / learned-bypass / rescue /
+// non-TLS-fallback all pass a non-nil DecryptionOutcome there) and handleTunnelInspect
+// (the inspect-success path, which logs per-inner-request and never reaches the close
+// seam). The `failed` outcome + the culvert_decrypt_failures_total taxonomy are a later
+// slice (failure paths do not yet construct a DecryptionOutcome).
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/KidCarmi/Culvert/internal/decryptobs"
+)
+
+// decSessionLabel is one (outcome, decision_source, tls_version) series with its count.
+type decSessionLabel struct {
+	outcome string
+	source  string
+	tlsVer  string
+	n       int64
+}
+
+// decSessionCounter is the hand-rolled, bounded-label counter behind
+// culvert_decrypt_sessions_total. It mirrors autoExcludeLearnCounter's shape (RWMutex +
+// insertion-ordered series) but drops the cardinality-cap folding: all three labels are
+// closed enum sets, so the series count can never exceed |Outcome|·|DecisionSource|·
+// |TLSVersion| = 144 regardless of traffic.
+type decSessionCounter struct {
+	mu     sync.RWMutex
+	counts map[string]*decSessionLabel
+	order  []string
+}
+
+var decSessions = &decSessionCounter{counts: make(map[string]*decSessionLabel)}
+
+// record increments the (outcome, source, tlsVer) series. Callers pass already-bounded
+// enum strings (recordDecryptSession coerces via decEnumOr), so no validation is needed
+// here — the values are compile-time enum members, never raw/attacker tokens.
+func (c *decSessionCounter) record(outcome, source, tlsVer string) {
+	k := outcome + "\x00" + source + "\x00" + tlsVer
+	c.mu.RLock()
+	ll, ok := c.counts[k]
+	c.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(&ll.n, 1)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ll, ok = c.counts[k]; ok { // double-check after upgrading the lock
+		atomic.AddInt64(&ll.n, 1)
+		return
+	}
+	c.counts[k] = &decSessionLabel{outcome: outcome, source: source, tlsVer: tlsVer, n: 1}
+	c.order = append(c.order, k)
+}
+
+// writePrometheus appends the counter's series in text-exposition form. Emits nothing
+// until at least one session is recorded (no zero-value noise), matching the other
+// hand-rolled counters.
+func (c *decSessionCounter) writePrometheus(w *strings.Builder) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.order) == 0 {
+		return
+	}
+	w.WriteString("\n# HELP culvert_decrypt_sessions_total Decryption decisions by outcome, decision source, and negotiated TLS version (ADR-0011 coverage)\n")
+	w.WriteString("# TYPE culvert_decrypt_sessions_total counter\n")
+	for _, k := range c.order {
+		ll := c.counts[k]
+		fmt.Fprintf(w, "culvert_decrypt_sessions_total{outcome=%q,decision_source=%q,tls_version=%q} %d\n",
+			ll.outcome, ll.source, ll.tlsVer, atomic.LoadInt64(&ll.n))
+	}
+}
+
+// recordDecryptSession increments the coverage counter once per session from a finalized
+// DecryptionOutcome. Labels pass through decEnumOr so an unset/cast enum coerces to its
+// sentinel (never "" or a raw token) — the same bounded-label guard toBlock uses, keeping
+// the metric vocabulary closed even if a future caller under-populates the struct. A nil
+// outcome (the non-decryption tunnel closes — WebSocket / SOCKS5 — that pass no dec block)
+// is a no-op: those are not decryption decisions and must not inflate coverage.
+func recordDecryptSession(o *DecryptionOutcome) {
+	if o == nil {
+		return
+	}
+	decSessions.record(
+		decEnumOr(o.Outcome, decryptobs.OutcomeNotDecrypted),
+		decEnumOr(o.DecisionSource, decryptobs.DecisionNonTLSFallback),
+		decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown),
+	)
+}
