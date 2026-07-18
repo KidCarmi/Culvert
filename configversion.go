@@ -231,7 +231,10 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
 
 	if globalConfigStore != nil {
-		globalConfigStore.Update(CurrentConfigSnapshot())
+		// A rolled-back config was valid when saved; if a cap was lowered since,
+		// the commit-time rejection is logged + alerted + surfaced via
+		// LastPublishError (the local rollback still applied).
+		_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	}
 
 	w.Header().Set("Content-Type", "application/json")

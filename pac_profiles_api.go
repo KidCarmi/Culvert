@@ -106,7 +106,7 @@ func pacApplyProfilesMutation(w http.ResponseWriter, r *http.Request, action, ob
 		fmt.Sprintf("profiles=%d pools=%d", len(candidate.Profiles), len(candidate.Pools)),
 		before, candidate)
 	saveConfigVersion(sessionAdmin(r), action)
-	publishCurrentConfigSnapshot()
+	_ = publishCurrentConfigSnapshot()
 	pacResetProfileAlert(object)
 	return true
 }

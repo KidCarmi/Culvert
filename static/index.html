@@ -13292,6 +13292,12 @@ function renderDiagnoseConfig(d) {
   let msg = '';
   if (status === 'degraded' && d.error) msg = '<p class="hint" style="color:var(--red)">' + escHtml(String(d.error)) + '</p>';
   else if (status === 'warn') msg = '<p class="hint" style="color:var(--warn)">' + escHtml(String(d.note || d.error || 'approaching a collection cap')) + '</p>';
+  // Commit-time rejection: the CP refused to publish the live config (over-cap),
+  // so the fleet is on the last valid snapshot until the oversized collection is trimmed.
+  if (d.publish_rejected) {
+    msg += '<p class="hint" style="color:var(--red)">Cluster publish rejected: ' + escHtml(String(d.publish_rejected)) +
+      ' — the fleet stays on the last valid config' + (d.publish_rejected_at ? ' (since ' + escHtml(String(d.publish_rejected_at)) + ')' : '') + '.</p>';
+  }
   // Utilization table (size vs cap) when present; otherwise the plain sizes.
   const util = d.utilization || [];
   let rows, head;
@@ -15477,6 +15483,9 @@ function resetBlockPage() {
              = expired-node re-enrollment (CHAOS-12 recovery path). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
+        <!-- P1 commit-time validation: the CP refused to publish an over-cap config
+             to the fleet (fleet stays on the last valid snapshot until trimmed). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>
       </div>
     </div>
     <div class="form-group">

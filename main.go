@@ -1155,7 +1155,10 @@ func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath strin
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
-	globalConfigStore.Update(CurrentConfigSnapshot())
+	// Initial publish. A commit-time rejection (startup config already over a
+	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
+	// the CP still serves locally, so boot continues.
+	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
 	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
 		return err

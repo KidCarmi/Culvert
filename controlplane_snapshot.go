@@ -237,6 +237,13 @@ type ConfigStore struct {
 	// DP-only processes and in tests that build a bare ConfigStore.
 	versionPath string
 	subs        []chan struct{}
+	// lastPublishErr records the reason the most recent Update was REJECTED at
+	// commit (P1 commit-time validation) — an over-cap snapshot is not published,
+	// so the fleet stays on the last valid config instead of every DP silently
+	// rejecting a bad one. Empty when the last publish succeeded. Surfaced to
+	// operators via LastPublishError() (diagnose/health).
+	lastPublishErr string
+	lastPublishTS  string
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -350,13 +357,38 @@ type dpLastGoodConfigSnapshotStatus struct {
 var dpLastGoodConfigSnapshotState atomic.Value // dpLastGoodConfigSnapshotStatus
 var dpControlPlanePollFailing atomic.Bool
 
-// Update atomically replaces the snapshot and notifies all subscribers.
-func (s *ConfigStore) Update(snap ConfigSnapshot) {
+// Update validates the snapshot at COMMIT time and, if it passes, atomically
+// replaces the published snapshot and notifies all subscribers. Returns the
+// validation error WITHOUT publishing when the snapshot exceeds a per-slice cap
+// (P1 commit-time validation): the CP is the point of truth, so an over-cap
+// config is rejected here with a named-field error and the fleet stays on the
+// last valid snapshot — instead of committing a snapshot that every DP would
+// then silently reject wholesale, freezing the fleet on stale config with no
+// clear signal (fail-open on new threats). The CP's own local proxying is
+// unaffected (its stores already hold the data); only distribution is gated.
+func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	if err := validateConfigSnapshot(snap); err != nil {
+		s.mu.Lock()
+		s.lastPublishErr = err.Error()
+		s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
+		curVer := s.version
+		s.mu.Unlock()
+		logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
+		fireAlert("config_snapshot_rejected", AlertPayload{
+			Event:  "config_snapshot_rejected",
+			Actor:  "culvert",
+			Source: "cluster",
+			Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
+		})
+		return err
+	}
 	s.mu.Lock()
 	s.version++
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.snap = snap
+	s.lastPublishErr = ""
+	s.lastPublishTS = ""
 	s.persistVersionLocked()
 	subs := append([]chan struct{}{}, s.subs...)
 	s.mu.Unlock()
@@ -368,10 +400,26 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) {
 		}
 	}
 	logger.Printf("ControlPlane: config v%d published", snap.Version)
+	return nil
 }
 
-func publishCurrentConfigSnapshot() {
-	globalConfigStore.Update(CurrentConfigSnapshot())
+// LastPublishError returns the reason the most recent config publish was
+// rejected at commit (over-cap), plus the timestamp — empty when the last
+// publish succeeded. Read-only; used by the diagnose/health surface so an
+// operator sees "publish rejected, fleet on stale config" as a named error.
+func (s *ConfigStore) LastPublishError() (msg, ts string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastPublishErr, s.lastPublishTS
+}
+
+// publishCurrentConfigSnapshot publishes the live config to the fleet. Returns
+// the commit-time validation error when the snapshot is over-cap (not
+// published). Most callers mutate a store then publish fire-and-forget — the
+// rejection is logged, alerted, and surfaced via LastPublishError — but the
+// error is returned so an admin handler can also report it inline.
+func publishCurrentConfigSnapshot() error {
+	return globalConfigStore.Update(CurrentConfigSnapshot())
 }
 
 // Get returns the current snapshot.

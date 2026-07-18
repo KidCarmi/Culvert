@@ -775,6 +775,11 @@ type configDiagnosis struct {
 	MaxUtilSlice   string                 `json:"max_util_slice,omitempty"` // the slice at MaxUtilPercent
 	Error          string                 `json:"error,omitempty"`          // first cap violation (names the collection + cap)
 	Note           string                 `json:"note,omitempty"`           // human explanation of a warn verdict
+	// PublishRejected is set on a Control Plane when the most recent config
+	// publish was refused at commit (over-cap) — the fleet is running the last
+	// valid snapshot, not the live config. Empty when the last publish succeeded.
+	PublishRejected   string `json:"publish_rejected,omitempty"`
+	PublishRejectedAt string `json:"publish_rejected_at,omitempty"`
 }
 
 // configWarnUtilPercent is the utilization at which a slice trips the amber
@@ -887,7 +892,20 @@ func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
 // build is a read-only assembly over the config stores; the snapshot VALUES never
 // leave this function (only counts + the verdict are returned).
 func diagnoseConfig(now time.Time) configDiagnosis {
-	return diagnoseConfigFrom(CurrentConfigSnapshot(), nodeParticipatesInConfigSync(), now)
+	syncing := nodeParticipatesInConfigSync()
+	d := diagnoseConfigFrom(CurrentConfigSnapshot(), syncing, now)
+	// P1 commit-time validation: if the CP's last publish was rejected (over-cap),
+	// the fleet is on a stale snapshot — surface it as a degraded, named error
+	// even if the operator has since trimmed the live config back under the cap
+	// (the fleet only recovers on the next successful publish).
+	if msg, ts := globalConfigStore.LastPublishError(); msg != "" {
+		d.PublishRejected, d.PublishRejectedAt = msg, ts
+		d.Status, d.OK = "degraded", false
+		if d.Error == "" {
+			d.Error = "last config publish rejected: " + msg
+		}
+	}
+	return d
 }
 
 // nodeParticipatesInConfigSync reports whether this node actually exchanges
