@@ -367,11 +367,11 @@ Declared at `controlplane.go:137–155` (per agent inventory, line-precise const
 
 | Constant | Limit |
 |---|---|
-| `maxSnapBlockedHosts` | 1_000_000 |
-| `maxSnapIPList` | 1_000_000 |
+| `maxSnapBlockedHosts` | 2_000_000 |
+| `maxSnapIPList` | 2_000_000 |
 | `maxSnapPolicyRules` | 10_000 |
 | `maxSnapSSLBypassPatterns` | 10_000 |
-| `maxSnapURLCategories` | 1_000_000 |
+| `maxSnapURLCategories` | 2_000_000 |
 | `maxSnapFileProfiles` | 1_000 |
 | `maxSnapFileBlockExtensions` | 10_000 |
 | `maxSnapRewriteRules` | 5_000 |
@@ -467,7 +467,7 @@ Per `roadmap/RUNTIME-OWNERSHIP.md` §4 P3.2c, the HA standby loop calls `applyCo
 
 ### 11.3 ConfigSnapshot exceeds size caps
 
-**Scenario:** CP pushes a snapshot with `len(snap.BlockedHosts) > 1_000_000`. `validateConfigSnapshot` rejects the entire snapshot.
+**Scenario:** CP pushes a snapshot with `len(snap.BlockedHosts) > 2_000_000`. `validateConfigSnapshot` rejects the entire snapshot.
 
 **Behaviour:** DP logs the validation error and continues with the previously-applied snapshot. **No partial apply.**
 

@@ -99,7 +99,7 @@ func (c *DataPlaneClient) connect(addr string) error {
 	conn, err := grpc.NewClient(addr, dialOpt,
 		grpc.WithDefaultCallOptions(
 			// GetConfig responses carry the full ConfigSnapshot; an
-			// enterprise blocklist (1 M hosts) is ~30 MiB decompressed, far
+			// enterprise blocklist (2 M hosts) is ~60 MiB decompressed, far
 			// past gRPC's 4 MiB default receive limit. maxClusterGRPCMsgSize
 			// matches the CP server's frame budget. UseCompressor gzips the
 			// stream (both directions — the CP echoes the request's

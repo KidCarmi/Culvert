@@ -119,22 +119,24 @@ type ConfigSnapshot struct {
 // Control Plane that pushes a snapshot exceeding ANY one of these
 // causes the entire snapshot to be rejected (no partial application).
 //
-// The blocklist/IP/URL-category caps are 1 M (raised from 200 k) so the
-// cluster keeps pace with enterprise-scale aggregated threat feeds
-// (URLhaus + abuse.ch + firebog-class lists routinely reach 500 k–1 M
-// hosts). The cap remains a real memory-DoS bound: the CP↔DP gRPC
-// channel is sized to maxClusterGRPCMsgSize (below) and the config
-// stream is gzip-compressed, so a 1 M-host snapshot (~30 MiB JSON,
-// ~3–5 MiB on the wire) transfers inside the frame instead of tripping
-// the old 4 MiB default. Local blocklist matching is an O(1)
-// map[string]bool (internal/blocklist), so these sizes cost lookups
-// nothing at request time.
+// The blocklist/IP/URL-category caps are 2 M (raised from 200 k) so the
+// cluster keeps pace with enterprise-scale aggregated threat feeds and
+// exceeds the largest single-list limits of comparable appliances
+// (PAN-OS domain EDLs top out ~4 M box-wide; a single feed there is far
+// under 2 M). URLhaus + abuse.ch + firebog-class aggregations routinely
+// reach 500 k–1 M hosts, so 2 M leaves genuine headroom. The cap remains
+// a real memory-DoS bound: the CP↔DP gRPC channel is sized to
+// maxClusterGRPCMsgSize (below) and the config stream is gzip-compressed,
+// so a 2 M-host snapshot (~60 MiB JSON, ~6–8 MiB on the wire) transfers
+// inside the frame instead of tripping the old 4 MiB default. Local
+// blocklist matching is an O(1) map[string]bool (internal/blocklist), so
+// these sizes cost lookups nothing at request time.
 const (
-	maxSnapBlockedHosts        = 1_000_000
-	maxSnapIPList              = 1_000_000
+	maxSnapBlockedHosts        = 2_000_000
+	maxSnapIPList              = 2_000_000
 	maxSnapPolicyRules         = 10_000
 	maxSnapSSLBypassPatterns   = 10_000
-	maxSnapURLCategories       = 1_000_000
+	maxSnapURLCategories       = 2_000_000
 	maxSnapFileProfiles        = 1_000
 	maxSnapFileBlockExtensions = 10_000
 	maxSnapRewriteRules        = 5_000
@@ -156,15 +158,16 @@ const (
 
 // maxClusterGRPCMsgSize is the CP↔DP gRPC max message size (send + recv on
 // both peers). gRPC's default receive limit is 4 MiB, which capped a config
-// snapshot at ~200 k hostname strings; raising it to 64 MiB lets an
-// enterprise-scale snapshot (1 M blocked hosts + IP list + URL categories,
-// ~30 MiB uncompressed JSON) transfer with headroom while still bounding a
-// single frame to a memory-safe size (a hostile CP cannot force an unbounded
-// DP allocation). The config stream is gzip-compressed on top of this
-// (~10:1 for host lists), so the on-wire cost stays a few MiB. The per-slice
-// validateConfigSnapshot caps remain the primary entry-count DoS bound; this
-// is the independent transport-frame bound.
-const maxClusterGRPCMsgSize = 64 << 20 // 64 MiB
+// snapshot at ~200 k hostname strings; raising it to 128 MiB lets an
+// enterprise-scale snapshot whose dominant slice is at the 2 M cap (~60 MiB
+// uncompressed JSON) transfer with ~2× headroom while still bounding a single
+// frame to a memory-safe size (a hostile CP cannot force an unbounded DP
+// allocation). grpc-go enforces this bound on the DECOMPRESSED message, so it
+// also caps a gzip decompression bomb. The config stream is gzip-compressed on
+// top of this (~10:1 for host lists), so the on-wire cost stays under ~10 MiB.
+// The per-slice validateConfigSnapshot caps remain the primary entry-count DoS
+// bound; this is the independent transport-frame bound.
+const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
 
 // validateConfigSnapshot enforces the per-slice caps above. Returns an
 // error naming the first field that overflows; nil when the snapshot is
