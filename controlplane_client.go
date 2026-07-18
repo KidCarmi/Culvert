@@ -12,7 +12,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/encoding/gzip"
 )
 
 // clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
@@ -122,28 +121,12 @@ func (c *DataPlaneClient) connect(addr string) error {
 		logger.Printf("DataPlane: connecting to %s (insecure — dev only!)", addr)
 	}
 
-	// GetConfig responses carry the full ConfigSnapshot; an enterprise
-	// blocklist (2 M hosts) is ~60 MiB decompressed, far past gRPC's 4 MiB
-	// default receive limit. maxClusterGRPCMsgSize matches the CP server's
-	// frame budget so the uncompressed snapshot alone fits.
-	callOpts := []grpc.CallOption{
-		grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
-		grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
-	}
-	// gzip compression is OPT-IN and default-off (clusterGRPCCompression).
-	// Setting UseCompressor makes the DP send every RPC gzip-encoded; a CP
-	// that has not registered the gzip codec (an un-upgraded or rolled-back
-	// peer) would reject EVERY such call with Unimplemented — a fleet-wide
-	// config-sync blackout on any DP-first rollout. Keeping it off by default
-	// means the frame increase alone unblocks large snapshots (uncompressed);
-	// operators enable compression only once the whole fleet speaks gzip
-	// (CP-first upgrade complete). The CP always registers the decompressor,
-	// so a compressed DP is safe against an already-upgraded CP.
-	if clusterGRPCCompression {
-		callOpts = append(callOpts, grpc.UseCompressor(gzip.Name))
-	}
-
-	conn, err := grpc.NewClient(addr, dialOpt, grpc.WithDefaultCallOptions(callOpts...))
+	// clusterClientCallOptions carries the mandatory raw codec (the default
+	// proto codec cannot marshal json.RawMessage), the raised frame budget (an
+	// enterprise 2 M-host snapshot is ~60 MiB, past gRPC's 4 MiB default), and
+	// the opt-in gzip compressor. See controlplane_codec.go and
+	// CULVERT_CLUSTER_GRPC_COMPRESSION for the CP-first migration rationale.
+	conn, err := grpc.NewClient(addr, dialOpt, grpc.WithDefaultCallOptions(clusterClientCallOptions()...))
 	if err != nil {
 		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}

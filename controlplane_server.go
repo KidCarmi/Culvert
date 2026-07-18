@@ -703,47 +703,7 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		grpc.MaxRecvMsgSize(maxClusterGRPCMsgSize),
 		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
 	)
-	svc := &controlPlaneServer{}
-
-	srv.RegisterService(&grpc.ServiceDesc{
-		ServiceName: configServiceName,
-		HandlerType: (*controlPlaneServer)(nil),
-		Methods: []grpc.MethodDesc{
-			{
-				MethodName: "GetConfig",
-				Handler:    wrapUnary(svc.GetConfig),
-			},
-			{
-				MethodName: "PushMetrics",
-				Handler:    wrapUnary(svc.PushMetrics),
-			},
-			{
-				MethodName: "Enroll",
-				Handler:    wrapUnary(svc.Enroll),
-			},
-			{
-				MethodName: "SyncRateLimits",
-				Handler:    wrapUnary(svc.SyncRateLimits),
-			},
-			{
-				MethodName: "SyncRevocations",
-				Handler:    wrapUnary(svc.SyncRevocations),
-			},
-			{
-				MethodName: "PushAuditEvents",
-				Handler:    wrapUnary(svc.PushAuditEvents),
-			},
-			{
-				MethodName: "RenewCert",
-				Handler:    wrapUnary(svc.RenewCert),
-			},
-			{
-				MethodName: "HASync",
-				Handler:    wrapUnary(svc.HASync),
-			},
-		},
-		Streams: []grpc.StreamDesc{},
-	}, svc)
+	registerConfigService(srv)
 
 	lc := net.ListenConfig{}
 	ln, err := lc.Listen(context.Background(), "tcp", addr)
@@ -758,6 +718,37 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 		}
 	}()
 	return nil
+}
+
+// registerConfigService registers the hand-rolled ConfigService (JSON over
+// gRPC, no protoc) on srv. Shared by StartControlPlaneGRPC and the bufconn
+// round-trip test so the test exercises the EXACT production registration —
+// the registration that used to panic at startup (see the nil impl below).
+//
+// The impl argument to RegisterService is nil, NOT a *controlPlaneServer: every
+// handler is bound via wrapUnary(svc.Method) and closes over svc, so the impl
+// is unused at dispatch. grpc.RegisterService reflect-checks a NON-nil impl
+// against HandlerType, and HandlerType here is a concrete struct
+// (*controlPlaneServer) rather than an interface, so a non-nil impl panics with
+// "reflect: non-interface type passed to Type.Implements". Passing nil takes
+// grpc's legacy no-typecheck path and lets the server actually start.
+func registerConfigService(srv grpc.ServiceRegistrar) {
+	svc := &controlPlaneServer{}
+	srv.RegisterService(&grpc.ServiceDesc{
+		ServiceName: configServiceName,
+		HandlerType: (*controlPlaneServer)(nil),
+		Methods: []grpc.MethodDesc{
+			{MethodName: "GetConfig", Handler: wrapUnary(svc.GetConfig)},
+			{MethodName: "PushMetrics", Handler: wrapUnary(svc.PushMetrics)},
+			{MethodName: "Enroll", Handler: wrapUnary(svc.Enroll)},
+			{MethodName: "SyncRateLimits", Handler: wrapUnary(svc.SyncRateLimits)},
+			{MethodName: "SyncRevocations", Handler: wrapUnary(svc.SyncRevocations)},
+			{MethodName: "PushAuditEvents", Handler: wrapUnary(svc.PushAuditEvents)},
+			{MethodName: "RenewCert", Handler: wrapUnary(svc.RenewCert)},
+			{MethodName: "HASync", Handler: wrapUnary(svc.HASync)},
+		},
+		Streams: []grpc.StreamDesc{},
+	}, nil)
 }
 
 // StopControlPlaneGRPC gracefully stops the gRPC server, draining in-flight
