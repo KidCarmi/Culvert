@@ -83,7 +83,7 @@ items:
     title: "TLS inspection administration guide"
     type: doc
     priority: high
-    status: todo
+    status: done
     audience: [security-engineer, admin]
     path: content/docs/04-tls-inspection/tls-inspection.md
     evidence_areas: [ca.go, "internal/ca", proxy_tunnel.go, docs/operator/decryption-profiles.md]

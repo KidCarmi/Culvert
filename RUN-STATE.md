@@ -16,10 +16,16 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-011** — TLS inspection administration guide. Selecting; next.
+- **H-012** — Identity & access (SSO/2FA/RBAC). Next high-pri doc.
 
 ## Recently completed
 
+- **H-011** — TLS inspection admin (`content/docs/04-tls-inspection/tls-inspection.md`)
+  + evidence ledger. CA lifecycle, passphrase/persistence, client trust
+  distribution, per-host bypass, Decryption Profiles + adaptive exclusions
+  (delegated to in-repo operator guides), rotation (auto + `/api/ca/rotate`),
+  failure modes. Planned postures (`permissive`/`fail-open`) flagged. Link
+  check + structure pass. Committed.
 - **H-010** — Policy engine (`content/docs/03-policy/policy-engine.md`) +
   evidence ledger. Rule model, first-match/default-deny semantics, 8 condition
   types, actions, TLS action, policy API (`/api/policy[/reorder|move|test|draft]`)
@@ -57,8 +63,9 @@ phase transition. Newest activity at the top of each section.
 - **C-002** — Architecture overview + claim-evidence ledger (critical).
 - **C-003** — Quick start + evidence ledger + reproduced lab run (critical).
 - **H-010** — Policy engine & Zero-Trust authoring + evidence ledger (high).
+- **H-011** — TLS inspection administration + evidence ledger (high).
 
-**All critical items complete.** High-priority in progress (H-010 done).
+**All critical items complete.** High-priority in progress (H-010, H-011 done).
 
 ## Commits created
 
@@ -66,7 +73,8 @@ phase transition. Newest activity at the top of each section.
 - `9176e99` docs(content): add verified product overview (what is Culvert).
 - `ba90a4d` docs(content): add verified architecture overview.
 - `8acf32d` docs(content): add verified quick-start & first-boot guide.
-- _(H-010 commit — hash recorded next cycle; pushed through 8acf32d)_
+- `939ed62` docs(content): add verified policy engine & Zero-Trust guide.
+- _(H-011 commit — hash recorded next cycle)_
 
 ## Blocked items
 
