@@ -884,6 +884,28 @@ type supportDiagnosis struct {
 	Checks              []storageCheck `json:"checks"`
 }
 
+// countBundleDirs returns how many csb_-shaped subdirectories exist under the
+// bundle store (the RAW on-disk bundle count, before manifest parsing). An absent
+// store is (0, nil) — a healthy empty store, created on the first bundle. A
+// present-but-unreadable directory returns the ReadDir error so the caller can
+// fault the diagnosis instead of silently reporting empty.
+func countBundleDirs() (int, error) {
+	entries, err := os.ReadDir(supportBundlesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil // no bundle written yet
+		}
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() && supportBundleIDRe.MatchString(e.Name()) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // diagnoseSupport inspects the persisted support-bundle store. now is injected for
 // deterministic timestamps in tests. It only reads bundle summaries (secret-free by
 // construction) and the retention observability atoms — it never opens a bundle.
@@ -922,20 +944,7 @@ func diagnoseSupport(now time.Time) supportDiagnosis {
 		d.NewestAgeHours = int64(now.Sub(newest).Hours())
 	}
 
-	// Check: the count cap is being honored. The janitor evicts oldest-first on a
-	// new build and on the age tick, so a persistent overflow beyond keep+1 signals
-	// a stuck janitor or a failing eviction — surface it rather than let the store
-	// grow silently. keep==0 disables the cap (no check).
-	if supportRetentionKeep > 0 {
-		overCap := d.BundleCount > supportRetentionKeep
-		detail := ""
-		if overCap {
-			detail = "count " + strconv.Itoa(d.BundleCount) + " exceeds keep cap " + strconv.Itoa(supportRetentionKeep)
-		}
-		d.Checks = append(d.Checks, storageCheck{
-			Name: "within_count_cap", Path: supportBundlesDir(), OK: !overCap, Detail: detail,
-		})
-	}
+	d.Checks = supportStoreChecks(now, oldest, d.BundleCount)
 
 	d.OK = true
 	for i := range d.Checks {
@@ -945,6 +954,56 @@ func diagnoseSupport(now time.Time) supportDiagnosis {
 		}
 	}
 	return d
+}
+
+// supportStoreChecks builds the health checks for the bundle store. Split out of
+// diagnoseSupport to keep it under the cyclop threshold. now/oldest are injected;
+// bundleCount is the PARSED-summary count from listSupportBundles.
+func supportStoreChecks(now, oldest time.Time, bundleCount int) []storageCheck {
+	dir := supportBundlesDir()
+	var checks []storageCheck
+
+	// Store readability + manifest integrity. listSupportBundles is deliberately
+	// LENIENT — empty on a ReadDir error, silently skips unreadable/corrupt
+	// manifests — so a broken store would otherwise read as a healthy EMPTY store
+	// (Codex #834). Cross-check the raw csb_-shaped subdir count against the parsed
+	// count: a ReadDir failure or a shortfall (a dir present but not parsed) faults.
+	rawDirs, readErr := countBundleDirs()
+	switch {
+	case readErr != nil:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false, Detail: "readdir: " + readErr.Error()})
+	case rawDirs > bundleCount:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: false,
+			Detail: strconv.Itoa(rawDirs-bundleCount) + " bundle dir(s) unreadable/corrupt (present on disk but not parsed)"})
+	default:
+		checks = append(checks, storageCheck{Name: "bundles_dir_readable", Path: dir, OK: true})
+	}
+
+	// Count cap honored. The janitor evicts oldest-first on a new build and on the
+	// age tick, so an overflow beyond keep signals a stuck/failing janitor. keep==0
+	// disables the cap.
+	if supportRetentionKeep > 0 {
+		overCap := bundleCount > supportRetentionKeep
+		detail := ""
+		if overCap {
+			detail = "count " + strconv.Itoa(bundleCount) + " exceeds keep cap " + strconv.Itoa(supportRetentionKeep)
+		}
+		checks = append(checks, storageCheck{Name: "within_count_cap", Path: dir, OK: !overCap, Detail: detail})
+	}
+
+	// Age cap honored. A store can sit under the count cap with only a few bundles
+	// yet still hold ones older than max-age if the background janitor is stopped or
+	// failing (Codex #834) — the count cap alone can't catch that. maxAge<=0 disables.
+	if supportRetentionMaxAge > 0 && !oldest.IsZero() {
+		overAge := now.Sub(oldest) > supportRetentionMaxAge
+		detail := ""
+		if overAge {
+			detail = "oldest bundle age " + strconv.FormatInt(int64(now.Sub(oldest).Hours())/24, 10) + "d exceeds max-age " +
+				strconv.Itoa(int(supportRetentionMaxAge/(24*time.Hour))) + "d — the age janitor may be stopped or failing"
+		}
+		checks = append(checks, storageCheck{Name: "within_age_cap", Path: dir, OK: !overAge, Detail: detail})
+	}
+	return checks
 }
 
 // apiDiagnoseSupport reports support-bundle store health (POST, operator).
