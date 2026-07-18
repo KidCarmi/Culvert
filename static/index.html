@@ -1775,11 +1775,11 @@ tr.dragging  { opacity: .4; }
 
           <!-- PAC Exception Intelligence P3: DIRECT-surface change preview -->
           <details style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
-            <summary style="cursor:pointer;font-weight:600;font-size:.85rem">Change preview — what a config change would add/remove/broaden</summary>
+            <summary id="pac-diff-summary" style="cursor:pointer;font-weight:600;font-size:.85rem">Change preview - what a config change would add, remove, or broaden</summary>
             <p style="font-size:.78rem;color:var(--muted);margin:8px 0;line-height:1.6">
               Paste or edit a candidate steering config below (pre-filled with the current one) and preview how its
-              <strong>DIRECT full-bypass surface</strong> differs from what is active now — added, removed, or broadened bypasses.
-              Read-only and config-derived: no change is applied, nothing is published.
+              <strong>DIRECT full-bypass surface</strong> differs from what is active now - added, removed, or broadened bypasses.
+              Read-only and config-derived: no change is applied, and nothing is published.
             </p>
             <textarea id="pac-diff-input" class="input" style="width:100%;height:150px;font-family:monospace;font-size:.72rem" spellcheck="false" placeholder='{"profiles":[...],"pools":[...]}'></textarea>
             <div style="display:flex;gap:8px;margin:8px 0">
