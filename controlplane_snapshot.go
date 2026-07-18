@@ -171,16 +171,21 @@ const (
 // entry-count DoS bound; this is the independent transport-frame bound.
 const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
 
-// validateConfigSnapshot enforces the per-slice caps above. Returns an
-// error naming the first field that overflows; nil when the snapshot is
-// within bounds. Callers must reject the whole snapshot on error — the
-// goal is to prevent partial application of an attacker-shaped payload.
-func validateConfigSnapshot(snap ConfigSnapshot) error {
-	checks := []struct {
-		name  string
-		size  int
-		limit int
-	}{
+// snapshotSliceCap is the live size and hard cap of one capped ConfigSnapshot
+// slice/map. It is the single source of truth shared by validateConfigSnapshot
+// (the DoS gate), the diagnose/health surface, and the Prometheus utilization
+// gauges — so the cap table can never drift between enforcement and reporting.
+type snapshotSliceCap struct {
+	Name string `json:"name"`
+	Size int    `json:"size"`
+	Cap  int    `json:"cap"`
+}
+
+// configSnapshotSliceCaps returns the (size, cap) of every capped slice in snap,
+// in a stable order. Callers that only need the pass/fail verdict should use
+// validateConfigSnapshot; this exists for utilization reporting.
+func configSnapshotSliceCaps(snap ConfigSnapshot) []snapshotSliceCap {
+	return []snapshotSliceCap{
 		{"blocked_hosts", len(snap.BlockedHosts), maxSnapBlockedHosts},
 		{"ip_list", len(snap.IPList), maxSnapIPList},
 		{"policy_rules", len(snap.PolicyRules), maxSnapPolicyRules},
@@ -204,9 +209,16 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"decryption_profiles", len(snap.DecryptionProfiles), maxSnapDecryptionProfiles},
 		{"idp_profiles", len(snap.IdPProfiles), maxSnapIdPProfiles},
 	}
-	for _, c := range checks {
-		if c.size > c.limit {
-			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.name, c.size, c.limit)
+}
+
+// validateConfigSnapshot enforces the per-slice caps above. Returns an
+// error naming the first field that overflows; nil when the snapshot is
+// within bounds. Callers must reject the whole snapshot on error — the
+// goal is to prevent partial application of an attacker-shaped payload.
+func validateConfigSnapshot(snap ConfigSnapshot) error {
+	for _, c := range configSnapshotSliceCaps(snap) {
+		if c.Size > c.Cap {
+			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.Name, c.Size, c.Cap)
 		}
 	}
 	return nil

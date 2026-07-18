@@ -13113,16 +13113,37 @@ function renderDiagnoseAll(d) {
   if (!el) return;
   d = d || {};
   const st = d.storage || {}, up = d.upstream || {}, cl = d.cluster || {}, cf = d.config || {};
-  const dot = ok => '<strong style="color:' + (ok ? 'var(--green)' : 'var(--red)') + '">' + (ok ? 'OK' : 'DEGRADED') + '</strong>';
+  // Status-aware pill: a check reports "status" (ok/warn/degraded) when it has a
+  // tri-state; otherwise fall back to the ok bool (green/red).
+  const pill = (ok, status) => {
+    const s = status || (ok ? 'ok' : 'degraded');
+    const map = { ok: ['var(--green)', 'OK'], warn: ['var(--warn)', 'WARN'], degraded: ['var(--red)', 'DEGRADED'] };
+    const [color, label] = map[s] || map.degraded;
+    return '<strong style="color:' + color + '">' + label + '</strong>';
+  };
+  // Config detail: show a utilization hint, and the advisory note on a warn.
+  let cfDetail;
+  if (cf.status === 'degraded') {
+    cfDetail = escHtml(String(cf.error || 'invalid'));
+  } else {
+    const util = (cf.max_util_percent != null && cf.max_util_slice)
+      ? (escHtml(String(cf.max_util_slice)) + ' ' + escHtml(String(cf.max_util_percent)) + '% of cap')
+      : 'valid';
+    cfDetail = cf.status === 'warn' && cf.note ? (escHtml(String(cf.note)) + ' (' + util + ')') : util;
+  }
   const rows = [
-    ['Storage', st.ok, 'free ' + escHtml(String(Math.round((st.free_bytes || 0) / (1 << 20)))) + ' MiB'],
-    ['Upstream', up.ok, up.enabled ? (escHtml(String(up.usable_count || 0)) + '/' + escHtml(String(up.count || 0)) + ' usable') : 'direct'],
-    ['Cluster', cl.ok, escHtml(String(cl.role || 'unknown'))],
-    ['Config', cf.ok, cf.ok ? 'valid' : escHtml(String(cf.error || 'invalid'))],
+    ['Storage', pill(st.ok, st.status), 'free ' + escHtml(String(Math.round((st.free_bytes || 0) / (1 << 20)))) + ' MiB'],
+    ['Upstream', pill(up.ok, up.status), up.enabled ? (escHtml(String(up.usable_count || 0)) + '/' + escHtml(String(up.count || 0)) + ' usable') : 'direct'],
+    ['Cluster', pill(cl.ok, cl.status), escHtml(String(cl.role || 'unknown'))],
+    ['Config', pill(cf.ok, cf.status), cfDetail],
   ];
-  const body = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + dot(r[1]) + '</td><td class="hint">' + r[2] + '</td></tr>').join('');
-  el.innerHTML = '<p class="hint">Local health <strong style="color:' + (d.ok ? 'var(--green)' : 'var(--red)') + '">' +
-    (d.ok ? 'OK' : 'DEGRADED') + '</strong></p><div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+  const body = rows.map(r => '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td><td class="hint">' + r[2] + '</td></tr>').join('');
+  // Aggregate: red if not ok; amber if ok-but-some-check-warns; else green.
+  const anyWarn = [st, up, cl, cf].some(c => c && c.status === 'warn');
+  const aggColor = !d.ok ? 'var(--red)' : (anyWarn ? 'var(--warn)' : 'var(--green)');
+  const aggLabel = !d.ok ? 'DEGRADED' : (anyWarn ? 'OK (warnings)' : 'OK');
+  el.innerHTML = '<p class="hint">Local health <strong style="color:' + aggColor + '">' + aggLabel +
+    '</strong></p><div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>' + body + '</tbody></table></div>';
 }
 
@@ -13261,14 +13282,34 @@ function renderDiagnoseConfig(d) {
   const el = document.getElementById('support-diagnose');
   if (!el) return;
   d = d || {};
-  const color = d.ok ? 'var(--green)' : 'var(--red)';
-  const hdr = '<p class="hint">Config snapshot <strong style="color:' + color + '">' + (d.ok ? 'VALID' : 'INVALID') +
-    '</strong> · policy v' + escHtml(String(d.policy_version || 0)) + ' · epoch ' + escHtml(String(d.epoch || 0)) + '</p>';
-  const err = d.error ? '<p class="hint" style="color:var(--red)">' + escHtml(String(d.error)) + '</p>' : '';
-  const rows = (d.sizes || []).map(s =>
-    '<tr><td class="hint">' + escHtml(String(s.name)) + '</td><td>' + escHtml(String(s.size)) + '</td></tr>').join('');
-  el.innerHTML = hdr + err + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
-    '<th>Collection</th><th>Size</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  const status = d.status || (d.ok ? 'ok' : 'degraded');
+  const map = { ok: ['var(--green)', 'VALID'], warn: ['var(--warn)', 'ADVISORY'], degraded: ['var(--red)', 'INVALID'] };
+  const [color, label] = map[status] || map.degraded;
+  const scope = d.syncing ? 'syncing (CP/DP)' : 'standalone';
+  const hdr = '<p class="hint">Config snapshot <strong style="color:' + color + '">' + label +
+    '</strong> · ' + escHtml(scope) + ' · policy v' + escHtml(String(d.policy_version || 0)) + ' · epoch ' + escHtml(String(d.epoch || 0)) + '</p>';
+  // On a warn/degraded, show the note (amber) or error (red).
+  let msg = '';
+  if (status === 'degraded' && d.error) msg = '<p class="hint" style="color:var(--red)">' + escHtml(String(d.error)) + '</p>';
+  else if (status === 'warn') msg = '<p class="hint" style="color:var(--warn)">' + escHtml(String(d.note || d.error || 'approaching a collection cap')) + '</p>';
+  // Utilization table (size vs cap) when present; otherwise the plain sizes.
+  const util = d.utilization || [];
+  let rows, head;
+  if (util.length) {
+    head = '<th>Collection</th><th>Size</th><th>Cap</th><th>Used</th>';
+    rows = util.map(u => {
+      const cap = u.cap || 0, pct = cap > 0 ? Math.round((u.size || 0) * 100 / cap) : 0;
+      const pc = pct >= 80 ? 'var(--warn)' : 'inherit';
+      return '<tr><td class="hint">' + escHtml(String(u.name)) + '</td><td>' + escHtml(String(u.size)) + '</td><td class="hint">' +
+        escHtml(String(cap)) + '</td><td style="color:' + pc + '">' + escHtml(String(pct)) + '%</td></tr>';
+    }).join('');
+  } else {
+    head = '<th>Collection</th><th>Size</th>';
+    rows = (d.sizes || []).map(s =>
+      '<tr><td class="hint">' + escHtml(String(s.name)) + '</td><td>' + escHtml(String(s.size)) + '</td></tr>').join('');
+  }
+  el.innerHTML = hdr + msg + '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+    head + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function diagnoseDNS() {
