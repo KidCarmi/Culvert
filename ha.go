@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 	"github.com/KidCarmi/Culvert/internal/halease"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
+	"github.com/KidCarmi/Culvert/internal/secret"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -607,7 +609,8 @@ func haRPCErrorProvesReachability(err error) bool {
 	switch status.Code(err) {
 	case codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument,
 		codes.FailedPrecondition, codes.AlreadyExists, codes.NotFound,
-		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted:
+		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted, codes.Aborted,
+		codes.Internal, codes.Unknown:
 		return true
 	default:
 		return false
@@ -635,50 +638,189 @@ func (h *HAState) seedTermFromLeader(leaderTerm uint64) {
 // failure does not leave unrelated replicated state partially applied.
 func applyHABundle(bundle *HAStateBundle, token string) bool {
 	// CHAOS-01 (HA-promotion follow-up): remember the leader's published config
-	// version so a later promotion seeds this node's version floor above it.
-	// applyConfigSnapshot below applies bundle.Config but does NOT advance the
-	// local ConfigStore.version (that counter moves only when THIS node
-	// publishes as CP), so without this the promoted CP would reseed only from
-	// its own stale/absent floor + wall clock and could re-issue versions the
-	// DPs already applied from the old leader. Recorded up front (the epoch
-	// fence in syncFromLeader already ran) so a raised floor is guaranteed even
-	// if a downstream apply step below fails — a higher floor never harms DPs.
-	noteReplicatedLeaderVersion(bundle.Version)
-
-	// Validate cluster bytes before any replicated state mutates. ImportFullState
-	// has no remaining failure path after this parse succeeds.
+	configApplyMu.Lock()
+	defer configApplyMu.Unlock()
 	if len(bundle.ClusterState) == 0 {
 		logger.Printf("HA: cluster state missing from bundle")
 		return false
 	}
-	var probe ClusterState
-	if err := json.Unmarshal(bundle.ClusterState, &probe); err != nil {
+	cluster, err := globalClusterStore.prepareImport(bundle.ClusterState)
+	if err != nil {
 		logger.Printf("HA: validate cluster state failed: %v", err)
 		return false
 	}
-
-	if bundle.CACertPEM != "" {
-		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
-			logger.Printf("HA: apply replicated CA failed (no state imported): %v", err)
-			return false
-		}
-	}
-
-	// Apply config before cluster state. Policy persistence is the only new
-	// fail-returning path in this slice; a failure must leave cluster state old.
-	if err := applyConfigSnapshot(bundle.Config); err != nil {
-		logger.Printf("HA: apply config snapshot error: %v", err)
+	ca, err := prepareReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token)
+	if err != nil {
+		cluster.Abort()
+		logger.Printf("HA: prepare replicated CA failed: %v", err)
 		return false
 	}
-
-	if len(bundle.ClusterState) > 0 {
-		if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
-			logger.Printf("HA: import prevalidated cluster state error: %v", err)
+	var idp *idpReplacement
+	if bundle.Config.IdPProfiles != nil {
+		idp, err = prepareIdPReplacement(bundle.Config.IdPProfiles)
+	}
+	if err != nil {
+		ca.Abort()
+		cluster.Abort()
+		logger.Printf("HA: prepare IdP config failed: %v", err)
+		return false
+	}
+	rules := bundle.Config.PolicyRules
+	if rules == nil {
+		rules = policyStore.List()
+	}
+	config, err := preparePolicyTaxonomyApply(rules, bundle.Config.URLCategories, bundle.Config.CategoryGroups, bundle.Config.DecryptionProfiles)
+	if err != nil {
+		ca.Abort()
+		cluster.Abort()
+		logger.Printf("HA: prepare config failed: %v", err)
+		return false
+	}
+	preparedIDP, err := idpRegistry.prepareReplacementForTxn(idp)
+	if err != nil {
+		config.abort()
+		ca.Abort()
+		cluster.Abort()
+		logger.Printf("HA: prepare IdP persistence failed: %v", err)
+		return false
+	}
+	abort := func() {
+		preparedIDP.Abort()
+		config.abort()
+		ca.Abort()
+		cluster.Abort()
+	}
+	writes := ca.Writes()
+	writes = append(writes, config.writes...)
+	if write := preparedIDP.Write(); write != nil {
+		writes = append(writes, *write)
+	}
+	if write := cluster.Write(); write != nil {
+		writes = append(writes, *write)
+		floor := bundle.Version
+		floorPath := filepath.Join(filepath.Dir(write.Path), cpConfigVersionFile)
+		if data, readErr := os.ReadFile(floorPath); readErr == nil {
+			var current cpConfigVersionState
+			if json.Unmarshal(data, &current) == nil && current.Version > floor {
+				floor = current.Version
+			}
+		}
+		floorData, marshalErr := json.Marshal(cpConfigVersionState{Version: floor})
+		if marshalErr != nil {
+			abort()
+			logger.Printf("HA: prepare config version floor failed: %v", marshalErr)
+			return false
+		}
+		writes = append(writes, filetxn.Write{Path: floorPath, Data: floorData, Mode: 0o600})
+	}
+	var tx *filetxn.Txn
+	if len(writes) > 0 {
+		journalDir := crossStoreTxnDir
+		if journalDir == "" {
+			journalDir = filepath.Dir(writes[0].Path)
+		}
+		tx, err = beginCrossStoreTxn(filepath.Join(journalDir, "ha_bundle.txn"), "ha-bundle", writes)
+		if err == nil {
+			err = tx.Apply()
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		if err != nil {
+			abort()
+			logger.Printf("HA: durable bundle apply failed: %v", err)
 			return false
 		}
 	}
-
+	config.publishDependencies()
+	applySnapshotPolicyAndTraffic(bundle.Config)
+	applySnapshotClusterRuntime(bundle.Config)
+	preparedIDP.Publish()
+	applySnapshotExtendedState(bundle.Config)
+	config.publishPolicy()
+	ca.Publish()
+	cluster.Publish()
+	if tx != nil {
+		if err := tx.Finish(); err != nil {
+			logger.Printf("HA: committed bundle cleanup deferred: %v", err)
+		}
+	}
+	noteReplicatedLeaderVersion(bundle.Version)
 	return true
+}
+
+type preparedClusterCA struct {
+	ca     *clusterCA
+	cert   []byte
+	probe  *clusterCA
+	writes []filetxn.Write
+	done   bool
+}
+
+func prepareReplicatedCA(certPEM []byte, encryptedKey, token string) (*preparedClusterCA, error) {
+	if len(certPEM) == 0 {
+		return nil, nil
+	}
+	if encryptedKey == "" {
+		return nil, fmt.Errorf("encrypted CA key missing from HA bundle (plaintext fallback removed)")
+	}
+	keyPEM, err := haDecryptKey(encryptedKey, token)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt CA key: %w", err)
+	}
+	probe := &clusterCA{}
+	if err := probe.loadFromPEM(certPEM, keyPEM); err != nil {
+		return nil, fmt.Errorf("validate replicated CA: %w", err)
+	}
+	globalClusterCA.mu.Lock()
+	prepared := &preparedClusterCA{ca: globalClusterCA, cert: append([]byte(nil), certPEM...), probe: probe}
+	if globalClusterCA.dir == "" {
+		return prepared, nil
+	}
+	certPath, err := safeCAPath(globalClusterCA.dir, "cluster-ca.crt")
+	if err != nil {
+		globalClusterCA.mu.Unlock()
+		return nil, err
+	}
+	keyPath, err := safeCAPath(globalClusterCA.dir, "cluster-ca.key")
+	if err != nil {
+		globalClusterCA.mu.Unlock()
+		return nil, err
+	}
+	keyData := keyPEM
+	if clusterCAKeyEncryptionEnabled() {
+		keyData, err = secret.Seal(keyPEM, clusterCAKEKProvider(globalClusterCA.dir))
+		if err != nil {
+			globalClusterCA.mu.Unlock()
+			return nil, err
+		}
+	}
+	prepared.writes = []filetxn.Write{{Path: certPath, Data: certPEM, Mode: 0o600}, {Path: keyPath, Data: keyData, Mode: 0o600}}
+	return prepared, nil
+}
+
+func (p *preparedClusterCA) Writes() []filetxn.Write {
+	if p == nil {
+		return nil
+	}
+	return append([]filetxn.Write(nil), p.writes...)
+}
+
+func (p *preparedClusterCA) Publish() {
+	if p == nil || p.done {
+		return
+	}
+	p.ca.cert, p.ca.key, p.ca.certPEM = p.probe.cert, p.probe.key, p.cert
+	p.done = true
+	p.ca.mu.Unlock()
+}
+
+func (p *preparedClusterCA) Abort() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	p.ca.mu.Unlock()
 }
 
 // applyReplicatedCA decrypts the HA-token-wrapped cluster CA key and installs it

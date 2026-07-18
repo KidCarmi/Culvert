@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
 	"github.com/KidCarmi/Culvert/internal/urlcat"
@@ -803,6 +804,84 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 }
 
 var errPolicyVersionConflict = errors.New("policy generation changed")
+
+// preparedPolicyReplacement is a detached policy generation whose durable
+// artifacts are owned by an outer multi-store transaction. Preparation holds
+// saveMu so another persisted policy mutation cannot overtake the transaction.
+type preparedPolicyReplacement struct {
+	store     *PolicyStore
+	rules     []*PolicyRule
+	version   int64
+	updatedAt string
+	writes    []filetxn.Write
+	done      bool
+}
+
+func (ps *PolicyStore) prepareReplacement(rules []PolicyRule, expected *int64) (*preparedPolicyReplacement, error) {
+	ps.saveMu.Lock()
+	ps.mu.RLock()
+	if expected != nil && ps.version != *expected {
+		ps.mu.RUnlock()
+		ps.saveMu.Unlock()
+		return nil, errPolicyVersionConflict
+	}
+	candidate := &PolicyStore{rules: ps.rules, path: ps.path, version: ps.version, updatedAt: ps.updatedAt}
+	ps.mu.RUnlock()
+	candidate.ReplaceAll(rules)
+
+	candidate.mu.RLock()
+	snapshot := make([]PolicyRule, len(candidate.rules))
+	for i, rule := range candidate.rules {
+		snapshot[i] = *rule
+		snapshot[i].HitCount = 0
+		snapshot[i].LastHit = ""
+	}
+	path := candidate.path
+	meta := policyMeta{Version: candidate.version, UpdatedAt: candidate.updatedAt}
+	preparedRules := candidate.rules
+	version, updatedAt := candidate.version, candidate.updatedAt
+	candidate.mu.RUnlock()
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		ps.saveMu.Unlock()
+		return nil, fmt.Errorf("marshal prepared policy rules: %w", err)
+	}
+	meta.PolicySHA256 = policySHA256(data)
+	metaData, err := json.Marshal(meta)
+	if err != nil {
+		ps.saveMu.Unlock()
+		return nil, fmt.Errorf("marshal prepared policy metadata: %w", err)
+	}
+	writes := []filetxn.Write(nil)
+	if path != "" {
+		writes = []filetxn.Write{{Path: path, Data: data, Mode: 0o600}, {Path: path + ".meta", Data: metaData, Mode: 0o600}}
+	}
+	return &preparedPolicyReplacement{store: ps, rules: preparedRules, version: version, updatedAt: updatedAt, writes: writes}, nil
+}
+
+func (p *preparedPolicyReplacement) Writes() []filetxn.Write {
+	return append([]filetxn.Write(nil), p.writes...)
+}
+
+func (p *preparedPolicyReplacement) Publish() {
+	if p == nil || p.done {
+		return
+	}
+	p.store.mu.Lock()
+	p.store.rules, p.store.version, p.store.updatedAt = p.rules, p.version, p.updatedAt
+	p.store.mu.Unlock()
+	p.done = true
+	p.store.saveMu.Unlock()
+}
+
+func (p *preparedPolicyReplacement) Abort() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	p.store.saveMu.Unlock()
+}
 
 // mutateAndSave applies edit to a detached candidate, durably commits it, then
 // publishes it. expected, when non-nil, is checked under the same lock as the

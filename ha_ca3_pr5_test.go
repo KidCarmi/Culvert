@@ -13,9 +13,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/catgroup"
+	"github.com/KidCarmi/Culvert/internal/decryptprofile"
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 )
 
 // withClusterCAForHA points globalClusterCA at a fresh CA bootstrapped in dir
@@ -216,6 +222,143 @@ func TestApplyHABundlePolicySaveFailureDoesNotReportSuccess(t *testing.T) {
 	}
 	if !bytes.Equal(beforeCluster, afterCluster) {
 		t.Fatal("HA policy persistence failure partially applied cluster state")
+	}
+}
+
+func TestApplyHABundleTransactionBoundaryFailuresPublishNothing(t *testing.T) {
+	targets := []string{"ca-cert", "ca-key", "policy", "policy-meta", "categories", "groups", "profiles", "idp", "cluster-state", "version-floor"}
+	for _, target := range targets {
+		t.Run(target, func(t *testing.T) {
+			setupProxyTest(t)
+			dir := t.TempDir()
+			oldTxnDir := crossStoreTxnDir
+			crossStoreTxnDir = dataDir
+			t.Cleanup(func() { crossStoreTxnDir = oldTxnDir })
+			certPEM, keyPEM := withClusterCAForHA(t, dir)
+			const token = "ha-boundary-token" // #nosec G101 -- synthetic test fixture
+			encryptedKey, err := haEncryptKey(keyPEM, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			oldStore, oldPolicy, oldIDP := globalClusterStore, policyStore, idpRegistry
+			oldCategories, oldGroups, oldProfiles := catStore, globalCategoryGroups, globalDecryptionProfiles
+			globalClusterStore = newTestClusterStore(t)
+			policyStore = &PolicyStore{path: filepath.Join(dir, "policy.json")}
+			catStore = newCategoryStore(nil)
+			catStore.SetPathForTest(filepath.Join(dir, "categories.json"))
+			globalCategoryGroups = catgroup.New()
+			globalCategoryGroups.SetPathForTest(filepath.Join(dir, "groups.json"))
+			globalDecryptionProfiles = decryptprofile.New()
+			globalDecryptionProfiles.SetPathForTest(filepath.Join(dir, "profiles.json"))
+			idpRegistry = &IdPRegistry{path: filepath.Join(dir, "idp_profiles.json"), live: make(map[string]IdentityProvider)}
+			t.Cleanup(func() {
+				globalClusterStore, policyStore, idpRegistry = oldStore, oldPolicy, oldIDP
+				catStore, globalCategoryGroups, globalDecryptionProfiles = oldCategories, oldGroups, oldProfiles
+			})
+			if err := policyStore.ReplaceAllAndSave([]PolicyRule{{Priority: 1, Name: "old-policy", Action: ActionAllow}}); err != nil {
+				t.Fatal(err)
+			}
+			catStore.ReplaceAll([]CategoryEntry{{Name: "old-category", Hosts: []string{"old.example"}}})
+			catStore.Save()
+			globalCategoryGroups.ReplaceAll([]CategoryGroup{{ID: "old-group", Name: "old-group", Categories: []string{"old-category"}}})
+			globalCategoryGroups.Save()
+			globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{ID: "old-profile", Name: "old-profile", CertVerification: "strict"}})
+			globalDecryptionProfiles.Save()
+
+			oldBegin := beginCrossStoreTxn
+			matched := false
+			beginCrossStoreTxn = func(journalPath, kind string, writes []filetxn.Write, opts ...filetxn.Option) (*filetxn.Txn, error) {
+				if want := filepath.Join(dataDir, "ha_bundle.txn"); journalPath != want {
+					return nil, fmt.Errorf("HA journal path = %q, want startup-recovered path %q", journalPath, want)
+				}
+				failureIndex := -1
+				for i := range writes {
+					base := filepath.Base(writes[i].Path)
+					isTarget := false
+					switch target {
+					case "ca-cert":
+						isTarget = base == "cluster-ca.crt"
+					case "ca-key":
+						isTarget = base == "cluster-ca.key"
+					case "policy":
+						isTarget = writes[i].Path == policyStore.path
+					case "policy-meta":
+						isTarget = writes[i].Path == policyStore.path+".meta"
+					case "categories":
+						isTarget = writes[i].Path == catStore.Path()
+					case "groups":
+						isTarget = writes[i].Path == globalCategoryGroups.Path()
+					case "profiles":
+						isTarget = writes[i].Path == globalDecryptionProfiles.Path()
+					case "idp":
+						isTarget = writes[i].Path == idpRegistry.path
+					case "cluster-state":
+						isTarget = writes[i].Path == globalClusterStore.path
+					case "version-floor":
+						isTarget = base == cpConfigVersionFile
+					}
+					if isTarget {
+						failureIndex = i
+						matched = true
+						break
+					}
+				}
+				if failureIndex < 0 {
+					return nil, fmt.Errorf("test seam: %s write missing", target)
+				}
+				failurePoint := fmt.Sprintf("before-write-%d", failureIndex)
+				opts = append(opts, filetxn.WithBoundaryHook(func(point string) error {
+					if point == failurePoint {
+						return errors.New("injected HA transaction boundary failure")
+					}
+					return nil
+				}))
+				return filetxn.Begin(journalPath, kind, writes, opts...)
+			}
+			t.Cleanup(func() { beginCrossStoreTxn = oldBegin })
+
+			bundle := &HAStateBundle{
+				ClusterState:   buildHANonEmptyClusterState(t),
+				CACertPEM:      string(certPEM),
+				CAKeyEncrypted: encryptedKey,
+				Version:        73,
+				Config: ConfigSnapshot{
+					PolicyRules:        []PolicyRule{{Priority: 1, Name: "new-policy", Action: ActionDrop}},
+					URLCategories:      []CategoryEntry{{Name: "new-category", Hosts: []string{"new.example"}}},
+					CategoryGroups:     []CategoryGroup{{ID: "new-group", Name: "new-group", Categories: []string{"new-category"}}},
+					DecryptionProfiles: []DecryptionProfile{{ID: "new-profile", Name: "new-profile", CertVerification: "strict"}},
+					IdPProfiles: []*IdPProfile{{
+						ID: "new-oidc", Name: "New OIDC", Type: IdPTypeOIDC, Enabled: false,
+						OIDC: &OIDCProfileConfig{Issuer: "https://8.8.8.8", ClientID: "culvert"},
+					}},
+				},
+			}
+			if applyHABundle(bundle, token) {
+				t.Fatal("HA bundle reported success after injected transaction failure")
+			}
+			if !matched {
+				t.Fatalf("target boundary %q was not exercised", target)
+			}
+			if globalClusterCA.Ready() {
+				t.Fatal("failed HA transaction published replicated CA")
+			}
+			if got := policyStore.List()[0].Name; got != "old-policy" {
+				t.Fatalf("failed HA transaction published policy %q", got)
+			}
+			if got := catStore.All()[0].Name; got != "old-category" {
+				t.Fatalf("failed HA transaction published category %q", got)
+			}
+			if got := idpRegistry.All(); len(got) != 0 {
+				t.Fatalf("failed HA transaction published %d IdP profile(s)", len(got))
+			}
+			if nodes := globalClusterStore.ListNodes(); len(nodes) != 0 {
+				t.Fatalf("failed HA transaction published %d cluster node(s)", len(nodes))
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "ha_bundle.txn")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed HA journal was not cleaned up: %v", err)
+			}
+		})
 	}
 }
 

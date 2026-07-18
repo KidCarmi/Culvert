@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 )
 
 // ---------------------------------------------------------------------------
@@ -109,6 +111,7 @@ type SAMLProfileConfig struct {
 // source of truth for all configured identity providers.
 type IdPRegistry struct {
 	mu       sync.RWMutex
+	txnMu    sync.Mutex
 	profiles []*IdPProfile
 	path     string // JSON file path (empty = in-memory only)
 
@@ -373,6 +376,8 @@ func prepareIdPReplacement(profiles []*IdPProfile) (*idpReplacement, error) {
 }
 
 func (r *IdPRegistry) applyReplacement(next *idpReplacement) error {
+	r.txnMu.Lock()
+	defer r.txnMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.path == "" {
@@ -389,6 +394,61 @@ func (r *IdPRegistry) applyReplacement(next *idpReplacement) error {
 	r.profiles = next.profiles
 	r.live = next.live
 	return nil
+}
+
+type preparedIdPReplacement struct {
+	registry *IdPRegistry
+	next     *idpReplacement
+	write    *filetxn.Write
+	done     bool
+}
+
+func (r *IdPRegistry) prepareReplacementForTxn(next *idpReplacement) (*preparedIdPReplacement, error) {
+	if next == nil {
+		return nil, nil
+	}
+	r.txnMu.Lock()
+	r.mu.RLock()
+	path := r.path
+	r.mu.RUnlock()
+	prepared := &preparedIdPReplacement{registry: r, next: next}
+	if path == "" {
+		return prepared, nil
+	}
+	data, err := json.MarshalIndent(next.profiles, "", "  ")
+	if err != nil {
+		r.txnMu.Unlock()
+		return nil, err
+	}
+	prepared.write = &filetxn.Write{Path: path, Data: data, Mode: 0o600}
+	return prepared, nil
+}
+
+func (p *preparedIdPReplacement) Write() *filetxn.Write {
+	if p == nil || p.write == nil {
+		return nil
+	}
+	write := *p.write
+	return &write
+}
+
+func (p *preparedIdPReplacement) Publish() {
+	if p == nil || p.done {
+		return
+	}
+	p.registry.mu.Lock()
+	p.registry.profiles, p.registry.live = p.next.profiles, p.next.live
+	p.registry.mu.Unlock()
+	p.done = true
+	p.registry.txnMu.Unlock()
+}
+
+func (p *preparedIdPReplacement) Abort() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	p.registry.txnMu.Unlock()
 }
 
 // ReplaceAll compiles and persists a complete replacement before the live swap.

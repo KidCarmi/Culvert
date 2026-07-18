@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
@@ -351,26 +353,18 @@ var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
 func applyConfigSnapshot(snap ConfigSnapshot) error {
-	if snap.IdPProfiles == nil {
-		return applyConfigSnapshotWithIdP(snap, nil)
+	var prepared *idpReplacement
+	if snap.IdPProfiles != nil {
+		var err error
+		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
+		if err != nil {
+			return fmt.Errorf("idp profile sync: %w", err)
+		}
 	}
-	oldBaseURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
-	applyExternalAuthSnapshotSettings(snap)
-	prepared, err := prepareIdPReplacement(snap.IdPProfiles)
-	if err != nil {
-		SetProxyBaseURL(oldBaseURL)
-		trustForwardedHeaders = oldTrust
-		return fmt.Errorf("idp profile sync: %w", err)
-	}
-	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
-		SetProxyBaseURL(oldBaseURL)
-		trustForwardedHeaders = oldTrust
-		return err
-	}
-	return nil
+	return applyConfigSnapshotWithIdP(snap, prepared, nil)
 }
 
-func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement) error {
+func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement, canonical *ConfigSnapshot) error {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
@@ -396,36 +390,105 @@ func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement) e
 		}
 	}
 
-	if err := applySnapshotPolicyAndTraffic(snap); err != nil {
+	if err := commitPreparedConfigSnapshot(snap, prepared, canonical); err != nil {
 		return err
 	}
-	applySnapshotClusterRuntime(snap)
-
-	// IdP profiles were compiled before any state mutation.
-	if prepared != nil {
-		if err := idpRegistry.applyReplacement(prepared); err != nil {
-			logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-			return err
-		}
-		logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
-	}
-
-	applySnapshotExtendedState(snap)
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
 	return nil
 }
 
+func commitPreparedConfigSnapshot(snap ConfigSnapshot, idp *idpReplacement, canonical *ConfigSnapshot) error {
+	configApplyMu.Lock()
+	defer configApplyMu.Unlock()
+
+	rules := snap.PolicyRules
+	if rules == nil {
+		rules = policyStore.List()
+	}
+	prepared, err := preparePolicyTaxonomyApply(rules, snap.URLCategories, snap.CategoryGroups, snap.DecryptionProfiles)
+	if err != nil {
+		return err
+	}
+	preparedIDP, err := idpRegistry.prepareReplacementForTxn(idp)
+	if err != nil {
+		prepared.abort()
+		return err
+	}
+	abort := func() {
+		prepared.abort()
+		preparedIDP.Abort()
+	}
+	writes := append([]filetxn.Write(nil), prepared.writes...)
+	if write := preparedIDP.Write(); write != nil {
+		writes = append(writes, *write)
+	}
+	journalName := "config_apply.txn"
+	if canonical != nil {
+		data, err := json.MarshalIndent(canonical, "", "  ")
+		if err != nil {
+			abort()
+			return err
+		}
+		writes = append(writes, filetxn.Write{Path: dpLastGoodConfigSnapshotPath(), Data: data, Mode: 0o600})
+		journalName = "dp_config_apply.txn"
+	}
+
+	publish := func() error {
+		prepared.publishDependencies()
+		applySnapshotPolicyAndTraffic(snap)
+		applySnapshotClusterRuntime(snap)
+		preparedIDP.Publish()
+		if idp != nil {
+			logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
+		}
+		applySnapshotExtendedState(snap)
+		prepared.publishPolicy()
+		return nil
+	}
+	if len(writes) == 0 {
+		return publish()
+	}
+	journalDir := crossStoreTxnDir
+	if canonical != nil {
+		journalDir = dataDir
+	}
+	if journalDir == "" {
+		journalDir = filepath.Dir(writes[0].Path)
+	}
+	if journalDir == "" {
+		abort()
+		return errors.New("config snapshot has no transaction recovery directory")
+	}
+	tx, err := beginCrossStoreTxn(filepath.Join(journalDir, journalName), "config-snapshot", writes)
+	if err != nil {
+		abort()
+		return err
+	}
+	if err := tx.Apply(); err != nil {
+		abort()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		abort()
+		return err
+	}
+	if err := publish(); err != nil {
+		// Publication is intentionally infallible after commit. Keep the journal
+		// for fail-closed startup verification if that invariant is violated.
+		return err
+	}
+	if err := tx.Finish(); err != nil && logger != nil {
+		logger.Printf("DataPlane: committed config transaction cleanup deferred: %v", err)
+	}
+	return nil
+}
+
 // applySnapshotPolicyAndTraffic applies the traffic-control and policy
 // slices of a snapshot (split from applyConfigSnapshot for gocognit; order
 // preserved verbatim).
-func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
-	// Policy persistence is the only fail-returning step in this slice. Commit it
-	// first so a local disk failure cannot expose a mixed snapshot generation.
-	if err := applySnapshotPolicyRules(snap.PolicyRules); err != nil {
-		return err
-	}
+func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
 	// Blocklist — in-place feed-entry replacement preserves the
 	// package-global bl's path / mode / manual / exceptions (the
 	// DP-local state that isn't in the cluster snapshot). The
@@ -479,13 +542,7 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
 		}
 	}
 
-	// URL categories.
-	if snap.URLCategories != nil {
-		catStore.ReplaceAll(snap.URLCategories)
-		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
-		// hardened in PR #246).
-		catStore.Save()
-	}
+	// URL categories are prepared and published by the outer config transaction.
 
 	// File profiles.
 	if snap.FileProfiles != nil {
@@ -512,7 +569,6 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
 	if snap.MaxConnsPerIP > 0 {
 		connLimiter.Enable(snap.MaxConnsPerIP)
 	}
-	return nil
 }
 
 func applySnapshotPolicyRules(rules []PolicyRule) error {
@@ -612,20 +668,8 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
 	}
 
-	// Category groups.
-	if snap.CategoryGroups != nil {
-		globalCategoryGroups.ReplaceAll(snap.CategoryGroups)
-		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
-		// hardened in PR #246).
-		globalCategoryGroups.Save()
-	}
-
-	// Named decryption profiles (nil-skip; applied here alongside category groups —
-	// both are named objects the policy rules reference by name).
-	if snap.DecryptionProfiles != nil {
-		globalDecryptionProfiles.ReplaceAll(snap.DecryptionProfiles)
-		globalDecryptionProfiles.Save()
-	}
+	// Category groups and decryption profiles are published by the outer
+	// config transaction before policy publication.
 
 	// Global file-block extensions (CRIT-2).
 	// CL-13: ReplaceAll triggers exactly one atomicWriteFile call
@@ -691,7 +735,7 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
 		return ConfigSnapshot{}, err
 	}
-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version})
 	return snap, nil
 }
 
@@ -700,17 +744,19 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 	if err != nil {
 		return ConfigSnapshot{}, err
 	}
-	applyExternalAuthSnapshotSettings(snap)
 	var prepared *idpReplacement
 	if snap.IdPProfiles != nil {
 		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
 		if err != nil {
+			dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version, LoadError: err.Error()})
 			return ConfigSnapshot{}, err
 		}
 	}
-	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
+	if err := applyConfigSnapshotWithIdP(snap, prepared, nil); err != nil {
+		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version, LoadError: err.Error()})
 		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config snapshot: %w", err)
 	}
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
 	return snap, nil
 }

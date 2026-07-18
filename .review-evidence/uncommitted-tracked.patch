@@ -1,0 +1,2281 @@
+diff --git a/auth_idp.go b/auth_idp.go
+index b4c25e8..d90e86a 100644
+--- a/auth_idp.go
++++ b/auth_idp.go
+@@ -7,6 +7,8 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"sync"
++
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ )
+ 
+ // ---------------------------------------------------------------------------
+@@ -109,6 +111,7 @@ type SAMLProfileConfig struct {
+ // source of truth for all configured identity providers.
+ type IdPRegistry struct {
+ 	mu       sync.RWMutex
++	txnMu    sync.Mutex
+ 	profiles []*IdPProfile
+ 	path     string // JSON file path (empty = in-memory only)
+ 
+@@ -373,6 +376,8 @@ func prepareIdPReplacement(profiles []*IdPProfile) (*idpReplacement, error) {
+ }
+ 
+ func (r *IdPRegistry) applyReplacement(next *idpReplacement) error {
++	r.txnMu.Lock()
++	defer r.txnMu.Unlock()
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+ 	if r.path == "" {
+@@ -391,6 +396,61 @@ func (r *IdPRegistry) applyReplacement(next *idpReplacement) error {
+ 	return nil
+ }
+ 
++type preparedIdPReplacement struct {
++	registry *IdPRegistry
++	next     *idpReplacement
++	write    *filetxn.Write
++	done     bool
++}
++
++func (r *IdPRegistry) prepareReplacementForTxn(next *idpReplacement) (*preparedIdPReplacement, error) {
++	if next == nil {
++		return nil, nil
++	}
++	r.txnMu.Lock()
++	r.mu.RLock()
++	path := r.path
++	r.mu.RUnlock()
++	prepared := &preparedIdPReplacement{registry: r, next: next}
++	if path == "" {
++		return prepared, nil
++	}
++	data, err := json.MarshalIndent(next.profiles, "", "  ")
++	if err != nil {
++		r.txnMu.Unlock()
++		return nil, err
++	}
++	prepared.write = &filetxn.Write{Path: path, Data: data, Mode: 0o600}
++	return prepared, nil
++}
++
++func (p *preparedIdPReplacement) Write() *filetxn.Write {
++	if p == nil || p.write == nil {
++		return nil
++	}
++	write := *p.write
++	return &write
++}
++
++func (p *preparedIdPReplacement) Publish() {
++	if p == nil || p.done {
++		return
++	}
++	p.registry.mu.Lock()
++	p.registry.profiles, p.registry.live = p.next.profiles, p.next.live
++	p.registry.mu.Unlock()
++	p.done = true
++	p.registry.txnMu.Unlock()
++}
++
++func (p *preparedIdPReplacement) Abort() {
++	if p == nil || p.done {
++		return
++	}
++	p.done = true
++	p.registry.txnMu.Unlock()
++}
++
+ // ReplaceAll compiles and persists a complete replacement before the live swap.
+ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
+ 	next, err := prepareIdPReplacement(profiles)
+diff --git a/config_surfaces_test.go b/config_surfaces_test.go
+index eb11610..7609a08 100644
+--- a/config_surfaces_test.go
++++ b/config_surfaces_test.go
+@@ -782,6 +782,7 @@ func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
+ // here so the scan survives further gocognit splits (add the new function).
+ var snapshotApplyFuncs = map[string]bool{
+ 	"applyConfigSnapshot":               true, // controlplane_snapshot.go
++	"commitPreparedConfigSnapshot":      true,
+ 	"applySnapshotPolicyAndTraffic":     true,
+ 	"applySnapshotClusterRuntime":       true,
+ 	"applySnapshotSessionSecret":        true,
+diff --git a/configversion.go b/configversion.go
+index ed7edd2..9b6c6b3 100644
+--- a/configversion.go
++++ b/configversion.go
+@@ -109,18 +109,27 @@ func saveConfigVersion(actor, action string) {
+ // persist the commit comment into the config-version timeline ("why this
+ // change"), so it survives alongside the rollback snapshot.
+ func saveConfigVersionNote(actor, action, note string) {
++	if err := saveConfigVersionSnapshot(actor, action, note, nil); err != nil {
++		logger.Printf("ConfigVersion: write error: %v", err)
++	}
++}
++
++func saveConfigVersionSnapshot(actor, action, note string, committedPolicy []PolicyRule) error {
+ 	saveConfigVersionMu.Lock()
+ 	defer saveConfigVersionMu.Unlock()
+ 
+ 	snap := captureConfigBackup()
++	if committedPolicy != nil {
++		snap.PolicyRules = committedPolicy
++	}
+ 	raw, err := json.Marshal(snap)
+ 	if err != nil {
+-		logger.Printf("ConfigVersion: marshal error: %v", err)
+-		return
++		return fmt.Errorf("marshal config version: %w", err)
+ 	}
+ 	if _, err := configVersions.SaveWithNote(actor, action, snap.ExportedAt, note, raw); err != nil {
+-		logger.Printf("ConfigVersion: write error: %v", err)
++		return fmt.Errorf("persist config version: %w", err)
+ 	}
++	return nil
+ }
+ 
+ // ── API Handlers ───────────────────────────────────────────────────────────
+@@ -262,10 +271,6 @@ func validateConfigBackup(b *configBackup) []string {
+ 	return warnings
+ }
+ 
+-// configRollbackMu serializes config rollback operations (B17) so concurrent
+-// rollback requests cannot interleave store mutations and leave partial state.
+-var configRollbackMu sync.Mutex
+-
+ // restoreBlocklistFromBackup rebuilds the blocklist from a snapshot.
+ // Feed attribution is carried across the rebuild — the Remove/Add loops
+ // would otherwise strand every feed entry as unattributed, making it
+@@ -287,38 +292,32 @@ func restoreBlocklistFromBackup(b *configBackup) {
+ 
+ // applyConfigBackup restores all config stores from a backup snapshot.
+ func applyConfigBackup(b *configBackup) error {
+-	configRollbackMu.Lock()
+-	defer configRollbackMu.Unlock()
+-	// Policy persistence is the only fail-returning apply step. Commit it before
+-	// mutating sibling stores so a disk failure leaves no mixed rollback state.
++	configApplyMu.Lock()
++	defer configApplyMu.Unlock()
+ 	var validRules []PolicyRule
+ 	for i := range b.PolicyRules {
+ 		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err == nil {
+ 			validRules = append(validRules, b.PolicyRules[i])
+ 		}
+ 	}
+-	// Persist the candidate first, then apply leaf dependencies while policy
+-	// readers are blocked; publish the policy only after dependencies are live.
+-	if err := policyStore.ReplaceAllAndSaveWithBeforePublish(validRules, func() {
+-		if b.URLCategories != nil {
+-			catStore.ReplaceAll(b.URLCategories)
+-			catStore.Save()
+-		}
+-		if b.CategoryGroups != nil {
+-			globalCategoryGroups.ReplaceAll(b.CategoryGroups)
+-			globalCategoryGroups.Save()
+-		}
+-		if b.DecryptionProfiles != nil {
+-			globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
+-			globalDecryptionProfiles.Save()
++	prepared, err := preparePolicyTaxonomyApply(validRules, b.URLCategories, b.CategoryGroups, b.DecryptionProfiles)
++	if err != nil {
++		return err
++	}
++	journalPath := ""
++	if len(prepared.writes) > 0 {
++		journalPath, err = configApplyJournalPath()
++		if err != nil {
++			prepared.abort()
++			return err
+ 		}
+-	}); err != nil {
++	}
++	if err := commitPreparedConfig(prepared, journalPath); err != nil {
+ 		return err
+ 	}
+ 	restoreBlocklistFromBackup(b)
+ 
+-	// Categories, groups, and decryption profiles were applied leaf-first inside
+-	// the policy publication boundary above.
++	// Policy and referenced taxonomy were committed as one recoverable generation.
+ 
+ 	setDefaultPolicyAction(b.DefaultAction)
+ 
+diff --git a/controlplane_client.go b/controlplane_client.go
+index 256b256..523032b 100644
+--- a/controlplane_client.go
++++ b/controlplane_client.go
+@@ -208,9 +208,9 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+ 		}
+ 	}
+ 	c.resetBackoff()
+-	dpControlPlanePollFailing.Store(false)
+ 	var snap ConfigSnapshot
+ 	if err := json.Unmarshal(raw, &snap); err != nil {
++		dpControlPlanePollFailing.Store(true)
+ 		logger.Printf("DataPlane: parse config error: %v", err)
+ 		return
+ 	}
+@@ -220,6 +220,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+ 	// subsequent legitimate snapshot via the "snap.Version <= lastVersion"
+ 	// short-circuit below.
+ 	if err := validateConfigSnapshot(snap); err != nil {
++		dpControlPlanePollFailing.Store(true)
+ 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+ 		return
+ 	}
+@@ -231,39 +232,30 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+ 	// rationale as the H5 placement above. applyConfigSnapshot re-checks
+ 	// (equal epoch passes) for its other callers.
+ 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
++		dpControlPlanePollFailing.Store(true)
+ 		return
+ 	}
+ 	if snap.Version <= c.lastVersion {
++		dpControlPlanePollFailing.Store(false)
+ 		return // nothing changed
+ 	}
+ 	snapForDisk := snap
+-	// Compile IdP providers against the candidate public origin before any
+-	// policy/traffic publication. Restore external-auth settings on rejection.
+-	oldBaseURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
+-	applyExternalAuthSnapshotSettings(snap)
++	// Compile IdP providers before any policy/traffic publication.
+ 	var preparedIdP *idpReplacement
+ 	if snap.IdPProfiles != nil {
+ 		preparedIdP, err = prepareIdPReplacement(snap.IdPProfiles)
+ 		if err != nil {
+-			SetProxyBaseURL(oldBaseURL)
+-			trustForwardedHeaders = oldTrust
+ 			dpControlPlanePollFailing.Store(true)
+ 			logger.Printf("DataPlane: config snapshot v%d IdP preparation failed: %v", snap.Version, err)
+ 			return
+ 		}
+ 	}
+-	if err := applyConfigSnapshotWithIdP(snap, preparedIdP); err != nil {
+-		SetProxyBaseURL(oldBaseURL)
+-		trustForwardedHeaders = oldTrust
++	if err := applyConfigSnapshotWithIdP(snap, preparedIdP, &snapForDisk); err != nil {
+ 		dpControlPlanePollFailing.Store(true)
+ 		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+ 		return
+ 	}
+-	if err := persistDPLastGoodConfigSnapshot(snapForDisk); err != nil {
+-		dpControlPlanePollFailing.Store(true)
+-		logger.Printf("DataPlane: config snapshot v%d last-good persist failed: %v", snap.Version, err)
+-		return
+-	}
++	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version})
+ 	dpControlPlanePollFailing.Store(false)
+ 	c.lastVersion = snap.Version
+ }
+diff --git a/controlplane_snapshot.go b/controlplane_snapshot.go
+index 909454b..602084f 100644
+--- a/controlplane_snapshot.go
++++ b/controlplane_snapshot.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"encoding/hex"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
+@@ -11,6 +12,7 @@ import (
+ 	"sync/atomic"
+ 	"time"
+ 
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ 	"github.com/KidCarmi/Culvert/internal/session"
+ )
+ 
+@@ -351,26 +353,18 @@ var caRotationNotify = make(chan struct{}, 1)
+ 
+ // applyConfigSnapshot updates all local proxy state from a received snapshot.
+ func applyConfigSnapshot(snap ConfigSnapshot) error {
+-	if snap.IdPProfiles == nil {
+-		return applyConfigSnapshotWithIdP(snap, nil)
+-	}
+-	oldBaseURL, oldTrust := cfg.ProxyBaseURL(), trustForwardedHeaders
+-	applyExternalAuthSnapshotSettings(snap)
+-	prepared, err := prepareIdPReplacement(snap.IdPProfiles)
+-	if err != nil {
+-		SetProxyBaseURL(oldBaseURL)
+-		trustForwardedHeaders = oldTrust
+-		return fmt.Errorf("idp profile sync: %w", err)
+-	}
+-	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
+-		SetProxyBaseURL(oldBaseURL)
+-		trustForwardedHeaders = oldTrust
+-		return err
++	var prepared *idpReplacement
++	if snap.IdPProfiles != nil {
++		var err error
++		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
++		if err != nil {
++			return fmt.Errorf("idp profile sync: %w", err)
++		}
+ 	}
+-	return nil
++	return applyConfigSnapshotWithIdP(snap, prepared, nil)
+ }
+ 
+-func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement) error {
++func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement, canonical *ConfigSnapshot) error {
+ 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
+ 	// before ANY state mutation; ratchet the last-seen epoch forward
+ 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
+@@ -396,36 +390,105 @@ func applyConfigSnapshotWithIdP(snap ConfigSnapshot, prepared *idpReplacement) e
+ 		}
+ 	}
+ 
+-	if err := applySnapshotPolicyAndTraffic(snap); err != nil {
++	if err := commitPreparedConfigSnapshot(snap, prepared, canonical); err != nil {
+ 		return err
+ 	}
+-	applySnapshotClusterRuntime(snap)
+ 
+-	// IdP profiles were compiled before any state mutation.
+-	if prepared != nil {
+-		if err := idpRegistry.applyReplacement(prepared); err != nil {
+-			logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
++	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
++		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
++	return nil
++}
++
++func commitPreparedConfigSnapshot(snap ConfigSnapshot, idp *idpReplacement, canonical *ConfigSnapshot) error {
++	configApplyMu.Lock()
++	defer configApplyMu.Unlock()
++
++	rules := snap.PolicyRules
++	if rules == nil {
++		rules = policyStore.List()
++	}
++	prepared, err := preparePolicyTaxonomyApply(rules, snap.URLCategories, snap.CategoryGroups, snap.DecryptionProfiles)
++	if err != nil {
++		return err
++	}
++	preparedIDP, err := idpRegistry.prepareReplacementForTxn(idp)
++	if err != nil {
++		prepared.abort()
++		return err
++	}
++	abort := func() {
++		prepared.abort()
++		preparedIDP.Abort()
++	}
++	writes := append([]filetxn.Write(nil), prepared.writes...)
++	if write := preparedIDP.Write(); write != nil {
++		writes = append(writes, *write)
++	}
++	journalName := "config_apply.txn"
++	if canonical != nil {
++		data, err := json.MarshalIndent(canonical, "", "  ")
++		if err != nil {
++			abort()
+ 			return err
+ 		}
+-		logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
++		writes = append(writes, filetxn.Write{Path: dpLastGoodConfigSnapshotPath(), Data: data, Mode: 0o600})
++		journalName = "dp_config_apply.txn"
+ 	}
+ 
+-	applySnapshotExtendedState(snap)
+-
+-	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
+-		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
++	publish := func() error {
++		prepared.publishDependencies()
++		applySnapshotPolicyAndTraffic(snap)
++		applySnapshotClusterRuntime(snap)
++		preparedIDP.Publish()
++		if idp != nil {
++			logger.Printf("DataPlane: synced %d IdP profile(s) from control plane", len(snap.IdPProfiles))
++		}
++		applySnapshotExtendedState(snap)
++		prepared.publishPolicy()
++		return nil
++	}
++	if len(writes) == 0 {
++		return publish()
++	}
++	journalDir := crossStoreTxnDir
++	if canonical != nil {
++		journalDir = dataDir
++	}
++	if journalDir == "" {
++		journalDir = filepath.Dir(writes[0].Path)
++	}
++	if journalDir == "" {
++		abort()
++		return errors.New("config snapshot has no transaction recovery directory")
++	}
++	tx, err := beginCrossStoreTxn(filepath.Join(journalDir, journalName), "config-snapshot", writes)
++	if err != nil {
++		abort()
++		return err
++	}
++	if err := tx.Apply(); err != nil {
++		abort()
++		return err
++	}
++	if err := tx.Commit(); err != nil {
++		abort()
++		return err
++	}
++	if err := publish(); err != nil {
++		// Publication is intentionally infallible after commit. Keep the journal
++		// for fail-closed startup verification if that invariant is violated.
++		return err
++	}
++	if err := tx.Finish(); err != nil && logger != nil {
++		logger.Printf("DataPlane: committed config transaction cleanup deferred: %v", err)
++	}
+ 	return nil
+ }
+ 
+ // applySnapshotPolicyAndTraffic applies the traffic-control and policy
+ // slices of a snapshot (split from applyConfigSnapshot for gocognit; order
+ // preserved verbatim).
+-func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
+-	// Policy persistence is the only fail-returning step in this slice. Commit it
+-	// first so a local disk failure cannot expose a mixed snapshot generation.
+-	if err := applySnapshotPolicyRules(snap.PolicyRules); err != nil {
+-		return err
+-	}
++func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) {
+ 	// Blocklist — in-place feed-entry replacement preserves the
+ 	// package-global bl's path / mode / manual / exceptions (the
+ 	// DP-local state that isn't in the cluster snapshot). The
+@@ -479,13 +542,7 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
+ 		}
+ 	}
+ 
+-	// URL categories.
+-	if snap.URLCategories != nil {
+-		catStore.ReplaceAll(snap.URLCategories)
+-		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+-		// hardened in PR #246).
+-		catStore.Save()
+-	}
++	// URL categories are prepared and published by the outer config transaction.
+ 
+ 	// File profiles.
+ 	if snap.FileProfiles != nil {
+@@ -512,7 +569,6 @@ func applySnapshotPolicyAndTraffic(snap ConfigSnapshot) error {
+ 	if snap.MaxConnsPerIP > 0 {
+ 		connLimiter.Enable(snap.MaxConnsPerIP)
+ 	}
+-	return nil
+ }
+ 
+ func applySnapshotPolicyRules(rules []PolicyRule) error {
+@@ -612,20 +668,8 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
+ 		globalBandwidth.ReplaceAll(snap.BandwidthPolicies)
+ 	}
+ 
+-	// Category groups.
+-	if snap.CategoryGroups != nil {
+-		globalCategoryGroups.ReplaceAll(snap.CategoryGroups)
+-		// P3.4 caller-side persist (Bucket-4 fsync-safe Save
+-		// hardened in PR #246).
+-		globalCategoryGroups.Save()
+-	}
+-
+-	// Named decryption profiles (nil-skip; applied here alongside category groups —
+-	// both are named objects the policy rules reference by name).
+-	if snap.DecryptionProfiles != nil {
+-		globalDecryptionProfiles.ReplaceAll(snap.DecryptionProfiles)
+-		globalDecryptionProfiles.Save()
+-	}
++	// Category groups and decryption profiles are published by the outer
++	// config transaction before policy publication.
+ 
+ 	// Global file-block extensions (CRIT-2).
+ 	// CL-13: ReplaceAll triggers exactly one atomicWriteFile call
+@@ -691,7 +735,7 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
+ 		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
+ 		return ConfigSnapshot{}, err
+ 	}
+-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
++	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version})
+ 	return snap, nil
+ }
+ 
+@@ -700,17 +744,19 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
+ 	if err != nil {
+ 		return ConfigSnapshot{}, err
+ 	}
+-	applyExternalAuthSnapshotSettings(snap)
+ 	var prepared *idpReplacement
+ 	if snap.IdPProfiles != nil {
+ 		prepared, err = prepareIdPReplacement(snap.IdPProfiles)
+ 		if err != nil {
++			dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version, LoadError: err.Error()})
+ 			return ConfigSnapshot{}, err
+ 		}
+ 	}
+-	if err := applyConfigSnapshotWithIdP(snap, prepared); err != nil {
++	if err := applyConfigSnapshotWithIdP(snap, prepared, nil); err != nil {
++		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{SavedVersion: snap.Version, LoadError: err.Error()})
+ 		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config snapshot: %w", err)
+ 	}
++	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+ 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
+ 	return snap, nil
+ }
+diff --git a/controlplane_version_persist_test.go b/controlplane_version_persist_test.go
+index 435d90e..3a9b5cc 100644
+--- a/controlplane_version_persist_test.go
++++ b/controlplane_version_persist_test.go
+@@ -161,21 +161,16 @@ func TestConfigStoreVersion_HAPromotionSeedsFromReplicatedLeader(t *testing.T) {
+ 	}
+ }
+ 
+-// TestApplyHABundle_RecordsReplicatedLeaderVersion pins the wiring: applyHABundle
+-// must capture the leader's bundle Version even when a downstream apply step
+-// fails (here the empty cluster-state import), because the leader already
+-// published that Version to the DPs.
+-func TestApplyHABundle_RecordsReplicatedLeaderVersion(t *testing.T) {
++// TestApplyHABundle_FailureDoesNotRecordReplicatedLeaderVersion ensures a
++// rejected local bundle cannot publish HA freshness metadata.
++func TestApplyHABundle_FailureDoesNotRecordReplicatedLeaderVersion(t *testing.T) {
+ 	resetReplicatedLeaderVersion(t)
+ 
+ 	const leaderVersion int64 = 987654
+-	// Empty bundle: no CA (skipped) and a nil ClusterState that fails to import,
+-	// so applyHABundle returns false BEFORE applyConfigSnapshot — proving the
+-	// version is recorded up front, independent of apply success.
+ 	if applyHABundle(&HAStateBundle{Version: leaderVersion}, "tok") {
+ 		t.Fatal("applyHABundle should return false when cluster state is absent")
+ 	}
+-	if got := replicatedLeaderConfigVersion.Load(); got != leaderVersion {
+-		t.Fatalf("applyHABundle did not record the leader version: got %d, want %d", got, leaderVersion)
++	if got := replicatedLeaderConfigVersion.Load(); got != 0 {
++		t.Fatalf("failed bundle recorded leader version %d", got)
+ 	}
+ }
+diff --git a/diagnostics.go b/diagnostics.go
+index dc068b1..f4baa11 100644
+--- a/diagnostics.go
++++ b/diagnostics.go
+@@ -193,15 +193,15 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
+ 		}
+ 	}
+ 	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
+-	if !dpControlPlanePollFailing.Load() {
+-		if st.SaveError != "" {
+-			return OperatorContractCheck{
+-				Code:           "dp_last_known_good_config",
+-				Status:         diagWarn,
+-				Message:        "control plane reachable, but last-known-good snapshot persistence failed",
+-				OperatorAction: "Fix data directory permissions so this DP can preserve its last successfully applied config for CP outages.",
+-			}
++	if st.SaveError != "" {
++		return OperatorContractCheck{
++			Code:           "dp_last_known_good_config",
++			Status:         diagWarn,
++			Message:        "control plane reachable, but last-known-good snapshot persistence failed",
++			OperatorAction: "Fix data directory permissions so this DP can preserve its last successfully applied config for CP outages.",
+ 		}
++	}
++	if !dpControlPlanePollFailing.Load() {
+ 		return OperatorContractCheck{
+ 			Code:    "dp_last_known_good_config",
+ 			Status:  diagOK,
+diff --git a/dp_last_good_config_test.go b/dp_last_good_config_test.go
+index 04e6cb7..6666ba3 100644
+--- a/dp_last_good_config_test.go
++++ b/dp_last_good_config_test.go
+@@ -3,11 +3,14 @@ package main
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
++	"fmt"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+ 
+ 	"github.com/KidCarmi/Culvert/internal/audit"
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ )
+ 
+ func withDPLastGoodConfigTestGlobals(t *testing.T) {
+@@ -135,15 +138,45 @@ func TestDPConfigPolicySaveFailureDoesNotAdvanceVersionOrLastGood(t *testing.T)
+ func TestDPLastGoodPersistFailureDoesNotAdvanceVersionOrHealth(t *testing.T) {
+ 	setupProxyTest(t)
+ 	withDPLastGoodConfigTestGlobals(t)
++	snapshotPolicyStoreForTest(t)
+ 	restoreEpoch := resetDPLastSeenEpochForTest()
+ 	defer restoreEpoch()
+ 	origPollFailing := dpControlPlanePollFailing.Load()
+ 	dpControlPlanePollFailing.Store(false)
+ 	defer dpControlPlanePollFailing.Store(origPollFailing)
+-	if err := os.Mkdir(dpLastGoodConfigSnapshotPath(), 0o700); err != nil {
++
++	policyStore.path = filepath.Join(dataDir, "policy.json")
++	if err := policyStore.ReplaceAllAndSave([]PolicyRule{{Priority: 1, Name: "old-policy", Action: ActionAllow}}); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	snap := ConfigSnapshot{Version: 2, BlockedHosts: []string{"applied-but-not-last-good.example"}}
++	oldBegin := beginCrossStoreTxn
++	beginCrossStoreTxn = func(journalPath, kind string, writes []filetxn.Write, opts ...filetxn.Option) (*filetxn.Txn, error) {
++		lastGoodWrite := -1
++		for i := range writes {
++			if writes[i].Path == dpLastGoodConfigSnapshotPath() {
++				lastGoodWrite = i
++				break
++			}
++		}
++		if lastGoodWrite < 0 {
++			return nil, errors.New("test seam: last-known-good write missing from transaction")
++		}
++		failurePoint := fmt.Sprintf("before-write-%d", lastGoodWrite)
++		opts = append(opts, filetxn.WithBoundaryHook(func(point string) error {
++			if point == failurePoint {
++				return errors.New("injected last-known-good write failure")
++			}
++			return nil
++		}))
++		return filetxn.Begin(journalPath, kind, writes, opts...)
++	}
++	t.Cleanup(func() { beginCrossStoreTxn = oldBegin })
++
++	snap := ConfigSnapshot{
++		Version:      2,
++		BlockedHosts: []string{"must-not-apply.example"},
++		PolicyRules:  []PolicyRule{{Priority: 1, Name: "new-policy", Action: ActionDrop}},
++	}
+ 	raw, err := json.Marshal(snap)
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -158,6 +191,22 @@ func TestDPLastGoodPersistFailureDoesNotAdvanceVersionOrHealth(t *testing.T) {
+ 	if !dpControlPlanePollFailing.Load() {
+ 		t.Fatal("last-good persistence failure reported healthy polling")
+ 	}
++	if got := policyStore.List()[0].Name; got != "old-policy" {
++		t.Fatalf("last-good failure published policy memory %q", got)
++	}
++	fresh := &PolicyStore{}
++	if err := fresh.Load(policyStore.path); err != nil {
++		t.Fatal(err)
++	}
++	if got := fresh.List()[0].Name; got != "old-policy" {
++		t.Fatalf("last-good failure left policy disk at %q", got)
++	}
++	if _, err := os.Stat(dpLastGoodConfigSnapshotPath()); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("failed last-good write persisted snapshot: %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(dataDir, "dp_config_apply.txn")); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("failed transaction journal was not cleaned up: %v", err)
++	}
+ }
+ 
+ func TestApplyDPLastGoodPolicySaveFailureReturnsError(t *testing.T) {
+diff --git a/enrollment.go b/enrollment.go
+index 52744cb..0e8281d 100644
+--- a/enrollment.go
++++ b/enrollment.go
+@@ -40,6 +40,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ 	"github.com/KidCarmi/Culvert/internal/secret"
+ )
+ 
+@@ -180,10 +181,14 @@ func (cs *ClusterStore) Save() error {
+ 
+ // saveLocked persists state without acquiring locks — caller must hold mu.
+ func (cs *ClusterStore) saveLocked() error {
++	return cs.saveStateLocked(cs.st)
++}
++
++func (cs *ClusterStore) saveStateLocked(st ClusterState) error {
+ 	if cs.path == "" {
+ 		return nil // no persistence path set
+ 	}
+-	data, err := json.MarshalIndent(cs.st, "", "  ")
++	data, err := json.MarshalIndent(st, "", "  ")
+ 	if err != nil {
+ 		return fmt.Errorf("marshal cluster state: %w", err)
+ 	}
+@@ -707,11 +712,17 @@ func (cs *ClusterStore) ExportState() (json.RawMessage, error) {
+ 	return json.Marshal(cs.st)
+ }
+ 
+-// ImportFullState replaces the entire cluster state from HA leader replication.
+-func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
++type preparedClusterState struct {
++	store *ClusterStore
++	state ClusterState
++	write *filetxn.Write
++	done  bool
++}
++
++func (cs *ClusterStore) prepareImport(data json.RawMessage) (*preparedClusterState, error) {
+ 	var st ClusterState
+ 	if err := json.Unmarshal(data, &st); err != nil {
+-		return fmt.Errorf("parse replicated state: %w", err)
++		return nil, fmt.Errorf("parse replicated state: %w", err)
+ 	}
+ 	if st.Nodes == nil {
+ 		st.Nodes = make(map[string]*EnrolledNode)
+@@ -719,16 +730,60 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
+ 	if st.Tokens == nil {
+ 		st.Tokens = make(map[string]*EnrollToken)
+ 	}
+-	// Same nil-map defence as Load() — a follower that replays replicated
+-	// state while a CA rotation is in progress would otherwise panic on the
+-	// first RecordNodeRenewed call if renewed_nodes was null/missing.
+ 	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
+ 		st.CARotation.RenewedNodes = make(map[string]string)
+ 	}
+ 	cs.mu.Lock()
+-	cs.st = st
+-	_ = cs.saveLocked()
+-	cs.mu.Unlock()
++	prepared := &preparedClusterState{store: cs, state: st}
++	if cs.path != "" {
++		payload, err := json.MarshalIndent(st, "", "  ")
++		if err != nil {
++			cs.mu.Unlock()
++			return nil, err
++		}
++		prepared.write = &filetxn.Write{Path: cs.path, Data: payload, Mode: 0o600}
++	}
++	return prepared, nil
++}
++
++func (p *preparedClusterState) Write() *filetxn.Write {
++	if p == nil || p.write == nil {
++		return nil
++	}
++	write := *p.write
++	return &write
++}
++
++func (p *preparedClusterState) Publish() {
++	if p == nil || p.done {
++		return
++	}
++	p.store.st = p.state
++	p.done = true
++	p.store.mu.Unlock()
++}
++
++func (p *preparedClusterState) Abort() {
++	if p == nil || p.done {
++		return
++	}
++	p.done = true
++	p.store.mu.Unlock()
++}
++
++// ImportFullState replaces the entire cluster state from HA leader replication.
++func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
++	prepared, err := cs.prepareImport(data)
++	if err != nil {
++		return err
++	}
++	if write := prepared.Write(); write != nil {
++		if err := atomicWriteFile(write.Path, write.Data, write.Mode); err != nil {
++			prepared.Abort()
++			return fmt.Errorf("persist replicated state: %w", err)
++		}
++	}
++	prepared.Publish()
+ 	return nil
+ }
+ 
+diff --git a/ha.go b/ha.go
+index 46b5297..0b8038c 100644
+--- a/ha.go
++++ b/ha.go
+@@ -15,8 +15,10 @@ import (
+ 	"time"
+ 
+ 	"github.com/KidCarmi/Culvert/internal/alerts"
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ 	"github.com/KidCarmi/Culvert/internal/halease"
+ 	"github.com/KidCarmi/Culvert/internal/reqlog"
++	"github.com/KidCarmi/Culvert/internal/secret"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+ )
+@@ -607,7 +609,8 @@ func haRPCErrorProvesReachability(err error) bool {
+ 	switch status.Code(err) {
+ 	case codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument,
+ 		codes.FailedPrecondition, codes.AlreadyExists, codes.NotFound,
+-		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted:
++		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted, codes.Aborted,
++		codes.Internal, codes.Unknown:
+ 		return true
+ 	default:
+ 		return false
+@@ -635,50 +638,189 @@ func (h *HAState) seedTermFromLeader(leaderTerm uint64) {
+ // failure does not leave unrelated replicated state partially applied.
+ func applyHABundle(bundle *HAStateBundle, token string) bool {
+ 	// CHAOS-01 (HA-promotion follow-up): remember the leader's published config
+-	// version so a later promotion seeds this node's version floor above it.
+-	// applyConfigSnapshot below applies bundle.Config but does NOT advance the
+-	// local ConfigStore.version (that counter moves only when THIS node
+-	// publishes as CP), so without this the promoted CP would reseed only from
+-	// its own stale/absent floor + wall clock and could re-issue versions the
+-	// DPs already applied from the old leader. Recorded up front (the epoch
+-	// fence in syncFromLeader already ran) so a raised floor is guaranteed even
+-	// if a downstream apply step below fails — a higher floor never harms DPs.
+-	noteReplicatedLeaderVersion(bundle.Version)
+-
+-	// Validate cluster bytes before any replicated state mutates. ImportFullState
+-	// has no remaining failure path after this parse succeeds.
++	configApplyMu.Lock()
++	defer configApplyMu.Unlock()
+ 	if len(bundle.ClusterState) == 0 {
+ 		logger.Printf("HA: cluster state missing from bundle")
+ 		return false
+ 	}
+-	var probe ClusterState
+-	if err := json.Unmarshal(bundle.ClusterState, &probe); err != nil {
++	cluster, err := globalClusterStore.prepareImport(bundle.ClusterState)
++	if err != nil {
+ 		logger.Printf("HA: validate cluster state failed: %v", err)
+ 		return false
+ 	}
+-
+-	if bundle.CACertPEM != "" {
+-		if err := applyReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token); err != nil {
+-			logger.Printf("HA: apply replicated CA failed (no state imported): %v", err)
++	ca, err := prepareReplicatedCA([]byte(bundle.CACertPEM), bundle.CAKeyEncrypted, token)
++	if err != nil {
++		cluster.Abort()
++		logger.Printf("HA: prepare replicated CA failed: %v", err)
++		return false
++	}
++	var idp *idpReplacement
++	if bundle.Config.IdPProfiles != nil {
++		idp, err = prepareIdPReplacement(bundle.Config.IdPProfiles)
++	}
++	if err != nil {
++		ca.Abort()
++		cluster.Abort()
++		logger.Printf("HA: prepare IdP config failed: %v", err)
++		return false
++	}
++	rules := bundle.Config.PolicyRules
++	if rules == nil {
++		rules = policyStore.List()
++	}
++	config, err := preparePolicyTaxonomyApply(rules, bundle.Config.URLCategories, bundle.Config.CategoryGroups, bundle.Config.DecryptionProfiles)
++	if err != nil {
++		ca.Abort()
++		cluster.Abort()
++		logger.Printf("HA: prepare config failed: %v", err)
++		return false
++	}
++	preparedIDP, err := idpRegistry.prepareReplacementForTxn(idp)
++	if err != nil {
++		config.abort()
++		ca.Abort()
++		cluster.Abort()
++		logger.Printf("HA: prepare IdP persistence failed: %v", err)
++		return false
++	}
++	abort := func() {
++		preparedIDP.Abort()
++		config.abort()
++		ca.Abort()
++		cluster.Abort()
++	}
++	writes := ca.Writes()
++	writes = append(writes, config.writes...)
++	if write := preparedIDP.Write(); write != nil {
++		writes = append(writes, *write)
++	}
++	if write := cluster.Write(); write != nil {
++		writes = append(writes, *write)
++		floor := bundle.Version
++		floorPath := filepath.Join(filepath.Dir(write.Path), cpConfigVersionFile)
++		if data, readErr := os.ReadFile(floorPath); readErr == nil {
++			var current cpConfigVersionState
++			if json.Unmarshal(data, &current) == nil && current.Version > floor {
++				floor = current.Version
++			}
++		}
++		floorData, marshalErr := json.Marshal(cpConfigVersionState{Version: floor})
++		if marshalErr != nil {
++			abort()
++			logger.Printf("HA: prepare config version floor failed: %v", marshalErr)
+ 			return false
+ 		}
++		writes = append(writes, filetxn.Write{Path: floorPath, Data: floorData, Mode: 0o600})
+ 	}
+-
+-	// Apply config before cluster state. Policy persistence is the only new
+-	// fail-returning path in this slice; a failure must leave cluster state old.
+-	if err := applyConfigSnapshot(bundle.Config); err != nil {
+-		logger.Printf("HA: apply config snapshot error: %v", err)
+-		return false
++	var tx *filetxn.Txn
++	if len(writes) > 0 {
++		journalDir := crossStoreTxnDir
++		if journalDir == "" {
++			journalDir = filepath.Dir(writes[0].Path)
++		}
++		tx, err = beginCrossStoreTxn(filepath.Join(journalDir, "ha_bundle.txn"), "ha-bundle", writes)
++		if err == nil {
++			err = tx.Apply()
++		}
++		if err == nil {
++			err = tx.Commit()
++		}
++		if err != nil {
++			abort()
++			logger.Printf("HA: durable bundle apply failed: %v", err)
++			return false
++		}
+ 	}
++	config.publishDependencies()
++	applySnapshotPolicyAndTraffic(bundle.Config)
++	applySnapshotClusterRuntime(bundle.Config)
++	preparedIDP.Publish()
++	applySnapshotExtendedState(bundle.Config)
++	config.publishPolicy()
++	ca.Publish()
++	cluster.Publish()
++	if tx != nil {
++		if err := tx.Finish(); err != nil {
++			logger.Printf("HA: committed bundle cleanup deferred: %v", err)
++		}
++	}
++	noteReplicatedLeaderVersion(bundle.Version)
++	return true
++}
+ 
+-	if len(bundle.ClusterState) > 0 {
+-		if err := globalClusterStore.ImportFullState(bundle.ClusterState); err != nil {
+-			logger.Printf("HA: import prevalidated cluster state error: %v", err)
+-			return false
++type preparedClusterCA struct {
++	ca     *clusterCA
++	cert   []byte
++	probe  *clusterCA
++	writes []filetxn.Write
++	done   bool
++}
++
++func prepareReplicatedCA(certPEM []byte, encryptedKey, token string) (*preparedClusterCA, error) {
++	if len(certPEM) == 0 {
++		return nil, nil
++	}
++	if encryptedKey == "" {
++		return nil, fmt.Errorf("encrypted CA key missing from HA bundle (plaintext fallback removed)")
++	}
++	keyPEM, err := haDecryptKey(encryptedKey, token)
++	if err != nil {
++		return nil, fmt.Errorf("decrypt CA key: %w", err)
++	}
++	probe := &clusterCA{}
++	if err := probe.loadFromPEM(certPEM, keyPEM); err != nil {
++		return nil, fmt.Errorf("validate replicated CA: %w", err)
++	}
++	globalClusterCA.mu.Lock()
++	prepared := &preparedClusterCA{ca: globalClusterCA, cert: append([]byte(nil), certPEM...), probe: probe}
++	if globalClusterCA.dir == "" {
++		return prepared, nil
++	}
++	certPath, err := safeCAPath(globalClusterCA.dir, "cluster-ca.crt")
++	if err != nil {
++		globalClusterCA.mu.Unlock()
++		return nil, err
++	}
++	keyPath, err := safeCAPath(globalClusterCA.dir, "cluster-ca.key")
++	if err != nil {
++		globalClusterCA.mu.Unlock()
++		return nil, err
++	}
++	keyData := keyPEM
++	if clusterCAKeyEncryptionEnabled() {
++		keyData, err = secret.Seal(keyPEM, clusterCAKEKProvider(globalClusterCA.dir))
++		if err != nil {
++			globalClusterCA.mu.Unlock()
++			return nil, err
+ 		}
+ 	}
++	prepared.writes = []filetxn.Write{{Path: certPath, Data: certPEM, Mode: 0o600}, {Path: keyPath, Data: keyData, Mode: 0o600}}
++	return prepared, nil
++}
+ 
+-	return true
++func (p *preparedClusterCA) Writes() []filetxn.Write {
++	if p == nil {
++		return nil
++	}
++	return append([]filetxn.Write(nil), p.writes...)
++}
++
++func (p *preparedClusterCA) Publish() {
++	if p == nil || p.done {
++		return
++	}
++	p.ca.cert, p.ca.key, p.ca.certPEM = p.probe.cert, p.probe.key, p.cert
++	p.done = true
++	p.ca.mu.Unlock()
++}
++
++func (p *preparedClusterCA) Abort() {
++	if p == nil || p.done {
++		return
++	}
++	p.done = true
++	p.ca.mu.Unlock()
+ }
+ 
+ // applyReplicatedCA decrypts the HA-token-wrapped cluster CA key and installs it
+diff --git a/ha_ca3_pr5_test.go b/ha_ca3_pr5_test.go
+index 6d1e0e8..b2a3d84 100644
+--- a/ha_ca3_pr5_test.go
++++ b/ha_ca3_pr5_test.go
+@@ -13,9 +13,15 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"encoding/json"
++	"errors"
++	"fmt"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
++
++	"github.com/KidCarmi/Culvert/internal/catgroup"
++	"github.com/KidCarmi/Culvert/internal/decryptprofile"
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ )
+ 
+ // withClusterCAForHA points globalClusterCA at a fresh CA bootstrapped in dir
+@@ -219,6 +225,143 @@ func TestApplyHABundlePolicySaveFailureDoesNotReportSuccess(t *testing.T) {
+ 	}
+ }
+ 
++func TestApplyHABundleTransactionBoundaryFailuresPublishNothing(t *testing.T) {
++	targets := []string{"ca-cert", "ca-key", "policy", "policy-meta", "categories", "groups", "profiles", "idp", "cluster-state", "version-floor"}
++	for _, target := range targets {
++		t.Run(target, func(t *testing.T) {
++			setupProxyTest(t)
++			dir := t.TempDir()
++			oldTxnDir := crossStoreTxnDir
++			crossStoreTxnDir = dataDir
++			t.Cleanup(func() { crossStoreTxnDir = oldTxnDir })
++			certPEM, keyPEM := withClusterCAForHA(t, dir)
++			const token = "ha-boundary-token" // #nosec G101 -- synthetic test fixture
++			encryptedKey, err := haEncryptKey(keyPEM, token)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			oldStore, oldPolicy, oldIDP := globalClusterStore, policyStore, idpRegistry
++			oldCategories, oldGroups, oldProfiles := catStore, globalCategoryGroups, globalDecryptionProfiles
++			globalClusterStore = newTestClusterStore(t)
++			policyStore = &PolicyStore{path: filepath.Join(dir, "policy.json")}
++			catStore = newCategoryStore(nil)
++			catStore.SetPathForTest(filepath.Join(dir, "categories.json"))
++			globalCategoryGroups = catgroup.New()
++			globalCategoryGroups.SetPathForTest(filepath.Join(dir, "groups.json"))
++			globalDecryptionProfiles = decryptprofile.New()
++			globalDecryptionProfiles.SetPathForTest(filepath.Join(dir, "profiles.json"))
++			idpRegistry = &IdPRegistry{path: filepath.Join(dir, "idp_profiles.json"), live: make(map[string]IdentityProvider)}
++			t.Cleanup(func() {
++				globalClusterStore, policyStore, idpRegistry = oldStore, oldPolicy, oldIDP
++				catStore, globalCategoryGroups, globalDecryptionProfiles = oldCategories, oldGroups, oldProfiles
++			})
++			if err := policyStore.ReplaceAllAndSave([]PolicyRule{{Priority: 1, Name: "old-policy", Action: ActionAllow}}); err != nil {
++				t.Fatal(err)
++			}
++			catStore.ReplaceAll([]CategoryEntry{{Name: "old-category", Hosts: []string{"old.example"}}})
++			catStore.Save()
++			globalCategoryGroups.ReplaceAll([]CategoryGroup{{ID: "old-group", Name: "old-group", Categories: []string{"old-category"}}})
++			globalCategoryGroups.Save()
++			globalDecryptionProfiles.ReplaceAll([]DecryptionProfile{{ID: "old-profile", Name: "old-profile", CertVerification: "strict"}})
++			globalDecryptionProfiles.Save()
++
++			oldBegin := beginCrossStoreTxn
++			matched := false
++			beginCrossStoreTxn = func(journalPath, kind string, writes []filetxn.Write, opts ...filetxn.Option) (*filetxn.Txn, error) {
++				if want := filepath.Join(dataDir, "ha_bundle.txn"); journalPath != want {
++					return nil, fmt.Errorf("HA journal path = %q, want startup-recovered path %q", journalPath, want)
++				}
++				failureIndex := -1
++				for i := range writes {
++					base := filepath.Base(writes[i].Path)
++					isTarget := false
++					switch target {
++					case "ca-cert":
++						isTarget = base == "cluster-ca.crt"
++					case "ca-key":
++						isTarget = base == "cluster-ca.key"
++					case "policy":
++						isTarget = writes[i].Path == policyStore.path
++					case "policy-meta":
++						isTarget = writes[i].Path == policyStore.path+".meta"
++					case "categories":
++						isTarget = writes[i].Path == catStore.Path()
++					case "groups":
++						isTarget = writes[i].Path == globalCategoryGroups.Path()
++					case "profiles":
++						isTarget = writes[i].Path == globalDecryptionProfiles.Path()
++					case "idp":
++						isTarget = writes[i].Path == idpRegistry.path
++					case "cluster-state":
++						isTarget = writes[i].Path == globalClusterStore.path
++					case "version-floor":
++						isTarget = base == cpConfigVersionFile
++					}
++					if isTarget {
++						failureIndex = i
++						matched = true
++						break
++					}
++				}
++				if failureIndex < 0 {
++					return nil, fmt.Errorf("test seam: %s write missing", target)
++				}
++				failurePoint := fmt.Sprintf("before-write-%d", failureIndex)
++				opts = append(opts, filetxn.WithBoundaryHook(func(point string) error {
++					if point == failurePoint {
++						return errors.New("injected HA transaction boundary failure")
++					}
++					return nil
++				}))
++				return filetxn.Begin(journalPath, kind, writes, opts...)
++			}
++			t.Cleanup(func() { beginCrossStoreTxn = oldBegin })
++
++			bundle := &HAStateBundle{
++				ClusterState:   buildHANonEmptyClusterState(t),
++				CACertPEM:      string(certPEM),
++				CAKeyEncrypted: encryptedKey,
++				Version:        73,
++				Config: ConfigSnapshot{
++					PolicyRules:        []PolicyRule{{Priority: 1, Name: "new-policy", Action: ActionDrop}},
++					URLCategories:      []CategoryEntry{{Name: "new-category", Hosts: []string{"new.example"}}},
++					CategoryGroups:     []CategoryGroup{{ID: "new-group", Name: "new-group", Categories: []string{"new-category"}}},
++					DecryptionProfiles: []DecryptionProfile{{ID: "new-profile", Name: "new-profile", CertVerification: "strict"}},
++					IdPProfiles: []*IdPProfile{{
++						ID: "new-oidc", Name: "New OIDC", Type: IdPTypeOIDC, Enabled: false,
++						OIDC: &OIDCProfileConfig{Issuer: "https://8.8.8.8", ClientID: "culvert"},
++					}},
++				},
++			}
++			if applyHABundle(bundle, token) {
++				t.Fatal("HA bundle reported success after injected transaction failure")
++			}
++			if !matched {
++				t.Fatalf("target boundary %q was not exercised", target)
++			}
++			if globalClusterCA.Ready() {
++				t.Fatal("failed HA transaction published replicated CA")
++			}
++			if got := policyStore.List()[0].Name; got != "old-policy" {
++				t.Fatalf("failed HA transaction published policy %q", got)
++			}
++			if got := catStore.All()[0].Name; got != "old-category" {
++				t.Fatalf("failed HA transaction published category %q", got)
++			}
++			if got := idpRegistry.All(); len(got) != 0 {
++				t.Fatalf("failed HA transaction published %d IdP profile(s)", len(got))
++			}
++			if nodes := globalClusterStore.ListNodes(); len(nodes) != 0 {
++				t.Fatalf("failed HA transaction published %d cluster node(s)", len(nodes))
++			}
++			if _, err := os.Stat(filepath.Join(dataDir, "ha_bundle.txn")); !errors.Is(err, os.ErrNotExist) {
++				t.Fatalf("failed HA journal was not cleaned up: %v", err)
++			}
++		})
++	}
++}
++
+ // TestHA_PR5_PersistFailureLeavesLiveCAUnchanged: if persistReplicatedKey fails,
+ // applyReplicatedCA must NOT have mutated the live globalClusterCA in memory.
+ func TestHA_PR5_PersistFailureLeavesLiveCAUnchanged(t *testing.T) {
+diff --git a/ha_failover_test.go b/ha_failover_test.go
+index cd0e8a2..aa9a175 100644
+--- a/ha_failover_test.go
++++ b/ha_failover_test.go
+@@ -289,8 +289,30 @@ func TestResumeDenied_NoTarget_KeepsS2Stance(t *testing.T) {
+ 	}
+ }
+ 
++func TestClusterImportPersistenceFailureDoesNotPublish(t *testing.T) {
++	cs := &ClusterStore{}
++	old := []byte(`{"nodes":{},"tokens":{},"revoked":[],"version":1}`)
++	if err := cs.ImportFullState(old); err != nil {
++		t.Fatal(err)
++	}
++	cs.mu.RLock()
++	beforeVersion := cs.st.Version
++	cs.mu.RUnlock()
++	cs.path = t.TempDir() // AtomicWrite cannot replace a directory.
++	candidate := []byte(`{"nodes":{},"tokens":{},"revoked":[],"version":2}`)
++	if err := cs.ImportFullState(candidate); err == nil {
++		t.Fatal("expected persistence failure")
++	}
++	cs.mu.RLock()
++	afterVersion := cs.st.Version
++	cs.mu.RUnlock()
++	if afterVersion != beforeVersion {
++		t.Fatalf("failed import changed live version: %d -> %d", beforeVersion, afterVersion)
++	}
++}
++
+ func TestHARPCApplicationErrorsProveLeaderReachability(t *testing.T) {
+-	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition} {
++	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition, codes.Internal, codes.Unknown} {
+ 		if !haRPCErrorProvesReachability(status.Error(code, "rejected")) {
+ 			t.Fatalf("%s response was classified as leader-unreachable", code)
+ 		}
+diff --git a/main.go b/main.go
+index 1f59f24..8cce91f 100644
+--- a/main.go
++++ b/main.go
+@@ -180,6 +180,10 @@ func main() {
+ 	loadFileConfigAndFlags(s)
+ 	initUIExtras(s)
+ 	initLogger(s)
++	crossStoreTxnDir = dataDir
++	if err := recoverCrossStoreTransactions(dataDir); err != nil {
++		logger.Fatalf("cross-store transaction recovery failed: %v", err)
++	}
+ 	initLifecycleContext(s)
+ 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
+ 
+@@ -192,7 +196,6 @@ func main() {
+ 	initPAC(s)
+ 	initLegacyAuthProviders(s)
+ 	initMetricsToken(s)
+-	initCluster(s)
+ 	initConnAndRateLimit(s)
+ 	initBlocklist(s)
+ 	initRootCA(s)
+@@ -206,9 +209,10 @@ func main() {
+ 	initUpstreamProxy(s)
+ 	initCDR(s)
+ 	initMTLSAndOCSP(s)
+-	initBackgroundServices(s)
+-	initSOCKS5(s)
+ 	initPersistentAdminState(s)
++	initCluster(s)
++	initSOCKS5(s)
++	initBackgroundServices(s)
+ 	loadReleaseManagement(resolveReleaseStartupConfig())
+ 	startAdminUI(s)
+ 
+diff --git a/main_test.go b/main_test.go
+index 2e6d45e..3c71880 100644
+--- a/main_test.go
++++ b/main_test.go
+@@ -18,5 +18,14 @@ func TestMain(m *testing.M) {
+ 	// obs default sink writes straight to stderr and observability tests for
+ 	// extracted leaves (internal/bandwidth, internal/nodegroup, ...) see "".
+ 	obs.SetSink(func(line string) { logger.Print(line) })
+-	os.Exit(m.Run())
++	configVersionDir, err := os.MkdirTemp("", "culvert-test-config-versions-")
++	if err != nil {
++		logger.Fatalf("create test config-version directory: %v", err)
++	}
++	configVersions.SetDirForTest(configVersionDir)
++	code := m.Run()
++	if err := os.RemoveAll(configVersionDir); err != nil {
++		logger.Printf("remove test config-version directory: %v", err)
++	}
++	os.Exit(code)
+ }
+diff --git a/policy.go b/policy.go
+index d6b8f7e..1beb131 100644
+--- a/policy.go
++++ b/policy.go
+@@ -16,6 +16,7 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	"github.com/KidCarmi/Culvert/internal/filetxn"
+ 	"github.com/KidCarmi/Culvert/internal/hostutil"
+ 	"github.com/KidCarmi/Culvert/internal/sslbypass"
+ 	"github.com/KidCarmi/Culvert/internal/urlcat"
+@@ -804,6 +805,84 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
+ 
+ var errPolicyVersionConflict = errors.New("policy generation changed")
+ 
++// preparedPolicyReplacement is a detached policy generation whose durable
++// artifacts are owned by an outer multi-store transaction. Preparation holds
++// saveMu so another persisted policy mutation cannot overtake the transaction.
++type preparedPolicyReplacement struct {
++	store     *PolicyStore
++	rules     []*PolicyRule
++	version   int64
++	updatedAt string
++	writes    []filetxn.Write
++	done      bool
++}
++
++func (ps *PolicyStore) prepareReplacement(rules []PolicyRule, expected *int64) (*preparedPolicyReplacement, error) {
++	ps.saveMu.Lock()
++	ps.mu.RLock()
++	if expected != nil && ps.version != *expected {
++		ps.mu.RUnlock()
++		ps.saveMu.Unlock()
++		return nil, errPolicyVersionConflict
++	}
++	candidate := &PolicyStore{rules: ps.rules, path: ps.path, version: ps.version, updatedAt: ps.updatedAt}
++	ps.mu.RUnlock()
++	candidate.ReplaceAll(rules)
++
++	candidate.mu.RLock()
++	snapshot := make([]PolicyRule, len(candidate.rules))
++	for i, rule := range candidate.rules {
++		snapshot[i] = *rule
++		snapshot[i].HitCount = 0
++		snapshot[i].LastHit = ""
++	}
++	path := candidate.path
++	meta := policyMeta{Version: candidate.version, UpdatedAt: candidate.updatedAt}
++	preparedRules := candidate.rules
++	version, updatedAt := candidate.version, candidate.updatedAt
++	candidate.mu.RUnlock()
++
++	data, err := json.MarshalIndent(snapshot, "", "  ")
++	if err != nil {
++		ps.saveMu.Unlock()
++		return nil, fmt.Errorf("marshal prepared policy rules: %w", err)
++	}
++	meta.PolicySHA256 = policySHA256(data)
++	metaData, err := json.Marshal(meta)
++	if err != nil {
++		ps.saveMu.Unlock()
++		return nil, fmt.Errorf("marshal prepared policy metadata: %w", err)
++	}
++	writes := []filetxn.Write(nil)
++	if path != "" {
++		writes = []filetxn.Write{{Path: path, Data: data, Mode: 0o600}, {Path: path + ".meta", Data: metaData, Mode: 0o600}}
++	}
++	return &preparedPolicyReplacement{store: ps, rules: preparedRules, version: version, updatedAt: updatedAt, writes: writes}, nil
++}
++
++func (p *preparedPolicyReplacement) Writes() []filetxn.Write {
++	return append([]filetxn.Write(nil), p.writes...)
++}
++
++func (p *preparedPolicyReplacement) Publish() {
++	if p == nil || p.done {
++		return
++	}
++	p.store.mu.Lock()
++	p.store.rules, p.store.version, p.store.updatedAt = p.rules, p.version, p.updatedAt
++	p.store.mu.Unlock()
++	p.done = true
++	p.store.saveMu.Unlock()
++}
++
++func (p *preparedPolicyReplacement) Abort() {
++	if p == nil || p.done {
++		return
++	}
++	p.done = true
++	p.store.saveMu.Unlock()
++}
++
+ // mutateAndSave applies edit to a detached candidate, durably commits it, then
+ // publishes it. expected, when non-nil, is checked under the same lock as the
+ // replacement to close optimistic-concurrency TOCTOU windows.
+diff --git a/policy_draft.go b/policy_draft.go
+index f846bb0..749dc4c 100644
+--- a/policy_draft.go
++++ b/policy_draft.go
+@@ -57,6 +57,11 @@ type draftState struct {
+ 	BaseGeneration int64  `json:"baseGeneration"` // policyStore generation the draft forked from
+ }
+ 
++type persistedPolicyDraft struct {
++	State draftState   `json:"state"`
++	Rules []PolicyRule `json:"rules"`
++}
++
+ // policyDraftCoordinator owns the candidate rulebase and its lifecycle.
+ type policyDraftCoordinator struct {
+ 	mu    sync.Mutex
+@@ -78,14 +83,27 @@ func initPolicyDraft(policyPath string) {
+ 		return
+ 	}
+ 	policyDraft.path = filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
++	journalPath := policyDraft.path + ".commit"
++	if data, err := os.ReadFile(journalPath); err == nil {
++		var pending persistedPolicyDraft
++		if json.Unmarshal(data, &pending) == nil && pending.State.Active {
++			if sameRuleSet(policyStore.List(), pending.Rules) {
++				_ = durableRemove(policyDraft.path)
++				_ = durableRemove(journalPath)
++				return
++			}
++			if restored, err := json.MarshalIndent(pending, "", "  "); err == nil {
++				if err := fileutil.AtomicWrite(policyDraft.path, restored, 0o600); err == nil {
++					_ = durableRemove(journalPath)
++				}
++			}
++		}
++	}
+ 	data, err := os.ReadFile(policyDraft.path)
+ 	if err != nil {
+ 		return // no pending draft
+ 	}
+-	var p struct {
+-		State draftState   `json:"state"`
+-		Rules []PolicyRule `json:"rules"`
+-	}
++	var p persistedPolicyDraft
+ 	if json.Unmarshal(data, &p) != nil || !p.State.Active {
+ 		return
+ 	}
+@@ -135,18 +153,28 @@ func (c *policyDraftCoordinator) candidateVersion() (version int64, updatedAt st
+ 	return c.cand.policyVersion()
+ }
+ 
+-// persistLocked durably writes the coordinator snapshot. Caller holds c.mu.
+-func (c *policyDraftCoordinator) persistLocked() error {
++func detachedPolicyDraftStore(src *PolicyStore) *PolicyStore {
++	rules := src.List()
++	version, updatedAt := src.policyVersion()
++	next := &PolicyStore{}
++	next.ReplaceAll(rules)
++	next.mu.Lock()
++	next.version = version
++	next.updatedAt = updatedAt
++	next.mu.Unlock()
++	return next
++}
++
++// persistCandidateLocked durably writes a detached coordinator snapshot.
++// Caller holds c.mu.
++func (c *policyDraftCoordinator) persistCandidateLocked(candidate *PolicyStore, state draftState) error {
+ 	if c.path == "" {
+ 		return nil
+ 	}
+-	if !c.state.Active {
++	if !state.Active {
+ 		return errors.New("cannot persist inactive policy draft")
+ 	}
+-	p := struct {
+-		State draftState   `json:"state"`
+-		Rules []PolicyRule `json:"rules"`
+-	}{State: c.state, Rules: c.cand.List()}
++	p := persistedPolicyDraft{State: state, Rules: candidate.List()}
+ 	data, err := json.MarshalIndent(p, "", "  ")
+ 	if err != nil {
+ 		return err
+@@ -154,24 +182,44 @@ func (c *policyDraftCoordinator) persistLocked() error {
+ 	return fileutil.AtomicWrite(c.path, data, 0o600)
+ }
+ 
++func (c *policyDraftCoordinator) persistLocked() error {
++	return c.persistCandidateLocked(c.cand, c.state)
++}
++
++func (c *policyDraftCoordinator) writeInactiveTombstoneLocked() error {
++	if c.path == "" {
++		return nil
++	}
++	data, err := json.MarshalIndent(persistedPolicyDraft{}, "", "  ")
++	if err != nil {
++		return err
++	}
++	return fileutil.AtomicWrite(c.path, data, 0o600)
++}
++
++func (c *policyDraftCoordinator) writeCommitJournalLocked() error {
++	if c.path == "" {
++		return nil
++	}
++	data, err := json.MarshalIndent(persistedPolicyDraft{State: c.state, Rules: c.cand.List()}, "", "  ")
++	if err != nil {
++		return err
++	}
++	return fileutil.AtomicWrite(c.path+".commit", data, 0o600)
++}
++
++func (c *policyDraftCoordinator) clearMemoryLocked() {
++	c.cand = &PolicyStore{}
++	c.state = draftState{}
++}
++
+ // clearDurablyLocked publishes an inactive tombstone before clearing memory.
+ // If cleanup fails, restart still ignores the tombstone.
+ func (c *policyDraftCoordinator) clearDurablyLocked() error {
+-	if c.path != "" {
+-		p := struct {
+-			State draftState   `json:"state"`
+-			Rules []PolicyRule `json:"rules"`
+-		}{}
+-		data, err := json.MarshalIndent(p, "", "  ")
+-		if err != nil {
+-			return err
+-		}
+-		if err := fileutil.AtomicWrite(c.path, data, 0o600); err != nil {
+-			return err
+-		}
++	if err := c.writeInactiveTombstoneLocked(); err != nil {
++		return err
+ 	}
+-	c.cand.ReplaceAll(nil)
+-	c.state = draftState{}
++	c.clearMemoryLocked()
+ 	if c.path != "" {
+ 		if err := durableRemove(c.path); err != nil {
+ 			logger.Printf("PolicyDraft: inactive tombstone cleanup error: %v", err)
+@@ -191,29 +239,28 @@ func (c *policyDraftCoordinator) mutateAndPersist(actor string, expected *int64,
+ 			return errPolicyVersionConflict
+ 		}
+ 	}
+-	beforeState := c.state
+-	beforeRules := c.cand.List()
++	nextState := c.state
++	next := detachedPolicyDraftStore(c.cand)
+ 	if !c.state.Active {
+ 		rules, baseGen := policyStore.snapshotWithVersion()
+ 		if expected != nil && baseGen != *expected {
+ 			return errPolicyVersionConflict
+ 		}
+-		c.cand.ReplaceAll(rules)
+-		c.state = draftState{Active: true, Actor: actor, StartedAt: time.Now().UTC().Format(time.RFC3339), BaseGeneration: baseGen}
++		next = &PolicyStore{}
++		next.ReplaceAll(rules)
++		nextState = draftState{Active: true, Actor: actor, StartedAt: time.Now().UTC().Format(time.RFC3339), BaseGeneration: baseGen}
+ 	}
+-	if err := edit(c.cand); err != nil {
+-		c.cand.ReplaceAll(beforeRules)
+-		c.state = beforeState
++	if err := edit(next); err != nil {
+ 		return err
+ 	}
+-	if sameRuleSet(policyStore.List(), c.cand.List()) {
++	if sameRuleSet(policyStore.List(), next.List()) {
+ 		return c.clearDurablyLocked()
+ 	}
+-	if err := c.persistLocked(); err != nil {
+-		c.cand.ReplaceAll(beforeRules)
+-		c.state = beforeState
++	if err := c.persistCandidateLocked(next, nextState); err != nil {
+ 		return fmt.Errorf("persist policy draft: %w", err)
+ 	}
++	c.cand = next
++	c.state = nextState
+ 	return nil
+ }
+ 
+@@ -229,14 +276,20 @@ func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, new
+ 	if !c.state.Active {
+ 		return nil
+ 	}
+-	before := c.cand.List()
+-	n := c.cand.CascadeDecryptionProfileRename(id, oldName, newName)
+-	if n > 0 {
+-		if err := c.persistLocked(); err != nil {
+-			c.cand.ReplaceAll(before)
+-			return fmt.Errorf("persist policy draft cascade: %w", err)
+-		}
++	next := detachedPolicyDraftStore(c.cand)
++	n := next.CascadeDecryptionProfileRename(id, oldName, newName)
++	if n == 0 {
++		return nil
++	}
++	nextState := c.state
++	if runningVersion, _ := policyStore.policyVersion(); runningVersion == nextState.BaseGeneration+1 {
++		nextState.BaseGeneration = runningVersion
+ 	}
++	if err := c.persistCandidateLocked(next, nextState); err != nil {
++		return fmt.Errorf("persist policy draft cascade: %w", err)
++	}
++	c.cand = next
++	c.state = nextState
+ 	return nil
+ }
+ 
+@@ -250,14 +303,20 @@ func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, new
+ 	if !c.state.Active {
+ 		return nil
+ 	}
+-	before := c.cand.List()
+-	n := c.cand.CascadeDestCategoryGroupRename(id, oldName, newName)
+-	if n > 0 {
+-		if err := c.persistLocked(); err != nil {
+-			c.cand.ReplaceAll(before)
+-			return fmt.Errorf("persist policy draft cascade: %w", err)
+-		}
++	next := detachedPolicyDraftStore(c.cand)
++	n := next.CascadeDestCategoryGroupRename(id, oldName, newName)
++	if n == 0 {
++		return nil
++	}
++	nextState := c.state
++	if runningVersion, _ := policyStore.policyVersion(); runningVersion == nextState.BaseGeneration+1 {
++		nextState.BaseGeneration = runningVersion
++	}
++	if err := c.persistCandidateLocked(next, nextState); err != nil {
++		return fmt.Errorf("persist policy draft cascade: %w", err)
+ 	}
++	c.cand = next
++	c.state = nextState
+ 	return nil
+ }
+ 
+@@ -337,36 +396,64 @@ func diffRuleSets(run, cand []PolicyRule) policyDraftDiff {
+ }
+ 
+ var errPolicyDraftInactive = errors.New("policy draft inactive")
++var policyVersionRecordMu sync.Mutex
+ 
+ // commit validates, persists, publishes, and clears one exact candidate while
+ // holding the coordinator lock. Staged writes and revert cannot interleave.
+ func (c *policyDraftCoordinator) commit(expectedCandidate *int64) (policyDraftDiff, error) {
++	diff, _, err := c.commitWithRules(expectedCandidate)
++	return diff, err
++}
++
++func (c *policyDraftCoordinator) commitWithRules(expectedCandidate *int64) (policyDraftDiff, []PolicyRule, error) {
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 	if !c.state.Active {
+-		return policyDraftDiff{}, errPolicyDraftInactive
++		return policyDraftDiff{}, nil, errPolicyDraftInactive
+ 	}
+ 	if expectedCandidate != nil {
+ 		version, _ := c.cand.policyVersion()
+ 		if version != *expectedCandidate {
+-			return policyDraftDiff{}, errPolicyVersionConflict
++			return policyDraftDiff{}, nil, errPolicyVersionConflict
+ 		}
+ 	}
+ 	cand := c.cand.List()
+ 	for i := range cand {
+ 		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
+-			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
++			return policyDraftDiff{}, nil, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
+ 		}
+ 	}
+ 	run := policyStore.List()
+ 	diff := diffRuleSets(run, cand)
++	if err := c.writeCommitJournalLocked(); err != nil {
++		return policyDraftDiff{}, nil, fmt.Errorf("journal policy draft commit: %w", err)
++	}
++	if err := c.writeInactiveTombstoneLocked(); err != nil {
++		if c.path != "" {
++			_ = durableRemove(c.path + ".commit")
++		}
++		return policyDraftDiff{}, nil, fmt.Errorf("retire policy draft: %w", err)
++	}
+ 	if err := policyStore.ReplaceAllAndSaveAtVersion(cand, c.state.BaseGeneration); err != nil {
+-		return policyDraftDiff{}, err
++		restoreErr := c.persistLocked()
++		if restoreErr == nil && c.path != "" {
++			_ = durableRemove(c.path + ".commit")
++		}
++		if restoreErr != nil {
++			return policyDraftDiff{}, nil, fmt.Errorf("%w; restore policy draft: %v", err, restoreErr)
++		}
++		return policyDraftDiff{}, nil, err
+ 	}
+-	if err := c.clearDurablyLocked(); err != nil {
+-		return policyDraftDiff{}, fmt.Errorf("clear committed policy draft: %w", err)
++	c.clearMemoryLocked()
++	if c.path != "" {
++		if err := durableRemove(c.path); err != nil {
++			logger.Printf("PolicyDraft: committed tombstone cleanup error: %v", err)
++		}
++		if err := durableRemove(c.path + ".commit"); err != nil {
++			logger.Printf("PolicyDraft: commit journal cleanup error: %v", err)
++		}
+ 	}
+-	return diff, nil
++	return diff, cand, nil
+ }
+ 
+ func (c *policyDraftCoordinator) revert() (policyDraftDiff, error) {
+@@ -417,17 +504,44 @@ func mutatePolicy(actor string, edit func(*PolicyStore) error) (staged bool, err
+ 	return mutatePolicyAtVersion(actor, nil, edit)
+ }
+ 
+-func mutatePolicyAtVersion(actor string, expected *int64, edit func(*PolicyStore) error) (staged bool, err error) {
++func mutatePolicyAtVersion(actor string, expected *int64, edit func(*PolicyStore) error) (bool, error) {
++	staged, _, err := mutatePolicyForWrite(actor, expected, edit)
++	return staged, err
++}
++
++func mutatePolicyForWrite(actor string, expected *int64, edit func(*PolicyStore) error) (bool, []PolicyRule, error) {
+ 	if requireCommitEnabled() {
+-		return true, policyDraft.mutateAndPersist(actor, expected, edit)
++		return true, nil, policyDraft.mutateAndPersist(actor, expected, edit)
++	}
++	policyVersionRecordMu.Lock()
++	var committed []PolicyRule
++	err := policyStore.MutateAndSaveAtVersion(expected, func(candidate *PolicyStore) error {
++		if err := edit(candidate); err != nil {
++			return err
++		}
++		committed = candidate.List()
++		return nil
++	})
++	if err != nil {
++		policyVersionRecordMu.Unlock()
++	}
++	return false, committed, err
++}
++
++func finishCommittedPolicyVersion(w http.ResponseWriter, r *http.Request, action, note string, committed []PolicyRule) bool {
++	defer policyVersionRecordMu.Unlock()
++	if err := saveConfigVersionSnapshot(sessionAdmin(r), action, note, committed); err != nil {
++		http.Error(w, "config version persistence failed", http.StatusInternalServerError)
++		return false
+ 	}
+-	return false, policyStore.MutateAndSaveAtVersion(expected, edit)
++	return true
+ }
+ 
+-func finishPolicyWrite(r *http.Request, action string, staged bool) {
+-	if !staged {
+-		saveConfigVersion(sessionAdmin(r), action)
++func finishPolicyWrite(w http.ResponseWriter, r *http.Request, action string, staged bool, committed []PolicyRule) bool {
++	if staged {
++		return true
+ 	}
++	return finishCommittedPolicyVersion(w, r, action, "", committed)
+ }
+ 
+ // effectivePolicyList is the rulebase the admin is currently editing/viewing:
+@@ -644,7 +758,14 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
+ 		version, _ := strconv.ParseInt(raw, 10, 64) // validated by policyVersionConflict above
+ 		expectedCandidate = &version
+ 	}
+-	diff, err := policyDraft.commit(expectedCandidate)
++	policyVersionRecordMu.Lock()
++	versionLockHeld := true
++	defer func() {
++		if versionLockHeld {
++			policyVersionRecordMu.Unlock()
++		}
++	}()
++	diff, committed, err := policyDraft.commitWithRules(expectedCandidate)
+ 	if errors.Is(err, errPolicyVersionConflict) {
+ 		http.Error(w, "the running rulebase changed since this draft was opened (an import or rollback) — revert and re-stage to avoid clobbering it", http.StatusConflict)
+ 		return
+@@ -659,11 +780,13 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	actor := sessionAdmin(r)
++	if !finishCommittedPolicyVersion(w, r, "policy.commit", comment, committed) {
++		versionLockHeld = false
++		return
++	}
++	versionLockHeld = false
+ 	detail := commitDetail(diff, comment)
+ 	auditEvent(r, "policy.commit", actor, detail)
+-	// Persist the commit comment into the config-version timeline (S3): the
+-	// version records WHY the rulebase changed, alongside the rollback snapshot.
+-	saveConfigVersionNote(actor, "policy.commit", comment)
+ 	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
+ 	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
+ }
+diff --git a/policy_draft_test.go b/policy_draft_test.go
+index 54bb639..e93471d 100644
+--- a/policy_draft_test.go
++++ b/policy_draft_test.go
+@@ -679,6 +679,124 @@ func TestDraftRevertTombstoneFailureRetainsDraft(t *testing.T) {
+ 	}
+ }
+ 
++func TestDraftCascadeAdvancesBaseGenerationForCommit(t *testing.T) {
++	draftTestSetup(t)
++	policyStore.path = filepath.Join(t.TempDir(), "policy.json")
++	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++		store.Add(PolicyRule{Name: "referenced", Action: ActionAllow, DecryptionProfile: "old", DecryptionProfileID: "profile-id"})
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
++		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++		store.CascadeDecryptionProfileRename("profile-id", "old", "new")
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := policyDraft.cascadeDecryptionProfileRename("profile-id", "old", "new"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := policyDraft.commit(nil); err != nil {
++		t.Fatalf("commit after mirrored cascade: %v", err)
++	}
++	for _, rule := range policyStore.List() {
++		if rule.Name == "referenced" && rule.DecryptionProfile != "new" {
++			t.Fatalf("cascade was lost: %#v", rule)
++		}
++	}
++}
++
++func TestPolicyConfigVersionFailureDoesNotReportOrAuditSuccess(t *testing.T) {
++	draftTestSetup(t)
++	resetAuditLog()
++	t.Cleanup(resetAuditLog)
++	origDir, origSeq := configVersions.Dir(), configVersions.Seq()
++	blocker := filepath.Join(t.TempDir(), "not-a-directory")
++	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	configVersions.SetDirForTest(filepath.Join(blocker, "versions"))
++	t.Cleanup(func() {
++		configVersions.SetDirForTest(origDir)
++		configVersions.SetSeqForTest(origSeq)
++	})
++
++	w := createRuleViaAPI(t, "version-failure", "")
++	if w.Code != http.StatusInternalServerError {
++		t.Fatalf("config-version failure status = %d, want 500 (body=%s)", w.Code, w.Body.String())
++	}
++	for _, entry := range auditGet() {
++		if entry.Action == "policy.add" && entry.Object == "version-failure" {
++			t.Fatal("config-version failure emitted success audit")
++		}
++	}
++}
++
++func TestDraftFailedEditPreservesCandidateGeneration(t *testing.T) {
++	draftTestSetup(t)
++	policyDraft.path = filepath.Join(t.TempDir(), "policy_draft.json")
++	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
++		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	beforeRules := policyDraft.candidateList()
++	beforeVersion, _ := policyDraft.candidateVersion()
++	if err := os.Remove(policyDraft.path); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(policyDraft.path, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	err := policyDraft.mutateAndPersist("alice", &beforeVersion, func(store *PolicyStore) error {
++		store.Add(PolicyRule{Name: "must-not-publish", Action: ActionAllow})
++		return nil
++	})
++	if err == nil {
++		t.Fatal("expected draft persistence failure")
++	}
++	afterVersion, _ := policyDraft.candidateVersion()
++	if afterVersion != beforeVersion || !sameRuleSet(beforeRules, policyDraft.candidateList()) {
++		t.Fatalf("failed edit changed candidate: version %d -> %d", beforeVersion, afterVersion)
++	}
++}
++
++func TestDraftCommitTombstoneFailureLeavesRunningAndDraftUnchanged(t *testing.T) {
++	draftTestSetup(t)
++	policyDraft.path = filepath.Join(t.TempDir(), "policy_draft.json")
++	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
++		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++	beforeRunning, beforeVersion := policyStore.snapshotWithVersion()
++	if err := os.Remove(policyDraft.path); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Mkdir(policyDraft.path, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := policyDraft.commit(nil); err == nil {
++		t.Fatal("expected tombstone failure")
++	}
++	afterRunning, afterVersion := policyStore.snapshotWithVersion()
++	if afterVersion != beforeVersion || !sameRuleSet(beforeRunning, afterRunning) {
++		t.Fatal("tombstone failure published running policy")
++	}
++	if !policyDraft.active() {
++		t.Fatal("tombstone failure discarded active draft")
++	}
++}
++
+ // ── helpers ────────────────────────────────────────────────────────────────
+ 
+ func ruleNames(rules []PolicyRule) []string {
+diff --git a/ui_authpolicy.go b/ui_authpolicy.go
+index d366bd8..c4a0edd 100644
+--- a/ui_authpolicy.go
++++ b/ui_authpolicy.go
+@@ -138,18 +138,21 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
+ 	var added PolicyRule
+-	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
+ 		added = store.Add(rule)
+ 		return nil
+-	}); err != nil {
++	})
++	if err != nil {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishCommittedPolicyVersion(w, r, "authpolicy.add", "", committed) {
++		return
++	}
+ 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
+ 		strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_"), sanitizeLog(added.Name), sanitizeLog(added.Auth.Owner))
+ 	auditEventDiff(r, "authpolicy.add", added.Name,
+ 		fmt.Sprintf("priority=%d outcome=%s owner=%s", added.Priority, added.Auth.Outcome, added.Auth.Owner), nil, added)
+-	saveConfigVersion(sessionAdmin(r), "authpolicy.add")
+ 	warnings, _ := validateAuthRule(added)
+ 	jsonOK(w, authRuleView{PolicyRule: added, Warnings: warnings})
+ }
+@@ -189,7 +192,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 	}
+ 	stampRuleMetadataForWrite(&rule, before, sessionAdmin(r))
+-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
+ 		if !store.Update(priority, rule) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -203,11 +206,13 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishCommittedPolicyVersion(w, r, "authpolicy.update", "", committed) {
++		return
++	}
+ 	logger.Printf("UI: auth rule updated priority=%s name=%q",
+ 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"), sanitizeLog(rule.Name))
+ 	auditEventDiff(r, "authpolicy.update", rule.Name,
+ 		fmt.Sprintf("priority=%d outcome=%s", priority, rule.Auth.Outcome), before, rule)
+-	saveConfigVersion(sessionAdmin(r), "authpolicy.update")
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 
+@@ -225,7 +230,7 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
+ 		return
+ 	}
+-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
+ 		if !store.Delete(priority) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -239,10 +244,12 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishCommittedPolicyVersion(w, r, "authpolicy.remove", "", committed) {
++		return
++	}
+ 	logger.Printf("UI: auth rule deleted priority=%s",
+ 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
+ 	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
+-	saveConfigVersion(sessionAdmin(r), "authpolicy.remove")
+ 	w.WriteHeader(http.StatusNoContent)
+ }
+ 
+@@ -297,7 +304,7 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
+-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
++	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
+ 		if !store.PermutePriorities(body.Priorities) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -311,12 +318,30 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishCommittedPolicyVersion(w, r, "authpolicy.reorder", "", committed) {
++		return
++	}
+ 	logger.Printf("UI: auth rules reordered (%d rule(s))", len(body.Priorities))
+ 	auditEvent(r, "authpolicy.reorder", fmt.Sprintf("%d rule(s)", len(body.Priorities)), "")
+-	saveConfigVersion(sessionAdmin(r), "authpolicy.reorder")
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 
++func mutateAuthPolicy(edit func(*PolicyStore) error) ([]PolicyRule, error) {
++	policyVersionRecordMu.Lock()
++	var committed []PolicyRule
++	err := policyStore.MutateAndSave(func(candidate *PolicyStore) error {
++		if err := edit(candidate); err != nil {
++			return err
++		}
++		committed = candidate.List()
++		return nil
++	})
++	if err != nil {
++		policyVersionRecordMu.Unlock()
++	}
++	return committed, err
++}
++
+ // isAuthRulePriority reports whether the rule at the given priority is a
+ // Stage-1 auth rule. Used by /api/policy to refuse mutating auth rules.
+ func isAuthRulePriority(priority int) bool {
+diff --git a/ui_config.go b/ui_config.go
+index c33a914..931a2de 100644
+--- a/ui_config.go
++++ b/ui_config.go
+@@ -885,14 +885,47 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
+ 		writeImportPreview(w, r, &b, replaceMode)
+ 		return
+ 	}
+-	// Persist the candidate first, apply taxonomy dependencies while policy
+-	// readers are blocked, then publish the policy.
+-	if err := policyStore.mutateAndSaveBeforePublish(nil, func(store *PolicyStore) error {
+-		importPolicyRules(store, &b, replaceMode)
+-		return nil
+-	}, func() {
+-		importCategoryTaxonomy(&b, replaceMode)
+-	}); err != nil {
++	configApplyMu.Lock()
++	defer configApplyMu.Unlock()
++	policyCandidate := &PolicyStore{}
++	policyCandidate.ReplaceAll(policyStore.List())
++	importPolicyRules(policyCandidate, &b, replaceMode)
++	var categoryCandidate []CategoryEntry
++	if len(b.URLCategories) > 0 {
++		categoryCandidate = b.URLCategories
++		if !replaceMode {
++			categoryCandidate = mergeByName(catStore.All(), b.URLCategories, func(e CategoryEntry) string { return e.Name })
++		}
++	}
++	var groupCandidate []CategoryGroup
++	if len(b.CategoryGroups) > 0 {
++		groupCandidate = b.CategoryGroups
++		if !replaceMode {
++			groupCandidate = mergeByName(globalCategoryGroups.List(), b.CategoryGroups, func(g CategoryGroup) string { return g.Name })
++		}
++	}
++	var profileCandidate []DecryptionProfile
++	if len(b.DecryptionProfiles) > 0 {
++		profileCandidate = b.DecryptionProfiles
++		if !replaceMode {
++			profileCandidate = mergeByName(globalDecryptionProfiles.List(), b.DecryptionProfiles, func(p DecryptionProfile) string { return p.Name })
++		}
++	}
++	prepared, err := preparePolicyTaxonomyApply(policyCandidate.List(), categoryCandidate, groupCandidate, profileCandidate)
++	if err != nil {
++		http.Error(w, "durable policy import failed", http.StatusInternalServerError)
++		return
++	}
++	journalPath := ""
++	if len(prepared.writes) > 0 {
++		journalPath, err = configApplyJournalPath()
++		if err != nil {
++			prepared.abort()
++			http.Error(w, "durable policy import failed", http.StatusInternalServerError)
++			return
++		}
++	}
++	if err := commitPreparedConfig(prepared, journalPath); err != nil {
+ 		http.Error(w, "durable policy import failed", http.StatusInternalServerError)
+ 		return
+ 	}
+diff --git a/ui_policy.go b/ui_policy.go
+index 7244d29..60e5bdc 100644
+--- a/ui_policy.go
++++ b/ui_policy.go
+@@ -1402,7 +1402,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
+ 	var added PolicyRule
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		added = store.Add(rule)
+ 		return nil
+ 	})
+@@ -1414,13 +1414,15 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.add", staged, committed) {
++		return
++	}
+ 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
+ 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
+ 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
+ 	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
+ 	auditEventDiffID(r, "policy.add", added.Name, added.ID,
+ 		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
+-	finishPolicyWrite(r, "policy.add", staged)
+ 	jsonOK(w, added)
+ }
+ 
+@@ -1464,7 +1466,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.Update(priority, rule) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1482,11 +1484,13 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.update", staged, committed) {
++		return
++	}
+ 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+ 	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
+ 	auditEventDiffID(r, "policy.update", rule.Name, ruleAuditID(beforeRule),
+ 		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
+-	finishPolicyWrite(r, "policy.update", staged)
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 
+@@ -1519,7 +1523,7 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+ 		return
+ 	}
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.Delete(priority) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1541,10 +1545,12 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
+ 	if beforeRule != nil {
+ 		name = beforeRule.Name
+ 	}
++	if !finishPolicyWrite(w, r, "policy.remove", staged, committed) {
++		return
++	}
+ 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
+ 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
+ 	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
+-	finishPolicyWrite(r, "policy.remove", staged)
+ 	w.WriteHeader(http.StatusNoContent)
+ }
+ 
+@@ -1588,7 +1594,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
+ 		return
+ 	}
+ 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.UpdateByID(id, rule) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1606,10 +1612,12 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.update", staged, committed) {
++		return
++	}
+ 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
+ 	auditEventDiffID(r, "policy.update", rule.Name, id,
+ 		fmt.Sprintf("priority=%d action=%s", rule.Priority, rule.Action), beforeRule, rule)
+-	finishPolicyWrite(r, "policy.update", staged)
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 
+@@ -1624,7 +1632,7 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
+ 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
+ 		return
+ 	}
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.DeleteByID(id) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1642,9 +1650,11 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.remove", staged, committed) {
++		return
++	}
+ 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
+ 	auditEventDiffID(r, "policy.remove", beforeRule.Name, id, "", beforeRule, nil)
+-	finishPolicyWrite(r, "policy.remove", staged)
+ 	w.WriteHeader(http.StatusNoContent)
+ }
+ 
+@@ -1678,7 +1688,7 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 	}
+ 	deleted := 0
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		for _, p := range body.Priorities {
+ 			if store.Delete(p) {
+ 				deleted++
+@@ -1694,9 +1704,11 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.bulk_remove", staged, committed) {
++		return
++	}
+ 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
+ 	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
+-	finishPolicyWrite(r, "policy.bulk_remove", staged)
+ 	jsonOK(w, map[string]any{"deleted": deleted})
+ }
+ 
+@@ -1759,7 +1771,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.PermutePriorities(body.Priorities) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1777,9 +1789,11 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.reorder", staged, committed) {
++		return
++	}
+ 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
+ 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
+-	finishPolicyWrite(r, "policy.reorder", staged)
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 
+@@ -1886,7 +1900,7 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, err.Error(), http.StatusBadRequest)
+ 		return
+ 	}
+-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
++	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+ 		if !store.PermutePriorities(priorities) {
+ 			return errPolicyRuleNotFound
+ 		}
+@@ -1904,11 +1918,13 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
+ 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+ 		return
+ 	}
++	if !finishPolicyWrite(w, r, "policy.move", staged, committed) {
++		return
++	}
+ 	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
+ 	safePos := sanitizeLog(body.Position)
+ 	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
+ 	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
+-	finishPolicyWrite(r, "policy.move", staged)
+ 	jsonOK(w, map[string]any{"ok": true})
+ }
+ 

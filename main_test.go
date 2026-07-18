@@ -18,5 +18,14 @@ func TestMain(m *testing.M) {
 	// obs default sink writes straight to stderr and observability tests for
 	// extracted leaves (internal/bandwidth, internal/nodegroup, ...) see "".
 	obs.SetSink(func(line string) { logger.Print(line) })
-	os.Exit(m.Run())
+	configVersionDir, err := os.MkdirTemp("", "culvert-test-config-versions-")
+	if err != nil {
+		logger.Fatalf("create test config-version directory: %v", err)
+	}
+	configVersions.SetDirForTest(configVersionDir)
+	code := m.Run()
+	if err := os.RemoveAll(configVersionDir); err != nil {
+		logger.Printf("remove test config-version directory: %v", err)
+	}
+	os.Exit(code)
 }

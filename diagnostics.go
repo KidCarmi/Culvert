@@ -193,15 +193,15 @@ func checkDPLastGoodConfigSnapshot() OperatorContractCheck {
 		}
 	}
 	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
-	if !dpControlPlanePollFailing.Load() {
-		if st.SaveError != "" {
-			return OperatorContractCheck{
-				Code:           "dp_last_known_good_config",
-				Status:         diagWarn,
-				Message:        "control plane reachable, but last-known-good snapshot persistence failed",
-				OperatorAction: "Fix data directory permissions so this DP can preserve its last successfully applied config for CP outages.",
-			}
+	if st.SaveError != "" {
+		return OperatorContractCheck{
+			Code:           "dp_last_known_good_config",
+			Status:         diagWarn,
+			Message:        "control plane reachable, but last-known-good snapshot persistence failed",
+			OperatorAction: "Fix data directory permissions so this DP can preserve its last successfully applied config for CP outages.",
 		}
+	}
+	if !dpControlPlanePollFailing.Load() {
 		return OperatorContractCheck{
 			Code:    "dp_last_known_good_config",
 			Status:  diagOK,

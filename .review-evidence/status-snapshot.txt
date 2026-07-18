@@ -1,0 +1,24 @@
+ M auth_idp.go
+ M config_surfaces_test.go
+ M configversion.go
+ M controlplane_client.go
+ M controlplane_snapshot.go
+ M controlplane_version_persist_test.go
+ M diagnostics.go
+ M dp_last_good_config_test.go
+ M enrollment.go
+ M ha.go
+ M ha_ca3_pr5_test.go
+ M ha_failover_test.go
+ M main.go
+ M main_test.go
+ M policy.go
+ M policy_draft.go
+ M policy_draft_test.go
+ M ui_authpolicy.go
+ M ui_config.go
+ M ui_policy.go
+?? .review-evidence/
+?? config_apply_txn.go
+?? config_apply_txn_test.go
+?? internal/filetxn/

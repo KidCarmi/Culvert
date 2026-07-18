@@ -1402,7 +1402,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	var added PolicyRule
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		added = store.Add(rule)
 		return nil
 	})
@@ -1414,13 +1414,15 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.add", staged, committed) {
+		return
+	}
 	logName := strings.ReplaceAll(strings.ReplaceAll(added.Name, "\n", "_"), "\r", "_")
 	logAction := strings.ReplaceAll(strings.ReplaceAll(string(added.Action), "\n", "_"), "\r", "_")
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_")
 	logger.Printf("UI: policy rule added priority=%s name=%q action=%q", logPriority, logName, logAction)
 	auditEventDiffID(r, "policy.add", added.Name, added.ID,
 		fmt.Sprintf("priority=%d action=%s", added.Priority, added.Action), nil, added)
-	finishPolicyWrite(r, "policy.add", staged)
 	jsonOK(w, added)
 }
 
@@ -1464,7 +1466,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.Update(priority, rule) {
 			return errPolicyRuleNotFound
 		}
@@ -1482,11 +1484,13 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.update", staged, committed) {
+		return
+	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule updated priority=%s name=%q", logPriority, sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, ruleAuditID(beforeRule),
 		fmt.Sprintf("priority=%d action=%s", priority, rule.Action), beforeRule, rule)
-	finishPolicyWrite(r, "policy.update", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1519,7 +1523,7 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.Delete(priority) {
 			return errPolicyRuleNotFound
 		}
@@ -1541,10 +1545,12 @@ func apiPolicyDelete(w http.ResponseWriter, r *http.Request) {
 	if beforeRule != nil {
 		name = beforeRule.Name
 	}
+	if !finishPolicyWrite(w, r, "policy.remove", staged, committed) {
+		return
+	}
 	logPriority := strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_")
 	logger.Printf("UI: policy rule deleted priority=%s", logPriority)
 	auditEventDiffID(r, "policy.remove", name, ruleAuditID(beforeRule), "", beforeRule, nil)
-	finishPolicyWrite(r, "policy.remove", staged)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1588,7 +1594,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	stampRuleMetadataForWrite(&rule, beforeRule, sessionAdmin(r))
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.UpdateByID(id, rule) {
 			return errPolicyRuleNotFound
 		}
@@ -1606,10 +1612,12 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.update", staged, committed) {
+		return
+	}
 	logger.Printf("UI: policy rule updated id=%s name=%q", sanitizeLog(id), sanitizeLog(rule.Name))
 	auditEventDiffID(r, "policy.update", rule.Name, id,
 		fmt.Sprintf("priority=%d action=%s", rule.Priority, rule.Action), beforeRule, rule)
-	finishPolicyWrite(r, "policy.update", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1624,7 +1632,7 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.DeleteByID(id) {
 			return errPolicyRuleNotFound
 		}
@@ -1642,9 +1650,11 @@ func apiPolicyDeleteByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.remove", staged, committed) {
+		return
+	}
 	logger.Printf("UI: policy rule deleted id=%s", sanitizeLog(id))
 	auditEventDiffID(r, "policy.remove", beforeRule.Name, id, "", beforeRule, nil)
-	finishPolicyWrite(r, "policy.remove", staged)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1678,7 +1688,7 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	deleted := 0
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		for _, p := range body.Priorities {
 			if store.Delete(p) {
 				deleted++
@@ -1694,9 +1704,11 @@ func apiPolicyBulkDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.bulk_remove", staged, committed) {
+		return
+	}
 	logger.Printf("UI: bulk policy delete %d rule(s)", deleted)
 	auditEvent(r, "policy.bulk_remove", fmt.Sprintf("%d rule(s)", deleted), "")
-	finishPolicyWrite(r, "policy.bulk_remove", staged)
 	jsonOK(w, map[string]any{"deleted": deleted})
 }
 
@@ -1759,7 +1771,7 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.PermutePriorities(body.Priorities) {
 			return errPolicyRuleNotFound
 		}
@@ -1777,9 +1789,11 @@ func apiPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.reorder", staged, committed) {
+		return
+	}
 	logger.Printf("UI: policy rules reordered (%d rules)", len(body.Priorities))
 	auditEvent(r, "policy.reorder", fmt.Sprintf("%d rules", len(body.Priorities)), "")
-	finishPolicyWrite(r, "policy.reorder", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -1886,7 +1900,7 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	staged, err := mutatePolicyAtVersion(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
+	staged, committed, err := mutatePolicyForWrite(sessionAdmin(r), expectedPolicyVersion(r), func(store *PolicyStore) error {
 		if !store.PermutePriorities(priorities) {
 			return errPolicyRuleNotFound
 		}
@@ -1904,11 +1918,13 @@ func apiPolicyMove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishPolicyWrite(w, r, "policy.move", staged, committed) {
+		return
+	}
 	safePri := strings.ReplaceAll(fmt.Sprintf("%d", body.Priority), "\n", "")
 	safePos := sanitizeLog(body.Position)
 	logger.Printf("UI: policy rule pri=%s moved to %s", safePri, safePos)
 	auditEvent(r, "policy.move", fmt.Sprintf("pri=%s to %s", safePri, safePos), "")
-	finishPolicyWrite(r, "policy.move", staged)
 	jsonOK(w, map[string]any{"ok": true})
 }
 

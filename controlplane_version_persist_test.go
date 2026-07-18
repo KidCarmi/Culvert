@@ -161,21 +161,16 @@ func TestConfigStoreVersion_HAPromotionSeedsFromReplicatedLeader(t *testing.T) {
 	}
 }
 
-// TestApplyHABundle_RecordsReplicatedLeaderVersion pins the wiring: applyHABundle
-// must capture the leader's bundle Version even when a downstream apply step
-// fails (here the empty cluster-state import), because the leader already
-// published that Version to the DPs.
-func TestApplyHABundle_RecordsReplicatedLeaderVersion(t *testing.T) {
+// TestApplyHABundle_FailureDoesNotRecordReplicatedLeaderVersion ensures a
+// rejected local bundle cannot publish HA freshness metadata.
+func TestApplyHABundle_FailureDoesNotRecordReplicatedLeaderVersion(t *testing.T) {
 	resetReplicatedLeaderVersion(t)
 
 	const leaderVersion int64 = 987654
-	// Empty bundle: no CA (skipped) and a nil ClusterState that fails to import,
-	// so applyHABundle returns false BEFORE applyConfigSnapshot — proving the
-	// version is recorded up front, independent of apply success.
 	if applyHABundle(&HAStateBundle{Version: leaderVersion}, "tok") {
 		t.Fatal("applyHABundle should return false when cluster state is absent")
 	}
-	if got := replicatedLeaderConfigVersion.Load(); got != leaderVersion {
-		t.Fatalf("applyHABundle did not record the leader version: got %d, want %d", got, leaderVersion)
+	if got := replicatedLeaderConfigVersion.Load(); got != 0 {
+		t.Fatalf("failed bundle recorded leader version %d", got)
 	}
 }

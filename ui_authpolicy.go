@@ -138,18 +138,21 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	stampRuleMetadataForWrite(&rule, nil, sessionAdmin(r))
 	var added PolicyRule
-	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
 		added = store.Add(rule)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
+		return
+	}
+	if !finishCommittedPolicyVersion(w, r, "authpolicy.add", "", committed) {
 		return
 	}
 	logger.Printf("UI: auth rule added priority=%s name=%q owner=%q",
 		strings.ReplaceAll(fmt.Sprintf("%d", added.Priority), "\n", "_"), sanitizeLog(added.Name), sanitizeLog(added.Auth.Owner))
 	auditEventDiff(r, "authpolicy.add", added.Name,
 		fmt.Sprintf("priority=%d outcome=%s owner=%s", added.Priority, added.Auth.Outcome, added.Auth.Owner), nil, added)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.add")
 	warnings, _ := validateAuthRule(added)
 	jsonOK(w, authRuleView{PolicyRule: added, Warnings: warnings})
 }
@@ -189,7 +192,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stampRuleMetadataForWrite(&rule, before, sessionAdmin(r))
-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
 		if !store.Update(priority, rule) {
 			return errPolicyRuleNotFound
 		}
@@ -203,11 +206,13 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishCommittedPolicyVersion(w, r, "authpolicy.update", "", committed) {
+		return
+	}
 	logger.Printf("UI: auth rule updated priority=%s name=%q",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"), sanitizeLog(rule.Name))
 	auditEventDiff(r, "authpolicy.update", rule.Name,
 		fmt.Sprintf("priority=%d outcome=%s", priority, rule.Auth.Outcome), before, rule)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.update")
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -225,7 +230,7 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rule at this priority is an access rule (use /api/policy)", http.StatusBadRequest)
 		return
 	}
-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
 		if !store.Delete(priority) {
 			return errPolicyRuleNotFound
 		}
@@ -239,10 +244,12 @@ func apiAuthPolicyDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishCommittedPolicyVersion(w, r, "authpolicy.remove", "", committed) {
+		return
+	}
 	logger.Printf("UI: auth rule deleted priority=%s",
 		strings.ReplaceAll(fmt.Sprintf("%d", priority), "\n", "_"))
 	auditEventDiff(r, "authpolicy.remove", before.Name, "", before, nil)
-	saveConfigVersion(sessionAdmin(r), "authpolicy.remove")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -297,7 +304,7 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+	committed, err := mutateAuthPolicy(func(store *PolicyStore) error {
 		if !store.PermutePriorities(body.Priorities) {
 			return errPolicyRuleNotFound
 		}
@@ -311,10 +318,28 @@ func apiAuthPolicyReorder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "durable policy write failed", http.StatusInternalServerError)
 		return
 	}
+	if !finishCommittedPolicyVersion(w, r, "authpolicy.reorder", "", committed) {
+		return
+	}
 	logger.Printf("UI: auth rules reordered (%d rule(s))", len(body.Priorities))
 	auditEvent(r, "authpolicy.reorder", fmt.Sprintf("%d rule(s)", len(body.Priorities)), "")
-	saveConfigVersion(sessionAdmin(r), "authpolicy.reorder")
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+func mutateAuthPolicy(edit func(*PolicyStore) error) ([]PolicyRule, error) {
+	policyVersionRecordMu.Lock()
+	var committed []PolicyRule
+	err := policyStore.MutateAndSave(func(candidate *PolicyStore) error {
+		if err := edit(candidate); err != nil {
+			return err
+		}
+		committed = candidate.List()
+		return nil
+	})
+	if err != nil {
+		policyVersionRecordMu.Unlock()
+	}
+	return committed, err
 }
 
 // isAuthRulePriority reports whether the rule at the given priority is a

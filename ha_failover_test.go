@@ -289,8 +289,30 @@ func TestResumeDenied_NoTarget_KeepsS2Stance(t *testing.T) {
 	}
 }
 
+func TestClusterImportPersistenceFailureDoesNotPublish(t *testing.T) {
+	cs := &ClusterStore{}
+	old := []byte(`{"nodes":{},"tokens":{},"revoked":[],"version":1}`)
+	if err := cs.ImportFullState(old); err != nil {
+		t.Fatal(err)
+	}
+	cs.mu.RLock()
+	beforeVersion := cs.st.Version
+	cs.mu.RUnlock()
+	cs.path = t.TempDir() // AtomicWrite cannot replace a directory.
+	candidate := []byte(`{"nodes":{},"tokens":{},"revoked":[],"version":2}`)
+	if err := cs.ImportFullState(candidate); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	cs.mu.RLock()
+	afterVersion := cs.st.Version
+	cs.mu.RUnlock()
+	if afterVersion != beforeVersion {
+		t.Fatalf("failed import changed live version: %d -> %d", beforeVersion, afterVersion)
+	}
+}
+
 func TestHARPCApplicationErrorsProveLeaderReachability(t *testing.T) {
-	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition} {
+	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition, codes.Internal, codes.Unknown} {
 		if !haRPCErrorProvesReachability(status.Error(code, "rejected")) {
 			t.Fatalf("%s response was classified as leader-unreachable", code)
 		}

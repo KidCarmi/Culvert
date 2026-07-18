@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 	"github.com/KidCarmi/Culvert/internal/secret"
 )
 
@@ -180,10 +181,14 @@ func (cs *ClusterStore) Save() error {
 
 // saveLocked persists state without acquiring locks — caller must hold mu.
 func (cs *ClusterStore) saveLocked() error {
+	return cs.saveStateLocked(cs.st)
+}
+
+func (cs *ClusterStore) saveStateLocked(st ClusterState) error {
 	if cs.path == "" {
 		return nil // no persistence path set
 	}
-	data, err := json.MarshalIndent(cs.st, "", "  ")
+	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cluster state: %w", err)
 	}
@@ -707,11 +712,17 @@ func (cs *ClusterStore) ExportState() (json.RawMessage, error) {
 	return json.Marshal(cs.st)
 }
 
-// ImportFullState replaces the entire cluster state from HA leader replication.
-func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
+type preparedClusterState struct {
+	store *ClusterStore
+	state ClusterState
+	write *filetxn.Write
+	done  bool
+}
+
+func (cs *ClusterStore) prepareImport(data json.RawMessage) (*preparedClusterState, error) {
 	var st ClusterState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("parse replicated state: %w", err)
+		return nil, fmt.Errorf("parse replicated state: %w", err)
 	}
 	if st.Nodes == nil {
 		st.Nodes = make(map[string]*EnrolledNode)
@@ -719,16 +730,60 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 	if st.Tokens == nil {
 		st.Tokens = make(map[string]*EnrollToken)
 	}
-	// Same nil-map defence as Load() — a follower that replays replicated
-	// state while a CA rotation is in progress would otherwise panic on the
-	// first RecordNodeRenewed call if renewed_nodes was null/missing.
 	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
 		st.CARotation.RenewedNodes = make(map[string]string)
 	}
 	cs.mu.Lock()
-	cs.st = st
-	_ = cs.saveLocked()
-	cs.mu.Unlock()
+	prepared := &preparedClusterState{store: cs, state: st}
+	if cs.path != "" {
+		payload, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			cs.mu.Unlock()
+			return nil, err
+		}
+		prepared.write = &filetxn.Write{Path: cs.path, Data: payload, Mode: 0o600}
+	}
+	return prepared, nil
+}
+
+func (p *preparedClusterState) Write() *filetxn.Write {
+	if p == nil || p.write == nil {
+		return nil
+	}
+	write := *p.write
+	return &write
+}
+
+func (p *preparedClusterState) Publish() {
+	if p == nil || p.done {
+		return
+	}
+	p.store.st = p.state
+	p.done = true
+	p.store.mu.Unlock()
+}
+
+func (p *preparedClusterState) Abort() {
+	if p == nil || p.done {
+		return
+	}
+	p.done = true
+	p.store.mu.Unlock()
+}
+
+// ImportFullState replaces the entire cluster state from HA leader replication.
+func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
+	prepared, err := cs.prepareImport(data)
+	if err != nil {
+		return err
+	}
+	if write := prepared.Write(); write != nil {
+		if err := atomicWriteFile(write.Path, write.Data, write.Mode); err != nil {
+			prepared.Abort()
+			return fmt.Errorf("persist replicated state: %w", err)
+		}
+	}
+	prepared.Publish()
 	return nil
 }
 

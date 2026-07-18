@@ -679,6 +679,124 @@ func TestDraftRevertTombstoneFailureRetainsDraft(t *testing.T) {
 	}
 }
 
+func TestDraftCascadeAdvancesBaseGenerationForCommit(t *testing.T) {
+	draftTestSetup(t)
+	policyStore.path = filepath.Join(t.TempDir(), "policy.json")
+	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		store.Add(PolicyRule{Name: "referenced", Action: ActionAllow, DecryptionProfile: "old", DecryptionProfileID: "profile-id"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
+		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyStore.MutateAndSave(func(store *PolicyStore) error {
+		store.CascadeDecryptionProfileRename("profile-id", "old", "new")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyDraft.cascadeDecryptionProfileRename("profile-id", "old", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policyDraft.commit(nil); err != nil {
+		t.Fatalf("commit after mirrored cascade: %v", err)
+	}
+	for _, rule := range policyStore.List() {
+		if rule.Name == "referenced" && rule.DecryptionProfile != "new" {
+			t.Fatalf("cascade was lost: %#v", rule)
+		}
+	}
+}
+
+func TestPolicyConfigVersionFailureDoesNotReportOrAuditSuccess(t *testing.T) {
+	draftTestSetup(t)
+	resetAuditLog()
+	t.Cleanup(resetAuditLog)
+	origDir, origSeq := configVersions.Dir(), configVersions.Seq()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configVersions.SetDirForTest(filepath.Join(blocker, "versions"))
+	t.Cleanup(func() {
+		configVersions.SetDirForTest(origDir)
+		configVersions.SetSeqForTest(origSeq)
+	})
+
+	w := createRuleViaAPI(t, "version-failure", "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("config-version failure status = %d, want 500 (body=%s)", w.Code, w.Body.String())
+	}
+	for _, entry := range auditGet() {
+		if entry.Action == "policy.add" && entry.Object == "version-failure" {
+			t.Fatal("config-version failure emitted success audit")
+		}
+	}
+}
+
+func TestDraftFailedEditPreservesCandidateGeneration(t *testing.T) {
+	draftTestSetup(t)
+	policyDraft.path = filepath.Join(t.TempDir(), "policy_draft.json")
+	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
+		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeRules := policyDraft.candidateList()
+	beforeVersion, _ := policyDraft.candidateVersion()
+	if err := os.Remove(policyDraft.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(policyDraft.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := policyDraft.mutateAndPersist("alice", &beforeVersion, func(store *PolicyStore) error {
+		store.Add(PolicyRule{Name: "must-not-publish", Action: ActionAllow})
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected draft persistence failure")
+	}
+	afterVersion, _ := policyDraft.candidateVersion()
+	if afterVersion != beforeVersion || !sameRuleSet(beforeRules, policyDraft.candidateList()) {
+		t.Fatalf("failed edit changed candidate: version %d -> %d", beforeVersion, afterVersion)
+	}
+}
+
+func TestDraftCommitTombstoneFailureLeavesRunningAndDraftUnchanged(t *testing.T) {
+	draftTestSetup(t)
+	policyDraft.path = filepath.Join(t.TempDir(), "policy_draft.json")
+	if err := policyDraft.mutateAndPersist("alice", nil, func(store *PolicyStore) error {
+		store.Add(PolicyRule{Name: "staged", Action: ActionAllow})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeRunning, beforeVersion := policyStore.snapshotWithVersion()
+	if err := os.Remove(policyDraft.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(policyDraft.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policyDraft.commit(nil); err == nil {
+		t.Fatal("expected tombstone failure")
+	}
+	afterRunning, afterVersion := policyStore.snapshotWithVersion()
+	if afterVersion != beforeVersion || !sameRuleSet(beforeRunning, afterRunning) {
+		t.Fatal("tombstone failure published running policy")
+	}
+	if !policyDraft.active() {
+		t.Fatal("tombstone failure discarded active draft")
+	}
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 func ruleNames(rules []PolicyRule) []string {

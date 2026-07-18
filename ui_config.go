@@ -885,14 +885,47 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		writeImportPreview(w, r, &b, replaceMode)
 		return
 	}
-	// Persist the candidate first, apply taxonomy dependencies while policy
-	// readers are blocked, then publish the policy.
-	if err := policyStore.mutateAndSaveBeforePublish(nil, func(store *PolicyStore) error {
-		importPolicyRules(store, &b, replaceMode)
-		return nil
-	}, func() {
-		importCategoryTaxonomy(&b, replaceMode)
-	}); err != nil {
+	configApplyMu.Lock()
+	defer configApplyMu.Unlock()
+	policyCandidate := &PolicyStore{}
+	policyCandidate.ReplaceAll(policyStore.List())
+	importPolicyRules(policyCandidate, &b, replaceMode)
+	var categoryCandidate []CategoryEntry
+	if len(b.URLCategories) > 0 {
+		categoryCandidate = b.URLCategories
+		if !replaceMode {
+			categoryCandidate = mergeByName(catStore.All(), b.URLCategories, func(e CategoryEntry) string { return e.Name })
+		}
+	}
+	var groupCandidate []CategoryGroup
+	if len(b.CategoryGroups) > 0 {
+		groupCandidate = b.CategoryGroups
+		if !replaceMode {
+			groupCandidate = mergeByName(globalCategoryGroups.List(), b.CategoryGroups, func(g CategoryGroup) string { return g.Name })
+		}
+	}
+	var profileCandidate []DecryptionProfile
+	if len(b.DecryptionProfiles) > 0 {
+		profileCandidate = b.DecryptionProfiles
+		if !replaceMode {
+			profileCandidate = mergeByName(globalDecryptionProfiles.List(), b.DecryptionProfiles, func(p DecryptionProfile) string { return p.Name })
+		}
+	}
+	prepared, err := preparePolicyTaxonomyApply(policyCandidate.List(), categoryCandidate, groupCandidate, profileCandidate)
+	if err != nil {
+		http.Error(w, "durable policy import failed", http.StatusInternalServerError)
+		return
+	}
+	journalPath := ""
+	if len(prepared.writes) > 0 {
+		journalPath, err = configApplyJournalPath()
+		if err != nil {
+			prepared.abort()
+			http.Error(w, "durable policy import failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := commitPreparedConfig(prepared, journalPath); err != nil {
 		http.Error(w, "durable policy import failed", http.StatusInternalServerError)
 		return
 	}

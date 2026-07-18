@@ -109,18 +109,27 @@ func saveConfigVersion(actor, action string) {
 // persist the commit comment into the config-version timeline ("why this
 // change"), so it survives alongside the rollback snapshot.
 func saveConfigVersionNote(actor, action, note string) {
+	if err := saveConfigVersionSnapshot(actor, action, note, nil); err != nil {
+		logger.Printf("ConfigVersion: write error: %v", err)
+	}
+}
+
+func saveConfigVersionSnapshot(actor, action, note string, committedPolicy []PolicyRule) error {
 	saveConfigVersionMu.Lock()
 	defer saveConfigVersionMu.Unlock()
 
 	snap := captureConfigBackup()
+	if committedPolicy != nil {
+		snap.PolicyRules = committedPolicy
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
-		logger.Printf("ConfigVersion: marshal error: %v", err)
-		return
+		return fmt.Errorf("marshal config version: %w", err)
 	}
 	if _, err := configVersions.SaveWithNote(actor, action, snap.ExportedAt, note, raw); err != nil {
-		logger.Printf("ConfigVersion: write error: %v", err)
+		return fmt.Errorf("persist config version: %w", err)
 	}
+	return nil
 }
 
 // ── API Handlers ───────────────────────────────────────────────────────────
@@ -262,10 +271,6 @@ func validateConfigBackup(b *configBackup) []string {
 	return warnings
 }
 
-// configRollbackMu serializes config rollback operations (B17) so concurrent
-// rollback requests cannot interleave store mutations and leave partial state.
-var configRollbackMu sync.Mutex
-
 // restoreBlocklistFromBackup rebuilds the blocklist from a snapshot.
 // Feed attribution is carried across the rebuild — the Remove/Add loops
 // would otherwise strand every feed entry as unattributed, making it
@@ -287,38 +292,32 @@ func restoreBlocklistFromBackup(b *configBackup) {
 
 // applyConfigBackup restores all config stores from a backup snapshot.
 func applyConfigBackup(b *configBackup) error {
-	configRollbackMu.Lock()
-	defer configRollbackMu.Unlock()
-	// Policy persistence is the only fail-returning apply step. Commit it before
-	// mutating sibling stores so a disk failure leaves no mixed rollback state.
+	configApplyMu.Lock()
+	defer configApplyMu.Unlock()
 	var validRules []PolicyRule
 	for i := range b.PolicyRules {
 		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err == nil {
 			validRules = append(validRules, b.PolicyRules[i])
 		}
 	}
-	// Persist the candidate first, then apply leaf dependencies while policy
-	// readers are blocked; publish the policy only after dependencies are live.
-	if err := policyStore.ReplaceAllAndSaveWithBeforePublish(validRules, func() {
-		if b.URLCategories != nil {
-			catStore.ReplaceAll(b.URLCategories)
-			catStore.Save()
+	prepared, err := preparePolicyTaxonomyApply(validRules, b.URLCategories, b.CategoryGroups, b.DecryptionProfiles)
+	if err != nil {
+		return err
+	}
+	journalPath := ""
+	if len(prepared.writes) > 0 {
+		journalPath, err = configApplyJournalPath()
+		if err != nil {
+			prepared.abort()
+			return err
 		}
-		if b.CategoryGroups != nil {
-			globalCategoryGroups.ReplaceAll(b.CategoryGroups)
-			globalCategoryGroups.Save()
-		}
-		if b.DecryptionProfiles != nil {
-			globalDecryptionProfiles.ReplaceAll(b.DecryptionProfiles)
-			globalDecryptionProfiles.Save()
-		}
-	}); err != nil {
+	}
+	if err := commitPreparedConfig(prepared, journalPath); err != nil {
 		return err
 	}
 	restoreBlocklistFromBackup(b)
 
-	// Categories, groups, and decryption profiles were applied leaf-first inside
-	// the policy publication boundary above.
+	// Policy and referenced taxonomy were committed as one recoverable generation.
 
 	setDefaultPolicyAction(b.DefaultAction)
 

@@ -57,6 +57,11 @@ type draftState struct {
 	BaseGeneration int64  `json:"baseGeneration"` // policyStore generation the draft forked from
 }
 
+type persistedPolicyDraft struct {
+	State draftState   `json:"state"`
+	Rules []PolicyRule `json:"rules"`
+}
+
 // policyDraftCoordinator owns the candidate rulebase and its lifecycle.
 type policyDraftCoordinator struct {
 	mu    sync.Mutex
@@ -78,14 +83,27 @@ func initPolicyDraft(policyPath string) {
 		return
 	}
 	policyDraft.path = filepath.Join(filepath.Dir(policyPath), "policy_draft.json")
+	journalPath := policyDraft.path + ".commit"
+	if data, err := os.ReadFile(journalPath); err == nil {
+		var pending persistedPolicyDraft
+		if json.Unmarshal(data, &pending) == nil && pending.State.Active {
+			if sameRuleSet(policyStore.List(), pending.Rules) {
+				_ = durableRemove(policyDraft.path)
+				_ = durableRemove(journalPath)
+				return
+			}
+			if restored, err := json.MarshalIndent(pending, "", "  "); err == nil {
+				if err := fileutil.AtomicWrite(policyDraft.path, restored, 0o600); err == nil {
+					_ = durableRemove(journalPath)
+				}
+			}
+		}
+	}
 	data, err := os.ReadFile(policyDraft.path)
 	if err != nil {
 		return // no pending draft
 	}
-	var p struct {
-		State draftState   `json:"state"`
-		Rules []PolicyRule `json:"rules"`
-	}
+	var p persistedPolicyDraft
 	if json.Unmarshal(data, &p) != nil || !p.State.Active {
 		return
 	}
@@ -135,18 +153,28 @@ func (c *policyDraftCoordinator) candidateVersion() (version int64, updatedAt st
 	return c.cand.policyVersion()
 }
 
-// persistLocked durably writes the coordinator snapshot. Caller holds c.mu.
-func (c *policyDraftCoordinator) persistLocked() error {
+func detachedPolicyDraftStore(src *PolicyStore) *PolicyStore {
+	rules := src.List()
+	version, updatedAt := src.policyVersion()
+	next := &PolicyStore{}
+	next.ReplaceAll(rules)
+	next.mu.Lock()
+	next.version = version
+	next.updatedAt = updatedAt
+	next.mu.Unlock()
+	return next
+}
+
+// persistCandidateLocked durably writes a detached coordinator snapshot.
+// Caller holds c.mu.
+func (c *policyDraftCoordinator) persistCandidateLocked(candidate *PolicyStore, state draftState) error {
 	if c.path == "" {
 		return nil
 	}
-	if !c.state.Active {
+	if !state.Active {
 		return errors.New("cannot persist inactive policy draft")
 	}
-	p := struct {
-		State draftState   `json:"state"`
-		Rules []PolicyRule `json:"rules"`
-	}{State: c.state, Rules: c.cand.List()}
+	p := persistedPolicyDraft{State: state, Rules: candidate.List()}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -154,24 +182,44 @@ func (c *policyDraftCoordinator) persistLocked() error {
 	return fileutil.AtomicWrite(c.path, data, 0o600)
 }
 
+func (c *policyDraftCoordinator) persistLocked() error {
+	return c.persistCandidateLocked(c.cand, c.state)
+}
+
+func (c *policyDraftCoordinator) writeInactiveTombstoneLocked() error {
+	if c.path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(persistedPolicyDraft{}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWrite(c.path, data, 0o600)
+}
+
+func (c *policyDraftCoordinator) writeCommitJournalLocked() error {
+	if c.path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(persistedPolicyDraft{State: c.state, Rules: c.cand.List()}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fileutil.AtomicWrite(c.path+".commit", data, 0o600)
+}
+
+func (c *policyDraftCoordinator) clearMemoryLocked() {
+	c.cand = &PolicyStore{}
+	c.state = draftState{}
+}
+
 // clearDurablyLocked publishes an inactive tombstone before clearing memory.
 // If cleanup fails, restart still ignores the tombstone.
 func (c *policyDraftCoordinator) clearDurablyLocked() error {
-	if c.path != "" {
-		p := struct {
-			State draftState   `json:"state"`
-			Rules []PolicyRule `json:"rules"`
-		}{}
-		data, err := json.MarshalIndent(p, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := fileutil.AtomicWrite(c.path, data, 0o600); err != nil {
-			return err
-		}
+	if err := c.writeInactiveTombstoneLocked(); err != nil {
+		return err
 	}
-	c.cand.ReplaceAll(nil)
-	c.state = draftState{}
+	c.clearMemoryLocked()
 	if c.path != "" {
 		if err := durableRemove(c.path); err != nil {
 			logger.Printf("PolicyDraft: inactive tombstone cleanup error: %v", err)
@@ -191,29 +239,28 @@ func (c *policyDraftCoordinator) mutateAndPersist(actor string, expected *int64,
 			return errPolicyVersionConflict
 		}
 	}
-	beforeState := c.state
-	beforeRules := c.cand.List()
+	nextState := c.state
+	next := detachedPolicyDraftStore(c.cand)
 	if !c.state.Active {
 		rules, baseGen := policyStore.snapshotWithVersion()
 		if expected != nil && baseGen != *expected {
 			return errPolicyVersionConflict
 		}
-		c.cand.ReplaceAll(rules)
-		c.state = draftState{Active: true, Actor: actor, StartedAt: time.Now().UTC().Format(time.RFC3339), BaseGeneration: baseGen}
+		next = &PolicyStore{}
+		next.ReplaceAll(rules)
+		nextState = draftState{Active: true, Actor: actor, StartedAt: time.Now().UTC().Format(time.RFC3339), BaseGeneration: baseGen}
 	}
-	if err := edit(c.cand); err != nil {
-		c.cand.ReplaceAll(beforeRules)
-		c.state = beforeState
+	if err := edit(next); err != nil {
 		return err
 	}
-	if sameRuleSet(policyStore.List(), c.cand.List()) {
+	if sameRuleSet(policyStore.List(), next.List()) {
 		return c.clearDurablyLocked()
 	}
-	if err := c.persistLocked(); err != nil {
-		c.cand.ReplaceAll(beforeRules)
-		c.state = beforeState
+	if err := c.persistCandidateLocked(next, nextState); err != nil {
 		return fmt.Errorf("persist policy draft: %w", err)
 	}
+	c.cand = next
+	c.state = nextState
 	return nil
 }
 
@@ -229,14 +276,20 @@ func (c *policyDraftCoordinator) cascadeDecryptionProfileRename(id, oldName, new
 	if !c.state.Active {
 		return nil
 	}
-	before := c.cand.List()
-	n := c.cand.CascadeDecryptionProfileRename(id, oldName, newName)
-	if n > 0 {
-		if err := c.persistLocked(); err != nil {
-			c.cand.ReplaceAll(before)
-			return fmt.Errorf("persist policy draft cascade: %w", err)
-		}
+	next := detachedPolicyDraftStore(c.cand)
+	n := next.CascadeDecryptionProfileRename(id, oldName, newName)
+	if n == 0 {
+		return nil
 	}
+	nextState := c.state
+	if runningVersion, _ := policyStore.policyVersion(); runningVersion == nextState.BaseGeneration+1 {
+		nextState.BaseGeneration = runningVersion
+	}
+	if err := c.persistCandidateLocked(next, nextState); err != nil {
+		return fmt.Errorf("persist policy draft cascade: %w", err)
+	}
+	c.cand = next
+	c.state = nextState
 	return nil
 }
 
@@ -250,14 +303,20 @@ func (c *policyDraftCoordinator) cascadeDestCategoryGroupRename(id, oldName, new
 	if !c.state.Active {
 		return nil
 	}
-	before := c.cand.List()
-	n := c.cand.CascadeDestCategoryGroupRename(id, oldName, newName)
-	if n > 0 {
-		if err := c.persistLocked(); err != nil {
-			c.cand.ReplaceAll(before)
-			return fmt.Errorf("persist policy draft cascade: %w", err)
-		}
+	next := detachedPolicyDraftStore(c.cand)
+	n := next.CascadeDestCategoryGroupRename(id, oldName, newName)
+	if n == 0 {
+		return nil
 	}
+	nextState := c.state
+	if runningVersion, _ := policyStore.policyVersion(); runningVersion == nextState.BaseGeneration+1 {
+		nextState.BaseGeneration = runningVersion
+	}
+	if err := c.persistCandidateLocked(next, nextState); err != nil {
+		return fmt.Errorf("persist policy draft cascade: %w", err)
+	}
+	c.cand = next
+	c.state = nextState
 	return nil
 }
 
@@ -337,36 +396,64 @@ func diffRuleSets(run, cand []PolicyRule) policyDraftDiff {
 }
 
 var errPolicyDraftInactive = errors.New("policy draft inactive")
+var policyVersionRecordMu sync.Mutex
 
 // commit validates, persists, publishes, and clears one exact candidate while
 // holding the coordinator lock. Staged writes and revert cannot interleave.
 func (c *policyDraftCoordinator) commit(expectedCandidate *int64) (policyDraftDiff, error) {
+	diff, _, err := c.commitWithRules(expectedCandidate)
+	return diff, err
+}
+
+func (c *policyDraftCoordinator) commitWithRules(expectedCandidate *int64) (policyDraftDiff, []PolicyRule, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.state.Active {
-		return policyDraftDiff{}, errPolicyDraftInactive
+		return policyDraftDiff{}, nil, errPolicyDraftInactive
 	}
 	if expectedCandidate != nil {
 		version, _ := c.cand.policyVersion()
 		if version != *expectedCandidate {
-			return policyDraftDiff{}, errPolicyVersionConflict
+			return policyDraftDiff{}, nil, errPolicyVersionConflict
 		}
 	}
 	cand := c.cand.List()
 	for i := range cand {
 		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
-			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
+			return policyDraftDiff{}, nil, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
 		}
 	}
 	run := policyStore.List()
 	diff := diffRuleSets(run, cand)
+	if err := c.writeCommitJournalLocked(); err != nil {
+		return policyDraftDiff{}, nil, fmt.Errorf("journal policy draft commit: %w", err)
+	}
+	if err := c.writeInactiveTombstoneLocked(); err != nil {
+		if c.path != "" {
+			_ = durableRemove(c.path + ".commit")
+		}
+		return policyDraftDiff{}, nil, fmt.Errorf("retire policy draft: %w", err)
+	}
 	if err := policyStore.ReplaceAllAndSaveAtVersion(cand, c.state.BaseGeneration); err != nil {
-		return policyDraftDiff{}, err
+		restoreErr := c.persistLocked()
+		if restoreErr == nil && c.path != "" {
+			_ = durableRemove(c.path + ".commit")
+		}
+		if restoreErr != nil {
+			return policyDraftDiff{}, nil, fmt.Errorf("%w; restore policy draft: %v", err, restoreErr)
+		}
+		return policyDraftDiff{}, nil, err
 	}
-	if err := c.clearDurablyLocked(); err != nil {
-		return policyDraftDiff{}, fmt.Errorf("clear committed policy draft: %w", err)
+	c.clearMemoryLocked()
+	if c.path != "" {
+		if err := durableRemove(c.path); err != nil {
+			logger.Printf("PolicyDraft: committed tombstone cleanup error: %v", err)
+		}
+		if err := durableRemove(c.path + ".commit"); err != nil {
+			logger.Printf("PolicyDraft: commit journal cleanup error: %v", err)
+		}
 	}
-	return diff, nil
+	return diff, cand, nil
 }
 
 func (c *policyDraftCoordinator) revert() (policyDraftDiff, error) {
@@ -417,17 +504,44 @@ func mutatePolicy(actor string, edit func(*PolicyStore) error) (staged bool, err
 	return mutatePolicyAtVersion(actor, nil, edit)
 }
 
-func mutatePolicyAtVersion(actor string, expected *int64, edit func(*PolicyStore) error) (staged bool, err error) {
-	if requireCommitEnabled() {
-		return true, policyDraft.mutateAndPersist(actor, expected, edit)
-	}
-	return false, policyStore.MutateAndSaveAtVersion(expected, edit)
+func mutatePolicyAtVersion(actor string, expected *int64, edit func(*PolicyStore) error) (bool, error) {
+	staged, _, err := mutatePolicyForWrite(actor, expected, edit)
+	return staged, err
 }
 
-func finishPolicyWrite(r *http.Request, action string, staged bool) {
-	if !staged {
-		saveConfigVersion(sessionAdmin(r), action)
+func mutatePolicyForWrite(actor string, expected *int64, edit func(*PolicyStore) error) (bool, []PolicyRule, error) {
+	if requireCommitEnabled() {
+		return true, nil, policyDraft.mutateAndPersist(actor, expected, edit)
 	}
+	policyVersionRecordMu.Lock()
+	var committed []PolicyRule
+	err := policyStore.MutateAndSaveAtVersion(expected, func(candidate *PolicyStore) error {
+		if err := edit(candidate); err != nil {
+			return err
+		}
+		committed = candidate.List()
+		return nil
+	})
+	if err != nil {
+		policyVersionRecordMu.Unlock()
+	}
+	return false, committed, err
+}
+
+func finishCommittedPolicyVersion(w http.ResponseWriter, r *http.Request, action, note string, committed []PolicyRule) bool {
+	defer policyVersionRecordMu.Unlock()
+	if err := saveConfigVersionSnapshot(sessionAdmin(r), action, note, committed); err != nil {
+		http.Error(w, "config version persistence failed", http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+func finishPolicyWrite(w http.ResponseWriter, r *http.Request, action string, staged bool, committed []PolicyRule) bool {
+	if staged {
+		return true
+	}
+	return finishCommittedPolicyVersion(w, r, action, "", committed)
 }
 
 // effectivePolicyList is the rulebase the admin is currently editing/viewing:
@@ -644,7 +758,14 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 		version, _ := strconv.ParseInt(raw, 10, 64) // validated by policyVersionConflict above
 		expectedCandidate = &version
 	}
-	diff, err := policyDraft.commit(expectedCandidate)
+	policyVersionRecordMu.Lock()
+	versionLockHeld := true
+	defer func() {
+		if versionLockHeld {
+			policyVersionRecordMu.Unlock()
+		}
+	}()
+	diff, committed, err := policyDraft.commitWithRules(expectedCandidate)
 	if errors.Is(err, errPolicyVersionConflict) {
 		http.Error(w, "the running rulebase changed since this draft was opened (an import or rollback) — revert and re-stage to avoid clobbering it", http.StatusConflict)
 		return
@@ -659,11 +780,13 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := sessionAdmin(r)
+	if !finishCommittedPolicyVersion(w, r, "policy.commit", comment, committed) {
+		versionLockHeld = false
+		return
+	}
+	versionLockHeld = false
 	detail := commitDetail(diff, comment)
 	auditEvent(r, "policy.commit", actor, detail)
-	// Persist the commit comment into the config-version timeline (S3): the
-	// version records WHY the rulebase changed, alongside the rollback snapshot.
-	saveConfigVersionNote(actor, "policy.commit", comment)
 	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
 	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
 }

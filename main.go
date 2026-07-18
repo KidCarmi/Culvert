@@ -180,6 +180,10 @@ func main() {
 	loadFileConfigAndFlags(s)
 	initUIExtras(s)
 	initLogger(s)
+	crossStoreTxnDir = dataDir
+	if err := recoverCrossStoreTransactions(dataDir); err != nil {
+		logger.Fatalf("cross-store transaction recovery failed: %v", err)
+	}
 	initLifecycleContext(s)
 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
 
@@ -192,7 +196,6 @@ func main() {
 	initPAC(s)
 	initLegacyAuthProviders(s)
 	initMetricsToken(s)
-	initCluster(s)
 	initConnAndRateLimit(s)
 	initBlocklist(s)
 	initRootCA(s)
@@ -206,9 +209,10 @@ func main() {
 	initUpstreamProxy(s)
 	initCDR(s)
 	initMTLSAndOCSP(s)
-	initBackgroundServices(s)
-	initSOCKS5(s)
 	initPersistentAdminState(s)
+	initCluster(s)
+	initSOCKS5(s)
+	initBackgroundServices(s)
 	loadReleaseManagement(resolveReleaseStartupConfig())
 	startAdminUI(s)
 

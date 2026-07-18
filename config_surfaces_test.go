@@ -782,6 +782,7 @@ func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
 // here so the scan survives further gocognit splits (add the new function).
 var snapshotApplyFuncs = map[string]bool{
 	"applyConfigSnapshot":               true, // controlplane_snapshot.go
+	"commitPreparedConfigSnapshot":      true,
 	"applySnapshotPolicyAndTraffic":     true,
 	"applySnapshotClusterRuntime":       true,
 	"applySnapshotSessionSecret":        true,

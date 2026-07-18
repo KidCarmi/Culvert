@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/filetxn"
 )
 
 func withDPLastGoodConfigTestGlobals(t *testing.T) {
@@ -135,15 +138,45 @@ func TestDPConfigPolicySaveFailureDoesNotAdvanceVersionOrLastGood(t *testing.T) 
 func TestDPLastGoodPersistFailureDoesNotAdvanceVersionOrHealth(t *testing.T) {
 	setupProxyTest(t)
 	withDPLastGoodConfigTestGlobals(t)
+	snapshotPolicyStoreForTest(t)
 	restoreEpoch := resetDPLastSeenEpochForTest()
 	defer restoreEpoch()
 	origPollFailing := dpControlPlanePollFailing.Load()
 	dpControlPlanePollFailing.Store(false)
 	defer dpControlPlanePollFailing.Store(origPollFailing)
-	if err := os.Mkdir(dpLastGoodConfigSnapshotPath(), 0o700); err != nil {
+
+	policyStore.path = filepath.Join(dataDir, "policy.json")
+	if err := policyStore.ReplaceAllAndSave([]PolicyRule{{Priority: 1, Name: "old-policy", Action: ActionAllow}}); err != nil {
 		t.Fatal(err)
 	}
-	snap := ConfigSnapshot{Version: 2, BlockedHosts: []string{"applied-but-not-last-good.example"}}
+	oldBegin := beginCrossStoreTxn
+	beginCrossStoreTxn = func(journalPath, kind string, writes []filetxn.Write, opts ...filetxn.Option) (*filetxn.Txn, error) {
+		lastGoodWrite := -1
+		for i := range writes {
+			if writes[i].Path == dpLastGoodConfigSnapshotPath() {
+				lastGoodWrite = i
+				break
+			}
+		}
+		if lastGoodWrite < 0 {
+			return nil, errors.New("test seam: last-known-good write missing from transaction")
+		}
+		failurePoint := fmt.Sprintf("before-write-%d", lastGoodWrite)
+		opts = append(opts, filetxn.WithBoundaryHook(func(point string) error {
+			if point == failurePoint {
+				return errors.New("injected last-known-good write failure")
+			}
+			return nil
+		}))
+		return filetxn.Begin(journalPath, kind, writes, opts...)
+	}
+	t.Cleanup(func() { beginCrossStoreTxn = oldBegin })
+
+	snap := ConfigSnapshot{
+		Version:      2,
+		BlockedHosts: []string{"must-not-apply.example"},
+		PolicyRules:  []PolicyRule{{Priority: 1, Name: "new-policy", Action: ActionDrop}},
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +190,22 @@ func TestDPLastGoodPersistFailureDoesNotAdvanceVersionOrHealth(t *testing.T) {
 	}
 	if !dpControlPlanePollFailing.Load() {
 		t.Fatal("last-good persistence failure reported healthy polling")
+	}
+	if got := policyStore.List()[0].Name; got != "old-policy" {
+		t.Fatalf("last-good failure published policy memory %q", got)
+	}
+	fresh := &PolicyStore{}
+	if err := fresh.Load(policyStore.path); err != nil {
+		t.Fatal(err)
+	}
+	if got := fresh.List()[0].Name; got != "old-policy" {
+		t.Fatalf("last-good failure left policy disk at %q", got)
+	}
+	if _, err := os.Stat(dpLastGoodConfigSnapshotPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed last-good write persisted snapshot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "dp_config_apply.txn")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed transaction journal was not cleaned up: %v", err)
 	}
 }
 
