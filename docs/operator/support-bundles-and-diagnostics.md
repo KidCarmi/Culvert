@@ -51,7 +51,11 @@ bounds keep the bundle store from growing without limit (both audited as
 If a bundle you expected is missing, `/api/support/status` (and the Support panel
 header) shows retention observability: how many bundles have been evicted since
 boot (`retention_evicted_total`) and when the age janitor last ran
-(`retention_last_sweep`) — so an eviction is never silent.
+(`retention_last_sweep`) — so an eviction is never silent. The same counters are
+scrapable on `/metrics` for durable alerting:
+`culvert_support_bundle_retention_evicted_total` (counter) and
+`culvert_support_bundle_retention_last_sweep_timestamp_seconds` (gauge — alert if
+it goes stale relative to the sweep cadence).
 
 ---
 

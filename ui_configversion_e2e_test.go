@@ -102,6 +102,17 @@ func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 		t.Fatalf("after UI created an allow rule, proxy never returned 200 — control-plane change did not reach the data plane")
 	}
 
+	// Deterministically confirm the policy.add snapshot PERSISTED before asserting
+	// on the SPA list. The settings panel fetches the versions once on navigation
+	// and the DOM-level ToContainText assertion never re-fetches — so if we navigate
+	// before the async snapshot write lands, the list stays stale for the whole
+	// timeout and flakes. Polling the store (no browser dependency) closes that race;
+	// navigating only AFTER it lands guarantees the nav-time fetch includes it. If
+	// the snapshot genuinely never persists, this fails with a precise message.
+	if !pollConfigVersionAction(t, "policy.add", 40) {
+		t.Fatalf("policy.add config-version snapshot never persisted after the UI added a rule")
+	}
+
 	// ── Settings surfaces the Config Versions list, incl. the policy.add snap ─
 	if err := page.Locator(`.nav-item[data-view="settings"]`).First().Click(); err != nil {
 		t.Fatalf("open settings panel: %v", err)
@@ -132,6 +143,24 @@ func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 	if !pollProxyStatus(t, proxyURL, backend.URL, http.StatusForbidden, 20) {
 		t.Fatalf("after UI rolled back to the deny baseline, proxy never returned 403 — rollback did not revert the data plane")
 	}
+}
+
+// pollConfigVersionAction polls the process-global config-version store until a
+// snapshot with the given action appears (up to attempts, 100ms apart). Reads the
+// store directly (no browser/API round-trip), so it is a deterministic barrier
+// against the async snapshot write — decoupling the UI-list assertion from write
+// timing.
+func pollConfigVersionAction(t *testing.T, action string, attempts int) bool {
+	t.Helper()
+	for i := 0; i < attempts; i++ {
+		for _, m := range configVersions.ListMeta() {
+			if m.Action == action {
+				return true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }
 
 // pollProxyStatus issues proxied GETs to target until it observes want (up to
