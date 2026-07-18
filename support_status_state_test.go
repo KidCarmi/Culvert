@@ -44,8 +44,8 @@ func TestApiSupportStatus_State(t *testing.T) {
 	if err := json.Unmarshal(gRec.Body.Bytes(), &st); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if st.RetentionKeep != supportRetentionKeep {
-		t.Fatalf("retention_keep=%d want %d", st.RetentionKeep, supportRetentionKeep)
+	if st.RetentionKeep != supportRetentionKeepVal() {
+		t.Fatalf("retention_keep=%d want %d", st.RetentionKeep, supportRetentionKeepVal())
 	}
 	if st.RecipientMax != maxSupportRecipients {
 		t.Fatalf("recipient_max=%d want %d", st.RecipientMax, maxSupportRecipients)

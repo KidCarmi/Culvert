@@ -83,7 +83,7 @@ func TestRetentionAgeCap_ExemptsEvidence(t *testing.T) {
 	writeFakeBundle(t, "csb_ageboundaaaaaaaaa234567abc", old)
 	writeBundleStateFile(t, "csb_ageboundaaaaaaaaa234567abc", bundleStateReady, "SR-1")
 
-	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+	pruneSupportBundlesByAge(now, supportRetentionMaxAgeVal())
 
 	exists := func(id string) bool { _, e := os.Stat(filepath.Join(supportBundlesDir(), id)); return e == nil }
 	if exists("csb_ageunboundaaaaaaa234567abc") {

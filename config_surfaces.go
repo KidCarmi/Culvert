@@ -386,6 +386,16 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "decryption_redact_hosts", Kind: kindConfig, Owner: "decRedact", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "DecryptionRedactHosts"}}},
 
+	// Support-bundle retention caps (Slice B). AdminDurable-only — node-local
+	// OPERATIONAL tuning over DURABLE forensic evidence: OFF export/import,
+	// version-rollback (a rollback must never mass-evict bundles), and CP→DP.
+	// Gated by the support_retention_saved sentinel on load.
+	{ID: "support_retention_keep", Kind: kindConfig, Owner: "supportRetention", AdminDurable: true,
+		Note:     "gated by support_retention_saved sentinel (as is support_retention_max_age_days)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionKeep"}}},
+	{ID: "support_retention_max_age_days", Kind: kindConfig, Owner: "supportRetention", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionMaxAgeDays"}}},
+
 	// ── AdminSettings sentinels + legacy migration inputs ────────────────
 	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
@@ -401,6 +411,8 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARASettingsSaved"}}},
 	{ID: "autoexclude_tunables_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeTunablesSaved"}}},
+	{ID: "support_retention_saved", Kind: kindSentinel, AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "SupportRetentionSaved"}}},
 	{ID: "blocklist_feed_url_legacy", Kind: kindLegacyMigration,
 		Note:     "read iff blocklist_feeds_saved is false; never written back",
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "BlocklistFeedURL"}}},

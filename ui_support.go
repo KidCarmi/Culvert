@@ -37,15 +37,16 @@ var (
 // M1 bounds so a bundle build can never fill the /data volume nor accumulate
 // without limit.
 const (
-	supportMinFreeBytes  = 256 << 20 // refuse a new bundle build below this free headroom
-	supportRetentionKeep = 10        // keep the newest N persisted bundles, evict oldest-first
+	supportMinFreeBytes = 256 << 20 // refuse a new bundle build below this free headroom
 
-	// supportRetentionMaxAge bounds how long a persisted bundle lives on disk. The
-	// count-based prune runs only when a NEW bundle is built, so an idle appliance
-	// (one that stopped creating bundles) would otherwise keep stale bundles
-	// forever; the background janitor evicts anything older than this.
-	supportRetentionMaxAge = 30 * 24 * time.Hour
-	// supportRetentionTick is the age-sweep cadence.
+	// The count cap (keep) and age cap (max-age) are admin-configurable + durable
+	// (Slice B). Read them via supportRetentionKeepVal() / supportRetentionMaxAgeVal()
+	// (support_retention_config.go), never a const — a stale const read would bypass a
+	// GUI-tightened cap. The count-based prune runs only when a NEW bundle is built, so
+	// an idle appliance would otherwise keep stale bundles forever; the background
+	// janitor evicts anything older than the age cap on the tick below.
+
+	// supportRetentionTick is the age-sweep cadence (fixed; not tuned).
 	supportRetentionTick = 6 * time.Hour
 
 	// supportMaxStoreBytes is a hard ceiling on the TOTAL on-disk size of the bundle
@@ -100,6 +101,7 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/recipients", apiSupportRecipients)
 	mux.HandleFunc("/api/support/recipients/{name}", apiSupportRecipientItem)
 	mux.HandleFunc("/api/support/debug-level", apiSupportDebugLevel)
+	mux.HandleFunc("/api/support/retention", apiSupportRetention)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
 }
 
@@ -349,8 +351,8 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		RedactionModelVersion: support.RedactionModelVer,
 		Collectors:            info,
 		Scopes:                supportScopeNames(),
-		RetentionKeep:         supportRetentionKeep,
-		RetentionMaxAgeDays:   int(supportRetentionMaxAge / (24 * time.Hour)),
+		RetentionKeep:         supportRetentionKeepVal(),
+		RetentionMaxAgeDays:   int(supportRetentionMaxAgeVal() / (24 * time.Hour)),
 		RetentionEvicted:      supportRetentionEvicted.Load(),
 		RetentionLastSweep:    lastSweep,
 		RecipientCount:        len(listSupportRecipients()),
@@ -834,7 +836,7 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 	if err := os.Rename(tmp, filepath.Join(dir, "manifest.json")); err != nil {
 		return nil, fmt.Errorf("commit manifest: %w", err)
 	}
-	pruneSupportBundles(supportRetentionKeep)
+	pruneSupportBundles(supportRetentionKeepVal())
 	// Exempt the bundle we just built: a store over-cap from case-bound evidence must
 	// not delete the fresh bundle before we return its id (it would be un-approvable).
 	pruneSupportBundlesBySize(supportMaxStoreBytes, res.BundleID)
@@ -971,7 +973,7 @@ func pruneSupportBundlesBySize(maxBytes int64, exceptDir string) {
 // it exits on shutdown.
 func startSupportRetentionJanitor(ctx context.Context) {
 	sweep := func() {
-		pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
+		pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAgeVal())
 		pruneSupportBundlesBySize(supportMaxStoreBytes, "")
 	}
 	sweep()

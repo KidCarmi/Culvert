@@ -989,8 +989,8 @@ func diagnoseSupport(now time.Time) supportDiagnosis {
 	d := supportDiagnosis{
 		SchemaVersion:       diagnoseSchemaVersion,
 		GeneratedAt:         now.UTC().Format(time.RFC3339),
-		RetentionKeep:       supportRetentionKeep,
-		RetentionMaxAgeDays: int(supportRetentionMaxAge / (24 * time.Hour)),
+		RetentionKeep:       supportRetentionKeepVal(),
+		RetentionMaxAgeDays: int(supportRetentionMaxAgeVal() / (24 * time.Hour)),
 		RetentionEvicted:    supportRetentionEvicted.Load(),
 	}
 	if u := supportRetentionLastSweep.Load(); u > 0 {
@@ -1057,12 +1057,13 @@ func supportStoreChecks(now, oldest time.Time, bundleCount int) []storageCheck {
 
 	// Count cap honored. The janitor evicts oldest-first on a new build and on the
 	// age tick, so an overflow beyond keep signals a stuck/failing janitor. keep==0
-	// disables the cap.
-	if supportRetentionKeep > 0 {
-		overCap := bundleCount > supportRetentionKeep
+	// disables the cap. Read the configurable cap once (Slice B).
+	keep := supportRetentionKeepVal()
+	if keep > 0 {
+		overCap := bundleCount > keep
 		detail := ""
 		if overCap {
-			detail = "count " + strconv.Itoa(bundleCount) + " exceeds keep cap " + strconv.Itoa(supportRetentionKeep)
+			detail = "count " + strconv.Itoa(bundleCount) + " exceeds keep cap " + strconv.Itoa(keep)
 		}
 		checks = append(checks, storageCheck{Name: "within_count_cap", Path: dir, OK: !overCap, Detail: detail})
 	}
@@ -1070,12 +1071,13 @@ func supportStoreChecks(now, oldest time.Time, bundleCount int) []storageCheck {
 	// Age cap honored. A store can sit under the count cap with only a few bundles
 	// yet still hold ones older than max-age if the background janitor is stopped or
 	// failing (Codex #834) — the count cap alone can't catch that. maxAge<=0 disables.
-	if supportRetentionMaxAge > 0 && !oldest.IsZero() {
-		overAge := now.Sub(oldest) > supportRetentionMaxAge
+	maxAge := supportRetentionMaxAgeVal()
+	if maxAge > 0 && !oldest.IsZero() {
+		overAge := now.Sub(oldest) > maxAge
 		detail := ""
 		if overAge {
 			detail = "oldest bundle age " + strconv.FormatInt(int64(now.Sub(oldest).Hours())/24, 10) + "d exceeds max-age " +
-				strconv.Itoa(int(supportRetentionMaxAge/(24*time.Hour))) + "d — the age janitor may be stopped or failing"
+				strconv.Itoa(int(maxAge/(24*time.Hour))) + "d — the age janitor may be stopped or failing"
 		}
 		checks = append(checks, storageCheck{Name: "within_age_cap", Path: dir, OK: !overAge, Detail: detail})
 	}

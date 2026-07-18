@@ -58,7 +58,7 @@ func TestPruneSupportBundlesByAge(t *testing.T) {
 	writeFakeBundle(t, newID, now.Add(-1*24*time.Hour).Format(time.RFC3339))  // < 30d → keep
 	writeFakeBundle(t, badID, "not-a-timestamp")                              // unparseable → keep
 
-	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+	pruneSupportBundlesByAge(now, supportRetentionMaxAgeVal())
 
 	if bundleDirExists(oldID) {
 		t.Error("bundle older than max age was not evicted")
@@ -92,7 +92,7 @@ func TestPruneSupportBundlesByAge_Observability(t *testing.T) {
 	writeFakeBundle(t, "csb_obsoldbundleaaaaa234567abc", now.Add(-60*24*time.Hour).Format(time.RFC3339))
 	writeFakeBundle(t, "csb_obsnewbundleaaaaa234567abc", now.Add(-1*24*time.Hour).Format(time.RFC3339))
 
-	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+	pruneSupportBundlesByAge(now, supportRetentionMaxAgeVal())
 
 	if got := supportRetentionLastSweep.Load(); got != now.Unix() {
 		t.Errorf("last-sweep not recorded: got %d want %d", got, now.Unix())
@@ -119,7 +119,7 @@ func TestSupportWritePrometheus(t *testing.T) {
 
 	now := time.Unix(1_800_000_000, 0).UTC()
 	writeFakeBundle(t, "csb_promoldbundleaaaaa23456abc", now.Add(-60*24*time.Hour).Format(time.RFC3339))
-	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+	pruneSupportBundlesByAge(now, supportRetentionMaxAgeVal())
 
 	var b strings.Builder
 	supportWritePrometheus(&b)
@@ -160,7 +160,7 @@ func TestPruneSupportBundlesByAge_ManifestIDDivergence(t *testing.T) {
 	// victimDir is a recent, healthy bundle that must NOT be touched.
 	writeFakeBundle(t, victimDir, now.Add(-1*24*time.Hour).Format(time.RFC3339))
 
-	pruneSupportBundlesByAge(now, supportRetentionMaxAge)
+	pruneSupportBundlesByAge(now, supportRetentionMaxAgeVal())
 
 	if bundleDirExists(staleDir) {
 		t.Error("the stale on-disk directory was not evicted")

@@ -139,6 +139,17 @@ type AdminSettings struct {
 	// plaintext); a plain bool needs no sentinel (false is both "off" and "unset").
 	// Node-local like the auto-exclusion tunables — OFF export/import, rollback, CP→DP.
 	DecryptionRedactHosts bool `json:"decryption_redact_hosts,omitempty"`
+
+	// Support-bundle retention caps (Slice B). SupportRetentionSaved is a sentinel
+	// (like AutoExcludeTunablesSaved): when false the values below are not applied on
+	// load, so a zero-value field can't override the compiled defaults on files
+	// predating this feature. These caps govern DURABLE forensic evidence, so they
+	// are node-local OPERATIONAL tuning — OFF export/import, version-rollback, and
+	// CP→DP propagation (the learned/tunable-state-is-node-local precedent; a synced
+	// surface would carry a config-rollback mass-eviction hazard).
+	SupportRetentionSaved      bool `json:"support_retention_saved"`
+	SupportRetentionKeep       int  `json:"support_retention_keep,omitempty"`
+	SupportRetentionMaxAgeDays int  `json:"support_retention_max_age_days,omitempty"`
 }
 
 var (
@@ -169,6 +180,7 @@ func LoadAdminSettings(path string) {
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
 	applyAdminAutoExcludeTunables(&s)
+	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	setDecRedactHosts(s.DecryptionRedactHosts) // ADR-0011 §4 host/SNI redaction posture
 
 	logger.Printf("AdminSettings: loaded from %s", path)
@@ -435,22 +447,47 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 	}
 }
 
+// adminSaveOverrides carries per-feature TARGET values a persist-before-apply PUT
+// wants written to disk instead of the current live values. Every field is nil for
+// an ordinary omnibus save; a PUT sets exactly the one it owns so a persist failure
+// never leaves that feature's live state changed vs disk. The omnibus save rebuilds
+// AdminSettings from scratch on EVERY admin mutation, so a new durable field MUST be
+// snapshotted in saveAdminSettingsWithOverrides or it is silently dropped on the next
+// unrelated mutation.
+type adminSaveOverrides struct {
+	autoExclude      *autoExcludeTunables
+	supportRetention *supportRetentionConfig
+	// applyOnSuccess, when set, is the runtime apply for a persist-before-apply PUT.
+	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
+	// successful write — so no concurrent omnibus save can snapshot the pre-apply
+	// runtime value and then land its own AtomicWrite after this one, reverting the
+	// just-persisted setting on disk. It runs only on a successful write (persist
+	// failure ⇒ never applied ⇒ runtime and disk stay in agreement).
+	applyOnSuccess func()
+}
+
 // SaveAdminSettings snapshots all current runtime values and writes them
 // atomically to the settings file. Called after every API mutation. Returns the
-// write error so a caller that needs durable-vs-runtime consistency (the F10
-// tunables PUT) can detect a persist failure; the fire-and-forget adminSettingsSave
-// wrapper ignores it (best-effort, as before).
-func SaveAdminSettings() error { return saveAdminSettingsWithAutoExclude(nil) }
+// write error so a caller that needs durable-vs-runtime consistency can detect a
+// persist failure; the fire-and-forget adminSettingsSave wrapper ignores it.
+func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSaveOverrides{}) }
 
-// saveAdminSettingsWithAutoExclude is SaveAdminSettings with an optional autoexclude
-// override. When ae is non-nil the durable file records those TARGET tunables instead
-// of the live cache's — the F10 PUT persists the target FIRST, then (only on success)
-// applies it to the live cache. Because the apply (Reconfigure) is infallible, a
-// persist failure leaves the cache — and every learned exclusion in it — untouched.
-func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
+// saveAdminSettingsWithOverrides is SaveAdminSettings with optional per-feature
+// TARGET overrides. When a field is non-nil the durable file records those TARGET
+// values instead of the live ones — the owning PUT persists the target FIRST, then
+// (only on success) applies it to the live runtime. Because those applies are
+// infallible, a persist failure leaves the live state — and any data it governs —
+// untouched.
+func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
+	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
+	// just the path read. Every save (omnibus or override-carrying) is thereby
+	// serialized: a concurrent adminSettingsSave() goroutine can neither snapshot a
+	// half-applied runtime nor land its AtomicWrite between this save's write and its
+	// applyOnSuccess. Saves are per-mutation and infrequent, so full serialization is
+	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
+	defer adminSettingsMu.Unlock()
 	path := adminSettingsPath
-	adminSettingsMu.Unlock()
 	if path == "" {
 		return nil
 	}
@@ -506,8 +543,9 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	s.YARAOnSaturation = yaraGetOnSaturation()
 	s.YARAAlertDegraded = yaraGetAlertDegraded()
 
-	snapshotAutoExcludeTunables(&s, ae)
-	s.DecryptionRedactHosts = decRedactHosts() // ADR-0011 §4 host/SNI redaction posture
+	snapshotAutoExcludeTunables(&s, ov.autoExclude)
+	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
+	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 host/SNI redaction posture
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -520,6 +558,12 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
+	}
+	// Persist-before-apply: the durable write succeeded, so apply the target to the
+	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
+	// moves atomically w.r.t. every other save.
+	if ov.applyOnSuccess != nil {
+		ov.applyOnSuccess()
 	}
 	return nil
 }
