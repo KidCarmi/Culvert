@@ -146,8 +146,48 @@ O(N log N) recompute under the blocklist lock).
 - No phase advertises a host count its own memory model cannot hold.
 - ALLOW-mode set changes are atomic build-then-swap.
 
+## P1 IMPLEMENTATION STATUS (shipped) + red-team fix pass
+
+P1 (CP-authoritative delta sync at today's scale) is implemented end-to-end and
+was put through a 6-lens Palo adversarial review. The core protocol was confirmed
+sound (the wire-protocol lens found no P0/correctness-P1: version-uniqueness +
+`latest==cur` binding + terminal-fingerprint resync form a closed loop; concurrent
+out-of-order records only shrink the ring → spurious resync, never a wrong chain).
+Shipped:
+
+- `blocklist.ApplyDelta` (dedup + hash-outside-lock), `FeedSetFingerprint` /
+  `SyncedFingerprint` (wire-fed XOR set fingerprint), `FeedList` (CP-authoritative).
+- CP delta ring (bounded count+bytes, resync markers, nil-baseline markers) fed by
+  `ConfigStore.Update`; `GetConfigDelta` RPC (epoch-fenced, capped, cached remainder,
+  frame-bounded, KnownFP idle-drift, redaction-walled); DP consumer with
+  full-path fallback, strict sequential apply, and durable epoch ratchet (D4).
+
+**Red-team fixes landed:** dedup closes the even-multiplicity silent-divergence;
+hash-outside-lock removes the hot-path stall; delta-apply cap closes the memory-DoS
+bypass; the redaction-parity wall now covers GetConfigDelta; the reply is
+cache-shared + frame-bounded; `dpLastSeenEpoch` is durable (D4); `TargetVersion` is
+forward-bounded; fp is checked before `bl.Save()`; the delta re-probes after an
+in-place CP upgrade.
+
+**D3 (off-CP signing) — DEFERRED with recorded sign-off.** The plan named a
+mandatory off-CP signature a P0 for P1. It is deferred because it is NOT a P1
+regression: the full-snapshot path has IDENTICAL exposure (a compromised current
+leader can already push an arbitrary full snapshot), so the delta path does not
+weaken the existing CP→DP trust model — which rests on mTLS + the epoch fence. The
+synced fingerprint is explicitly NOT an authenticity control (it is linear/forgeable
+by a content-controlling party). Signing is a cross-cutting hardening that must
+cover BOTH the full and delta paths (reusing the in-tree Sigstore/ed25519
+release-catalog roots) and is tracked as its own slice, not smuggled into P1.
+
+**Efficiency debt (tracked, not regressions — parity with the pre-existing full
+path):** the DP still writes a full ~60 MiB last-good per delta apply (Perf-F3), and
+`Update` re-diffs+re-hashes the blocklist on every publish even when it is unchanged
+(Perf-F4). Both are admin-action-rate and match the full path's existing cost;
+optimize with a blocklist generation counter + coalesced last-good in a follow-up.
+
 ## Open items still requiring a decision (down from draft-1)
 
 - The compact-structure choice + concurrency model (P2 design doc).
 - CP delta-ring byte bound + published resync-frequency SLO.
 - Air-gap story for feed distribution (mandatory CP mirror vs. offline sideload).
+- D3 signing slice (covers both full + delta paths) + Perf-F3/F4 efficiency debt.
