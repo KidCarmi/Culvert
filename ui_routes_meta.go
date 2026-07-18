@@ -369,6 +369,14 @@ var uiRoutes = []uiRouteMetadata{
 			// Exception Intelligence P0). Observable evidence class only.
 			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
 		}},
+	{Path: "/api/pac/posture/diff", Handler: "apiPACPostureDiff", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only DIRECT-surface change-diff for a candidate config (PAC
+			// Exception Intelligence P3). POST only to carry the candidate JSON;
+			// Mutating follows the POST convention (informational, like
+			// /api/pac/analyze). AuditExpected stays false — no mutation. Observable.
+			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only candidate DIRECT-diff; POST carries the candidate config"},
+		}},
 	{Path: "/api/pac/posture/exceptions", Handler: "apiPACExceptions", Domain: "pac", Public: false,
 		Methods: []uiRouteMethod{
 			// DIRECT-exception governance list (PAC Exception Intelligence P2).

@@ -61,6 +61,32 @@ func TestUIContract_GovernanceSurfacePresent(t *testing.T) {
 	}
 }
 
+// TestUIContract_ChangeDiffPreviewPresent pins the P3 change-preview UI wiring
+// in the posture panel (editor, handlers, dispatch, endpoint).
+func TestUIContract_ChangeDiffPreviewPresent(t *testing.T) {
+	html, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	s := string(html)
+	mustContain := []string{
+		`id="pac-diff-input"`,         // candidate editor
+		`id="pac-diff-result"`,        // rendered diff
+		`function runPacDiff`,         // POST + render handler
+		`function loadPacDiffCurrent`, // baseline pre-fill
+		`/api/pac/posture/diff`,       // the P3 endpoint
+		`case 'runPacDiff':`,          // CSP-safe dispatch
+		`case 'loadPacDiffCurrent':`,  //
+		`data-click="runPacDiff"`,     // wired button
+		`data-click="loadPacDiffCurrent"`,
+	}
+	for _, sub := range mustContain {
+		if !strings.Contains(s, sub) {
+			t.Errorf("static/index.html P3 change-preview missing %q", sub)
+		}
+	}
+}
+
 // TestUIContract_GovernanceEditorIsAdminGated proves the Govern/Edit/Clear
 // actions are rendered only for admins (the row actions are behind isAdmin),
 // matching the admin-only write RBAC on the API.

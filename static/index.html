@@ -1781,6 +1781,22 @@ tr.dragging  { opacity: .4; }
           </p>
           <div id="pac-posture-summary" style="font-size:.85rem;margin-bottom:10px"></div>
           <div id="pac-posture-body"></div>
+
+          <!-- PAC Exception Intelligence P3: DIRECT-surface change preview -->
+          <details style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+            <summary style="cursor:pointer;font-weight:600;font-size:.85rem">Change preview — what a config change would add/remove/broaden</summary>
+            <p style="font-size:.78rem;color:var(--muted);margin:8px 0;line-height:1.6">
+              Paste or edit a candidate steering config below (pre-filled with the current one) and preview how its
+              <strong>DIRECT full-bypass surface</strong> differs from what is active now — added, removed, or broadened bypasses.
+              Read-only and config-derived: no change is applied, nothing is published.
+            </p>
+            <textarea id="pac-diff-input" class="input" style="width:100%;height:150px;font-family:monospace;font-size:.72rem" spellcheck="false" placeholder='{"profiles":[...],"pools":[...]}'></textarea>
+            <div style="display:flex;gap:8px;margin:8px 0">
+              <button class="btn ghost sm" data-click="loadPacDiffCurrent">Reset to current config</button>
+              <button class="btn primary sm" data-click="runPacDiff">Preview DIRECT changes</button>
+            </div>
+            <div id="pac-diff-result" style="font-size:.82rem"></div>
+          </details>
         </div>
       </div>
 
@@ -4556,6 +4572,8 @@ document.addEventListener('click', e => {
     case 'closePacGovModal':  closePacGovModal(); break;
     case 'savePacGov':        savePacGov(); break;
     case 'clearPacGov':       clearPacGov(arg); break;
+    case 'loadPacDiffCurrent': loadPacDiffCurrent(); break;
+    case 'runPacDiff':        runPacDiff(); break;
 
     // ── Certificates ──
     case 'loadCACertInfo':    loadCACertInfo(); break;
@@ -12182,9 +12200,74 @@ async function loadPACPosture() {
     }
     html += '</tbody></table>';
     body.innerHTML = html;
+    // Pre-fill the P3 change-preview editor with the current config (once).
+    const diffIn = document.getElementById('pac-diff-input');
+    if (diffIn && !diffIn.value.trim()) loadPacDiffCurrent();
   } catch(e) {
     body.innerHTML = '<div style="color:var(--muted);font-size:.82rem">Inventory unavailable: ' + escHtml(e.message) + '</div>';
     sum.innerHTML = '';
+  }
+}
+
+// loadPacDiffCurrent fills the change-preview editor with the current steering
+// config ({profiles, pools}) so an operator edits from a real baseline.
+async function loadPacDiffCurrent() {
+  const el = document.getElementById('pac-diff-input');
+  if (!el) return;
+  try {
+    const cfg = await api('/api/pac/profiles');
+    el.value = JSON.stringify({ profiles: cfg.profiles || [], pools: cfg.pools || [] }, null, 2);
+  } catch(e) { /* leave editor as-is on failure */ }
+}
+
+// runPacDiff previews how the edited candidate config would change the DIRECT
+// full-bypass surface vs the active config. Read-only (POST carries the body).
+async function runPacDiff() {
+  const out = document.getElementById('pac-diff-result');
+  const raw = (document.getElementById('pac-diff-input') || {}).value || '';
+  if (!out) return;
+  let candidate;
+  try { candidate = JSON.parse(raw); }
+  catch(e) { out.innerHTML = '<div style="color:var(--red,#e5484d)">Invalid JSON: ' + escHtml(e.message) + '</div>'; return; }
+  try {
+    const resp = await apiFetch('/api/pac/posture/diff', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(candidate),
+    });
+    if (resp.status === 400) {
+      const data = await resp.json().catch(() => null);
+      if (data && data.issues) { renderPACIssues(data.issues); out.innerHTML = '<div style="color:var(--red,#e5484d)">Invalid candidate config (see errors above).</div>'; return; }
+      out.innerHTML = '<div style="color:var(--red,#e5484d)">' + escHtml(await resp.text()) + '</div>'; return;
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    renderPACIssues(null);
+    const d = await resp.json();
+    const risk = d.riskIncreased
+      ? '<span style="color:var(--red,#e5484d);font-weight:700">RISK INCREASED</span>'
+      : '<span style="color:var(--ok,#22c55e);font-weight:700">no new bypass surface</span>';
+    let h = '<div style="margin:8px 0">' + risk + ' · ' +
+      '<strong>+' + (d.pathsAdded||0) + '</strong> added (' +
+      '<span style="color:var(--red,#e5484d)">' + (d.broadPathsAdded||0) + ' broad</span>), ' +
+      '<strong>-' + (d.pathsRemoved||0) + '</strong> removed · ' +
+      (d.profilesGainedDirect||0) + ' gained / ' + (d.profilesLostDirect||0) + ' lost DIRECT · ' +
+      '<span style="color:var(--muted)">evidence: config</span></div>';
+    const deltas = d.deltas || [];
+    if (deltas.length) {
+      h += '<table class="tbl" style="width:100%;font-size:.8rem"><thead><tr><th>Profile</th><th>Change</th><th>DIRECT source</th></tr></thead><tbody>';
+      for (const x of deltas) {
+        const add = x.change === 'path_added' || x.change === 'profile_gained_direct';
+        const color = add ? 'var(--red,#e5484d)' : 'var(--ok,#22c55e)';
+        const broad = x.broad ? ' <span style="color:var(--amber,#f5a623);font-size:.72rem">(broad)</span>' : '';
+        h += '<tr><td>' + escHtml(x.name || x.profileId) + '</td>' +
+          '<td style="color:' + color + '">' + escHtml(x.change) + '</td>' +
+          '<td>' + escHtml(x.detail || x.kind || '') + broad + '</td></tr>';
+      }
+      h += '</tbody></table>';
+    } else {
+      h += '<div style="color:var(--muted)">No DIRECT-surface change.</div>';
+    }
+    out.innerHTML = h;
+  } catch(e) {
+    out.innerHTML = '<div style="color:var(--red,#e5484d)">Diff failed: ' + escHtml(e.message) + '</div>';
   }
 }
 
