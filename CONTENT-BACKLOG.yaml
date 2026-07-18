@@ -179,7 +179,7 @@ items:
     title: "Backup & restore via the compose operator contract"
     type: doc
     priority: medium
-    status: todo
+    status: done
     audience: [admin, sre]
     path: content/docs/10-operations/backup-and-restore.md
     evidence_areas: [docker-compose.yml, "internal/backupcrypt", docs/operator/docker-compose-backup-restore.md]

@@ -16,10 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **M-024** — Backup & restore (compose operator contract). Next.
+- **M-022** — PAC traffic steering. Next.
 
 ## Recently completed
 
+- **M-024** — Backup & restore (`content/docs/10-operations/backup-and-restore.md`)
+  + evidence ledger. Compose `cli` operator contract, encrypted backup
+  (AES-256-GCM/PBKDF2-600k), runtime-safe dry-run vs offline-only commit,
+  leftovers, security boundaries (backup volume only in cli, no docker.sock).
+  Link check pass. Committed.
 - **M-023** — High availability (`content/docs/08-distributed/high-availability.md`)
   + evidence ledger. Legacy-vs-lease models, fencing-lease mechanics (epoch,
   Acquire-gated promotion, self-fence, WriteAllowed), guarded failover
