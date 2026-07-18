@@ -65,8 +65,10 @@ import (
 //   - 173 — PAC Traffic Steering PR2+PR3 integration: +7 routes over main's 166
 //     (/pac/ per-profile PAC file; /api/pac/profiles, /profiles/, /pools,
 //     /pools/, /simulate, /analyze).
+//   - 174 — PAC Exception Intelligence P0 added /api/pac/posture/inventory
+//     (read-only config-derived DIRECT full-bypass inventory; viewer).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 173
+	const want = 174
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

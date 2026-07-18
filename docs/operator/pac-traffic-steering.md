@@ -344,3 +344,28 @@ rules independent of the sample.
 mints a new revision, updates the active served profile, audits
 (`pac.profile_rollback`), snapshots config, and republishes the cluster
 snapshot so DPs converge — restoring the exact prior artifact digest.
+
+## DIRECT bypass inventory (posture)
+
+`GET /api/pac/posture/inventory` (viewer) returns a **config-derived**
+inventory of every PAC path that returns `DIRECT` — a **full security-path
+bypass** (matching traffic skips TLS inspection, DLP, CDR, URL filtering,
+threat inspection, authentication, policy, and all proxy logging; it never
+reaches Culvert), distinct from a TLS-decryption bypass. The PAC panel renders
+it read-only as **DIRECT Bypass Inventory**.
+
+Each profile (including the synthesized legacy default) is walked for the three
+DIRECT sources: an explicit `direct` rule (`direct_rule`), availability mode
+(`availability_mode` — appends DIRECT to the terminal, fail-open), and
+`private-networks=direct` (`private_networks` — RFC-1918/loopback DIRECT).
+Secure-mode profiles report no DIRECT (the compiler neutralizes it). Wildcards
+and broad IPv4 CIDRs (≤ /16), plus the all-destination mode/private bypasses,
+are flagged `broad`.
+
+**Evidence class: `config` (Observable).** The inventory reports what the
+configuration makes *reachable* — it never claims a bypass was *used*. Culvert
+cannot observe DIRECT traffic (it never reaches the proxy), so usage/ownership/
+impact are out of scope here and are the subject of later phases (an endpoint
+agent or imported firewall/DNS evidence). `serving` marks enabled profiles,
+whose bypass is reachable by clients now; a disabled profile is inventoried but
+serves nothing (404).
