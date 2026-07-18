@@ -691,7 +691,7 @@ func resolveSSLDecision(match *PolicyMatch, host, clientIP string) sslResolution
 			if reason, hit := autoExclude().Contains(scopeID, host); hit {
 				sslAction = SSLBypass
 				exclReason = reason
-				recordAutoExcludeHit()
+				recordAutoExcludeHit(scopeID)
 				logger.Printf("SSL_AUTOEXCLUDE_BYPASS %s -> %q (scope=%s reason=%s)",
 					sanitizeLog(clientIP), sanitizeLog(host), sanitizeLog(scopeID), reason)
 			}

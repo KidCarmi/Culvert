@@ -629,13 +629,10 @@ culvert_inspect_upstream_alpn_total{protocol="http/1.1"} %d
 	// coverage erosion the operator can alert on). Learn events (by reason) append
 	// via autoExcludeLearns.writePrometheus below.
 	aeStats := autoExclude().Stats()
-	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion
-# TYPE culvert_decrypt_autoexclude_hit_total counter
-culvert_decrypt_autoexclude_hit_total %d
-# HELP culvert_decrypt_autoexclude_active Current count of active learned decryption exclusions (hosts inspection is OFF for)
-# TYPE culvert_decrypt_autoexclude_active gauge
-culvert_decrypt_autoexclude_active %d
-# HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
+	// hit_total{scope} and active{scope} are emitted as labelled series below (F6, via
+	// autoExcludeHitsByScope + writeAutoExcludeActiveByScope); the process total is
+	// sum()-able and also surfaced on /api/decryption/health.
+	_, _ = fmt.Fprintf(w, `# HELP culvert_decrypt_autoexclude_pending Current count of in-progress (unconfirmed) exclusion observations
 # TYPE culvert_decrypt_autoexclude_pending gauge
 culvert_decrypt_autoexclude_pending %d
 # HELP culvert_decrypt_autoexclude_rescue_total Sessions live-bypassed on the first client_cert_required signal (confirm-count-exempt, before any persistent promotion)
@@ -645,8 +642,6 @@ culvert_decrypt_autoexclude_rescue_total %d
 # TYPE culvert_decrypt_autoexclude_surge_total counter
 culvert_decrypt_autoexclude_surge_total %d
 `,
-		atomic.LoadInt64(&autoExcludeHitCounter),
-		aeStats.Active,
 		aeStats.Pending,
 		atomic.LoadInt64(&autoExcludeRescueCounter),
 		atomic.LoadInt64(&autoExcludeSurgeCounter),
@@ -656,9 +651,11 @@ culvert_decrypt_autoexclude_surge_total %d
 	ruleMet.WritePrometheus(&ruleMetBuf)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	autoExcludeLearns.writePrometheus(&ruleMetBuf)
-	decSessions.writePrometheus(&ruleMetBuf)      // culvert_decrypt_sessions_total (ADR-0011 coverage)
-	decFailures.writePrometheus(&ruleMetBuf)      // culvert_decrypt_failures_total (ADR-0011 failure taxonomy)
-	crashByComponent.writePrometheus(&ruleMetBuf) // culvert_crash_records_* (panic recovery)
+	autoExcludeHitsByScope.writePrometheus(&ruleMetBuf) // F6: per-scope autoexclude hit counter
+	writeAutoExcludeActiveByScope(&ruleMetBuf)          // F6: per-scope autoexclude active gauge
+	decSessions.writePrometheus(&ruleMetBuf)            // culvert_decrypt_sessions_total (ADR-0011 coverage)
+	decFailures.writePrometheus(&ruleMetBuf)            // culvert_decrypt_failures_total (ADR-0011 failure taxonomy)
+	crashByComponent.writePrometheus(&ruleMetBuf)       // culvert_crash_records_* (panic recovery)
 	latencyHist.WritePrometheus(&ruleMetBuf)
 	urlcatWritePrometheus(&ruleMetBuf)
 	caWritePrometheus(&ruleMetBuf)

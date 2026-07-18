@@ -287,3 +287,24 @@ func TestEmptyScopeOrHost_NoOp(t *testing.T) {
 		t.Fatal("empty scope must never match")
 	}
 }
+
+// TestActiveByScope pins the F6 per-scope active breakdown: it counts non-expired
+// exclusions per scope ID and drops a scope once its only entry expires.
+func TestActiveByScope(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	c := newTestCache(Config{ConfirmN: 1, TTL: time.Hour}, clk)
+	c.Observe("prof-A", "A", "a1.example", ReasonClientCertRequired, "ip:1.1.1.1")
+	c.Observe("prof-A", "A", "a2.example", ReasonClientCertRequired, "ip:1.1.1.2")
+	c.Observe("prof-B", "B", "b1.example", ReasonClientCertRequired, "ip:1.1.1.3")
+
+	got := c.ActiveByScope()
+	if got["prof-A"] != 2 || got["prof-B"] != 1 {
+		t.Fatalf("ActiveByScope = %v, want prof-A:2 prof-B:1", got)
+	}
+
+	// Expire everything: no scope should remain (expired entries are not counted).
+	clk.add(2 * time.Hour)
+	if got := c.ActiveByScope(); len(got) != 0 {
+		t.Fatalf("expired entries still counted: %v", got)
+	}
+}
