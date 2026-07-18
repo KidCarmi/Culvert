@@ -45,7 +45,7 @@ func TestReachableLeaderLocalSyncFailureCannotAutoPromote(t *testing.T) {
 		ctx:       context.Background(),
 		failCount: haStandbyMaxFail - 1,
 	}
-	if s.handleSyncResult(false, true) {
+	if s.handleSyncResult(false, leaderReachableProven) {
 		t.Fatal("local sync rejection exited the standby loop")
 	}
 	if s.failCount != 0 {
@@ -291,11 +291,11 @@ func TestResumeDenied_NoTarget_KeepsS2Stance(t *testing.T) {
 
 func TestHARPCApplicationErrorsProveLeaderReachability(t *testing.T) {
 	for _, code := range []codes.Code{codes.Unauthenticated, codes.PermissionDenied, codes.FailedPrecondition} {
-		if !haRPCErrorProvesReachability(status.Error(code, "rejected")) {
-			t.Fatalf("%s response was classified as leader-unreachable", code)
+		if got := classifyLeaderReachability(status.Error(code, "rejected")); got != leaderReachableProven {
+			t.Fatalf("%s response classified %v, want leaderReachableProven", code, got)
 		}
 	}
-	if haRPCErrorProvesReachability(status.Error(codes.Unavailable, "transport down")) {
-		t.Fatal("Unavailable was classified as reachable")
+	if got := classifyLeaderReachability(status.Error(codes.Unavailable, "transport down")); got != leaderUnreachableProven {
+		t.Fatalf("Unavailable classified %v, want leaderUnreachableProven", got)
 	}
 }
