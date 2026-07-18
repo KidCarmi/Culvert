@@ -385,10 +385,12 @@ func (cs *ClusterStore) GetNode(nodeID string) (*EnrolledNode, bool) {
 	return n, ok
 }
 
-// UpdateNodeSeen updates the LastSeen timestamp and status.
+// UpdateNodeSeen updates the LastSeen timestamp and status. An empty ipAddr or
+// version is skipped so a heartbeat that omits either (e.g. an older DP that
+// predates the M5 version report) never wipes a previously-recorded value.
 // Persists to disk every 10 heartbeats to avoid excessive I/O while
 // still surviving restarts with reasonably fresh status.
-func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
+func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr, version string) {
 	cs.mu.Lock()
 	if n, ok := cs.st.Nodes[nodeID]; ok {
 		n.LastSeen = time.Now()
@@ -396,6 +398,9 @@ func (cs *ClusterStore) UpdateNodeSeen(nodeID, ipAddr string) {
 		if ipAddr != "" {
 			n.IPAddress = ipAddr
 			autoGeoLabel(n)
+		}
+		if version != "" {
+			n.Version = version
 		}
 	}
 	cs.heartbeatCount++

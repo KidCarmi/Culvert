@@ -255,20 +255,30 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 			logger.Fatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
+	// Version facts of the cached config the node is about to enforce, so the
+	// first heartbeat reports the applied config/policy version even if the
+	// initial CP poll is rejected (M5 PR-A — Codex).
+	var cachedConfigVersion, cachedPolicyVersion int64
 	if snap, err := applyDPLastGoodConfigSnapshot(); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			logger.Printf("DataPlane: last-known-good config unavailable: %v", err)
 		} else {
 			logger.Printf("DataPlane: no last-known-good config at %s", dpLastGoodConfigSnapshotPath())
 		}
-	} else if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
-		logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
-		addr = mergedAddr
+	} else {
+		cachedConfigVersion = snap.Version
+		cachedPolicyVersion = snap.PolicyVersion
+		if mergedAddr := mergeCPAddresses(addr, snap.CPAddresses); mergedAddr != addr {
+			logger.Printf("DataPlane: seeded CP failover addresses from last-known-good config: %s", sanitizeLog(mergedAddr))
+			addr = mergedAddr
+		}
 	}
 	dpClient, err := NewDataPlaneClient(nodeID, addr, certFile, keyFile, caFile)
 	if err != nil {
 		logger.Fatalf("DataPlane client: %v", err)
 	}
+	dpClient.lastVersion.Store(cachedConfigVersion)
+	dpClient.lastPolicyVersion.Store(cachedPolicyVersion)
 	activeDPClient.Store(dpClient) // for HA address discovery
 	audit.SetDPMode(true)
 	dpClient.Run(ctx, 30*time.Second)

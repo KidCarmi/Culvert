@@ -47,17 +47,27 @@ func readClusterGRPCCompression() bool {
 // When multiple CP addresses are configured (HA mode), the client automatically
 // fails over to the next address on connection failure, trying each in order.
 type DataPlaneClient struct {
-	nodeID      string
-	conn        *grpc.ClientConn
-	addrs       []string // all CP addresses (for HA failover)
-	activeIdx   int      // index into addrs of current connection
-	certFile    string   // TLS cert for reconnection
-	keyFile     string   // TLS key for reconnection
-	caFile      string   // CA cert for reconnection
-	mu          sync.Mutex
-	lastVersion int64
-	failCount   int // consecutive fetch failures for exponential backoff
-	callForTest func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	nodeID    string
+	conn      *grpc.ClientConn
+	addrs     []string // all CP addresses (for HA failover)
+	activeIdx int      // index into addrs of current connection
+	certFile  string   // TLS cert for reconnection
+	keyFile   string   // TLS key for reconnection
+	caFile    string   // CA cert for reconnection
+	mu        sync.Mutex
+	// lastVersion / lastPolicyVersion are the version facts of the config
+	// snapshot this node has APPLIED — the config-store version and the CP's
+	// monotonic policy generation carried on that snapshot (NOT the DP-local
+	// policyStore apply counter, which ReplaceAll bumps to 1,2,… regardless of
+	// the CP generation). fetchAndApply is the sole writer; both are seeded from
+	// the last-known-good snapshot at startup so the heartbeat reports the
+	// config the node is already enforcing even before the first successful CP
+	// poll. Atomic because metricsLoop (a separate goroutine) reads them to
+	// stamp the heartbeat report — race-free under -race.
+	lastVersion       atomic.Int64
+	lastPolicyVersion atomic.Int64
+	failCount         int // consecutive fetch failures for exponential backoff
+	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -213,9 +223,9 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
 	// P0-3: report the version we already hold so the CP can reply with a tiny
 	// "unchanged" sentinel instead of the full snapshot when nothing changed.
-	// Safe to read c.lastVersion unlocked — fetchAndApply is the only writer and
-	// runs on a single config-loop goroutine.
-	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion})
+	// fetchAndApply is the only writer and runs on a single config-loop
+	// goroutine; the atomic load keeps metricsLoop's concurrent read race-free.
+	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion.Load()})
 	// CL-9 PR4: time the primary config poll (success only). Scope is exactly
 	// this c.call — not the failover retry, unmarshal, validate, or apply.
 	pollStart := time.Now()
@@ -293,7 +303,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
 		return
 	}
-	if snap.Version <= c.lastVersion {
+	if snap.Version <= c.lastVersion.Load() {
 		return // nothing changed
 	}
 	snapForDisk := snap
@@ -312,7 +322,28 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
-	c.lastVersion = snap.Version
+	c.lastVersion.Store(snap.Version)
+	c.lastPolicyVersion.Store(snap.PolicyVersion)
+}
+
+// buildMetricsReport assembles the DP→CP heartbeat report. The version facts
+// are raw diagnostics (M5 PR-A): ConfigVersion/PolicyVersion are the APPLIED
+// snapshot's identity (seeded from the last-known-good snapshot at startup, so
+// they are populated even before the first successful poll), Epoch is the
+// highest fencing epoch observed, and CulvertVersion is this build. All reads
+// are atomic or set-once — safe from the metricsLoop goroutine.
+func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
+	return MetricsReport{
+		NodeID:         c.nodeID,
+		Total:          atomic.LoadInt64(&statTotal),
+		Blocked:        atomic.LoadInt64(&statBlocked),
+		AuthFail:       atomic.LoadInt64(&statAuthFail),
+		Uptime:         uptime(),
+		ConfigVersion:  c.lastVersion.Load(),
+		PolicyVersion:  c.lastPolicyVersion.Load(),
+		Epoch:          dpLastSeenEpoch.Load(),
+		CulvertVersion: version,
+	}
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
@@ -323,13 +354,7 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report := MetricsReport{
-				NodeID:   c.nodeID,
-				Total:    atomic.LoadInt64(&statTotal),
-				Blocked:  atomic.LoadInt64(&statBlocked),
-				AuthFail: atomic.LoadInt64(&statAuthFail),
-				Uptime:   uptime(),
-			}
+			report := c.buildMetricsReport()
 			b, _ := json.Marshal(report)
 			raw, err := c.call(ctx, methodPushMetrics, b)
 			if err != nil {

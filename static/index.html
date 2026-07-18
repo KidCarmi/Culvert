@@ -3925,7 +3925,7 @@ Firefox (all platforms):
         </div>
         <div class="tbl-wrap">
           <table id="cluster-nodes-table" style="display:none">
-            <thead><tr><th>Node ID</th><th>Status</th><th>Labels</th><th>Last Seen</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Cert Expires</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Node ID</th><th>Status</th><th>Labels</th><th>Last Seen</th><th>Version</th><th>Total Requests</th><th>Blocked</th><th>Enrolled</th><th>Cert Expires</th><th>Actions</th></tr></thead>
             <tbody id="cluster-nodes-tbody"></tbody>
           </table>
         </div>
@@ -15096,6 +15096,12 @@ async function loadCluster() {
         const labelHtml = Object.keys(labels).length > 0
           ? Object.entries(labels).map(([k,v]) => `<span style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:.65rem;margin:1px">${escHtml(k)}=${escHtml(v)}</span>`).join(' ')
           : '<em style="color:var(--muted);font-size:.7rem">none</em>';
+        // M5: build version comes from the enrolled node (heartbeat-populated);
+        // applied config version + policy/epoch are raw facts from the metrics report.
+        const buildVer = n.version ? escHtml(n.version) : '<em style="color:var(--muted);font-size:.7rem">unknown</em>';
+        const cfgVer = m.config_version ? `<span style="color:var(--muted);font-size:.68rem">cfg v${m.config_version}</span>` : '';
+        const verTitle = `policy v${m.policy_version || 0} · epoch ${m.epoch || 0}`;
+        const versionCell = `<span title="${escHtml(verTitle)}">${buildVer}${cfgVer ? '<br>' + cfgVer : ''}</span>`;
         let actions = '';
         if (canRevoke) {
           actions += `<button class="btn ghost sm" style="color:#ef4444;font-size:.7rem" data-click="revokeNode" data-arg="${escHtml(n.node_id)}">Revoke</button>`;
@@ -15113,6 +15119,7 @@ async function loadCluster() {
           <td><span style="color:${statusColor}">${statusIcon}</span> ${escHtml(n.status)}</td>
           <td style="max-width:200px">${labelHtml}</td>
           <td>${lastSeen}</td>
+          <td style="white-space:nowrap">${versionCell}</td>
           <td>${(m.total || 0).toLocaleString()}</td>
           <td>${(m.blocked || 0).toLocaleString()}</td>
           <td>${enrolledAt}</td>

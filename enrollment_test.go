@@ -315,7 +315,7 @@ func TestNodeRegistry_UpdateSeen(t *testing.T) {
 	cs := newTestClusterStore(t)
 
 	cs.RegisterNode(&EnrolledNode{NodeID: "dp-1", Status: "disconnected"})
-	cs.UpdateNodeSeen("dp-1", "10.0.0.5")
+	cs.UpdateNodeSeen("dp-1", "10.0.0.5", "")
 
 	n, _ := cs.GetNode("dp-1")
 	if n.Status != "connected" {
@@ -1067,7 +1067,7 @@ func TestClusterStore_ConcurrentAccess(t *testing.T) {
 				cs.ListNodes()
 				cs.ListTokens()
 				cs.ListRevoked()
-				cs.UpdateNodeSeen("dp-a", "10.0.0.1")
+				cs.UpdateNodeSeen("dp-a", "10.0.0.1", "")
 				cs.GetNode("dp-b")
 				cs.IsRevoked("serial-x")
 			}

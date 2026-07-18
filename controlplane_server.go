@@ -177,8 +177,9 @@ func (s *controlPlaneServer) PushMetrics(ctx context.Context, raw json.RawMessag
 	nodeMetrics[report.NodeID] = report
 	nodeMetricsMu.Unlock()
 
-	// Update heartbeat.
-	globalClusterStore.UpdateNodeSeen(report.NodeID, "")
+	// Update heartbeat. M5 PR-B: carry the DP's reported build version so the
+	// cluster node list shows which culvert version each node is actually on.
+	globalClusterStore.UpdateNodeSeen(report.NodeID, "", report.CulvertVersion)
 
 	logger.Printf("ControlPlane: metrics from node %s (total=%d)", report.NodeID, report.Total)
 	// ADR-0005 S3: piggyback the fencing epoch on every heartbeat reply so

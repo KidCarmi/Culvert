@@ -163,7 +163,8 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 func TestFetchAndApply_OverCapDoesNotPoisonLastVersion(t *testing.T) {
 	resetSnapshotBoundsTestGlobals(t)
 
-	c := &DataPlaneClient{lastVersion: 5}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(5)
 	snap := ConfigSnapshot{
 		Version:      10,
 		BlockedHosts: make([]string, maxSnapBlockedHosts+1),
@@ -176,8 +177,8 @@ func TestFetchAndApply_OverCapDoesNotPoisonLastVersion(t *testing.T) {
 	if err := validateConfigSnapshot(snap); err == nil {
 		t.Fatal("validator should have rejected oversized snapshot")
 	}
-	if c.lastVersion != 5 {
-		t.Errorf("lastVersion should remain 5 on rejected snapshot; got %d", c.lastVersion)
+	if c.lastVersion.Load() != 5 {
+		t.Errorf("lastVersion should remain 5 on rejected snapshot; got %d", c.lastVersion.Load())
 	}
 }
 
