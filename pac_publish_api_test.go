@@ -358,6 +358,60 @@ func TestAPIPACLifecycle_RBAC(t *testing.T) {
 	}
 }
 
+// ─── Concurrency: save_draft must not clobber concurrent publishes ─────────────
+
+// TestAPIPACLifecycle_ConcurrentSaveDraftPublish guards the lifecycle
+// read-modify-write serialization. Because LifecycleStore hands out deep
+// copies, a lost-update here is invisible to -race — so this asserts on the
+// resulting revision integrity: every published revision number is unique and
+// the count matches the number of publishes (no revision erased by a racing
+// save_draft, no duplicate number re-minted).
+func TestAPIPACLifecycle_ConcurrentSaveDraftPublish(t *testing.T) {
+	resetPACPublishGlobals(t)
+	seedPublishProfile(t)
+
+	const publishes = 12
+	var wg sync.WaitGroup
+	// Interleave publishes (benign pool swaps — no new DIRECT) with save_drafts.
+	pools := []string{"main", "alt"}
+	for i := 0; i < publishes; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			body := `{"action":"publish","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"` +
+				pools[i%2] + `","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"cdn.example","action":"use_pool"}]}}`
+			pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.140:0")
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			body := `{"action":"save_draft","draft":{"id":"hq","name":"HQ","enabled":true,"poolId":"` +
+				pools[i%2] + `","privateNetworks":"proxy","availabilityMode":"balanced","rules":[{"kind":"suffix","pattern":"draft.example","action":"use_pool"}]}}`
+			pacPost(t, "/api/pac/profiles/hq/lifecycle", body, RoleAdmin, "198.51.100.141:0")
+		}(i)
+	}
+	wg.Wait()
+
+	lc, ok := pacLifecycle.Get("hq")
+	if !ok {
+		t.Fatal("lifecycle record missing after concurrent mutations")
+	}
+	if len(lc.Revisions) != publishes {
+		t.Fatalf("expected %d published revisions, got %d (a save_draft clobbered a publish?)", publishes, len(lc.Revisions))
+	}
+	seen := make(map[int64]bool, len(lc.Revisions))
+	for i := range lc.Revisions {
+		n := lc.Revisions[i].N
+		if seen[n] {
+			t.Errorf("duplicate revision number %d — monotonic-never-reused invariant violated", n)
+		}
+		seen[n] = true
+	}
+	// The active spec must correspond to a real published revision.
+	if _, ok := lc.ActiveRevision(); !ok {
+		t.Errorf("ActiveN=%d has no matching revision after concurrent publishes", lc.ActiveN)
+	}
+}
+
 // ─── Impact analysis (read-only /api/pac/analyze; viewer) ───────────────────────
 
 func TestAPIPACAnalyze_Impact(t *testing.T) {
