@@ -690,11 +690,16 @@ func StartControlPlaneGRPC(addr, certFile, keyFile, caFile string) error {
 	srv := grpc.NewServer(
 		serverOpt,
 		// Match the DP client's frame budget so an enterprise-scale
-		// ConfigSnapshot (2 M blocked hosts + IP list + URL categories) fits.
-		// gRPC's 4 MiB default receive limit is what capped the old snapshot
-		// at ~200 k hosts. Importing google.golang.org/grpc/encoding/gzip
-		// (blank import above) registers the compressor so the server both
-		// decompresses gzip requests and echoes gzip on its responses.
+		// ConfigSnapshot (2 M blocked hosts + IP list + URL categories) fits
+		// uncompressed. gRPC's 4 MiB default receive limit is what capped the
+		// old snapshot at ~200 k hosts. Importing
+		// google.golang.org/grpc/encoding/gzip (blank import above) registers
+		// the codec so the server ALWAYS accepts gzip requests and echoes gzip
+		// on those responses — but never REQUIRES it. This is what makes the
+		// DP's opt-in compression (CULVERT_CLUSTER_GRPC_COMPRESSION) a safe,
+		// CP-first migration: an upgraded CP handles both compressed and
+		// uncompressed DPs, so enabling compression never depends on rollout
+		// order the way an unconditional client-side compressor would.
 		grpc.MaxRecvMsgSize(maxClusterGRPCMsgSize),
 		grpc.MaxSendMsgSize(maxClusterGRPCMsgSize),
 	)

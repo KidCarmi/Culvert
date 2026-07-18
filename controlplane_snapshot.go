@@ -163,10 +163,12 @@ const (
 // uncompressed JSON) transfer with ~2× headroom while still bounding a single
 // frame to a memory-safe size (a hostile CP cannot force an unbounded DP
 // allocation). grpc-go enforces this bound on the DECOMPRESSED message, so it
-// also caps a gzip decompression bomb. The config stream is gzip-compressed on
-// top of this (~10:1 for host lists), so the on-wire cost stays under ~10 MiB.
-// The per-slice validateConfigSnapshot caps remain the primary entry-count DoS
-// bound; this is the independent transport-frame bound.
+// also caps a gzip decompression bomb. The frame alone carries the uncompressed
+// snapshot; gzip on the config stream (~10:1 for host lists) is an OPT-IN
+// bandwidth optimization (CULVERT_CLUSTER_GRPC_COMPRESSION, default off) rather
+// than a correctness requirement, so a mixed-version fleet is never forced onto
+// compression. The per-slice validateConfigSnapshot caps remain the primary
+// entry-count DoS bound; this is the independent transport-frame bound.
 const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
 
 // validateConfigSnapshot enforces the per-slice caps above. Returns an

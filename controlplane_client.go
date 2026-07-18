@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,31 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding/gzip"
 )
+
+// clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
+// gRPC stream. It is a rollout/transition control, read once at startup
+// (startup-scoped, recorded GUI-parity deferral — same class as the HA-lease
+// endpoints and -cluster-insecure). Default OFF: an unset/typo'd value leaves
+// compression disabled so a partially-upgraded or rolled-back cluster can never
+// go dark (the frame increase alone carries an uncompressed 2 M-host snapshot).
+// Enable it only after every Control Plane in the fleet runs a build that
+// registers the gzip codec (CP-first upgrade complete).
+const clusterGRPCCompressionEnvVar = "CULVERT_CLUSTER_GRPC_COMPRESSION"
+
+// clusterGRPCCompression is the resolved opt-in flag, read once at startup.
+var clusterGRPCCompression = readClusterGRPCCompression()
+
+// readClusterGRPCCompression parses the opt-in env var. Fail-safe: only an
+// explicit true-ish value enables compression; everything else (unset,
+// unknown, false-ish) leaves it off.
+func readClusterGRPCCompression() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(clusterGRPCCompressionEnvVar))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // ─── Data Plane gRPC client ───────────────────────────────────────────────────
 
@@ -96,20 +122,28 @@ func (c *DataPlaneClient) connect(addr string) error {
 		logger.Printf("DataPlane: connecting to %s (insecure — dev only!)", addr)
 	}
 
-	conn, err := grpc.NewClient(addr, dialOpt,
-		grpc.WithDefaultCallOptions(
-			// GetConfig responses carry the full ConfigSnapshot; an
-			// enterprise blocklist (2 M hosts) is ~60 MiB decompressed, far
-			// past gRPC's 4 MiB default receive limit. maxClusterGRPCMsgSize
-			// matches the CP server's frame budget. UseCompressor gzips the
-			// stream (both directions — the CP echoes the request's
-			// compressor), so the on-wire snapshot stays a few MiB; the size
-			// limit is checked on the decompressed bytes.
-			grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
-			grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
-			grpc.UseCompressor(gzip.Name),
-		),
-	)
+	// GetConfig responses carry the full ConfigSnapshot; an enterprise
+	// blocklist (2 M hosts) is ~60 MiB decompressed, far past gRPC's 4 MiB
+	// default receive limit. maxClusterGRPCMsgSize matches the CP server's
+	// frame budget so the uncompressed snapshot alone fits.
+	callOpts := []grpc.CallOption{
+		grpc.MaxCallRecvMsgSize(maxClusterGRPCMsgSize),
+		grpc.MaxCallSendMsgSize(maxClusterGRPCMsgSize),
+	}
+	// gzip compression is OPT-IN and default-off (clusterGRPCCompression).
+	// Setting UseCompressor makes the DP send every RPC gzip-encoded; a CP
+	// that has not registered the gzip codec (an un-upgraded or rolled-back
+	// peer) would reject EVERY such call with Unimplemented — a fleet-wide
+	// config-sync blackout on any DP-first rollout. Keeping it off by default
+	// means the frame increase alone unblocks large snapshots (uncompressed);
+	// operators enable compression only once the whole fleet speaks gzip
+	// (CP-first upgrade complete). The CP always registers the decompressor,
+	// so a compressed DP is safe against an already-upgraded CP.
+	if clusterGRPCCompression {
+		callOpts = append(callOpts, grpc.UseCompressor(gzip.Name))
+	}
+
+	conn, err := grpc.NewClient(addr, dialOpt, grpc.WithDefaultCallOptions(callOpts...))
 	if err != nil {
 		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}
