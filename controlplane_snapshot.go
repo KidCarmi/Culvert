@@ -369,6 +369,15 @@ func (s *ConfigStore) Get() ConfigSnapshot {
 	return s.snap
 }
 
+// Version returns the current published config version without copying the
+// whole snapshot. Used by the version-conditional GetConfig fast path so an
+// unchanged poll never materializes or marshals the (up to ~60 MiB) snapshot.
+func (s *ConfigStore) Version() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.version
+}
+
 // Subscribe returns a channel that receives a signal on every config update.
 func (s *ConfigStore) Subscribe() chan struct{} {
 	ch := make(chan struct{}, 1)

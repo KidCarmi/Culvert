@@ -131,6 +131,61 @@ func TestCPGRPC_FrameBoundEnforced(t *testing.T) {
 	}
 }
 
+// TestCPGRPC_VersionConditional proves the P0-3 fast path: a DP that reports
+// the current version gets a tiny "unchanged" sentinel instead of the full
+// snapshot, while a stale version (or an old DP that omits the field) gets the
+// full snapshot. This is what removes the ~60 MiB re-marshal+resend on every
+// unchanged poll.
+func TestCPGRPC_VersionConditional(t *testing.T) {
+	dial := startBufconnCP(t)
+	curVer := publishLargeSnapshot(200_000) // ~4 MiB full snapshot
+	conn := dial(t, clusterClientCallOptions()...)
+
+	get := func(known int64) json.RawMessage {
+		body, _ := json.Marshal(getConfigRequest{KnownVersion: known})
+		var resp json.RawMessage
+		if err := conn.Invoke(context.Background(), methodGetConfig, body, &resp); err != nil {
+			t.Fatalf("GetConfig(known=%d): %v", known, err)
+		}
+		return resp
+	}
+
+	// Up-to-date DP: tiny unchanged sentinel, NOT the full snapshot.
+	resp := get(curVer)
+	var probe configUnchangedReply
+	if err := json.Unmarshal(resp, &probe); err != nil || !probe.ConfigUnchanged {
+		t.Fatalf("up-to-date DP: expected unchanged sentinel, got %d bytes: %s", len(resp), truncate(resp))
+	}
+	if len(resp) > 256 {
+		t.Errorf("unchanged sentinel is %d bytes; must be tiny, not a full snapshot", len(resp))
+	}
+
+	// Stale DP (one version behind): full snapshot.
+	stale := get(curVer - 1)
+	var snap ConfigSnapshot
+	if err := json.Unmarshal(stale, &snap); err != nil {
+		t.Fatalf("stale DP: unmarshal full snapshot: %v", err)
+	}
+	if snap.Version != curVer || len(snap.BlockedHosts) != 200_000 {
+		t.Errorf("stale DP: got v%d/%d hosts, want v%d/200000", snap.Version, len(snap.BlockedHosts), curVer)
+	}
+
+	// Old DP omitting known_version (KnownVersion 0): must get the full snapshot
+	// (backward compatibility — an old binary never sends the field).
+	old := get(0)
+	var oldSnap ConfigSnapshot
+	if err := json.Unmarshal(old, &oldSnap); err != nil || oldSnap.Version != curVer {
+		t.Errorf("old DP (known=0): expected full snapshot v%d, got v%d (err=%v)", curVer, oldSnap.Version, err)
+	}
+}
+
+func truncate(b []byte) string {
+	if len(b) > 80 {
+		return string(b[:80]) + "..."
+	}
+	return string(b)
+}
+
 // TestCPGRPC_CompressionRoundTrip exercises the opt-in gzip path: a DP that has
 // enabled compression sends gzip-encoded requests, and the server (which always
 // registers the gzip codec) decompresses and echoes gzip. Proves compression is

@@ -207,10 +207,15 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// P0-3: report the version we already hold so the CP can reply with a tiny
+	// "unchanged" sentinel instead of the full snapshot when nothing changed.
+	// Safe to read c.lastVersion unlocked — fetchAndApply is the only writer and
+	// runs on a single config-loop goroutine.
+	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion})
 	// CL-9 PR4: time the primary config poll (success only). Scope is exactly
 	// this c.call — not the failover retry, unmarshal, validate, or apply.
 	pollStart := time.Now()
-	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+	raw, err := c.call(ctx, methodGetConfig, reqBody)
 	if err == nil {
 		dpPollHist.Observe(time.Since(pollStart).Seconds())
 	}
@@ -230,7 +235,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		}
 		logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
 		// Retry immediately on the new connection; on success fall through to apply.
-		raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
@@ -240,6 +245,15 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	}
 	c.resetBackoff()
 	dpMarkCPPollHealthy()
+	// P0-3: detect the CP's "unchanged" sentinel before attempting a full
+	// snapshot unmarshal. On an unchanged poll (the common case) this is a tiny
+	// response and we skip the ~60 MiB unmarshal + validate + apply entirely.
+	// Probing into a one-field struct also cheaply ignores a full snapshot
+	// response (config_unchanged absent → false) without allocating its slices.
+	var probe configUnchangedReply
+	if err := json.Unmarshal(raw, &probe); err == nil && probe.ConfigUnchanged {
+		return // CP confirmed our version is current; nothing to do
+	}
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)

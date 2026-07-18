@@ -86,7 +86,24 @@ func verifyNodeCert(ctx context.Context, claimedNodeID string) error {
 	return nil
 }
 
-func (s *controlPlaneServer) GetConfig(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+func (s *controlPlaneServer) GetConfig(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
+	// P0-3 version-conditional fast path: the DP sends the version it already
+	// holds. If it is current, return a tiny "unchanged" sentinel instead of
+	// re-marshaling and re-sending the whole (~60 MiB at 2 M hosts) snapshot on
+	// every poll — the dominant steady-state CP CPU/egress cost the 10x cap
+	// raise amplified. This preserves the DP's existing semantics exactly: the
+	// DP already returns before applyConfigSnapshot when snap.Version <=
+	// lastVersion, so nothing (incl. CA-rotation detection, which lives in
+	// apply) fires on an unchanged version today either. An old DP omits the
+	// field (KnownVersion 0) and always gets the full snapshot, and an old CP
+	// ignores the request body and always returns full — so this is
+	// backward-compatible in both rollout directions.
+	var greq getConfigRequest
+	_ = json.Unmarshal(req, &greq) // tolerate empty/"{}"/garbage → KnownVersion 0
+	if greq.KnownVersion > 0 && greq.KnownVersion >= globalConfigStore.Version() {
+		return json.Marshal(configUnchangedReply{ConfigUnchanged: true, Version: greq.KnownVersion})
+	}
+
 	// GetConfig is called during initial poll before enrollment completes, so
 	// it must remain reachable without a full node-identity check. However,
 	// the snapshot carries secrets (SessionHMAC) that must NOT leak to
