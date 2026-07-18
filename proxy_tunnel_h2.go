@@ -167,6 +167,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		// session cannot be rescued (unlike the strip path). A qualifying failure
 		// still learns the host so the NEXT session self-heals via the cache.
 		maybeFailOpenOrigin(hostOnly, match, id, err)
+		recordDecryptFailure(originInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
 		logger.Printf("SSL_INSPECT(native) upstream TLS handshake %q: %v", sanitizeLog(targetHost), err)
 		return
 	}
@@ -179,9 +180,10 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, newMITMClientConfigForALPN(downstreamProtos))
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                             //nolint:errcheck // best-effort cleanup
-		upstreamTLS.Close()                           //nolint:errcheck // best-effort cleanup
-		maybeFailOpenClient(hostOnly, match, id, err) // learn a pinning rejection (learn-only)
+		clientTLS.Close()                                                            //nolint:errcheck // best-effort cleanup
+		upstreamTLS.Close()                                                          //nolint:errcheck // best-effort cleanup
+		maybeFailOpenClient(hostOnly, match, id, err)                                // learn a pinning rejection (learn-only)
+		recordDecryptFailure(clientInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
 		logger.Printf("SSL_INSPECT(native) client TLS handshake %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}

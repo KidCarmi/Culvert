@@ -103,3 +103,71 @@ func recordDecryptSession(o *DecryptionOutcome) {
 		decEnumOr(o.TLSVersion, decryptobs.TLSVersionUnknown),
 	)
 }
+
+// decFailureLabel is one (fail_category, fail_stage) failure series with its count.
+type decFailureLabel struct {
+	category string
+	stage    string
+	n        int64
+}
+
+// decFailureCounter backs culvert_decrypt_failures_total{fail_category,fail_stage}. Like
+// decSessions it needs no cardinality cap: both labels are closed enum sets (10 categories
+// × 7 stages = 70 max series). It is the failure-taxonomy counter — the "why did decryption
+// fail" breakdown operators triage from (PAN-OS Decryption Error-Index parity).
+type decFailureCounter struct {
+	mu     sync.RWMutex
+	counts map[string]*decFailureLabel
+	order  []string
+}
+
+var decFailures = &decFailureCounter{counts: make(map[string]*decFailureLabel)}
+
+func (c *decFailureCounter) record(category, stage string) {
+	k := category + "\x00" + stage
+	c.mu.RLock()
+	ll, ok := c.counts[k]
+	c.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(&ll.n, 1)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ll, ok = c.counts[k]; ok {
+		atomic.AddInt64(&ll.n, 1)
+		return
+	}
+	c.counts[k] = &decFailureLabel{category: category, stage: stage, n: 1}
+	c.order = append(c.order, k)
+}
+
+func (c *decFailureCounter) writePrometheus(w *strings.Builder) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.order) == 0 {
+		return
+	}
+	w.WriteString("\n# HELP culvert_decrypt_failures_total Decryption failures by normalized category and lifecycle stage (ADR-0011; PAN-OS Error-Index parity)\n")
+	w.WriteString("# TYPE culvert_decrypt_failures_total counter\n")
+	for _, k := range c.order {
+		ll := c.counts[k]
+		fmt.Fprintf(w, "culvert_decrypt_failures_total{fail_category=%q,fail_stage=%q} %d\n",
+			ll.category, ll.stage, atomic.LoadInt64(&ll.n))
+	}
+}
+
+// recordDecryptFailure records a FAILED decryption session: it counts the failure
+// taxonomy (culvert_decrypt_failures_total) AND the coverage total (outcome=failed) — the
+// two are always paired at a failure site, so this is the single call the inspect failure
+// paths make. Labels pass through decEnumOr so the vocabulary stays closed. nil is a no-op.
+func recordDecryptFailure(o *DecryptionOutcome) {
+	if o == nil {
+		return
+	}
+	recordDecryptSession(o) // a failed session also counts toward coverage
+	decFailures.record(
+		decEnumOr(o.FailCategory, decryptobs.FailCategoryOther),
+		decEnumOr(o.FailStage, decryptobs.FailStageUpstreamHandshake),
+	)
+}

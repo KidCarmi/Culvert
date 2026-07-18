@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"strings"
 
 	"github.com/KidCarmi/Culvert/internal/autoexclude"
 	"github.com/KidCarmi/Culvert/internal/decryptobs"
@@ -163,6 +164,107 @@ func inspectedOutcome(dec sslResolution, hostOnly string, upstreamCS tls.Connect
 		o.RuleName = match.Rule.Name
 	}
 	return o
+}
+
+// originInspectFailureOutcome builds the ADR-0011 DecryptionOutcome for an UPSTREAM
+// (origin-leg) inspect-handshake FAILURE — the session was attempted and could not be
+// decrypted, so it 502s. The bounded (FailStage, FailCategory, DecisionSource) come from
+// classifyOriginFailure; the raw error string is NEVER stored (only the categorical
+// result). TLS fields stay at sentinels (no negotiated session). Used for the failure
+// taxonomy metric; the per-session record projection is a later slice.
+func originInspectFailureOutcome(err error, hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
+	stage, category, source := classifyOriginFailure(err)
+	certVerify := decryptobs.CertVerifyNotChecked
+	if category == decryptobs.FailCategoryCertificate {
+		certVerify = decryptobs.CertVerifyUnknown // coarse; the fine cert sub-status is a record-projection follow-up
+	}
+	o := &DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeFailed,
+		DecisionSource: source,
+		Host:           hostOnly,
+		CertVerify:     certVerify,
+		FailStage:      stage,
+		FailCategory:   category,
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
+// clientInspectFailureOutcome builds the ADR-0011 DecryptionOutcome for a CLIENT-leg
+// (forged-leaf) inspect-handshake FAILURE — the client rejected our leaf (pinning) or its
+// hello was incompatible. Same sentinel/redaction posture as the origin builder.
+func clientInspectFailureOutcome(err error, hostOnly string, dec sslResolution, match *PolicyMatch) *DecryptionOutcome {
+	stage, category := classifyClientFailure(err)
+	o := &DecryptionOutcome{
+		Outcome: decryptobs.OutcomeFailed,
+		// A client-leg (forged-leaf) failure always blocks the current session (502); there
+		// is no cert-verify-block source on this leg.
+		DecisionSource: decryptobs.DecisionNoFailOpen502,
+		Host:           hostOnly,
+		CertVerify:     decryptobs.CertVerifyNotChecked,
+		FailStage:      stage,
+		FailCategory:   category,
+		ProfileID:      dec.ScopeID,
+		CacheConsulted: dec.Consulted,
+	}
+	if match != nil && match.Rule != nil {
+		o.RuleID = match.Rule.ID
+		o.RuleName = match.Rule.Name
+	}
+	return o
+}
+
+// classifyOriginFailure maps an upstream (origin-leg) inspect-handshake error to the
+// bounded ADR-0011 (FailStage, FailCategory, DecisionSource). It reuses isOriginCertVerifyErr
+// for the certificate class (a Block decision) and matches the same narrow, deliberate TLS
+// error strings as the autoexclude classifier — but here EVERY failure gets a category, so
+// unknown errors fail SAFE to (upstream_handshake, other, no_fail_open_502): an
+// unrecognised error is never mislabelled as a specific class. The raw string never leaves
+// this function.
+func classifyOriginFailure(err error) (decryptobs.FailStage, decryptobs.FailCategory, decryptobs.DecisionSource) {
+	if err == nil {
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryOther, decryptobs.DecisionNoFailOpen502
+	}
+	if isOriginCertVerifyErr(err) {
+		// A verified-and-rejected origin cert is a Block decision, not a fail-open 502.
+		return decryptobs.FailStageCertVerify, decryptobs.FailCategoryCertificate, decryptobs.DecisionCertVerifyBlock
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "certificate required"):
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryClientCertRequired, decryptobs.DecisionNoFailOpen502
+	case containsAny(msg, "server selected unsupported protocol version", "no supported versions satisfy", "protocol version not supported"):
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryVersion, decryptobs.DecisionNoFailOpen502
+	case strings.Contains(msg, "no cipher suite supported"):
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryCipher, decryptobs.DecisionNoFailOpen502
+	case containsAny(msg, "i/o timeout", "deadline exceeded", "timed out"):
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryTimeout, decryptobs.DecisionNoFailOpen502
+	case containsAny(msg, "handshake failure", "no application protocol", "unexpected message", "protocol version"):
+		return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryProtocol, decryptobs.DecisionNoFailOpen502
+	}
+	return decryptobs.FailStageUpstreamHandshake, decryptobs.FailCategoryOther, decryptobs.DecisionNoFailOpen502
+}
+
+// classifyClientFailure maps a client-leg (forged-leaf) handshake error to the bounded
+// ADR-0011 (FailStage, FailCategory). It reuses classifyClientInspectFailure for the
+// pinning class; anything else fails safe to (client_hello, other). The DecisionSource is
+// always no_fail_open_502 on this leg, so the builder sets it directly.
+func classifyClientFailure(err error) (decryptobs.FailStage, decryptobs.FailCategory) {
+	if err == nil {
+		return decryptobs.FailStageClientHello, decryptobs.FailCategoryOther
+	}
+	if _, pinned := classifyClientInspectFailure(err); pinned {
+		return decryptobs.FailStageClientLeafReject, decryptobs.FailCategoryClientPinned
+	}
+	if containsAny(strings.ToLower(err.Error()), "i/o timeout", "deadline exceeded", "timed out") {
+		return decryptobs.FailStageClientHello, decryptobs.FailCategoryTimeout
+	}
+	return decryptobs.FailStageClientHello, decryptobs.FailCategoryOther
 }
 
 // nonTLSFallbackOutcome builds the ADR-0011 DecryptionOutcome for a CONNECT that reached
