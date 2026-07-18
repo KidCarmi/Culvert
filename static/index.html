@@ -4507,6 +4507,7 @@ document.addEventListener('click', e => {
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
     case 'supportExportSealed':    supportExportSealed(arg); break;
     case 'addRecipient':           addRecipient(); break;
+    case 'rotateRecipient':        rotateRecipient(arg); break;
     case 'deleteRecipient':        deleteRecipient(arg); break;
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
@@ -12724,14 +12725,17 @@ function renderRecipients(list) {
   list = list || [];
   if (!list.length) { el.innerHTML = '<p class="hint">No registered recipients.</p>'; return; }
   const canDel = (uiRole === 'operator' || uiRole === 'admin');
+  const canRotate = (uiRole === 'admin');
   const rows = list.map(rec => {
     const fp = String(rec.fingerprint || '');
-    const del = canDel ? ' <button class="btn ghost sm" data-click="deleteRecipient" data-arg="' + escHtml(String(rec.name)) + '" title="Remove this recipient">Remove</button>' : '';
+    const nm = escHtml(String(rec.name));
+    const rot = canRotate ? ' <button class="btn ghost sm" data-click="rotateRecipient" data-arg="' + nm + '" title="Replace this recipient’s key in place (rotation)">Rotate</button>' : '';
+    const del = canDel ? ' <button class="btn ghost sm" data-click="deleteRecipient" data-arg="' + nm + '" title="Remove this recipient">Remove</button>' : '';
     // Render the FULL SHA-256 fingerprint (wraps) so an operator can compare every
     // hex digit out-of-band before trusting a recipient — a prefix is not a trust anchor.
-    return '<tr><td>' + escHtml(String(rec.name)) + '</td>' +
+    return '<tr><td>' + nm + '</td>' +
       '<td class="hint" style="font-family:monospace;word-break:break-all;max-width:360px" title="SHA-256 fingerprint — verify all 64 hex digits out-of-band">' + escHtml(fp) + '</td>' +
-      '<td>' + del + '</td></tr>';
+      '<td>' + rot + del + '</td></tr>';
   }).join('');
   el.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
     '<th>Name</th><th>Fingerprint</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
@@ -12755,6 +12759,24 @@ async function addRecipient() {
     await loadRecipients();
   } catch (err) {
     toast('Register failed: ' + err.message, 'error');
+  }
+}
+
+async function rotateRecipient(name) {
+  if (!name) return;
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const key = window.prompt('New base64 X25519 public key for "' + name + '" (in-place rotation — the name stays, its key + fingerprint change). Verify the new fingerprint out-of-band.');
+  if (key === null) return; // cancelled
+  const k = key.trim();
+  if (!k) { toast('A new public key is required', 'error'); return; }
+  try {
+    const r = await apiFetch('/api/support/recipients/' + encodeURIComponent(String(name)),
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ public_key: k }) });
+    if (!r.ok) { toast('Rotate failed: ' + (await r.text()), 'error'); return; }
+    toast('Recipient "' + name + '" rotated — verify its new fingerprint (shown in the list) out-of-band before sealing', 'success');
+    await loadRecipients();
+  } catch (err) {
+    toast('Rotate failed: ' + err.message, 'error');
   }
 }
 

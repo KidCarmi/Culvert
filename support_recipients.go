@@ -50,6 +50,8 @@ type supportRecipient struct {
 	Fingerprint string `json:"fingerprint"`
 	CreatedAt   string `json:"created_at"`
 	CreatedBy   string `json:"created_by,omitempty"`
+	RotatedAt   string `json:"rotated_at,omitempty"` // last key-rotation time (in-place PUT)
+	RotatedBy   string `json:"rotated_by,omitempty"`
 }
 
 var supportRecipientMu sync.Mutex
@@ -141,6 +143,36 @@ func addSupportRecipient(name, pubB64, actor string) (supportRecipient, error) {
 	return rec, nil
 }
 
+// updateSupportRecipientKey rotates an EXISTING recipient's public key in place —
+// the name binding (and thus every reference to it) is preserved while the key and
+// fingerprint change. The new key is validated with the same low-order guard as
+// registration. Returns errRecipientNotFound if the name is absent.
+func updateSupportRecipientKey(name, pubB64, actor string) (supportRecipient, error) {
+	name = strings.TrimSpace(name)
+	pub, err := decodeX25519PubKey(pubB64)
+	if err != nil {
+		return supportRecipient{}, errors.New("invalid public key: " + err.Error())
+	}
+
+	supportRecipientMu.Lock()
+	defer supportRecipientMu.Unlock()
+	list := loadSupportRecipientsLocked()
+	for i := range list {
+		if list[i].Name != name {
+			continue
+		}
+		list[i].PublicKey = pubB64
+		list[i].Fingerprint = recipientFingerprint(pub)
+		list[i].RotatedAt = time.Now().UTC().Format(time.RFC3339)
+		list[i].RotatedBy = actor
+		if err := saveSupportRecipientsLocked(list); err != nil {
+			return supportRecipient{}, err
+		}
+		return list[i], nil
+	}
+	return supportRecipient{}, errRecipientNotFound
+}
+
 // deleteSupportRecipient removes one recipient by name. Returns errRecipientNotFound
 // if absent.
 func deleteSupportRecipient(name string) error {
@@ -215,13 +247,52 @@ func apiSupportRecipients(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// apiSupportRecipientItem removes a registered recipient (DELETE, operator).
+// apiSupportRecipientItem rotates (PUT, admin) or removes (DELETE, operator) a
+// registered recipient.
 func apiSupportRecipientItem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		w.Header().Set("Allow", http.MethodDelete)
+	switch r.Method {
+	case http.MethodPut:
+		handleRecipientRotate(w, r)
+	case http.MethodDelete:
+		handleRecipientDelete(w, r)
+	default:
+		w.Header().Set("Allow", "PUT, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleRecipientRotate replaces an existing recipient's key in place (admin).
+func handleRecipientRotate(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	name := r.PathValue("name")
+	if !supportRecipientNameRe.MatchString(name) {
+		http.Error(w, "invalid recipient name", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	rec, err := updateSupportRecipientKey(name, req.PublicKey, auditActor(r))
+	if err != nil {
+		if errors.Is(err, errRecipientNotFound) {
+			http.Error(w, "recipient not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	auditEvent(r, "support.recipient.rotate", rec.Name, rec.Fingerprint)
+	jsonOK(w, rec)
+}
+
+// handleRecipientDelete removes a registered recipient (operator).
+func handleRecipientDelete(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}

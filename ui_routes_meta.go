@@ -670,8 +670,12 @@ var uiRoutes = []uiRouteMetadata{
 				Note: "register a named recipient (validates the X25519 key against the low-order guard, stores its SHA-256 fingerprint); admin; audited as support.recipient.add"},
 		}},
 	{Path: "/api/support/recipients/{name}", Handler: "apiSupportRecipientItem", Domain: "support", Public: false,
-		Methods: []uiRouteMethod{{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
-			Note: "remove a registered recipient; operator+; audited as support.recipient.delete"}}},
+		Methods: []uiRouteMethod{
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "rotate a registered recipient's key in place (re-validated + re-fingerprinted); admin; audited as support.recipient.rotate"},
+			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
+				Note: "remove a registered recipient; operator+; audited as support.recipient.delete"},
+		}},
 	{Path: "/api/support/debug-level", Handler: "apiSupportDebugLevel", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "effective capture level + elevation state + remaining TTL"},
