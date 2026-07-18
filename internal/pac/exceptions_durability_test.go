@@ -9,6 +9,7 @@ package pac
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -181,7 +182,7 @@ func TestDurability_ConcurrentWritesKeepFileValid(t *testing.T) {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			id := string(rune('a' + g))
+			id := fmt.Sprintf("g%d", g)
 			for i := 0; i < 100; i++ {
 				_ = s.Put(ExceptionRecord{ProfileID: id, Owner: "o", Reason: "r"})
 				if i%4 == 0 {

@@ -6,6 +6,7 @@ package pac
 // copy-on-read isolation, and concurrency safety.
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -100,7 +101,7 @@ func TestStore_ConcurrentAccessRaceFree(t *testing.T) {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			id := string(rune('a' + g))
+			id := fmt.Sprintf("g%d", g)
 			for i := 0; i < 200; i++ {
 				_ = s.Put(ExceptionRecord{ProfileID: id, Owner: "o", Reason: "r"})
 				_, _ = s.Get(id)
