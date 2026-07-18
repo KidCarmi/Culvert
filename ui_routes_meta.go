@@ -275,6 +275,10 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "PUT", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true},
 		}},
+	{Path: "/api/decryption/health", Handler: "apiDecryptionHealth", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011: read-only decryption coverage + failure-taxonomy aggregate (server-computed from culvert_decrypt_* counters); side-effect-free"},
+		}},
 	{Path: "/api/decryption-exclusions", Handler: "apiDecryptionExclusions", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "read-only list of the volatile auto-exclusion cache + posture"},

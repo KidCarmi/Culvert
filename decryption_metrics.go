@@ -87,6 +87,27 @@ func (c *decSessionCounter) writePrometheus(w *strings.Builder) {
 	}
 }
 
+// decSessionSample is one coverage series in structured (JSON-friendly) form.
+type decSessionSample struct {
+	Outcome    string `json:"outcome"`
+	Source     string `json:"decision_source"`
+	TLSVersion string `json:"tls_version"`
+	Count      int64  `json:"count"`
+}
+
+// snapshot returns a copy of every coverage series. Safe to call concurrently with
+// record; used by the /api/decryption/health aggregate (read path, off the hot path).
+func (c *decSessionCounter) snapshot() []decSessionSample {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]decSessionSample, 0, len(c.order))
+	for _, k := range c.order {
+		ll := c.counts[k]
+		out = append(out, decSessionSample{ll.outcome, ll.source, ll.tlsVer, atomic.LoadInt64(&ll.n)})
+	}
+	return out
+}
+
 // recordDecryptSession increments the coverage counter once per session from a finalized
 // DecryptionOutcome. Labels pass through decEnumOr so an unset/cast enum coerces to its
 // sentinel (never "" or a raw token) — the same bounded-label guard toBlock uses, keeping
@@ -155,6 +176,25 @@ func (c *decFailureCounter) writePrometheus(w *strings.Builder) {
 		fmt.Fprintf(w, "culvert_decrypt_failures_total{fail_category=%q,fail_stage=%q} %d\n",
 			ll.category, ll.stage, atomic.LoadInt64(&ll.n))
 	}
+}
+
+// decFailureSample is one failure series in structured (JSON-friendly) form.
+type decFailureSample struct {
+	Category string `json:"fail_category"`
+	Stage    string `json:"fail_stage"`
+	Count    int64  `json:"count"`
+}
+
+// snapshot returns a copy of every failure series. Safe to call concurrently with record.
+func (c *decFailureCounter) snapshot() []decFailureSample {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]decFailureSample, 0, len(c.order))
+	for _, k := range c.order {
+		ll := c.counts[k]
+		out = append(out, decFailureSample{ll.category, ll.stage, atomic.LoadInt64(&ll.n)})
+	}
+	return out
 }
 
 // recordDecryptFailure records a FAILED decryption session: it counts the failure
