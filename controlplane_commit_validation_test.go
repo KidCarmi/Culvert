@@ -13,6 +13,64 @@ import (
 	"testing"
 )
 
+// TestConfigStore_Update_RejectsByteOversizeAtCommit covers the byte-budget
+// gate: a snapshot within the per-slice and aggregate ENTRY caps but whose
+// marshaled size exceeds the wire budget (long strings) must be rejected at
+// commit — otherwise it commits on the CP and fails every DP fetch with an
+// opaque ResourceExhausted, freezing the fleet with no signal.
+func TestConfigStore_Update_RejectsByteOversizeAtCommit(t *testing.T) {
+	s := &ConfigStore{}
+	if err := s.Update(ConfigSnapshot{BlockedHosts: []string{"a.example"}}); err != nil {
+		t.Fatalf("valid publish rejected: %v", err)
+	}
+	// 200k entries (well under the 2M/3M count caps) of ~700 bytes each ⇒
+	// ~140 MiB marshaled, past the 120 MiB byte budget.
+	const n, width = 200_000, 700
+	long := strings.Repeat("x", width)
+	hosts := make([]string, n)
+	for i := range hosts {
+		hosts[i] = long
+	}
+	err := s.Update(ConfigSnapshot{BlockedHosts: hosts})
+	if err == nil {
+		t.Fatal("byte-oversized publish accepted; the commit byte gate must reject it")
+	}
+	if !strings.Contains(err.Error(), "wire size") {
+		t.Errorf("rejection should name the byte overflow; got %v", err)
+	}
+	if s.Get().Version != 1 {
+		t.Errorf("byte-oversized publish advanced the version to %d — fleet must stay on the last valid config", s.Get().Version)
+	}
+	if msg, _ := s.LastPublishError(); !strings.Contains(msg, "wire size") {
+		t.Errorf("LastPublishError should record the byte overflow; got %q", msg)
+	}
+}
+
+// TestConfigSnapshotSizeMetrics_AllSlices pins that the utilization metric emits
+// EVERY capped slice (not just blocked_hosts) plus the aggregate and
+// url_category_hosts bounds, sourced from the sizes cached at publish.
+func TestConfigSnapshotSizeMetrics_AllSlices(t *testing.T) {
+	recordPublishedSnapshotSizes(ConfigSnapshot{
+		BlockedHosts: []string{"a", "b"},
+		IPList:       []string{"1.2.3.4"},
+	})
+	var w strings.Builder
+	writeConfigSnapshotSizeMetrics(&w)
+	out := w.String()
+	for _, want := range []string{
+		`culvert_config_snapshot_slice_entries{slice="blocked_hosts"} 2`,
+		`culvert_config_snapshot_slice_entries{slice="ip_list"} 1`,
+		`culvert_config_snapshot_slice_entries{slice="url_category_hosts"}`,
+		`culvert_config_snapshot_slice_entries{slice="aggregate_host_scale"} 3`,
+		`culvert_config_snapshot_slice_cap{slice="blocked_hosts"} 2000000`,
+		`culvert_config_snapshot_slice_cap{slice="aggregate_host_scale"} 3000000`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
 func TestConfigStore_Update_RejectsOverCapAtCommit(t *testing.T) {
 	s := &ConfigStore{}
 

@@ -188,6 +188,17 @@ const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
 // maxClusterGRPCMsgSize.
 const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 
+// maxSnapshotWireBytes is the commit-time BYTE budget for a published snapshot,
+// set safely below maxClusterGRPCMsgSize (128 MiB) to leave room for gRPC
+// framing. The per-slice/aggregate ENTRY caps bound counts, but a count-valid
+// snapshot with long strings (max-length hostnames, long threat-feed keys) can
+// still marshal past the frame — it would then commit on the CP and fail EVERY
+// DP fetch with an opaque ResourceExhausted, freezing the fleet on stale config
+// with no signal (fail-open on new threats). ConfigStore.Update measures the
+// marshaled size and rejects over-budget publishes here so the byte overflow is
+// caught at commit with a named error, exactly like the count gate.
+const maxSnapshotWireBytes = 120 << 20 // 120 MiB
+
 // maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
 // entries. The entry count is small (maxSnapURLCategories), but each entry
 // carries a Hosts list; without this a handful of categories could smuggle
@@ -421,21 +432,23 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	// Gate 1 — entry counts (fast pre-check).
 	if err := validateConfigSnapshot(snap); err != nil {
-		s.mu.Lock()
-		s.lastPublishErr = err.Error()
-		s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
-		curVer := s.version
-		s.mu.Unlock()
-		logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
-		fireAlert("config_snapshot_rejected", AlertPayload{
-			Event:  "config_snapshot_rejected",
-			Actor:  "culvert",
-			Source: "cluster",
-			Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
-		})
-		return err
+		return s.rejectPublish(err)
 	}
+	// Gate 2 — marshaled BYTE budget. Counts can pass while long strings push
+	// the snapshot past the frame; measuring the real wire size here stops a
+	// byte-oversized config from committing and then failing every DP fetch.
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return s.rejectPublish(fmt.Errorf("config snapshot marshal failed: %w", err))
+	}
+	if len(b) > maxSnapshotWireBytes {
+		return s.rejectPublish(fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes))
+	}
+
+	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
+
 	s.mu.Lock()
 	s.version++
 	snap.Version = s.version
@@ -455,6 +468,58 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	}
 	logger.Printf("ControlPlane: config v%d published", snap.Version)
 	return nil
+}
+
+// rejectPublish records a commit-time rejection (count OR byte gate): it does
+// NOT publish, stamps LastPublishError, logs, and fires the operator alert.
+// Returns err so callers can surface it inline too.
+func (s *ConfigStore) rejectPublish(err error) error {
+	s.mu.Lock()
+	s.lastPublishErr = err.Error()
+	s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
+	curVer := s.version
+	s.mu.Unlock()
+	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
+	fireAlert("config_snapshot_rejected", AlertPayload{
+		Event:  "config_snapshot_rejected",
+		Actor:  "culvert",
+		Source: "cluster",
+		Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
+	})
+	return err
+}
+
+// publishedSnapshotSizes is the per-slice utilization of the last published
+// snapshot, cached so the /metrics scrape emits all-slice gauges without
+// rebuilding (and re-allocating) a full ~60 MiB snapshot each time.
+type publishedSnapshotSizes struct {
+	Slices         []snapshotSliceCap // every capped slice: name/size/cap
+	URLCatHosts    int                // aggregate hosts across url_categories
+	URLCatHostsCap int
+	Aggregate      int // sum of host-scale slices (matches validateConfigSnapshot)
+	AggregateCap   int
+}
+
+var lastPublishedSnapshotSizes atomic.Value // publishedSnapshotSizes
+
+// recordPublishedSnapshotSizes captures snap's slice sizes at publish time.
+func recordPublishedSnapshotSizes(snap ConfigSnapshot) {
+	slices := configSnapshotSliceCaps(snap)
+	urlCatHosts := 0
+	for i := range snap.URLCategories {
+		urlCatHosts += len(snap.URLCategories[i].Hosts)
+	}
+	agg := len(snap.BlockedHosts) + len(snap.IPList) + len(snap.SSLBypassPatterns) +
+		len(snap.PACExclusions) + len(snap.RateLimitExempt) + len(snap.DPIPatterns) +
+		len(snap.ThreatFeedURLs) + len(snap.ThreatFeedDomains) + len(snap.ThreatDomainAllowlist) +
+		urlCatHosts
+	lastPublishedSnapshotSizes.Store(publishedSnapshotSizes{
+		Slices:         slices,
+		URLCatHosts:    urlCatHosts,
+		URLCatHostsCap: maxSnapURLCategoryHosts,
+		Aggregate:      agg,
+		AggregateCap:   maxSnapAggregateEntries,
+	})
 }
 
 // LastPublishError returns the reason the most recent config publish was
@@ -510,7 +575,14 @@ var lastSeenCAFingerprint atomic.Value // string
 var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
-func applyConfigSnapshot(snap ConfigSnapshot) {
+// applyConfigSnapshot applies snap to the local proxy state and returns an
+// error when the snapshot is REJECTED (stale epoch, over-cap, or IdP-sync
+// failure) so callers can react. The DP poller pre-validates and treats a
+// non-nil error as defensive; the HA resync path (applyHABundle) MUST fail
+// closed on it — otherwise a standby that silently drops an over-cap bundle's
+// config marks sync-OK and, once promoted, serves stale/empty config. No
+// partial state mutation occurs on rejection.
+func applyConfigSnapshot(snap ConfigSnapshot) error {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
@@ -518,7 +590,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// check EARLIER — before its external-auth/IdP application, last-good
 	// persist, and version advance — this one covers the other callers.
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
-		return
+		return fmt.Errorf("config snapshot v%d rejected: stale epoch %d", snap.Version, snap.Epoch)
 	}
 	// H5: reject the entire snapshot if any per-slice cap is exceeded.
 	// Logged at info; the next CP poll cycle will retry with a fresh
@@ -526,7 +598,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// state mutation occurs on rejection.
 	if err := validateConfigSnapshot(snap); err != nil {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
-		return
+		return fmt.Errorf("config snapshot v%d rejected: %w", snap.Version, err)
 	}
 
 	applySnapshotPolicyAndTraffic(snap)
@@ -538,13 +610,14 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// (extended) state below — pre-existing ordering, preserved by the split.
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
 		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-		return
+		return fmt.Errorf("config snapshot v%d IdP sync rejected: %w", snap.Version, err)
 	}
 
 	applySnapshotExtendedState(snap)
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
+	return nil
 }
 
 // applySnapshotPolicyAndTraffic applies the traffic-control and policy
@@ -826,6 +899,14 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		return ConfigSnapshot{}, err
 	}
 	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	// Seed the poll-deadline size predictor from the on-disk snapshot so a
+	// cold-started DP's very FIRST poll already budgets time for a full transfer
+	// of roughly this size — otherwise a large config on a thin WAN times out at
+	// the 15s base and loops (the failover-churn pathology P1 #4 fixes for
+	// running DPs but not, without this, at boot). len(data) ≈ the wire size.
+	if len(data) > 0 {
+		dpLastFullSnapshotBytes.Store(int64(len(data)))
+	}
 	return snap, nil
 }
 
@@ -840,7 +921,9 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 	}
 	snapForApply := snap
 	snapForApply.IdPProfiles = nil
-	applyConfigSnapshot(snapForApply)
+	if err := applyConfigSnapshot(snapForApply); err != nil {
+		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config: %w", err)
+	}
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
 	return snap, nil
 }

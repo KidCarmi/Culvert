@@ -655,12 +655,20 @@ func (s *controlPlaneServer) HASync(ctx context.Context, raw json.RawMessage) (j
 		caKeyEncrypted = enc
 	}
 
+	// Replicate the PUBLISHED snapshot (globalConfigStore.Get()), NOT a fresh
+	// CurrentConfigSnapshot(): the published snapshot is the one commit-time
+	// validation already accepted, so the standby always receives a
+	// within-cap, version-CONSISTENT config. A fresh rebuild could be over-cap
+	// (rejected at publish, so never distributed to DPs) yet get stamped with
+	// the old published Version — the standby would then hold config the fleet
+	// never had, mismatched to its version floor.
+	published := globalConfigStore.Get()
 	bundle := HAStateBundle{
 		ClusterState:     stateJSON,
 		CACertPEM:        string(globalClusterCA.CACertPEM()),
 		CAKeyEncrypted:   caKeyEncrypted,
-		Config:           CurrentConfigSnapshot(),
-		Version:          globalConfigStore.Get().Version,
+		Config:           published,
+		Version:          published.Version,
 		PromoteRequested: globalHA.plannedPromotion.Load(), // ADR-0004 Slice 1e: coordinated handoff
 		LeaderTerm:       globalHA.Status().Term,           // ADR-0004 Slice 1c/P2: seed standby epoch
 		Epoch:            globalHA.CurrentEpoch(),          // ADR-0005 S3: puller-side fence input

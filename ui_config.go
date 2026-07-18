@@ -67,6 +67,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	if allowed < 0 {
 		allowed = 0
 	}
+	// Fleet-freeze status: non-empty when the CP's last config publish was
+	// rejected at commit (over cap/bytes), so the fleet is stuck on the last
+	// valid snapshot. Surfaced on the always-polled /api/stats so the dashboard
+	// can raise a persistent banner instead of the operator having to run the
+	// diagnose verb (the failure this feature exists to make un-silent).
+	publishRejected, publishRejectedAt := globalConfigStore.LastPublishError()
 	jsonOK(w, map[string]any{
 		"total":       total,
 		"allowed":     allowed,
@@ -99,6 +105,9 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// on the Dashboard instead of requiring the admin to know to check
 		// the Governance nav item.
 		"c2Mode": c2Mode(),
+		// Cluster config-publish freeze (empty = healthy).
+		"configPublishRejected":   publishRejected,
+		"configPublishRejectedAt": publishRejectedAt,
 	})
 }
 

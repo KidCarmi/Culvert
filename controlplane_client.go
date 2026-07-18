@@ -291,7 +291,13 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return
 	}
 	snap.IdPProfiles = nil
-	applyConfigSnapshot(snap)
+	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
+	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
+	// apply must not be recorded as the new good state).
+	if err := applyConfigSnapshot(snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+		return
+	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.lastVersion = snap.Version

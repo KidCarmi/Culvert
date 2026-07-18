@@ -12,12 +12,20 @@ import (
 // Applying a large ConfigSnapshot on a Data Plane node is a build-then-swap
 // operation: ReplaceFeedEntries builds the new blocklist maps while the old
 // ones are still live, on top of the freshly-unmarshaled slices and the wire
-// buffer. A legitimate 2 M-host snapshot peaks a few hundred MiB transient. With
-// NO memory limit set, a memory-constrained DP (512 MiB–1 GiB container) can be
-// OOM-SIGKILLed mid-apply — a hard crash that can loop restart→poll→OOM. Go's
-// soft memory limit turns that transient spike into aggressive GC / allocation
-// backpressure instead of a kill, which is exactly the graceful-degradation
-// posture we want on the config-apply path.
+// buffer. A legitimate 2 M-host snapshot peaks a few hundred MiB.
+//
+// SCOPE OF PROTECTION (important — do not over-claim): Go's soft memory limit
+// makes the runtime GC harder as the heap approaches the limit. It reclaims
+// GARBAGE — the wire buffer, the decompression buffer, the unmarshaled input
+// slice once the maps are built, and the OLD maps once the swap completes. It
+// CANNOT reclaim memory that is still REACHABLE, so it does not shrink the
+// instant during the swap when the old maps, the new maps, and the input slice
+// are all live at once (~410–470 MiB at 2 M hosts). GOMEMLIMIT therefore turns
+// a transient-garbage spike into GC pressure instead of an OOM, and buys
+// headroom around the reachable peak — but it is NOT a substitute for sizing a
+// DP node above that reachable peak. See docs/operator/cluster-config-capacity.md
+// for the minimum-memory sizing guidance at 2 M; a true bound would require a
+// streaming/chunked apply that never holds both maps (a documented follow-up).
 //
 // initMemoryBackstop sets debug.SetMemoryLimit to ~80% of the detected
 // container memory limit, UNLESS the operator already pinned GOMEMLIMIT (the Go

@@ -642,6 +642,15 @@ tr.dragging  { opacity: .4; }
     <span>Connection to Culvert lost — automatic retries stopped. Data on screen is stale. Reload the page to resume.</span>
   </div>
 
+  <!-- Fleet-freeze banner: the CP rejected its own config publish (over cap/bytes),
+       so data-plane nodes are running the LAST valid config, not the current one.
+       Driven by /api/stats on every tick so this top-severity state is always
+       visible, not hidden behind a manual diagnose. -->
+  <div id="config-freeze-banner" class="banner crit" role="alert" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-shield-alert"/></svg>
+    <span id="config-freeze-msg"></span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
@@ -6278,8 +6287,16 @@ async function importConfig(input) {
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok) {
-      statusEl.style.cssText = 'display:block;color:var(--green)';
-      statusEl.textContent = `✓ Configuration imported (${data.mode || 'merge'} mode, exported ${data.exportedAt || 'unknown date'})`;
+      if (data.cluster_publish_rejected) {
+        // Local import succeeded, but the config is too big to sync — the fleet
+        // did NOT receive it. Amber, not green: this is the silent-stale-fleet
+        // trap the commit-time validation exists to make visible.
+        statusEl.style.cssText = 'display:block;color:var(--warn)';
+        statusEl.textContent = `⚠ Imported locally, but the cluster did NOT receive it (over cap): ${data.cluster_publish_rejected}. Data-plane nodes stay on the last valid config — trim the oversized collection and re-import.`;
+      } else {
+        statusEl.style.cssText = 'display:block;color:var(--green)';
+        statusEl.textContent = `✓ Configuration imported (${data.mode || 'merge'} mode, exported ${data.exportedAt || 'unknown date'})`;
+      }
       previewEl.style.display = 'none';
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
@@ -6490,6 +6507,20 @@ async function fetchStats() {
     const nb = document.getElementById('nav-blocked-count');
     if (s.blocked > 0) { nb.textContent = fmt(s.blocked); nb.style.display = ''; }
     updateBreakdownChart(s.allowed, s.blocked, s.authFail);
+    // Fleet-freeze banner: the CP rejected its own config publish, so DPs are on
+    // the last valid config. Always-visible top-severity state.
+    const cfb = document.getElementById('config-freeze-banner');
+    if (cfb) {
+      if (s.configPublishRejected) {
+        const when = s.configPublishRejectedAt ? ' (since ' + escHtml(String(s.configPublishRejectedAt)) + ')' : '';
+        document.getElementById('config-freeze-msg').textContent =
+          'Cluster config frozen: the last publish was rejected — ' + s.configPublishRejected +
+          when + '. Data-plane nodes are running the LAST valid config. Trim the oversized collection, then re-check with Support → Run config check.';
+        cfb.style.display = '';
+      } else {
+        cfb.style.display = 'none';
+      }
+    }
     // Show/hide Getting Started banner
     const gsb = document.getElementById('getting-started-banner');
     if (gsb) gsb.style.display = s.total === 0 ? '' : 'none';

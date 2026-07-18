@@ -142,7 +142,11 @@ func TestApplyConfigSnapshot_RejectsOversizedSnapshot(t *testing.T) {
 	for i := range snap.BlockedHosts {
 		snap.BlockedHosts[i] = "evil.example"
 	}
-	applyConfigSnapshot(snap)
+	// applyConfigSnapshot must now RETURN an error on rejection (so the HA
+	// resync path can fail closed instead of marking sync-OK on a dropped apply).
+	if err := applyConfigSnapshot(snap); err == nil {
+		t.Error("applyConfigSnapshot returned nil for an over-cap snapshot; HA fail-closed depends on the error")
+	}
 
 	if bl != preBL {
 		t.Error("bl pointer changed despite over-cap snapshot — partial application")

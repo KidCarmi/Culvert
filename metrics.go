@@ -588,20 +588,9 @@ culvert_auth_sso_required_total %d
 		atomic.LoadInt64(&statAuthSSORequired),
 	)
 
-	// Config-snapshot cluster-sync cap utilization (P1). Paired entries/cap
-	// gauges let external monitoring alert before a slice overflows the CP↔DP
-	// sync cap (the class of failure the blocked_hosts cap surfaced). Sourced
-	// from the cheap live count — no snapshot materialization on scrape.
-	_, _ = fmt.Fprintf(w, `# HELP culvert_config_snapshot_slice_entries Current entry count of a capped ConfigSnapshot slice
-# TYPE culvert_config_snapshot_slice_entries gauge
-culvert_config_snapshot_slice_entries{slice="blocked_hosts"} %d
-# HELP culvert_config_snapshot_slice_cap Hard cap (CP↔DP sync) of a capped ConfigSnapshot slice
-# TYPE culvert_config_snapshot_slice_cap gauge
-culvert_config_snapshot_slice_cap{slice="blocked_hosts"} %d
-`,
-		int64(bl.Count()),
-		int64(maxSnapBlockedHosts),
-	)
+	// Config-snapshot cluster-sync cap utilization is emitted for ALL capped
+	// slices by writeConfigSnapshotSizeMetrics (cluster_metrics.go), sourced from
+	// the sizes cached at publish — no per-scrape snapshot rebuild.
 
 	// PR3d — inspected native-HTTP/2 tunnel drain observability. activeConns above
 	// conflates H1-inspect, H2-inspect, and raw-bypass tunnels; these disambiguate

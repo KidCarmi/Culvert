@@ -631,8 +631,15 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 		return false
 	}
 
-	// Apply config snapshot.
-	applyConfigSnapshot(bundle.Config)
+	// Apply config snapshot. FAIL CLOSED: applyConfigSnapshot silently applies
+	// nothing on a rejected (over-cap / stale-epoch) config, so ignoring its
+	// result would let the standby markSyncOK on stale/empty config and then,
+	// once promoted, serve it fleet-wide. A rejected config aborts the resync so
+	// freshness/sync-OK is not set on partial state.
+	if err := applyConfigSnapshot(bundle.Config); err != nil {
+		logger.Printf("HA: replicated config snapshot rejected — resync NOT marked healthy: %v", err)
+		return false
+	}
 
 	return true
 }

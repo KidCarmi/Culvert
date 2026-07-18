@@ -113,5 +113,35 @@ func clusterWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_dp_config_last_snapshot_bytes gauge\n")
 	fmt.Fprintf(w, "culvert_dp_config_last_snapshot_bytes %d\n", dpLastFullSnapshotBytes.Load())
 
+	writeConfigSnapshotSizeMetrics(w)
 	dpPollHist.WritePrometheus(w)
+}
+
+// writeConfigSnapshotSizeMetrics emits size-vs-cap gauges for EVERY capped
+// ConfigSnapshot slice plus the aggregate and url_category-hosts bounds, so an
+// operator can alert before ANY sync cap overflows — not just blocked_hosts.
+// Sourced from the sizes cached at publish (recordPublishedSnapshotSizes), so a
+// /metrics scrape never rebuilds the full snapshot. Absent until the first
+// publish (CP nodes); the always-available culvert_blocklist_size covers
+// blocked_hosts on non-publishing nodes.
+func writeConfigSnapshotSizeMetrics(w *strings.Builder) {
+	ps, ok := lastPublishedSnapshotSizes.Load().(publishedSnapshotSizes)
+	if !ok {
+		return
+	}
+	w.WriteString("\n# HELP culvert_config_snapshot_slice_entries Current entry count of a capped ConfigSnapshot slice (last published)\n")
+	w.WriteString("# TYPE culvert_config_snapshot_slice_entries gauge\n")
+	for _, s := range ps.Slices {
+		fmt.Fprintf(w, "culvert_config_snapshot_slice_entries{slice=%q} %d\n", s.Name, s.Size)
+	}
+	fmt.Fprintf(w, "culvert_config_snapshot_slice_entries{slice=\"url_category_hosts\"} %d\n", ps.URLCatHosts)
+	fmt.Fprintf(w, "culvert_config_snapshot_slice_entries{slice=\"aggregate_host_scale\"} %d\n", ps.Aggregate)
+
+	w.WriteString("\n# HELP culvert_config_snapshot_slice_cap Hard cap (CP↔DP sync) of a capped ConfigSnapshot slice\n")
+	w.WriteString("# TYPE culvert_config_snapshot_slice_cap gauge\n")
+	for _, s := range ps.Slices {
+		fmt.Fprintf(w, "culvert_config_snapshot_slice_cap{slice=%q} %d\n", s.Name, s.Cap)
+	}
+	fmt.Fprintf(w, "culvert_config_snapshot_slice_cap{slice=\"url_category_hosts\"} %d\n", ps.URLCatHostsCap)
+	fmt.Fprintf(w, "culvert_config_snapshot_slice_cap{slice=\"aggregate_host_scale\"} %d\n", ps.AggregateCap)
 }
