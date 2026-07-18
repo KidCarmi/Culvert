@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,31 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
+// gRPC stream. It is a rollout/transition control, read once at startup
+// (startup-scoped, recorded GUI-parity deferral — same class as the HA-lease
+// endpoints and -cluster-insecure). Default OFF: an unset/typo'd value leaves
+// compression disabled so a partially-upgraded or rolled-back cluster can never
+// go dark (the frame increase alone carries an uncompressed 2 M-host snapshot).
+// Enable it only after every Control Plane in the fleet runs a build that
+// registers the gzip codec (CP-first upgrade complete).
+const clusterGRPCCompressionEnvVar = "CULVERT_CLUSTER_GRPC_COMPRESSION"
+
+// clusterGRPCCompression is the resolved opt-in flag, read once at startup.
+var clusterGRPCCompression = readClusterGRPCCompression()
+
+// readClusterGRPCCompression parses the opt-in env var. Fail-safe: only an
+// explicit true-ish value enables compression; everything else (unset,
+// unknown, false-ish) leaves it off.
+func readClusterGRPCCompression() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(clusterGRPCCompressionEnvVar))) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // ─── Data Plane gRPC client ───────────────────────────────────────────────────
 
@@ -95,7 +121,12 @@ func (c *DataPlaneClient) connect(addr string) error {
 		logger.Printf("DataPlane: connecting to %s (insecure — dev only!)", addr)
 	}
 
-	conn, err := grpc.NewClient(addr, dialOpt)
+	// clusterClientCallOptions carries the mandatory raw codec (the default
+	// proto codec cannot marshal json.RawMessage), the raised frame budget (an
+	// enterprise 2 M-host snapshot is ~60 MiB, past gRPC's 4 MiB default), and
+	// the opt-in gzip compressor. See controlplane_codec.go and
+	// CULVERT_CLUSTER_GRPC_COMPRESSION for the CP-first migration rationale.
+	conn, err := grpc.NewClient(addr, dialOpt, grpc.WithDefaultCallOptions(clusterClientCallOptions()...))
 	if err != nil {
 		return fmt.Errorf("gRPC dial %s: %w", addr, err)
 	}
@@ -175,11 +206,20 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 	}
 }
 
-func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+// pollConfig performs one GetConfig poll (with HA failover on repeated failure)
+// and returns the raw response bytes. ok is false when the poll failed and a
+// backoff was applied — the caller must return without applying. Split out of
+// fetchAndApply to keep that function under the funlen budget.
+func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
+	// P0-3: report the version we already hold so the CP can reply with a tiny
+	// "unchanged" sentinel instead of the full snapshot when nothing changed.
+	// Safe to read c.lastVersion unlocked — fetchAndApply is the only writer and
+	// runs on a single config-loop goroutine.
+	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion})
 	// CL-9 PR4: time the primary config poll (success only). Scope is exactly
 	// this c.call — not the failover retry, unmarshal, validate, or apply.
 	pollStart := time.Now()
-	raw, err := c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+	raw, err := c.call(ctx, methodGetConfig, reqBody)
 	if err == nil {
 		dpPollHist.Observe(time.Since(pollStart).Seconds())
 	}
@@ -191,24 +231,44 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		// fail over to; otherwise back off and retry the same CP next tick.
 		if c.failCount < 3 || len(c.addrs) <= 1 {
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 		if !c.failover() {
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 		logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
 		// Retry immediately on the new connection; on success fall through to apply.
-		raw, err = c.call(ctx, methodGetConfig, json.RawMessage("{}"))
+		raw, err = c.call(ctx, methodGetConfig, reqBody)
 		if err != nil {
 			dpMarkCPPollFailing()
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 	}
 	c.resetBackoff()
 	dpMarkCPPollHealthy()
+	return raw, true
+}
+
+func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	raw, ok := c.pollConfig(ctx)
+	if !ok {
+		return
+	}
+	// P0-3: detect the CP's "unchanged" sentinel before attempting a full
+	// snapshot unmarshal. On an unchanged poll (the common case) this is a tiny
+	// response and we skip the ~60 MiB unmarshal + validate + apply entirely.
+	// Probing into a one-field struct also cheaply ignores a full snapshot
+	// response (config_unchanged absent → false) without allocating its slices.
+	var probe configUnchangedReply
+	if err := json.Unmarshal(raw, &probe); err == nil && probe.ConfigUnchanged {
+		return // CP confirmed our version is current; nothing to do
+	}
+	// A full snapshot: record its size so the next poll's deadline is budgeted
+	// for a transfer this large even if that poll turns out to be unchanged.
+	dpLastFullSnapshotBytes.Store(int64(len(raw)))
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
@@ -243,7 +303,13 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return
 	}
 	snap.IdPProfiles = nil
-	applyConfigSnapshot(snap)
+	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
+	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
+	// apply must not be recorded as the new good state).
+	if err := applyConfigSnapshot(snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+		return
+	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.lastVersion = snap.Version
@@ -413,7 +479,7 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	if c.callForTest != nil {
 		return c.callForTest(ctx, method, req)
 	}
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, callDeadline(method))
 	defer cancel()
 	c.mu.Lock()
 	conn := c.conn
@@ -421,6 +487,51 @@ func (c *DataPlaneClient) call(ctx context.Context, method string, req json.RawM
 	var resp json.RawMessage
 	err := conn.Invoke(callCtx, method, req, &resp)
 	return resp, err
+}
+
+// Config-poll deadline model (P1 #4). A fixed 5s deadline was fine for the old
+// ~4 MiB-capped snapshot, but a 2 M-host config (~60 MiB) can legitimately take
+// far longer to transfer on a thin WAN — a timeout there increments failCount
+// and triggers spurious failover churn against a HEALTHY leader. The
+// snapshot-carrying RPCs (GetConfig, HASync) therefore get a deadline that
+// SCALES with the last full snapshot size at a conservative WAN throughput
+// floor; all other RPCs keep the tight 5s.
+const (
+	dpTightCallDeadline  = 5 * time.Second
+	dpConfigBaseDeadline = 15 * time.Second
+	dpConfigMaxDeadline  = 300 * time.Second
+	dpConfigWANFloorBps  = 512 * 1024 // 512 KiB/s (~4 Mbit/s) — a starved-link floor
+)
+
+// dpLastFullSnapshotBytes is the size of the most recent FULL config snapshot
+// the DP received (not the tiny version-unchanged sentinel). It predicts how big
+// the next change will be, so an unchanged poll still budgets enough time for a
+// potential full transfer. Exposed as culvert_dp_config_last_snapshot_bytes.
+var dpLastFullSnapshotBytes atomic.Int64
+
+// callDeadline picks the per-RPC deadline. GetConfig/HASync carry the snapshot,
+// so they scale with the last full size; everything else stays tight.
+func callDeadline(method string) time.Duration {
+	switch method {
+	case methodGetConfig, methodHASync:
+		return scaledConfigDeadline(dpLastFullSnapshotBytes.Load())
+	default:
+		return dpTightCallDeadline
+	}
+}
+
+// scaledConfigDeadline = base + lastBytes / WAN-floor, clamped. With no history
+// (first poll) it is just the base, generous enough for a moderate initial
+// snapshot on a slow link; once a full snapshot is seen it tracks that size.
+func scaledConfigDeadline(lastBytes int64) time.Duration {
+	d := dpConfigBaseDeadline
+	if lastBytes > 0 {
+		d += time.Duration(lastBytes/dpConfigWANFloorBps) * time.Second
+	}
+	if d > dpConfigMaxDeadline {
+		d = dpConfigMaxDeadline
+	}
+	return d
 }
 
 // activeDPClient is a reference to the running DP client so that config sync

@@ -67,6 +67,12 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 	if allowed < 0 {
 		allowed = 0
 	}
+	// Fleet-freeze status: non-empty when the CP's last config publish was
+	// rejected at commit (over cap/bytes), so the fleet is stuck on the last
+	// valid snapshot. Surfaced on the always-polled /api/stats so the dashboard
+	// can raise a persistent banner instead of the operator having to run the
+	// diagnose verb (the failure this feature exists to make un-silent).
+	publishRejected, publishRejectedAt := globalConfigStore.LastPublishError()
 	jsonOK(w, map[string]any{
 		"total":       total,
 		"allowed":     allowed,
@@ -99,6 +105,9 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// on the Dashboard instead of requiring the admin to know to check
 		// the Governance nav item.
 		"c2Mode": c2Mode(),
+		// Cluster config-publish freeze (empty = healthy).
+		"configPublishRejected":   publishRejected,
+		"configPublishRejectedAt": publishRejectedAt,
 	})
 }
 
@@ -1115,9 +1124,16 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// Republish the cluster snapshot: import is a recovery path operators use
 	// interchangeably with rollback (which already republishes) — DPs must
 	// converge on the imported state without waiting for an unrelated
-	// mutation (Palo fleet review, ops finding 2).
-	publishCurrentConfigSnapshot()
-	jsonOK(w, map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt})
+	// mutation (Palo fleet review, ops finding 2). The imported config is
+	// applied locally regardless; if it exceeds a cluster-sync cap the publish
+	// is rejected at commit — report that inline so the admin knows the fleet
+	// did not receive it (the local import still succeeded).
+	pubErr := publishCurrentConfigSnapshot()
+	resp := map[string]any{"ok": true, "mode": importMode, "exportedAt": b.ExportedAt}
+	if pubErr != nil {
+		resp["cluster_publish_rejected"] = pubErr.Error()
+	}
+	jsonOK(w, resp)
 }
 
 // importPACPreValidationOK strictly validates the PAC fields of an import
@@ -1674,7 +1690,7 @@ func apiNetworkSettings(w http.ResponseWriter, r *http.Request) {
 		// finding from roadmap/CONFIG-VERSIONING-TRIAGE.md +
 		// roadmap/CATEGORY-D-PRIME-DIRECTION.md §4.
 		// Keep connected DPs aligned for SAML/OIDC callback generation.
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		jsonOK(w, map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

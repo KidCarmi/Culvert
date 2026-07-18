@@ -119,16 +119,30 @@ type ConfigSnapshot struct {
 // Control Plane that pushes a snapshot exceeding ANY one of these
 // causes the entire snapshot to be rejected (no partial application).
 //
-// Without these caps, a CP could pack the gRPC frame (4 MiB by
-// default) full of small entries — ~200 k blocked-host strings, or
-// many policy rules — and force every DP to allocate proportional
-// memory + CPU on every poll cycle.
+// The blocklist/IP caps are 2 M (raised from 200 k) so the cluster keeps
+// pace with enterprise-scale aggregated threat feeds and exceeds the largest
+// single-list limits of comparable appliances (PAN-OS domain EDLs top out
+// ~4 M box-wide; a single feed there is far under 2 M). URLhaus + abuse.ch +
+// firebog-class aggregations routinely reach 500 k–1 M hosts, so 2 M leaves
+// genuine headroom. url_categories is host-scale via its inner Hosts lists
+// (maxSnapURLCategoryHosts), not its entry count. The cap remains
+// a real memory-DoS bound: the CP↔DP gRPC channel is sized to
+// maxClusterGRPCMsgSize (below) and the config stream is gzip-compressed,
+// so a 2 M-host snapshot (~60 MiB JSON, ~6–8 MiB on the wire) transfers
+// inside the frame instead of tripping the old 4 MiB default. Local
+// blocklist matching is an O(1) map[string]bool (internal/blocklist), so
+// these sizes cost lookups nothing at request time.
 const (
-	maxSnapBlockedHosts        = 200_000
-	maxSnapIPList              = 200_000
-	maxSnapPolicyRules         = 10_000
-	maxSnapSSLBypassPatterns   = 10_000
+	maxSnapBlockedHosts = 2_000_000
+	maxSnapIPList       = 2_000_000
+	maxSnapPolicyRules  = 10_000
+	// url_categories is a list of category DEFINITIONS (named groups), not hosts —
+	// the realistic entry count is hundreds to low-thousands. The host volume
+	// lives in each entry's Hosts list and is bounded separately by
+	// maxSnapURLCategoryHosts, so the entry cap is a modest structural bound
+	// (a 2 M entry cap was an over-broad copy of the host-scale slices).
 	maxSnapURLCategories       = 200_000
+	maxSnapSSLBypassPatterns   = 10_000
 	maxSnapFileProfiles        = 1_000
 	maxSnapFileBlockExtensions = 10_000
 	maxSnapRewriteRules        = 5_000
@@ -148,16 +162,75 @@ const (
 	maxSnapIdPProfiles         = 1_000
 )
 
-// validateConfigSnapshot enforces the per-slice caps above. Returns an
-// error naming the first field that overflows; nil when the snapshot is
-// within bounds. Callers must reject the whole snapshot on error — the
-// goal is to prevent partial application of an attacker-shaped payload.
-func validateConfigSnapshot(snap ConfigSnapshot) error {
-	checks := []struct {
-		name  string
-		size  int
-		limit int
-	}{
+// maxClusterGRPCMsgSize is the CP↔DP gRPC max message size (send + recv on
+// both peers). gRPC's default receive limit is 4 MiB, which capped a config
+// snapshot at ~200 k hostname strings; raising it to 128 MiB lets an
+// enterprise-scale snapshot whose dominant slice is at the 2 M cap (~60 MiB
+// uncompressed JSON) transfer with ~2× headroom while still bounding a single
+// frame to a memory-safe size (a hostile CP cannot force an unbounded DP
+// allocation). grpc-go enforces this bound on the DECOMPRESSED message, so it
+// also caps a gzip decompression bomb. The frame alone carries the uncompressed
+// snapshot; gzip on the config stream (~10:1 for host lists) is an OPT-IN
+// bandwidth optimization (CULVERT_CLUSTER_GRPC_COMPRESSION, default off) rather
+// than a correctness requirement, so a mixed-version fleet is never forced onto
+// compression. The per-slice validateConfigSnapshot caps remain the primary
+// entry-count DoS bound; this is the independent transport-frame bound.
+const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
+
+// maxClusterInboundMsgSize bounds every CP↔DP message in the SMALL direction:
+// the CP server's inbound RPCs (GetConfig req, PushMetrics, PushAuditEvents,
+// Enroll, SyncRateLimits/Revocations, RenewCert, HASync req) are all tiny —
+// none carries a snapshot (the big config only flows OUTBOUND as a response).
+// So the server's receive limit and the client's send limit are pinned tight
+// here (16 MiB, ~60× the largest observed inbound batch) instead of inheriting
+// the 128 MiB frame — shrinking the CP's inbound allocation surface. Only the
+// snapshot-carrying direction (server send / client receive) uses the full
+// maxClusterGRPCMsgSize.
+const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
+
+// maxSnapshotWireBytes is the commit-time BYTE budget for a published snapshot,
+// set safely below maxClusterGRPCMsgSize (128 MiB) to leave room for gRPC
+// framing. The per-slice/aggregate ENTRY caps bound counts, but a count-valid
+// snapshot with long strings (max-length hostnames, long threat-feed keys) can
+// still marshal past the frame — it would then commit on the CP and fail EVERY
+// DP fetch with an opaque ResourceExhausted, freezing the fleet on stale config
+// with no signal (fail-open on new threats). ConfigStore.Update measures the
+// marshaled size and rejects over-budget publishes here so the byte overflow is
+// caught at commit with a named error, exactly like the count gate.
+const maxSnapshotWireBytes = 120 << 20 // 120 MiB
+
+// maxSnapURLCategoryHosts bounds the AGGREGATE hosts across all url_categories
+// entries. The entry count is small (maxSnapURLCategories), but each entry
+// carries a Hosts list; without this a handful of categories could smuggle
+// millions of hosts past the per-entry cap. Sized host-scale (matches the
+// blocked-host order) so category-based blocking stays enterprise-capable.
+const maxSnapURLCategoryHosts = 2_000_000
+
+// maxSnapAggregateEntries bounds the SUM of the memory-dominant host-scale
+// slices. Each per-slice cap fits the frame alone, but several maxed slices
+// together exceed the 128 MiB CP↔DP frame and would overflow it as an opaque
+// gRPC ResourceExhausted. This makes the 3×2 M-class case infeasible-by-design
+// and, more usefully, rejected at commit with a clear named error. Sized just
+// under the frame's physical entry capacity (~128 MiB / ~35 B per entry) so it
+// admits the largest configs that CAN sync (e.g. a 2 M blocklist plus threat
+// feeds) and only rejects those that genuinely cannot.
+const maxSnapAggregateEntries = 3_000_000
+
+// snapshotSliceCap is the live size and hard cap of one capped ConfigSnapshot
+// slice/map. It is the single source of truth shared by validateConfigSnapshot
+// (the DoS gate), the diagnose/health surface, and the Prometheus utilization
+// gauges — so the cap table can never drift between enforcement and reporting.
+type snapshotSliceCap struct {
+	Name string `json:"name"`
+	Size int    `json:"size"`
+	Cap  int    `json:"cap"`
+}
+
+// configSnapshotSliceCaps returns the (size, cap) of every capped slice in snap,
+// in a stable order. Callers that only need the pass/fail verdict should use
+// validateConfigSnapshot; this exists for utilization reporting.
+func configSnapshotSliceCaps(snap ConfigSnapshot) []snapshotSliceCap {
+	return []snapshotSliceCap{
 		{"blocked_hosts", len(snap.BlockedHosts), maxSnapBlockedHosts},
 		{"ip_list", len(snap.IPList), maxSnapIPList},
 		{"policy_rules", len(snap.PolicyRules), maxSnapPolicyRules},
@@ -181,10 +254,37 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 		{"decryption_profiles", len(snap.DecryptionProfiles), maxSnapDecryptionProfiles},
 		{"idp_profiles", len(snap.IdPProfiles), maxSnapIdPProfiles},
 	}
-	for _, c := range checks {
-		if c.size > c.limit {
-			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.name, c.size, c.limit)
+}
+
+// validateConfigSnapshot enforces the per-slice caps above. Returns an
+// error naming the first field that overflows; nil when the snapshot is
+// within bounds. Callers must reject the whole snapshot on error — the
+// goal is to prevent partial application of an attacker-shaped payload.
+func validateConfigSnapshot(snap ConfigSnapshot) error {
+	for _, c := range configSnapshotSliceCaps(snap) {
+		if c.Size > c.Cap {
+			return fmt.Errorf("config snapshot %s=%d exceeds cap %d", c.Name, c.Size, c.Cap)
 		}
+	}
+	// Inner-dimension bound: url_categories has a small entry cap, but each entry
+	// carries a Hosts list — bound the aggregate so a few categories cannot
+	// smuggle millions of hosts past the per-entry cap.
+	urlCatHosts := 0
+	for i := range snap.URLCategories {
+		urlCatHosts += len(snap.URLCategories[i].Hosts)
+	}
+	if urlCatHosts > maxSnapURLCategoryHosts {
+		return fmt.Errorf("config snapshot url_category_hosts=%d exceeds cap %d", urlCatHosts, maxSnapURLCategoryHosts)
+	}
+	// Aggregate bound: several individually-valid host-scale slices can together
+	// exceed the CP↔DP frame. Reject the sum here with a clear named error rather
+	// than letting the wire fail with an opaque ResourceExhausted.
+	agg := len(snap.BlockedHosts) + len(snap.IPList) + len(snap.SSLBypassPatterns) +
+		len(snap.PACExclusions) + len(snap.RateLimitExempt) + len(snap.DPIPatterns) +
+		len(snap.ThreatFeedURLs) + len(snap.ThreatFeedDomains) + len(snap.ThreatDomainAllowlist) +
+		urlCatHosts
+	if agg > maxSnapAggregateEntries {
+		return fmt.Errorf("config snapshot aggregate host-scale entries=%d exceeds cap %d (too large to sync in one CP↔DP frame)", agg, maxSnapAggregateEntries)
 	}
 	return nil
 }
@@ -202,6 +302,18 @@ type ConfigStore struct {
 	// DP-only processes and in tests that build a bare ConfigStore.
 	versionPath string
 	subs        []chan struct{}
+	// lastPublishErr records the reason the most recent Update was REJECTED at
+	// commit (P1 commit-time validation) — an over-cap snapshot is not published,
+	// so the fleet stays on the last valid config instead of every DP silently
+	// rejecting a bad one. Empty when the last publish succeeded. Surfaced to
+	// operators via LastPublishError() (diagnose/health).
+	lastPublishErr string
+	lastPublishTS  string
+	// published is true once a VALID snapshot has been published at least once.
+	// It stays false if the CP's initial publish was rejected at commit — in
+	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
+	// must refuse rather than distribute an empty config (see ServableConfig).
+	published bool
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -315,13 +427,41 @@ type dpLastGoodConfigSnapshotStatus struct {
 var dpLastGoodConfigSnapshotState atomic.Value // dpLastGoodConfigSnapshotStatus
 var dpControlPlanePollFailing atomic.Bool
 
-// Update atomically replaces the snapshot and notifies all subscribers.
-func (s *ConfigStore) Update(snap ConfigSnapshot) {
+// Update validates the snapshot at COMMIT time and, if it passes, atomically
+// replaces the published snapshot and notifies all subscribers. Returns the
+// validation error WITHOUT publishing when the snapshot exceeds a per-slice cap
+// (P1 commit-time validation): the CP is the point of truth, so an over-cap
+// config is rejected here with a named-field error and the fleet stays on the
+// last valid snapshot — instead of committing a snapshot that every DP would
+// then silently reject wholesale, freezing the fleet on stale config with no
+// clear signal (fail-open on new threats). The CP's own local proxying is
+// unaffected (its stores already hold the data); only distribution is gated.
+func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	// Gate 1 — entry counts (fast pre-check).
+	if err := validateConfigSnapshot(snap); err != nil {
+		return s.rejectPublish(err)
+	}
+	// Gate 2 — marshaled BYTE budget. Counts can pass while long strings push
+	// the snapshot past the frame; measuring the real wire size here stops a
+	// byte-oversized config from committing and then failing every DP fetch.
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return s.rejectPublish(fmt.Errorf("config snapshot marshal failed: %w", err))
+	}
+	if len(b) > maxSnapshotWireBytes {
+		return s.rejectPublish(fmt.Errorf("config snapshot wire size=%d bytes exceeds budget %d (too large to sync in one CP↔DP frame)", len(b), maxSnapshotWireBytes))
+	}
+
+	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
+
 	s.mu.Lock()
 	s.version++
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	s.snap = snap
+	s.published = true
+	s.lastPublishErr = ""
+	s.lastPublishTS = ""
 	s.persistVersionLocked()
 	subs := append([]chan struct{}{}, s.subs...)
 	s.mu.Unlock()
@@ -333,10 +473,96 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) {
 		}
 	}
 	logger.Printf("ControlPlane: config v%d published", snap.Version)
+	return nil
 }
 
-func publishCurrentConfigSnapshot() {
-	globalConfigStore.Update(CurrentConfigSnapshot())
+// rejectPublish records a commit-time rejection (count OR byte gate): it does
+// NOT publish, stamps LastPublishError, logs, and fires the operator alert.
+// Returns err so callers can surface it inline too.
+func (s *ConfigStore) rejectPublish(err error) error {
+	s.mu.Lock()
+	s.lastPublishErr = err.Error()
+	s.lastPublishTS = time.Now().UTC().Format(time.RFC3339)
+	curVer := s.version
+	s.mu.Unlock()
+	logWarnf("ControlPlane: REJECTING config publish (fleet stays on v%d): %v", curVer, err)
+	fireAlert("config_snapshot_rejected", AlertPayload{
+		Event:  "config_snapshot_rejected",
+		Actor:  "culvert",
+		Source: "cluster",
+		Detail: "config publish rejected at commit: " + err.Error() + " — the cluster stays on the last valid config; reduce the oversized collection to resume sync",
+	})
+	return err
+}
+
+// publishedSnapshotSizes is the per-slice utilization of the last published
+// snapshot, cached so the /metrics scrape emits all-slice gauges without
+// rebuilding (and re-allocating) a full ~60 MiB snapshot each time.
+type publishedSnapshotSizes struct {
+	Slices         []snapshotSliceCap // every capped slice: name/size/cap
+	URLCatHosts    int                // aggregate hosts across url_categories
+	URLCatHostsCap int
+	Aggregate      int // sum of host-scale slices (matches validateConfigSnapshot)
+	AggregateCap   int
+}
+
+var lastPublishedSnapshotSizes atomic.Value // publishedSnapshotSizes
+
+// recordPublishedSnapshotSizes captures snap's slice sizes at publish time.
+func recordPublishedSnapshotSizes(snap ConfigSnapshot) {
+	slices := configSnapshotSliceCaps(snap)
+	urlCatHosts := 0
+	for i := range snap.URLCategories {
+		urlCatHosts += len(snap.URLCategories[i].Hosts)
+	}
+	agg := len(snap.BlockedHosts) + len(snap.IPList) + len(snap.SSLBypassPatterns) +
+		len(snap.PACExclusions) + len(snap.RateLimitExempt) + len(snap.DPIPatterns) +
+		len(snap.ThreatFeedURLs) + len(snap.ThreatFeedDomains) + len(snap.ThreatDomainAllowlist) +
+		urlCatHosts
+	lastPublishedSnapshotSizes.Store(publishedSnapshotSizes{
+		Slices:         slices,
+		URLCatHosts:    urlCatHosts,
+		URLCatHostsCap: maxSnapURLCategoryHosts,
+		Aggregate:      agg,
+		AggregateCap:   maxSnapAggregateEntries,
+	})
+}
+
+// ServableConfig reports whether the store holds a config the cluster RPCs may
+// distribute. It is false ONLY in the rejected-initial-publish case: a publish
+// was attempted and rejected AND nothing valid was ever published, so s.snap is
+// still the zero ConfigSnapshot. In that state GetConfig/HASync must refuse
+// rather than serve an empty config to a fresh DP or HA standby (which would
+// apply the empty state). After any successful publish, a later rejection keeps
+// the last valid snapshot in s.snap, which stays servable (the "fleet stays on
+// last valid config" contract). Returns the rejection reason for the caller's
+// error message.
+func (s *ConfigStore) ServableConfig() (ok bool, reason string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.published && s.lastPublishErr != "" {
+		return false, s.lastPublishErr
+	}
+	return true, ""
+}
+
+// LastPublishError returns the reason the most recent config publish was
+// rejected at commit (over-cap), plus the timestamp — empty when the last
+// publish succeeded. Read-only; used by the diagnose/health surface so an
+// operator sees "publish rejected, fleet on stale config" as a named error.
+func (s *ConfigStore) LastPublishError() (msg, ts string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastPublishErr, s.lastPublishTS
+}
+
+// publishCurrentConfigSnapshot publishes the live config to the fleet. Returns
+// the commit-time validation error when the snapshot is over-cap (not
+// published). Most callers mutate a store then publish fire-and-forget — the
+// rejection is logged, alerted, and surfaced via LastPublishError — but the
+// error is returned so an admin handler can also report it inline.
+func publishCurrentConfigSnapshot() error {
+	return globalConfigStore.Update(CurrentConfigSnapshot())
 }
 
 // Get returns the current snapshot.
@@ -344,6 +570,15 @@ func (s *ConfigStore) Get() ConfigSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.snap
+}
+
+// Version returns the current published config version without copying the
+// whole snapshot. Used by the version-conditional GetConfig fast path so an
+// unchanged poll never materializes or marshals the (up to ~60 MiB) snapshot.
+func (s *ConfigStore) Version() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.version
 }
 
 // Subscribe returns a channel that receives a signal on every config update.
@@ -364,7 +599,14 @@ var lastSeenCAFingerprint atomic.Value // string
 var caRotationNotify = make(chan struct{}, 1)
 
 // applyConfigSnapshot updates all local proxy state from a received snapshot.
-func applyConfigSnapshot(snap ConfigSnapshot) {
+// applyConfigSnapshot applies snap to the local proxy state and returns an
+// error when the snapshot is REJECTED (stale epoch, over-cap, or IdP-sync
+// failure) so callers can react. The DP poller pre-validates and treats a
+// non-nil error as defensive; the HA resync path (applyHABundle) MUST fail
+// closed on it — otherwise a standby that silently drops an over-cap bundle's
+// config marks sync-OK and, once promoted, serves stale/empty config. No
+// partial state mutation occurs on rejection.
+func applyConfigSnapshot(snap ConfigSnapshot) error {
 	// ADR-0005 S3: reject snapshots from a fenced-out (stale-epoch) CP
 	// before ANY state mutation; ratchet the last-seen epoch forward
 	// otherwise. Epoch 0 is accepted only while the ratchet is unseeded
@@ -372,7 +614,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// check EARLIER — before its external-auth/IdP application, last-good
 	// persist, and version advance — this one covers the other callers.
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
-		return
+		return fmt.Errorf("config snapshot v%d rejected: stale epoch %d", snap.Version, snap.Epoch)
 	}
 	// H5: reject the entire snapshot if any per-slice cap is exceeded.
 	// Logged at info; the next CP poll cycle will retry with a fresh
@@ -380,7 +622,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// state mutation occurs on rejection.
 	if err := validateConfigSnapshot(snap); err != nil {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
-		return
+		return fmt.Errorf("config snapshot v%d rejected: %w", snap.Version, err)
 	}
 
 	applySnapshotPolicyAndTraffic(snap)
@@ -392,13 +634,14 @@ func applyConfigSnapshot(snap ConfigSnapshot) {
 	// (extended) state below — pre-existing ordering, preserved by the split.
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
 		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
-		return
+		return fmt.Errorf("config snapshot v%d IdP sync rejected: %w", snap.Version, err)
 	}
 
 	applySnapshotExtendedState(snap)
 
 	logger.Printf("DataPlane: applied config v%d (%d blocked hosts, %d rules, ip_mode=%s, rate=%d rpm)",
 		snap.Version, len(snap.BlockedHosts), len(snap.PolicyRules), snap.IPFilterMode, snap.RateLimitRPM)
+	return nil
 }
 
 // applySnapshotPolicyAndTraffic applies the traffic-control and policy
@@ -680,6 +923,14 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		return ConfigSnapshot{}, err
 	}
 	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	// Seed the poll-deadline size predictor from the on-disk snapshot so a
+	// cold-started DP's very FIRST poll already budgets time for a full transfer
+	// of roughly this size — otherwise a large config on a thin WAN times out at
+	// the 15s base and loops (the failover-churn pathology P1 #4 fixes for
+	// running DPs but not, without this, at boot). len(data) ≈ the wire size.
+	if len(data) > 0 {
+		dpLastFullSnapshotBytes.Store(int64(len(data)))
+	}
 	return snap, nil
 }
 
@@ -694,7 +945,9 @@ func applyDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 	}
 	snapForApply := snap
 	snapForApply.IdPProfiles = nil
-	applyConfigSnapshot(snapForApply)
+	if err := applyConfigSnapshot(snapForApply); err != nil {
+		return ConfigSnapshot{}, fmt.Errorf("apply last-known-good config: %w", err)
+	}
 	logger.Printf("DataPlane: applied last-known-good config snapshot v%d from %s", snap.Version, dpLastGoodConfigSnapshotPath())
 	return snap, nil
 }
@@ -714,7 +967,12 @@ func mergeCPAddresses(primary string, peers []string) string {
 }
 
 func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
-	data, err := json.MarshalIndent(snap, "", "  ")
+	// Compact Marshal, not MarshalIndent: this runs at the peak-overlap moment of
+	// a config apply (new blocklist maps built while the old are still live), and
+	// MarshalIndent double-buffers (compact + indented copies) a snapshot that can
+	// be ~60 MiB at 2 M hosts — needless transient memory on the exact path P0-2
+	// hardens against OOM. The last-good file is machine-read, not human-edited.
+	data, err := json.Marshal(snap)
 	if err != nil {
 		setDPLastGoodConfigSnapshotSaveError(snap.Version, err)
 		logger.Printf("DataPlane: last-known-good config marshal failed: %v", err)

@@ -754,23 +754,59 @@ type configCollectionSize struct {
 // surfaces any snapshot value (rules, hosts, session HMAC, IdP secrets) — only
 // counts and the pass/fail verdict.
 type configDiagnosis struct {
-	SchemaVersion int                    `json:"schema_version"`
-	GeneratedAt   string                 `json:"generated_at"`
-	OK            bool                   `json:"ok"` // validateConfigSnapshot == nil (no cap exceeded)
-	PolicyVersion int64                  `json:"policy_version"`
-	Epoch         int64                  `json:"epoch"`
-	Sizes         []configCollectionSize `json:"sizes"`
-	Error         string                 `json:"error,omitempty"` // first cap violation (names the collection + cap)
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	// OK is the AGGREGATE-safe verdict: true unless the snapshot is a real
+	// problem for THIS node's role. A standalone node never syncs config over
+	// the cluster wire, so an over-cap snapshot is advisory (warn), not a
+	// failure — keeping OK true so a lone appliance is not marked DEGRADED for a
+	// cluster-sync bound it does not exercise. A syncing node (CP or DP) keeps
+	// the hard verdict: over-cap ⇒ OK false.
+	OK     bool   `json:"ok"`
+	Status string `json:"status"` // "ok" | "warn" | "degraded"
+	// Syncing reports whether this node participates in CP↔DP config sync, i.e.
+	// whether the per-slice caps actually gate anything for it.
+	Syncing        bool                   `json:"syncing"`
+	PolicyVersion  int64                  `json:"policy_version"`
+	Epoch          int64                  `json:"epoch"`
+	Sizes          []configCollectionSize `json:"sizes"`
+	Utilization    []snapshotSliceCap     `json:"utilization"`              // size vs cap for every capped slice
+	MaxUtilPercent int                    `json:"max_util_percent"`         // highest size/cap across all slices
+	MaxUtilSlice   string                 `json:"max_util_slice,omitempty"` // the slice at MaxUtilPercent
+	Error          string                 `json:"error,omitempty"`          // first cap violation (names the collection + cap)
+	Note           string                 `json:"note,omitempty"`           // human explanation of a warn verdict
+	// PublishRejected is set on a Control Plane when the most recent config
+	// publish was refused at commit (over-cap) — the fleet is running the last
+	// valid snapshot, not the live config. Empty when the last publish succeeded.
+	PublishRejected   string `json:"publish_rejected,omitempty"`
+	PublishRejectedAt string `json:"publish_rejected_at,omitempty"`
 }
 
+// configWarnUtilPercent is the utilization at which a slice trips the amber
+// "approaching cap" tier — an early passive signal before a slice actually
+// overflows and (for a syncing node) breaks the fleet.
+const configWarnUtilPercent = 80
+
 // diagnoseConfigFrom validates a snapshot and summarizes its non-secret sizes.
-// Pure (no I/O), so tests drive the pass/fail branches with a fabricated snapshot.
-// validateConfigSnapshot supplies the COMPLETE verdict (it checks every capped
-// collection); the Sizes list surfaces the operationally-relevant subset.
-func diagnoseConfigFrom(snap ConfigSnapshot, now time.Time) configDiagnosis {
+// Pure (no I/O), so tests drive the branches with a fabricated snapshot + role.
+// syncing = this node participates in config sync (CP or DP); it decides whether
+// an over-cap snapshot is a hard failure (degraded) or advisory (warn).
+func diagnoseConfigFrom(snap ConfigSnapshot, syncing bool, now time.Time) configDiagnosis {
+	util := configSnapshotSliceCaps(snap)
+	maxPct, maxSlice := 0, ""
+	for _, s := range util {
+		if s.Cap <= 0 {
+			continue
+		}
+		pct := s.Size * 100 / s.Cap
+		if pct > maxPct {
+			maxPct, maxSlice = pct, s.Name
+		}
+	}
 	d := configDiagnosis{
 		SchemaVersion: diagnoseSchemaVersion,
 		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		Syncing:       syncing,
 		PolicyVersion: snap.PolicyVersion,
 		Epoch:         snap.Epoch,
 		Sizes: []configCollectionSize{
@@ -790,11 +826,26 @@ func diagnoseConfigFrom(snap ConfigSnapshot, now time.Time) configDiagnosis {
 			{"bandwidth_policies", len(snap.BandwidthPolicies)},
 			{"decryption_profiles", len(snap.DecryptionProfiles)},
 		},
+		Utilization:    util,
+		MaxUtilPercent: maxPct,
+		MaxUtilSlice:   maxSlice,
 	}
-	if err := validateConfigSnapshot(snap); err != nil {
-		d.Error = boundedErr(err.Error())
-	} else {
-		d.OK = true
+	switch err := validateConfigSnapshot(snap); {
+	case err != nil && syncing:
+		// A syncing node with an over-cap snapshot is genuinely broken: a CP
+		// cannot push it and a DP would reject it wholesale.
+		d.Status, d.OK, d.Error = "degraded", false, boundedErr(err.Error())
+	case err != nil && !syncing:
+		// Standalone: the cap only gates cluster sync, which this node does not
+		// do. Surface it as advisory so the aggregate health stays green — this
+		// is the false-positive DEGRADED a lone appliance used to hit.
+		d.Status, d.OK, d.Error = "warn", true, boundedErr(err.Error())
+		d.Note = "over the cluster-sync cap, but this node is standalone (not syncing) so proxying is unaffected; the cap would block CP→DP sync if you enable clustering"
+	case maxPct >= configWarnUtilPercent:
+		d.Status, d.OK = "warn", true
+		d.Note = "a config collection is approaching its cap"
+	default:
+		d.Status, d.OK = "ok", true
 	}
 	return d
 }
@@ -841,7 +892,32 @@ func apiDiagnoseCluster(w http.ResponseWriter, r *http.Request) {
 // build is a read-only assembly over the config stores; the snapshot VALUES never
 // leave this function (only counts + the verdict are returned).
 func diagnoseConfig(now time.Time) configDiagnosis {
-	return diagnoseConfigFrom(CurrentConfigSnapshot(), now)
+	syncing := nodeParticipatesInConfigSync()
+	d := diagnoseConfigFrom(CurrentConfigSnapshot(), syncing, now)
+	// P1 commit-time validation: if the CP's last publish was rejected (over-cap),
+	// the fleet is on a stale snapshot — surface it as a degraded, named error
+	// even if the operator has since trimmed the live config back under the cap
+	// (the fleet only recovers on the next successful publish).
+	if msg, ts := globalConfigStore.LastPublishError(); msg != "" {
+		d.PublishRejected, d.PublishRejectedAt = msg, ts
+		d.Status, d.OK = "degraded", false
+		if d.Error == "" {
+			d.Error = "last config publish rejected: " + msg
+		}
+	}
+	return d
+}
+
+// nodeParticipatesInConfigSync reports whether this node actually exchanges
+// ConfigSnapshots over the cluster wire — i.e. whether the per-slice caps gate
+// anything for it. True for a Control Plane (it publishes snapshots) or an
+// active Data Plane (it applies them); false for a standalone appliance, for
+// which the caps are a dormant cluster-sync bound.
+func nodeParticipatesInConfigSync() bool {
+	clusterRoleMu.RLock()
+	role := clusterRole.role
+	clusterRoleMu.RUnlock()
+	return role == "control-plane" || role == "data-plane" || activeDPClient.Load() != nil
 }
 
 // apiDiagnoseConfig reports live config-snapshot validity + non-secret sizes

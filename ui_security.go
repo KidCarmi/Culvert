@@ -603,7 +603,7 @@ func apiDomainAllowlist(w http.ResponseWriter, r *http.Request) {
 		// allowlist until some unrelated admin action publishes a
 		// snapshot — the exact "unblock this false positive NOW" latency
 		// this control exists to remove. No-op when not running as CP.
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		// Closes the audit gap flagged by
 		// roadmap/DOMAIN-ALLOWLIST-ROLLBACK-CLASSIFICATION.md §3.5 and
 		// ui_routes_meta.go:291 ("no direct auditEvent observed"). The

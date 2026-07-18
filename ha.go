@@ -552,6 +552,12 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: HASync RPC error: %v", err)
 		return false
 	}
+	// Record the HA bundle size so the NEXT HASync poll's deadline scales with
+	// it. An HA-only standby never runs fetchAndApply (the GetConfig path), so
+	// without this its HASync deadline would stay at the 15s base and a large
+	// bundle (2M-host config) over a slow WAN would time out every sync and
+	// never mark the standby healthy (P1, Codex #841).
+	dpLastFullSnapshotBytes.Store(int64(len(raw)))
 
 	var bundle HAStateBundle
 	if err := json.Unmarshal(raw, &bundle); err != nil {
@@ -631,8 +637,15 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 		return false
 	}
 
-	// Apply config snapshot.
-	applyConfigSnapshot(bundle.Config)
+	// Apply config snapshot. FAIL CLOSED: applyConfigSnapshot silently applies
+	// nothing on a rejected (over-cap / stale-epoch) config, so ignoring its
+	// result would let the standby markSyncOK on stale/empty config and then,
+	// once promoted, serve it fleet-wide. A rejected config aborts the resync so
+	// freshness/sync-OK is not set on partial state.
+	if err := applyConfigSnapshot(bundle.Config); err != nil {
+		logger.Printf("HA: replicated config snapshot rejected — resync NOT marked healthy: %v", err)
+		return false
+	}
 
 	return true
 }

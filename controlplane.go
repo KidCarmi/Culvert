@@ -69,6 +69,22 @@ var (
 	methodHASync          = fmt.Sprintf("/%s/HASync", configServiceName)
 )
 
+// getConfigRequest is the GetConfig request body (P0-3). The DP reports the
+// config version it already holds so the CP can skip resending an unchanged
+// snapshot. Absent/zero (old DP, or first poll) means "send the full snapshot".
+type getConfigRequest struct {
+	KnownVersion int64 `json:"known_version,omitempty"`
+}
+
+// configUnchangedReply is the tiny GetConfig response the CP returns when the
+// DP's KnownVersion is already current. The distinctive config_unchanged key
+// lets the DP detect it with a cheap probe before attempting a full snapshot
+// unmarshal. Never carries any snapshot data or secrets.
+type configUnchangedReply struct {
+	ConfigUnchanged bool  `json:"config_unchanged"`
+	Version         int64 `json:"version,omitempty"`
+}
+
 // MetricsReport is sent by Data Plane nodes to the Control Plane.
 type MetricsReport struct {
 	NodeID   string `json:"node_id"`

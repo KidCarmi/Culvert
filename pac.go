@@ -100,7 +100,7 @@ func apiPACConfig(w http.ResponseWriter, r *http.Request) {
 		// without this, an exclusions change (including a wipe) waits for an
 		// UNRELATED mutation to bump the snapshot version (Palo fleet review,
 		// ops finding 1).
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(struct { //nolint:errcheck // best-effort response write
 			PACConfig

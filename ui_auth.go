@@ -501,7 +501,7 @@ func apiIdPList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.create", p.ID, p.Name, nil, auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile created id=%q name=%q type=%q", sanitizeLog(p.ID), sanitizeLog(p.Name), sanitizeLog(string(p.Type)))
 		jsonOK(w, publicIdPProfile(&p))
@@ -563,7 +563,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.update", id, p.Name, auditIdPProfile(before), auditIdPProfile(&p))
 		logger.Printf("UI: IdP profile updated id=%q name=%q", sanitizeLog(id), sanitizeLog(p.Name))
 		jsonOK(w, publicIdPProfile(&p))
@@ -576,7 +576,7 @@ func apiIdPItem(w http.ResponseWriter, r *http.Request, id string) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		publishCurrentConfigSnapshot()
+		_ = publishCurrentConfigSnapshot()
 		auditEventDiff(r, "idp.delete", id, "", auditIdPProfile(p), nil)
 		logger.Printf("UI: IdP profile deleted id=%q", sanitizeLog(id))
 		w.WriteHeader(http.StatusNoContent)

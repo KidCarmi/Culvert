@@ -588,6 +588,10 @@ culvert_auth_sso_required_total %d
 		atomic.LoadInt64(&statAuthSSORequired),
 	)
 
+	// Config-snapshot cluster-sync cap utilization is emitted for ALL capped
+	// slices by writeConfigSnapshotSizeMetrics (cluster_metrics.go), sourced from
+	// the sizes cached at publish — no per-scrape snapshot rebuild.
+
 	// PR3d — inspected native-HTTP/2 tunnel drain observability. activeConns above
 	// conflates H1-inspect, H2-inspect, and raw-bypass tunnels; these disambiguate
 	// the H2-inspect subset so an operator can confirm a node GOAWAY'd cleanly on
