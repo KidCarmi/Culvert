@@ -463,7 +463,7 @@ func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMat
 
 	// Per-connection accounting entry (bytes + lifetime). bypassReason (when set)
 	// tags the feed entry so a rescue is queryable, not just an unattributed bypass.
-	recordTunnelCloseGatedDec(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason, dec, false)
+	recordTunnelCloseGatedDec(match, id, "CONNECT", r.Host, toDest, toClient, start, "bypass", bypassReason, dec, decRedactHosts())
 }
 
 // upstreamVerifyRoots returns the process-wide root pool used to verify
@@ -776,7 +776,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
 		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
 		<-done
-		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), false)
+		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 		return
 	}
 
@@ -807,7 +807,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// — the §4 host/SNI redaction config surface is a later slice.
 	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match)
 	recordDecryptSession(inspected)
-	decBlock := inspected.toBlock(false)
+	decBlock := inspected.toBlock(decRedactHosts())
 
 	// 5. Proxy the decrypted HTTP/1.x stream request-by-request (DPI/scan/CDR/
 	// file-block via the shared inspection pipeline). Extracted so the native-ALPN

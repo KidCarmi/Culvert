@@ -166,6 +166,9 @@ var d0KnownRoutes = func() []string {
 //   - 166 — reconcile parallel-merge drift (support exports + decryption/health
 //     both bumped 163→164) and add /api/support/bundles/{id}/manifest (read-only
 //     manifest metadata view without downloading the tarball; viewer).
+//   - 177 — catch up to main (PAC steering/exception + PEI-P2 governance routes,
+//     176) + ADR-0011 §4 added /api/decryption/redaction (host/SNI redaction
+//     toggle; GET viewer / PUT admin).
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by
@@ -182,7 +185,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 176
+	const want = 177
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

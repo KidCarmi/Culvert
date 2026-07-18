@@ -279,6 +279,11 @@ var uiRoutes = []uiRouteMetadata{
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011: read-only decryption coverage + failure-taxonomy aggregate (server-computed from culvert_decrypt_* counters); side-effect-free"},
 		}},
+	{Path: "/api/decryption/redaction", Handler: "apiDecryptionRedaction", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "ADR-0011 §4: read the host/SNI redaction posture"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true, Note: "ADR-0011 §4: toggle host/SNI redaction; node-local (admin_settings-durable, off export/import/rollback/CP→DP)"},
+		}},
 	{Path: "/api/decryption-exclusions", Handler: "apiDecryptionExclusions", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "read-only list of the volatile auto-exclusion cache + posture"},

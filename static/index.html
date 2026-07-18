@@ -3223,6 +3223,18 @@ Firefox (all platforms):
           </div>
         </div>
       </div>
+
+      <div class="panel" style="margin-top:16px" data-min-role="admin">
+        <div class="panel-header"><span class="panel-title">Privacy</span></div>
+        <div class="panel-body">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="dechealth-redact" data-change="toggleDecRedaction">
+            Redact host / SNI in decryption records (store a hash instead of the plaintext)
+          </label>
+          <p class="hint" style="margin-top:6px">Applies to the <code>dec.*</code> block on request/tunnel records and the SIEM export.
+            Durable and <strong>node-local</strong> — not exported, rolled back, or synced to the fleet. Off by default.</p>
+        </div>
+      </div>
     </div>
 
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
@@ -4780,6 +4792,7 @@ document.addEventListener('change', e => {
     case 'releaseDispToggleBackup':  document.getElementById('rel-disp-passlabel').style.display = el.checked ? '' : 'none'; break;
     case 'apOutcomeChanged':  apOutcomeChanged(); break;
     case 'yaraSettingCheckWarn': yaraSettingCheckWarn(); break;
+    case 'toggleDecRedaction': toggleDecRedaction(); break;
     default: console.warn('CSP delegation: unknown change action:', el.dataset.change);
   }
 });
@@ -7016,9 +7029,34 @@ async function fetchDecHealth() {
   try {
     const d = await api('/api/decryption/health');
     renderDecHealth(d);
+    loadDecRedaction();
   } catch (e) {
     if (cov) cov.innerHTML = '<p class="hint" style="color:var(--red)">Could not load decryption health. ' +
       '<button class="btn ghost sm" data-click="fetchDecHealth">Retry</button></p>';
+  }
+}
+
+// loadDecRedaction reflects the current host/SNI redaction posture into the toggle (admin
+// panel only). A viewer/error simply leaves it unchecked.
+async function loadDecRedaction() {
+  const cb = document.getElementById('dechealth-redact');
+  if (!cb) return;
+  try {
+    const d = await api('/api/decryption/redaction');
+    cb.checked = !!d.redact_hosts;
+  } catch (e) { /* not permitted / unavailable — leave unchecked */ }
+}
+
+// toggleDecRedaction PUTs the new posture; reverts the checkbox on failure.
+async function toggleDecRedaction() {
+  const cb = document.getElementById('dechealth-redact');
+  if (!cb) return;
+  try {
+    await api('/api/decryption/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
+    toast('Host/SNI redaction ' + (cb.checked ? 'enabled' : 'disabled'), 'success');
+  } catch (e) {
+    cb.checked = !cb.checked; // revert the optimistic flip
+    toast('Error: ' + (e.message || 'could not update redaction'), 'error');
   }
 }
 

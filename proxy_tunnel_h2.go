@@ -208,7 +208,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up, down, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
 	inspected := inspectedOutcome(dec, hostOnly, upstreamTLS.ConnectionState(), match)
 	recordDecryptSession(inspected)
-	decBlock := inspected.toBlock(false)
+	decBlock := inspected.toBlock(decRedactHosts())
 	if up == "h2" && down == "h2" {
 		handleInspectH2(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
 		return
@@ -240,7 +240,7 @@ func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUps
 	// not_decrypted/non_tls_fallback outcome. Unlike the native path's inspected block
 	// (a documented follow-up needing the h2 leg's TLS state), this outcome is pure
 	// sentinels + host, so it is populated now for parity with the strip path.
-	recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUp, toCl, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), false)
+	recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUp, toCl, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 }
 
 // handshakeUpstreamALPN performs the upstream inspect-leg TLS handshake offering

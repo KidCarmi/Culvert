@@ -379,6 +379,13 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "autoexclude_max_entries", Kind: kindConfig, Owner: "autoExclude", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "AutoExcludeMaxEntries"}}},
 
+	// ADR-0011 §4 host/SNI redaction posture — a node-local privacy choice, durable in
+	// admin_settings.json but OFF export/import, version-rollback, and CP→DP (like the
+	// autoexclude tunables). Plain bool: default false is both "off" and "unset", so no
+	// sentinel row is needed.
+	{ID: "decryption_redact_hosts", Kind: kindConfig, Owner: "decRedact", AdminDurable: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "DecryptionRedactHosts"}}},
+
 	// ── AdminSettings sentinels + legacy migration inputs ────────────────
 	{ID: "log_retention_saved", Kind: kindSentinel, AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "LogRetentionSaved"}}},
