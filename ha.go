@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -487,61 +488,97 @@ func (s *standbyLoopState) setFail(n int) {
 	s.h.setSyncFailCount(n)
 }
 
-// syncOnce performs a single sync attempt without reconnecting (the immediate
-// try at loop start), updating failCount.
+// syncOnce performs a single sync attempt without reconnecting (the immediate try
+// at loop start). It updates the promotion streak but NEVER promotes.
 func (s *standbyLoopState) syncOnce() {
+	if s.ctx.Err() != nil {
+		return // shutting down — do not classify a cancelled call (C1)
+	}
+	if !s.ensureLocalTLSOK() {
+		return // local TLS fault: held, warned, client dropped for rebuild
+	}
 	if s.client == nil {
-		// No client: construction failed (local TLS material / dial setup), which
-		// is never evidence of leader unreachability (A3). Hold the streak, warn.
-		s.warnLocalClientFault(errNoLeaderClient)
+		s.warnLocalClientFault(errNoLeaderClient) // local construction fault: hold
 		return
 	}
-	ok, reach := s.h.syncFromLeader(s.ctx, s.client, s.token)
-	switch {
-	case ok:
+	ok, outcome := s.h.syncFromLeader(s.ctx, s.client, s.token)
+	if ok {
 		s.syncRecovered()
-	case reach == leaderReachableProven:
-		s.setFail(0)
-		s.manualWarned = false
-	case reach == leaderUnreachableProven:
-		s.setFail(s.failCount + 1)
-	default: // leaderReachabilityUnknown — ambiguous, never advance the streak (A8)
-		s.warnAmbiguousLeaderError()
+		return
 	}
+	s.stepStreak(outcome)
 }
 
-// handleSyncResult classifies an attempted sync and returns true only when this
-// node was promoted (the loop should exit). The promotion streak advances ONLY
-// on positive evidence the leader is unreachable: a live-but-rejecting leader
-// resets it, and an ambiguous/local fault holds it (never promotes).
-func (s *standbyLoopState) handleSyncResult(ok bool, reach leaderReachability) bool {
+// handleSyncResult applies one sync result and returns true only when this node
+// was promoted (the loop should exit).
+func (s *standbyLoopState) handleSyncResult(ok bool, outcome reachabilityOutcome) bool {
 	if ok {
 		s.syncRecovered()
 		return false
 	}
 	if s.ctx.Err() != nil {
-		return true // shutting down — exit without treating it as a leader failure
+		return true // shutting down — not a leader failure
 	}
-	switch reach {
-	case leaderReachableProven:
-		s.setFail(0)
-		s.manualWarned = false
-		logger.Printf("HA: leader reachable but state sync was rejected locally")
+	if s.stepStreak(outcome) {
+		return s.onMaxFail()
+	}
+	return false
+}
+
+// stepStreak applies one classified outcome to the promotion streak and returns
+// true iff the streak has reached the promotion threshold on a promoting outcome.
+// It never itself promotes. This is the single mode-aware policy point, kept
+// deliberately separate for legacy vs fenced HA (owner ADR-0012 §6.2 #3):
+//
+//   - reachable / remote-rejected -> the leader is ALIVE: reset.
+//   - local failure               -> never leader evidence: hold + warn.
+//   - ambiguous (unattributable)  -> LEGACY: hold + warn (fail-safe, owner #1);
+//     FENCED: advance (a candidacy signal only — the lease is the final authority
+//     and denies promotion while the leader lives, so a false-unreachable is safe).
+//   - unreachable proven          -> advance (both modes; not currently produced
+//     by classifyLeaderReachability — reserved for a future lower-layer probe).
+func (s *standbyLoopState) stepStreak(outcome reachabilityOutcome) (atThreshold bool) {
+	switch outcome {
+	case outcomeLeaderReachable, outcomeRemoteRejected:
+		s.syncRecovered()
 		return false
-	case leaderReachabilityUnknown:
-		// No positive evidence of unreachability (ambiguous RPC error). Do not
-		// advance the promotion streak; stay read-only and surface it (A8).
-		s.warnAmbiguousLeaderError()
+	case outcomeLocalFailure:
+		s.warnLocalClientFault(errLocalTLSPreflight)
 		return false
-	default: // leaderUnreachableProven
+	case outcomeAmbiguous:
+		if !s.h.leaseConfigured() {
+			// Legacy/unfenced: an unattributable failure is NOT positive proof the
+			// leader is unavailable. Hold the streak, stay read-only, warn (owner #1).
+			s.warnAmbiguousLeaderError()
+			return false
+		}
+		// Fenced: advance toward candidacy; acquireLeaseForLeadership arbitrates.
 		s.setFail(s.failCount + 1)
-		logger.Printf("HA: leader unreachable (%d/%d)", s.failCount, haStandbyMaxFail)
-		return s.failCount >= haStandbyMaxFail && s.onMaxFail()
+		logger.Printf("HA: leader unreachable-or-ambiguous (%d/%d) — fence will arbitrate", s.failCount, haStandbyMaxFail)
+		return s.failCount >= haStandbyMaxFail
+	case outcomeLeaderUnreachableProven:
+		s.setFail(s.failCount + 1)
+		logger.Printf("HA: leader unreachable proven (%d/%d)", s.failCount, haStandbyMaxFail)
+		return s.failCount >= haStandbyMaxFail
 	}
+	return false
+}
+
+// ensureLocalTLSOK runs the local TLS-material preflight. On failure it warns,
+// holds the streak, and drops any client so it is rebuilt after the local
+// condition is repaired (owner ADR-0012 §6 #4). Returns false when local material
+// is not usable — the caller must NOT treat that as leader unreachability.
+func (s *standbyLoopState) ensureLocalTLSOK() bool {
+	if err := preflightLocalTLS(s.certFile, s.keyFile, s.caFile); err != nil {
+		s.warnLocalClientFault(err)
+		s.client = nil
+		return false
+	}
+	return true
 }
 
 // syncRecovered resets the failure streak and re-arms every warn-once latch after
-// a successful sync, so a later fault episode warns again.
+// the leader is proven reachable, so a later fault episode warns again.
 func (s *standbyLoopState) syncRecovered() {
 	s.setFail(0)
 	s.manualWarned = false
@@ -549,12 +586,13 @@ func (s *standbyLoopState) syncRecovered() {
 	s.ambiguousWarned = false
 }
 
-// warnLocalClientFault reports a local client-construction fault (bad/undecryptable
-// TLS material, dial-option error) that blocks sync. It is operator-visible but
-// MUST NOT advance the promotion streak — a local fault is never evidence the
-// leader is unreachable (A3). Warn-once per episode to avoid 5s-tick log spam.
+// warnLocalClientFault reports a LOCAL fault (failed TLS preflight, bad/
+// undecryptable material, client-construction/dial failure) that blocks sync. It
+// is operator-visible but MUST NOT advance the promotion streak — a local fault is
+// never evidence the leader is unreachable (A3, owner #1/#4). Warn-once per
+// episode to avoid 5s-tick spam.
 func (s *standbyLoopState) warnLocalClientFault(err error) {
-	logger.Printf("HA: local fault building leader client (TLS material / dial) — staying read-only, NOT promoting: %v", err)
+	logger.Printf("HA: local fault (TLS material / preflight / client) — staying read-only, NOT promoting: %v", err)
 	if s.localFaultWarned {
 		return
 	}
@@ -562,16 +600,18 @@ func (s *standbyLoopState) warnLocalClientFault(err error) {
 	go alerts.Fire("ha_local_client_fault", alerts.Payload{
 		Event:  "ha_local_client_fault",
 		Host:   s.leaderAddr,
-		Detail: "local TLS material / client construction failed; standby staying read-only; automatic promotion withheld (A3)",
+		Detail: "local TLS material / preflight / client construction failed; standby staying read-only; automatic promotion withheld",
 		Source: "ha",
 	})
 }
 
-// warnAmbiguousLeaderError reports an ambiguous HASync RPC error (e.g. Unknown /
-// Internal) that is not positive evidence of unreachability. Operator-visible;
-// never advances the promotion streak (A8). Warn-once per episode.
+// warnAmbiguousLeaderError reports an unattributable HASync failure (codes that
+// cannot positively prove leader unavailability: Unavailable/DeadlineExceeded/
+// Unknown/Internal/…). In legacy/unfenced mode this HOLDS the promotion streak and
+// asks the operator to verify and act, since the node cannot safely auto-promote
+// on ambiguous evidence (owner #1/#2). Warn-once per episode.
 func (s *standbyLoopState) warnAmbiguousLeaderError() {
-	logger.Printf("HA: ambiguous leader RPC error — no proof of unreachability, staying read-only, NOT promoting")
+	logger.Printf("HA: leader state unverified (ambiguous transport/RPC error) — automatic promotion withheld in legacy mode; verify the leader and promote manually, or enable lease-fenced failover")
 	if s.ambiguousWarned {
 		return
 	}
@@ -579,7 +619,7 @@ func (s *standbyLoopState) warnAmbiguousLeaderError() {
 	go alerts.Fire("ha_ambiguous_leader_error", alerts.Payload{
 		Event:  "ha_ambiguous_leader_error",
 		Host:   s.leaderAddr,
-		Detail: "ambiguous leader RPC error (Unknown/Internal); not proof of unreachability; automatic promotion withheld (A8)",
+		Detail: "ambiguous leader error (Unavailable/DeadlineExceeded/Unknown/Internal); not proof of unreachability; legacy auto-promotion withheld; operator action or lease-fenced mode required",
 		Source: "ha",
 	})
 }
@@ -587,6 +627,12 @@ func (s *standbyLoopState) warnAmbiguousLeaderError() {
 // tick runs one loop iteration: reconnect if needed, then sync. Returns true
 // when the loop should exit (this node was promoted to leader).
 func (s *standbyLoopState) tick() bool {
+	if s.ctx.Err() != nil {
+		return true // shutting down
+	}
+	if !s.ensureLocalTLSOK() {
+		return false // local TLS fault: held, never promote
+	}
 	if s.client == nil {
 		c, err := NewDataPlaneClient("ha-standby", s.leaderAddr, s.certFile, s.keyFile, s.caFile)
 		if err != nil {
@@ -599,8 +645,8 @@ func (s *standbyLoopState) tick() bool {
 		}
 		s.client = c
 	}
-	ok, reach := s.h.syncFromLeader(s.ctx, s.client, s.token)
-	return s.handleSyncResult(ok, reach)
+	ok, outcome := s.h.syncFromLeader(s.ctx, s.client, s.token)
+	return s.handleSyncResult(ok, outcome)
 }
 
 // warnManualFailoverRequired logs and alerts that the leader is unreachable
@@ -623,7 +669,7 @@ func (h *HAState) warnManualFailoverRequired(leaderAddr string) {
 // returned reachability evidence distinguishes a live-but-rejecting leader and
 // an ambiguous/local fault from a proven transport failure, so local disk/config
 // faults and ambiguous errors cannot trigger automatic promotion.
-func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (ok bool, reach leaderReachability) {
+func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, token string) (ok bool, outcome reachabilityOutcome) {
 	// ADR-0005 S0: advertise this standby's own address so the leader can record
 	// it as the failback target (the topology otherwise never tells the leader).
 	reqBytes, _ := json.Marshal(map[string]string{"token": token, "standby_addr": h.advertiseAddr()})
@@ -638,13 +684,13 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		// The leader answered with bytes we could not parse — it is reachable;
 		// this is a local/protocol rejection, never a transport failure.
 		logger.Printf("HA: parse state bundle error: %v", err)
-		return false, leaderReachableProven
+		return false, outcomeRemoteRejected
 	}
 	// ADR-0005 S3 (Finding 7): PULLER-side fence — verify the bundle's
 	// epoch against our own lease backend BEFORE any import. A zombie
 	// leader serving stale state must not reach ImportFullState.
 	if !h.verifyBundleEpoch(bundle.Epoch) {
-		return false, leaderReachableProven
+		return false, outcomeRemoteRejected
 	}
 	ok = applyHABundle(&bundle, token)
 	if ok {
@@ -666,58 +712,109 @@ func (h *HAState) syncFromLeader(ctx context.Context, client *DataPlaneClient, t
 		logger.Printf("HA: leader requested a planned promotion — performing coordinated handoff")
 		h.promote("planned handoff requested by leader")
 	}
-	return ok, leaderReachableProven
+	return ok, outcomeLeaderReachable
 }
 
-// leaderReachability is the EVIDENCE an HASync attempt yields about the leader.
-// Automatic promotion requires positive proof of unreachability; anything else
-// keeps the standby read-only (invariant #4 / ADR-0012 §6.2 Q1 direction).
-type leaderReachability int
+// reachabilityOutcome is the typed, layered classification of one HASync attempt
+// (owner ADR-0012 §6.2 decision #5). The promotion detector consumes this, not a
+// raw gRPC status code — because gRPC collapses genuinely-different root causes
+// (leader-down, TLS/cert failure, DNS failure) into a single codes.Unavailable,
+// so a status code alone cannot positively attribute unreachability.
+type reachabilityOutcome int
 
 const (
-	// leaderReachableProven: the leader answered (even if it rejected the call),
-	// so it is alive — reset the promotion streak.
-	leaderReachableProven leaderReachability = iota
-	// leaderUnreachableProven: positive transport-failure evidence — advance the
-	// promotion streak (hysteresis via haStandbyMaxFail).
-	leaderUnreachableProven
-	// leaderReachabilityUnknown: no positive evidence either way (an ambiguous
-	// RPC error, or a purely local fault). Never advances the streak; the
-	// standby stays read-only and the fence/operator arbitrates.
-	leaderReachabilityUnknown
+	// outcomeLeaderReachable: the sync succeeded — the leader is alive and its
+	// state was applied. Resets the promotion streak.
+	outcomeLeaderReachable reachabilityOutcome = iota
+	// outcomeRemoteRejected: the leader answered but rejected/failed the call (an
+	// application error, or a malformed/epoch-stale bundle). The leader is ALIVE,
+	// so this resets the streak — an integrity/rejection signal, never availability.
+	outcomeRemoteRejected
+	// outcomeLocalFailure: a local prerequisite/material/apply fault (TLS preflight,
+	// client construction, disk, decrypt). NEVER evidence of leader unavailability;
+	// holds the streak and warns.
+	outcomeLocalFailure
+	// outcomeAmbiguous: the failure cannot be confidently attributed to leader
+	// unavailability (codes.Unavailable — which also carries TLS/cert/DNS faults —,
+	// DeadlineExceeded — slow-vs-dead —, Unknown/Internal/Canceled/…). Legacy mode
+	// HOLDS (fail-safe, owner #1); fenced mode advances (the lease is the authority).
+	outcomeAmbiguous
+	// outcomeLeaderUnreachableProven: positive, attributed proof of transport-level
+	// unreachability. Advances the streak in both modes. NOTE: this is NOT derivable
+	// from a gRPC status code alone (see classifyLeaderReachability); it is reserved
+	// for a future lower-layer probe (ADR-0012 §6 "layered reachability", not built).
+	outcomeLeaderUnreachableProven
 )
 
-// errNoLeaderClient marks the local state where the leader client was never
-// constructed (a prior local TLS/dial fault). It is logged, never promoted on.
-var errNoLeaderClient = errors.New("no leader client (local construction failed)")
+var (
+	// errNoLeaderClient marks the local state where the leader client was never
+	// constructed (a prior local TLS/dial fault). Logged, never promoted on.
+	errNoLeaderClient = errors.New("no leader client (local construction failed)")
+	// errLocalTLSPreflight wraps a failed local TLS-material preflight.
+	errLocalTLSPreflight = errors.New("local TLS preflight failed")
+)
 
-// classifyLeaderReachability maps an HASync RPC error to reachability evidence.
-//
-// A node may automatically promote ONLY on positive evidence that the leader is
-// unreachable per the failure detector. A local inability to validate, persist,
-// decrypt, authenticate, or apply leader state is never evidence of leader
-// unavailability, and it is not even routed here — see standbyLoopState.tick and
-// syncOnce, which withhold the streak on a local client-construction fault (A3).
-// Ambiguous transport/server codes default to "unknown" (no promotion) so a
-// wrapped server-side error on a live leader cannot drive failover (A8).
-func classifyLeaderReachability(err error) leaderReachability {
+// classifyLeaderReachability maps an HASync RPC error to a typed reachability
+// outcome. It deliberately never returns outcomeLeaderUnreachableProven: gRPC's
+// status code cannot separate a down leader (connection refused) from a live
+// leader we failed to reach for TLS/cert/DNS reasons — connection-refused,
+// TLS-unknown-authority, expired-server-cert, hostname-mismatch, mTLS-reject and
+// DNS-failure ALL surface as codes.Unavailable. Positive unreachability therefore
+// requires lower-layer evidence we do not yet collect (documented redesign), so
+// every non-answering outcome is Ambiguous and the mode-aware streak policy
+// decides its meaning (hold in legacy, candidate in fenced). desc string-matching
+// is intentionally NOT used (owner #5).
+func classifyLeaderReachability(err error) reachabilityOutcome {
 	switch status.Code(err) {
-	case codes.Unavailable, codes.DeadlineExceeded:
-		// Canonical transport-failure / timeout evidence (connection refused,
-		// transport loss, TLS handshake failure to the leader, name-resolution
-		// failure, deadline). The failure detector's streak supplies hysteresis.
-		return leaderUnreachableProven
 	case codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument,
 		codes.FailedPrecondition, codes.AlreadyExists, codes.NotFound,
 		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted:
 		// The leader answered and deliberately rejected the call — it is alive.
-		return leaderReachableProven
+		return outcomeRemoteRejected
 	default:
-		// Unknown, Internal, Canceled, Aborted, DataLoss, ... are ambiguous: a
-		// wrapped server-side error on a reachable leader is indistinguishable
-		// from an oddly-surfaced transport failure. Fail closed to no promotion.
-		return leaderReachabilityUnknown
+		// Unavailable (leader-down OR TLS/cert/DNS fault), DeadlineExceeded
+		// (slow-vs-dead), Unknown/Internal/Canceled/Aborted/DataLoss, … — none is
+		// positive proof of leader unavailability. Fail closed to Ambiguous.
+		return outcomeAmbiguous
 	}
+}
+
+// preflightLocalTLS deterministically validates local TLS prerequisites before
+// any RPC failure is used as reachability evidence (owner ADR-0012 §6 decision
+// #4). A failure is a LOCAL fault (never leader unreachability). A SUCCESS does
+// NOT prove the remote handshake will succeed — it only removes local material as
+// a cause. Overridable in tests.
+var preflightLocalTLS = defaultPreflightLocalTLS
+
+func defaultPreflightLocalTLS(certFile, keyFile, caFile string) error {
+	if certFile == "" || keyFile == "" {
+		return nil // insecure/dev mode — no local client material to validate
+	}
+	cert, err := loadDPNodeKeyPair(certFile, keyFile) // readable + cert/key match (+ KEK decrypt)
+	if err != nil {
+		return fmt.Errorf("%w: client cert/key: %v", errLocalTLSPreflight, err)
+	}
+	leaf := cert.Leaf
+	if leaf == nil && len(cert.Certificate) > 0 {
+		if leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
+			return fmt.Errorf("%w: parse client leaf: %v", errLocalTLSPreflight, err)
+		}
+	}
+	if leaf != nil {
+		now := time.Now()
+		if now.Before(leaf.NotBefore) {
+			return fmt.Errorf("%w: client cert not yet valid (NotBefore %s)", errLocalTLSPreflight, leaf.NotBefore.UTC())
+		}
+		if now.After(leaf.NotAfter) {
+			return fmt.Errorf("%w: client cert expired (NotAfter %s)", errLocalTLSPreflight, leaf.NotAfter.UTC())
+		}
+	}
+	if caFile != "" {
+		if _, err := loadCertPool(caFile); err != nil {
+			return fmt.Errorf("%w: trust roots: %v", errLocalTLSPreflight, err)
+		}
+	}
+	return nil
 }
 
 // seedTermFromLeader raises this standby's epoch to the leader's term (never

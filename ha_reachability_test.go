@@ -1,13 +1,24 @@
 package main
 
-// ha_reachability_test.go — PR-2 (A3/A8): a standby may automatically promote
-// ONLY on positive evidence the leader is unreachable per the failure detector.
-// A local inability to validate, persist, decrypt, authenticate, or apply leader
-// state is never evidence of unavailability; ambiguous RPC errors default to no
-// promotion. See ADR-0012 §6.2 and invariant #4.
+// ha_reachability_test.go — PR-2 (A3/A8) reachability model, hardened after the
+// adversarial panel. A standby may automatically promote ONLY on positive,
+// attributed evidence the leader is unreachable. gRPC status codes cannot supply
+// that (Unavailable collapses leader-down with TLS/cert/DNS faults; Deadline is
+// slow-vs-dead), so every non-answering code is Ambiguous and a MODE-AWARE policy
+// decides: legacy/unfenced HOLDS (fail-safe), fenced advances-as-candidate and the
+// lease is the final authority. Local TLS-material faults are held via preflight.
+// Owner decisions: ADR-0012 §6.2 #1–#5.
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,9 +28,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// legacyStandby builds an auto-failover-enabled, non-lease standby with a
-// working promote context, so a genuine threshold crossing WOULD promote — which
-// makes "did not promote" assertions meaningful rather than vacuous.
+// legacyStandby builds an auto-failover-enabled, NON-lease standby with a working
+// promote context, so a genuine threshold crossing WOULD promote — making
+// "did not promote" assertions meaningful rather than vacuous.
 func legacyStandby() *HAState {
 	h := &HAState{}
 	h.mu.Lock()
@@ -31,211 +42,247 @@ func legacyStandby() *HAState {
 	return h
 }
 
-// 1. Reachable leader + local TLS-material failure must not promote (A3).
-// A local client-construction fault (unreadable/undecryptable TLS material) is
-// surfaced through tick()'s reconnect; it must hold the streak, never advance it.
-func TestReachableLeaderPlusLocalTLSFailureNoPromote(t *testing.T) {
-	dir := t.TempDir()
-	s := &standbyLoopState{
-		h:          legacyStandby(),
-		ctx:        context.Background(),
-		leaderAddr: "leader:50051",
-		// Non-empty but nonexistent TLS material → NewDataPlaneClient fails
-		// locally (buildClientTLS/loadDPNodeKeyPair), grpc never dials.
-		certFile:  filepath.Join(dir, "missing-cert.pem"),
-		keyFile:   filepath.Join(dir, "missing-key.pem"),
-		failCount: haStandbyMaxFail - 1, // one short of the promotion threshold
-	}
-	if s.tick() {
-		t.Fatal("local TLS-material fault exited the loop (promoted)")
-	}
-	if s.failCount != haStandbyMaxFail-1 {
-		t.Fatalf("local TLS fault advanced the promotion streak: failCount=%d, want %d", s.failCount, haStandbyMaxFail-1)
-	}
-	if s.h.IsLeader() {
-		t.Fatal("local TLS-material fault promoted the standby")
-	}
-	if !s.localFaultWarned {
-		t.Fatal("local fault was not made operator-visible")
-	}
+// stubPreflight overrides the local-TLS preflight for a test and restores it.
+func stubPreflight(t *testing.T, fn func(certFile, keyFile, caFile string) error) {
+	t.Helper()
+	orig := preflightLocalTLS
+	preflightLocalTLS = fn
+	t.Cleanup(func() { preflightLocalTLS = orig })
 }
 
-// 2. Reachable leader + rejected configuration must not promote.
-// A leader that answered but whose config we rejected locally is alive.
-func TestReachableLeaderPlusRejectedConfigNoPromote(t *testing.T) {
-	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
-	if s.handleSyncResult(false, leaderReachableProven) {
-		t.Fatal("rejected-config (reachable leader) exited the loop (promoted)")
-	}
-	if s.failCount != 0 {
-		t.Fatalf("reachable-leader rejection counted as a leader failure: failCount=%d", s.failCount)
-	}
-	if s.h.IsLeader() {
-		t.Fatal("reachable leader + rejected config promoted the standby")
-	}
-}
+// --- Classifier: no gRPC code yields proven-unreachable. ---
 
-// 3. Reachable leader + local persistence failure must not promote.
-// Same evidence class (leader answered; the local apply/persist failed).
-func TestReachableLeaderPlusLocalPersistenceFailureNoPromote(t *testing.T) {
-	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
-	if s.handleSyncResult(false, leaderReachableProven) {
-		t.Fatal("local persistence failure (reachable leader) promoted the standby")
-	}
-	if s.failCount != 0 {
-		t.Fatalf("local persistence failure counted as a leader failure: failCount=%d", s.failCount)
-	}
-	if s.h.IsLeader() {
-		t.Fatal("local persistence failure promoted the standby")
-	}
-}
-
-// 4. Malformed / invalid leader response must not promote.
-// syncFromLeader maps an unparseable bundle to leaderReachableProven (the leader
-// answered) — which, per the state machine, resets the streak and never promotes.
-func TestMalformedLeaderResponseNoPromote(t *testing.T) {
-	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
-	// leaderReachableProven is exactly what syncFromLeader returns for a
-	// malformed/epoch-rejected bundle (ha.go: json.Unmarshal / verifyBundleEpoch).
-	if s.handleSyncResult(false, leaderReachableProven) {
-		t.Fatal("malformed leader response promoted the standby")
-	}
-	if s.h.IsLeader() {
-		t.Fatal("malformed leader response promoted the standby")
-	}
-}
-
-// 5. gRPC Unknown / Internal do not automatically prove unreachability (A8).
-func TestAmbiguousGRPCErrorsDoNotProveUnreachability(t *testing.T) {
-	for _, code := range []codes.Code{codes.Unknown, codes.Internal, codes.Canceled, codes.DataLoss, codes.Aborted} {
-		if got := classifyLeaderReachability(status.Error(code, "ambiguous")); got != leaderReachabilityUnknown {
-			t.Fatalf("%s classified %v, want leaderReachabilityUnknown (no promotion)", code, got)
+func TestClassify_RemoteRejectedCodesAreReachable(t *testing.T) {
+	for _, code := range []codes.Code{
+		codes.Unauthenticated, codes.PermissionDenied, codes.InvalidArgument,
+		codes.FailedPrecondition, codes.AlreadyExists, codes.NotFound,
+		codes.OutOfRange, codes.Unimplemented, codes.ResourceExhausted,
+	} {
+		if got := classifyLeaderReachability(status.Error(code, "rejected")); got != outcomeRemoteRejected {
+			t.Errorf("%s classified %v, want outcomeRemoteRejected (leader answered)", code, got)
 		}
 	}
-	// And the state machine must hold — neither advance nor reset — and never promote.
+}
+
+func TestClassify_AmbiguousCodesNeverProveUnreachable(t *testing.T) {
+	// Unavailable (leader-down OR TLS/cert/DNS), DeadlineExceeded (slow-vs-dead),
+	// and server-ambiguous codes must all be Ambiguous — never proven-unreachable.
+	for _, code := range []codes.Code{
+		codes.Unavailable, codes.DeadlineExceeded, codes.Unknown, codes.Internal,
+		codes.Canceled, codes.DataLoss, codes.Aborted,
+	} {
+		got := classifyLeaderReachability(status.Error(code, "x"))
+		if got != outcomeAmbiguous {
+			t.Errorf("%s classified %v, want outcomeAmbiguous", code, got)
+		}
+		if got == outcomeLeaderUnreachableProven {
+			t.Errorf("%s must never be proven-unreachable from a status code alone", code)
+		}
+	}
+}
+
+// --- Legacy/unfenced: ambiguous, timeouts, TLS, and local faults never promote. ---
+
+func TestLegacy_AmbiguousHoldsStreakNeverPromotes(t *testing.T) {
 	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
-	if s.handleSyncResult(false, leaderReachabilityUnknown) {
-		t.Fatal("ambiguous error promoted the standby")
+	if s.handleSyncResult(false, outcomeAmbiguous) {
+		t.Fatal("legacy ambiguous outcome promoted")
 	}
 	if s.failCount != haStandbyMaxFail-1 {
-		t.Fatalf("ambiguous error moved the promotion streak: failCount=%d, want %d", s.failCount, haStandbyMaxFail-1)
+		t.Fatalf("legacy ambiguous moved the streak: failCount=%d, want %d (held)", s.failCount, haStandbyMaxFail-1)
+	}
+	if s.h.IsLeader() {
+		t.Fatal("legacy ambiguous promoted the standby")
 	}
 	if !s.ambiguousWarned {
-		t.Fatal("ambiguous leader error was not made operator-visible")
+		t.Fatal("legacy ambiguous was not made operator-visible")
 	}
 }
 
-// 6a. Genuine transport failure / deadline IS positive unreachability evidence,
-// and advances the streak with hysteresis (below threshold → no promotion yet).
-func TestGenuineUnreachableAdvancesStreakWithHysteresis(t *testing.T) {
-	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded} {
-		if got := classifyLeaderReachability(status.Error(code, "down")); got != leaderUnreachableProven {
-			t.Fatalf("%s classified %v, want leaderUnreachableProven", code, got)
-		}
+func TestLegacy_DeadlineExceededIsAmbiguousAndHolds(t *testing.T) {
+	// DeadlineExceeded classifies Ambiguous; in legacy mode it must HOLD.
+	if got := classifyLeaderReachability(status.Error(codes.DeadlineExceeded, "timeout")); got != outcomeAmbiguous {
+		t.Fatalf("DeadlineExceeded classified %v, want outcomeAmbiguous", got)
 	}
+	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
+	out := classifyLeaderReachability(status.Error(codes.DeadlineExceeded, "timeout"))
+	if s.handleSyncResult(false, out) || s.failCount != haStandbyMaxFail-1 || s.h.IsLeader() {
+		t.Fatalf("legacy DeadlineExceeded must hold+not promote: failCount=%d leader=%v", s.failCount, s.h.IsLeader())
+	}
+}
+
+func TestLegacy_TLSHandshakeUnavailableHolds(t *testing.T) {
+	// A TLS/cert handshake failure surfaces as Unavailable → Ambiguous → hold.
+	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), failCount: haStandbyMaxFail - 1}
+	out := classifyLeaderReachability(status.Error(codes.Unavailable, "authentication handshake failed: tls: unknown authority"))
+	if s.handleSyncResult(false, out) || s.failCount != haStandbyMaxFail-1 || s.h.IsLeader() {
+		t.Fatalf("legacy TLS-Unavailable must hold+not promote: failCount=%d leader=%v", s.failCount, s.h.IsLeader())
+	}
+}
+
+func TestLegacy_RepeatedAmbiguousNeverCrossesThreshold(t *testing.T) {
 	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background()}
-	for want := 1; want < haStandbyMaxFail; want++ {
-		if s.handleSyncResult(false, leaderUnreachableProven) {
-			t.Fatalf("promoted below the failure threshold at streak %d", want)
+	for i := 0; i < haStandbyMaxFail*4; i++ {
+		if s.handleSyncResult(false, outcomeAmbiguous) {
+			t.Fatalf("legacy promoted on repeated ambiguous at iteration %d", i)
 		}
-		if s.failCount != want {
-			t.Fatalf("streak = %d, want %d", s.failCount, want)
-		}
-		if s.h.IsLeader() {
-			t.Fatalf("promoted below threshold at streak %d", want)
-		}
+	}
+	if s.failCount != 0 || s.h.IsLeader() {
+		t.Fatalf("legacy repeated ambiguous accumulated: failCount=%d leader=%v", s.failCount, s.h.IsLeader())
 	}
 }
 
-// 6b. At the threshold, genuine unreachability promotes through the real fence.
-func TestGenuineUnreachablePromotesAtThreshold(t *testing.T) {
+// --- Fenced: ambiguous makes a candidate; the LEASE is the final authority. ---
+
+func TestFenced_AmbiguousPromotesOnlyWhenLeaseFree(t *testing.T) {
 	tempHADir(t)
 	h := freshStandby(halease.NewFake(time.Minute))
 	defer h.Stop()
 	s := &standbyLoopState{h: h, ctx: context.Background(), leaderAddr: "dead-leader:50051", failCount: haStandbyMaxFail - 1}
-	if !s.handleSyncResult(false, leaderUnreachableProven) {
-		t.Fatal("genuine unreachable at threshold must promote (loop should exit)")
+	if !s.handleSyncResult(false, outcomeAmbiguous) {
+		t.Fatal("fenced ambiguous at threshold with a free lease must promote")
 	}
 	if !h.IsLeader() {
-		t.Fatal("node should be leader after threshold-crossing auto-failover")
+		t.Fatal("node should be leader after fence-arbitrated promotion")
 	}
 }
 
-// 7. Repeated local (and ambiguous) failures never cross the promotion threshold.
-func TestRepeatedLocalFailuresNeverCrossPromotionThreshold(t *testing.T) {
-	dir := t.TempDir()
-	s := &standbyLoopState{
-		h:          legacyStandby(),
-		ctx:        context.Background(),
-		leaderAddr: "leader:50051",
-		certFile:   filepath.Join(dir, "missing-cert.pem"),
-		keyFile:    filepath.Join(dir, "missing-key.pem"),
+func TestFenced_AmbiguousCannotBypassHeldLease(t *testing.T) {
+	tempHADir(t)
+	f := halease.NewFake(time.Minute)
+	if granted, _, _ := f.Acquire(context.Background(), "cp-leader"); !granted {
+		t.Fatal("seed: leader must hold the lease")
 	}
-	for i := 0; i < haStandbyMaxFail*4; i++ {
-		if s.tick() {
-			t.Fatalf("repeated local fault promoted at iteration %d", i)
-		}
+	h := freshStandby(f) // cp-standby; the leader already holds the fence
+	defer h.Stop()
+	s := &standbyLoopState{h: h, ctx: context.Background(), leaderAddr: "leader:50051", failCount: haStandbyMaxFail - 1}
+	if s.handleSyncResult(false, outcomeAmbiguous) {
+		t.Fatal("fenced ambiguous promoted while the leader holds the lease — fence bypassed")
 	}
-	if s.failCount != 0 {
-		t.Fatalf("repeated local faults accumulated a promotion streak: failCount=%d", s.failCount)
-	}
-	if s.h.IsLeader() {
-		t.Fatal("repeated local faults eventually promoted the standby")
-	}
-
-	// Same guarantee for repeated ambiguous RPC errors.
-	a := &standbyLoopState{h: legacyStandby(), ctx: context.Background()}
-	for i := 0; i < haStandbyMaxFail*4; i++ {
-		if a.handleSyncResult(false, leaderReachabilityUnknown) {
-			t.Fatalf("repeated ambiguous error promoted at iteration %d", i)
-		}
-	}
-	if a.failCount != 0 || a.h.IsLeader() {
-		t.Fatalf("repeated ambiguous errors crossed the threshold: failCount=%d leader=%v", a.failCount, a.h.IsLeader())
+	if h.IsLeader() {
+		t.Fatal("standby became leader despite a held fence")
 	}
 }
 
-// 8. Local and ambiguous faults are operator-visible, and the warning latches
-// re-arm after recovery so a later fault episode warns again.
-func TestLocalAndAmbiguousFaultsAreOperatorVisible(t *testing.T) {
-	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), leaderAddr: "leader:50051"}
+// --- Local TLS preflight: a local fault holds in BOTH modes. ---
 
-	s.warnLocalClientFault(errNoLeaderClient)
+func TestPreflight_FailureHoldsInLegacy(t *testing.T) {
+	stubPreflight(t, func(_, _, _ string) error { return errLocalTLSPreflight })
+	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background(), leaderAddr: "leader:50051", failCount: haStandbyMaxFail - 1}
+	if s.tick() {
+		t.Fatal("local preflight failure exited the loop (promoted) in legacy mode")
+	}
+	if s.failCount != haStandbyMaxFail-1 || s.h.IsLeader() {
+		t.Fatalf("preflight fault advanced/promoted: failCount=%d leader=%v", s.failCount, s.h.IsLeader())
+	}
 	if !s.localFaultWarned {
-		t.Fatal("local fault did not set the operator-visible latch")
+		t.Fatal("preflight fault not operator-visible")
 	}
-	s.warnAmbiguousLeaderError()
-	if !s.ambiguousWarned {
-		t.Fatal("ambiguous error did not set the operator-visible latch")
-	}
+}
 
-	// A successful sync re-arms both latches (so the next episode is visible too).
-	if s.handleSyncResult(true, leaderReachableProven) {
+func TestPreflight_FailureHoldsInFencedMode(t *testing.T) {
+	tempHADir(t)
+	stubPreflight(t, func(_, _, _ string) error { return errLocalTLSPreflight })
+	h := freshStandby(halease.NewFake(time.Minute))
+	defer h.Stop()
+	// Even in fenced mode, a LOCAL fault must never advance toward the fence.
+	s := &standbyLoopState{h: h, ctx: context.Background(), leaderAddr: "leader:50051", failCount: haStandbyMaxFail - 1}
+	for i := 0; i < haStandbyMaxFail*3; i++ {
+		if s.tick() {
+			t.Fatalf("fenced preflight fault promoted at iteration %d", i)
+		}
+	}
+	if s.failCount != haStandbyMaxFail-1 || s.h.IsLeader() {
+		t.Fatalf("fenced preflight fault advanced/promoted: failCount=%d leader=%v", s.failCount, s.h.IsLeader())
+	}
+}
+
+func TestDefaultPreflight_ExpiredAndValidLocalCert(t *testing.T) {
+	dir := t.TempDir()
+	// Expired cert → LocalFailure.
+	expCert, expKey := filepath.Join(dir, "exp-cert.pem"), filepath.Join(dir, "exp-key.pem")
+	writeTestCert(t, expCert, expKey, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+	if err := defaultPreflightLocalTLS(expCert, expKey, ""); err == nil {
+		t.Fatal("expired local cert passed preflight")
+	}
+	// Valid cert → nil.
+	okCert, okKey := filepath.Join(dir, "ok-cert.pem"), filepath.Join(dir, "ok-key.pem")
+	writeTestCert(t, okCert, okKey, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+	if err := defaultPreflightLocalTLS(okCert, okKey, ""); err != nil {
+		t.Fatalf("valid local cert failed preflight: %v", err)
+	}
+	// Empty material (dev/insecure) → nil (nothing to validate).
+	if err := defaultPreflightLocalTLS("", "", ""); err != nil {
+		t.Fatalf("empty material should pass preflight: %v", err)
+	}
+}
+
+// --- Reset / recovery / concurrency. ---
+
+func TestRemoteRejectedResetsStreak(t *testing.T) {
+	tempHADir(t)
+	h := freshStandby(halease.NewFake(time.Minute))
+	defer h.Stop()
+	s := &standbyLoopState{h: h, ctx: context.Background(), failCount: 2, localFaultWarned: true, ambiguousWarned: true}
+	if s.handleSyncResult(false, outcomeRemoteRejected) {
+		t.Fatal("remote-rejected (leader alive) exited the loop")
+	}
+	if s.failCount != 0 || s.localFaultWarned || s.ambiguousWarned {
+		t.Fatalf("remote-rejected did not reset+re-arm: failCount=%d local=%v amb=%v", s.failCount, s.localFaultWarned, s.ambiguousWarned)
+	}
+}
+
+func TestRecoveryAfterFaultResetsLatchesAndStreak(t *testing.T) {
+	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background()}
+	s.localFaultWarned, s.ambiguousWarned, s.failCount = true, true, 0
+	if s.handleSyncResult(true, outcomeLeaderReachable) {
 		t.Fatal("successful sync exited the loop")
 	}
-	if s.localFaultWarned || s.ambiguousWarned {
-		t.Fatal("warn latches were not re-armed after recovery")
+	if s.failCount != 0 || s.localFaultWarned || s.ambiguousWarned || s.h.IsLeader() {
+		t.Fatalf("recovery did not fully re-arm: failCount=%d local=%v amb=%v leader=%v",
+			s.failCount, s.localFaultWarned, s.ambiguousWarned, s.h.IsLeader())
 	}
 }
 
-// 9. After a local fault clears, the standby resumes syncing without any unsafe
-// promotion — the streak stays at zero and the node remains a standby.
-func TestRecoveryAfterLocalFaultResumesWithoutUnsafePromotion(t *testing.T) {
-	s := &standbyLoopState{h: legacyStandby(), ctx: context.Background()}
-	// Simulate an episode of held-off local faults.
-	s.localFaultWarned = true
-	s.failCount = 0
-	// The leader becomes reachable and the sync succeeds.
-	if s.handleSyncResult(true, leaderReachableProven) {
-		t.Fatal("recovered sync exited the loop (promoted)")
+// C1: a cancelled context (shutdown) must not be classified as a leader fault.
+func TestSyncOnce_CancelledCtxDoesNotClassify(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &standbyLoopState{h: legacyStandby(), ctx: ctx, leaderAddr: "leader:50051"}
+	s.syncOnce()
+	if s.failCount != 0 || s.ambiguousWarned || s.localFaultWarned {
+		t.Fatalf("cancelled-ctx syncOnce classified a fault: failCount=%d amb=%v local=%v",
+			s.failCount, s.ambiguousWarned, s.localFaultWarned)
 	}
-	if s.failCount != 0 {
-		t.Fatalf("recovery left a nonzero streak: %d", s.failCount)
+}
+
+// writeTestCert writes a self-signed ECDSA cert+key PEM pair with the given
+// validity window (used to exercise the preflight expiry check deterministically).
+func writeTestCert(t *testing.T, certPath, keyPath string, notBefore, notAfter time.Time) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s.h.IsLeader() {
-		t.Fatal("recovery unexpectedly promoted the standby")
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "ha-standby-test"},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
-	if s.localFaultWarned {
-		t.Fatal("recovery did not clear the local-fault latch")
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
