@@ -29,7 +29,7 @@ evidence from but does not mirror.
 | Policy | [Policy engine & Zero-Trust authoring](docs/03-policy/policy-engine.md) | published |
 | TLS inspection | [TLS inspection administration](docs/04-tls-inspection/tls-inspection.md) | published |
 | Identity | [Identity & access (SSO, 2FA, RBAC)](docs/05-identity/identity-and-access.md) | published |
-| Observability | Metrics, dashboard, logs, audit | _planned_ |
+| Observability | [Metrics, dashboard, logs, audit](docs/06-observability/observability.md) | published |
 
 The authoritative, prioritized queue is [`../CONTENT-BACKLOG.yaml`](../CONTENT-BACKLOG.yaml);
 live progress is in [`../RUN-STATE.md`](../RUN-STATE.md).

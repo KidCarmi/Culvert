@@ -16,10 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-013** — Observability (metrics/dashboard/logs/syslog/alerts/audit). Next.
+- **H-014** — YouTube package: "What is Culvert" (product intro). Next.
 
 ## Recently completed
 
+- **H-013** — Observability (`content/docs/06-observability/observability.md`) +
+  evidence ledger. Metrics families + `/metrics` bearer, SSE dashboard, JSONL
+  logs, async syslog (RFC 3164/5424), OTLP, signed webhook alerts, audit ring.
+  Reinforced the audit non-tamper-evidence correction (G-01). Link check pass.
+  Committed. **All high-priority docs (H-010–H-013) complete.**
 - **H-012** — Identity & access (`content/docs/05-identity/identity-and-access.md`)
   + evidence ledger. Identity sources, multi-IdP email-domain routing, TOTP
   step-up flow (Mermaid), 3-role RBAC (two-layer), session security, brute-force
@@ -70,9 +75,10 @@ phase transition. Newest activity at the top of each section.
 - **H-010** — Policy engine & Zero-Trust authoring + evidence ledger (high).
 - **H-011** — TLS inspection administration + evidence ledger (high).
 - **H-012** — Identity & access + evidence ledger (high).
+- **H-013** — Observability + evidence ledger (high).
 
-**All critical items complete.** High-priority docs done (H-010/011/012);
-remaining high-pri are the two YouTube packages (H-014, H-015) + H-013.
+**All critical + high-priority docs complete.** Remaining high-pri: the two
+YouTube packages (H-014, H-015).
 
 ## Commits created
 
@@ -82,7 +88,8 @@ remaining high-pri are the two YouTube packages (H-014, H-015) + H-013.
 - `8acf32d` docs(content): add verified quick-start & first-boot guide.
 - `939ed62` docs(content): add verified policy engine & Zero-Trust guide.
 - `4466469` docs(content): add verified TLS inspection administration guide.
-- _(H-012 commit — hash recorded next cycle)_
+- `3c4ec1d` docs(content): add verified identity & access guide.
+- _(H-013 commit — hash recorded next cycle)_
 
 ## Blocked items
 

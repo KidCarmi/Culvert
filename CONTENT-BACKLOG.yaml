@@ -105,7 +105,7 @@ items:
     title: "Observability: metrics, dashboard, logs, syslog, alerts, audit"
     type: doc
     priority: high
-    status: todo
+    status: done
     audience: [admin, sre]
     path: content/docs/06-observability/observability.md
     evidence_areas: [metrics.go, events.go, logger.go, syslog.go, alerts.go, "internal/audit"]
