@@ -902,6 +902,7 @@ func registerConfigService(srv grpc.ServiceRegistrar) {
 		HandlerType: (*controlPlaneServer)(nil),
 		Methods: []grpc.MethodDesc{
 			{MethodName: "GetConfig", Handler: wrapUnary(svc.GetConfig)},
+			{MethodName: "GetConfigDelta", Handler: wrapUnary(svc.GetConfigDelta)},
 			{MethodName: "PushMetrics", Handler: wrapUnary(svc.PushMetrics)},
 			{MethodName: "Enroll", Handler: wrapUnary(svc.Enroll)},
 			{MethodName: "SyncRateLimits", Handler: wrapUnary(svc.SyncRateLimits)},

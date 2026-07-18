@@ -27,9 +27,13 @@ package main
 // bytes: a spurious resync only costs one full pull.
 
 import (
+	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/KidCarmi/Culvert/internal/blocklist"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -196,4 +200,70 @@ func diffHosts(prev, next []string) (added, removed []string) {
 // naturally.
 func blocklistSyncedFingerprint(hosts []string) string {
 	return blocklist.FeedSetFingerprint(hosts)
+}
+
+// GetConfigDelta serves the incremental blocklist catch-up path (T3 P1). A DP
+// reports the blocklist version it holds; the CP returns the ordered {added,
+// removed} chain to the newest version plus the small non-blocklist remainder,
+// or a resync directive when the DP is too far behind to be caught up
+// incrementally. The blocklist is ~95%+ of the snapshot bytes at scale, so this
+// turns a routine config change from a full ~60 MiB re-pull into a few-KB delta.
+//
+// Same guards as GetConfig: refuse when no valid config is servable; throttle
+// unenrolled callers per peer IP (the delta reveals blocklist changes); redact
+// secrets from the remainder for unenrolled callers. Epoch-fenced via the reply
+// Epoch (the DP ratchets it exactly like a full snapshot).
+func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMessage) (json.RawMessage, error) {
+	if ok, reason := globalConfigStore.ServableConfig(); !ok {
+		return nil, status.Errorf(codes.Unavailable, "control plane has no valid config to distribute: %s", reason)
+	}
+	var dreq getConfigDeltaRequest
+	_ = json.Unmarshal(req, &dreq) // tolerate empty/garbage → KnownVersion 0 → resync
+
+	enrolled := callerIsEnrolledNode(ctx)
+	if !enrolled {
+		if ip := peerSourceIP(ctx); ip != "" && !unenrolledConfigPullAllow(ip) {
+			return nil, status.Errorf(codes.ResourceExhausted, "unenrolled config-pull rate exceeded; enroll to poll without limit")
+		}
+	}
+
+	epoch := globalHA.CurrentEpoch()
+	// Bind cur to the snapshot we would actually return so the chain, remainder,
+	// and target version are all the same version (no torn read across a publish).
+	snap := globalConfigStore.Get()
+	cur := snap.Version
+	if dreq.KnownVersion == cur {
+		return json.Marshal(getConfigDeltaReply{Mode: "unchanged", TargetVersion: cur, Epoch: epoch})
+	}
+
+	chain, latest, ok := globalConfigStore.deltaRing.chain(dreq.KnownVersion)
+	if !ok || latest != cur {
+		// Gap, resync marker, or the ring lags the store version (the brief
+		// record-after-unlock window, or a non-contiguous publish). Full resync.
+		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
+	}
+
+	// Remainder = the target snapshot minus the blocklist (which rides as the
+	// delta chain). Redact secrets from unenrolled callers, mirroring GetConfig.
+	snap.BlockedHosts = nil
+	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
+		snap.CAFingerprint = fp
+	}
+	if !enrolled {
+		snap.SessionHMAC = ""
+		snap.IdPProfiles = nil
+	}
+	targetFP := ""
+	if n := len(chain); n > 0 {
+		targetFP = chain[n-1].FP
+	}
+	return json.Marshal(getConfigDeltaReply{
+		Mode:          "delta",
+		BaseVersion:   dreq.KnownVersion,
+		TargetVersion: cur,
+		Epoch:         epoch,
+		Deltas:        chain,
+		TargetFP:      targetFP,
+		Remainder:     &snap,
+	})
 }
