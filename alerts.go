@@ -39,6 +39,24 @@ func fireAlert(event string, payload AlertPayload) {
 
 func init() { alerts.SetSink(fireAlert) }
 
+// alertHookArmed reports whether any enabled webhook subscribes to event
+// (exactly or via "*"). Hot-path producers that fire per-request-rate alerts
+// (recordStats: one `go fireAlert(...)` per blocked request) consult this
+// BEFORE constructing the payload and spawning the goroutine — on the default
+// deployment with no webhooks configured, the pre-gate spawn paid a
+// heap-allocated closure, a goroutine spawn/schedule round, and Dispatch's
+// dedup-mutex + timestamp work per blocked request for a guaranteed no-op.
+// The probe is a single RLock scan with zero allocations (gated by
+// TestBenchGate_AlertDispatchDisabledAllocs); an armed deployment spawns
+// exactly as before. A webhook added between the probe and the event is
+// benign: alerts are best-effort async delivery, and the next event fires
+// (same accepted race class as maybeTrackDestinationCountry's DB-swap
+// window). Reads globalAlertStore at call time, preserving the
+// test-reassignment tolerance of fireAlert.
+func alertHookArmed(event string) bool {
+	return globalAlertStore.HasEnabledHookFor(event)
+}
+
 // validateWebhookURL is re-exposed for the admin API handlers (config-time
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL

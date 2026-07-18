@@ -290,6 +290,29 @@ func (as *Store) GetByID(id string) (Webhook, bool) {
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
+// HasEnabledHookFor reports whether at least one enabled webhook subscribes to
+// event (exactly or via the "*" wildcard) — the same match rule Dispatch
+// applies. It is the allocation-free arm probe hot-path producers consult
+// BEFORE spawning a fire goroutine: on a deployment with no matching webhook
+// (the default — no webhooks at all), the probe is a single RLock scan and the
+// producer skips the goroutine spawn, payload construction, and Dispatch's
+// dedup/timestamp work entirely. Read-only; never touches the dedup state.
+func (as *Store) HasEnabledHookFor(event string) bool {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	for i := range as.hooks {
+		if !as.hooks[i].Enabled {
+			continue
+		}
+		for _, ev := range as.hooks[i].Events {
+			if ev == event || ev == "*" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Dispatch fans payload out to all enabled webhooks matching event.
 // Always non-blocking: delivery happens in background goroutines.
 // Q17: Duplicate events with the same event+detail are suppressed within

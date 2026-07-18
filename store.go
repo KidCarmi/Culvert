@@ -1092,16 +1092,25 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
-	// Fire webhook alerts for security events (async, non-blocking).
+	// Fire webhook alerts for security events (async, non-blocking). The
+	// alertHookArmed gate keeps the blocked path goroutine-free and
+	// allocation-free when no enabled webhook subscribes to the event — the
+	// default deployment; see alertHookArmed for the measured cost and the
+	// benign arm race. The payload literal sits INSIDE the gate so its Detail
+	// concatenation is also skipped when unarmed.
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
-		go fireAlert("threat_detected", AlertPayload{
-			Actor: ip, Host: host, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
-		})
+		if alertHookArmed("threat_detected") {
+			go fireAlert("threat_detected", AlertPayload{
+				Actor: ip, Host: host, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+			})
+		}
 	case "POLICY_BLOCK", "POLICY_DROP":
-		go fireAlert("policy_block", AlertPayload{
-			Actor: ip, Host: host, Detail: ruleMatched, Source: "policy",
-		})
+		if alertHookArmed("policy_block") {
+			go fireAlert("policy_block", AlertPayload{
+				Actor: ip, Host: host, Detail: ruleMatched, Source: "policy",
+			})
+		}
 	}
 	if status == "OK" || status == "POLICY_ALLOW" {
 		topHosts.Record(host)

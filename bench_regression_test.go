@@ -215,6 +215,40 @@ func TestBenchGate_GeoTrackDispatchDisabledAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_AlertDispatchDisabledAllocs locks in the goroutine-free,
+// allocation-free blocked-request stats path when no enabled webhook
+// subscribes to the event — the default deployment (no webhooks at all).
+// Before the alertHookArmed gate, recordStats ran `go fireAlert(...)` per
+// blocked request: a heap-allocated closure + goroutine spawn/schedule round
+// on the request path, plus Dispatch's dedup-mutex and RFC3339 timestamp
+// work in the spawned goroutine — 3 allocs/op serial (4 parallel) and ~732
+// ns/op measured, all for a guaranteed no-op. The gated path adds a single
+// RLock scan; the bound is ZERO — any reintroduction of the pre-gate spawn
+// (or payload construction outside the gate) fails this gate.
+func TestBenchGate_AlertDispatchDisabledAllocs(t *testing.T) {
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+
+	tsRecordResult(false) // arm the time-series minute bucket (steady state)
+	const maxAllocs int64 = 0
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			recordStats("203.0.113.7", "blocked.example.com", "POLICY_BLOCK", "block-rule", "Block_Page")
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("recordStats blocked/unarmed: %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: blocked-request stats path allocates %d/op with no webhooks configured, exceeds bound %d — "+
+			"a per-blocked-request alert goroutine spawn has returned to recordStats "+
+			"(alertHookArmed gate bypassed, or payload built outside the gate?)", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_ScrubAllocs guards the per-request header-scrub hot path.
 func TestBenchGate_ScrubAllocs(t *testing.T) {
 	const maxAllocs = 16 // baseline 13

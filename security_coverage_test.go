@@ -240,6 +240,50 @@ func TestFireAlert_WildcardEvent(t *testing.T) {
 	}
 }
 
+// TestRecordStats_AlertGate_ArmedDelivers proves the alertHookArmed gate on
+// the blocked-request path never drops a real alert: with an enabled webhook
+// subscribed to policy_block, recordStats("POLICY_BLOCK") must still dispatch
+// exactly as before the gate. (The unarmed side — no goroutine, no allocation
+// — is pinned by TestStatsBlockedPath_ZeroAllocUnarmed.)
+func TestRecordStats_AlertGate_ArmedDelivers(t *testing.T) {
+	received := make(chan struct{}, 5)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	restore := ssrf.AllowLoopbackForTest()
+	defer restore()
+
+	orig := globalAlertStore
+	defer func() { globalAlertStore = orig }()
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+	resetAlertDedup()
+	t.Cleanup(resetAlertDedup)
+
+	as.Add(AlertWebhook{
+		Name:    "block-hook",
+		URL:     srv.URL,
+		Events:  []string{"policy_block"},
+		Enabled: true,
+	})
+
+	if !alertHookArmed("policy_block") {
+		t.Fatal("alertHookArmed(policy_block) = false with an enabled subscribed hook")
+	}
+	recordStats("203.0.113.9", "blocked.example.com", "POLICY_BLOCK", "gate-armed-rule", "Block_Page")
+
+	select {
+	case <-received:
+		// Good — the gated path still delivers when armed.
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout: policy_block webhook not fired through the gated recordStats path")
+	}
+}
+
 func TestFireAlert_TimestampAutoFilled(t *testing.T) {
 	// fireAlert should auto-fill Timestamp when empty — just ensure no panic.
 	orig := globalAlertStore

@@ -117,6 +117,70 @@ func BenchmarkRecordStatsAllowedParallel(b *testing.B) {
 	})
 }
 
+// swapEmptyAlertStore installs a fresh, empty webhook store for the duration
+// of a benchmark/test and restores the original, so the unarmed-path
+// measurements are deterministic regardless of what hooks other tests left on
+// the process-wide store.
+func swapEmptyAlertStore(tb testing.TB) {
+	tb.Helper()
+	orig := globalAlertStore
+	tb.Cleanup(func() { globalAlertStore = orig })
+	as := &AlertStore{}
+	as.Init("")
+	globalAlertStore = as
+}
+
+// BenchmarkRecordStatsBlocked measures the per-request stats fan-out for a
+// BLOCKED request with no webhooks configured (the default deployment). Before
+// the alertHookArmed gate this path spawned a `go fireAlert(...)` goroutine
+// per blocked request — a heap-allocated closure + spawn/schedule round plus
+// Dispatch's dedup-mutex and timestamp work, all for a guaranteed no-op
+// (measured 732 ns/op, 113 B/op, 3 allocs/op serial; 1181 ns/op, 4 allocs/op
+// parallel). Gated it is the same zero-alloc accounting as the allowed path.
+func BenchmarkRecordStatsBlocked(b *testing.B) {
+	swapEmptyAlertStore(b)
+	tsRecordResult(false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		recordStats("203.0.113.7", "blocked.example.com", "POLICY_BLOCK", "block-rule", "Block_Page")
+	}
+}
+
+// BenchmarkRecordStatsBlockedParallel is the concurrent variant — the shape a
+// default-deny deployment sees under a scan or block flood.
+func BenchmarkRecordStatsBlockedParallel(b *testing.B) {
+	swapEmptyAlertStore(b)
+	tsRecordResult(false)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			recordStats("203.0.113.7", "blocked.example.com", "THREAT_BLOCKED", "feed", "urlhaus")
+		}
+	})
+}
+
+// TestStatsBlockedPath_ZeroAllocUnarmed is the deterministic regression gate
+// for the gated blocked path: with no enabled webhook subscribed, recording a
+// blocked request must not allocate and must not spawn an alert goroutine.
+// Allocation counts are hardware-independent, so any reintroduction of the
+// pre-gate spawn (or payload construction outside the gate) fails on every
+// runner.
+func TestStatsBlockedPath_ZeroAllocUnarmed(t *testing.T) {
+	swapEmptyAlertStore(t)
+	tsRecordResult(false) // arm lastMin so the loop measures the same-minute path
+	for _, status := range []string{"POLICY_BLOCK", "POLICY_DROP", "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED"} {
+		allocs := testing.AllocsPerRun(1000, func() {
+			recordStats("203.0.113.7", "blocked.example.com", status, "rule-x", "act")
+		})
+		if allocs != 0 {
+			t.Errorf("REGRESSION: recordStats(%s) allocates %.1f/op with no webhooks configured, want 0 — "+
+				"the per-blocked-request alert spawn has returned ahead of the alertHookArmed gate", status, allocs)
+		}
+	}
+}
+
 // TestStatsHotPath_ZeroAllocSteadyState is the deterministic regression gate
 // for the stats hot path (mirrors reqlog's TestAdd_ZeroAllocSteadyState):
 // counting a request against an already-tracked host and bumping the
