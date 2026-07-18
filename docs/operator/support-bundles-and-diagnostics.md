@@ -41,16 +41,41 @@ The bundle is written under `<dataDir>/support/bundles/<id>/`. Three retention
 bounds keep the bundle store from growing without limit (all audited as
 `support.bundle.expire`, and surfaced read-only on `/api/support/status`):
 
-- **Count cap** — only the newest *N* evictable bundles are kept; the oldest are
-  evicted when a new bundle is built.
+- **Count cap** — only the newest *N* evictable bundles are kept (default 10); the
+  oldest are evicted when a new bundle is built. **Configurable** (`keep`, 1–10000).
 - **Age cap** — a background janitor evicts any evictable bundle older than the max
   age (default 30 days), so an **idle** appliance (one that has stopped creating
   bundles, and so never triggers the count cap) still ages out stale bundles.
-  A bundle whose timestamp can't be read is kept (fail-safe).
+  A bundle whose timestamp can't be read is kept (fail-safe). **Configurable**
+  (`max_age_days`, 1–3650).
 - **Size cap** — a hard ceiling on the total store size (default 2 GiB); the oldest
   evictable bundles are reclaimed above it. Without this, a store of large bundles
   could wedge bundle creation — the free-disk preflight only *refuses* a new build,
-  it never reclaims.
+  it never reclaims. **Always active** (not configurable — the disk-safety backstop).
+
+### Tuning the count and age caps
+
+The **Retention tuning** card in the Support panel (admin-only), or
+`GET`/`PUT /api/support/retention`, sets the `keep` and `max_age_days` caps.
+
+- The caps are **node-local**: each node stores its own, durable in
+  `admin_settings.json`. They are deliberately **off** config export/import,
+  version-rollback, and CP→DP cluster sync — a rollback or a fleet push must never
+  mass-evict forensic evidence. In a cluster, set them per node; each node's
+  effective caps are visible on its own `/api/support/status`.
+- A `PUT` is a **partial** patch: send only the field you want to change; an omitted
+  field is left unchanged (so setting `keep` can never silently reset `max_age_days`).
+  Out-of-range values are **rejected**, not clamped. Disabling a cap is not supported
+  — the size cap is the always-on backstop.
+- Tightening a cap is a **one-way door**. If the new caps would evict any
+  non-evidence bundle, the `PUT` returns `409` with an `evict_count`; the UI asks you
+  to confirm, and the API requires a matching `confirm_evict` to proceed. Evidence
+  and pending bundles are never counted. The tightened caps take effect on the **next
+  janitor sweep** (within the sweep cadence), not instantly — so a mistaken tighten
+  can be re-widened before the sweep runs. `GET` reports `pending_evictions`: how many
+  bundles the *current* caps will remove on the next sweep.
+- A hand-edited out-of-range persisted value (e.g. `keep: 0`) is **refused on load**
+  and the compiled defaults are kept — a corrupt file can never wipe the store.
 
 **Evidence is never auto-deleted.** A bundle bound to a support **case** (a
 `case=<id>` on creation) is exempt from *all three* caps — it is forensic evidence

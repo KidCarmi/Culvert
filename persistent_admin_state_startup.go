@@ -33,6 +33,10 @@ import "context"
 //  6. LoadAdminSettings — it restores GUI-saved state (e.g. re-enables
 //     the log store) and therefore must run after the subsystems it toggles
 //     have been initialised earlier in startup.
+//     6a. startSupportRetentionJanitor — started here, AFTER LoadAdminSettings, so
+//     its immediate boot sweep observes the GUI-configured retention caps (Slice B)
+//     instead of the compiled defaults. Moved out of the background-services slice
+//     for this ordering guarantee.
 //  7. flushStartupAlerts LAST — earlier init slices (e.g. the Root-CA load,
 //     CHAOS-06) queue alerts via deferStartupAlert because the webhook store
 //     only becomes real at step 4; the flush delivers them now that it is.
@@ -54,5 +58,11 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	// closes the rename/crash window before the first periodic counter save.
 	saveHitCounters(cfg.HitCountersPath)
 	LoadAdminSettings(cfg.AdminSettingsPath)
+	// Slice B: start the support-bundle retention janitor only AFTER LoadAdminSettings
+	// has restored the GUI-configured caps, so its immediate boot sweep enforces the
+	// operator's caps rather than the compiled defaults for up to one tick. Parented
+	// to ctx so it exits on shutdown (identical lifetime to the old placement in the
+	// background-services slice, just later in the boot order).
+	go startSupportRetentionJanitor(ctx)
 	flushStartupAlerts()
 }

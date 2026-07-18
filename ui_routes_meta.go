@@ -756,6 +756,11 @@ var uiRoutes = []uiRouteMetadata{
 				Note: "elevate the default bundle capture depth for a bounded window (mandatory positive ttl_seconds); admin; audited as support.debug_level.set"},
 			{Method: "DELETE", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 				Note: "revert the capture level to baseline immediately; operator+; audited as support.debug_level.clear"}}},
+	{Path: "/api/support/retention", Handler: "apiSupportRetention", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "current retention caps + defaults + bounds + pending-eviction projection"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "set the configurable count/age retention caps (partial {keep, max_age_days}; a change evicting evidence-exempt bundles needs typed confirm_evict); admin; audited as support.retention.set"}}},
 	{Path: "/api/diagnose/storage", Handler: "apiDiagnoseStorage", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "local read-only storage diagnosis (writability probe + free space + data-dir stat); operator+; no network, no shell; audited as diagnose.storage"}}},

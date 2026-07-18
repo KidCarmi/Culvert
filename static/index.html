@@ -4289,6 +4289,19 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">Retention tuning</div>
+            <p class="hint">Node-local caps on the persisted bundle store. <strong>Case-bound (evidence) and pending bundles are exempt</strong>; a 2&nbsp;GiB store ceiling is always active. Tightening a cap is a <strong>one-way door</strong> — evicted bundles cannot be recovered, and a change that would evict bundles must be confirmed.</p>
+            <div id="support-retention" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
+              <label class="hint" for="support-ret-keep">Keep newest</label>
+              <input id="support-ret-keep" class="input sm" type="number" min="1" max="10000" style="width:90px" title="Number of newest evictable bundles to keep (1–10000)">
+              <label class="hint" for="support-ret-age">Max age (days)</label>
+              <input id="support-ret-age" class="input sm" type="number" min="1" max="3650" style="width:90px" title="Evict non-evidence bundles older than this many days (1–3650)">
+              <button class="btn primary sm" data-click="supportSetRetention" data-min-role="admin" title="Apply the retention caps (a tightening that evicts bundles asks for confirmation)">Save caps</button>
+            </div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Diagnostics</div>
             <p class="hint">Local, read-only checks - no network, no shell.</p>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="operator">
@@ -4735,6 +4748,7 @@ document.addEventListener('click', e => {
     case 'supportCreateBundle':    supportCreateBundle(); break;
     case 'supportSetDebugLevel':   supportSetDebugLevel(); break;
     case 'supportClearDebugLevel': supportClearDebugLevel(); break;
+    case 'supportSetRetention':    supportSetRetention(); break;
     case 'diagnoseAll':            diagnoseAll(); break;
     case 'diagnoseStorage':        diagnoseStorage(); break;
     case 'diagnoseUpstream':       diagnoseUpstream(); break;
@@ -13276,14 +13290,17 @@ async function loadSupport() {
   // resolves, and surface per-panel errors without letting one fail the others.
   const dlEl = document.getElementById('support-debug-level');
   if (dlEl) { dlEl.innerHTML = '<p class="hint">Loading…</p>'; dlEl.setAttribute('aria-busy', 'true'); }
+  const retEl = document.getElementById('support-retention');
+  if (retEl) { retEl.innerHTML = '<p class="hint">Loading…</p>'; retEl.setAttribute('aria-busy', 'true'); }
   const cf = document.getElementById('support-case-filter');
   const caseFilter = (cf && cf.value || '').trim();
   const bundlesPath = '/api/support/bundles' + (caseFilter ? '?case=' + encodeURIComponent(caseFilter) : '');
-  const [healthR, statusR, bundlesR, dlR] = await Promise.allSettled([
+  const [healthR, statusR, bundlesR, dlR, retR] = await Promise.allSettled([
     api('/api/health/explain'),
     api('/api/support/status'),
     api(bundlesPath),
     api('/api/support/debug-level'),
+    api('/api/support/retention'),
   ]);
   if (healthR.status === 'fulfilled') renderSupportHealth(healthR.value);
   else if (healthEl) healthEl.innerHTML = '<p class="hint">Failed to load health: ' + escHtml(healthR.reason.message) + '</p>';
@@ -13293,7 +13310,9 @@ async function loadSupport() {
   else if (bundlesEl) bundlesEl.innerHTML = '<p class="hint">Failed to load bundles: ' + escHtml(bundlesR.reason.message) + '</p>';
   if (dlR.status === 'fulfilled') renderSupportDebugLevel(dlR.value);
   else if (dlEl) dlEl.innerHTML = '<p class="hint">Failed to load capture level: ' + escHtml(dlR.reason.message) + '</p>';
-  [healthEl, statusEl, bundlesEl, dlEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
+  if (retR.status === 'fulfilled') renderSupportRetention(retR.value);
+  else if (retEl) retEl.innerHTML = '<p class="hint">Failed to load retention: ' + escHtml(retR.reason.message) + '</p>';
+  [healthEl, statusEl, bundlesEl, dlEl, retEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
   loadRecipients();
 }
 
@@ -13836,6 +13855,56 @@ async function supportClearDebugLevel() {
     await loadSupport();
   } catch (err) {
     toast('Revert failed: ' + err.message, 'error');
+  }
+}
+
+function renderSupportRetention(r) {
+  const el = document.getElementById('support-retention');
+  if (!el) return;
+  r = r || {};
+  const b = r.bounds || {};
+  const kb = b.keep || {}, ab = b.max_age_days || {};
+  const pending = r.pending_evictions || 0;
+  el.innerHTML = '<p class="hint">Keep newest <strong>' + escHtml(String(r.keep)) +
+    '</strong> bundles · evict non-evidence older than <strong>' + escHtml(String(r.max_age_days)) +
+    '</strong> days' +
+    (pending > 0 ? ' · <strong style="color:var(--orange)">' + escHtml(String(pending)) +
+      '</strong> bundle(s) pending eviction on the next sweep' : '') + '</p>';
+  // Pre-fill the inputs with the current values (never clobber an in-progress edit).
+  const keepInp = document.getElementById('support-ret-keep');
+  const ageInp = document.getElementById('support-ret-age');
+  if (keepInp) { if (kb.min != null) keepInp.min = kb.min; if (kb.max != null) keepInp.max = kb.max; if (document.activeElement !== keepInp) keepInp.value = r.keep; }
+  if (ageInp) { if (ab.min != null) ageInp.min = ab.min; if (ab.max != null) ageInp.max = ab.max; if (document.activeElement !== ageInp) ageInp.value = r.max_age_days; }
+}
+
+async function supportSetRetention() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const keepInp = document.getElementById('support-ret-keep');
+  const ageInp = document.getElementById('support-ret-age');
+  const keep = parseInt((keepInp && keepInp.value) || '', 10);
+  const age = parseInt((ageInp && ageInp.value) || '', 10);
+  if (!(keep >= 1) || !(age >= 1)) { toast('Keep and max-age must be positive integers', 'error'); return; }
+  const body = { keep: keep, max_age_days: age };
+  try {
+    let r = await apiFetch('/api/support/retention', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.status === 409) {
+      // Destructive-tightening typed-confirm: the server projected how many
+      // non-evidence bundles this change would evict; require explicit consent.
+      const j = await r.json().catch(() => ({}));
+      const n = j.evict_count || 0;
+      const ok = await confirmAction(
+        'Evict ' + n + ' bundle(s)?',
+        'Tightening these caps will permanently remove ' + n + ' non-evidence bundle(s) on the next sweep. Case-bound (evidence) and pending bundles are exempt. This cannot be undone.',
+        'Evict ' + n);
+      if (!ok) return;
+      body.confirm_evict = n;
+      r = await apiFetch('/api/support/retention', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    }
+    if (!r.ok) { throw new Error(await r.text()); }
+    toast('Retention caps saved', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Save caps failed: ' + err.message, 'error');
   }
 }
 

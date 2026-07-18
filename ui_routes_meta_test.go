@@ -77,7 +77,7 @@ import (
 //     green) but the const bump for one was overwritten, leaving actual=178 and
 //     the lock at 177 (main's Fast Gate was red on this). Bumped to match.
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 178
+	const want = 179
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
