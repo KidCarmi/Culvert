@@ -3177,6 +3177,16 @@ Firefox (all platforms):
       </div>
 
       <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Inspection-Coverage Trend</span></div>
+        <div class="panel-body">
+          <p class="hint">Per-interval inspection coverage over the recent window — is coverage eroding?
+            Sampled once a minute; each point is that minute's <strong>inspected ÷ (inspected + bypass/exclusion)</strong>.
+            Volatile (resets on restart).</p>
+          <div id="dechealth-trend"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
         <div class="panel-header"><span class="panel-title">Top Failure Reasons</span></div>
         <div class="panel-body">
           <p class="hint">What is breaking decryption and where in the handshake (PAN-OS Decryption Error-Index parity).</p>
@@ -7041,6 +7051,9 @@ function renderDecHealth(d) {
       </tr></thead><tbody>${rows}</tbody></table>`;
   }
 
+  // Coverage-erosion trend (ADR-0011 §3): per-interval ratio over the recent window.
+  renderDecTrend(d.trend || []);
+
   // Top failure reasons: category × stage, descending (server-sorted).
   const fEl = document.getElementById('dechealth-failures');
   if (fEl) {
@@ -7069,6 +7082,46 @@ function renderDecHealth(d) {
       `Learning-surge alerts: ${ae.surge_total ?? 0} · ` +
       `Fail-open: ${ae.fail_open_profiles ?? 0} profile(s) / ${ae.fail_open_rules ?? 0} rule(s)`);
   }
+}
+
+// renderDecTrend draws the inspection-coverage-erosion line (ADR-0011 §3) as a small
+// theme-aware inline SVG — no charting lib, matching the panel's other components. Each
+// point is one interval's inspected ÷ (inspected + bypass/exclusion). Intervals with no
+// decryption decisions are skipped (a flat "no traffic" gap would read as 0% coverage and
+// falsely alarm). Below two plottable points it shows a collecting hint.
+function renderDecTrend(trend) {
+  const el = document.getElementById('dechealth-trend');
+  if (!el) return;
+  const pts = (trend || []).filter(s => ((s.inspected || 0) + (s.bypassed || 0)) > 0);
+  if (pts.length < 2) {
+    el.innerHTML = '<p class="hint">Collecting samples… the coverage trend appears after a few minutes of decryption traffic on this node.</p>';
+    return;
+  }
+  const W = 640, H = 130, padL = 34, padR = 10, padT = 10, padB = 20;
+  const n = pts.length;
+  const xAt = i => padL + (i / (n - 1)) * (W - padL - padR);
+  const yAt = r => padT + (1 - Math.max(0, Math.min(1, r))) * (H - padT - padB);
+  const grid = [0, 0.5, 1].map(r => {
+    const y = yAt(r).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>` +
+      `<text x="${padL - 6}" y="${(yAt(r) + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--muted)">${r * 100}%</text>`;
+  }).join('');
+  const line = pts.map((s, i) => `${xAt(i).toFixed(1)},${yAt(s.ratio || 0).toFixed(1)}`).join(' ');
+  const area = `${padL},${yAt(0).toFixed(1)} ${line} ${xAt(n - 1).toFixed(1)},${yAt(0).toFixed(1)}`;
+  const latest = Math.round((pts[n - 1].ratio || 0) * 1000) / 10;
+  const fromT = new Date(pts[0].ts).toLocaleTimeString();
+  const toT = new Date(pts[n - 1].ts).toLocaleTimeString();
+  el.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Inspection coverage over time; latest ${latest}%" style="max-width:100%">
+      ${grid}
+      <polygon points="${area}" fill="var(--accent2)" opacity="0.12"/>
+      <polyline points="${line}" fill="none" stroke="var(--accent2)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+    <div class="hint" style="display:flex;justify-content:space-between;margin-top:4px">
+      <span>${escHtml(fromT)}</span>
+      <span>Latest interval: <strong style="color:var(--accent2)">${latest}%</strong> inspected</span>
+      <span>${escHtml(toT)}</span>
+    </div>`;
 }
 
 // drillDec sets the one-shot dec.* filter, switches to the Live Feed, and applies it.
