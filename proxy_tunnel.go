@@ -673,7 +673,15 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 			Outcome:        decryptobs.OutcomeRescued,
 			DecisionSource: decryptobs.DecisionAutoexcludeRescue,
 			Host:           hostOnly,
+			// The rescue is gated on a fail-open profile, so dec.ScopeID is the
+			// non-empty profile identity recordAutoExclude/recordAutoExcludeRescue
+			// keyed the cache/audit/alert entry on. Project it like every sibling
+			// builder (bypass/failure/withLearn) so the rescued row is attributable
+			// to its profile scope — otherwise a per-scope blast-radius/SIEM query
+			// misses every rescued session (review finding: scope-attribution gap).
+			ProfileID:      dec.ScopeID,
 			ExclReason:     autoExReasonClientCert,
+			ExclScope:      dec.ScopeID,
 			FailStage:      decryptobs.FailStageUpstreamHandshake,
 			FailCategory:   decryptobs.FailCategoryClientCertRequired,
 			Rescued:        true,
