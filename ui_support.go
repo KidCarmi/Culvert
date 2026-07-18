@@ -757,6 +757,12 @@ func buildSupportBundle(ctx context.Context, level support.DebugLevel, scope, ca
 // crash-safe on the error path (a failed persist never strands a partial dir),
 // and bounded (oldest-first retention cap) — roadmap cross-milestone invariant #4.
 func createSupportBundle(ctx context.Context, scope string, level support.DebugLevel, caseID string) (res *support.BuildResult, retErr error) {
+	// Reclaim over-cap OLD bundles BEFORE the low-disk preflight — otherwise a store
+	// already at the size ceiling refuses every new build (507) while stale bundles
+	// sit un-reclaimed, the exact wedge the size cap exists to prevent. No just-created
+	// bundle exists yet, so nothing to exempt.
+	pruneSupportBundlesBySize(supportMaxStoreBytes, "")
+
 	// Disk-headroom preflight: never begin a build that could fill /data. A
 	// statfs error is non-fatal (fail-open on an unreadable FS is fine here —
 	// the write itself still errors and cleans up), a low reading is fail-closed.
@@ -829,7 +835,9 @@ func createSupportBundle(ctx context.Context, scope string, level support.DebugL
 		return nil, fmt.Errorf("commit manifest: %w", err)
 	}
 	pruneSupportBundles(supportRetentionKeep)
-	pruneSupportBundlesBySize(supportMaxStoreBytes)
+	// Exempt the bundle we just built: a store over-cap from case-bound evidence must
+	// not delete the fresh bundle before we return its id (it would be un-approvable).
+	pruneSupportBundlesBySize(supportMaxStoreBytes, res.BundleID)
 	return res, nil
 }
 
@@ -866,20 +874,22 @@ func pruneSupportBundles(keep int) {
 }
 
 // evictBundleDir removes one bundle directory (best-effort, path-guarded) and records
-// the eviction. Caller MUST hold supportPruneMu. dirName is the ON-DISK directory,
-// NEVER the manifest BundleID (a corrupt/hand-copied manifest can name a different,
-// valid bundle).
-func evictBundleDir(dirName, reason string) {
+// the eviction. Returns true ONLY on a real removal — the size cap uses this to avoid
+// crediting bytes it did not actually reclaim. Caller MUST hold supportPruneMu. dirName
+// is the ON-DISK directory, NEVER the manifest BundleID (a corrupt/hand-copied manifest
+// can name a different, valid bundle).
+func evictBundleDir(dirName, reason string) bool {
 	if !supportBundleIDRe.MatchString(dirName) {
-		return // defense-in-depth against a path-traversal shape
+		return false // defense-in-depth against a path-traversal shape
 	}
 	if err := os.RemoveAll(filepath.Join(supportBundlesDir(), dirName)); err != nil {
 		logger.Printf("support: %s evict failed for %q: %v",
 			reason, strings.ReplaceAll(dirName, "\n", ""), err)
-		return
+		return false
 	}
 	supportRetentionEvicted.Add(1)
 	auditSystem("support.bundle.expire", dirName, reason)
+	return true
 }
 
 // pruneSupportBundlesByAge evicts persisted bundles whose manifest CreatedAt is
@@ -921,7 +931,10 @@ func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
 // (the supportMinFreeBytes preflight only refuses new builds, never reclaims). Evidence
 // (case-bound) bundles are exempt — if the store is over the ceiling with only evidence,
 // nothing is reclaimed (an operator must unbind/delete manually; logged once).
-func pruneSupportBundlesBySize(maxBytes int64) {
+// exceptDir (may be "") is a bundle the caller must never evict — the create path
+// passes the bundle it just built so a store already over-cap from case-bound
+// evidence can't delete the freshly-created bundle before returning its id.
+func pruneSupportBundlesBySize(maxBytes int64, exceptDir string) {
 	if maxBytes <= 0 {
 		return
 	}
@@ -939,12 +952,14 @@ func pruneSupportBundlesBySize(maxBytes int64) {
 	// Evict oldest-first (walk from the tail) over evictable bundles until under cap.
 	for i := len(sums) - 1; i >= 0 && total > maxBytes; i-- {
 		s := &sums[i]
-		if retentionEvidence(s) {
-			continue // evidence is never size-reclaimed
+		if retentionEvidence(s) || s.dirName == exceptDir {
+			continue // evidence (and the just-created bundle) are never size-reclaimed
 		}
-		size := s.SizeBytes
-		evictBundleDir(s.dirName, "retention size-cap")
-		total -= size
+		// Only credit the reclaim if the removal actually succeeded — otherwise the
+		// loop could stop under the cap while the files are still on disk.
+		if evictBundleDir(s.dirName, "retention size-cap") {
+			total -= s.SizeBytes
+		}
 	}
 	if total > maxBytes {
 		logger.Printf("support: store still over size cap (%d > %d bytes) after reclaiming all evictable bundles — remaining are case-bound evidence; manual cleanup required", total, maxBytes)
@@ -957,7 +972,7 @@ func pruneSupportBundlesBySize(maxBytes int64) {
 func startSupportRetentionJanitor(ctx context.Context) {
 	sweep := func() {
 		pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAge)
-		pruneSupportBundlesBySize(supportMaxStoreBytes)
+		pruneSupportBundlesBySize(supportMaxStoreBytes, "")
 	}
 	sweep()
 	t := time.NewTicker(supportRetentionTick)

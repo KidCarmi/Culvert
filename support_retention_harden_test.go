@@ -117,7 +117,7 @@ func TestRetentionSizeCap_ReclaimsOldestUnbound(t *testing.T) {
 	writeBundleTGZ(t, "csb_sizeboundaaaaaaaa234567abc", 1000)
 	writeBundleStateFile(t, "csb_sizeboundaaaaaaaa234567abc", bundleStateReady, "SR-2")
 
-	pruneSupportBundlesBySize(2500)
+	pruneSupportBundlesBySize(2500, "")
 
 	exists := func(id string) bool { _, e := os.Stat(filepath.Join(supportBundlesDir(), id)); return e == nil }
 	if exists("csb_sizeoldaaaaaaaaaa234567abc") || exists("csb_sizemidaaaaaaaaaa234567abc") {
@@ -128,6 +128,55 @@ func TestRetentionSizeCap_ReclaimsOldestUnbound(t *testing.T) {
 	}
 	if !exists("csb_sizeboundaaaaaaaa234567abc") {
 		t.Error("case-bound evidence must never be size-reclaimed")
+	}
+}
+
+// TestRetentionSizeCap_NeverEvictsExceptDir proves the create-path guarantee: the size
+// prune must NEVER evict the bundle named by exceptDir even when the store is over the
+// ceiling and EVERY other bundle is case-bound evidence (so nothing else is evictable).
+// Regression for the create-path hazard where a store already at the size ceiling from
+// evidence bundles would delete the freshly-built bundle before returning its id.
+func TestRetentionSizeCap_NeverEvictsExceptDir(t *testing.T) {
+	prev := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prev })
+
+	now := time.Unix(1_800_000_000, 0).UTC()
+	ts := func(dAgo int) string { return now.Add(-time.Duration(dAgo) * time.Hour).Format(time.RFC3339) }
+
+	// Three 1000-byte case-bound (evidence) bundles fill the store past a 2500 cap, plus a
+	// fresh unbound bundle the create path would pass as exceptDir. With everything else
+	// evidence, the prune has nothing evictable — it must leave exceptDir alone, not delete
+	// it as the only unbound (evictable) bundle.
+	for i, id := range []string{
+		"csb_exboundoneaaaaaaa234567abc",
+		"csb_exboundtwoaaaaaaa234567abc",
+		"csb_exboundthreeaaaa2234567abc",
+	} {
+		writeFakeBundle(t, id, ts(i+2))
+		writeBundleTGZ(t, id, 1000)
+		writeBundleStateFile(t, id, bundleStateReady, "SR-EX")
+	}
+	const fresh = "csb_exfreshaaaaaaaaaa234567abc"
+	writeFakeBundle(t, fresh, ts(1))
+	writeBundleTGZ(t, fresh, 1000)
+
+	pruneSupportBundlesBySize(2500, fresh)
+
+	exists := func(id string) bool { _, e := os.Stat(filepath.Join(supportBundlesDir(), id)); return e == nil }
+	if !exists(fresh) {
+		t.Error("the just-created (exceptDir) bundle must never be size-reclaimed, even when the store is over-cap with only evidence")
+	}
+	// The three evidence bundles are also exempt, so the store legitimately stays over-cap
+	// (logged once) — that is the documented one-way manual-cleanup posture, not a bug.
+	for _, id := range []string{
+		"csb_exboundoneaaaaaaa234567abc",
+		"csb_exboundtwoaaaaaaa234567abc",
+		"csb_exboundthreeaaaa2234567abc",
+	} {
+		if !exists(id) {
+			t.Errorf("case-bound evidence %s must never be size-reclaimed", id)
+		}
 	}
 }
 
@@ -153,7 +202,7 @@ func TestRetentionPruneSerialization(t *testing.T) {
 			defer wg.Done()
 			pruneSupportBundles(3)
 			pruneSupportBundlesByAge(now, time.Hour)
-			pruneSupportBundlesBySize(2000)
+			pruneSupportBundlesBySize(2000, "")
 		}()
 	}
 	wg.Wait() // -race asserts no data race; no panic asserts the mutex holds
