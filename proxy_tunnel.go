@@ -692,6 +692,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		// emitted alerts never learn. No rescue here (client-cert is handled above,
 		// structurally, before this branch).
 		maybeFailOpenOrigin(hostOnly, match, id, herr)
+		recordDecryptFailure(originInspectFailureOutcome(herr, hostOnly, dec, match)) // ADR-0011 failure taxonomy
 		logger.Printf("upstream TLS handshake error %q: %v%s", sanitizeLog(targetHost), herr, mintlsHint(match))
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		return
@@ -785,9 +786,10 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// stable across connections and clients can resume.
 	clientTLS := tls.Server(readerConn{Conn: rawClient, r: peekBuf}, mitmClientTLSConfig)
 	if err := clientTLS.HandshakeContext(r.Context()); err != nil {
-		clientTLS.Close()                             //nolint:errcheck // best-effort cleanup on handshake failure
-		upstreamTLS.Close()                           //nolint:errcheck // best-effort cleanup on handshake failure
-		maybeFailOpenClient(hostOnly, match, id, err) // learn a pinning rejection (learn-only; next session self-heals)
+		clientTLS.Close()                                                            //nolint:errcheck // best-effort cleanup on handshake failure
+		upstreamTLS.Close()                                                          //nolint:errcheck // best-effort cleanup on handshake failure
+		maybeFailOpenClient(hostOnly, match, id, err)                                // learn a pinning rejection (learn-only; next session self-heals)
+		recordDecryptFailure(clientInspectFailureOutcome(err, hostOnly, dec, match)) // ADR-0011 failure taxonomy
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}

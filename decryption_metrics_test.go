@@ -187,6 +187,84 @@ func TestRecordTunnelCloseDec_NilNoCoverage(t *testing.T) {
 	}
 }
 
+// decFailureLineRE parses one culvert_decrypt_failures_total series line.
+var decFailureLineRE = regexp.MustCompile(
+	`culvert_decrypt_failures_total\{fail_category="([^"]*)",fail_stage="([^"]*)"\} (\d+)`)
+
+// TestDecFailureCounter_Exposition pins exact counts + bounded labels on an isolated
+// instance (10 categories × 7 stages = 70 max series).
+func TestDecFailureCounter_Exposition(t *testing.T) {
+	c := &decFailureCounter{counts: map[string]*decFailureLabel{}}
+	var empty strings.Builder
+	c.writePrometheus(&empty)
+	if empty.Len() != 0 {
+		t.Fatalf("empty failure counter must emit nothing, got %q", empty.String())
+	}
+	c.record("certificate", "cert_verify")
+	c.record("certificate", "cert_verify")
+	c.record("client_pinned", "client_leaf_reject")
+
+	var sb strings.Builder
+	c.writePrometheus(&sb)
+	got := map[[2]string]int64{}
+	for _, m := range decFailureLineRE.FindAllStringSubmatch(sb.String(), -1) {
+		n, _ := strconv.ParseInt(m[3], 10, 64)
+		got[[2]string{m[1], m[2]}] = n
+	}
+	if got[[2]string{"certificate", "cert_verify"}] != 2 || got[[2]string{"client_pinned", "client_leaf_reject"}] != 1 {
+		t.Fatalf("failure counts wrong: %v", got)
+	}
+	// Cardinality: every enum combination stays bounded.
+	c2 := &decFailureCounter{counts: map[string]*decFailureLabel{}}
+	for _, cat := range decryptobs.AllFailCategories {
+		for _, st := range decryptobs.AllFailStages {
+			c2.record(cat.String(), st.String())
+		}
+	}
+	var sb2 strings.Builder
+	c2.writePrometheus(&sb2)
+	if n := len(decFailureLineRE.FindAllStringSubmatch(sb2.String(), -1)); n != len(decryptobs.AllFailCategories)*len(decryptobs.AllFailStages) {
+		t.Fatalf("failure series = %d, want %d (bounded by construction)", n, len(decryptobs.AllFailCategories)*len(decryptobs.AllFailStages))
+	}
+}
+
+// TestRecordDecryptFailure_CountsBothMetrics proves a failed session increments BOTH the
+// failure taxonomy AND the coverage total (outcome=failed) — the paired-count contract.
+func TestRecordDecryptFailure_CountsBothMetrics(t *testing.T) {
+	failuresBefore := globalDecFailureCount(t, "cipher", "upstream_handshake")
+	coverageBefore := globalDecSessionCount(t, "failed", "no_fail_open_502", "unknown")
+
+	recordDecryptFailure(&DecryptionOutcome{
+		Outcome:        decryptobs.OutcomeFailed,
+		DecisionSource: decryptobs.DecisionNoFailOpen502,
+		FailStage:      decryptobs.FailStageUpstreamHandshake,
+		FailCategory:   decryptobs.FailCategoryCipher,
+	})
+
+	if got := globalDecFailureCount(t, "cipher", "upstream_handshake"); got != failuresBefore+1 {
+		t.Fatalf("failures_total delta = %d, want +1", got-failuresBefore)
+	}
+	if got := globalDecSessionCount(t, "failed", "no_fail_open_502", "unknown"); got != coverageBefore+1 {
+		t.Fatalf("sessions_total{failed} delta = %d, want +1 (failed session must also count in coverage)", got-coverageBefore)
+	}
+	recordDecryptFailure(nil) // nil is a no-op, must not panic
+}
+
+// globalDecFailureCount reads the current count for one failure tuple off the global
+// counter (0 if absent). Delta-based, tolerant of suite accumulation.
+func globalDecFailureCount(t *testing.T, category, stage string) int64 {
+	t.Helper()
+	var sb strings.Builder
+	decFailures.writePrometheus(&sb)
+	for _, m := range decFailureLineRE.FindAllStringSubmatch(sb.String(), -1) {
+		if m[1] == category && m[2] == stage {
+			n, _ := strconv.ParseInt(m[3], 10, 64)
+			return n
+		}
+	}
+	return 0
+}
+
 // TestRecordDecryptSession_CoercesAndNilGuard exercises the global entry point: a nil
 // outcome is a no-op, and an outcome carrying cast/garbage enums coerces to the sentinels
 // (never a raw token) so the metric vocabulary stays closed.
