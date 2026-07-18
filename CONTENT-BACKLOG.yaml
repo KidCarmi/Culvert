@@ -1,0 +1,227 @@
+# Culvert Content Backlog
+#
+# The prioritized queue for the autonomous content factory. Every item is
+# built against verified product evidence (see CONTENT-STANDARD.md). Status
+# values: todo | in_progress | blocked | done. Priority: critical | high |
+# medium | low. Items are worked highest-priority-first; ties broken by
+# dependency order (foundational items first).
+#
+# type: doc  = documentation-website article
+#       yt   = YouTube package
+#       train = administrator-training outline
+#       meta = content-infrastructure / index work
+
+meta:
+  product: Culvert
+  product_summary: >-
+    Self-hosted Secure Web Gateway and identity-aware forward proxy
+    (HTTP/HTTPS/SOCKS5/WebSocket) shipped as a single Go binary.
+  content_root: content/
+  standard: CONTENT-STANDARD.md
+  evidence_hierarchy:
+    - runtime_implementation
+    - automated_test_coverage
+    - public_api_or_config_contract
+    - authoritative_architecture_decision
+    - reproducible_lab_evidence
+
+items:
+  # ---- Critical: foundational, everything else references these ----
+  - id: C-001
+    title: "Product overview: what Culvert is and its verified capabilities"
+    type: doc
+    priority: critical
+    status: todo
+    audience: [evaluator, security-engineer, admin]
+    path: content/docs/01-overview/what-is-culvert.md
+    evidence_areas: [README.md, main.go, "internal/*", docs/architecture.md]
+    depends_on: []
+    notes: >-
+      Capability inventory verified against code. Each capability row must map
+      to a source file/test/API. Explicitly separate supported vs. planned.
+
+  - id: C-002
+    title: "Architecture overview (website edition): request pipeline + CP/DP"
+    type: doc
+    priority: critical
+    status: todo
+    audience: [security-engineer, admin, architect]
+    path: content/docs/01-overview/architecture.md
+    evidence_areas: [docs/architecture.md, proxy.go, controlplane.go, policy.go]
+    depends_on: [C-001]
+    notes: >-
+      Adapt/verify the request pipeline and CP/DP model against current code;
+      Mermaid diagrams faithful to the actual stages. Do not merely mirror
+      docs/architecture.md — verify each stage still exists.
+
+  - id: C-003
+    title: "Getting started: first boot, setup wizard, readiness verification"
+    type: doc
+    priority: critical
+    status: todo
+    audience: [admin]
+    path: content/docs/02-getting-started/quick-start.md
+    evidence_areas: [README.md, scripts/install.sh, docker-compose.yml, healthcheck.go]
+    depends_on: [C-001]
+    notes: >-
+      Every command validated against the built binary / compose file. Health
+      and readiness endpoints verified against healthcheck.go.
+
+  # ---- High: core capability administration guides ----
+  - id: H-010
+    title: "Policy engine & Zero-Trust egress policy authoring"
+    type: doc
+    priority: high
+    status: todo
+    audience: [security-engineer, admin]
+    path: content/docs/03-policy/policy-engine.md
+    evidence_areas: [policy.go, "internal/urlcat", "internal/sslbypass", proxy.go]
+    depends_on: [C-002]
+    notes: 8 condition types, first-match, default-deny, actions, TLS action.
+
+  - id: H-011
+    title: "TLS inspection administration guide"
+    type: doc
+    priority: high
+    status: todo
+    audience: [security-engineer, admin]
+    path: content/docs/04-tls-inspection/tls-inspection.md
+    evidence_areas: [ca.go, "internal/ca", proxy_tunnel.go, docs/operator/decryption-profiles.md]
+    depends_on: [H-010]
+    notes: CA lifecycle, leaf signing, per-host bypass, cache bounds, passphrase.
+
+  - id: H-012
+    title: "Identity & access: OIDC, SAML, LDAP, TOTP 2FA, admin RBAC"
+    type: doc
+    priority: high
+    status: todo
+    audience: [security-engineer, admin]
+    path: content/docs/05-identity/identity-and-access.md
+    evidence_areas: [auth_oidc.go, auth_saml.go, auth_ldap.go, "internal/totp", ui_rbac.go]
+    depends_on: [C-002]
+    notes: Multi-IdP routing, RBAC roles, session security.
+
+  - id: H-013
+    title: "Observability: metrics, dashboard, logs, syslog, alerts, audit"
+    type: doc
+    priority: high
+    status: todo
+    audience: [admin, sre]
+    path: content/docs/06-observability/observability.md
+    evidence_areas: [metrics.go, events.go, logger.go, syslog.go, alerts.go, "internal/audit"]
+    depends_on: [C-002]
+    notes: Prometheus namespace, SSE, syslog RFC modes, signed webhooks, audit ring.
+
+  - id: H-014
+    title: "YouTube: What is Culvert (product intro, 3-4 min)"
+    type: yt
+    priority: high
+    status: todo
+    audience: [evaluator, security-engineer]
+    path: content/youtube/01-what-is-culvert/
+    evidence_areas: [C-001]
+    depends_on: [C-001]
+    notes: Narration grounded in the verified capability inventory.
+
+  - id: H-015
+    title: "YouTube: Deploy Culvert in 5 minutes (quick-start demo)"
+    type: yt
+    priority: high
+    status: todo
+    audience: [admin]
+    path: content/youtube/02-deploy-in-5-minutes/
+    evidence_areas: [C-003]
+    depends_on: [C-003]
+    notes: Every command reproduced/validated; failure & recovery path real.
+
+  # ---- Medium: deeper capability + operations ----
+  - id: M-020
+    title: "Content security: ClamAV, YARA, threat feeds, DPI, file blocking, CDR"
+    type: doc
+    priority: medium
+    status: todo
+    audience: [security-engineer]
+    path: content/docs/07-content-security/content-security.md
+    evidence_areas: [scanner.go, "internal/clamav", "internal/yara", threatfeed.go, "internal/fileblock"]
+    depends_on: [H-010]
+
+  - id: M-021
+    title: "Distributed deployment: Control Plane / Data Plane with mTLS"
+    type: doc
+    priority: medium
+    status: todo
+    audience: [admin, architect]
+    path: content/docs/08-distributed/control-plane-data-plane.md
+    evidence_areas: [controlplane.go, enrollment.go, dp_enrollment.go, controlplane_tls.go]
+    depends_on: [C-002]
+
+  - id: M-022
+    title: "PAC traffic steering"
+    type: doc
+    priority: medium
+    status: todo
+    audience: [admin]
+    path: content/docs/09-pac/pac-traffic-steering.md
+    evidence_areas: ["internal/pac", pac.go, docs/operator/pac-traffic-steering.md]
+    depends_on: [H-010]
+
+  - id: M-023
+    title: "High availability: etcd fencing lease & failover"
+    type: doc
+    priority: medium
+    status: todo
+    audience: [admin, sre, architect]
+    path: content/docs/08-distributed/high-availability.md
+    evidence_areas: ["internal/halease", ha_lease.go, ha_failover.go, docs/operator/ha-lease-failover.md]
+    depends_on: [M-021]
+
+  - id: M-024
+    title: "Backup & restore via the compose operator contract"
+    type: doc
+    priority: medium
+    status: todo
+    audience: [admin, sre]
+    path: content/docs/10-operations/backup-and-restore.md
+    evidence_areas: [docker-compose.yml, "internal/backupcrypt", docs/operator/docker-compose-backup-restore.md]
+    depends_on: [C-003]
+
+  - id: M-025
+    title: "YouTube: Zero-Trust egress policy in the admin UI"
+    type: yt
+    priority: medium
+    status: todo
+    audience: [security-engineer, admin]
+    path: content/youtube/03-zero-trust-policy/
+    evidence_areas: [H-010]
+    depends_on: [H-010]
+
+  - id: M-026
+    title: "Administrator training outline: Culvert operations curriculum"
+    type: train
+    priority: medium
+    status: todo
+    audience: [admin]
+    path: content/training/admin-curriculum.md
+    evidence_areas: [C-001, C-003, H-010, H-011, H-012, H-013]
+    depends_on: [C-003, H-010]
+
+  # ---- Low / later ----
+  - id: L-030
+    title: "Supply-chain integrity: signed release catalog & release management"
+    type: doc
+    priority: low
+    status: todo
+    audience: [security-engineer, admin]
+    path: content/docs/11-supply-chain/release-management.md
+    evidence_areas: [release_wiring.go, "docs/operator/enterprise-release-catalog-plan.md"]
+    depends_on: [C-002]
+
+  - id: L-031
+    title: "Configuration reference (verified field-by-field)"
+    type: doc
+    priority: low
+    status: todo
+    audience: [admin]
+    path: content/docs/12-reference/configuration.md
+    evidence_areas: [config.go, config.example.yaml]
+    depends_on: [C-003]
