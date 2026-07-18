@@ -55,13 +55,19 @@ type DataPlaneClient struct {
 	keyFile   string   // TLS key for reconnection
 	caFile    string   // CA cert for reconnection
 	mu        sync.Mutex
-	// lastVersion is the applied config-snapshot version. fetchAndApply is the
-	// sole writer, but metricsLoop (a separate goroutine) now reads it to stamp
-	// the heartbeat report — so it is atomic to keep that cross-goroutine read
-	// race-free under -race.
-	lastVersion atomic.Int64
-	failCount   int // consecutive fetch failures for exponential backoff
-	callForTest func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// lastVersion / lastPolicyVersion are the version facts of the config
+	// snapshot this node has APPLIED — the config-store version and the CP's
+	// monotonic policy generation carried on that snapshot (NOT the DP-local
+	// policyStore apply counter, which ReplaceAll bumps to 1,2,… regardless of
+	// the CP generation). fetchAndApply is the sole writer; both are seeded from
+	// the last-known-good snapshot at startup so the heartbeat reports the
+	// config the node is already enforcing even before the first successful CP
+	// poll. Atomic because metricsLoop (a separate goroutine) reads them to
+	// stamp the heartbeat report — race-free under -race.
+	lastVersion       atomic.Int64
+	lastPolicyVersion atomic.Int64
+	failCount         int // consecutive fetch failures for exponential backoff
+	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -317,6 +323,27 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.lastVersion.Store(snap.Version)
+	c.lastPolicyVersion.Store(snap.PolicyVersion)
+}
+
+// buildMetricsReport assembles the DP→CP heartbeat report. The version facts
+// are raw diagnostics (M5 PR-A): ConfigVersion/PolicyVersion are the APPLIED
+// snapshot's identity (seeded from the last-known-good snapshot at startup, so
+// they are populated even before the first successful poll), Epoch is the
+// highest fencing epoch observed, and CulvertVersion is this build. All reads
+// are atomic or set-once — safe from the metricsLoop goroutine.
+func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
+	return MetricsReport{
+		NodeID:         c.nodeID,
+		Total:          atomic.LoadInt64(&statTotal),
+		Blocked:        atomic.LoadInt64(&statBlocked),
+		AuthFail:       atomic.LoadInt64(&statAuthFail),
+		Uptime:         uptime(),
+		ConfigVersion:  c.lastVersion.Load(),
+		PolicyVersion:  c.lastPolicyVersion.Load(),
+		Epoch:          dpLastSeenEpoch.Load(),
+		CulvertVersion: version,
+	}
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
@@ -327,21 +354,7 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// M5 PR-A: stamp raw version facts. policyStore.policyVersion() is
-			// RLock-guarded, dpLastSeenEpoch is atomic, and version is set once
-			// at startup — all safe to read from this goroutine.
-			polVer, _ := policyStore.policyVersion()
-			report := MetricsReport{
-				NodeID:         c.nodeID,
-				Total:          atomic.LoadInt64(&statTotal),
-				Blocked:        atomic.LoadInt64(&statBlocked),
-				AuthFail:       atomic.LoadInt64(&statAuthFail),
-				Uptime:         uptime(),
-				ConfigVersion:  c.lastVersion.Load(),
-				PolicyVersion:  polVer,
-				Epoch:          dpLastSeenEpoch.Load(),
-				CulvertVersion: version,
-			}
+			report := c.buildMetricsReport()
 			b, _ := json.Marshal(report)
 			raw, err := c.call(ctx, methodPushMetrics, b)
 			if err != nil {

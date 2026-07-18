@@ -121,6 +121,40 @@ func TestPushMetrics_StampsVersionFacts(t *testing.T) {
 	}
 }
 
+// TestBuildMetricsReport_StampsAppliedSnapshotFacts pins that the heartbeat
+// reports the APPLIED snapshot's version facts (Codex P2): ConfigVersion and
+// PolicyVersion come from the client's applied-snapshot tracking — which is
+// seeded from the last-known-good snapshot at startup — not from a live poll
+// or the DP-local policyStore apply counter.
+func TestBuildMetricsReport_StampsAppliedSnapshotFacts(t *testing.T) {
+	origEpoch := dpLastSeenEpoch.Load()
+	defer dpLastSeenEpoch.Store(origEpoch)
+	dpLastSeenEpoch.Store(11)
+
+	c := &DataPlaneClient{nodeID: "dp-1"}
+	// Simulate startup seeding from a cached snapshot at config v5 / policy v9,
+	// with no successful CP poll yet.
+	c.lastVersion.Store(5)
+	c.lastPolicyVersion.Store(9)
+
+	report := c.buildMetricsReport()
+	if report.NodeID != "dp-1" {
+		t.Fatalf("node_id = %q, want dp-1", report.NodeID)
+	}
+	if report.ConfigVersion != 5 {
+		t.Errorf("config_version = %d, want 5 (applied snapshot version)", report.ConfigVersion)
+	}
+	if report.PolicyVersion != 9 {
+		t.Errorf("policy_version = %d, want 9 (applied snapshot policy generation, not local counter)", report.PolicyVersion)
+	}
+	if report.Epoch != 11 {
+		t.Errorf("epoch = %d, want 11", report.Epoch)
+	}
+	if report.CulvertVersion != version {
+		t.Errorf("culvert_version = %q, want %q", report.CulvertVersion, version)
+	}
+}
+
 // TestUpdateNodeSeen_EmptyVersionPreservesExisting guards the skip-on-empty
 // contract: an older DP heartbeat that omits the version must not wipe a
 // version previously recorded from a newer report.
