@@ -207,6 +207,7 @@ func (h *HAState) selfFence(reason string) {
 	}
 	h.role = "standby"
 	h.since = time.Now()
+	fencedEpoch := h.leaseEpoch // capture the epoch being fenced before it is zeroed
 	h.leaseEpoch = 0
 	// CLOSE the keepalive stop channel rather than just nil it: when the
 	// loop's own renew round fenced, it exits by returning anyway — but a
@@ -227,6 +228,9 @@ func (h *HAState) selfFence(reason string) {
 	h.promoted.Store(false) // a future (fence-gated) promotion is legitimate
 
 	logger.Printf("HA: SELF-FENCED — demoted to read-only standby: %s", sanitizeLog(reason))
+	// M5: record the demotion in the failover ring (the epoch is the one being
+	// fenced out, captured before the zero above).
+	globalHAFailoverRing.Load().record("leader", "standby", "self-fence: "+reason, fencedEpoch, time.Now())
 	go alerts.Fire("ha_self_fenced", alerts.Payload{
 		Event:  "ha_self_fenced",
 		Detail: "leader lost the fencing lease and demoted to read-only standby: " + reason,

@@ -743,8 +743,13 @@ func (h *HAState) promote(reason string) {
 		Term:         h.term,
 	}
 	newTerm := h.term
+	promoteEpoch := h.leaseEpoch // fencing epoch in effect (0 in legacy mode)
 	h.mu.Unlock()
 	statHAFailovers.Add(1) // CL-9 PR3: count standby→leader promotions only
+	// M5: record the promotion in the failover ring. promote() is the single
+	// path every promotion funnels through — auto-failover, planned handoff, and
+	// PromoteManually all call it — so this one append covers them all.
+	globalHAFailoverRing.Load().record("standby", "leader", reason, promoteEpoch, time.Now())
 
 	// Update persisted config.
 	_ = saveHAConfig(cfg)
@@ -965,6 +970,9 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 		// -ha-etcd-endpoints wiring; the endpoints themselves are startup
 		// config — read-once, restart-scoped — so the panel shows STATUS).
 		addLeaseHealth(resp, globalHA)
+		// M5: recent role-transition history (promotions + self-fences), newest
+		// first. Raw facts for the HA panel; empty when nothing has transitioned.
+		resp["failover_events"] = globalHAFailoverRing.Load().list()
 		if status.Enabled && status.Role == "leader" {
 			resp["deploy_cmd"] = haDeployCommand()
 		}
