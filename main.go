@@ -181,6 +181,7 @@ func main() {
 	loadFileConfigAndFlags(s)
 	initUIExtras(s)
 	initLogger(s)
+	initMemoryBackstop() // P0-2: soft GOMEMLIMIT so a large config-apply degrades to GC, not OOM
 	initLifecycleContext(s)
 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
 
