@@ -31,8 +31,16 @@ evidence from but does not mirror.
 | Identity | [Identity & access (SSO, 2FA, RBAC)](docs/05-identity/identity-and-access.md) | published |
 | Observability | [Metrics, dashboard, logs, audit](docs/06-observability/observability.md) | published |
 
+## YouTube packages
+
+| Package | Status |
+|---|---|
+| [What is Culvert (intro)](youtube/01-what-is-culvert/package.md) | published |
+| [Deploy in 5 minutes (quick-start demo)](youtube/02-deploy-in-5-minutes/package.md) | published |
+
 The authoritative, prioritized queue is [`../CONTENT-BACKLOG.yaml`](../CONTENT-BACKLOG.yaml);
-live progress is in [`../RUN-STATE.md`](../RUN-STATE.md).
+live progress is in [`../RUN-STATE.md`](../RUN-STATE.md); the session summary is
+in [`../reports/CONTENT-FACTORY-SUMMARY.md`](../reports/CONTENT-FACTORY-SUMMARY.md).
 
 ## Authoring rules (summary)
 

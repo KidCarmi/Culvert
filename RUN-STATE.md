@@ -16,10 +16,16 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-015** — YouTube package: "Deploy Culvert in 5 minutes". Next.
+- **None** — all critical + high-priority items complete (stop condition #1).
+  Remaining backlog is medium/low priority (M-020…M-026, L-030, L-031), all
+  unblocked and available for a subsequent run.
 
 ## Recently completed
 
+- **H-015** — YouTube "Deploy in 5 minutes"
+  (`content/youtube/02-deploy-in-5-minutes/package.md`). Full package; `/health`
+  + `/ready` output shown is the reproduced lab run; the `docker compose` flow is
+  validated-by-code and explicitly marked not-reproduced in the ledger.
 - **H-014** — YouTube "What is Culvert"
   (`content/youtube/01-what-is-culvert/package.md`). Full package: objective,
   titles, thumbnail brief, narration script (every claim mapped to C-001
@@ -81,9 +87,10 @@ phase transition. Newest activity at the top of each section.
 - **H-011** — TLS inspection administration + evidence ledger (high).
 - **H-012** — Identity & access + evidence ledger (high).
 - **H-013** — Observability + evidence ledger (high).
+- **H-014** — YouTube package: What is Culvert (high).
+- **H-015** — YouTube package: Deploy in 5 minutes (high).
 
-**All critical + high-priority docs complete.** Remaining high-pri: the two
-YouTube packages (H-014, H-015).
+**All critical + high-priority items complete (8 docs/2 YouTube packages).**
 
 ## Commits created
 
@@ -94,7 +101,9 @@ YouTube packages (H-014, H-015).
 - `939ed62` docs(content): add verified policy engine & Zero-Trust guide.
 - `4466469` docs(content): add verified TLS inspection administration guide.
 - `3c4ec1d` docs(content): add verified identity & access guide.
-- _(H-013 commit — hash recorded next cycle)_
+- `6b01b96` docs(content): add verified observability guide.
+- `65b448a` docs(content): add YouTube package — What is Culvert (intro).
+- _(H-015 + summary commit — hash recorded on push)_
 
 ## Blocked items
 

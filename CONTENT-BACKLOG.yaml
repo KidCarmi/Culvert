@@ -127,7 +127,7 @@ items:
     title: "YouTube: Deploy Culvert in 5 minutes (quick-start demo)"
     type: yt
     priority: high
-    status: todo
+    status: done
     audience: [admin]
     path: content/youtube/02-deploy-in-5-minutes/
     evidence_areas: [C-003]
