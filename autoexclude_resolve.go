@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -403,10 +404,133 @@ func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err 
 }
 
 // autoExcludeHitCounter counts sessions bypassed because of a learned exclusion
-// (the self-heal read path). Exposed via metrics.go.
+// (the self-heal read path). Kept as the process-total source of truth for the
+// /api/decryption/health aggregate and the qualification test; the per-scope
+// breakdown rides autoExcludeHitsByScope (F6). Exposed via metrics.go.
 var autoExcludeHitCounter int64
 
-func recordAutoExcludeHit() { atomic.AddInt64(&autoExcludeHitCounter, 1) }
+// recordAutoExcludeHit records one learned-exclusion bypass. It is on the per-CONNECT
+// decision hot path (resolveSSLDecision's hit branch), so it must not allocate: the atomic
+// add is alloc-free, and autoExcludeHitsByScope.record keys by the scopeID string DIRECTLY
+// (no concat) so an already-seen scope is a lock + map read with zero allocation
+// (TestBenchGate_AutoExcludeResolveAllocs pins the failOpenHit case). sum over the
+// {scope} label reproduces the process total.
+func recordAutoExcludeHit(scopeID string) {
+	atomic.AddInt64(&autoExcludeHitCounter, 1)
+	autoExcludeHitsByScope.record(scopeID)
+}
+
+// autoExcludeHitScopeCounter is the cardinality-capped single-label {scope} hit counter
+// behind culvert_decrypt_autoexclude_hit_total. Scope is an admin-created decryption-
+// profile ID; the map is still capped defensively (overflow folds to _other_), matching
+// autoExcludeLearnCounter. Keying by the scopeID alone (no concat) keeps record()
+// allocation-free on the hot path.
+type autoExcludeHitScopeCounter struct {
+	mu     sync.RWMutex
+	counts map[string]*int64
+	order  []string
+}
+
+var autoExcludeHitsByScope = &autoExcludeHitScopeCounter{counts: make(map[string]*int64)}
+
+func (c *autoExcludeHitScopeCounter) record(scope string) {
+	c.mu.RLock()
+	p, ok := c.counts[scope]
+	c.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(p, 1)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p, ok = c.counts[scope]; ok {
+		atomic.AddInt64(p, 1)
+		return
+	}
+	if len(c.order) >= maxAutoExcludeLabels {
+		scope = "_other_" // fold overflow scopes into a shared bucket
+		if p, ok = c.counts[scope]; ok {
+			atomic.AddInt64(p, 1)
+			return
+		}
+	}
+	v := int64(1)
+	c.counts[scope] = &v
+	c.order = append(c.order, scope)
+}
+
+func (c *autoExcludeHitScopeCounter) writePrometheus(w *strings.Builder) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.order) == 0 {
+		return
+	}
+	w.WriteString("# HELP culvert_decrypt_autoexclude_hit_total Sessions that bypassed SSL inspection because of a learned decryption exclusion, by profile scope\n")
+	w.WriteString("# TYPE culvert_decrypt_autoexclude_hit_total counter\n")
+	for _, scope := range c.order {
+		s := strings.ReplaceAll(scope, `"`, "")
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_hit_total{scope=%q} %d\n", s, atomic.LoadInt64(c.counts[scope]))
+	}
+}
+
+// scopeGauge is one capped active-by-scope series.
+type scopeGauge struct {
+	scope string
+	n     int
+}
+
+// cappedActiveScopes orders the per-scope active counts (count desc, then scope name) and
+// bounds the distinct series at maxAutoExcludeLabels, folding the tail into a single
+// _other_ aggregate. The cache can hold up to maxEntries (tunable, default 4096) entries
+// across arbitrarily many admin-created profiles, so without the cap a scrape could emit
+// thousands of Prometheus series (Codex #817); this mirrors the hit counter's fold. The
+// count-desc order keeps the highest-occupancy scopes (the ones eroding coverage most) as
+// their own series and buckets the long tail.
+func cappedActiveScopes(byScope map[string]int) []scopeGauge {
+	if len(byScope) == 0 {
+		return nil
+	}
+	scopes := make([]string, 0, len(byScope))
+	for s := range byScope {
+		scopes = append(scopes, s)
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		if byScope[scopes[i]] != byScope[scopes[j]] {
+			return byScope[scopes[i]] > byScope[scopes[j]]
+		}
+		return scopes[i] < scopes[j]
+	})
+	out := make([]scopeGauge, 0, len(scopes))
+	other := 0
+	for i, s := range scopes {
+		if i >= maxAutoExcludeLabels {
+			other += byScope[s]
+			continue
+		}
+		out = append(out, scopeGauge{s, byScope[s]})
+	}
+	if other > 0 {
+		out = append(out, scopeGauge{"_other_", other})
+	}
+	return out
+}
+
+// writeAutoExcludeActiveByScope emits the culvert_decrypt_autoexclude_active{scope} gauge
+// — the current live-exclusion occupancy per profile scope (F6). Read path only (scrape
+// time), computed from the engine snapshot; emits nothing when the cache is empty (no
+// zero-noise), matching the labeled learn/hit series. Cardinality-capped via
+// cappedActiveScopes.
+func writeAutoExcludeActiveByScope(w *strings.Builder) {
+	rows := cappedActiveScopes(autoExclude().ActiveByScope())
+	if len(rows) == 0 {
+		return
+	}
+	w.WriteString("# HELP culvert_decrypt_autoexclude_active Current active learned decryption exclusions (inspection is OFF for these hosts), by profile scope\n")
+	w.WriteString("# TYPE culvert_decrypt_autoexclude_active gauge\n")
+	for _, r := range rows {
+		fmt.Fprintf(w, "culvert_decrypt_autoexclude_active{scope=%q} %d\n", strings.ReplaceAll(r.scope, `"`, ""), r.n)
+	}
+}
 
 // autoExcludeLearnCounter is a cardinality-capped {reason,scope} learn counter,
 // mirroring decProfMintlsRejects. The reason set is a bounded engine enum and the

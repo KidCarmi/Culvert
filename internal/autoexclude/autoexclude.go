@@ -605,6 +605,23 @@ type Stats struct {
 	MaxEntries int `json:"max_entries"`
 }
 
+// ActiveByScope returns the count of currently-active (non-expired) exclusions per scope
+// ID — the per-scope breakdown behind the culvert_decrypt_autoexclude_active{scope} gauge
+// (F6). Scope cardinality is bounded by the admin-created decryption-profile set, so no
+// label cap is needed. A scope with only expired entries is omitted (its live count is 0).
+func (c *Cache) ActiveByScope() map[string]int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	out := make(map[string]int)
+	for _, e := range c.active {
+		if now.Before(e.expiresAt) {
+			out[e.scopeID]++
+		}
+	}
+	return out
+}
+
 // Stats returns a snapshot of the cache configuration and occupancy.
 func (c *Cache) Stats() Stats {
 	c.mu.RLock()
