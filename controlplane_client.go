@@ -206,7 +206,11 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 	}
 }
 
-func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+// pollConfig performs one GetConfig poll (with HA failover on repeated failure)
+// and returns the raw response bytes. ok is false when the poll failed and a
+// backoff was applied — the caller must return without applying. Split out of
+// fetchAndApply to keep that function under the funlen budget.
+func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
 	// P0-3: report the version we already hold so the CP can reply with a tiny
 	// "unchanged" sentinel instead of the full snapshot when nothing changed.
 	// Safe to read c.lastVersion unlocked — fetchAndApply is the only writer and
@@ -227,11 +231,11 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		// fail over to; otherwise back off and retry the same CP next tick.
 		if c.failCount < 3 || len(c.addrs) <= 1 {
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 		if !c.failover() {
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 		logger.Printf("DataPlane: failover succeeded — retrying GetConfig")
 		// Retry immediately on the new connection; on success fall through to apply.
@@ -240,11 +244,19 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 			dpMarkCPPollFailing()
 			logger.Printf("DataPlane: GetConfig error after failover: %v", err)
 			c.backoff(ctx)
-			return
+			return nil, false
 		}
 	}
 	c.resetBackoff()
 	dpMarkCPPollHealthy()
+	return raw, true
+}
+
+func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	raw, ok := c.pollConfig(ctx)
+	if !ok {
+		return
+	}
 	// P0-3: detect the CP's "unchanged" sentinel before attempting a full
 	// snapshot unmarshal. On an unchanged poll (the common case) this is a tiny
 	// response and we skip the ~60 MiB unmarshal + validate + apply entirely.
