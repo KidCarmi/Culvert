@@ -667,6 +667,9 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/support/bundles/{id}/download-sealed", Handler: "apiSupportBundleExportSealed", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "download a READY bundle sealed to a recipient X25519 public key (NaCl anonymous box, E2E — appliance holds no decrypt key); operator+ (approval-gated exfil); public key or registered recipient name in body (not secret); audited as support.bundle.download_sealed"}}},
+	{Path: "/api/support/bundles/{id}/exports", Handler: "apiSupportBundleExports", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer,
+			Note: "recent export/exfiltration history for one bundle (actor/time/action) scanned from the audit ring; read-only, no bundle content; viewer+"}}},
 	{Path: "/api/support/recipients", Handler: "apiSupportRecipients", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer, Note: "list registered sealing recipients (name + public key + fingerprint; nothing secret)"},
