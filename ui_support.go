@@ -993,6 +993,18 @@ func startSupportRetentionJanitor(ctx context.Context) {
 // one-shot: it builds a minimal (L0) bundle headless — no server, no admin UI —
 // and writes it to outPath. This is the "GUI is down" escape hatch (the endorsed
 // GAP-MON-01 recovery path). Prints a short summary to stdout.
+//
+// Recovery-safety contract (M5 PR-E — pinned by support_recovery_test.go): this
+// runs from handleOneShotCommands BEFORE any init*, so it must build a valid
+// bundle with the server/DB/CP unavailable. That holds because (1) every
+// subsystem singleton is constructed at package-init (certMgr, globalThreatFeed,
+// …), so it is non-nil though unconfigured; (2) the L0 collectors read those as
+// empty-but-valid rather than assuming a live subsystem; and (3) mandatory
+// collectors gate completeness but NEVER abort, and the runner isolates each
+// collector's panic/timeout/budget into a failed SECTION — so a partial bundle
+// is always produced, never an aborted one. A NEW L0 collector that reaches an
+// init*-wired subsystem (the DB, the CP client, live server state) breaks the
+// wall.
 func runSupportBundleCommand(outPath string) error {
 	res, err := buildSupportBundle(context.Background(), support.L0, "standard", "")
 	if err != nil {
