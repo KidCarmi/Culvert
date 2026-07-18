@@ -50,6 +50,14 @@ func loadPAC(cfg pacStartupConfig) error {
 			logger.Printf("PAC lifecycle history WARNING: %v", err)
 		}
 	}
+	if cfg.ExceptionsPath != "" {
+		// Governance metadata is NODE-LOCAL operator state, not serving-critical
+		// config. A corrupt file self-quarantines and starts empty in Load;
+		// treat any load error as a warning (never fatal).
+		if err := pacExceptions.Load(cfg.ExceptionsPath); err != nil {
+			logger.Printf("PAC exception governance WARNING: %v", err)
+		}
+	}
 	pacStore.SetDefaultPort(cfg.DefaultProxyPort)
 	return nil
 }

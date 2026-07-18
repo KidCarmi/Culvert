@@ -265,6 +265,15 @@ func pacProfileDelete(w http.ResponseWriter, r *http.Request, id string) {
 		if err := pacLifecycle.Delete(id); err != nil {
 			logger.Printf("PAC: lifecycle delete for %s: %v", sanitizeLog(id), err)
 		}
+		// Drop the node-local DIRECT-exception governance too, so a later
+		// profile recreated under the SAME id cannot silently inherit the old
+		// owner/reason/expiry and show a newly introduced bypass as governed
+		// without fresh attestation.
+		pacExceptionsMu.Lock()
+		if err := pacExceptions.Delete(id); err != nil {
+			logger.Printf("PAC: exception delete for %s: %v", sanitizeLog(id), err)
+		}
+		pacExceptionsMu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

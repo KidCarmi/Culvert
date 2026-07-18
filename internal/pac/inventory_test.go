@@ -89,6 +89,49 @@ func TestBuildDirectInventory(t *testing.T) {
 	}
 }
 
+// TestBuildDirectInventory_DropsInvalidRules pins F3: a DIRECT rule the
+// compiler would drop for an invalid pattern must NOT be inventoried (the
+// inventory must match what the compiled PAC actually emits).
+func TestBuildDirectInventory_DropsInvalidRules(t *testing.T) {
+	cfg := ProfilesConfig{
+		Pools: []Pool{{ID: "p", Name: "P", Endpoints: []PoolEndpoint{{Host: "proxy.example", Port: 8080}}}},
+		Profiles: []Profile{
+			{ID: "bad", Name: "Bad", Enabled: true, PoolID: "p",
+				PrivateNetworks: PrivateProxy, AvailabilityMode: ModeBalanced,
+				Rules: []Rule{
+					{Kind: RuleKindCIDR4, Pattern: "not-a-cidr", Action: ActionDirect},
+					{Kind: RuleKindWildcard, Pattern: "bad\"quote", Action: ActionDirect},
+					{Kind: "bogus-kind", Pattern: "x.example", Action: ActionDirect},
+					{Kind: RuleKindDomain, Pattern: "", Action: ActionDirect},
+					// One VALID rule survives.
+					{Kind: RuleKindDomain, Pattern: "ok.example", Action: ActionDirect},
+				}},
+		},
+	}
+	inv := BuildDirectInventory(cfg)
+	p := inv.Profiles[0]
+	// plain-host + exactly one valid direct_rule = 2 paths (the four invalid
+	// rules are dropped, matching the compiler).
+	if len(p.DirectPaths) != 2 {
+		t.Fatalf("DirectPaths = %d, want 2 (plain-host + one valid rule); got %+v", len(p.DirectPaths), p.DirectPaths)
+	}
+	var ruleCount int
+	for i := range p.DirectPaths {
+		if p.DirectPaths[i].Kind == BypassRule {
+			ruleCount++
+			if p.DirectPaths[i].Pattern != "ok.example" {
+				t.Errorf("surviving rule pattern = %q, want ok.example", p.DirectPaths[i].Pattern)
+			}
+		}
+	}
+	if ruleCount != 1 {
+		t.Errorf("direct_rule entries = %d, want 1", ruleCount)
+	}
+	if inv.BroadDirectPaths != 0 {
+		t.Errorf("BroadDirectPaths = %d, want 0 (the dropped wildcard must not be counted broad)", inv.BroadDirectPaths)
+	}
+}
+
 func TestRuleIsBroad(t *testing.T) {
 	cases := []struct {
 		r    Rule
