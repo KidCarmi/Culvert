@@ -34,19 +34,23 @@ func TestBuildDirectInventory(t *testing.T) {
 	if inv.TotalProfiles != 5 {
 		t.Errorf("TotalProfiles = %d, want 5", inv.TotalProfiles)
 	}
-	// hq, dr, br are direct-capable; safe + locked (secure) are not.
-	if inv.DirectCapableProfiles != 3 {
-		t.Errorf("DirectCapableProfiles = %d, want 3", inv.DirectCapableProfiles)
+	// EVERY profile carries the unconditional plain-host DIRECT bypass, so all
+	// 5 are direct-capable (secure included — it neutralizes only rules/private/
+	// availability, not the plain-host guard).
+	if inv.DirectCapableProfiles != 5 {
+		t.Errorf("DirectCapableProfiles = %d, want 5 (plain-host is universal)", inv.DirectCapableProfiles)
 	}
-	// dr is disabled, so serving-direct = hq + br = 2.
-	if inv.ServingDirectProfiles != 2 {
-		t.Errorf("ServingDirectProfiles = %d, want 2 (dr is disabled)", inv.ServingDirectProfiles)
+	// dr is disabled, so serving-direct = safe + hq + locked + br = 4.
+	if inv.ServingDirectProfiles != 4 {
+		t.Errorf("ServingDirectProfiles = %d, want 4 (dr is disabled)", inv.ServingDirectProfiles)
 	}
-	// hq: wildcard rule + private = 2; dr: availability = 1; br: cidr rule = 1 → 4.
-	if inv.TotalDirectPaths != 4 {
-		t.Errorf("TotalDirectPaths = %d, want 4", inv.TotalDirectPaths)
+	// Each profile +1 plain-host; hq +wildcard +private; dr +availability;
+	// br +cidr; locked (secure) plain-host only → 1+3+2+1+2 = 9.
+	if inv.TotalDirectPaths != 9 {
+		t.Errorf("TotalDirectPaths = %d, want 9", inv.TotalDirectPaths)
 	}
-	// broad: hq wildcard + hq private + dr availability = 3 (br /24 is narrow).
+	// broad: hq wildcard + hq private + dr availability = 3 (plain-host and the
+	// /24 CIDR are not broad).
 	if inv.BroadDirectPaths != 3 {
 		t.Errorf("BroadDirectPaths = %d, want 3", inv.BroadDirectPaths)
 	}
@@ -55,22 +59,33 @@ func TestBuildDirectInventory(t *testing.T) {
 	for _, p := range inv.Profiles {
 		byID[p.ProfileID] = p
 	}
-	if byID["safe"].DirectCapable {
-		t.Error("proxy-only profile must not be DIRECT-capable")
+	// A proxy-only profile still bypasses for dotless hosts → exactly the
+	// plain-host path, not broad.
+	if !byID["safe"].DirectCapable || len(byID["safe"].DirectPaths) != 1 ||
+		byID["safe"].DirectPaths[0].Kind != BypassPlainHost || byID["safe"].DirectPaths[0].Broad {
+		t.Errorf("proxy-only profile must expose exactly the plain-host bypass: %+v", byID["safe"])
 	}
-	if byID["locked"].DirectCapable {
-		t.Error("secure-mode profile must not be DIRECT-capable (DIRECT neutralized)")
+	// Secure mode neutralizes rules/private/availability but keeps plain-host.
+	if !byID["locked"].DirectCapable || len(byID["locked"].DirectPaths) != 1 ||
+		byID["locked"].DirectPaths[0].Kind != BypassPlainHost {
+		t.Errorf("secure profile must expose only the plain-host bypass: %+v", byID["locked"])
 	}
 	if !byID["dr"].DirectCapable || byID["dr"].Serving {
 		t.Errorf("dr must be DIRECT-capable but not serving: %+v", byID["dr"])
 	}
-	if got := len(byID["hq"].DirectPaths); got != 2 {
-		t.Errorf("hq DirectPaths = %d, want 2", got)
+	if got := len(byID["hq"].DirectPaths); got != 3 {
+		t.Errorf("hq DirectPaths = %d, want 3 (plain-host + wildcard + private)", got)
 	}
-	// br's single CIDR path must not be flagged broad (/24).
+	// br: plain-host + one /24 CIDR path; the CIDR path is not broad.
 	brPaths := byID["br"].DirectPaths
-	if len(brPaths) != 1 || brPaths[0].Broad {
-		t.Errorf("br /24 rule should be one non-broad path: %+v", brPaths)
+	var cidr *DirectEntry
+	for i := range brPaths {
+		if brPaths[i].Kind == BypassRule {
+			cidr = &brPaths[i]
+		}
+	}
+	if len(brPaths) != 2 || cidr == nil || cidr.Broad {
+		t.Errorf("br should be plain-host + one non-broad /24 rule: %+v", brPaths)
 	}
 }
 

@@ -54,9 +54,9 @@ func TestAPIPACPostureInventory(t *testing.T) {
 	if inv.TotalProfiles != 3 {
 		t.Errorf("TotalProfiles = %d, want 3 (default + safe + hq)", inv.TotalProfiles)
 	}
-	// default (DIRECT via exclusion+private) and hq (DIRECT rule) are capable; safe is not.
-	if inv.DirectCapableProfiles != 2 {
-		t.Errorf("DirectCapableProfiles = %d, want 2", inv.DirectCapableProfiles)
+	// Every profile carries the unconditional plain-host bypass → all capable.
+	if inv.DirectCapableProfiles != 3 {
+		t.Errorf("DirectCapableProfiles = %d, want 3 (plain-host is universal)", inv.DirectCapableProfiles)
 	}
 	byID := map[string]pac.ProfileDirectInventory{}
 	for _, p := range inv.Profiles {
@@ -65,8 +65,11 @@ func TestAPIPACPostureInventory(t *testing.T) {
 	if _, ok := byID[pac.DefaultProfileID]; !ok {
 		t.Error("inventory must include the synthesized legacy default profile")
 	}
-	if byID["safe"].DirectCapable {
-		t.Error("proxy-only profile must not be DIRECT-capable")
+	// Proxy-only profile is still capable via the plain-host bypass, but only
+	// that one path (no rule/private/availability DIRECT).
+	if !byID["safe"].DirectCapable || len(byID["safe"].DirectPaths) != 1 ||
+		byID["safe"].DirectPaths[0].Kind != pac.BypassPlainHost {
+		t.Errorf("proxy-only profile must expose exactly the plain-host bypass: %+v", byID["safe"])
 	}
 	if !byID["hq"].DirectCapable || inv.BroadDirectPaths < 1 {
 		t.Errorf("hq wildcard DIRECT rule must be a broad path: %+v", byID["hq"])

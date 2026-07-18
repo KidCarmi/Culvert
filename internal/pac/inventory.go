@@ -26,6 +26,11 @@ const (
 	// BypassPrivate is private-networks=direct sending all RFC-1918/loopback
 	// destinations DIRECT.
 	BypassPrivate DirectBypassKind = "private_networks"
+	// BypassPlainHost is the unconditional dotless-intranet-hostname DIRECT
+	// guard the compiler emits in EVERY profile (including secure mode; only
+	// IPv6 literals are excluded). Every PAC profile therefore bypasses for
+	// plain single-label hostnames.
+	BypassPlainHost DirectBypassKind = "plain_host"
 )
 
 // DirectEntry is one config-derived path by which a profile fully bypasses
@@ -114,13 +119,22 @@ func BuildDirectInventory(cfg ProfilesConfig) DirectInventory {
 	return inv
 }
 
-// directEntriesFor enumerates the DIRECT paths of a single profile. Returns
-// nil for a secure-mode profile (DIRECT is neutralized by the compiler).
+// directEntriesFor enumerates the DIRECT paths of a single profile. EVERY
+// profile — including secure mode — carries the unconditional plain-host
+// bypass the compiler emits (compile_profiles.go); secure mode neutralizes
+// only the rule/private/availability DIRECT sources, not the plain-host guard.
 func directEntriesFor(p *Profile) []DirectEntry {
+	// Always present: the compiler unconditionally sends plain (dotless)
+	// intranet hostnames DIRECT (IPv6 literals excluded), in every mode.
+	out := []DirectEntry{{
+		Kind:   BypassPlainHost,
+		Detail: "plain (dotless) intranet hostnames are sent DIRECT (unconditional; IPv6 literals excluded)",
+	}}
 	if p.AvailabilityMode == ModeSecure {
-		return nil
+		// Secure mode neutralizes DIRECT rules, the private-network bypass, and
+		// the terminal chain — only the plain-host guard above remains.
+		return out
 	}
-	var out []DirectEntry
 	if p.AvailabilityMode == ModeAvailability {
 		out = append(out, DirectEntry{
 			Kind:   BypassAvailability,

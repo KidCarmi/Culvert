@@ -354,13 +354,17 @@ threat inspection, authentication, policy, and all proxy logging; it never
 reaches Culvert), distinct from a TLS-decryption bypass. The PAC panel renders
 it read-only as **DIRECT Bypass Inventory**.
 
-Each profile (including the synthesized legacy default) is walked for the three
-DIRECT sources: an explicit `direct` rule (`direct_rule`), availability mode
-(`availability_mode` — appends DIRECT to the terminal, fail-open), and
+Each profile (including the synthesized legacy default) is walked for the DIRECT
+sources: the always-present plain-host guard (`plain_host` — dotless intranet
+hostnames go DIRECT in **every** profile, IPv6 literals excluded; the compiler
+emits it unconditionally, so even a secure/proxy-only profile bypasses for
+single-label names), an explicit `direct` rule (`direct_rule`), availability
+mode (`availability_mode` — appends DIRECT to the terminal, fail-open), and
 `private-networks=direct` (`private_networks` — RFC-1918/loopback DIRECT).
-Secure-mode profiles report no DIRECT (the compiler neutralizes it). Wildcards
-and broad IPv4 CIDRs (≤ /16), plus the all-destination mode/private bypasses,
-are flagged `broad`.
+Secure mode neutralizes the rule/private/availability sources but **not** the
+plain-host guard. Wildcards and broad IPv4 CIDRs (≤ /16), plus the
+all-destination mode/private bypasses, are flagged `broad` (the plain-host
+guard is not).
 
 **Evidence class: `config` (Observable).** The inventory reports what the
 configuration makes *reachable* — it never claims a bypass was *used*. Culvert
