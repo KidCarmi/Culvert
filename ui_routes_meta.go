@@ -358,6 +358,12 @@ var uiRoutes = []uiRouteMetadata{
 			// mutating lifecycle route remains a meaningful drift indicator.
 			{Method: "POST", MinRole: RoleViewer, Mutating: true, Note: "read-only PAC steering diff/impact analysis; POST carries the query body"},
 		}},
+	{Path: "/api/pac/posture/inventory", Handler: "apiPACPostureInventory", Domain: "pac", Public: false,
+		Methods: []uiRouteMethod{
+			// Read-only config-derived DIRECT (full-bypass) inventory (PAC
+			// Exception Intelligence P0). Observable evidence class only.
+			{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"},
+		}},
 
 	// ── Security: TLS inspect (CA, certs, SSL bypass) ─────────────────────
 	{Path: "/api/security", Handler: "apiSecurity", Domain: "security", Public: false,

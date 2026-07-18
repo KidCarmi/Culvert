@@ -1738,6 +1738,23 @@ tr.dragging  { opacity: .4; }
 
     <!-- ── PAC FILE ───────────────────────────────────────────────────────── -->
     <div class="view" id="view-pac">
+      <!-- PAC Exception Intelligence P0: read-only DIRECT bypass inventory -->
+      <div class="panel" style="margin-bottom:18px">
+        <div class="panel-header"><span class="panel-title">DIRECT Bypass Inventory</span></div>
+        <div class="panel-body">
+          <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;line-height:1.6">
+            Every PAC path that returns <code>DIRECT</code> — a <strong>full security-path bypass</strong>:
+            matching traffic skips TLS inspection, DLP, CDR, URL filtering, threat inspection,
+            authentication, policy, and all proxy logging — it never reaches Culvert. (This is
+            <em>not</em> the same as a TLS-decryption bypass.) <strong>Derived from configuration:</strong>
+            it shows what the config makes reachable, not that a bypass was used — Culvert cannot
+            observe DIRECT traffic.
+          </p>
+          <div id="pac-posture-summary" style="font-size:.85rem;margin-bottom:10px"></div>
+          <div id="pac-posture-body"></div>
+        </div>
+      </div>
+
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start">
 
         <!-- Left: PAC config -->
@@ -11906,6 +11923,50 @@ async function loadPACConfig() {
     refreshPACPreview();
   } catch(e) { /* first load may fail */ }
   loadPACProfiles();
+  loadPACPosture();
+}
+
+// loadPACPosture renders the read-only, config-derived DIRECT (full
+// security-path bypass) inventory. Observable evidence only — never claims a
+// bypass was used.
+async function loadPACPosture() {
+  const sum = document.getElementById('pac-posture-summary');
+  const body = document.getElementById('pac-posture-body');
+  if (!sum || !body) return;
+  try {
+    const inv = await api('/api/pac/posture/inventory');
+    sum.innerHTML =
+      '<strong>' + (inv.directCapableProfiles||0) + '</strong> of ' + (inv.totalProfiles||0) +
+      ' profiles can emit DIRECT · <strong>' + (inv.servingDirectProfiles||0) + '</strong> serving now · ' +
+      (inv.totalDirectPaths||0) + ' DIRECT path(s), ' +
+      '<span style="color:var(--red,#e5484d)">' + (inv.broadDirectPaths||0) + ' broad</span> · ' +
+      '<span style="color:var(--muted)">evidence: config (what the config makes reachable, not observed usage)</span>';
+    const capable = (inv.profiles||[]).filter(p => p.directCapable);
+    if (!capable.length) {
+      body.innerHTML = '<div style="padding:10px;background:var(--surface2);border-radius:6px;font-size:.82rem">No profile can emit DIRECT — all traffic reaches Culvert.</div>';
+      return;
+    }
+    let html = '<table class="tbl" style="width:100%;font-size:.82rem"><thead><tr>' +
+      '<th>Profile</th><th>Serving</th><th>Mode</th><th>DIRECT paths (full bypass)</th></tr></thead><tbody>';
+    for (const p of capable) {
+      const paths = (p.directPaths||[]).map(d => {
+        const badge = '<span style="background:var(--crit-tint,rgba(239,68,68,.15));color:var(--red,#e5484d);border:1px solid rgba(239,68,68,.4);border-radius:4px;padding:1px 6px;font-size:.7rem;font-weight:600;margin-right:6px">FULL BYPASS</span>';
+        const broad = d.broad ? ' <span style="color:var(--amber,#f5a623);font-size:.72rem">(broad)</span>' : '';
+        return '<div style="margin:2px 0">' + badge + escHtml(d.detail || d.kind) + broad + '</div>';
+      }).join('');
+      const serving = p.serving
+        ? '<span style="color:var(--red,#e5484d)">yes</span>'
+        : '<span style="color:var(--muted)">no (disabled)</span>';
+      html += '<tr><td><strong>' + escHtml(p.name || p.profileId) + '</strong><br>' +
+        '<span style="color:var(--muted);font-size:.75rem">' + escHtml(p.profileId) + '</span></td>' +
+        '<td>' + serving + '</td><td>' + escHtml(p.availabilityMode || '') + '</td><td>' + paths + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:.82rem">Inventory unavailable: ' + escHtml(e.message) + '</div>';
+    sum.innerHTML = '';
+  }
 }
 
 // renderPACIssues shows the server's structured validation issues (or hides
