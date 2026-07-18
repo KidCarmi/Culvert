@@ -87,6 +87,9 @@ func apiDecryptionHealth(w http.ResponseWriter, r *http.Request) {
 			"failed":          failed,   // separate bucket, excluded from inspected_ratio
 			"inspected_ratio": inspectedRatio,
 		},
+		// ADR-0011 §3 coverage-erosion trend: per-interval delta samples (may be empty
+		// until the sampler has ticked at least once).
+		"trend": decTrend.snapshot(),
 		"autoexclude": map[string]any{
 			"active":             aeStats.Active,
 			"pending":            aeStats.Pending,

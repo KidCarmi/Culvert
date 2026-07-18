@@ -27,4 +27,8 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// M5: support-bundle age-retention janitor — evicts stale bundles on an idle
 	// appliance (the count-based prune only runs on a new build).
 	go startSupportRetentionJanitor(ctx)
+
+	// ADR-0011 §3: decryption inspection-coverage trend sampler (volatile time-series
+	// behind the Decryption Health panel's coverage-erosion chart).
+	go startDecCoverageSampler(ctx)
 }
