@@ -226,13 +226,19 @@ func clientEvidence(reason AutoExcludeReason, identity, clientIP string) string 
 // when the observation PROMOTES it to an active exclusion (confirm-count of
 // distinct client-evidence tokens reached), fires the audit + alert + metric.
 // Safe to call on any failure site; it no-ops if the reason or scope is empty.
-func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
+// recordAutoExclude returns contributed=true iff this session actually fed the
+// learner (reached Observe with acceptable evidence) — the ADR-0011 signal the
+// failure-row projection reads to stamp dec.cache_learned/excl_reason on the
+// DECRYPT_FAILED sessions that populate the cache (Codex #840). It stays true
+// even when Observe is still gathering confirmation: the confirm-count token WAS
+// contributed. Every early return (no reason / no scope / no evidence) is false.
+func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) (contributed bool) {
 	if reason == "" {
-		return
+		return false
 	}
 	scopeID, scopeName := decryptionScope(match)
 	if scopeID == "" {
-		return // no fail-open profile to scope to (gated caller, defensive)
+		return false // no fail-open profile to scope to (gated caller, defensive)
 	}
 	client := clientEvidence(reason, id.Identity, id.ClientIP)
 	if client == "" {
@@ -243,10 +249,12 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 		// could reset an in-flight window and drop already-accumulated AUTHENTICATED
 		// tokens (letting IP-only noise indefinitely block the two-identity promotion
 		// path). Skipping the call makes empty evidence contribute NOTHING, as intended.
-		return
+		return false
 	}
+	// From here the session HAS fed the learner (the Observe call is the evidence
+	// contribution), so contributed=true whether or not this token tips promotion.
 	if !autoExclude().Observe(scopeID, scopeName, host, reason, client) {
-		return // still gathering confirmation, or already excluded
+		return true // still gathering confirmation (or already excluded) — evidence still contributed
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
 	autoExcludeLearns.record(string(reason), scopeName)
@@ -274,6 +282,7 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	// a threshold crossing (poisoning-campaign signal) — the aggregate the
 	// per-host alert above cannot provide.
 	maybeFireAutoExcludeSurge(scopeName)
+	return true
 }
 
 // feedReasonClientCertRescue is the structured feed ActionTaken tag for a
@@ -376,31 +385,42 @@ func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExclude
 // (a specific, structured signal) may rescue the triggering session (B3);
 // unsupported-params learns but returns false (the next session self-heals). A
 // cert-verify or unrecognized failure returns false and never learns.
-func maybeFailOpenOrigin(host string, match *PolicyMatch, id ProxyIdentity, err error) (rescue bool) {
+// The returned `learned` reason is non-empty iff this session actually fed the
+// learner (ADR-0011 §cache-lifecycle): the failure-row projection stamps it onto
+// the DECRYPT_FAILED dec block so the drill-down reflects which failures populate
+// the cache (Codex #840). rescue is unchanged (the client-cert live-rescue gate).
+func maybeFailOpenOrigin(host string, match *PolicyMatch, id ProxyIdentity, err error) (learned AutoExcludeReason, rescue bool) {
 	if !resolveFailOpen(match) {
-		return false
+		return "", false
 	}
 	reason, learn, rescueOK := classifyOriginInspectFailure(err)
 	if !learn {
-		return false
+		return "", rescueOK
 	}
-	recordAutoExclude(match, host, reason, id)
-	return rescueOK
+	if !recordAutoExclude(match, host, reason, id) {
+		return "", rescueOK // qualifying signal but no evidence contributed (e.g. unauth client_pinned)
+	}
+	return reason, rescueOK
 }
 
 // maybeFailOpenClient learns a CLIENT-leg pinning rejection under a fail-open
 // profile. Learn-only: the client already aborted its handshake against our
 // forged leaf, so the current session cannot be rescued — the NEXT session to the
 // (scope, host) self-heals via the cache once the confirm-count is met.
-func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err error) {
+// Returns the `learned` reason (non-empty iff this session fed the learner) so
+// the client-leg failure row can carry the cache-lifecycle fields (Codex #840).
+func maybeFailOpenClient(host string, match *PolicyMatch, id ProxyIdentity, err error) (learned AutoExcludeReason) {
 	if !resolveFailOpen(match) {
-		return
+		return ""
 	}
 	reason, learn := classifyClientInspectFailure(err)
 	if !learn {
-		return
+		return ""
 	}
-	recordAutoExclude(match, host, reason, id)
+	if !recordAutoExclude(match, host, reason, id) {
+		return ""
+	}
+	return reason
 }
 
 // autoExcludeHitCounter counts sessions bypassed because of a learned exclusion

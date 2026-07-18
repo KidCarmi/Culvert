@@ -169,6 +169,9 @@ var d0KnownRoutes = func() []string {
 //   - 177 — catch up to main (PAC steering/exception + PEI-P2 governance routes,
 //     176) + ADR-0011 §4 added /api/decryption/redaction (host/SNI redaction
 //     toggle; GET viewer / PUT admin).
+//   - 178 — reconcile parallel-merge drift: Supportability M5 added
+//     /api/diagnose/support (bundle-store health self-check) but its lock bump
+//     collided with the /api/decryption/redaction merge; the true count is 178.
 //
 // POST-C1 FAILURE MATRIX (the table below is the FULL contract; the
 // reverse-direction gap that existed in pre-C1 D0 is now closed by

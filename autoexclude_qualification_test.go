@@ -119,8 +119,8 @@ func TestRolloutRehearsal(t *testing.T) {
 	if a := resolveSSLAction(fc, "cc.example", "9.9.9.9"); a != SSLInspect {
 		t.Fatal("step6: disabling fail-open must stop consulting the cache")
 	}
-	if maybeFailOpenOrigin("new.example", fc, ProxyIdentity{ClientIP: "10.0.0.3", Identity: "carol"}, errTLS("certificate required")) {
-		t.Fatal("step6: disabled profile must not learn or rescue")
+	if learned, rescue := maybeFailOpenOrigin("new.example", fc, ProxyIdentity{ClientIP: "10.0.0.3", Identity: "carol"}, errTLS("certificate required")); learned != "" || rescue {
+		t.Fatalf("step6: disabled profile must not learn or rescue (learned=%q rescue=%v)", learned, rescue)
 	}
 	if _, ok := autoExclude().Contains(scope, "new.example"); ok {
 		t.Fatal("step6: no new learn after disable")
