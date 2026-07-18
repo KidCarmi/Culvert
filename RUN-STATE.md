@@ -16,10 +16,15 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **H-010** — Policy engine & Zero-Trust authoring. Selecting; next high-pri.
+- **H-011** — TLS inspection administration guide. Selecting; next.
 
 ## Recently completed
 
+- **H-010** — Policy engine (`content/docs/03-policy/policy-engine.md`) +
+  evidence ledger. Rule model, first-match/default-deny semantics, 8 condition
+  types, actions, TLS action, policy API (`/api/policy[/reorder|move|test|draft]`)
+  with RBAC verified (`ui_policy.go:39/45`), Zero-Trust rollout, Policy Tester.
+  Link check + structure pass. Committed.
 - **C-003** — Quick start (`content/docs/02-getting-started/quick-start.md`) +
   evidence ledger + **reproduced lab run** (`content/evidence/quick-start-lab-run.md`:
   real `/health` + `/ready` output from the built binary). Readiness gating
@@ -51,15 +56,17 @@ phase transition. Newest activity at the top of each section.
 - **C-001** — Product overview + claim-evidence ledger (critical).
 - **C-002** — Architecture overview + claim-evidence ledger (critical).
 - **C-003** — Quick start + evidence ledger + reproduced lab run (critical).
+- **H-010** — Policy engine & Zero-Trust authoring + evidence ledger (high).
 
-**All critical-priority items complete.** Proceeding to high-priority (H-01x).
+**All critical items complete.** High-priority in progress (H-010 done).
 
 ## Commits created
 
 - `5a4aa90` docs(content): bootstrap autonomous content foundation scaffolding.
 - `9176e99` docs(content): add verified product overview (what is Culvert).
 - `ba90a4d` docs(content): add verified architecture overview.
-- _(C-003 commit — hash recorded next cycle)_
+- `8acf32d` docs(content): add verified quick-start & first-boot guide.
+- _(H-010 commit — hash recorded next cycle; pushed through 8acf32d)_
 
 ## Blocked items
 

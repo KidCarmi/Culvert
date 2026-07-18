@@ -72,7 +72,7 @@ items:
     title: "Policy engine & Zero-Trust egress policy authoring"
     type: doc
     priority: high
-    status: todo
+    status: done
     audience: [security-engineer, admin]
     path: content/docs/03-policy/policy-engine.md
     evidence_areas: [policy.go, "internal/urlcat", "internal/sslbypass", proxy.go]
