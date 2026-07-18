@@ -23,11 +23,11 @@ var supportScopeBaseline = []string{"product", "health", "readiness", "diagnosti
 // collector registry — pinned by TestSupportScopes_ReferenceRealCollectors.
 var supportIncidentScopes = map[string][]string{
 	"tls":      {"tls", "scan", "logs", "config", "policy"},
-	"upstream": {"upstream", "logs", "config", "metrics"},
+	"upstream": {"upstream", "logs", "config", "metrics", "local_health"},
 	"policy":   {"policy", "config", "audit", "logs", "config_versions"},
 	"storage":  {"metrics", "config_versions", "governance"},
 	"dns":      {"upstream", "logs", "config"},
-	"cluster":  {"governance", "config", "config_versions", "cdr"},
+	"cluster":  {"local_health", "governance", "config", "config_versions", "cdr"},
 	"scan":     {"scan", "cdr", "logs", "config"},
 }
 
