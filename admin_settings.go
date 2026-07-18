@@ -457,6 +457,13 @@ func snapshotBlocklistFeeds(s *AdminSettings) {
 type adminSaveOverrides struct {
 	autoExclude      *autoExcludeTunables
 	supportRetention *supportRetentionConfig
+	// applyOnSuccess, when set, is the runtime apply for a persist-before-apply PUT.
+	// It runs INSIDE the save's adminSettingsMu critical section, immediately after a
+	// successful write — so no concurrent omnibus save can snapshot the pre-apply
+	// runtime value and then land its own AtomicWrite after this one, reverting the
+	// just-persisted setting on disk. It runs only on a successful write (persist
+	// failure ⇒ never applied ⇒ runtime and disk stay in agreement).
+	applyOnSuccess func()
 }
 
 // SaveAdminSettings snapshots all current runtime values and writes them
@@ -465,13 +472,6 @@ type adminSaveOverrides struct {
 // persist failure; the fire-and-forget adminSettingsSave wrapper ignores it.
 func SaveAdminSettings() error { return saveAdminSettingsWithOverrides(adminSaveOverrides{}) }
 
-// saveAdminSettingsWithAutoExclude is retained as a thin shim over the generalized
-// override save for the F10 tunables PUT (persist-before-apply on the autoexclude
-// tunables). New persist-before-apply callers use saveAdminSettingsWithOverrides.
-func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
-	return saveAdminSettingsWithOverrides(adminSaveOverrides{autoExclude: ae})
-}
-
 // saveAdminSettingsWithOverrides is SaveAdminSettings with optional per-feature
 // TARGET overrides. When a field is non-nil the durable file records those TARGET
 // values instead of the live ones — the owning PUT persists the target FIRST, then
@@ -479,9 +479,15 @@ func saveAdminSettingsWithAutoExclude(ae *autoExcludeTunables) error {
 // infallible, a persist failure leaves the live state — and any data it governs —
 // untouched.
 func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
+	// Hold adminSettingsMu across the ENTIRE snapshot → write → apply sequence, not
+	// just the path read. Every save (omnibus or override-carrying) is thereby
+	// serialized: a concurrent adminSettingsSave() goroutine can neither snapshot a
+	// half-applied runtime nor land its AtomicWrite between this save's write and its
+	// applyOnSuccess. Saves are per-mutation and infrequent, so full serialization is
+	// free; adminSettingsSave already runs this off the request goroutine.
 	adminSettingsMu.Lock()
+	defer adminSettingsMu.Unlock()
 	path := adminSettingsPath
-	adminSettingsMu.Unlock()
 	if path == "" {
 		return nil
 	}
@@ -552,6 +558,12 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	if err := fileutil.AtomicWrite(path, data, 0o600); err != nil {
 		logger.Printf("AdminSettings: write error: %v", err)
 		return err
+	}
+	// Persist-before-apply: the durable write succeeded, so apply the target to the
+	// live runtime now — still under adminSettingsMu, so the (disk, runtime) pair
+	// moves atomically w.r.t. every other save.
+	if ov.applyOnSuccess != nil {
+		ov.applyOnSuccess()
 	}
 	return nil
 }

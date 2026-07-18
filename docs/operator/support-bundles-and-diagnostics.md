@@ -69,10 +69,12 @@ The **Retention tuning** card in the Support panel (admin-only), or
   — the size cap is the always-on backstop.
 - Tightening a cap is a **one-way door**. If the new caps would evict any
   non-evidence bundle, the `PUT` returns `409` with an `evict_count`; the UI asks you
-  to confirm, and the API requires a matching `confirm_evict` to proceed. Evidence
-  and pending bundles are never counted. The tightened caps take effect on the **next
-  janitor sweep** (within the sweep cadence), not instantly — so a mistaken tighten
-  can be re-widened before the sweep runs. `GET` reports `pending_evictions`: how many
+  to confirm, and the API requires a matching `confirm_evict` to proceed. Case-bound
+  (evidence) bundles are never counted; **pending bundles are exempt from the count
+  cap only** — a tightened *age* cap can still age out (and therefore count) a stale
+  unapproved pending bundle. The tightened caps take effect on the **next janitor
+  sweep** (within the sweep cadence), not instantly — so a mistaken tighten can be
+  re-widened before the sweep runs. `GET` reports `pending_evictions`: how many
   bundles the *current* caps will remove on the next sweep.
 - A hand-edited out-of-range persisted value (e.g. `keep: 0`) is **refused on load**
   and the compiled defaults are kept — a corrupt file can never wipe the store.

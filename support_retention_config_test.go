@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -333,6 +334,56 @@ func TestRetention_OmnibusSaveKeepsRetention(t *testing.T) {
 	if json.Unmarshal(data, &s) != nil || !s.SupportRetentionSaved ||
 		s.SupportRetentionKeep != 6 || s.SupportRetentionMaxAgeDays != 15 {
 		t.Fatalf("omnibus save dropped retention: %+v", s)
+	}
+}
+
+// TestRetention_ConcurrentSaveDoesNotRevert pins the serialize-apply-with-saves fix
+// (Codex #845 P2): a retention PUT racing a flurry of concurrent omnibus
+// SaveAdminSettings must never leave disk and runtime disagreeing on the caps — the
+// apply runs inside the save's lock, so no omnibus save can snapshot the pre-apply
+// value and land its write after the PUT's. -race asserts no data race.
+func TestRetention_ConcurrentSaveDoesNotRevert(t *testing.T) {
+	swapSupportRetention(t, supportRetentionConfig{Keep: 10, MaxAgeDays: 30})
+	path := filepath.Join(t.TempDir(), "admin_settings.json")
+	swapAdminSettingsPath(t, path)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = SaveAdminSettings()
+				}
+			}
+		}()
+	}
+
+	keep := 4 // no bundles in this store ⇒ no eviction ⇒ no confirm needed
+	if w := callRetention(RoleAdmin, http.MethodPut, supportRetentionPatch{Keep: &keep}); w.Code != http.StatusOK {
+		close(stop)
+		wg.Wait()
+		t.Fatalf("PUT: got %d", w.Code)
+	}
+	// Let omnibus saves keep racing after the PUT, then quiesce.
+	for i := 0; i < 50; i++ {
+		_ = SaveAdminSettings()
+	}
+	close(stop)
+	wg.Wait()
+
+	if got := currentSupportRetention().Keep; got != 4 {
+		t.Fatalf("runtime keep=%d, want 4", got)
+	}
+	var s AdminSettings
+	data, _ := os.ReadFile(path)
+	if json.Unmarshal(data, &s) != nil || s.SupportRetentionKeep != 4 {
+		t.Fatalf("disk keep=%d, want 4 — a concurrent omnibus save reverted the PUT", s.SupportRetentionKeep)
 	}
 }
 

@@ -917,13 +917,17 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 		}
 		// VALIDATE (done) → PERSIST target → APPLY runtime. Persist first: a write
 		// failure must not have already evicted learned entries (persist-before-apply).
+		// The apply runs via applyOnSuccess INSIDE the save's lock so a concurrent
+		// omnibus save can't revert the just-persisted tunables on disk.
 		old := currentAutoExcludeTunables()
-		if err := saveAdminSettingsWithAutoExclude(&resolved); err != nil {
+		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			autoExclude:    &resolved,
+			applyOnSuccess: func() { autoExclude().Reconfigure(resolved.engineConfig()) },
+		}); err != nil {
 			logger.Printf("decryption tunables: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist tunables", http.StatusInternalServerError)
 			return
 		}
-		autoExclude().Reconfigure(resolved.engineConfig()) // infallible; disk already committed
 		auditEventDiff(r, "decryption.autoexclude.tunables", "tunables",
 			"updated adaptive decryption-exclusion tunables", old, resolved)
 		jsonOK(w, resolved)

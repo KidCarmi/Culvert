@@ -22,8 +22,10 @@ import (
 // forensic evidence fleet-wide).
 //
 // DATA-LOSS POSTURE: the caps govern DURABLE forensic evidence, so every design
-// choice here favours NOT deleting. Case-bound (evidence) and pending bundles
-// stay exempt (Slice A). A PUT that would tighten a cap enough to evict a bundle
+// choice here favours NOT deleting. Case-bound (evidence) bundles stay exempt from
+// EVERY cap; pending (unapproved) bundles are exempt from the COUNT cap only, so a
+// tightened age cap can still age a stale never-approved bundle out (Slice A). A PUT
+// that would tighten a cap enough to evict a bundle
 // requires a typed confirm_evict matching the projected count, and it NEVER
 // immediate-sweeps — the next janitor tick (≤ supportRetentionTick) applies the
 // tightened age/size caps, giving an operator a window to reconsider.
@@ -230,7 +232,7 @@ func apiSupportRetention(w http.ResponseWriter, r *http.Request) {
 			},
 			// Bundles the CURRENT caps would remove on the next sweep/build.
 			"pending_evictions": pending,
-			"note":              "PUT accepts a partial {keep, max_age_days}; an omitted field is left unchanged. A change that would evict additional bundles requires confirm_evict=<evict_count> (returned as 409). Case-bound (evidence) and pending bundles are exempt; disabling a cap is not supported and the 2 GiB store ceiling is always active.",
+			"note":              "PUT accepts a partial {keep, max_age_days}; an omitted field is left unchanged. A change that would evict additional bundles requires confirm_evict=<evict_count> (returned as 409). Case-bound (evidence) bundles are exempt from every cap; pending bundles are exempt from the count cap only (a tightened age cap can still evict one). Disabling a cap is not supported and the 2 GiB store ceiling is always active.",
 		})
 
 	case http.MethodPut:
@@ -272,12 +274,17 @@ func apiSupportRetention(w http.ResponseWriter, r *http.Request) {
 		}
 		// VALIDATE (done) → PERSIST target → APPLY runtime. Persist first: a write
 		// failure must not leave the live caps changed vs disk (persist-before-apply).
-		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{supportRetention: &resolved}); err != nil {
+		// The apply runs via applyOnSuccess INSIDE the save's lock, so a concurrent
+		// omnibus save can't snapshot the old caps and then clobber the just-written
+		// new caps on disk (the serialize-apply-with-saves race).
+		if err := saveAdminSettingsWithOverrides(adminSaveOverrides{
+			supportRetention: &resolved,
+			applyOnSuccess:   func() { setSupportRetention(resolved) },
+		}); err != nil {
 			logger.Printf("support retention: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist retention config", http.StatusInternalServerError)
 			return
 		}
-		setSupportRetention(resolved) // infallible; disk already committed
 		auditEventDiff(r, "support.retention.set", "retention",
 			"updated support-bundle retention caps", cur, resolved)
 		jsonOK(w, map[string]any{

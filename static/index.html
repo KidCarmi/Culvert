@@ -4290,7 +4290,7 @@ Firefox (all platforms):
 
           <div>
             <div style="font-weight:600;margin-bottom:6px">Retention tuning</div>
-            <p class="hint">Node-local caps on the persisted bundle store. <strong>Case-bound (evidence) and pending bundles are exempt</strong>; a 2&nbsp;GiB store ceiling is always active. Tightening a cap is a <strong>one-way door</strong> — evicted bundles cannot be recovered, and a change that would evict bundles must be confirmed.</p>
+            <p class="hint">Node-local caps on the persisted bundle store. <strong>Case-bound (evidence) bundles are exempt from every cap</strong>; pending (unapproved) bundles are exempt from the <strong>count</strong> cap only, so a tightened age cap can still age one out. A 2&nbsp;GiB store ceiling is always active. Tightening a cap is a <strong>one-way door</strong> — evicted bundles cannot be recovered, and a change that would evict bundles must be confirmed.</p>
             <div id="support-retention" role="status" aria-live="polite" style="margin:6px 0"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <label class="hint" for="support-ret-keep">Keep newest</label>
@@ -13894,7 +13894,7 @@ async function supportSetRetention() {
       const n = j.evict_count || 0;
       const ok = await confirmAction(
         'Evict ' + n + ' bundle(s)?',
-        'Tightening these caps will permanently remove ' + n + ' non-evidence bundle(s) on the next sweep. Case-bound (evidence) and pending bundles are exempt. This cannot be undone.',
+        'Tightening these caps will permanently remove ' + n + ' non-evidence bundle(s) on the next sweep. Case-bound (evidence) bundles are exempt from every cap; pending bundles are exempt from the count cap only, so a tightened age cap can still evict one. This cannot be undone.',
         'Evict ' + n);
       if (!ok) return;
       body.confirm_evict = n;
