@@ -15,9 +15,19 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/support"
+)
+
+// Retention-sweep observability (node-local, since-boot). An operator asking
+// "why did my bundle disappear?" can see the total evicted and when the age
+// janitor last ran. Atomics: read lock-free from the status handler, written
+// from the prune paths / janitor goroutine.
+var (
+	supportRetentionEvicted   atomic.Int64 // bundles removed by retention (both caps) since boot
+	supportRetentionLastSweep atomic.Int64 // unix seconds of the last age-sweep pass (0 = never run)
 )
 
 // Support-bundle disk-safety bounds (roadmap cross-milestone invariant #4: every
@@ -269,11 +279,13 @@ type supportStatus struct {
 	CollectorEngineVer    int                    `json:"collector_engine_version"`
 	RedactionModelVersion int                    `json:"redaction_model_version"`
 	Collectors            []supportCollectorInfo `json:"collectors"`
-	Scopes                []string               `json:"scopes"`                 // selectable incident scopes
-	RetentionKeep         int                    `json:"retention_keep"`         // count cap: newest N persisted bundles kept
-	RetentionMaxAgeDays   int                    `json:"retention_max_age_days"` // age cap: idle-appliance background sweep
-	RecipientCount        int                    `json:"recipient_count"`        // registered sealing recipients
-	RecipientMax          int                    `json:"recipient_max"`          // registry cap
+	Scopes                []string               `json:"scopes"`                         // selectable incident scopes
+	RetentionKeep         int                    `json:"retention_keep"`                 // count cap: newest N persisted bundles kept
+	RetentionMaxAgeDays   int                    `json:"retention_max_age_days"`         // age cap: idle-appliance background sweep
+	RetentionEvicted      int64                  `json:"retention_evicted_total"`        // bundles removed by retention since boot
+	RetentionLastSweep    string                 `json:"retention_last_sweep,omitempty"` // RFC3339 of the last age sweep (empty = never)
+	RecipientCount        int                    `json:"recipient_count"`                // registered sealing recipients
+	RecipientMax          int                    `json:"recipient_max"`                  // registry cap
 }
 
 // apiSupportStatus reports the support subsystem's contract + current state: engine
@@ -298,6 +310,10 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 			MinLevel: int(m.MinLevel), MaxClass: m.MaxClass.String(), SchemaVersion: m.SchemaVersion,
 		})
 	}
+	lastSweep := ""
+	if u := supportRetentionLastSweep.Load(); u > 0 {
+		lastSweep = time.Unix(u, 0).UTC().Format(time.RFC3339)
+	}
 	jsonOK(w, supportStatus{
 		BundleFormat:          support.BundleFormat,
 		CollectorEngineVer:    support.CollectorEngineVer,
@@ -306,6 +322,8 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 		Scopes:                supportScopeNames(),
 		RetentionKeep:         supportRetentionKeep,
 		RetentionMaxAgeDays:   int(supportRetentionMaxAge / (24 * time.Hour)),
+		RetentionEvicted:      supportRetentionEvicted.Load(),
+		RetentionLastSweep:    lastSweep,
 		RecipientCount:        len(listSupportRecipients()),
 		RecipientMax:          maxSupportRecipients,
 	})
@@ -799,6 +817,7 @@ func pruneSupportBundles(keep int) {
 				strings.ReplaceAll(s.dirName, "\n", ""), err)
 			continue
 		}
+		supportRetentionEvicted.Add(1)
 		auditSystem("support.bundle.expire", s.dirName, "retention cap")
 	}
 }
@@ -813,6 +832,9 @@ func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
 	if maxAge <= 0 {
 		return
 	}
+	// Record that a real sweep ran (observability), regardless of how many — if
+	// any — bundles it evicts. now is injected, so this is deterministic in tests.
+	supportRetentionLastSweep.Store(now.Unix())
 	// Index-based range: supportBundleSummary is 128 bytes (gocritic rangeValCopy).
 	sums := listSupportBundles()
 	for i := range sums {
@@ -835,6 +857,7 @@ func pruneSupportBundlesByAge(now time.Time, maxAge time.Duration) {
 				strings.ReplaceAll(s.dirName, "\n", ""), err)
 			continue
 		}
+		supportRetentionEvicted.Add(1)
 		auditSystem("support.bundle.expire", s.dirName, "retention max-age")
 	}
 }

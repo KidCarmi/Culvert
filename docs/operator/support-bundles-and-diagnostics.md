@@ -48,6 +48,11 @@ bounds keep the bundle store from growing without limit (both audited as
   bundles, and so never triggers the count cap) still ages out stale bundles.
   A bundle whose timestamp can't be read is kept (fail-safe).
 
+If a bundle you expected is missing, `/api/support/status` (and the Support panel
+header) shows retention observability: how many bundles have been evicted since
+boot (`retention_evicted_total`) and when the age janitor last ran
+(`retention_last_sweep`) — so an eviction is never silent.
+
 ---
 
 ## 2. Capture-level controller (deeper capture, bounded)
