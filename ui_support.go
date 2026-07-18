@@ -329,6 +329,19 @@ func apiSupportStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// supportWritePrometheus exposes the support-bundle retention counters for
+// scraping — durable, alertable observability that complements the point-in-time
+// JSON on /api/support/status (e.g. alert if the last sweep timestamp goes stale,
+// or on a sudden eviction-rate spike). Counts + a timestamp only; no secrets.
+func supportWritePrometheus(w *strings.Builder) {
+	w.WriteString("\n# HELP culvert_support_bundle_retention_evicted_total Support bundles removed by retention (count + age caps) since process start\n")
+	w.WriteString("# TYPE culvert_support_bundle_retention_evicted_total counter\n")
+	fmt.Fprintf(w, "culvert_support_bundle_retention_evicted_total %d\n", supportRetentionEvicted.Load())
+	w.WriteString("# HELP culvert_support_bundle_retention_last_sweep_timestamp_seconds Unix time of the last age-retention sweep (0 = never run)\n")
+	w.WriteString("# TYPE culvert_support_bundle_retention_last_sweep_timestamp_seconds gauge\n")
+	fmt.Fprintf(w, "culvert_support_bundle_retention_last_sweep_timestamp_seconds %d\n", supportRetentionLastSweep.Load())
+}
+
 // supportBundleIDRe pins the deterministic bundle-id shape so a path segment can
 // never traverse out of the bundles dir.
 var supportBundleIDRe = regexp.MustCompile(`^csb_[a-z2-7]{26}$`)
