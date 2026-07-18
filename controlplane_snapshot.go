@@ -314,6 +314,10 @@ type ConfigStore struct {
 	// which case s.snap is still the zero ConfigSnapshot and the cluster RPCs
 	// must refuse rather than distribute an empty config (see ServableConfig).
 	published bool
+	// deltaRing retains recent per-version blocklist deltas so a lagging DP can
+	// catch up incrementally via GetConfigDelta (T3 P1). The zero value is
+	// ready; a swapped-in test store gets a fresh ring automatically.
+	deltaRing blocklistDeltaRing
 }
 
 var globalConfigStore = &ConfigStore{}
@@ -455,9 +459,16 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	recordPublishedSnapshotSizes(snap) // for the utilization metrics (cheap; no per-scrape rebuild)
 
 	s.mu.Lock()
+	// Capture the pre-publish blocklist + version for the delta ring. oldHosts
+	// still references the outgoing snapshot's slice (safe — s.snap is replaced,
+	// not mutated in place).
+	oldHosts := s.snap.BlockedHosts
+	base := s.version
 	s.version++
 	snap.Version = s.version
 	snap.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	newHosts := snap.BlockedHosts
+	target, epoch := s.version, snap.Epoch
 	s.snap = snap
 	s.published = true
 	s.lastPublishErr = ""
@@ -465,6 +476,11 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	s.persistVersionLocked()
 	subs := append([]chan struct{}{}, s.subs...)
 	s.mu.Unlock()
+
+	// Record the blocklist delta OUTSIDE the store lock: the O(N) diff +
+	// fingerprint over up to 2 M hosts must not stall config readers/pollers.
+	// Config publishes are admin-action-rate, so the cost is not hot-path.
+	s.deltaRing.record(base, target, oldHosts, newHosts, blocklistSyncedFingerprint(newHosts), epoch)
 
 	for _, ch := range subs {
 		select {
