@@ -44,7 +44,7 @@ items:
     title: "Architecture overview (website edition): request pipeline + CP/DP"
     type: doc
     priority: critical
-    status: todo
+    status: done
     audience: [security-engineer, admin, architect]
     path: content/docs/01-overview/architecture.md
     evidence_areas: [docs/architecture.md, proxy.go, controlplane.go, policy.go]

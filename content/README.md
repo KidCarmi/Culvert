@@ -24,7 +24,7 @@ evidence from but does not mirror.
 | Section | Article | Status |
 |---|---|---|
 | Overview | [What is Culvert](docs/01-overview/what-is-culvert.md) | published |
-| Overview | Architecture | _planned_ |
+| Overview | [Architecture](docs/01-overview/architecture.md) | published |
 | Getting started | Quick start & first boot | _planned_ |
 | Policy | Policy engine & Zero-Trust authoring | _planned_ |
 | TLS inspection | TLS inspection administration | _planned_ |

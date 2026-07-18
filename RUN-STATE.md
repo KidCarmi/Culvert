@@ -16,15 +16,19 @@ phase transition. Newest activity at the top of each section.
 
 ## Current item
 
-- **C-002** — Architecture overview (website edition). Selecting; next.
+- **C-003** — Getting started / quick start. Selecting; next.
 
 ## Recently completed
 
-- **C-001** — Product overview (`content/docs/01-overview/what-is-culvert.md`)
-  + evidence ledger. All ~55 capability claims verified against code via 3
-  parallel research agents + direct greps. Two overclaims corrected
-  (tamper-evident audit → append-only; CDR → external engine). Link check and
-  markdown structure pass. Committed.
+- **C-002** — Architecture (`content/docs/01-overview/architecture.md`) +
+  evidence ledger. Request pipeline **re-verified from `proxy.go:handleRequest`**
+  (14-stage order), not mirrored — caught doc-drift (G-05: plugin runs after
+  auth, not before; rate-limit + IDNA gate omitted from the old diagram).
+  3 Mermaid diagrams. Link check + structure pass. Committed.
+- **C-001** — Product overview + evidence ledger. ~55 capability claims verified
+  via 3 parallel research agents + direct greps. Two overclaims corrected
+  (tamper-evident audit → append-only; CDR → external engine). Committed
+  `9176e99`.
 
 ## Execution plan
 
@@ -41,11 +45,13 @@ phase transition. Newest activity at the top of each section.
 ## Completed items
 
 - **C-001** — Product overview + claim-evidence ledger (critical).
+- **C-002** — Architecture overview + claim-evidence ledger (critical).
 
 ## Commits created
 
 - `5a4aa90` docs(content): bootstrap autonomous content foundation scaffolding.
-- _(C-001 commit — recorded on push)_
+- `9176e99` docs(content): add verified product overview (what is Culvert).
+- _(C-002 commit — hash recorded next cycle)_
 
 ## Blocked items
 
@@ -72,6 +78,14 @@ _(none yet)_
   an external "Sluice" CDR engine; the disarm/reconstruct algorithm is not
   in-binary. Content labels CDR "Supported (companion engine)". Not a defect —
   a deployment prerequisite to document clearly (parallels the ClamAV sidecar).
+- **[G-05] `docs/architecture.md` pipeline diagram drift.** The in-repo diagram
+  places the plugin middleware chain *before* authentication, but in
+  `proxy.go` `handleRequest` the plugin decision runs *after* Stage-1 auth,
+  inside `preDispatchBlocked` (`proxy.go:435`). The diagram also omits the
+  rate-limit stage and the host-canonicalization (IDNA, fail-closed) gate
+  (`proxy.go:850-859`). The website architecture article uses the code-verified
+  order. _Human decision:_ update `docs/architecture.md` to match (out of scope
+  for content — it is product doc, flagged not edited).
 
 ## Verification log
 
