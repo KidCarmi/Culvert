@@ -70,9 +70,15 @@ func apiPACExceptions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	now := time.Now().UTC()
-	capable := pacDirectCapableMap()
-	records := pacExceptions.All()
+	out := pacGovernanceViews(pacDirectCapableMap(), pacExceptions.All(), time.Now().UTC())
+	jsonOK(w, map[string]any{"exceptions": out})
+}
+
+// pacGovernanceViews joins the DIRECT-capable profiles with their governance
+// records into a sorted view list. Non-DIRECT-capable profiles are skipped —
+// governance only applies to profiles that can actually emit DIRECT. Pure
+// (clock injected) so it is unit-testable without the HTTP layer.
+func pacGovernanceViews(capable map[string]pac.ProfileDirectInventory, records map[string]pac.ExceptionRecord, now time.Time) []pacExceptionView {
 	out := make([]pacExceptionView, 0, len(capable))
 	for id, pinv := range capable {
 		if !pinv.DirectCapable {
@@ -89,7 +95,7 @@ func apiPACExceptions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ProfileID < out[j].ProfileID })
-	jsonOK(w, map[string]any{"exceptions": out})
+	return out
 }
 
 // apiPACExceptionItem handles GET/PUT/DELETE /api/pac/posture/exceptions/{id}.

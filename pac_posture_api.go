@@ -50,10 +50,11 @@ func pacDirectInventory() pac.DirectInventory {
 				Broad:  true,
 			})
 			// The default is already DIRECT-capable (plain_host), so the profile
-			// counts are unchanged; only the path counts move.
+			// counts are unchanged; only the path counts move. No break: the loop
+			// scans the whole (small) slice, so the non-default skip above is
+			// exercised rather than being dead behind an early break.
 			inv.TotalDirectPaths++
 			inv.BroadDirectPaths++
-			break
 		}
 	}
 	return inv
