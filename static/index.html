@@ -516,6 +516,9 @@ tr.dragging  { opacity: .4; }
     <div class="nav-item" data-view="decexclusions" data-min-role="viewer" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Exclusions
     </div>
+    <div class="nav-item" data-view="dechealth" data-min-role="viewer" role="button" tabindex="0">
+      <svg class="ico" aria-hidden="true"><use href="#i-shield"/></svg> Decryption Health
+    </div>
     <div class="nav-item" data-view="policy-tester" role="button" tabindex="0">
       <svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg> Policy Tester
     </div>
@@ -924,6 +927,9 @@ tr.dragging  { opacity: .4; }
           <input type="checkbox" id="auto-scroll" checked> Auto-scroll
         </label>
       </div>
+
+      <!-- Active decryption drill-down chip (set from the Decryption Health panel) -->
+      <div id="dec-drill-banner" style="display:none;margin-bottom:8px"></div>
 
       <!-- History controls — time range + pagination (shown only for History source) -->
       <div class="filter-bar" id="log-history-controls" style="display:none">
@@ -3033,6 +3039,45 @@ Firefox (all platforms):
       </div>
     </div>
 
+    <!-- ── DECRYPTION HEALTH (ADR-0011 Phase 3) ────────────────────────── -->
+    <div class="view" id="view-dechealth">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Decryption Coverage</span>
+          <button class="btn sm ghost" data-click="fetchDecHealth">Refresh</button>
+        </div>
+        <div class="panel-body">
+          <p class="hint">
+            How much of this node's TLS is actually being inspected right now, and why the rest is not.
+            Coverage is <strong>inspected ÷ (inspected + bypass/exclusion)</strong> — decryption
+            <em>failures</em> are counted separately (they are sessions to triage, not a deliberate coverage gap).
+            Counts are per-process since start; click any outcome or failure to see those sessions in the Live Feed.
+          </p>
+          <div id="dechealth-coverage" style="margin:14px 0"></div>
+          <div id="dechealth-bar" style="margin:14px 0"></div>
+          <div id="dechealth-outcomes"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Top Failure Reasons</span></div>
+        <div class="panel-body">
+          <p class="hint">What is breaking decryption and where in the handshake (PAN-OS Decryption Error-Index parity).</p>
+          <div id="dechealth-failures"></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-header"><span class="panel-title">Adaptive Exclusion Posture</span></div>
+        <div class="panel-body">
+          <div id="dechealth-autoexclude" class="hint"></div>
+          <div style="margin-top:10px">
+            <a href="#" data-click="switchView" data-arg="decexclusions" style="color:var(--accent)">Open Decryption Exclusions →</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── FILE BLOCK PROFILE ──────────────────────────────────────────── -->
     <div class="view" id="view-fileblock">
       <div style="margin-bottom:14px">
@@ -4408,6 +4453,10 @@ document.addEventListener('click', e => {
     case 'resetDecTunables':  resetDecTunables(); break;
     case 'evictDecExclusion': evictDecExclusion(arg, arg2); break;
     case 'clearDecExclusions': clearDecExclusions(); break;
+    case 'fetchDecHealth':    fetchDecHealth(); break;
+    case 'drillDecOutcome':   drillDec('dec_outcome', arg); break;
+    case 'drillDecFailCat':   drillDec('dec_fail_category', arg); break;
+    case 'clearDecDrill':     clearDecDrill(); break;
     case 'cancelCatGroup':    cancelCatGroup(); break;
     case 'editCatGroup':      editCatGroup(arg); break;
     case 'deleteCatGroup':    deleteCatGroup(arg); break;
@@ -4751,6 +4800,7 @@ const viewMeta = {
   catgroups:    { title: 'Category Groups', meta: 'Bundle multiple URL categories into named groups for policy rules' },
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) — volatile, per-node, expiring; every entry reduces inspection coverage' },
+  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) — click any slice to drill into the Live Feed' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension — Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice — enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -4830,6 +4880,7 @@ function switchView(name) {
   if (name === 'policy')         { fetchPolicy(); loadFileProfileDropdown(); fetchCatGroups(); loadDecryptionProfileDropdown(); }
   if (name === 'decprofiles')    fetchDecProfiles();
   if (name === 'decexclusions')  fetchDecExclusions();
+  if (name === 'dechealth')      fetchDecHealth();
   if (name === 'authpolicy')     loadAuthPolicy();
   if (name === 'urlcat')         loadURLCategories();
   if (name === 'catgroups')      fetchCatGroups();
@@ -6421,6 +6472,10 @@ let polActionFilter = ''; // F20: filter by action (allow/block/'')
 let _polUnusedFilter = false;      // policy-metadata P1: show only stale/never-matched rules
 const POL_UNUSED_DAYS = 90;        // "unused" = not matched within this many days (incl. never)
 let logFilter = '', logStatusFilter = '', logLevelFilter = '', logMethodFilter = '', logIdentityFilter = '';
+// ADR-0011 P3 drill-down: a one-shot dec.* filter set from the Decryption Health panel.
+// {field: 'dec_outcome'|'dec_fail_category'|…, value: '…'} or null. Included in
+// logFilterParams so it flows to both the live ring and the history store.
+let logDecFilter = null;
 
 function badgeHTML(status) {
   if (status === 'OK')              return '<span class="badge ok">OK</span>';
@@ -6482,6 +6537,7 @@ function logFilterParams() {
   if (logStatusFilter)   params.push('status='   + logStatusFilter);
   if (logLevelFilter)    params.push('level='    + logLevelFilter);
   if (logMethodFilter)   params.push('method='   + logMethodFilter);
+  if (logDecFilter)      params.push(logDecFilter.field + '=' + encodeURIComponent(logDecFilter.value));
   return params;
 }
 
@@ -6763,8 +6819,153 @@ function clearFilter() {
   document.getElementById('log-level').value    = '';
   document.getElementById('log-method').value   = '';
   logFilter = ''; logIdentityFilter = ''; logStatusFilter = ''; logLevelFilter = ''; logMethodFilter = '';
+  logDecFilter = null; renderDecDrillBanner();
   syncLogTabs(''); // reset the tab row to "All"
   fetchLogs();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Decryption Health (ADR-0011 Phase 3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Outcome identity: label + a semantic accent color from the app palette. Colors are
+// ACCENTS beside the always-present text labels (identity is the label, never color
+// alone), and failed(red)/rescued(orange) are kept non-adjacent in the mix bar. Bypass
+// outcomes share the "not inspected" family; failed is the only red.
+const DEC_OUTCOMES = [
+  { key: 'inspected',      label: 'Inspected',        color: 'var(--green)'  },
+  { key: 'bypass_manual',  label: 'Manual bypass',    color: 'var(--accent)' },
+  { key: 'bypass_learned', label: 'Learned exclusion', color: 'var(--yellow)' },
+  { key: 'rescued',        label: 'Live-rescued',     color: 'var(--orange)' },
+  { key: 'not_decrypted',  label: 'Not decrypted',    color: 'var(--muted)'  },
+  { key: 'failed',         label: 'Failed',           color: 'var(--red)'    },
+];
+
+async function fetchDecHealth() {
+  const cov = document.getElementById('dechealth-coverage');
+  if (cov) cov.innerHTML = '<p class="hint">Loading…</p>';
+  try {
+    const d = await api('/api/decryption/health');
+    renderDecHealth(d);
+  } catch (e) {
+    if (cov) cov.innerHTML = '<p class="hint" style="color:var(--red)">Could not load decryption health. ' +
+      '<button class="btn ghost sm" data-click="fetchDecHealth">Retry</button></p>';
+  }
+}
+
+function renderDecHealth(d) {
+  const sessions = d.sessions || {}, byOutcome = sessions.by_outcome || {};
+  const coverage = d.coverage || {}, failures = d.failures || {}, ae = d.autoexclude || {};
+  const total = sessions.total || 0;
+
+  // Coverage headline: inspected ÷ (inspected + bypass/exclusion), failures excluded.
+  const ratioPct = Math.round((coverage.inspected_ratio || 0) * 1000) / 10;
+  const cov = document.getElementById('dechealth-coverage');
+  if (cov) {
+    cov.innerHTML = total === 0
+      ? '<p class="hint">No decryption decisions recorded yet on this node.</p>'
+      : `<div style="display:flex;flex-wrap:wrap;gap:24px;align-items:baseline">
+          <div><span style="font-size:2rem;font-weight:700;color:var(--accent2)">${ratioPct}%</span>
+            <span class="hint"> inspection coverage</span></div>
+          <div class="hint">Inspected <strong>${coverage.inspected||0}</strong> ·
+            Bypassed <strong>${coverage.bypassed||0}</strong> ·
+            Failed <strong style="color:var(--red)">${coverage.failed||0}</strong> ·
+            Total <strong>${total}</strong></div>
+        </div>`;
+  }
+
+  // Outcome mix: a single labelled stacked bar (2px surface gaps between segments) +
+  // a directly-labelled, drill-downable table beneath it.
+  const bar = document.getElementById('dechealth-bar');
+  if (bar) {
+    if (total === 0) { bar.innerHTML = ''; }
+    else {
+      const segs = DEC_OUTCOMES.filter(o => (byOutcome[o.key]||0) > 0).map(o => {
+        const pct = (byOutcome[o.key] / total) * 100;
+        return `<div title="${escHtml(o.label)}: ${byOutcome[o.key]} (${pct.toFixed(1)}%)"
+          style="width:${pct}%;background:${o.color};height:22px"></div>`;
+      }).join('');
+      bar.innerHTML = `<div style="display:flex;gap:2px;border-radius:5px;overflow:hidden;background:var(--surface2)">${segs}</div>`;
+    }
+  }
+
+  const out = document.getElementById('dechealth-outcomes');
+  if (out) {
+    const rows = DEC_OUTCOMES.map(o => {
+      const n = byOutcome[o.key] || 0;
+      const pct = total ? ((n/total)*100).toFixed(1) : '0.0';
+      return `<tr>
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${o.color};margin-right:8px"></span>${escHtml(o.label)}</td>
+        <td style="text-align:right">${n}</td>
+        <td style="text-align:right;color:var(--muted)">${pct}%</td>
+        <td>${n > 0 ? `<a href="#" data-click="drillDecOutcome" data-arg="${o.key}" style="color:var(--accent)">view sessions →</a>` : ''}</td>
+      </tr>`;
+    }).join('');
+    out.innerHTML = `<table class="tbl" style="width:100%;margin-top:12px"><thead><tr>
+      <th>Outcome</th><th style="text-align:right">Count</th><th style="text-align:right">Share</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  // Top failure reasons: category × stage, descending (server-sorted).
+  const fEl = document.getElementById('dechealth-failures');
+  if (fEl) {
+    const top = failures.top || [];
+    if (!top.length) {
+      fEl.innerHTML = '<p class="hint">No decryption failures recorded.</p>';
+    } else {
+      const rows = top.map(f => `<tr>
+        <td>${escHtml(f.fail_category)}</td>
+        <td style="color:var(--muted)">${escHtml(f.fail_stage)}</td>
+        <td style="text-align:right">${f.count}</td>
+        <td><a href="#" data-click="drillDecFailCat" data-arg="${escHtml(f.fail_category)}" style="color:var(--accent)">view sessions →</a></td>
+      </tr>`).join('');
+      fEl.innerHTML = `<table class="tbl" style="width:100%"><thead><tr>
+        <th>Category</th><th>Stage</th><th style="text-align:right">Count</th><th></th>
+        </tr></thead><tbody>${rows}</tbody></table>`;
+    }
+  }
+
+  // Adaptive exclusion posture (mirrors the exclusions panel's headline numbers).
+  const aeEl = document.getElementById('dechealth-autoexclude');
+  if (aeEl) {
+    aeEl.innerHTML = escHtml(
+      `Active exclusions: ${ae.active ?? 0} · Pending: ${ae.pending ?? 0} · ` +
+      `Learned-bypass hits: ${ae.hit_total ?? 0} · Live-rescues: ${ae.rescue_total ?? 0} · ` +
+      `Learning-surge alerts: ${ae.surge_total ?? 0} · ` +
+      `Fail-open: ${ae.fail_open_profiles ?? 0} profile(s) / ${ae.fail_open_rules ?? 0} rule(s)`);
+  }
+}
+
+// drillDec sets the one-shot dec.* filter, switches to the Live Feed, and applies it.
+// logHistOffset is reset so a drill-down that lands on the Saved-logs source starts at
+// page 1 — otherwise a stale offset from a prior deep page could show an empty result even
+// though matches exist on the first page (Codex #823).
+function drillDec(field, value) {
+  logDecFilter = { field, value };
+  logHistOffset = 0;
+  switchView('livefeed');
+  renderDecDrillBanner();
+  fetchLogs();
+}
+
+function clearDecDrill() {
+  logDecFilter = null;
+  logHistOffset = 0;
+  renderDecDrillBanner();
+  fetchLogs();
+}
+
+// renderDecDrillBanner shows/hides the active dec.* filter chip above the feed so the
+// drill-down is visible and clearable (the regular Clear button also resets it).
+function renderDecDrillBanner() {
+  const el = document.getElementById('dec-drill-banner');
+  if (!el) return;
+  if (!logDecFilter) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const label = logDecFilter.field === 'dec_fail_category' ? 'failure' : 'outcome';
+  el.style.display = '';
+  el.innerHTML = `<span style="font-size:.78rem;background:rgba(20,184,166,.12);color:var(--accent2);padding:3px 10px;border-radius:12px">`
+    + `decryption ${label} = <strong>${escHtml(logDecFilter.value)}</strong>`
+    + ` <a href="#" data-click="clearDecDrill" style="color:var(--accent2);text-decoration:none" title="clear this filter">✕</a></span>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
