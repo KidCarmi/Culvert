@@ -4503,6 +4503,7 @@ document.addEventListener('click', e => {
     case 'diagnoseTLS':            diagnoseTLS(); break;
     case 'supportDeleteBundle':    supportDeleteBundle(arg); break;
     case 'supportShowReport':      supportShowReport(arg); break;
+    case 'supportShowExports':     supportShowExports(arg); break;
     case 'supportValidateBundle':  supportValidateBundle(arg); break;
     case 'supportExportEncrypted': supportExportEncrypted(arg); break;
     case 'supportExportSealed':    supportExportSealed(arg); break;
@@ -12317,7 +12318,8 @@ function renderSupportBundles(list) {
       // Report preview is counts-only (viewer-safe). Download needs operator+ AND
       // an approved (ready) bundle. Approve is the admin mandatory-preview gate.
       const reportBtn = '<button class="btn ghost sm" data-click="supportShowReport" data-arg="' + escHtml(String(b.bundle_id)) + '">Report</button>' +
-        ' <button class="btn ghost sm" data-click="supportValidateBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Re-derive + check section hashes (tamper detection)">Validate</button>';
+        ' <button class="btn ghost sm" data-click="supportValidateBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Re-derive + check section hashes (tamper detection)">Validate</button>' +
+        ' <button class="btn ghost sm" data-click="supportShowExports" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Recent export history — who took this bundle off the box, and how">Exports</button>';
       let ops = '';
       if (canWrite) {
         ops += ready
@@ -12923,6 +12925,33 @@ async function supportShowReport(id) {
     }
   } catch (err) {
     toast('Report unavailable: ' + err.message, 'error');
+  }
+}
+
+async function supportShowExports(id) {
+  if (!id) return;
+  try {
+    const d = await api('/api/support/bundles/' + encodeURIComponent(String(id)) + '/exports');
+    const evs = (d && d.exports) || [];
+    const label = a => String(a || '').replace('support.bundle.download_', '').replace('support.bundle.download', 'plain');
+    const rows = evs.map(e =>
+      '<tr><td>' + escHtml(String(e.time || '')) + '</td>' +
+      '<td>' + escHtml(String(e.actor || '')) + '</td>' +
+      '<td>' + escHtml(label(e.action)) + '</td></tr>').join('');
+    const table = evs.length
+      ? '<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr>' +
+        '<th>Time</th><th>Actor</th><th>Form</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="hint">No recent exports recorded for this bundle.</p>';
+    const el = document.getElementById('support-bundles');
+    if (el) {
+      let box = document.getElementById('support-exports-box');
+      if (!box) { box = document.createElement('div'); box.id = 'support-exports-box'; box.style.marginTop = '12px'; el.appendChild(box); }
+      box.innerHTML = '<div style="font-weight:600;margin:6px 0">Export history — ' + escHtml(String(id)) +
+        '</div><p class="hint">' + escHtml(String(d.note || '')) + '</p>' + table;
+      box.scrollIntoView({ block: 'nearest' });
+    }
+  } catch (err) {
+    toast('Export history unavailable: ' + err.message, 'error');
   }
 }
 

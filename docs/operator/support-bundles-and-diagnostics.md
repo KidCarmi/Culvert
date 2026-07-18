@@ -90,6 +90,21 @@ manifest all report **not ok**. The verdict is integrity metadata only (section 
 
 ---
 
+## 4a. Export (exfiltration) history
+
+Every way a bundle leaves the appliance — plain download, passphrase-encrypted,
+or sealed — is audited. Review who took a given bundle off the box and how.
+
+**UI:** Support panel → **Exports** on a bundle row.
+**API:** `GET /api/support/bundles/{id}/exports` (viewer).
+
+It returns the recent export events (actor, time, form) for that bundle — read-only
+audit metadata, never bundle content. History comes from the in-memory audit ring,
+so it is **recent-only** (oldest events are evicted); the durable audit trail /
+SIEM stream remains the system of record.
+
+---
+
 ## 5. Case workflow
 
 - **Bind** a bundle to a case at creation (§1).

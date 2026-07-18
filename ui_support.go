@@ -48,6 +48,7 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/bundles/{id}/validate", apiSupportBundleValidate)
 	mux.HandleFunc("/api/support/bundles/{id}/download-encrypted", apiSupportBundleExportEncrypted)
 	mux.HandleFunc("/api/support/bundles/{id}/download-sealed", apiSupportBundleExportSealed)
+	mux.HandleFunc("/api/support/bundles/{id}/exports", apiSupportBundleExports)
 	mux.HandleFunc("/api/support/recipients", apiSupportRecipients)
 	mux.HandleFunc("/api/support/recipients/{name}", apiSupportRecipientItem)
 	mux.HandleFunc("/api/support/debug-level", apiSupportDebugLevel)
