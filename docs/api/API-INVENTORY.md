@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 84
-- **Exempt (≤270-day horizon):** 200
+- **Documented:** 93
+- **Exempt (≤270-day horizon):** 191
 
 ## By domain
 
@@ -12,18 +12,18 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 13 |
+| cluster | 31 | 15 |
 | dashboard | 13 | 9 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 4 |
-| policy | 65 | 18 |
+| policy | 65 | 19 |
 | release | 6 | 1 |
-| security | 51 | 13 |
-| settings | 30 | 11 |
+| security | 51 | 15 |
+| settings | 30 | 12 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 3 |
+| support | 30 | 6 |
 
 ## Documented operations
 
@@ -50,12 +50,15 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/cluster/ca` | apiClusterCA | viewer |
 | GET | `/api/cluster/ha` | apiClusterHA | viewer |
 | GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
+| GET | `/api/cluster/node-groups` | apiNodeGroups | viewer |
+| GET | `/api/cluster/node-groups/membership` | apiNodeGroupMembership | viewer |
 | GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
 | GET | `/api/cluster/rate-limits` | apiClusterRateLimits | viewer |
 | GET | `/api/cluster/revocations` | apiClusterRevocations | viewer |
 | GET | `/api/cluster/rotation` | apiClusterRotation | viewer |
 | GET | `/api/cluster/status` | apiClusterStatus | viewer |
 | GET | `/api/cluster/tokens` | apiClusterTokens | viewer |
+| GET | `/api/config/diff` | apiConfigDiff | viewer |
 | GET | `/api/config/export` | apiConfigExport | admin |
 | POST | `/api/config/import` | apiConfigImport | admin |
 | GET | `/api/config/versions` | apiConfigVersions | viewer |
@@ -66,6 +69,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | * | `/api/dashboard/top-rules` | apiDashboardTopRules | viewer |
 | DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator |
 | GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer |
+| GET | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | viewer |
 | GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
 | GET | `/api/decryption/health` | apiDecryptionHealth | viewer |
 | GET | `/api/decryption/redaction` | apiDecryptionRedaction | viewer |
@@ -92,9 +96,11 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/rewrite` | apiRewrite | viewer |
 | GET | `/api/security` | apiSecurity | viewer |
 | GET | `/api/security-scan/cache` | apiScanCache | viewer |
+| GET | `/api/security-scan/exclusions` | apiSecScanExclusions | viewer |
 | GET | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | viewer |
 | GET | `/api/security-scan/status` | apiSecScanStatus | viewer |
 | GET | `/api/security-scan/svc` | apiScanSvcConfig | viewer |
+| GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | GET | `/api/session-secret` | apiSessionSecret | viewer |
 | GET | `/api/session-timeout` | apiSessionTimeout | viewer |
@@ -105,6 +111,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/setup/status` | apiSetupStatus | public |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
 | * | `/api/stats` | apiStats | viewer |
+| GET | `/api/support/bundles` | apiSupportBundles | viewer |
+| GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |
+| GET | `/api/support/recipients` | apiSupportRecipients | viewer |
 | GET | `/api/support/retention` | apiSupportRetention | viewer |
 | GET | `/api/support/status` | apiSupportStatus | viewer |
 | * | `/api/timeseries` | apiTimeseries | viewer |

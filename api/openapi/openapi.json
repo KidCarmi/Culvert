@@ -141,6 +141,24 @@
         ],
         "type": "object"
       },
+      "AutoExcludeTunables": {
+        "additionalProperties": true,
+        "properties": {
+          "bounds": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "defaults": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "defaults",
+          "bounds"
+        ],
+        "type": "object"
+      },
       "BandwidthPolicies": {
         "items": {
           "additionalProperties": true,
@@ -420,6 +438,28 @@
         "type": "object",
         "x-culvert-open-justification": "The backup envelope is intentionally an opaque superset of every config surface; its exact members vary by feature set and version, so it cannot be a closed schema. Sensitivity is enforced operationally (0600 at rest, admin-only + audited transfer), not by the contract shape.",
         "x-culvert-sensitive": true
+      },
+      "ConfigDiff": {
+        "additionalProperties": true,
+        "properties": {
+          "changes": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "from": {
+            "type": "integer"
+          },
+          "to": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "changes"
+        ],
+        "type": "object"
       },
       "ConfigVersionList": {
         "items": {
@@ -930,6 +970,16 @@
         ],
         "type": "object"
       },
+      "NodeGroupMembership": {
+        "additionalProperties": true,
+        "description": "Nodes matching a node group's label selector.",
+        "type": "object"
+      },
+      "NodeGroups": {
+        "additionalProperties": true,
+        "description": "Node group definitions and selectors.",
+        "type": "object"
+      },
       "OCSPStatus": {
         "additionalProperties": false,
         "properties": {
@@ -1220,6 +1270,30 @@
         ],
         "type": "object"
       },
+      "ScanExclusions": {
+        "additionalProperties": true,
+        "properties": {
+          "hashes": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "hashes",
+          "hosts"
+        ],
+        "type": "object"
+      },
       "ScanSvcConfig": {
         "additionalProperties": true,
         "properties": {
@@ -1422,6 +1496,40 @@
         ],
         "type": "object"
       },
+      "SupportBundles": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
+      },
+      "SupportDebugLevel": {
+        "additionalProperties": true,
+        "description": "Support debug-level state.",
+        "type": "object"
+      },
+      "SupportRecipients": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "type": "integer"
+          },
+          "recipients": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "recipients",
+          "max"
+        ],
+        "type": "object"
+      },
       "SupportRetention": {
         "additionalProperties": true,
         "properties": {
@@ -1541,6 +1649,11 @@
         "required": [
           "users"
         ],
+        "type": "object"
+      },
+      "YARARules": {
+        "additionalProperties": true,
+        "description": "YARA rule inventory — directory, files, per-file rule names, compiled names.",
         "type": "object"
       },
       "YARASettings": {
@@ -2566,6 +2679,107 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/node-groups": {
+      "get": {
+        "description": "Returns node group definitions and label selectors.",
+        "operationId": "getNodeGroups",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeGroups"
+                }
+              }
+            },
+            "description": "Node groups."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Node groups",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/node-groups/membership": {
+      "get": {
+        "description": "Returns nodes matching a node group's selector. Requires the `name` query parameter.",
+        "operationId": "getNodeGroupMembership",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeGroupMembership"
+                }
+              }
+            },
+            "description": "Node group membership."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Referenced object/version not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Node group membership",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/nodes": {
       "get": {
         "description": "Returns the enrolled cluster nodes.",
@@ -2791,6 +3005,76 @@
         "summary": "Enrollment tokens",
         "tags": [
           "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/config/diff": {
+      "get": {
+        "description": "Diffs two configuration versions. Requires `from` and `to` query parameters.",
+        "operationId": "getConfigDiff",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDiff"
+                }
+              }
+            },
+            "description": "Config version diff."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Referenced object/version not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Config version diff",
+        "tags": [
+          "config"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
@@ -3246,6 +3530,45 @@
         "summary": "List adaptive decryption-exclusion cache entries",
         "tags": [
           "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/decryption-exclusions/tunables": {
+      "get": {
+        "description": "Returns adaptive decryption auto-exclude tunable defaults and bounds.",
+        "operationId": "getAutoExcludeTunables",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoExcludeTunables"
+                }
+              }
+            },
+            "description": "Auto-exclude tunables."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Auto-exclude tunables",
+        "tags": [
+          "policy"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
@@ -4301,6 +4624,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/security-scan/exclusions": {
+      "get": {
+        "description": "Returns scan exclusion hashes and hosts.",
+        "operationId": "getScanExclusions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanExclusions"
+                }
+              }
+            },
+            "description": "Scan exclusions."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Scan exclusions",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/security-scan/feeds/domain-allowlist": {
       "get": {
         "description": "Returns the threat-feed domain allowlist.",
@@ -4407,6 +4769,45 @@
           }
         ],
         "summary": "Scan service config",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/yara/rules": {
+      "get": {
+        "description": "Returns the YARA rule inventory (directory, files, rule names).",
+        "operationId": "getYARARules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/YARARules"
+                }
+              }
+            },
+            "description": "YARA rules."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "YARA rules",
         "tags": [
           "security"
         ],
@@ -4822,6 +5223,136 @@
         "summary": "Aggregate proxy counters and health flags",
         "tags": [
           "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/bundles": {
+      "get": {
+        "description": "Returns generated support bundles (optionally filtered by case).",
+        "operationId": "getSupportBundles",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "case",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportBundles"
+                }
+              }
+            },
+            "description": "Support bundles."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support bundles",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/debug-level": {
+      "get": {
+        "description": "Returns the current support debug-level state.",
+        "operationId": "getSupportDebugLevel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportDebugLevel"
+                }
+              }
+            },
+            "description": "Support debug level."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support debug level",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/recipients": {
+      "get": {
+        "description": "Returns configured support-bundle recipients and the max allowed.",
+        "operationId": "getSupportRecipients",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportRecipients"
+                }
+              }
+            },
+            "description": "Support recipients."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support recipients",
+        "tags": [
+          "support"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",

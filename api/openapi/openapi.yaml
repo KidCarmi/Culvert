@@ -761,6 +761,57 @@ components:
       description: Aggregated operator diagnostics contract (health, posture, and remediation hints).
       additionalProperties: true
 
+    # ── Slice 3 tranche 7: remaining reads (node-groups/support/scan) ──────────────
+    NodeGroups:
+      type: object
+      description: Node group definitions and selectors.
+      additionalProperties: true
+    NodeGroupMembership:
+      type: object
+      description: Nodes matching a node group's label selector.
+      additionalProperties: true
+    SupportBundles:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    SupportDebugLevel:
+      type: object
+      description: Support debug-level state.
+      additionalProperties: true
+    SupportRecipients:
+      type: object
+      required: [recipients, max]
+      additionalProperties: false
+      properties:
+        recipients: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        max: { type: integer }
+    ScanExclusions:
+      type: object
+      required: [hashes, hosts]
+      additionalProperties: true
+      properties:
+        hashes: { type: array, items: { type: string }, nullable: true }
+        hosts: { type: array, items: { type: string }, nullable: true }
+    YARARules:
+      type: object
+      description: YARA rule inventory — directory, files, per-file rule names, compiled names.
+      additionalProperties: true
+    AutoExcludeTunables:
+      type: object
+      required: [defaults, bounds]
+      additionalProperties: true
+      properties:
+        defaults: { type: object, additionalProperties: true }
+        bounds: { type: object, additionalProperties: true }
+    ConfigDiff:
+      type: object
+      required: [from, to, changes]
+      additionalProperties: true
+      properties:
+        from: { type: integer }
+        to: { type: integer }
+        changes: { type: object, additionalProperties: true, nullable: true }
+
 paths:
   /healthz:
     get:
@@ -2797,4 +2848,233 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/cluster/node-groups:
+    get:
+      operationId: getNodeGroups
+      tags: [cluster]
+      summary: Node groups
+      description: Returns node group definitions and label selectors.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Node groups.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NodeGroups' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/node-groups/membership:
+    get:
+      operationId: getNodeGroupMembership
+      tags: [cluster]
+      summary: Node group membership
+      description: Returns nodes matching a node group's selector. Requires the `name` query parameter.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Node group membership.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NodeGroupMembership' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '404':
+          description: Referenced object/version not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/bundles:
+    get:
+      operationId: getSupportBundles
+      tags: [support]
+      summary: Support bundles
+      description: Returns generated support bundles (optionally filtered by case).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: case
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Support bundles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportBundles' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/debug-level:
+    get:
+      operationId: getSupportDebugLevel
+      tags: [support]
+      summary: Support debug level
+      description: Returns the current support debug-level state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Support debug level.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportDebugLevel' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/recipients:
+    get:
+      operationId: getSupportRecipients
+      tags: [support]
+      summary: Support recipients
+      description: Returns configured support-bundle recipients and the max allowed.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Support recipients.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportRecipients' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/exclusions:
+    get:
+      operationId: getScanExclusions
+      tags: [security]
+      summary: Scan exclusions
+      description: Returns scan exclusion hashes and hosts.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Scan exclusions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanExclusions' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/yara/rules:
+    get:
+      operationId: getYARARules
+      tags: [security]
+      summary: YARA rules
+      description: Returns the YARA rule inventory (directory, files, rule names).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: YARA rules.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YARARules' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/decryption-exclusions/tunables:
+    get:
+      operationId: getAutoExcludeTunables
+      tags: [policy]
+      summary: Auto-exclude tunables
+      description: Returns adaptive decryption auto-exclude tunable defaults and bounds.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Auto-exclude tunables.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutoExcludeTunables' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/config/diff:
+    get:
+      operationId: getConfigDiff
+      tags: [config]
+      summary: Config version diff
+      description: Diffs two configuration versions. Requires `from` and `to` query parameters.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: to
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Config version diff.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigDiff' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '404':
+          description: Referenced object/version not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
         '403': { $ref: '#/components/responses/PlainForbidden' }
