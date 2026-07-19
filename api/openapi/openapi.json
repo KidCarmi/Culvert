@@ -401,6 +401,18 @@
         ],
         "type": "object"
       },
+      "DecryptionRedaction": {
+        "additionalProperties": false,
+        "properties": {
+          "redact_hosts": {
+            "description": "false (redaction off) or an array of redacted hosts."
+          }
+        },
+        "required": [
+          "redact_hosts"
+        ],
+        "type": "object"
+      },
       "DefaultActionStatus": {
         "additionalProperties": false,
         "properties": {
@@ -414,6 +426,22 @@
         },
         "required": [
           "defaultAction"
+        ],
+        "type": "object"
+      },
+      "DomainAllowlist": {
+        "additionalProperties": false,
+        "properties": {
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "domains"
         ],
         "type": "object"
       },
@@ -672,6 +700,11 @@
         ],
         "type": "object"
       },
+      "ObjectReferences": {
+        "additionalProperties": true,
+        "description": "Reverse references from named objects (categories, groups, profiles) to policy rules.",
+        "type": "object"
+      },
       "OkResponse": {
         "additionalProperties": true,
         "properties": {
@@ -704,6 +737,50 @@
         "required": [
           "proxyHost",
           "proxyPort"
+        ],
+        "type": "object"
+      },
+      "PACPools": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
+      },
+      "PACPostureInventory": {
+        "additionalProperties": true,
+        "description": "Direct-access PAC posture inventory (shape varies).",
+        "type": "object"
+      },
+      "PACProfiles": {
+        "additionalProperties": true,
+        "properties": {
+          "defaultProfile": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "pools": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "profiles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "profiles",
+          "pools"
         ],
         "type": "object"
       },
@@ -789,6 +866,25 @@
         },
         "type": "object"
       },
+      "ReleaseStatus": {
+        "additionalProperties": true,
+        "description": "Release-management status — catalog availability, verify mode, and freshness.",
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "verify_mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "type": "object"
+      },
       "RewriteList": {
         "additionalProperties": false,
         "properties": {
@@ -835,6 +931,42 @@
         "required": [
           "patterns",
           "count"
+        ],
+        "type": "object"
+      },
+      "ScanCache": {
+        "additionalProperties": true,
+        "properties": {
+          "cache_hits": {
+            "type": "integer"
+          },
+          "cache_misses": {
+            "type": "integer"
+          },
+          "cache_size": {
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "ScanSvcConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "remote_enabled": {
+            "type": "boolean"
+          },
+          "remote_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote_enabled"
         ],
         "type": "object"
       },
@@ -1066,6 +1198,11 @@
         "required": [
           "users"
         ],
+        "type": "object"
+      },
+      "YARASettings": {
+        "additionalProperties": true,
+        "description": "YARA engine runtime settings (fields vary by build/config).",
         "type": "object"
       }
     },
@@ -2193,6 +2330,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/decryption/redaction": {
+      "get": {
+        "description": "Returns hosts whose decrypted content is redacted from logs.",
+        "operationId": "getDecryptionRedaction",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptionRedaction"
+                }
+              }
+            },
+            "description": "Decryption redaction hosts."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Decryption redaction hosts",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/default-action": {
       "get": {
         "description": "Returns the default policy action applied when no rule matches (allow or deny).",
@@ -2544,6 +2720,67 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/objects/references": {
+      "get": {
+        "description": "Returns reverse references from a named object to the policy rules that use it. Requires the object type via the `type` query parameter.",
+        "operationId": "getObjectReferences",
+        "parameters": [
+          {
+            "description": "Object type to resolve references for (e.g. category, category-group, decryption-profile).",
+            "in": "query",
+            "name": "type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectReferences"
+                }
+              }
+            },
+            "description": "Object references."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Object references",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/ocsp": {
       "get": {
         "description": "Returns OCSP revocation-check status and counters.",
@@ -2611,6 +2848,123 @@
           }
         ],
         "summary": "PAC configuration",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/pac/pools": {
+      "get": {
+        "description": "Returns the PAC upstream pools.",
+        "operationId": "getPACPools",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PACPools"
+                }
+              }
+            },
+            "description": "PAC pools."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "PAC pools",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/pac/posture/inventory": {
+      "get": {
+        "description": "Returns the direct-access PAC posture inventory.",
+        "operationId": "getPACPostureInventory",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PACPostureInventory"
+                }
+              }
+            },
+            "description": "PAC posture inventory."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "PAC posture inventory",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/pac/profiles": {
+      "get": {
+        "description": "Returns PAC profiles, the default profile, and pools.",
+        "operationId": "getPACProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PACProfiles"
+                }
+              }
+            },
+            "description": "PAC profiles."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "PAC profiles",
         "tags": [
           "pac"
         ],
@@ -2700,6 +3054,55 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/releases": {
+      "get": {
+        "description": "Returns release-catalog availability, verify mode, and freshness. Returns 503 when release management is not configured.",
+        "operationId": "getReleases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseStatus"
+                }
+              }
+            },
+            "description": "Release-management status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Release management not configured. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Release-management status",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/rewrite": {
       "get": {
         "description": "Returns the configured HTTP header rewrite rules.",
@@ -2778,6 +3181,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/security-scan/cache": {
+      "get": {
+        "description": "Returns the SHA-256 scan-result cache hit/miss/size stats.",
+        "operationId": "getScanCache",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanCache"
+                }
+              }
+            },
+            "description": "Scan hash-cache stats."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Scan hash-cache stats",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/feeds/domain-allowlist": {
+      "get": {
+        "description": "Returns the threat-feed domain allowlist.",
+        "operationId": "getScanDomainAllowlist",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainAllowlist"
+                }
+              }
+            },
+            "description": "Threat-feed domain allowlist."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Threat-feed domain allowlist",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/security-scan/status": {
       "get": {
         "description": "Returns ClamAV/YARA/threat-feed scan-service status.",
@@ -2806,6 +3287,84 @@
           }
         ],
         "summary": "Security-scan status",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/svc": {
+      "get": {
+        "description": "Returns the scan-service mode (local/remote) and remote URL.",
+        "operationId": "getScanSvcConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanSvcConfig"
+                }
+              }
+            },
+            "description": "Scan service config."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Scan service config",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/yara/settings": {
+      "get": {
+        "description": "Returns the YARA engine runtime settings.",
+        "operationId": "getYARASettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/YARASettings"
+                }
+              }
+            },
+            "description": "YARA engine settings."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "YARA engine settings",
         "tags": [
           "security"
         ],

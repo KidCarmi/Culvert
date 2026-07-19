@@ -552,6 +552,70 @@ components:
         enabled: { type: boolean }
         scan_svc_mode: { type: string }
 
+    # ── Slice 3 tranche 4: scan/pac/decryption/release read-model schemas ──────────
+    ScanSvcConfig:
+      type: object
+      required: [remote_enabled]
+      additionalProperties: true
+      properties:
+        remote_enabled: { type: boolean }
+        remote_url: { type: string }
+    ScanCache:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        cache_hits: { type: integer }
+        cache_misses: { type: integer }
+        cache_size: { type: integer }
+    DomainAllowlist:
+      type: object
+      required: [domains]
+      additionalProperties: false
+      properties:
+        domains: { type: array, items: { type: string }, nullable: true }
+    YARASettings:
+      type: object
+      description: YARA engine runtime settings (fields vary by build/config).
+      additionalProperties: true
+    DecryptionRedaction:
+      type: object
+      required: [redact_hosts]
+      additionalProperties: false
+      properties:
+        redact_hosts:
+          description: "false (redaction off) or an array of redacted hosts."
+    PACPools:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    PACProfiles:
+      type: object
+      required: [profiles, pools]
+      additionalProperties: true
+      properties:
+        defaultProfile: { type: object, additionalProperties: true, nullable: true }
+        profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        pools: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    PACPostureInventory:
+      type: object
+      description: Direct-access PAC posture inventory (shape varies).
+      additionalProperties: true
+    ReleaseStatus:
+      type: object
+      description: Release-management status — catalog availability, verify mode, and freshness.
+      required: [available]
+      additionalProperties: true
+      properties:
+        available: { type: boolean }
+        reason: { type: string }
+        verify_mode: { type: string }
+    ObjectReferences:
+      type: object
+      description: Reverse references from named objects (categories, groups, profiles) to policy rules.
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -1827,4 +1891,240 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SecurityScanStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/security-scan/svc:
+    get:
+      operationId: getScanSvcConfig
+      tags: [security]
+      summary: Scan service config
+      description: Returns the scan-service mode (local/remote) and remote URL.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Scan service config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanSvcConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/cache:
+    get:
+      operationId: getScanCache
+      tags: [security]
+      summary: Scan hash-cache stats
+      description: Returns the SHA-256 scan-result cache hit/miss/size stats.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Scan hash-cache stats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanCache' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/feeds/domain-allowlist:
+    get:
+      operationId: getScanDomainAllowlist
+      tags: [security]
+      summary: Threat-feed domain allowlist
+      description: Returns the threat-feed domain allowlist.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Threat-feed domain allowlist.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DomainAllowlist' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/yara/settings:
+    get:
+      operationId: getYARASettings
+      tags: [security]
+      summary: YARA engine settings
+      description: Returns the YARA engine runtime settings.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: YARA engine settings.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YARASettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/decryption/redaction:
+    get:
+      operationId: getDecryptionRedaction
+      tags: [policy]
+      summary: Decryption redaction hosts
+      description: Returns hosts whose decrypted content is redacted from logs.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Decryption redaction hosts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecryptionRedaction' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/pac/pools:
+    get:
+      operationId: getPACPools
+      tags: [pac]
+      summary: PAC pools
+      description: Returns the PAC upstream pools.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC pools.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACPools' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/pac/profiles:
+    get:
+      operationId: getPACProfiles
+      tags: [pac]
+      summary: PAC profiles
+      description: Returns PAC profiles, the default profile, and pools.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC profiles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACProfiles' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/pac/posture/inventory:
+    get:
+      operationId: getPACPostureInventory
+      tags: [pac]
+      summary: PAC posture inventory
+      description: Returns the direct-access PAC posture inventory.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC posture inventory.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACPostureInventory' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/releases:
+    get:
+      operationId: getReleases
+      tags: [config]
+      summary: Release-management status
+      description: Returns release-catalog availability, verify mode, and freshness. Returns 503 when release management is not configured.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Release-management status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleaseStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Release management not configured. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/objects/references:
+    get:
+      operationId: getObjectReferences
+      tags: [policy]
+      summary: Object references
+      description: Returns reverse references from a named object to the policy rules that use it. Requires the object type via the `type` query parameter.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: Object type to resolve references for (e.g. category, category-group, decryption-profile).
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Object references.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ObjectReferences' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
