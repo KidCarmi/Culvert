@@ -134,3 +134,24 @@ func TestInstaller_DisabledCatalogDoesNotDowngrade(t *testing.T) {
 		t.Fatal("install.sh must handle the off/none/disabled sentinels")
 	}
 }
+
+// The verifier download URL is built from GH_REPO + the release tag; both must be
+// validated so a CULVERT_GITHUB_REPO / poisoned-tag_name value cannot path-traverse
+// to another repo's asset (red-team finding).
+func TestInstaller_ValidatesVerifierDownloadInputs(t *testing.T) {
+	s := readContractFile(t, "scripts/install.sh")
+	for _, want := range []string{
+		"safe_release_tag",                        // release-tag charset guard
+		`GH_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`, // owner/name guard
+		`"$GH_REPO" == *".."*`,                    // no traversal in repo
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.sh must validate verifier download inputs; missing %q", want)
+		}
+	}
+	// The verifier must be staged under an exec-capable dir (not blindly /tmp) so a
+	// noexec /tmp does not silently block the trusted install.
+	if !strings.Contains(s, `mktemp -d "${INSTALL_DIR}/.verifier`) {
+		t.Error("install.sh should stage the verifier under an exec-capable dir (INSTALL_DIR) to survive /tmp noexec")
+	}
+}

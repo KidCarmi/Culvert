@@ -690,10 +690,22 @@ catalog_fetch_disabled() {
 # rate-limited api.github.com (60 req/hr/IP, unauthenticated) does not hard-fail the
 # install: the JSON API first, then the non-rate-limited releases/latest HTML
 # redirect whose Location carries the tag.
+# safe_release_tag — accept only a conservative release-tag charset. This is a
+# HARD injection guard: `ver` flows into the download URL, and GitHub applies
+# RFC-3986 dot-segment normalization, so a tag containing `/` or `..` could escape
+# to a DIFFERENT repo's asset (e.g. ver="../../attacker/evilrepo/releases/download/v1").
+# Reject anything but [alnum . _ -] with an optional leading `v` and no `..`.
+safe_release_tag() {
+  [[ "$1" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]*$ && "$1" != *".."* ]]
+}
+
 resolve_verifier_version() {
   local v
   v="${CULVERT_BOOTSTRAP_VERIFIER_VERSION:-}"
-  if [[ -n "$v" ]]; then printf '%s\n' "$v"; return 0; fi
+  if [[ -n "$v" ]]; then
+    safe_release_tag "$v" || { warn "CULVERT_BOOTSTRAP_VERIFIER_VERSION=$v is not a valid release tag"; return 1; }
+    printf '%s\n' "$v"; return 0
+  fi
   v="$(curl -fsS --max-time 15 "https://api.github.com/repos/${GH_REPO}/releases/latest" 2>/dev/null \
     | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')" || true
   if [[ -z "$v" ]]; then
@@ -703,6 +715,9 @@ resolve_verifier_version() {
       | tr -d '\r' | grep -iE '^location:' | sed -E 's#.*/releases/tag/([^/[:space:]]+).*#\1#' | head -n1)" || true
   fi
   [[ -n "$v" ]] || return 1
+  # Validate even the network-derived tag: a MITM-poisoned tag_name/Location must not
+  # be able to path-traverse the download URL to another repo.
+  safe_release_tag "$v" || { warn "resolved verifier tag '$v' is not a valid release tag"; return 1; }
   printf '%s\n' "$v"
 }
 
@@ -723,6 +738,11 @@ acquire_bootstrap_verifier() {
     return 0 # already fetched this run
   fi
   command -v curl >/dev/null 2>&1 || { warn "curl is required to fetch the catalog verifier"; return 1; }
+  # GH_REPO is interpolated into the download URL; constrain it to owner/name so a
+  # CULVERT_GITHUB_REPO override cannot inject path segments or a different host.
+  if [[ ! "$GH_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ || "$GH_REPO" == *".."* ]]; then
+    warn "CULVERT_GITHUB_REPO='$GH_REPO' is not a valid owner/name repository"; return 1
+  fi
   local arch
   case "$(uname -m)" in
     x86_64|amd64)  arch=amd64 ;;
@@ -736,7 +756,11 @@ acquire_bootstrap_verifier() {
     return 1
   fi
   local dir asset
-  dir="$(mktemp -d)" || return 1
+  # Stage under an EXEC-CAPABLE dir: the verifier is downloaded THEN executed, so a
+  # /tmp mounted `noexec` (CIS-hardened / hardened-EC2 posture) would block the
+  # trusted install. Prefer the install dir (root fs, owned by us); fall back to
+  # $TMPDIR/mktemp default only if that fails. cleanup_bootstrap_verifier removes it.
+  dir="$(mktemp -d "${INSTALL_DIR}/.verifier.XXXXXX" 2>/dev/null)" || dir="$(mktemp -d)" || return 1
   asset="culvert-linux-${arch}"
   if ! curl -fsSL --max-time 90 -o "$dir/culvert" "https://github.com/${GH_REPO}/releases/download/${ver}/${asset}"; then
     warn "could not download the catalog verifier ($asset $ver)"
@@ -774,6 +798,12 @@ seed_from_catalog() {
     warn "CULVERT_RELEASE_CATALOG_URL=$CATALOG_URL — catalog fetch is disabled; not auto-seeding from the catalog."
     return 1
   fi
+  # A plaintext override origin leaves the catalog fetch confidential-only-broken and,
+  # worse, leaks any presigned mirror credentials to on-path observers. The signature
+  # still protects INTEGRITY over http, but warn loudly — prefer https for mirrors.
+  case "$(printf '%s' "${CATALOG_URL:-}" | tr '[:upper:]' '[:lower:]')" in
+    http://*) warn "CULVERT_RELEASE_CATALOG_URL uses plaintext http:// — prefer https:// for an operator mirror (a presigned URL would leak on-path)." ;;
+  esac
   acquire_bootstrap_verifier || return 1
   # Cleanup the throwaway verifier download when this function returns (any path).
   trap cleanup_bootstrap_verifier RETURN
@@ -797,14 +827,23 @@ seed_from_catalog() {
   image_ref="$(CULVERT_RELEASE_CATALOG_URL="$CATALOG_URL" "${cmd[@]}" 2>"$errf")" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     warn "Signed-catalog resolution failed (fail-closed; NOT falling back to tag discovery):"
-    while IFS= read -r line; do warn "  $line"; done <"$errf"
+    # Read line-by-line, but also emit a final line that lacks a trailing newline
+    # (a bare exec error like "…/culvert: Permission denied" may not end in \n).
+    while IFS= read -r line || [[ -n "$line" ]]; do warn "  $line"; done <"$errf"
     [[ "$rc" -eq 124 ]] && warn "  (verifier timed out — the release may predate 'bootstrap-resolve'; pin CULVERT_BOOTSTRAP_VERIFIER_VERSION)"
+    # 126 = the downloaded verifier could not be executed; the usual cause is a
+    # noexec staging filesystem. We stage under $INSTALL_DIR to avoid /tmp noexec,
+    # but surface the actionable hint if it still bites.
+    [[ "$rc" -eq 126 ]] && warn "  (verifier not executable — the staging filesystem may be mounted noexec; set TMPDIR to an exec-capable dir, or use CULVERT_PROXY_SEED_REF)"
     rm -f "$errf"
     return 1
   fi
   rm -f "$errf"
   image_ref="$(printf '%s' "$image_ref" | tr -d '[:space:]')"
-  if [[ "$image_ref" != *@sha256:* ]]; then
+  # Strict shape gate: repo@sha256:<64 lowercase hex>. Tighter than a glob so a
+  # compromised verifier's stdout cannot smuggle metacharacters past this point
+  # (docker's quoted argv already neutralizes them; this is defense-in-depth).
+  if [[ ! "$image_ref" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$ ]]; then
     warn "catalog resolver returned an unexpected image ref; refusing to seed."
     return 1
   fi
