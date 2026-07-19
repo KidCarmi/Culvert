@@ -78,8 +78,10 @@ import (
 //     the lock at 177 (main's Fast Gate was red on this). Bumped to match.
 //   - 180 — PAC Exception Intelligence P3 added /api/pac/posture/diff (read-only
 //     candidate DIRECT change-diff; viewer POST), on top of main's 179.
+//   - 181 — M5 supportability added /api/diagnose/etcd (bounded read-only HA
+//     fencing-lease reachability probe; operator POST).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 180
+	const want = 181
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

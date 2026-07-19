@@ -260,6 +260,24 @@ func (h *HAState) WriteAllowed() bool {
 	return time.Since(h.leaseConfirmedAt) < h.leaseValidFor-haLeaseWriteMargin
 }
 
+// probeLeaseBackend performs a read-only reachability check of the fencing-lease
+// backend (M5 diagnose etcd). configured is false when no lease provider is armed
+// (legacy manual-failover or standalone HA) — the caller reports that as a clean
+// not-configured result, never an error. The Read is bounded by ctx and MUST NOT
+// mutate lease state (Provider.Read contract). It deliberately does NOT touch the
+// leaseEpoch/validity bookkeeping — this is an out-of-band diagnostic, not a
+// keepalive.
+func (h *HAState) probeLeaseBackend(ctx context.Context) (configured bool, st halease.Status, err error) {
+	h.mu.RLock()
+	p := h.lease
+	h.mu.RUnlock()
+	if p == nil {
+		return false, halease.Status{}, nil
+	}
+	st, err = p.Read(ctx)
+	return true, st, err
+}
+
 // leaseHealth reports the lease posture for /healthz: mode ("none" legacy /
 // "lease"), current validity, and the fencing epoch (0 = not held).
 func (h *HAState) leaseHealth() (mode string, valid bool, epoch int64) {
