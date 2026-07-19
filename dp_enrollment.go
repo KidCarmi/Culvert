@@ -242,6 +242,10 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	}
 	clusterRole.nodeID = nodeID
 
+	// D4: seed the fencing-epoch ratchet from disk BEFORE the first poll so a
+	// restart cannot reopen the epoch-0 window an epoch-0 zombie CP would exploit.
+	loadDPLastSeenEpoch()
+
 	if certFile != "" {
 		if err := checkDPCertExpiry(certFile); err != nil {
 			logWarnf("ControlPlane: %v", err)

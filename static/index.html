@@ -3932,6 +3932,22 @@ Firefox (all platforms):
         </div>
       </div>
 
+      <!-- Config-sync convergence (T3 P1) -->
+      <div class="panel" style="margin-top:16px;display:none" id="cluster-convergence-panel">
+        <div class="panel-header">
+          <span class="panel-title">Config Sync Convergence</span>
+          <button class="btn ghost sm" data-click="loadClusterConvergence"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
+        </div>
+        <div style="padding:20px 20px 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+          <div class="stat-card"><div class="stat-val" id="conv-version">-</div><div class="stat-label">CP Config Version</div></div>
+          <div class="stat-card"><div class="stat-val" id="conv-converged">0</div><div class="stat-label">Converged Nodes</div></div>
+          <div class="stat-card"><div class="stat-val" id="conv-stragglers">0</div><div class="stat-label">Stragglers</div></div>
+        </div>
+        <div style="padding:16px 20px 20px">
+          <div id="convergence-list"><em style="color:var(--muted);font-size:.82rem">Loading…</em></div>
+        </div>
+      </div>
+
       <!-- Enrolled Nodes Table -->
       <div class="panel" style="margin-top:16px" id="cluster-nodes-panel">
         <div class="panel-header">
@@ -4752,6 +4768,7 @@ document.addEventListener('click', e => {
     case 'enableHA':          enableHA(); break;
     case 'copyHADeployCmd':   copyHADeployCmd(); break;
     case 'loadClusterCA':     loadClusterCA(); break;
+    case 'loadClusterConvergence': loadClusterConvergence(true); break;
     case 'importClusterCA':   importClusterCA(); break;
     case 'showEnrollModal':   showEnrollModal(); break;
     case 'hideEnrollModal':   hideEnrollModal(); break;
@@ -15209,6 +15226,7 @@ async function loadCluster() {
     loadCARotation();
     loadHA(isCP);
     loadClusterMetrics(isCP);
+    loadClusterConvergence(isCP);
     loadClusterRateLimits(showCluster);
     loadNodeGroups(showCluster);
     loadBandwidthPolicies(showCluster);
@@ -15981,6 +15999,45 @@ async function loadClusterMetrics(show) {
     document.getElementById('cm-blocked').textContent = (r.cluster_blocked || 0).toLocaleString();
     document.getElementById('cm-authfail').textContent = (r.cluster_auth_fail || 0).toLocaleString();
     document.getElementById('cm-nodes').textContent = r.node_count || 0;
+  } catch(e) { panel.style.display = 'none'; }
+}
+
+// Config-sync fleet convergence (T3 P1). Read-only: which DPs are current,
+// which lag, which drifted (at the CP version but a different blocklist
+// fingerprint). CP-only panel.
+async function loadClusterConvergence(show) {
+  const panel = document.getElementById('cluster-convergence-panel');
+  if (!show) { panel.style.display = 'none'; return; }
+  try {
+    const r = await api('/api/cluster/convergence');
+    if (!r) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    document.getElementById('conv-version').textContent = 'v' + (r.cp_version || 0);
+    document.getElementById('conv-converged').textContent = r.converged || 0;
+    const strEl = document.getElementById('conv-stragglers');
+    strEl.textContent = r.stragglers || 0;
+    strEl.style.color = (r.stragglers > 0) ? '#f59e0b' : '#22c55e';
+    const el = document.getElementById('convergence-list');
+    const nodes = r.nodes || [];
+    if (nodes.length === 0) {
+      el.innerHTML = '<em style="color:var(--muted);font-size:.82rem">No data-plane nodes reporting.</em>';
+      return;
+    }
+    nodes.sort((a,b) => (a.converged === b.converged) ? (b.versions_behind - a.versions_behind) : (a.converged ? 1 : -1));
+    let html = '<table class="table" style="font-size:.82rem"><thead><tr><th>Node</th><th>Version</th><th>Behind</th><th>Status</th></tr></thead><tbody>';
+    nodes.forEach(n => {
+      let status, color;
+      if (!n.reporting) { status = 'No telemetry'; color = 'var(--muted)'; }
+      else if (n.fp_mismatch) { status = 'Drifted'; color = '#ef4444'; }
+      else if (n.converged) { status = 'Converged'; color = '#22c55e'; }
+      else { status = 'Behind'; color = '#f59e0b'; }
+      html += '<tr><td>' + escHtml(n.node_id) + '</td>'
+        + '<td>v' + (n.config_version || 0) + '</td>'
+        + '<td>' + (n.versions_behind || 0) + '</td>'
+        + '<td style="color:' + color + '">' + status + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
   } catch(e) { panel.style.display = 'none'; }
 }
 

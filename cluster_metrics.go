@@ -114,7 +114,42 @@ func clusterWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "culvert_dp_config_last_snapshot_bytes %d\n", dpLastFullSnapshotBytes.Load())
 
 	writeConfigSnapshotSizeMetrics(w)
+	writeConfigConvergenceMetrics(w)
 	dpPollHist.WritePrometheus(w)
+}
+
+// writeConfigConvergenceMetrics exposes the T3 P1 delta-sync counters and the
+// fleet convergence gauges (aggregate counts only — no node IDs, per the CL-9
+// no-user-strings contract).
+func writeConfigConvergenceMetrics(w *strings.Builder) {
+	w.WriteString("\n# HELP culvert_cluster_config_delta_served_total Config deltas served to data-plane nodes (incremental catch-up)\n")
+	w.WriteString("# TYPE culvert_cluster_config_delta_served_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_config_delta_served_total %d\n", statConfigDeltaServed.Load())
+
+	w.WriteString("\n# HELP culvert_cluster_config_delta_unchanged_total Config-delta polls answered unchanged (DP already current)\n")
+	w.WriteString("# TYPE culvert_cluster_config_delta_unchanged_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_config_delta_unchanged_total %d\n", statConfigDeltaUnchanged.Load())
+
+	w.WriteString("\n# HELP culvert_cluster_config_delta_resync_total Config-delta polls that returned a full-resync directive (gap, drift, or oversized)\n")
+	w.WriteString("# TYPE culvert_cluster_config_delta_resync_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_config_delta_resync_total %d\n", statConfigDeltaResync.Load())
+
+	w.WriteString("\n# HELP culvert_cluster_config_delta_frame_skips_total Delta replies downgraded to resync because chain+remainder exceeded the frame\n")
+	w.WriteString("# TYPE culvert_cluster_config_delta_frame_skips_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_config_delta_frame_skips_total %d\n", statConfigDeltaFrameSkips.Load())
+
+	fc := computeFleetConvergence()
+	w.WriteString("\n# HELP culvert_cluster_config_version Current published config version on this control plane\n")
+	w.WriteString("# TYPE culvert_cluster_config_version gauge\n")
+	fmt.Fprintf(w, "culvert_cluster_config_version %d\n", fc.CPVersion)
+
+	w.WriteString("\n# HELP culvert_cluster_config_converged_nodes Data-plane nodes converged to the current config version\n")
+	w.WriteString("# TYPE culvert_cluster_config_converged_nodes gauge\n")
+	fmt.Fprintf(w, "culvert_cluster_config_converged_nodes %d\n", fc.Converged)
+
+	w.WriteString("\n# HELP culvert_cluster_config_straggler_nodes Data-plane nodes behind the current config version or drifted\n")
+	w.WriteString("# TYPE culvert_cluster_config_straggler_nodes gauge\n")
+	fmt.Fprintf(w, "culvert_cluster_config_straggler_nodes %d\n", fc.Stragglers)
 }
 
 // writeConfigSnapshotSizeMetrics emits size-vs-cap gauges for EVERY capped

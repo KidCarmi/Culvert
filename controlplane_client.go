@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // clusterGRPCCompressionEnvVar opts the DP into gzip-compressing its CP↔DP
@@ -63,10 +65,13 @@ type DataPlaneClient struct {
 	// the last-known-good snapshot at startup so the heartbeat reports the
 	// config the node is already enforcing even before the first successful CP
 	// poll. Atomic because metricsLoop (a separate goroutine) reads them to
-	// stamp the heartbeat report — race-free under -race.
+	// stamp the heartbeat report — race-free under -race. (T3 P1 reads
+	// lastVersion.Load() for the delta base + convergence telemetry.)
 	lastVersion       atomic.Int64
 	lastPolicyVersion atomic.Int64
-	failCount         int // consecutive fetch failures for exponential backoff
+	failCount         int  // consecutive fetch failures for exponential backoff
+	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
+	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
@@ -145,6 +150,10 @@ func (c *DataPlaneClient) connect(addr string) error {
 		_ = c.conn.Close()
 	}
 	c.conn = conn
+	// A new connection may be a different (possibly newer) CP — re-probe delta
+	// support. Safe under the callers' locking: connect runs pre-goroutine in
+	// NewDataPlaneClient and under c.mu in reconnectActive/failover.
+	c.deltaUnsupported = false
 	logger.Printf("DataPlane: connected to ControlPlane at %s", addr)
 	return nil
 }
@@ -263,6 +272,23 @@ func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, 
 }
 
 func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
+	// T3 P1: when we already hold a version, try the incremental blocklist delta
+	// first. tryDeltaSync returns true when it fully handled this cycle (nothing
+	// changed, or the delta applied and verified); false falls through to the
+	// full-snapshot path below (fresh DP, resync directive, old CP, or any error
+	// — the full path owns backoff/failover).
+	//
+	// Safe across a restart even though lastVersion is now seeded from the
+	// last-known-good snapshot at startup (dp_enrollment.go): both persist paths
+	// write the CP-AUTHORITATIVE (manual-free) blocklist as the last-good
+	// BlockedHosts, so applyDPLastGoodConfigSnapshot restores a syncedFP consistent
+	// with the CP's fingerprint for that version. The KnownFP idle-drift check and
+	// the post-apply fingerprint verification then force a FULL resync on any
+	// inconsistency (e.g. a crash-mid-apply), so a first-poll delta can never
+	// silently persist divergent state.
+	if c.lastVersion.Load() > 0 && c.tryDeltaSync(ctx) {
+		return
+	}
 	raw, ok := c.pollConfig(ctx)
 	if !ok {
 		return
@@ -326,11 +352,129 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	c.lastPolicyVersion.Store(snap.PolicyVersion)
 }
 
+// tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
+// fully handled (unchanged, delta applied+verified, or a fenced-out CP we skip);
+// false to fall through to the full-snapshot path. Never touches failCount — the
+// full path owns backoff/failover, so a delta error costs at most one wasted RPC
+// before the full poll runs.
+func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
+	c.mu.Lock()
+	unsupported := c.deltaUnsupported
+	if unsupported {
+		// Re-probe periodically even without a reconnect: gRPC transparently
+		// re-heals the transport on the SAME ClientConn across an in-place CP
+		// upgrade, so connect() (which clears the latch) is never called. Without
+		// this, a DP that met an old CP would use the full path forever after the
+		// CP is upgraded. Every deltaReprobeInterval polls we clear the latch and
+		// probe once more; a still-old CP just re-latches.
+		c.deltaProbeSkips++
+		if c.deltaProbeSkips >= deltaReprobeInterval {
+			c.deltaProbeSkips = 0
+			c.deltaUnsupported = false
+			unsupported = false
+		}
+	}
+	c.mu.Unlock()
+	if unsupported {
+		return false // known-old CP: skip straight to the full path
+	}
+
+	req, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: c.lastVersion.Load(), KnownFP: bl.SyncedFingerprint()})
+	raw, err := c.call(ctx, methodGetConfigDelta, req)
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			c.mu.Lock()
+			c.deltaUnsupported = true
+			c.deltaProbeSkips = 0
+			c.mu.Unlock()
+			logger.Printf("DataPlane: control plane has no GetConfigDelta — using full config sync (will re-probe)")
+		}
+		return false // fall back to the full path (which handles backoff/failover)
+	}
+	var reply getConfigDeltaReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		logger.Printf("DataPlane: parse config delta error: %v", err)
+		return false
+	}
+	switch reply.Mode {
+	case "unchanged":
+		c.resetBackoff()
+		dpMarkCPPollHealthy()
+		return true
+	case "delta":
+		return c.applyDeltaReply(reply)
+	default: // "resync" or unknown → full path
+		return false
+	}
+}
+
+// applyDeltaReply applies a delta-mode reply. Returns true when applied+verified
+// (lastVersion advanced), false to fall through to a full resync. Ordering
+// (Codex review): epoch fence, then the BLOCKLIST delta + cap + fingerprint
+// verification BEFORE any other store is touched, then the non-blocklist
+// remainder (external-auth/IdP/policy/…). A rejected delta (cap or fingerprint
+// mismatch) therefore leaves auth/IdP/policy UNTOUCHED — never advanced to a
+// version whose blocklist could not be verified.
+func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
+	// ADR-0005 S3: fence before ANY mutation. A fenced-out zombie CP's delta is
+	// rejected; skip the cycle rather than fall through to a full pull that would
+	// re-fence identically.
+	if !dpObserveEpoch("config delta", reply.Epoch) {
+		return true
+	}
+	// Base must match ours (strict sequential), and the target must move strictly
+	// FORWARD. Advancing lastVersion to a CP-controlled TargetVersion without the
+	// forward check would let a buggy/hostile CP jump it to a huge value, after
+	// which every full-path snapshot (snap.Version <= lastVersion) is silently
+	// suppressed — a stale-config freeze DoS.
+	if len(reply.Remainder) == 0 || reply.BaseVersion != c.lastVersion.Load() || reply.TargetVersion <= reply.BaseVersion {
+		return false // malformed, base moved, or non-monotonic target → full resync
+	}
+	var remainder ConfigSnapshot
+	if err := json.Unmarshal(reply.Remainder, &remainder); err != nil {
+		logger.Printf("DataPlane: parse delta remainder v%d: %v — full resync", reply.TargetVersion, err)
+		return false
+	}
+	if err := validateConfigSnapshot(remainder); err != nil {
+		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
+		return false
+	}
+	// applyBlocklistDeltaSnapshot applies the blocklist chain and verifies the
+	// cap + fingerprint FIRST, and ONLY on success applies the non-blocklist
+	// remainder (external-auth before IdP, then the rest) — so no auth/IdP/policy
+	// mutation happens for a delta whose blocklist is rejected. snapForDisk keeps
+	// the full remainder (incl. IdP profiles) for the last-good file.
+	snapForDisk := remainder
+	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
+		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
+		return false
+	}
+	// Persist a RECONSTRUCTED full last-good: the remainder omits BlockedHosts, so
+	// a cold restart would otherwise re-apply an empty blocklist. Use FeedList()
+	// (CP-authoritative, non-manual) — NOT List() — so the on-disk BlockedHosts is
+	// fingerprint-consistent with the CP's feed-only target: List() would fold in
+	// DP-local manual blocks the CP set never had, poisoning syncedFP on reload.
+	// (Enforcement of manual blocks is unaffected — ReplaceFeedEntries re-injects
+	// them on the restart apply.) This is load-bearing: lastVersion IS restored
+	// from the last-good at startup (dp_enrollment.go), so a fingerprint-consistent
+	// on-disk BlockedHosts is what lets a first-poll delta resume safely instead of
+	// forcing a spurious resync every restart (see the fetchAndApply gate).
+	snapForDisk.BlockedHosts = bl.FeedList()
+	persistDPLastGoodConfigSnapshot(snapForDisk)
+	dpMarkCPPollHealthy()
+	c.resetBackoff()
+	c.lastVersion.Store(reply.TargetVersion)
+	c.lastPolicyVersion.Store(remainder.PolicyVersion)
+	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
+	return true
+}
+
 // buildMetricsReport assembles the DP→CP heartbeat report. The version facts
 // are raw diagnostics (M5 PR-A): ConfigVersion/PolicyVersion are the APPLIED
 // snapshot's identity (seeded from the last-known-good snapshot at startup, so
 // they are populated even before the first successful poll), Epoch is the
-// highest fencing epoch observed, and CulvertVersion is this build. All reads
+// highest fencing epoch observed, and CulvertVersion is this build. SyncedFP is
+// the T3 P1 blocklist synced fingerprint (fleet convergence/drift). All reads
 // are atomic or set-once — safe from the metricsLoop goroutine.
 func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 	return MetricsReport{
@@ -343,6 +487,7 @@ func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
 		PolicyVersion:  c.lastPolicyVersion.Load(),
 		Epoch:          dpLastSeenEpoch.Load(),
 		CulvertVersion: version,
+		SyncedFP:       bl.SyncedFingerprint(),
 	}
 }
 
@@ -528,6 +673,13 @@ const (
 	dpConfigWANFloorBps  = 512 * 1024 // 512 KiB/s (~4 Mbit/s) — a starved-link floor
 )
 
+// deltaReprobeInterval is how many polls a DP stays on the full path after a CP
+// returns Unimplemented for GetConfigDelta before re-probing. Covers the in-place
+// CP-upgrade case where gRPC re-heals the transport on the same ClientConn and
+// connect() (which clears the latch) never runs. At the default poll interval
+// this re-probes a few minutes after an upgrade — cheap, and self-correcting.
+const deltaReprobeInterval = 20
+
 // dpLastFullSnapshotBytes is the size of the most recent FULL config snapshot
 // the DP received (not the tiny version-unchanged sentinel). It predicts how big
 // the next change will be, so an unchanged poll still budgets enough time for a
@@ -538,7 +690,12 @@ var dpLastFullSnapshotBytes atomic.Int64
 // so they scale with the last full size; everything else stays tight.
 func callDeadline(method string) time.Duration {
 	switch method {
-	case methodGetConfig, methodHASync:
+	case methodGetConfig, methodHASync, methodGetConfigDelta:
+		// GetConfigDelta carries a delta chain (up to the ring's byte bound) plus
+		// the non-blocklist remainder — a multi-MiB reply on a thin WAN. Without the
+		// scaled deadline it would time out at 5s and fall through to the full pull,
+		// so the delta path would add a wasted RPC and save nothing for exactly the
+		// larger changes it should optimize. Budget it like the snapshot RPCs.
 		return scaledConfigDeadline(dpLastFullSnapshotBytes.Load())
 	default:
 		return dpTightCallDeadline

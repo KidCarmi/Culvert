@@ -647,6 +647,15 @@ func applyHABundle(bundle *HAStateBundle, token string) bool {
 		return false
 	}
 
+	// Seed the local ConfigStore's snapshot from the replicated bundle so that, on
+	// a later promotion, the FIRST published delta diffs against the version DPs
+	// actually hold (bundle.Version) instead of a nil baseline. Without this the
+	// promoted leader's first Update records an "add-everything" delta whose Base
+	// pins to a live DP version; harmless (fp-verify → resync) but a spurious full
+	// resync. Snapshot only — version/published are still managed by
+	// armVersionPersistence at promotion.
+	globalConfigStore.seedReplicatedSnapshot(bundle.Config)
+
 	return true
 }
 

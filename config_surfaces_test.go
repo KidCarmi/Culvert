@@ -806,14 +806,17 @@ func TestConfigSurfaces_SnapshotApplyParity(t *testing.T) {
 // `snap.Field` selector inside them is a read = a consumed field. Enumerated
 // here so the scan survives further gocognit splits (add the new function).
 var snapshotApplyFuncs = map[string]bool{
-	"applyConfigSnapshot":               true, // controlplane_snapshot.go
-	"applySnapshotPolicyAndTraffic":     true,
-	"applySnapshotClusterRuntime":       true,
-	"applySnapshotSessionSecret":        true,
-	"applySnapshotExtendedState":        true,
-	"applyExternalAuthSnapshotSettings": true,
-	"syncSnapshotIdPProfiles":           true,
-	"fetchAndApply":                     true, // controlplane_client.go (DP poller)
+	"applyConfigSnapshot":                 true, // controlplane_snapshot.go
+	"applySnapshotPolicyAndTraffic":       true,
+	"applySnapshotBlocklist":              true, // T3 P1: blocklist step, split out of applySnapshotPolicyAndTraffic
+	"applySnapshotTrafficExceptBlocklist": true, // T3 P1: the rest, shared by the full + delta apply paths
+	"applySnapshotClusterRuntime":         true,
+	"applySnapshotSessionSecret":          true,
+	"applySnapshotExtendedState":          true,
+	"applyExternalAuthSnapshotSettings":   true,
+	"syncSnapshotIdPProfiles":             true,
+	"fetchAndApply":                       true, // controlplane_client.go (DP poller)
+	"applyBlocklistDeltaSnapshot":         true, // T3 P1: DP-side delta apply (controlplane_delta.go)
 }
 
 func snapshotApplyFuncNames() string {
@@ -942,9 +945,12 @@ func TestConfigSurfaces_SnapshotWireWipe(t *testing.T) {
 	}
 }
 
-// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside
-// the `if !callerIsEnrolledNode(…) { … }` block of controlplane_server.go
-// (snap.Field = "" / nil assignments).
+// snapshotRedactedFields returns the ConfigSnapshot field names zeroed inside the
+// shared redactUnenrolledSnapshot helper (snap.Field = "" / nil assignments on the
+// pointer parameter). Redaction moved OUT of the GetConfig if-block into this
+// single helper so BOTH unenrolled-reachable surfaces (GetConfig and
+// GetConfigDelta) route through one pinned place — the AST scan follows it there.
+// snapshotRedactionCallers additionally asserts every such surface calls it.
 func snapshotRedactedFields(t *testing.T) map[string]bool {
 	t.Helper()
 	const file = "controlplane_server.go"
@@ -955,22 +961,12 @@ func snapshotRedactedFields(t *testing.T) map[string]bool {
 	}
 	redacted := map[string]bool{}
 	ast.Inspect(f, func(n ast.Node) bool {
-		ifst, ok := n.(*ast.IfStmt)
-		if !ok {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "redactUnenrolledSnapshot" || fn.Body == nil {
 			return true
 		}
-		un, ok := ifst.Cond.(*ast.UnaryExpr)
-		if !ok || un.Op != token.NOT {
-			return true
-		}
-		call, ok := un.X.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if fnid, ok := call.Fun.(*ast.Ident); !ok || fnid.Name != "callerIsEnrolledNode" {
-			return true
-		}
-		ast.Inspect(ifst.Body, func(m ast.Node) bool {
+		// The pointer param is named "snap"; collect its zeroed fields.
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
 			if as, ok := m.(*ast.AssignStmt); ok {
 				for _, lhs := range as.Lhs {
 					if sel, ok := lhs.(*ast.SelectorExpr); ok {
@@ -982,7 +978,40 @@ func snapshotRedactedFields(t *testing.T) map[string]bool {
 			}
 			return true
 		})
-		return true
+		return false
 	})
+	if len(redacted) == 0 {
+		t.Fatal("redactUnenrolledSnapshot not found or zeroes no fields — the redaction wall lost its anchor")
+	}
 	return redacted
+}
+
+// snapshotRedactionCallers asserts that every unenrolled-reachable snapshot
+// surface routes through redactUnenrolledSnapshot, so the wall (which pins the
+// helper's fields) actually covers each door. Sec-F2: GetConfigDelta added a
+// SECOND secret-bearing surface in a different file; without this the parity test
+// would give false assurance for it.
+func TestConfigSurfaces_RedactionCallers(t *testing.T) {
+	for _, file := range []string{"controlplane_server.go", "controlplane_delta.go"} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		found := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "redactUnenrolledSnapshot" {
+				found = true
+			}
+			return true
+		})
+		if !found {
+			t.Errorf("%s serves ConfigSnapshot to unenrolled callers but never calls "+
+				"redactUnenrolledSnapshot — a secret-bearing surface outside the redaction wall", file)
+		}
+	}
 }

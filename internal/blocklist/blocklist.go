@@ -58,6 +58,14 @@ type Store struct {
 	feedSrc    map[string]string // host → feed URL attribution (lazily initialized)
 	path       string
 	mode       string // "block" (default) or "allow"
+
+	// syncedFP is the 256-bit XOR-of-SHA256 fingerprint of the
+	// CP-AUTHORITATIVE host set the cluster delta-sync path last applied
+	// (T3 P1). It is fed ONLY by CP-supplied data (ReplaceFeedEntries /
+	// ApplyDelta) and is deliberately DECOUPLED from DP-local manual blocks
+	// and from the enforcement maps, so a DP with its own manual blocks still
+	// converges to the exact fingerprint the CP advertises. See delta.go.
+	syncedFP [32]byte
 }
 
 // Mode returns the current list mode: "block" (default) or "allow".
@@ -419,6 +427,13 @@ func (b *Store) Add(host string) {
 func (b *Store) ReplaceFeedEntries(hosts []string) {
 	newExact := map[string]bool{}
 	newWildcards := map[string]bool{}
+	// Recompute the CP-authoritative synced fingerprint over the incoming set
+	// (T3 P1). A full apply is the ground-truth reset for syncedFP — it heals
+	// any drift a malformed delta stream could have introduced. Computed here,
+	// before the lock, so the O(N) hashing never stalls IsBlocked. The
+	// fingerprint is over the CP list ONLY (no manual re-injection) because the
+	// synced set the CP advertises does not include DP-local manual blocks.
+	fp := feedSetFingerprint(hosts)
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -431,6 +446,7 @@ func (b *Store) ReplaceFeedEntries(hosts []string) {
 		}
 	}
 	b.mu.Lock()
+	b.syncedFP = fp
 	// Re-inject admin-added manual entries into the enforcement
 	// maps. b.manual is the attribution set; the entries are also
 	// normalised at AddManual time so no further trim/lowercase is
@@ -586,6 +602,30 @@ func (b *Store) List() []string {
 	}
 	for suffix := range b.wildcards {
 		out = append(out, "*"+suffix)
+	}
+	return out
+}
+
+// FeedList returns the CP-authoritative (non-manual) entries — the synced set —
+// with wildcards rendered as "*.example.com". The delta path persists this as the
+// last-good BlockedHosts so a cold restart reconstructs a fingerprint-consistent
+// synced set: List() would fold in DP-local manual blocks the CP set never had,
+// which on reload would poison syncedFP relative to the CP's feed-only target.
+// (Enforcement of manual blocks is unaffected — ReplaceFeedEntries re-injects
+// b.manual on every apply.)
+func (b *Store) FeedList() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.exact)+len(b.wildcards))
+	for h := range b.exact {
+		if !b.manual[h] {
+			out = append(out, h)
+		}
+	}
+	for suffix := range b.wildcards {
+		if h := "*" + suffix; !b.manual[h] {
+			out = append(out, h)
+		}
 	}
 	return out
 }

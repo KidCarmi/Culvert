@@ -80,8 +80,10 @@ import (
 //     candidate DIRECT change-diff; viewer POST), on top of main's 179.
 //   - 181 — M5 supportability added /api/diagnose/etcd (bounded read-only HA
 //     fencing-lease reachability probe; operator POST).
+//   - 182 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
+//     convergence / straggler view; viewer).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 181
+	const want = 182
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

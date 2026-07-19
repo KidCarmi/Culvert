@@ -42,6 +42,7 @@ package main
 //   replace the JSON codec with generated protobuf for efficiency.
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -67,7 +68,46 @@ var (
 	methodPushAuditEvents = fmt.Sprintf("/%s/PushAuditEvents", configServiceName)
 	methodRenewCert       = fmt.Sprintf("/%s/RenewCert", configServiceName)
 	methodHASync          = fmt.Sprintf("/%s/HASync", configServiceName)
+	methodGetConfigDelta  = fmt.Sprintf("/%s/GetConfigDelta", configServiceName)
 )
+
+// getConfigDeltaRequest is the GetConfigDelta request body (T3 P1). The DP
+// reports the blocklist config version it currently holds so the CP can return
+// just the incremental {added, removed} chain to reach the newest version — or a
+// resync directive when the DP is too far behind to be caught up incrementally.
+type getConfigDeltaRequest struct {
+	KnownVersion int64  `json:"known_version"`
+	KnownFP      string `json:"known_fp,omitempty"` // DP's current synced fingerprint (diagnostic)
+}
+
+// getConfigDeltaReply is the GetConfigDelta response.
+//
+// Mode:
+//   - "unchanged": the DP is already current; nothing to apply.
+//   - "delta": Deltas carry the ordered, gap-free blocklist chain from
+//     BaseVersion to TargetVersion; Remainder carries the target snapshot with
+//     BlockedHosts omitted (the small non-blocklist slices, applied wholesale);
+//     TargetFP is the synced fingerprint the DP must reach after applying the
+//     chain (a mismatch forces a full resync).
+//   - "resync": the DP must fall back to a full GetConfig (gap, resync marker,
+//     or a raced/lagging delta ring).
+//
+// Epoch is the issuing CP's fencing epoch at response time — the DP applies the
+// same dpObserveEpoch ratchet it applies to a full snapshot (ADR-0005 S3), so a
+// fenced-out zombie CP cannot poison the incremental base.
+type getConfigDeltaReply struct {
+	Mode          string           `json:"mode"`
+	BaseVersion   int64            `json:"base_version,omitempty"`
+	TargetVersion int64            `json:"target_version,omitempty"`
+	Epoch         int64            `json:"epoch,omitempty"`
+	Deltas        []blocklistDelta `json:"deltas,omitempty"`
+	TargetFP      string           `json:"target_fp,omitempty"`
+	// Remainder is the target snapshot MINUS BlockedHosts (which rides as the
+	// delta chain), pre-marshaled so the CP shares one remainder marshal across
+	// the fleet instead of re-marshaling the host-scale non-blocklist slices per
+	// DP. The DP unmarshals it into a ConfigSnapshot.
+	Remainder json.RawMessage `json:"remainder,omitempty"`
+}
 
 // getConfigRequest is the GetConfig request body (P0-3). The DP reports the
 // config version it already holds so the CP can skip resending an unchanged
@@ -92,14 +132,17 @@ type MetricsReport struct {
 	Blocked  int64  `json:"blocked"`
 	AuthFail int64  `json:"auth_fail"`
 	Uptime   string `json:"uptime"`
-	// M5 PR-A: raw version facts so the CP (and TAC Cloud) can tell which
-	// config each DP actually applied without correlating on the box. All
-	// additive + omitempty: a mixed-version cluster where an older DP omits
-	// them degrades to the zero value, never errors (the snapshot discipline).
+	// M5 PR-A + T3 P1 reverse telemetry: raw version facts plus the blocklist
+	// synced fingerprint the DP enforces, so the CP (and TAC Cloud) can tell which
+	// config each DP actually applied and surface fleet convergence/stragglers
+	// without correlating on the box. All additive + omitempty: a mixed-version
+	// cluster where an older DP omits them degrades to the zero value, never
+	// errors (the snapshot discipline).
 	ConfigVersion  int64  `json:"config_version,omitempty"`  // applied config-snapshot version (DP-side c.lastVersion)
 	PolicyVersion  int64  `json:"policy_version,omitempty"`  // running policy-store generation on the node
 	Epoch          int64  `json:"epoch,omitempty"`           // highest fencing epoch the node has observed
 	CulvertVersion string `json:"culvert_version,omitempty"` // build version string on the node
+	SyncedFP       string `json:"synced_fp,omitempty"`       // T3 P1: blocklist synced fingerprint (drift detection)
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.
