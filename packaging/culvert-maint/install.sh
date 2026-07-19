@@ -137,16 +137,26 @@ extract_toml_string() {
 # empty ALLOWLIST to that same Go-side pattern (config.go's
 # defaultImageAllowlist) so the comparison always runs, catching exactly that
 # case at install time instead of at every future dispatch.
+#
+# The match itself is a REAL regex test against a synthetic digest-pinned ref
+# (<repo>@sha256:<64 zeros>) — mirroring exactly what the agent's own
+# ImageAllowlist.MatchString(req.ImageRef) does at dispatch time, since a
+# pinned upgrade/rollback ref is always digest form. A plain substring check
+# (an earlier version of this function used one) would wrongly PASS a REPO
+# that is merely a substring of the allowlist pattern's literal text — e.g.
+# "kidcarmi/culvert" against the ghcr.io/kidcarmi/culvert-anchored default —
+# even though that repo can never actually match the anchored regex.
 check_proxy_repo_matches_allowlist() {
     _repo=$1; _allowlist=$2
     if [ -z "$_allowlist" ]; then
         _allowlist='^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
     fi
-    _al_norm=$(printf '%s' "$_allowlist" | sed 's/\\//g')
-    case "$_al_norm" in
-        *"$_repo"*) return 0 ;;
-    esac
-    die "proxy_repo '$_repo' is not referenced by image_allowlist — they MUST describe the same repository (P1.4). Set image_allowlist in config.toml to a pattern matching '$_repo' (an unset image_allowlist defaults to a pattern anchored to ghcr.io/kidcarmi/culvert, which will never match a custom proxy_repo) and re-run."
+    _zeros64=$(awk 'BEGIN{for(i=0;i<64;i++)printf "0"}')
+    _test_ref="${_repo}@sha256:${_zeros64}"
+    if printf '%s' "$_test_ref" | grep -Eq -- "$_allowlist"; then
+        return 0
+    fi
+    die "proxy_repo '$_repo' is not matched by image_allowlist (tested as '$_test_ref') — they MUST describe the same repository (P1.4). Set image_allowlist in config.toml to a regex matching '$_repo' (an unset image_allowlist defaults to a pattern anchored to ghcr.io/kidcarmi/culvert, which will never match a custom proxy_repo) and re-run."
 }
 
 # ── 1. Pre-flight ────────────────────────────────────────────────────────────
@@ -385,10 +395,10 @@ case "$PROXY_REPO" in
 esac
 reject_unsafe "proxy_repo" "$PROXY_REPO"
 
-# proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1).
-# Heuristic: the allowlist regex (backslashes stripped) must contain the
-# proxy_repo literal. Runs even when image_allowlist is left unset — see
-# check_proxy_repo_matches_allowlist's doc comment for why that case matters most.
+# proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1),
+# checked as a real regex match against a synthetic digest-pinned ref — runs
+# even when image_allowlist is left unset. See check_proxy_repo_matches_allowlist's
+# doc comment for the full rationale.
 check_proxy_repo_matches_allowlist "$PROXY_REPO" "$IMAGE_ALLOWLIST"
 
 # Validate compose_project_dir: present, absolute, no unsafe chars.

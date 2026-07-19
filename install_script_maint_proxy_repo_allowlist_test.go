@@ -76,7 +76,7 @@ func TestCheckProxyRepoMatchesAllowlist_CustomRepoWithUnsetAllowlist_Dies(t *tes
 			"image_allowlist (the unset allowlist defaults to a pattern anchored to ghcr.io/kidcarmi/culvert, "+
 			"which can never match the custom repo) — got success:\n%s", out)
 	}
-	if !strings.Contains(out, "is not referenced by image_allowlist") {
+	if !strings.Contains(out, "is not matched by image_allowlist") {
 		t.Errorf("expected the P1.4 mismatch error message, got:\n%s", out)
 	}
 }
@@ -121,7 +121,30 @@ func TestCheckProxyRepoMatchesAllowlist_CustomRepoWithUnrelatedAllowlist_Dies(t 
 	if !died {
 		t.Fatalf("expected a custom proxy_repo with an unrelated explicit image_allowlist to die, got success:\n%s", out)
 	}
-	if !strings.Contains(out, "is not referenced by image_allowlist") {
+	if !strings.Contains(out, "is not matched by image_allowlist") {
+		t.Errorf("expected the P1.4 mismatch error message, got:\n%s", out)
+	}
+}
+
+// TestCheckProxyRepoMatchesAllowlist_SubstringOfDefaultAllowlist_Dies is the
+// Codex-review regression: a proxy_repo that is merely a TEXTUAL SUBSTRING of
+// the default allowlist pattern (e.g. "kidcarmi/culvert", missing the
+// "ghcr.io/" host the pattern anchors on) must still be REJECTED. An earlier
+// version of check_proxy_repo_matches_allowlist used `case "$AL_NORM" in
+// *"$_repo"*)`, a plain substring test that would wrongly PASS this repo
+// (its literal text does appear inside the allowlist pattern's text) even
+// though the anchored regex (^ghcr\.io/...) can never actually match a ref
+// built from it — reproducing the exact "install succeeds, every future
+// upgrade/rollback dispatch silently fails" bug this function exists to
+// catch. The fix replaces the substring test with a real regex match against
+// a synthetic digest-pinned ref.
+func TestCheckProxyRepoMatchesAllowlist_SubstringOfDefaultAllowlist_Dies(t *testing.T) {
+	died, out := runCheckProxyRepoMatchesAllowlist(t, "kidcarmi/culvert", "")
+	if !died {
+		t.Fatalf("expected proxy_repo 'kidcarmi/culvert' (a substring of the default allowlist's literal "+
+			"text, but not matched by its ^ghcr\\.io/-anchored regex) to be REJECTED, got success:\n%s", out)
+	}
+	if !strings.Contains(out, "is not matched by image_allowlist") {
 		t.Errorf("expected the P1.4 mismatch error message, got:\n%s", out)
 	}
 }
