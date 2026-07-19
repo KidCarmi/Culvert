@@ -2441,6 +2441,61 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/alerts/webhooks/test": {
+      "post": {
+        "description": "Test alert webhook.",
+        "operationId": "testAlertWebhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Test alert webhook."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test alert webhook",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "alert.webhook.test",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/audit": {
       "get": {
         "description": "Returns paginated admin audit-log entries.",
@@ -3078,6 +3133,61 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/authpolicy/reorder": {
+      "post": {
+        "description": "Reorder auth policy rules.",
+        "operationId": "reorderAuthPolicy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Reorder auth policy rules."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Reorder auth policy rules",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "authpolicy.reorder",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/blocklist/exceptions": {
       "delete": {
         "description": "Removes a host from the blocklist exception list.",
@@ -3361,6 +3471,51 @@
         "x-culvert-audit-event": "blocklist.feed.add",
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/blocklist/feed/sync": {
+      "post": {
+        "description": "Sync blocklist feeds.",
+        "operationId": "syncBlocklistFeed",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Sync blocklist feeds."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Sync blocklist feeds",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "blocklist.feed.sync",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
@@ -4926,6 +5081,61 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/labels": {
+      "post": {
+        "description": "Set node labels.",
+        "operationId": "setClusterLabels",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Set node labels."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set node labels",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.labels.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/metrics": {
       "get": {
         "description": "Returns aggregated per-node cluster metrics.",
@@ -4960,6 +5170,61 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/mode": {
+      "post": {
+        "description": "Set cluster mode.",
+        "operationId": "setClusterMode",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Set cluster mode."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set cluster mode",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.mode.set",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -5284,6 +5549,61 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/revoke": {
+      "post": {
+        "description": "Revoke cluster sessions.",
+        "operationId": "revokeClusterSessions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revoke cluster sessions."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Revoke cluster sessions",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.revoke",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -6611,6 +6931,366 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/diagnose/all": {
+      "post": {
+        "description": "Run all diagnostics.",
+        "operationId": "diagnoseAll",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run all diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run all diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.all",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/cluster": {
+      "post": {
+        "description": "Run cluster diagnostics.",
+        "operationId": "diagnoseCluster",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run cluster diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run cluster diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.cluster",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/config": {
+      "post": {
+        "description": "Run config diagnostics.",
+        "operationId": "diagnoseConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run config diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run config diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.config",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/dns": {
+      "post": {
+        "description": "Run DNS diagnostics.",
+        "operationId": "diagnoseDNS",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run DNS diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run DNS diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.dns",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/storage": {
+      "post": {
+        "description": "Run storage diagnostics.",
+        "operationId": "diagnoseStorage",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run storage diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run storage diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.storage",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/support": {
+      "post": {
+        "description": "Run support diagnostics.",
+        "operationId": "diagnoseSupport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run support diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run support diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.support",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/tls": {
+      "post": {
+        "description": "Run TLS diagnostics.",
+        "operationId": "diagnoseTLS",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run TLS diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run TLS diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.tls",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/upstream": {
+      "post": {
+        "description": "Run upstream diagnostics.",
+        "operationId": "diagnoseUpstream",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Run upstream diagnostics."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Run upstream diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.upstream",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/diagnostics": {
       "get": {
         "description": "Returns the aggregated operator diagnostics contract.",
@@ -7271,6 +7951,61 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/idp/discover": {
+      "post": {
+        "description": "Discover IdP metadata.",
+        "operationId": "discoverIdP",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Discover IdP metadata."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Discover IdP metadata",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "idp.discover",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/logger": {
       "get": {
         "description": "Returns the log file path, max size, and format.",
@@ -7305,6 +8040,51 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/logs/purge": {
+      "post": {
+        "description": "Purge logs.",
+        "operationId": "purgeLogs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Purge logs."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Purge logs",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-audit-event": "logs.purge",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -7739,6 +8519,60 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/pac/analyze": {
+      "post": {
+        "description": "Analyze PAC posture.",
+        "operationId": "analyzePAC",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Analyze PAC posture."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Analyze PAC posture",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/pac/pools": {
       "get": {
         "description": "Returns the PAC upstream pools.",
@@ -8002,6 +8836,60 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/pac/posture/diff": {
+      "post": {
+        "description": "Diff PAC posture.",
+        "operationId": "diffPACPosture",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Diff PAC posture."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Diff PAC posture",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -8552,6 +9440,60 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/pac/simulate": {
+      "post": {
+        "description": "Simulate PAC resolution.",
+        "operationId": "simulatePAC",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Simulate PAC resolution."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Simulate PAC resolution",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/policy": {
       "delete": {
         "description": "Delete policy rule.",
@@ -8850,6 +9792,260 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/policy/draft/commit": {
+      "post": {
+        "description": "Commit policy draft.",
+        "operationId": "commitPolicyDraft",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Commit policy draft."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Commit policy draft",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy.draft.commit",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy/draft/revert": {
+      "post": {
+        "description": "Revert policy draft.",
+        "operationId": "revertPolicyDraft",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Revert policy draft."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Revert policy draft",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy.draft.revert",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy/move": {
+      "post": {
+        "description": "Move a policy rule.",
+        "operationId": "movePolicyRule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Move a policy rule."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Move a policy rule",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy.move",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy/reorder": {
+      "post": {
+        "description": "Reorder policy rules.",
+        "operationId": "reorderPolicyRules",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Reorder policy rules."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Reorder policy rules",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "policy.reorder",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/policy/test": {
+      "post": {
+        "description": "Test policy evaluation.",
+        "operationId": "testPolicy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Test policy evaluation."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test policy evaluation",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-danger-level": "none",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/releases": {
       "get": {
         "description": "Returns release-catalog availability, verify mode, and freshness. Returns 503 when release management is not configured.",
@@ -8988,6 +10184,61 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/releases/dispatch": {
+      "post": {
+        "description": "Dispatch release upgrade.",
+        "operationId": "dispatchRelease",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Dispatch release upgrade."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Dispatch release upgrade",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-audit-event": "release.dispatch",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -11234,6 +12485,51 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/syslog/test": {
+      "post": {
+        "description": "Test syslog delivery.",
+        "operationId": "testSyslog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Test syslog delivery."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test syslog delivery",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-audit-event": "syslog.test",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/timeseries": {
       "get": {
         "description": "Returns total/allowed/blocked request time-series data.",
@@ -11398,6 +12694,51 @@
         "x-culvert-audit-event": "upstream.set",
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/upstream/health": {
+      "post": {
+        "description": "Force upstream health check.",
+        "operationId": "checkUpstreamHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Force upstream health check."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Force upstream health check",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "upstream.health.check",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",

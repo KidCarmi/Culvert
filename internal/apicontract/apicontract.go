@@ -552,12 +552,17 @@ func lintExtensions(o Operation, where string) []string {
 	if extString(ext, "x-culvert-introduced-version") == "" {
 		v = append(v, fmt.Sprintf("%s: missing x-culvert-introduced-version", where))
 	}
+	// Stricter rules for mutating/destructive operations. A non-GET op must
+	// declare a danger level; an audit event is required only when the op is
+	// actually state-changing (danger-level != "none") — pure analysis POSTs
+	// (simulate/test/analyze) legitimately neither mutate nor audit.
 	if o.Method != "GET" && o.Method != "HEAD" && o.Method != "OPTIONS" {
-		if danger := extString(ext, "x-culvert-danger-level"); !validDanger[danger] {
+		danger := extString(ext, "x-culvert-danger-level")
+		if !validDanger[danger] {
 			v = append(v, fmt.Sprintf("%s: mutating op missing/invalid x-culvert-danger-level (%q)", where, danger))
 		}
-		if extString(ext, "x-culvert-audit-event") == "" {
-			v = append(v, fmt.Sprintf("%s: mutating op missing x-culvert-audit-event", where))
+		if danger != "none" && extString(ext, "x-culvert-audit-event") == "" {
+			v = append(v, fmt.Sprintf("%s: state-changing op missing x-culvert-audit-event", where))
 		}
 	}
 	return v

@@ -3,27 +3,27 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 196
-- **Exempt (≤270-day horizon):** 88
+- **Documented:** 223
+- **Exempt (≤270-day horizon):** 61
 
 ## By domain
 
 | Domain | Entries | Documented |
 |---|---|---|
-| auth | 18 | 7 |
+| auth | 18 | 8 |
 | cdr | 11 | 9 |
-| cluster | 31 | 26 |
-| dashboard | 13 | 10 |
+| cluster | 31 | 30 |
+| dashboard | 13 | 11 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
-| pac | 23 | 17 |
-| policy | 65 | 50 |
-| release | 6 | 5 |
-| security | 51 | 40 |
-| settings | 30 | 19 |
+| pac | 23 | 20 |
+| policy | 65 | 57 |
+| release | 6 | 6 |
+| security | 51 | 41 |
+| settings | 30 | 20 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 8 |
+| support | 30 | 16 |
 
 ## Documented operations
 
@@ -33,6 +33,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/alerts/webhooks` | apiAlertsWebhooks | viewer |
 | POST | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
 | PUT | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
+| POST | `/api/alerts/webhooks/test` | apiAlertsWebhookTest | operator |
 | GET | `/api/audit` | apiAudit | viewer |
 | POST | `/api/auth/change-password` | apiAuthChangePassword | viewer |
 | POST | `/api/auth/login` | apiAuthLogin | public |
@@ -45,12 +46,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/authpolicy` | apiAuthPolicy | viewer |
 | POST | `/api/authpolicy` | apiAuthPolicy | admin |
 | PUT | `/api/authpolicy` | apiAuthPolicy | admin |
+| POST | `/api/authpolicy/reorder` | apiAuthPolicyReorder | admin |
 | DELETE | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
 | POST | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | DELETE | `/api/blocklist/feed` | apiBlocklistFeed | operator |
 | GET | `/api/blocklist/feed` | apiBlocklistFeed | viewer |
 | POST | `/api/blocklist/feed` | apiBlocklistFeed | operator |
+| POST | `/api/blocklist/feed/sync` | apiBlocklistFeedSync | operator |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
 | PUT | `/api/blockpage` | apiBlockPage | admin |
@@ -83,7 +86,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/cluster/ha` | apiClusterHA | viewer |
 | POST | `/api/cluster/ha` | apiClusterHA | admin |
 | POST | `/api/cluster/ha/promote` | apiClusterHAPromote | admin |
+| POST | `/api/cluster/labels` | apiClusterLabels | admin |
 | GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
+| POST | `/api/cluster/mode` | apiClusterMode | admin |
 | DELETE | `/api/cluster/node-groups` | apiNodeGroups | admin |
 | GET | `/api/cluster/node-groups` | apiNodeGroups | viewer |
 | POST | `/api/cluster/node-groups` | apiNodeGroups | admin |
@@ -91,6 +96,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
 | GET | `/api/cluster/rate-limits` | apiClusterRateLimits | viewer |
 | GET | `/api/cluster/revocations` | apiClusterRevocations | viewer |
+| POST | `/api/cluster/revoke` | apiClusterRevoke | admin |
 | GET | `/api/cluster/rotation` | apiClusterRotation | viewer |
 | GET | `/api/cluster/status` | apiClusterStatus | viewer |
 | DELETE | `/api/cluster/tokens` | apiClusterTokens | admin |
@@ -119,6 +125,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | PUT | `/api/decryption/redaction` | apiDecryptionRedaction | admin |
 | GET | `/api/default-action` | apiDefaultAction | viewer |
 | POST | `/api/default-action` | apiDefaultAction | operator |
+| POST | `/api/diagnose/all` | apiDiagnoseAll | operator |
+| POST | `/api/diagnose/cluster` | apiDiagnoseCluster | operator |
+| POST | `/api/diagnose/config` | apiDiagnoseConfig | operator |
+| POST | `/api/diagnose/dns` | apiDiagnoseDNS | operator |
+| POST | `/api/diagnose/storage` | apiDiagnoseStorage | operator |
+| POST | `/api/diagnose/support` | apiDiagnoseSupport | operator |
+| POST | `/api/diagnose/tls` | apiDiagnoseTLS | operator |
+| POST | `/api/diagnose/upstream` | apiDiagnoseUpstream | operator |
 | GET | `/api/diagnostics` | apiDiagnostics | viewer |
 | DELETE | `/api/dpi` | apiContentScan | operator |
 | GET | `/api/dpi` | apiContentScan | viewer |
@@ -133,7 +147,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | PUT | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
 | GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
 | GET | `/api/health/explain` | apiHealthExplain | viewer |
+| POST | `/api/idp/discover` | apiIdPDiscover | admin |
 | GET | `/api/logger` | apiLoggerConfig | viewer |
+| POST | `/api/logs/purge` | apiLogsPurge | admin |
 | GET | `/api/logs/retention` | apiLogsRetention | viewer |
 | PUT | `/api/logs/retention` | apiLogsRetention | admin |
 | GET | `/api/metrics-config` | apiMetricsConfig | viewer |
@@ -143,11 +159,13 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/ocsp` | apiOCSPConfig | admin |
 | GET | `/api/pac-config` | apiPACConfig | viewer |
 | POST | `/api/pac-config` | apiPACConfig | admin |
+| POST | `/api/pac/analyze` | apiPACAnalyze | viewer |
 | GET | `/api/pac/pools` | apiPACPools | viewer |
 | POST | `/api/pac/pools` | apiPACPools | admin |
 | DELETE | `/api/pac/pools/` | apiPACPoolItem | admin |
 | GET | `/api/pac/pools/` | apiPACPoolItem | viewer |
 | PUT | `/api/pac/pools/` | apiPACPoolItem | admin |
+| POST | `/api/pac/posture/diff` | apiPACPostureDiff | viewer |
 | DELETE | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
 | GET | `/api/pac/posture/exceptions/` | apiPACExceptionItem | viewer |
 | PUT | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
@@ -158,15 +176,22 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/pac/profiles/` | apiPACProfileItem | viewer |
 | POST | `/api/pac/profiles/` | apiPACProfileItem | admin |
 | PUT | `/api/pac/profiles/` | apiPACProfileItem | admin |
+| POST | `/api/pac/simulate` | apiPACSimulate | viewer |
 | DELETE | `/api/policy` | apiPolicy | operator |
 | GET | `/api/policy` | apiPolicy | viewer |
 | POST | `/api/policy` | apiPolicy | operator |
 | PUT | `/api/policy` | apiPolicy | operator |
 | GET | `/api/policy/draft` | apiPolicyDraft | viewer |
 | PUT | `/api/policy/draft` | apiPolicyDraft | admin |
+| POST | `/api/policy/draft/commit` | apiPolicyDraftCommit | operator |
+| POST | `/api/policy/draft/revert` | apiPolicyDraftRevert | operator |
+| POST | `/api/policy/move` | apiPolicyMove | operator |
+| POST | `/api/policy/reorder` | apiPolicyReorder | operator |
+| POST | `/api/policy/test` | apiPolicyTest | viewer |
 | GET | `/api/releases` | apiReleases | viewer |
 | POST | `/api/releases/catalog-refresh` | apiReleaseCatalogRefresh | admin |
 | GET | `/api/releases/current` | apiReleaseCurrent | viewer |
+| POST | `/api/releases/dispatch` | apiReleaseDispatch | admin |
 | POST | `/api/releases/dispatch/resume` | apiReleaseDispatchResume | admin |
 | GET | `/api/releases/dispatch/status` | apiReleaseDispatchStatus | viewer |
 | DELETE | `/api/rewrite` | apiRewrite | operator |
@@ -215,10 +240,12 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/support/retention` | apiSupportRetention | viewer |
 | PUT | `/api/support/retention` | apiSupportRetention | admin |
 | GET | `/api/support/status` | apiSupportStatus | viewer |
+| POST | `/api/syslog/test` | apiSyslogTest | admin |
 | * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |
 | GET | `/api/upstream` | apiUpstream | viewer |
 | POST | `/api/upstream` | apiUpstream | admin |
+| POST | `/api/upstream/health` | apiUpstreamHealth | admin |
 | GET | `/api/upstream/settings` | apiUpstreamSettings | viewer |
 | DELETE | `/api/urlcat` | apiURLCat | operator |
 | GET | `/api/urlcat` | apiURLCat | viewer |

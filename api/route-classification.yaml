@@ -101,12 +101,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/audit"
     method: "GET"
     handler: "apiAudit"
@@ -266,12 +261,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/blocklist"
     method: "GET"
     handler: "apiBlocklist"
@@ -386,12 +376,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/blocklist/mode"
     method: "GET"
     handler: "apiBlocklistMode"
@@ -796,12 +781,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/cluster/metrics"
     method: "GET"
     handler: "apiClusterMetrics"
@@ -821,12 +801,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/cluster/node-groups"
     method: "GET"
     handler: "apiNodeGroups"
@@ -921,12 +896,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/cluster/rotation"
     method: "GET"
     handler: "apiClusterRotation"
@@ -1306,12 +1276,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/cluster"
     method: "POST"
     handler: "apiDiagnoseCluster"
@@ -1321,12 +1286,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/config"
     method: "POST"
     handler: "apiDiagnoseConfig"
@@ -1336,12 +1296,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/etcd"
     method: "POST"
     handler: "apiDiagnoseEtcd"
@@ -1366,12 +1321,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/storage"
     method: "POST"
     handler: "apiDiagnoseStorage"
@@ -1381,12 +1331,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/support"
     method: "POST"
     handler: "apiDiagnoseSupport"
@@ -1396,12 +1341,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/tls"
     method: "POST"
     handler: "apiDiagnoseTLS"
@@ -1411,12 +1351,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/upstream"
     method: "POST"
     handler: "apiDiagnoseUpstream"
@@ -1426,12 +1361,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnostics"
     method: "GET"
     handler: "apiDiagnostics"
@@ -1686,12 +1616,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/logger"
     method: "GET"
     handler: "apiLoggerConfig"
@@ -1726,12 +1651,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/logs/retention"
     method: "GET"
     handler: "apiLogsRetention"
@@ -1861,12 +1781,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/pools"
     method: "GET"
     handler: "apiPACPools"
@@ -1929,12 +1844,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/posture/exceptions"
     method: "GET"
     handler: "apiPACExceptions"
@@ -2066,12 +1976,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/policy"
     method: "GET"
     handler: "apiPolicy"
@@ -2141,12 +2046,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/policy/draft/revert"
     method: "POST"
     handler: "apiPolicyDraftRevert"
@@ -2156,12 +2056,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/policy/move"
     method: "POST"
     handler: "apiPolicyMove"
@@ -2171,12 +2066,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/policy/reorder"
     method: "POST"
     handler: "apiPolicyReorder"
@@ -2186,12 +2076,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/policy/test"
     method: "POST"
     handler: "apiPolicyTest"
@@ -2201,12 +2086,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/releases"
     method: "GET"
     handler: "apiReleases"
@@ -2246,12 +2126,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/releases/dispatch/resume"
     method: "POST"
     handler: "apiReleaseDispatchResume"
@@ -3074,12 +2949,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/timeseries"
     method: "*"
     handler: "apiTimeseries"
@@ -3159,12 +3029,7 @@ routes:
     mutating: true
     audit_expected: false
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/upstream/settings"
     method: "GET"
     handler: "apiUpstreamSettings"
