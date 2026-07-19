@@ -122,6 +122,33 @@ extract_toml_string() {
     ' "$CONFIG_DEST"
 }
 
+# check_proxy_repo_matches_allowlist REPO ALLOWLIST — proxy_repo and
+# image_allowlist MUST describe the same repository (P1.4 §3.1): a mismatch
+# lets install.sh complete successfully while the agent's OWN image_allowlist
+# gate (cmd/culvert-maint/internal/config) then rejects every upgrade/rollback
+# dispatch forever, silently, because the requested <proxy_repo>@sha256:...
+# ref never matches. An empty ALLOWLIST previously SKIPPED this check
+# entirely, on the assumption that "empty means the Go default, which matches
+# the proxy_repo default" — but that assumption only holds when proxy_repo is
+# ALSO left at its default. The common real-world case is the opposite: an
+# operator customizes proxy_repo (e.g. a private mirror) and never touches
+# image_allowlist, so it silently defaults to a pattern anchored to
+# ghcr.io/kidcarmi/culvert that can never match the custom repo. Default an
+# empty ALLOWLIST to that same Go-side pattern (config.go's
+# defaultImageAllowlist) so the comparison always runs, catching exactly that
+# case at install time instead of at every future dispatch.
+check_proxy_repo_matches_allowlist() {
+    _repo=$1; _allowlist=$2
+    if [ -z "$_allowlist" ]; then
+        _allowlist='^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
+    fi
+    _al_norm=$(printf '%s' "$_allowlist" | sed 's/\\//g')
+    case "$_al_norm" in
+        *"$_repo"*) return 0 ;;
+    esac
+    die "proxy_repo '$_repo' is not referenced by image_allowlist — they MUST describe the same repository (P1.4). Set image_allowlist in config.toml to a pattern matching '$_repo' (an unset image_allowlist defaults to a pattern anchored to ghcr.io/kidcarmi/culvert, which will never match a custom proxy_repo) and re-run."
+}
+
 # ── 1. Pre-flight ────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -360,15 +387,9 @@ reject_unsafe "proxy_repo" "$PROXY_REPO"
 
 # proxy_repo and image_allowlist MUST describe the same repository (P1.4 §3.1).
 # Heuristic: the allowlist regex (backslashes stripped) must contain the
-# proxy_repo literal. Only checked when image_allowlist is explicitly set; an
-# empty value means the Go default is used, which matches the proxy_repo default.
-if [ -n "$IMAGE_ALLOWLIST" ]; then
-    AL_NORM=$(printf '%s' "$IMAGE_ALLOWLIST" | sed 's/\\//g')
-    case "$AL_NORM" in
-        *"$PROXY_REPO"*) : ;;
-        *) die "proxy_repo '$PROXY_REPO' is not referenced by image_allowlist — they MUST describe the same repository (P1.4). Reconcile config.toml and re-run." ;;
-    esac
-fi
+# proxy_repo literal. Runs even when image_allowlist is left unset — see
+# check_proxy_repo_matches_allowlist's doc comment for why that case matters most.
+check_proxy_repo_matches_allowlist "$PROXY_REPO" "$IMAGE_ALLOWLIST"
 
 # Validate compose_project_dir: present, absolute, no unsafe chars.
 [ -n "$PROJECT_DIR" ] || die "compose_project_dir not found in $CONFIG_DEST — edit it first, then re-run"
