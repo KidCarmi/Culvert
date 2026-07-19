@@ -1356,6 +1356,33 @@ components:
         resp_add: { type: object, additionalProperties: { type: string } }
         resp_remove: { type: array, items: { type: string } }
 
+    AddBlocklistEntry:
+      type: object
+      description: Provide a single host or a list.
+      additionalProperties: false
+      properties:
+        host: { type: string }
+        hosts: { type: array, items: { type: string } }
+    DPIPatternInput:
+      type: object
+      description: Provide a single pattern or a list.
+      additionalProperties: false
+      properties:
+        pattern: { type: string }
+        patterns: { type: array, items: { type: string } }
+    AlertWebhook:
+      type: object
+      required: [name, url]
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string }
+        events: { type: array, items: { type: string }, nullable: true }
+        enabled: { type: boolean }
+        secret: { type: string, format: password }
+
 paths:
   /healthz:
     get:
@@ -3911,7 +3938,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DPIPatternInput' }
       responses:
         '200':
           description: Add DPI pattern.
@@ -5912,7 +5939,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Created.
@@ -5946,7 +5973,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Updated.
@@ -7610,7 +7637,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Test alert webhook.
@@ -7884,7 +7911,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDefaultAuthOutcomeBody' }
       responses:
         '200':
           description: Set unauth mode (legacy alias).
@@ -7948,7 +7975,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AddBlocklistEntry' }
       responses:
         '200':
           description: Add blocklist entry.
@@ -8324,7 +8351,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DPIPatternInput' }
       responses:
         '200':
           description: Add DPI pattern (legacy alias).

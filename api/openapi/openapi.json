@@ -58,6 +58,22 @@
       }
     },
     "schemas": {
+      "AddBlocklistEntry": {
+        "additionalProperties": false,
+        "description": "Provide a single host or a list.",
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "AddBlocklistException": {
         "additionalProperties": false,
         "description": "Provide a single host or a list.",
@@ -160,6 +176,40 @@
           "deliveries"
         ],
         "type": "object"
+      },
+      "AlertWebhook": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "format": "password",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object",
+        "x-culvert-sensitive": true
       },
       "AlertWebhookInput": {
         "additionalProperties": true,
@@ -757,6 +807,22 @@
           "count",
           "blocked_total"
         ],
+        "type": "object"
+      },
+      "DPIPatternInput": {
+        "additionalProperties": false,
+        "description": "Provide a single pattern or a list.",
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "DashboardHealth": {
@@ -3033,7 +3099,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlertWebhookInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -3096,7 +3162,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlertWebhookInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -3190,7 +3256,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -4161,7 +4227,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AddBlocklistEntry"
               }
             }
           },
@@ -7625,7 +7691,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DPIPatternInput"
               }
             }
           },
@@ -9090,7 +9156,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DPIPatternInput"
               }
             }
           },
@@ -14152,7 +14218,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDefaultAuthOutcomeBody"
               }
             }
           },

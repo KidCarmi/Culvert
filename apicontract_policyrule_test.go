@@ -77,3 +77,23 @@ func TestConformance_MoreStructs_Request(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_SmallStructs_Request(t *testing.T) {
+	spec := loadContract(t)
+	cases := []struct{ method, path, good, bad string }{
+		{"POST", "/api/blocklist", `{"hosts":["a.com","b.com"]}`, `{"host":5}`},
+		{"POST", "/api/dpi", `{"pattern":"evil"}`, `{"pattern":1}`},
+		{"POST", "/api/alerts/webhooks", `{"name":"slack","url":"https://h","events":["threat_detected"],"enabled":true}`, `{"name":"x"}`},
+		{"PUT", "/api/settings/unauth-mode", `{"defaultAuthOutcome":"Default"}`, `{"defaultAuthOutcome":"Nope"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.good)); err != nil {
+				t.Fatalf("valid body rejected: %v", err)
+			}
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.bad)); err == nil {
+				t.Fatalf("accepted invalid body %s", c.bad)
+			}
+		})
+	}
+}
