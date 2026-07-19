@@ -165,6 +165,11 @@ type startupState struct {
 }
 
 func main() {
+	// Positional subcommand: `culvert bootstrap-resolve ...` fetches + verifies the
+	// signed release catalog and emits the fresh-install decision, then exits. It
+	// must run BEFORE the global flag set is defined (it is not a flag).
+	maybeRunBootstrapResolve(os.Args)
+
 	s := &startupState{}
 	parseFlags(s)
 	handleOneShotCommands(s)
