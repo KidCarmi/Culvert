@@ -1052,6 +1052,37 @@ components:
       description: A single YARA rule file (open superset).
       additionalProperties: true
 
+    # ── Slice 3 tranche 15: cdr/release read schemas ──────────────────────────────
+    CDRConfig:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+    CDRHealth:
+      type: object
+      description: CDR sidecar health (shape varies).
+      additionalProperties: true
+    CDRInstances:
+      type: object
+      description: Enrolled CDR instances.
+      additionalProperties: true
+    CDRPolicies:
+      type: object
+      required: [rules, count]
+      additionalProperties: true
+      properties:
+        rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        count: { type: integer }
+    ReleaseCurrent:
+      type: object
+      description: Current installed release.
+      additionalProperties: true
+    DispatchStatus:
+      type: object
+      description: Release dispatch/upgrade status.
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -3823,6 +3854,31 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterCAInfo' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: clusterCAAction
+      tags: [cluster]
+      summary: Cluster CA action
+      description: Performs a cluster CA action (rotate/init).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.ca
+      responses:
+        '200':
+          description: Cluster CA action initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cluster/tokens:
     get:
       operationId: getClusterTokens
@@ -5190,3 +5246,269 @@ paths:
           description: Not found. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+
+  /api/cdr/config:
+    get:
+      operationId: getCDRConfig
+      tags: [cluster]
+      summary: CDR config
+      description: Returns CDR (content-disarm) configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: CDR config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CDRConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cdr/health:
+    get:
+      operationId: getCDRHealth
+      tags: [cluster]
+      summary: CDR health
+      description: Returns CDR sidecar health. Returns 503 when no CDR client is active.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: CDR health.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CDRHealth' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: No active CDR client. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/cdr/instances:
+    get:
+      operationId: getCDRInstances
+      tags: [cluster]
+      summary: CDR instances
+      description: Returns enrolled CDR instances.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: CDR instances.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CDRInstances' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cdr/policies:
+    get:
+      operationId: getCDRPolicies
+      tags: [cluster]
+      summary: CDR policies
+      description: Returns CDR policy rules.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: CDR policies.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CDRPolicies' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/releases/current:
+    get:
+      operationId: getReleaseCurrent
+      tags: [config]
+      summary: Current release
+      description: Returns the currently installed release.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Current release.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReleaseCurrent' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Not configured. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/releases/dispatch/status:
+    get:
+      operationId: getDispatchStatus
+      tags: [config]
+      summary: Dispatch status
+      description: Returns the release dispatch/upgrade status.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Dispatch status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DispatchStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cdr/test:
+    post:
+      operationId: testCDR
+      tags: [cluster]
+      summary: Test CDR
+      description: Runs a CDR test.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: cdr.test
+      responses:
+        '200':
+          description: Test CDR initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/drain:
+    post:
+      operationId: drainCluster
+      tags: [cluster]
+      summary: Drain node
+      description: Drains this node for maintenance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.drain
+      responses:
+        '200':
+          description: Drain node initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/ha/promote:
+    post:
+      operationId: promoteHA
+      tags: [cluster]
+      summary: Promote to leader
+      description: Promotes this node to HA leader (break-glass).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.ha.promote
+      responses:
+        '200':
+          description: Promote to leader initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/releases/catalog-refresh:
+    post:
+      operationId: refreshCatalog
+      tags: [config]
+      summary: Refresh release catalog
+      description: Forces a verified release-catalog refresh.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: release.catalog_refresh
+      responses:
+        '200':
+          description: Refresh release catalog initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/releases/dispatch/resume:
+    post:
+      operationId: resumeDispatch
+      tags: [config]
+      summary: Resume dispatch
+      description: Resumes a paused release dispatch.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: release.dispatch.resume
+      responses:
+        '200':
+          description: Resume dispatch initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }

@@ -341,6 +341,49 @@
         "description": "Internal CA state (opaque superset; fields depend on rotation/dual-CA mode).",
         "type": "object"
       },
+      "CDRConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "CDRHealth": {
+        "additionalProperties": true,
+        "description": "CDR sidecar health (shape varies).",
+        "type": "object"
+      },
+      "CDRInstances": {
+        "additionalProperties": true,
+        "description": "Enrolled CDR instances.",
+        "type": "object"
+      },
+      "CDRPolicies": {
+        "additionalProperties": true,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules",
+          "count"
+        ],
+        "type": "object"
+      },
       "CategoryGroups": {
         "additionalProperties": false,
         "properties": {
@@ -831,6 +874,11 @@
         ],
         "type": "object"
       },
+      "DispatchStatus": {
+        "additionalProperties": true,
+        "description": "Release dispatch/upgrade status.",
+        "type": "object"
+      },
       "DomainAllowlist": {
         "additionalProperties": false,
         "properties": {
@@ -1301,6 +1349,11 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "ReleaseCurrent": {
+        "additionalProperties": true,
+        "description": "Current installed release.",
         "type": "object"
       },
       "ReleaseStatus": {
@@ -3741,6 +3794,217 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cdr/config": {
+      "get": {
+        "description": "Returns CDR (content-disarm) configuration.",
+        "operationId": "getCDRConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CDRConfig"
+                }
+              }
+            },
+            "description": "CDR config."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "CDR config",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cdr/health": {
+      "get": {
+        "description": "Returns CDR sidecar health. Returns 503 when no CDR client is active.",
+        "operationId": "getCDRHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CDRHealth"
+                }
+              }
+            },
+            "description": "CDR health."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No active CDR client. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "CDR health",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cdr/instances": {
+      "get": {
+        "description": "Returns enrolled CDR instances.",
+        "operationId": "getCDRInstances",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CDRInstances"
+                }
+              }
+            },
+            "description": "CDR instances."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "CDR instances",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cdr/policies": {
+      "get": {
+        "description": "Returns CDR policy rules.",
+        "operationId": "getCDRPolicies",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CDRPolicies"
+                }
+              }
+            },
+            "description": "CDR policies."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "CDR policies",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cdr/test": {
+      "post": {
+        "description": "Runs a CDR test.",
+        "operationId": "testCDR",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Test CDR initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Test CDR",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cdr.test",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/audit": {
       "get": {
         "description": "Returns cluster-plane audit entries.",
@@ -3866,6 +4130,94 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Performs a cluster CA action (rotate/init).",
+        "operationId": "clusterCAAction",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Cluster CA action initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster CA action",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.ca",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/drain": {
+      "post": {
+        "description": "Drains this node for maintenance.",
+        "operationId": "drainCluster",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Drain node initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Drain node",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.drain",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/cluster/ha": {
@@ -3902,6 +4254,51 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/ha/promote": {
+      "post": {
+        "description": "Promotes this node to HA leader (break-glass).",
+        "operationId": "promoteHA",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Promote to leader initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Promote to leader",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cluster.ha.promote",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -7262,6 +7659,184 @@
           }
         ],
         "summary": "Release-management status",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/releases/catalog-refresh": {
+      "post": {
+        "description": "Forces a verified release-catalog refresh.",
+        "operationId": "refreshCatalog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Refresh release catalog initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Refresh release catalog",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-audit-event": "release.catalog_refresh",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/releases/current": {
+      "get": {
+        "description": "Returns the currently installed release.",
+        "operationId": "getReleaseCurrent",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCurrent"
+                }
+              }
+            },
+            "description": "Current release."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not configured. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Current release",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/releases/dispatch/resume": {
+      "post": {
+        "description": "Resumes a paused release dispatch.",
+        "operationId": "resumeDispatch",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resume dispatch initiated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Resume dispatch",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-audit-event": "release.dispatch.resume",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/releases/dispatch/status": {
+      "get": {
+        "description": "Returns the release dispatch/upgrade status.",
+        "operationId": "getDispatchStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DispatchStatus"
+                }
+              }
+            },
+            "description": "Dispatch status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Dispatch status",
         "tags": [
           "config"
         ],

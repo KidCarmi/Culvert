@@ -3,22 +3,22 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 156
-- **Exempt (≤270-day horizon):** 128
+- **Documented:** 168
+- **Exempt (≤270-day horizon):** 116
 
 ## By domain
 
 | Domain | Entries | Documented |
 |---|---|---|
 | auth | 18 | 7 |
-| cdr | 11 | 0 |
-| cluster | 31 | 20 |
+| cdr | 11 | 5 |
+| cluster | 31 | 23 |
 | dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 15 |
 | policy | 65 | 36 |
-| release | 6 | 1 |
+| release | 6 | 5 |
 | security | 51 | 35 |
 | settings | 30 | 19 |
 | setup | 2 | 2 |
@@ -60,10 +60,18 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/category-groups` | apiCategoryGroups | viewer |
 | POST | `/api/category-groups` | apiCategoryGroups | operator |
 | PUT | `/api/category-groups` | apiCategoryGroups | operator |
+| GET | `/api/cdr/config` | apiCDRConfig | viewer |
+| GET | `/api/cdr/health` | apiCDRHealth | viewer |
+| GET | `/api/cdr/instances` | apiCDRInstances | viewer |
+| GET | `/api/cdr/policies` | apiCDRPolicies | viewer |
+| POST | `/api/cdr/test` | apiCDRTest | admin |
 | GET | `/api/cluster/audit` | apiClusterAudit | viewer |
 | GET | `/api/cluster/bandwidth` | apiBandwidthPolicies | viewer |
 | GET | `/api/cluster/ca` | apiClusterCA | viewer |
+| POST | `/api/cluster/ca` | apiClusterCA | admin |
+| POST | `/api/cluster/drain` | apiClusterDrain | admin |
 | GET | `/api/cluster/ha` | apiClusterHA | viewer |
+| POST | `/api/cluster/ha/promote` | apiClusterHAPromote | admin |
 | GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
 | DELETE | `/api/cluster/node-groups` | apiNodeGroups | admin |
 | GET | `/api/cluster/node-groups` | apiNodeGroups | viewer |
@@ -135,6 +143,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/policy` | apiPolicy | viewer |
 | GET | `/api/policy/draft` | apiPolicyDraft | viewer |
 | GET | `/api/releases` | apiReleases | viewer |
+| POST | `/api/releases/catalog-refresh` | apiReleaseCatalogRefresh | admin |
+| GET | `/api/releases/current` | apiReleaseCurrent | viewer |
+| POST | `/api/releases/dispatch/resume` | apiReleaseDispatchResume | admin |
+| GET | `/api/releases/dispatch/status` | apiReleaseDispatchStatus | viewer |
 | DELETE | `/api/rewrite` | apiRewrite | operator |
 | GET | `/api/rewrite` | apiRewrite | viewer |
 | POST | `/api/rewrite` | apiRewrite | operator |
