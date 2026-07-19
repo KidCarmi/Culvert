@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 118
-- **Exempt (≤270-day horizon):** 166
+- **Documented:** 127
+- **Exempt (≤270-day horizon):** 157
 
 ## By domain
 
@@ -16,14 +16,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
-| pac | 23 | 4 |
-| policy | 65 | 28 |
+| pac | 23 | 5 |
+| policy | 65 | 35 |
 | release | 6 | 1 |
 | security | 51 | 22 |
 | settings | 30 | 19 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 6 |
+| support | 30 | 7 |
 
 ## Documented operations
 
@@ -41,7 +41,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | DELETE | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
 | POST | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
+| DELETE | `/api/blocklist/feed` | apiBlocklistFeed | operator |
 | GET | `/api/blocklist/feed` | apiBlocklistFeed | viewer |
+| POST | `/api/blocklist/feed` | apiBlocklistFeed | operator |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
 | GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
@@ -77,7 +79,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator |
 | GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer |
 | GET | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | viewer |
+| DELETE | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
 | GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
+| POST | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
+| PUT | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
 | GET | `/api/decryption/health` | apiDecryptionHealth | viewer |
 | GET | `/api/decryption/redaction` | apiDecryptionRedaction | viewer |
 | PUT | `/api/decryption/redaction` | apiDecryptionRedaction | admin |
@@ -101,13 +106,16 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/ocsp` | apiOCSPConfig | viewer |
 | POST | `/api/ocsp` | apiOCSPConfig | admin |
 | GET | `/api/pac-config` | apiPACConfig | viewer |
+| POST | `/api/pac-config` | apiPACConfig | admin |
 | GET | `/api/pac/pools` | apiPACPools | viewer |
 | GET | `/api/pac/posture/inventory` | apiPACPostureInventory | viewer |
 | GET | `/api/pac/profiles` | apiPACProfiles | viewer |
 | GET | `/api/policy` | apiPolicy | viewer |
 | GET | `/api/policy/draft` | apiPolicyDraft | viewer |
 | GET | `/api/releases` | apiReleases | viewer |
+| DELETE | `/api/rewrite` | apiRewrite | operator |
 | GET | `/api/rewrite` | apiRewrite | viewer |
+| POST | `/api/rewrite` | apiRewrite | operator |
 | GET | `/api/security` | apiSecurity | viewer |
 | POST | `/api/security` | apiSecurity | admin |
 | GET | `/api/security-scan/cache` | apiScanCache | viewer |
@@ -139,6 +147,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |
 | GET | `/api/support/recipients` | apiSupportRecipients | viewer |
 | GET | `/api/support/retention` | apiSupportRetention | viewer |
+| PUT | `/api/support/retention` | apiSupportRetention | admin |
 | GET | `/api/support/status` | apiSupportStatus | viewer |
 | * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |

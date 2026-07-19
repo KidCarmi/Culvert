@@ -74,6 +74,23 @@
         },
         "type": "object"
       },
+      "AddBlocklistFeed": {
+        "additionalProperties": false,
+        "properties": {
+          "interval": {
+            "description": "e.g. 24h, or off",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "interval"
+        ],
+        "type": "object"
+      },
       "AddFileblock": {
         "additionalProperties": false,
         "description": "Provide a single extension or a list.",
@@ -724,6 +741,11 @@
         ],
         "type": "object"
       },
+      "DecryptionProfileInput": {
+        "additionalProperties": true,
+        "description": "A decryption profile (rich object; open superset).",
+        "type": "object"
+      },
       "DecryptionProfiles": {
         "additionalProperties": false,
         "properties": {
@@ -1267,6 +1289,11 @@
           "rules",
           "count"
         ],
+        "type": "object"
+      },
+      "RewriteRuleInput": {
+        "additionalProperties": true,
+        "description": "An HTTP header rewrite rule (rich object; open superset).",
         "type": "object"
       },
       "Role": {
@@ -1888,6 +1915,11 @@
           "keep",
           "max_age_days"
         ],
+        "type": "object"
+      },
+      "SupportRetentionPatch": {
+        "additionalProperties": true,
+        "description": "Partial support-bundle retention update.",
         "type": "object"
       },
       "SupportStatus": {
@@ -2679,6 +2711,59 @@
       }
     },
     "/api/blocklist/feed": {
+      "delete": {
+        "description": "Removes a blocklist feed source by URL.",
+        "operationId": "deleteBlocklistFeed",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "url",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete blocklist feed",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "blocklist.feed.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
       "get": {
         "description": "Returns configured blocklist feed sources with sync state.",
         "operationId": "getBlocklistFeed",
@@ -2712,6 +2797,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Adds or updates a blocklist feed source.",
+        "operationId": "addBlocklistFeed",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddBlocklistFeed"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Add blocklist feed",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "blocklist.feed.add",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -4333,6 +4471,67 @@
       }
     },
     "/api/decryption-profiles": {
+      "delete": {
+        "description": "Deletes a decryption profile by id or name.",
+        "operationId": "deleteDecryptionProfile",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete decryption profile",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "decryption_profile.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
       "get": {
         "description": "Returns TLS-inspection decryption profiles and their names.",
         "operationId": "getDecryptionProfiles",
@@ -4366,6 +4565,112 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Creates a TLS-inspection decryption profile.",
+        "operationId": "createDecryptionProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecryptionProfileInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Create decryption profile",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "decryption_profile.create",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates a decryption profile.",
+        "operationId": "updateDecryptionProfile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecryptionProfileInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update decryption profile",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "decryption_profile.update",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -5386,6 +5691,59 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Sets the PAC proxy host and port.",
+        "operationId": "setPACConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PACConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set PAC config",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-audit-event": "pac.config.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/pac/pools": {
@@ -5633,6 +5991,59 @@
       }
     },
     "/api/rewrite": {
+      "delete": {
+        "description": "Deletes a rewrite rule by id.",
+        "operationId": "deleteRewriteRule",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete rewrite rule",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "rewrite.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
       "get": {
         "description": "Returns the configured HTTP header rewrite rules.",
         "operationId": "getRewrite",
@@ -5666,6 +6077,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Adds an HTTP header rewrite rule.",
+        "operationId": "addRewriteRule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RewriteRuleInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Add rewrite rule",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "rewrite.add",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -7051,6 +7515,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates support-bundle retention settings.",
+        "operationId": "setSupportRetention",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupportRetentionPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set support retention",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.retention.set",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

@@ -9,7 +9,7 @@ Tracks the sliced rollout from ADR-0007. Status as of 2026-07-19.
 | 0 | Evidence + architecture (inventory, research, risk register, decision matrix, ADR, plan, independent review) | **DONE** |
 | 1 | Contract baseline (root, shared schemas, security schemes, representative high-value endpoints, style guide, lint, bundle, offline docs) | **DONE** |
 | 2 | Route-coverage enforcement (live enumeration, classification, missing-route + phantom detection, exemption mechanism) | **DONE** |
-| 3 | Full supported-API coverage (document all supported endpoints; retire exemptions) | **IN PROGRESS** — 118/284 documented (read surface complete across all domains; first write endpoints documented with request-conformance tests), 166 exempt remaining |
+| 3 | Full supported-API coverage (document all supported endpoints; retire exemptions) | **IN PROGRESS** — 127/284 documented (read surface complete across all domains; first write endpoints documented with request-conformance tests), 157 exempt remaining |
 | 4 | Runtime contract tests (request/response/failure/authz/tenant) | **CORE DONE** — 73 live response-conformance tests through real handlers; growing with Slice 3 |
 | 5 | Compatibility + generation (breaking-change mandatory post-baseline; committed Go client; changelog; 3.1.1 re-eval) | **SCAFFOLDED** (scripts pinned; deep lane) |
 | 6 | Docs + release integration (vendored Redoc/Scalar under CSP; visibility-filtered outputs; release traceability) | **PARTIAL** (offline HTML shipped; richer docs + release wiring TODO) |

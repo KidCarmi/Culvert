@@ -972,6 +972,27 @@ components:
         host: { type: string }
         hosts: { type: array, items: { type: string } }
 
+    # ── Slice 3 tranche 11: write request schemas ─────────────────────────────────
+    AddBlocklistFeed:
+      type: object
+      required: [url, interval]
+      additionalProperties: false
+      properties:
+        url: { type: string }
+        interval: { type: string, description: "e.g. 24h, or off" }
+    DecryptionProfileInput:
+      type: object
+      description: A decryption profile (rich object; open superset).
+      additionalProperties: true
+    RewriteRuleInput:
+      type: object
+      description: An HTTP header rewrite rule (rich object; open superset).
+      additionalProperties: true
+    SupportRetentionPatch:
+      type: object
+      description: Partial support-bundle retention update.
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -2016,6 +2037,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setPACConfig
+      tags: [pac]
+      summary: Set PAC config
+      description: Sets the PAC proxy host and port.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: pac.config.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PACConfig' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/settings:
     get:
@@ -2195,6 +2245,65 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/RewriteList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addRewriteRule
+      tags: [policy]
+      summary: Add rewrite rule
+      description: Adds an HTTP header rewrite rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: rewrite.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RewriteRuleInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteRewriteRule
+      tags: [policy]
+      summary: Delete rewrite rule
+      description: Deletes a rewrite rule by id.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: rewrite.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/category-groups:
     get:
       operationId: getCategoryGroups
@@ -2612,6 +2721,65 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BlocklistFeedList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addBlocklistFeed
+      tags: [policy]
+      summary: Add blocklist feed
+      description: Adds or updates a blocklist feed source.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.feed.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddBlocklistFeed' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteBlocklistFeed
+      tags: [policy]
+      summary: Delete blocklist feed
+      description: Removes a blocklist feed source by URL.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.feed.delete
+      parameters:
+        - name: url
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/urlcat:
     get:
       operationId: getURLCategories
@@ -2752,6 +2920,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DecryptionProfiles' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createDecryptionProfile
+      tags: [policy]
+      summary: Create decryption profile
+      description: Creates a TLS-inspection decryption profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: decryption_profile.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateDecryptionProfile
+      tags: [policy]
+      summary: Update decryption profile
+      description: Updates a decryption profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: decryption_profile.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteDecryptionProfile
+      tags: [policy]
+      summary: Delete decryption profile
+      description: Deletes a decryption profile by id or name.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: decryption_profile.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/dpi:
     get:
       operationId: getDPI
@@ -3662,6 +3922,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SupportRetention' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setSupportRetention
+      tags: [support]
+      summary: Set support retention
+      description: Updates support-bundle retention settings.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: support.retention.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupportRetentionPatch' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/diagnostics:
     get:
       operationId: getDiagnostics
