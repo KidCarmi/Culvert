@@ -1211,6 +1211,70 @@ components:
       properties:
         exceptions: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
 
+    BlockPageConfig:
+      type: object
+      required: [html]
+      additionalProperties: false
+      properties:
+        html: { type: string }
+    SetBlockPageBody:
+      type: object
+      required: [html]
+      additionalProperties: false
+      properties:
+        html: { type: string }
+    LockoutsList:
+      type: object
+      required: [lockouts]
+      additionalProperties: false
+      properties:
+        lockouts: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    ClearLockoutBody:
+      type: object
+      required: [username]
+      additionalProperties: false
+      properties:
+        username: { type: string }
+    URLCategoryLookup:
+      type: object
+      required: [host, category]
+      additionalProperties: true
+      properties:
+        host: { type: string }
+        category: { type: string }
+        tier: { type: string }
+        matchedBy: { type: string }
+        blocked: { type: boolean }
+        blockSource: { type: string }
+    SetClusterLabels:
+      type: object
+      required: [node_id]
+      additionalProperties: false
+      properties:
+        node_id: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+    SetClusterMode:
+      type: object
+      additionalProperties: false
+      properties:
+        grpc_addr: { type: string }
+        cert_file: { type: string }
+        key_file: { type: string }
+        ca_file: { type: string }
+    MovePolicyRule:
+      type: object
+      additionalProperties: false
+      properties:
+        priority: { type: integer }
+        position: { type: string }
+        targetName: { type: string }
+    ReorderPolicy:
+      type: object
+      required: [priorities]
+      additionalProperties: false
+      properties:
+        priorities: { type: array, items: { type: integer } }
+
 paths:
   /healthz:
     get:
@@ -6739,7 +6803,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetBlockPageBody' }
       responses:
         '200':
           description: Block page set.
@@ -6767,7 +6831,7 @@ paths:
           description: Block page HTML.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/BlockPageConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/diagnose/all:
@@ -7019,7 +7083,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/MovePolicyRule' }
       responses:
         '200':
           description: Move a policy rule.
@@ -7049,7 +7113,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ReorderPolicy' }
       responses:
         '200':
           description: Reorder policy rules.
@@ -7275,7 +7339,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetClusterLabels' }
       responses:
         '200':
           description: Set node labels.
@@ -7305,7 +7369,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetClusterMode' }
       responses:
         '200':
           description: Set cluster mode.
@@ -7869,7 +7933,7 @@ paths:
           description: Auth lockouts.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/LockoutsList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: clearLockout
@@ -7891,7 +7955,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ClearLockoutBody' }
       responses:
         '200':
           description: Clear auth lockout.
@@ -8091,7 +8155,7 @@ paths:
           description: Lookup URL category.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/URLCategoryLookup' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/alerts/webhooks/history:
     get:

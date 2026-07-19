@@ -292,6 +292,18 @@
         "nullable": true,
         "type": "array"
       },
+      "BlockPageConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "html": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "html"
+        ],
+        "type": "object"
+      },
       "BlocklistFeedList": {
         "additionalProperties": false,
         "properties": {
@@ -461,6 +473,18 @@
         ],
         "type": "object",
         "x-culvert-sensitive": true
+      },
+      "ClearLockoutBody": {
+        "additionalProperties": false,
+        "properties": {
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
+        ],
+        "type": "object"
       },
       "ClusterAudit": {
         "additionalProperties": false,
@@ -1115,6 +1139,23 @@
         ],
         "type": "object"
       },
+      "LockoutsList": {
+        "additionalProperties": false,
+        "properties": {
+          "lockouts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "lockouts"
+        ],
+        "type": "object"
+      },
       "LogLevel": {
         "additionalProperties": false,
         "properties": {
@@ -1224,6 +1265,21 @@
           "tokenSet",
           "path"
         ],
+        "type": "object"
+      },
+      "MovePolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "targetName": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "NetworkSettings": {
@@ -1589,6 +1645,21 @@
         ],
         "type": "object"
       },
+      "ReorderPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "priorities": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "priorities"
+        ],
+        "type": "object"
+      },
       "RewriteList": {
         "additionalProperties": false,
         "properties": {
@@ -1813,6 +1884,18 @@
         ],
         "type": "object"
       },
+      "SetBlockPageBody": {
+        "additionalProperties": false,
+        "properties": {
+          "html": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "html"
+        ],
+        "type": "object"
+      },
       "SetBlocklistMode": {
         "additionalProperties": false,
         "properties": {
@@ -1827,6 +1910,42 @@
         "required": [
           "mode"
         ],
+        "type": "object"
+      },
+      "SetClusterLabels": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "node_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id"
+        ],
+        "type": "object"
+      },
+      "SetClusterMode": {
+        "additionalProperties": false,
+        "properties": {
+          "ca_file": {
+            "type": "string"
+          },
+          "cert_file": {
+            "type": "string"
+          },
+          "grpc_addr": {
+            "type": "string"
+          },
+          "key_file": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "SetConnLimit": {
@@ -2396,6 +2515,34 @@
         },
         "nullable": true,
         "type": "array"
+      },
+      "URLCategoryLookup": {
+        "additionalProperties": true,
+        "properties": {
+          "blockSource": {
+            "type": "string"
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "category": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "matchedBy": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "category"
+        ],
+        "type": "object"
       },
       "UpsertCategoryGroup": {
         "additionalProperties": false,
@@ -2980,7 +3127,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/LockoutsList"
                 }
               }
             },
@@ -3016,7 +3163,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ClearLockoutBody"
               }
             }
           },
@@ -4249,7 +4396,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/BlockPageConfig"
                 }
               }
             },
@@ -4285,7 +4432,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetBlockPageBody"
               }
             }
           },
@@ -5997,7 +6144,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetClusterLabels"
               }
             }
           },
@@ -6091,7 +6238,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetClusterMode"
               }
             }
           },
@@ -11584,7 +11731,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/MovePolicyRule"
               }
             }
           },
@@ -11639,7 +11786,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ReorderPolicy"
               }
             }
           },
@@ -16068,7 +16215,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/URLCategoryLookup"
                 }
               }
             },
