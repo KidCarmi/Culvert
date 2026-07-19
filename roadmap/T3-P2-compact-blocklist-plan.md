@@ -110,6 +110,38 @@ p99 lookup is unacceptable. A benchgate (`//go:build benchgate`) asserts:
   fingerprint is defined over the host set, representation-independent).
 - **Rollback-safe:** switching the flag off rebuilds the map from the same file.
 
+## REVISED SEQUENCING (post-analysis): the duplicate-map elimination is the dominant, low-risk win — do it FIRST, arena LATER
+
+A closer look at the memory model changes the order. Today every host is stored
+TWICE in memory: once as a key in `exact map[string]bool` (~0.9 GB at 10M) and
+AGAIN as a key in `feedSrc map[string]string` (~1.35 GB — the host key repeated
+PLUS a non-interned URL string copy per host). The single biggest waste is the
+DUPLICATE KEY, not just the URL copy.
+
+**Slice 1 = merge attribution INTO the exact map + intern feed URLs, eliminating
+the `feedSrc` map entirely.** `exact` becomes `map[string]uint32` where presence =
+blocked and the value = a feed-id into a tiny interned `feeds []string` table
+(0 = unattributed/legacy; manual stays tracked in `manual`). This:
+- kills the ~1.35 GB second map → ~0.93 GB total at 10M (a **~1.3 GB cut**), so
+  **10M fits an 8 GB DP with NO arena/overlay/compaction**;
+- touches the hot path minimally — `IsBlocked` still does ONE map probe and
+  ignores the value (no torn-read risk, no overlay-first regression, no
+  open-addressing/hash-flood surface — the concerns the C1 arena introduced);
+- keeps the on-disk `.sources` format unchanged (resolve id→URL on Save) — no
+  wire/format change, fingerprint unchanged.
+
+**C1 (the arena + overlay + compaction) is DEFERRED to an optional later slice**,
+justified only if 4 GB DPs must hold 10M (measure Slice-1 RSS first). This
+sidesteps the entire high-risk hot-path rewrite unless the numbers demand it.
+
+Risk that remains for Slice 1: it rewrites ~8 interdependent, frozen,
+security-relevant methods (RemoveByFeedSource / CountByFeedSource / ListWithSource
+/ RestoreFeedSources / RemoveUnattributedFeedEntries / SnapshotFeedSources /
+ClearAll / Remove / Add / ReplaceFeedEntries) against feed-ids. Mitigation:
+byte-identical semantic-parity tests for every method (same verdict, same
+attribution, same cascade-delete set) + a code red-team after implementation (the
+P1 pattern), NOT a design red-team.
+
 ## Slicing (each independently shippable + benchmarked)
 
 - **P2.1 — compactSet (arena + open-addressing index), read-only + benchgate.** Build
