@@ -1328,6 +1328,34 @@ components:
         created_at: { type: string }
         updated_at: { type: string }
 
+    URLCategoryEntry:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        hosts: { type: array, items: { type: string }, nullable: true }
+        builtIn: { type: boolean }
+    FileblockProfileFull:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        extensions: { type: array, items: { type: string }, nullable: true }
+    RewriteRuleFull:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: integer }
+        host: { type: string }
+        req_set: { type: object, additionalProperties: { type: string } }
+        req_add: { type: object, additionalProperties: { type: string } }
+        req_remove: { type: array, items: { type: string } }
+        resp_set: { type: object, additionalProperties: { type: string } }
+        resp_add: { type: object, additionalProperties: { type: string } }
+        resp_remove: { type: array, items: { type: string } }
+
 paths:
   /healthz:
     get:
@@ -2817,7 +2845,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RewriteRuleInput' }
+            schema: { $ref: '#/components/schemas/RewriteRuleFull' }
       responses:
         '200':
           description: Updated.
@@ -3404,7 +3432,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/URLCategoryEntry' }
       responses:
         '200':
           description: Create URL category.
@@ -3433,7 +3461,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/URLCategoryEntry' }
       responses:
         '200':
           description: Update URL category.
@@ -3603,7 +3631,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/FileblockProfileFull' }
       responses:
         '200':
           description: Create file-block profile.
@@ -3632,7 +3660,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/FileblockProfileFull' }
       responses:
         '200':
           description: Update file-block profile.

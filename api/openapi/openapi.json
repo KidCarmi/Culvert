@@ -1033,6 +1033,25 @@
         ],
         "type": "object"
       },
+      "FileblockProfileFull": {
+        "additionalProperties": false,
+        "properties": {
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "FileblockProfileList": {
         "items": {
           "additionalProperties": true,
@@ -1838,6 +1857,54 @@
           "rules",
           "count"
         ],
+        "type": "object"
+      },
+      "RewriteRuleFull": {
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "req_add": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "req_remove": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "req_set": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "resp_add": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "resp_remove": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resp_set": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
         "type": "object"
       },
       "RewriteRuleInput": {
@@ -2656,6 +2723,28 @@
         },
         "required": [
           "ips"
+        ],
+        "type": "object"
+      },
+      "URLCategoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "builtIn": {
+            "type": "boolean"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -9438,7 +9527,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/FileblockProfileFull"
               }
             }
           },
@@ -9491,7 +9580,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/FileblockProfileFull"
               }
             }
           },
@@ -12426,7 +12515,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RewriteRuleInput"
+                "$ref": "#/components/schemas/RewriteRuleFull"
               }
             }
           },
@@ -16123,7 +16212,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/URLCategoryEntry"
               }
             }
           },
@@ -16176,7 +16265,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/URLCategoryEntry"
               }
             }
           },

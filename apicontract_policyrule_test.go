@@ -58,3 +58,22 @@ func TestConformance_AuthPolicyRule_Request(t *testing.T) {
 		t.Fatal("auth policy accepted unknown field")
 	}
 }
+
+func TestConformance_MoreStructs_Request(t *testing.T) {
+	spec := loadContract(t)
+	cases := []struct{ method, path, good, bad string }{
+		{"POST", "/api/urlcat", `{"name":"social","hosts":["fb.com"],"builtIn":false}`, `{"name":"x","extra":1}`},
+		{"POST", "/api/fileblock/profiles", `{"name":"exe","extensions":["exe","dll"]}`, `{"extensions":"exe"}`},
+		{"POST", "/api/rewrite", `{"host":"x.com","req_set":{"X-A":"1"},"resp_remove":["Server"]}`, `{"id":"one"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.good)); err != nil {
+				t.Fatalf("valid body rejected: %v", err)
+			}
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.bad)); err == nil {
+				t.Fatalf("accepted invalid body %s", c.bad)
+			}
+		})
+	}
+}
