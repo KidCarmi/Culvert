@@ -3879,6 +3879,7 @@ Firefox (all platforms):
               <div class="stat-card"><div class="stat-val" id="cca-expires">-</div><div class="stat-label">Expires</div></div>
               <div class="stat-card"><div class="stat-val" id="cca-fingerprint" style="font-size:.65rem;word-break:break-all">-</div><div class="stat-label">SHA-256 Fingerprint</div></div>
             </div>
+            <div id="cca-rotation-warning" style="display:none;margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(239,68,68,.12);color:var(--danger);font-size:.8rem;line-height:1.5"></div>
           </div>
           <details style="margin-top:12px">
             <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Import Custom Cluster CA</summary>
@@ -15234,6 +15235,22 @@ async function loadClusterCA() {
       ? '\nOld CA: ' + (r.secondaryCA.subject || '') + ' (expires ' + new Date(r.secondaryCA.expires).toLocaleDateString() + ')'
       : '';
     document.getElementById('cca-fingerprint').textContent = fpText + secInfo;
+    // Auto-rotation runs silently in the background (once/day, starting 30 days
+    // before expiry) - if it keeps failing (e.g. a read-only CA directory), the
+    // only prior signal was a log line, discovered only once nodes actually lost
+    // trust at expiry. Surface the last failure here instead.
+    const warnEl = document.getElementById('cca-rotation-warning');
+    if (warnEl) {
+      if (r.lastRotationError) {
+        warnEl.style.display = '';
+        warnEl.innerHTML = '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Cluster CA auto-rotation failed at ' +
+          escHtml(new Date(r.lastRotationErrorAt).toLocaleString()) + ': ' + escHtml(r.lastRotationError) +
+          '. It will keep retrying automatically on each rotation check; if this persists until the CA expires, enrolled nodes will lose mTLS trust. Import a replacement CA below, or resolve the underlying error (e.g. disk space/permissions on the CA directory).';
+      } else {
+        warnEl.style.display = 'none';
+        warnEl.textContent = '';
+      }
+    }
   } catch(e) {
     if (e.message !== 'Unauthorized') toast('Failed to load cluster CA: ' + e.message, 'error');
   }
