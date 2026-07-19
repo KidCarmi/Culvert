@@ -109,8 +109,9 @@ load-bearing guard-test names for groups A–E so this evidence cannot silently 
 ### A. PR1 — `certVerification=permissive` is retired (18 invariants)
 - Accepted set is exactly `{"", strict, skip}`; interactive create/update/update-by-ID/API
   POST/PUT reject `permissive` with no partial mutation — `TestValidCertVerificationSet`,
-  `TestValidate_RejectsPermissive`, `TestAdd/Update/UpdateByID_RejectsPermissive`,
-  `TestApiDecryptionProfiles_RejectsPermissive_{POST,PUT}` `[engine]`+`[root]`.
+  `TestValidate_RejectsPermissive`, `TestAdd_RejectsPermissive`, `TestUpdate_RejectsPermissive`,
+  `TestUpdateByID_RejectsPermissive`, `TestApiDecryptionProfiles_RejectsPermissive_POST`,
+  `TestApiDecryptionProfiles_RejectsPermissive_PUT` `[engine]`+`[root]`.
 - Bulk paths (import / rollback / CP→DP / on-disk `Load`) **fail-closed-migrate**
   `permissive`→`strict`, never drop, idempotent, audit-visible —
   `TestReplaceAll_MigratesPermissive`, `TestLoad_MigratesAndPersistsPermissive`,
@@ -346,12 +347,22 @@ go test -run TestQualificationManifest -count=1 .
 ```
 
 ### 9.1 Executable qualification manifest
-`qualification_manifest_test.go` (package `main`) declares the canonical set of
-load-bearing guard-test names for each qualified invariant group (A/B/C/D/E) and asserts —
-by scanning the repo's `*_test.go` sources, the same technique as the C1 route-parity and
-`config_surfaces` walls — that each named guard test still exists. Renaming or deleting a
-qualified guard test without updating the manifest turns the silent evidence-rot into a red
-test. It exercises no runtime behavior.
+`qualification_manifest_test.go` (package `main`) closes evidence-rot two ways, both by
+scanning the repo's `*_test.go` sources (the same technique as the C1 route-parity and
+`config_surfaces` walls):
+
+1. **Completeness** — it parses THIS dossier and asserts that every exactly-named test the
+   doc cites in prose (a backticked `Test…` name outside a code fence) exists in the
+   qualified source surface. This is the real wall: it tracks the doc's own citations, so a cited
+   guard that is renamed/deleted — or a citation that never existed — goes red, with no
+   subset to fall through. Wildcard group refs (`` `TestReconfigure_*` ``) carry a `*` and
+   are covered by their group's own parity test, not this exact-match scan.
+2. **Load-bearing floor** — a curated per-group map (`qualManifest`, groups A–E) of the
+   most security-load-bearing guards, so the intent stays greppable even if the prose is
+   later restructured, and an emptied group is caught.
+
+Renaming or deleting a qualified guard test without updating the dossier turns silent
+evidence-rot into a red test. It exercises no runtime behavior.
 
 ---
 

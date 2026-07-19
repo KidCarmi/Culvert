@@ -12,18 +12,29 @@ import (
 // adaptive-decryption production qualification (roadmap/PR5-adaptive-decryption-
 // production-qualification.md §3, §9.1).
 //
-// The dossier names the load-bearing guard tests that prove each qualified security
-// invariant (PR1 permissive-retirement, PR2 security-generation fencing, the fail-closed
-// classifier, scoped isolation, PR3 destination privacy). If one of those guard tests is
-// renamed or deleted, the dossier's evidence claim silently becomes false. This test
-// pins the mapping: it scans the qualified source surface for the actual `func Test…`
-// definitions (the same source-scan technique as the C1 route-parity and
-// config_surfaces walls) and fails if any manifest entry no longer exists.
+// The dossier names the guard tests that prove each qualified security invariant (PR1
+// permissive-retirement, PR2 security-generation fencing, the fail-closed classifier,
+// scoped isolation, PR3 destination privacy). If one of those guard tests is renamed or
+// deleted, the dossier's evidence claim silently becomes false. This test closes that
+// drift two ways, both against the actual `func Test…` definitions in the qualified source
+// surface (the same source-scan technique as the C1 route-parity and config_surfaces walls):
 //
-// It exercises NO runtime behavior — it is pure evidence protection. Updating a qualified
-// guard test's name is fine; it just has to be a conscious edit here too (which is the
-// point). This is NOT a substitute for running the guard tests — CI runs those; this only
-// guarantees they still exist under the names the dossier cites.
+//  1. COMPLETENESS — it parses the dossier itself and asserts that EVERY exactly-named
+//     test the doc cites (`TestFoo` in backticks, outside code fences) exists. This is the
+//     real drift wall: the manifest can never lag the doc, because the doc IS the source of
+//     truth for which names are cited. A cited test that is renamed/deleted — or a doc that
+//     cites a name that never existed — goes red.
+//  2. LOAD-BEARING FLOOR — a curated, human-readable map (`qualManifest`) of the most
+//     security-load-bearing guards per group, so the intent is greppable even if the doc's
+//     prose is later restructured. Every floor entry is also a doc citation, so (1) covers
+//     it; the floor exists for documentation and to catch a group being emptied.
+//
+// It exercises NO runtime behavior — pure evidence protection. It is NOT a substitute for
+// running the guard tests (CI runs those); it only guarantees they still exist under the
+// names the dossier cites. Wildcard group references in the doc (e.g. `TestReconfigure_*`)
+// are intentionally not exact-matched here — they carry a `*`, so the completeness scan
+// skips them; their members are pinned individually where the doc names them, and each
+// group has its own parity test.
 
 // qualManifest maps each qualified invariant group to the load-bearing guard tests the
 // PR5 dossier cites as its evidence. Keep in lockstep with §3 of the dossier.
@@ -137,10 +148,64 @@ func collectTestFuncNames(t *testing.T) map[string]struct{} {
 	return found
 }
 
+// qualDossierPath is the qualification dossier, anchored to the package source dir
+// (CWD-independent, per static_read_wall_test.go).
+func qualDossierPath() string {
+	return filepath.Join(pkgSourceDir(), "roadmap", "PR5-adaptive-decryption-production-qualification.md")
+}
+
+// codeFenceRe strips fenced code blocks so the completeness scan does not treat a
+// reproduction command's `-run 'TestBenchGate_AutoExclude'` PREFIX pattern as an exact
+// test name. exactCitedName then extracts each backticked, exactly-named `TestFoo`.
+var (
+	codeFenceRe    = regexp.MustCompile("(?s)```.*?```")
+	exactCitedName = regexp.MustCompile("`(Test\\w+)`")
+)
+
+// dossierCitedTestNames returns every exactly-named `TestFoo` the dossier cites in prose
+// (outside code fences). Wildcard group refs like `TestReconfigure_*` carry a `*` and so
+// do not match the exact pattern — they are excluded by construction.
+func dossierCitedTestNames(t *testing.T) []string {
+	t.Helper()
+	b, err := os.ReadFile(qualDossierPath())
+	if err != nil {
+		t.Fatalf("read qualification dossier: %v", err)
+	}
+	prose := codeFenceRe.ReplaceAllString(string(b), "")
+	seen := map[string]struct{}{}
+	var names []string
+	for _, m := range exactCitedName.FindAllStringSubmatch(prose, -1) {
+		if _, ok := seen[m[1]]; ok {
+			continue
+		}
+		seen[m[1]] = struct{}{}
+		names = append(names, m[1])
+	}
+	return names
+}
+
 // TestQualificationManifest asserts every guard test the PR5 dossier cites still exists in
-// the source. A rename/delete without updating both the dossier and this manifest goes red.
+// the source. A rename/delete without updating the dossier (and, for a floor entry, this
+// manifest) goes red.
 func TestQualificationManifest(t *testing.T) {
 	found := collectTestFuncNames(t)
+
+	// (1) COMPLETENESS: every exactly-named test the dossier cites must exist. This is what
+	// makes the wall real — it tracks the doc's citations directly, so no cited guard can
+	// rot while this test stays green.
+	cited := dossierCitedTestNames(t)
+	if len(cited) == 0 {
+		t.Fatal("no exactly-named tests parsed from the dossier — the completeness scan is broken (check the dossier path / format)")
+	}
+	for _, name := range cited {
+		if _, ok := found[name]; !ok {
+			t.Errorf("the PR5 dossier cites guard test %q, which does not exist in the qualified source surface — a cited test was renamed/deleted (update the dossier) or the citation is wrong", name)
+		}
+	}
+
+	// (2) LOAD-BEARING FLOOR: the curated per-group guards must exist and each group must be
+	// non-empty. Redundant with (1) for existence, but pins the intent and catches an
+	// emptied group.
 	for group, names := range qualManifest {
 		if len(names) == 0 {
 			t.Errorf("qualification group %q has no guard tests — an empty evidence group is a drift bug", group)
@@ -148,7 +213,7 @@ func TestQualificationManifest(t *testing.T) {
 		}
 		for _, name := range names {
 			if _, ok := found[name]; !ok {
-				t.Errorf("qualification group %q cites guard test %q, which no longer exists in the qualified source surface — update roadmap/PR5-adaptive-decryption-production-qualification.md AND this manifest together", group, name)
+				t.Errorf("qualification group %q cites guard test %q, which no longer exists — update the dossier AND this manifest together", group, name)
 			}
 		}
 	}
