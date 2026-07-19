@@ -5,6 +5,16 @@ package main
 // (redactHost → "h_"+12hex) instead of recording the plaintext. OFF by default (the
 // historical behavior), so upgrading changes nothing until an operator opts in.
 //
+// SCOPE (PR3 B0 honesty fix — the contract is METADATA-ONLY, not full traffic privacy):
+// this posture pseudonymizes ONLY the nested dec.host/dec.sni sub-fields. The SAME log
+// record still carries the plaintext destination in the top-level Entry.Host / Entry.URI,
+// which are emitted to the request feed, the JSONL/history logs, the SIEM/syslog export,
+// and the dashboard drill-down unchanged. The API GET surfaces this scope + warning and
+// the SPA panel shows it, so the toggle no longer advertises privacy it does not deliver.
+// Full traffic-log destination privacy across every sink (opt-in, keyed HMAC, node-local
+// key, fail-closed) is the recommended follow-up in
+// roadmap/PR3-privacy-posture-v2-DECISION.md (Option B).
+//
 // The flag is read at PROJECTION time (toBlock) on the decision/close path, so it must be
 // a lock-free atomic read. It is DURABLE in admin_settings.json but node-local — off
 // export/import, version-rollback, and CP→DP sync (an AdminDurable-only config_surfaces
@@ -36,7 +46,18 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"redact_hosts": decRedactHosts()})
+		// Surface the TRUTHFUL scope alongside the flag (PR3 B0 honesty fix): this
+		// posture pseudonymizes ONLY the nested dec.host/dec.sni sub-fields. The same
+		// records still carry the plaintext destination in the top-level Host/URI
+		// across the feed, JSONL/history, SIEM, and drill-down. Full traffic-log
+		// destination privacy (opt-in keyed-HMAC across every sink) is the recommended
+		// follow-up recorded in roadmap/PR3-privacy-posture-v2-DECISION.md.
+		jsonOK(w, map[string]any{
+			"redact_hosts": decRedactHosts(),
+			"scope":        "decryption_metadata_only",
+			"scope_fields": []string{"dec.host", "dec.sni"},
+			"warning":      "Top-level request-log host and URI remain plaintext across the feed, JSONL/history logs, SIEM export, and dashboard drill-down. This is not full traffic-log destination privacy.",
+		})
 
 	case http.MethodPut:
 		if !requireRole(w, r, RoleAdmin) {

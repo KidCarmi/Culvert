@@ -120,3 +120,37 @@ func TestApiDecryptionRedaction_GetPutAndRBAC(t *testing.T) {
 		t.Fatalf("DELETE code=%d, want 405", w.Code)
 	}
 }
+
+// TestDecRedaction_APISurfacesHonestScope pins the PR3 B0 honesty fix: the GET
+// response advertises the TRUTHFUL scope (decryption-metadata-only) and warns that
+// top-level host/URI remain plaintext — so the toggle no longer claims privacy it does
+// not deliver. This is the mission red line ("do not claim 'host/SNI is redacted' if
+// another field in the same record reveals it").
+func TestDecRedaction_APISurfacesHonestScope(t *testing.T) {
+	swapDecRedact(t, true)
+	req := httptest.NewRequest(http.MethodGet, "/api/decryption/redaction", http.NoBody)
+	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
+	rw := httptest.NewRecorder()
+	apiDecryptionRedaction(rw, req)
+	if rw.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", rw.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["scope"] != "decryption_metadata_only" {
+		t.Fatalf("scope = %v, want decryption_metadata_only", resp["scope"])
+	}
+	warn, _ := resp["warning"].(string)
+	for _, want := range []string{"host", "URI", "plaintext"} {
+		if !strings.Contains(warn, want) {
+			t.Fatalf("warning must mention %q; got %q", want, warn)
+		}
+	}
+	// The scope_fields must name exactly the two nested fields it actually redacts.
+	fields, _ := resp["scope_fields"].([]any)
+	if len(fields) != 2 || fields[0] != "dec.host" || fields[1] != "dec.sni" {
+		t.Fatalf("scope_fields = %v, want [dec.host dec.sni]", fields)
+	}
+}
