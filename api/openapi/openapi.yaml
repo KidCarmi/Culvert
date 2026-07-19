@@ -876,6 +876,63 @@ components:
       properties:
         token: { type: string, format: password }
 
+    # ── Slice 3 tranche 9: more write request schemas ─────────────────────────────
+    SecurityUpdate:
+      type: object
+      description: Partial update — supply only the fields to change.
+      additionalProperties: false
+      properties:
+        ipFilterMode: { type: string, enum: ["", allow, block] }
+        ipAdd: { type: string }
+        ipRemove: { type: string }
+        ipList: { type: array, items: { type: string } }
+        rateLimitRPM: { type: integer }
+        rateLimitExemptAdd: { type: string }
+        rateLimitExemptDel: { type: string }
+    UpstreamUpdate:
+      type: object
+      required: [proxies]
+      additionalProperties: false
+      properties:
+        proxies: { type: array, items: { type: object, additionalProperties: true } }
+    AddFileblock:
+      type: object
+      description: Provide a single extension or a list.
+      additionalProperties: false
+      properties:
+        extension: { type: string }
+        extensions: { type: array, items: { type: string } }
+    SetScanExclusions:
+      type: object
+      additionalProperties: false
+      properties:
+        hashes: { type: array, items: { type: string } }
+        hosts: { type: array, items: { type: string } }
+    SetDomainAllowlist:
+      type: object
+      required: [domains]
+      additionalProperties: false
+      properties:
+        domains: { type: array, items: { type: string } }
+    SetYARASettings:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        timeout_secs: { type: integer, format: int64 }
+        max_inflight: { type: integer, format: int64 }
+        on_timeout: { type: string }
+        on_saturation: { type: string }
+        alert_degraded: { type: boolean }
+    SetLogsRetention:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        retentionDays: { type: integer }
+        retentionMaxGB: { type: number }
+        criticalDiskPct: { type: integer }
+
 paths:
   /healthz:
     get:
@@ -1690,6 +1747,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SecurityConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: updateSecurity
+      tags: [security]
+      summary: Update IP-filter / rate-limit
+      description: Partial update of IP-filter mode/list and rate-limit settings.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: security.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SecurityUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/ocsp:
     get:
       operationId: getOCSP
@@ -2105,6 +2192,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LogsRetention' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setLogsRetention
+      tags: [settings]
+      summary: Set log retention
+      description: Updates log-store retention settings.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: logs.retention.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetLogsRetention' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/ca/key-provider:
     get:
       operationId: getCAKeyProvider
@@ -2260,6 +2377,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ExtensionList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addFileblock
+      tags: [policy]
+      summary: Add blocked extensions
+      description: Adds file extension(s) to the block list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: fileblock.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddFileblock' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/fileblock/profiles:
     get:
       operationId: getFileblockProfiles
@@ -2489,6 +2636,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DomainAllowlist' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setDomainAllowlist
+      tags: [security]
+      summary: Set threat-feed allowlist
+      description: Replaces the threat-feed domain allowlist.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: scan.domain_allowlist.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetDomainAllowlist' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/security-scan/yara/settings:
     get:
       operationId: getYARASettings
@@ -2511,6 +2688,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/YARASettings' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setYARASettings
+      tags: [security]
+      summary: Set YARA settings
+      description: Updates YARA engine runtime settings.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.settings.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetYARASettings' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/decryption/redaction:
     get:
       operationId: getDecryptionRedaction
@@ -2966,6 +3173,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setUpstream
+      tags: [cluster]
+      summary: Set upstream proxies
+      description: Replaces the upstream proxy pool.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: upstream.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpstreamUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/cluster/ca:
     get:
@@ -3362,6 +3598,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ScanExclusions' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setScanExclusions
+      tags: [security]
+      summary: Set scan exclusions
+      description: Replaces scan exclusion hashes and hosts.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: scan.exclusions.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetScanExclusions' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/security-scan/yara/rules:
     get:
       operationId: getYARARules

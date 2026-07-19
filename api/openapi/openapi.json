@@ -58,6 +58,22 @@
       }
     },
     "schemas": {
+      "AddFileblock": {
+        "additionalProperties": false,
+        "description": "Provide a single extension or a list.",
+        "properties": {
+          "extension": {
+            "type": "string"
+          },
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "AddSSLBypass": {
         "additionalProperties": false,
         "description": "Provide a single pattern or a list.",
@@ -1375,6 +1391,42 @@
         ],
         "type": "object"
       },
+      "SecurityUpdate": {
+        "additionalProperties": false,
+        "description": "Partial update — supply only the fields to change.",
+        "properties": {
+          "ipAdd": {
+            "type": "string"
+          },
+          "ipFilterMode": {
+            "enum": [
+              "",
+              "allow",
+              "block"
+            ],
+            "type": "string"
+          },
+          "ipList": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ipRemove": {
+            "type": "string"
+          },
+          "rateLimitExemptAdd": {
+            "type": "string"
+          },
+          "rateLimitExemptDel": {
+            "type": "string"
+          },
+          "rateLimitRPM": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "SessionSecretStatus": {
         "additionalProperties": false,
         "properties": {
@@ -1458,6 +1510,21 @@
         ],
         "type": "object"
       },
+      "SetDomainAllowlist": {
+        "additionalProperties": false,
+        "properties": {
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "domains"
+        ],
+        "type": "object"
+      },
       "SetLogLevel": {
         "additionalProperties": false,
         "properties": {
@@ -1468,6 +1535,24 @@
         "required": [
           "level"
         ],
+        "type": "object"
+      },
+      "SetLogsRetention": {
+        "additionalProperties": false,
+        "properties": {
+          "criticalDiskPct": {
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "retentionDays": {
+            "type": "integer"
+          },
+          "retentionMaxGB": {
+            "type": "number"
+          }
+        },
         "type": "object"
       },
       "SetMetricsToken": {
@@ -1508,6 +1593,24 @@
         ],
         "type": "object"
       },
+      "SetScanExclusions": {
+        "additionalProperties": false,
+        "properties": {
+          "hashes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "SetSessionTimeout": {
         "additionalProperties": false,
         "properties": {
@@ -1518,6 +1621,32 @@
         "required": [
           "hours"
         ],
+        "type": "object"
+      },
+      "SetYARASettings": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_degraded": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_inflight": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "on_saturation": {
+            "type": "string"
+          },
+          "on_timeout": {
+            "type": "string"
+          },
+          "timeout_secs": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "SettingsSummary": {
@@ -1757,6 +1886,22 @@
         },
         "required": [
           "enabled",
+          "proxies"
+        ],
+        "type": "object"
+      },
+      "UpstreamUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "proxies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
           "proxies"
         ],
         "type": "object"
@@ -4290,6 +4435,59 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Adds file extension(s) to the block list.",
+        "operationId": "addFileblock",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddFileblock"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Add blocked extensions",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-audit-event": "fileblock.add",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/fileblock/profiles": {
@@ -4482,6 +4680,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates log-store retention settings.",
+        "operationId": "setLogsRetention",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLogsRetention"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set log retention",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-audit-event": "logs.retention.set",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -5091,6 +5342,59 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Partial update of IP-filter mode/list and rate-limit settings.",
+        "operationId": "updateSecurity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecurityUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update IP-filter / rate-limit",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "security.update",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/security-scan/cache": {
@@ -5169,6 +5473,59 @@
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Replaces scan exclusion hashes and hosts.",
+        "operationId": "setScanExclusions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetScanExclusions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set scan exclusions",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "scan.exclusions.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
       }
     },
     "/api/security-scan/feeds/domain-allowlist": {
@@ -5205,6 +5562,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Replaces the threat-feed domain allowlist.",
+        "operationId": "setDomainAllowlist",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDomainAllowlist"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set threat-feed allowlist",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "scan.domain_allowlist.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -5361,6 +5771,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Updates YARA engine runtime settings.",
+        "operationId": "setYARASettings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetYARASettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set YARA settings",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "yara.settings.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -6220,6 +6683,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Replaces the upstream proxy pool.",
+        "operationId": "setUpstream",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpstreamUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set upstream proxies",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "upstream.set",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

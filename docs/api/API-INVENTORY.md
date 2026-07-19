@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 103
-- **Exempt (≤270-day horizon):** 181
+- **Documented:** 110
+- **Exempt (≤270-day horizon):** 174
 
 ## By domain
 
@@ -12,14 +12,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 15 |
-| dashboard | 13 | 9 |
+| cluster | 31 | 16 |
+| dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 4 |
-| policy | 65 | 22 |
+| policy | 65 | 23 |
 | release | 6 | 1 |
-| security | 51 | 18 |
+| security | 51 | 22 |
 | settings | 30 | 16 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
@@ -83,11 +83,13 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/dpi/bypass` | apiContentScanBypass | viewer |
 | PUT | `/api/dpi/bypass` | apiContentScanBypass | admin |
 | GET | `/api/fileblock` | apiFileblock | viewer |
+| POST | `/api/fileblock` | apiFileblock | operator |
 | GET | `/api/fileblock/profiles` | apiFileblockProfiles | viewer |
 | GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
 | GET | `/api/health/explain` | apiHealthExplain | viewer |
 | GET | `/api/logger` | apiLoggerConfig | viewer |
 | GET | `/api/logs/retention` | apiLogsRetention | viewer |
+| PUT | `/api/logs/retention` | apiLogsRetention | admin |
 | GET | `/api/metrics-config` | apiMetricsConfig | viewer |
 | POST | `/api/metrics-config` | apiMetricsConfig | admin |
 | GET | `/api/objects/references` | apiObjectReferences | viewer |
@@ -102,13 +104,17 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/releases` | apiReleases | viewer |
 | GET | `/api/rewrite` | apiRewrite | viewer |
 | GET | `/api/security` | apiSecurity | viewer |
+| POST | `/api/security` | apiSecurity | admin |
 | GET | `/api/security-scan/cache` | apiScanCache | viewer |
 | GET | `/api/security-scan/exclusions` | apiSecScanExclusions | viewer |
+| PUT | `/api/security-scan/exclusions` | apiSecScanExclusions | admin |
 | GET | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | viewer |
+| PUT | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | admin |
 | GET | `/api/security-scan/status` | apiSecScanStatus | viewer |
 | GET | `/api/security-scan/svc` | apiScanSvcConfig | viewer |
 | GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
+| PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
 | GET | `/api/session-secret` | apiSessionSecret | viewer |
 | GET | `/api/session-timeout` | apiSessionTimeout | viewer |
 | POST | `/api/session-timeout` | apiSessionTimeout | admin |
@@ -129,6 +135,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |
 | GET | `/api/upstream` | apiUpstream | viewer |
+| POST | `/api/upstream` | apiUpstream | admin |
 | GET | `/api/upstream/settings` | apiUpstreamSettings | viewer |
 | GET | `/api/urlcat` | apiURLCat | viewer |
 | GET | `/healthz` | apiHealthz | public |
