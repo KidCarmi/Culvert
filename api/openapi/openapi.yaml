@@ -707,6 +707,60 @@ components:
         enabled: { type: boolean }
         proxies: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
 
+    # ── Slice 3 tranche 6: cluster/support/diagnostics read-model schemas ──────────
+    ClusterCAInfo:
+      type: object
+      description: Cluster CA info (fingerprint, validity, readiness).
+      additionalProperties: true
+    ClusterTokens:
+      type: object
+      required: [tokens]
+      additionalProperties: false
+      properties:
+        tokens: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    ClusterAudit:
+      type: object
+      required: [entries, total]
+      additionalProperties: false
+      properties:
+        entries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        total: { type: integer }
+    BandwidthPolicies:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    ClusterRateLimits:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+    ClusterRevocations:
+      type: object
+      required: [local_revoked, cluster_mode]
+      additionalProperties: true
+      properties:
+        local_revoked: { type: integer }
+        cluster_mode: { type: boolean }
+    ClusterRotation:
+      type: object
+      required: [active]
+      additionalProperties: true
+      properties:
+        active: { type: boolean }
+    SupportRetention:
+      type: object
+      required: [keep, max_age_days]
+      additionalProperties: true
+      properties:
+        keep: { type: integer }
+        max_age_days: { type: integer }
+        defaults: { type: object, additionalProperties: true }
+    OperatorContract:
+      type: object
+      description: Aggregated operator diagnostics contract (health, posture, and remediation hints).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -2493,6 +2547,253 @@ paths:
       responses:
         '200':
           description: Upstream proxy pool.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/cluster/ca:
+    get:
+      operationId: getClusterCA
+      tags: [cluster]
+      summary: Cluster CA info
+      description: Returns cluster CA fingerprint, validity, and readiness.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster CA info.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterCAInfo' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/tokens:
+    get:
+      operationId: getClusterTokens
+      tags: [cluster]
+      summary: Enrollment tokens
+      description: Returns node enrollment tokens.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Enrollment tokens.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterTokens' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/audit:
+    get:
+      operationId: getClusterAudit
+      tags: [cluster]
+      summary: Cluster audit log
+      description: Returns cluster-plane audit entries.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster audit log.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterAudit' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/bandwidth:
+    get:
+      operationId: getBandwidthPolicies
+      tags: [cluster]
+      summary: Bandwidth policies
+      description: Returns per-node-group bandwidth/QoS policies. Returns 503 when the bandwidth manager is not initialised.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Bandwidth policies.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BandwidthPolicies' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '503':
+          description: Bandwidth manager not initialised. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/cluster/rate-limits:
+    get:
+      operationId: getClusterRateLimits
+      tags: [cluster]
+      summary: Cluster rate limits
+      description: Returns distributed rate-limit sync status.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster rate limits.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterRateLimits' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/revocations:
+    get:
+      operationId: getClusterRevocations
+      tags: [cluster]
+      summary: Session revocations
+      description: Returns local and cluster session-revocation counts.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Session revocations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterRevocations' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/rotation:
+    get:
+      operationId: getClusterRotation
+      tags: [cluster]
+      summary: Rolling-upgrade rotation
+      description: Returns rolling-upgrade rotation state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Rolling-upgrade rotation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterRotation' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/retention:
+    get:
+      operationId: getSupportRetention
+      tags: [support]
+      summary: Support-bundle retention
+      description: Returns support-bundle retention settings and defaults.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Support-bundle retention.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportRetention' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/diagnostics:
+    get:
+      operationId: getDiagnostics
+      tags: [support]
+      summary: Operator diagnostics
+      description: Returns the aggregated operator diagnostics contract.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Operator diagnostics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperatorContract' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/health/explain:
+    get:
+      operationId: getHealthExplain
+      tags: [support]
+      summary: Health explanation
+      description: Returns the operator health-explanation contract.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Health explanation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperatorContract' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/upstream/settings:
+    get:
+      operationId: getUpstreamSettings
+      tags: [cluster]
+      summary: Upstream pool settings
+      description: Returns the upstream proxy pool configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Upstream pool settings.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamConfig' }

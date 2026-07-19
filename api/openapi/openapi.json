@@ -141,6 +141,14 @@
         ],
         "type": "object"
       },
+      "BandwidthPolicies": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
+      },
       "BlocklistFeedList": {
         "additionalProperties": false,
         "properties": {
@@ -268,6 +276,32 @@
         "type": "object",
         "x-culvert-sensitive": true
       },
+      "ClusterAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "total"
+        ],
+        "type": "object"
+      },
+      "ClusterCAInfo": {
+        "additionalProperties": true,
+        "description": "Cluster CA info (fingerprint, validity, readiness).",
+        "type": "object"
+      },
       "ClusterHA": {
         "additionalProperties": true,
         "description": "High-availability status.",
@@ -307,6 +341,46 @@
         ],
         "type": "object"
       },
+      "ClusterRateLimits": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "ClusterRevocations": {
+        "additionalProperties": true,
+        "properties": {
+          "cluster_mode": {
+            "type": "boolean"
+          },
+          "local_revoked": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "local_revoked",
+          "cluster_mode"
+        ],
+        "type": "object"
+      },
+      "ClusterRotation": {
+        "additionalProperties": true,
+        "properties": {
+          "active": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "active"
+        ],
+        "type": "object"
+      },
       "ClusterStatus": {
         "additionalProperties": true,
         "description": "Cluster node role and enrollment status (fields vary by role).",
@@ -320,6 +394,23 @@
         },
         "required": [
           "role"
+        ],
+        "type": "object"
+      },
+      "ClusterTokens": {
+        "additionalProperties": false,
+        "properties": {
+          "tokens": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "tokens"
         ],
         "type": "object"
       },
@@ -886,6 +977,11 @@
         ],
         "type": "object"
       },
+      "OperatorContract": {
+        "additionalProperties": true,
+        "description": "Aggregated operator diagnostics contract (health, posture, and remediation hints).",
+        "type": "object"
+      },
       "PACConfig": {
         "additionalProperties": false,
         "properties": {
@@ -1323,6 +1419,26 @@
           "total",
           "allowed",
           "blocked"
+        ],
+        "type": "object"
+      },
+      "SupportRetention": {
+        "additionalProperties": true,
+        "properties": {
+          "defaults": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "keep": {
+            "type": "integer"
+          },
+          "max_age_days": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "keep",
+          "max_age_days"
         ],
         "type": "object"
       },
@@ -2245,6 +2361,133 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/audit": {
+      "get": {
+        "description": "Returns cluster-plane audit entries.",
+        "operationId": "getClusterAudit",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterAudit"
+                }
+              }
+            },
+            "description": "Cluster audit log."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster audit log",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/bandwidth": {
+      "get": {
+        "description": "Returns per-node-group bandwidth/QoS policies. Returns 503 when the bandwidth manager is not initialised.",
+        "operationId": "getBandwidthPolicies",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BandwidthPolicies"
+                }
+              }
+            },
+            "description": "Bandwidth policies."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Bandwidth manager not initialised. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Bandwidth policies",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/ca": {
+      "get": {
+        "description": "Returns cluster CA fingerprint, validity, and readiness.",
+        "operationId": "getClusterCA",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterCAInfo"
+                }
+              }
+            },
+            "description": "Cluster CA info."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster CA info",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/ha": {
       "get": {
         "description": "Returns high-availability role, peer, and failover state.",
@@ -2362,6 +2605,123 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/rate-limits": {
+      "get": {
+        "description": "Returns distributed rate-limit sync status.",
+        "operationId": "getClusterRateLimits",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRateLimits"
+                }
+              }
+            },
+            "description": "Cluster rate limits."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster rate limits",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/revocations": {
+      "get": {
+        "description": "Returns local and cluster session-revocation counts.",
+        "operationId": "getClusterRevocations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRevocations"
+                }
+              }
+            },
+            "description": "Session revocations."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Session revocations",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/rotation": {
+      "get": {
+        "description": "Returns rolling-upgrade rotation state.",
+        "operationId": "getClusterRotation",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterRotation"
+                }
+              }
+            },
+            "description": "Rolling-upgrade rotation."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Rolling-upgrade rotation",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/status": {
       "get": {
         "description": "Returns this node's cluster role and enrollment status.",
@@ -2390,6 +2750,45 @@
           }
         ],
         "summary": "Cluster status",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/tokens": {
+      "get": {
+        "description": "Returns node enrollment tokens.",
+        "operationId": "getClusterTokens",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterTokens"
+                }
+              }
+            },
+            "description": "Enrollment tokens."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Enrollment tokens",
         "tags": [
           "cluster"
         ],
@@ -3012,6 +3411,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/diagnostics": {
+      "get": {
+        "description": "Returns the aggregated operator diagnostics contract.",
+        "operationId": "getDiagnostics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorContract"
+                }
+              }
+            },
+            "description": "Operator diagnostics."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Operator diagnostics",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/dpi": {
       "get": {
         "description": "Returns DPI content-scan patterns and the blocked-request counter (canonical path; /api/content-scan is a legacy alias).",
@@ -3202,6 +3640,45 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/health/explain": {
+      "get": {
+        "description": "Returns the operator health-explanation contract.",
+        "operationId": "getHealthExplain",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorContract"
+                }
+              }
+            },
+            "description": "Health explanation."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Health explanation",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -4354,6 +4831,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/support/retention": {
+      "get": {
+        "description": "Returns support-bundle retention settings and defaults.",
+        "operationId": "getSupportRetention",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportRetention"
+                }
+              }
+            },
+            "description": "Support-bundle retention."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support-bundle retention",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/support/status": {
       "get": {
         "description": "Returns supportability status — debug level, bundle state, retention.",
@@ -4500,6 +5016,45 @@
           }
         ],
         "summary": "Upstream proxy pool",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/upstream/settings": {
+      "get": {
+        "description": "Returns the upstream proxy pool configuration.",
+        "operationId": "getUpstreamSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamConfig"
+                }
+              }
+            },
+            "description": "Upstream pool settings."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Upstream pool settings",
         "tags": [
           "cluster"
         ],

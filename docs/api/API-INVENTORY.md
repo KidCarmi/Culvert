@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 73
-- **Exempt (≤270-day horizon):** 211
+- **Documented:** 84
+- **Exempt (≤270-day horizon):** 200
 
 ## By domain
 
@@ -12,10 +12,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 5 |
+| cluster | 31 | 13 |
 | dashboard | 13 | 9 |
 | governance | 1 | 1 |
-| observability | 2 | 1 |
+| observability | 2 | 2 |
 | pac | 23 | 4 |
 | policy | 65 | 18 |
 | release | 6 | 1 |
@@ -23,7 +23,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | settings | 30 | 11 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 1 |
+| support | 30 | 3 |
 
 ## Documented operations
 
@@ -45,10 +45,17 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
 | GET | `/api/category-groups` | apiCategoryGroups | viewer |
+| GET | `/api/cluster/audit` | apiClusterAudit | viewer |
+| GET | `/api/cluster/bandwidth` | apiBandwidthPolicies | viewer |
+| GET | `/api/cluster/ca` | apiClusterCA | viewer |
 | GET | `/api/cluster/ha` | apiClusterHA | viewer |
 | GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
 | GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
+| GET | `/api/cluster/rate-limits` | apiClusterRateLimits | viewer |
+| GET | `/api/cluster/revocations` | apiClusterRevocations | viewer |
+| GET | `/api/cluster/rotation` | apiClusterRotation | viewer |
 | GET | `/api/cluster/status` | apiClusterStatus | viewer |
+| GET | `/api/cluster/tokens` | apiClusterTokens | viewer |
 | GET | `/api/config/export` | apiConfigExport | admin |
 | POST | `/api/config/import` | apiConfigImport | admin |
 | GET | `/api/config/versions` | apiConfigVersions | viewer |
@@ -63,11 +70,13 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/decryption/health` | apiDecryptionHealth | viewer |
 | GET | `/api/decryption/redaction` | apiDecryptionRedaction | viewer |
 | GET | `/api/default-action` | apiDefaultAction | viewer |
+| GET | `/api/diagnostics` | apiDiagnostics | viewer |
 | GET | `/api/dpi` | apiContentScan | viewer |
 | GET | `/api/dpi/bypass` | apiContentScanBypass | viewer |
 | GET | `/api/fileblock` | apiFileblock | viewer |
 | GET | `/api/fileblock/profiles` | apiFileblockProfiles | viewer |
 | GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
+| GET | `/api/health/explain` | apiHealthExplain | viewer |
 | GET | `/api/logger` | apiLoggerConfig | viewer |
 | GET | `/api/logs/retention` | apiLogsRetention | viewer |
 | GET | `/api/metrics-config` | apiMetricsConfig | viewer |
@@ -96,9 +105,11 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/setup/status` | apiSetupStatus | public |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
 | * | `/api/stats` | apiStats | viewer |
+| GET | `/api/support/retention` | apiSupportRetention | viewer |
 | GET | `/api/support/status` | apiSupportStatus | viewer |
 | * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |
 | GET | `/api/upstream` | apiUpstream | viewer |
+| GET | `/api/upstream/settings` | apiUpstreamSettings | viewer |
 | GET | `/api/urlcat` | apiURLCat | viewer |
 | GET | `/healthz` | apiHealthz | public |
