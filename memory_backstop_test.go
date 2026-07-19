@@ -5,7 +5,25 @@ package main
 // "max"/unlimited/garbage must NOT produce a bogus limit that throttles a
 // legitimate deployment.
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// withCachedMemoryBackstopState saves and restores memoryBackstopState so a
+// test can drive the cache without leaking into neighbours. Mirrors
+// withCachedStorageState (diagnostics_test.go).
+func withCachedMemoryBackstopState(t *testing.T) {
+	t.Helper()
+	prev := memoryBackstopState.Load()
+	t.Cleanup(func() {
+		if prev == nil {
+			memoryBackstopState.Store(memoryBackstopStatus{})
+		} else {
+			memoryBackstopState.Store(prev)
+		}
+	})
+}
 
 func TestParseCgroupMemLimit(t *testing.T) {
 	const gib = int64(1) << 30
@@ -42,5 +60,63 @@ func TestIsFiniteMemLimit(t *testing.T) {
 	}
 	if isFiniteMemLimit(int64(1) << 62) {
 		t.Error("unlimited sentinel (2^62) must not be treated as finite")
+	}
+}
+
+func TestCheckMemoryBackstop_NotYetRun(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	memoryBackstopState.Store(memoryBackstopStatus{})
+	c := checkMemoryBackstop()
+	if c.Code != "memory_backstop" || c.Status != diagOK {
+		t.Errorf("got %+v, want ok memory_backstop", c)
+	}
+}
+
+func TestCheckMemoryBackstop_OperatorPinned(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopOperatorPinned, Pinned: "500MiB"})
+	c := checkMemoryBackstop()
+	if c.Status != diagOK || !strings.Contains(c.Message, "500MiB") {
+		t.Errorf("got %+v, want ok message mentioning the pinned value", c)
+	}
+}
+
+func TestCheckMemoryBackstop_Active(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopActive, SoftMiB: 800, ContainerMiB: 1000})
+	c := checkMemoryBackstop()
+	if c.Status != diagOK || !strings.Contains(c.Message, "800 MiB") || !strings.Contains(c.Message, "1000 MiB") {
+		t.Errorf("got %+v, want ok message mentioning soft + container MiB", c)
+	}
+}
+
+func TestCheckMemoryBackstop_CapTooSmall(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopCapTooSmall, ContainerMiB: 64})
+	c := checkMemoryBackstop()
+	if c.Status != diagWarn || c.OperatorAction == "" {
+		t.Errorf("got %+v, want warn with a non-empty operator action", c)
+	}
+}
+
+func TestCheckMemoryBackstop_NotDetected(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	memoryBackstopState.Store(memoryBackstopStatus{Mode: memBackstopNotDetected})
+	c := checkMemoryBackstop()
+	if c.Status != diagOK {
+		t.Errorf("got %+v, want ok (no container limit is a normal bare-host posture)", c)
+	}
+}
+
+// TestInitMemoryBackstop_OperatorPinned exercises the one code path of
+// initMemoryBackstop that does not depend on reading real cgroup files: an
+// operator-set GOMEMLIMIT short-circuits detection and is cached verbatim.
+func TestInitMemoryBackstop_OperatorPinned(t *testing.T) {
+	withCachedMemoryBackstopState(t)
+	t.Setenv("GOMEMLIMIT", "321MiB")
+	initMemoryBackstop()
+	st := loadMemoryBackstopStatus()
+	if st.Mode != memBackstopOperatorPinned || st.Pinned != "321MiB" {
+		t.Errorf("got %+v, want operator_pinned with Pinned=321MiB", st)
 	}
 }
