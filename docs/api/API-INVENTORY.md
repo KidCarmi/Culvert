@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 137
-- **Exempt (≤270-day horizon):** 147
+- **Documented:** 143
+- **Exempt (≤270-day horizon):** 141
 
 ## By domain
 
@@ -12,18 +12,18 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 18 |
+| cluster | 31 | 20 |
 | dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 5 |
 | policy | 65 | 36 |
 | release | 6 | 1 |
-| security | 51 | 29 |
+| security | 51 | 32 |
 | settings | 30 | 19 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 7 |
+| support | 30 | 8 |
 
 ## Documented operations
 
@@ -50,7 +50,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/blocklist/feed` | apiBlocklistFeed | operator |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
+| GET | `/api/ca-cert` | apiCACert | viewer |
 | POST | `/api/ca/cache-clear` | apiCACacheClear | admin |
+| GET | `/api/ca/download` | apiCADownload | viewer |
 | GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
@@ -63,7 +65,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/cluster/ca` | apiClusterCA | viewer |
 | GET | `/api/cluster/ha` | apiClusterHA | viewer |
 | GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
+| DELETE | `/api/cluster/node-groups` | apiNodeGroups | admin |
 | GET | `/api/cluster/node-groups` | apiNodeGroups | viewer |
+| POST | `/api/cluster/node-groups` | apiNodeGroups | admin |
 | GET | `/api/cluster/node-groups/membership` | apiNodeGroupMembership | viewer |
 | GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
 | GET | `/api/cluster/rate-limits` | apiClusterRateLimits | viewer |
@@ -138,6 +142,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
+| POST | `/api/security-scan/yara/validate` | apiSecYARAValidate | operator |
 | GET | `/api/session-secret` | apiSessionSecret | viewer |
 | POST | `/api/session-secret` | apiSessionSecret | admin |
 | GET | `/api/session-timeout` | apiSessionTimeout | viewer |
@@ -156,6 +161,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/support/bundles` | apiSupportBundles | viewer |
 | GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |
 | GET | `/api/support/recipients` | apiSupportRecipients | viewer |
+| POST | `/api/support/recipients` | apiSupportRecipients | admin |
 | GET | `/api/support/retention` | apiSupportRetention | viewer |
 | PUT | `/api/support/retention` | apiSupportRetention | admin |
 | GET | `/api/support/status` | apiSupportStatus | viewer |

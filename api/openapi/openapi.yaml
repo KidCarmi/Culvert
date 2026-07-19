@@ -1017,6 +1017,23 @@ components:
       description: Enrollment token request (ttl/label).
       additionalProperties: true
 
+    # ── Slice 3 tranche 13: schemas ───────────────────────────────────────────────
+    ValidateYARA:
+      type: object
+      description: Provide the rule source via `source` (or the `rule` alias).
+      additionalProperties: false
+      properties:
+        source: { type: string }
+        rule: { type: string }
+    NodeGroupInput:
+      type: object
+      description: Node group definition (rich object; open superset).
+      additionalProperties: true
+    AddRecipient:
+      type: object
+      description: Support-bundle recipient (rich object; open superset).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -4124,6 +4141,65 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NodeGroups' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createNodeGroup
+      tags: [cluster]
+      summary: Create node group
+      description: Creates a node group.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: node_group.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NodeGroupInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteNodeGroup
+      tags: [cluster]
+      summary: Delete node group
+      description: Deletes a node group by name.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: node_group.delete
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cluster/node-groups/membership:
     get:
       operationId: getNodeGroupMembership
@@ -4228,6 +4304,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SupportRecipients' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addSupportRecipient
+      tags: [support]
+      summary: Add support recipient
+      description: Adds a support-bundle recipient.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.recipient.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddRecipient' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/security-scan/exclusions:
     get:
       operationId: getScanExclusions
@@ -4572,6 +4678,89 @@ paths:
       responses:
         '200':
           description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/ca-cert:
+    get:
+      operationId: getCACert
+      tags: [security]
+      summary: Download CA certificate
+      description: Returns the PEM-encoded internal CA certificate as an attachment.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PEM-encoded CA certificate (attachment).
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: No CA certificate available. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/ca/download:
+    get:
+      operationId: downloadCACert
+      tags: [security]
+      summary: Download CA certificate (alias)
+      description: Returns the PEM-encoded internal CA certificate as an attachment.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PEM-encoded CA certificate (attachment).
+          content:
+            application/x-pem-file:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: No CA certificate available. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/security-scan/yara/validate:
+    post:
+      operationId: validateYARA
+      tags: [security]
+      summary: Validate YARA rule
+      description: Dry-run validation of a YARA rule source.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: yara.validate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ValidateYARA' }
+      responses:
+        '200':
+          description: Validate YARA rule.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

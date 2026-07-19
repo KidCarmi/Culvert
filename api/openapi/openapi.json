@@ -107,6 +107,11 @@
         },
         "type": "object"
       },
+      "AddRecipient": {
+        "additionalProperties": true,
+        "description": "Support-bundle recipient (rich object; open superset).",
+        "type": "object"
+      },
       "AddSSLBypass": {
         "additionalProperties": false,
         "description": "Provide a single pattern or a list.",
@@ -1065,6 +1070,11 @@
           "base_url",
           "trust_forwarded_headers"
         ],
+        "type": "object"
+      },
+      "NodeGroupInput": {
+        "additionalProperties": true,
+        "description": "Node group definition (rich object; open superset).",
         "type": "object"
       },
       "NodeGroupMembership": {
@@ -2093,6 +2103,19 @@
         "required": [
           "users"
         ],
+        "type": "object"
+      },
+      "ValidateYARA": {
+        "additionalProperties": false,
+        "description": "Provide the rule source via `source` (or the `rule` alias).",
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "YARARules": {
@@ -3192,6 +3215,55 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/ca-cert": {
+      "get": {
+        "description": "Returns the PEM-encoded internal CA certificate as an attachment.",
+        "operationId": "getCACert",
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-pem-file": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "PEM-encoded CA certificate (attachment)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No CA certificate available. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Download CA certificate",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/ca/cache-clear": {
       "post": {
         "description": "Clears the MITM leaf-certificate cache.",
@@ -3229,6 +3301,55 @@
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/ca/download": {
+      "get": {
+        "description": "Returns the PEM-encoded internal CA certificate as an attachment.",
+        "operationId": "downloadCACert",
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-pem-file": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "PEM-encoded CA certificate (attachment)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No CA certificate available. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Download CA certificate (alias)",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -3806,6 +3927,59 @@
       }
     },
     "/api/cluster/node-groups": {
+      "delete": {
+        "description": "Deletes a node group by name.",
+        "operationId": "deleteNodeGroup",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Deleted."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete node group",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "node_group.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
       "get": {
         "description": "Returns node group definitions and label selectors.",
         "operationId": "getNodeGroups",
@@ -3839,6 +4013,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Creates a node group.",
+        "operationId": "createNodeGroup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeGroupInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Create node group",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "node_group.create",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -7189,6 +7416,61 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/security-scan/yara/validate": {
+      "post": {
+        "description": "Dry-run validation of a YARA rule source.",
+        "operationId": "validateYARA",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateYARA"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Validate YARA rule."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Validate YARA rule",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "yara.validate",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/session-secret": {
       "get": {
         "description": "Returns whether a shared session secret is configured (never returns the secret).",
@@ -8006,6 +8288,59 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Adds a support-bundle recipient.",
+        "operationId": "addSupportRecipient",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddRecipient"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Add support recipient",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.recipient.add",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
