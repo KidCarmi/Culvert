@@ -8618,6 +8618,10 @@ paths:
               schema: { type: string }
         '304':
           description: Not modified (ETag).
+        '404':
+          description: No PAC file configured. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /pac/{profile}.pac:
     get:
       operationId: getProfilePAC

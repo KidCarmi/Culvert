@@ -15815,6 +15815,16 @@
           },
           "304": {
             "description": "Not modified (ETag)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No PAC file configured. Body is plain text."
           }
         },
         "security": [],
