@@ -154,10 +154,13 @@ func blockedByResponseHeaders(w http.ResponseWriter, r *http.Request, resp *http
 
 // scanHTTPResponseBody runs the security body-scan pipeline (archive magic,
 // polyglot, ClamAV/YARA) over a plain-HTTP response. It returns true if the
-// response was blocked (block page served; caller must return). On a clean scan
-// it reassembles resp.Body (buffered prefix + any bytes beyond the scan limit)
-// so the caller streams it unchanged; when scanning does not apply — or the
-// body cannot be read — it leaves resp.Body as-is and returns false.
+// response was handled here (block page or error served; caller must return).
+// On a clean scan it reassembles resp.Body (buffered prefix + any bytes beyond
+// the scan limit) so the caller streams it unchanged; when scanning does not
+// apply it leaves resp.Body as-is and returns false. A body READ error while
+// buffering fails closed with a 502 (CHAOS-17): the buffered prefix is
+// incomplete and the content was never scanned, mirroring the inspect path's
+// scanReadError contract.
 func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Response) bool {
 	// Skip buffering if Content-Length signals the response exceeds the scan
 	// limit — avoids wasting memory and I/O on oversized bodies.
@@ -177,7 +180,14 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 
 	buffered, readErr := io.ReadAll(io.LimitReader(resp.Body, globalSecScanner.MaxBytes()))
 	if readErr != nil {
-		return false
+		// Fail closed, matching the inspect path's scanReadError contract
+		// (CHAOS-17). Nothing has been written to the client yet, and the
+		// buffered prefix is incomplete: falling through here used to stream a
+		// truncated body that had ALSO bypassed scanning — an origin RST
+		// mid-buffer became unscanned, corrupted content with a 200 status.
+		logger.Printf("HTTP scan: body read error for %q: %v — failing closed (502)", sanitizeLog(r.Host), readErr)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return true
 	}
 	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
 	// signatures match the actual content.

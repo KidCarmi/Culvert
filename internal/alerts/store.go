@@ -17,6 +17,7 @@ package alerts
 //   "cert_expiry"           — CA certificate nearing expiry (fired on startup if ≤30 days)
 //   "ca_load_failed"        — Root CA load/init failed at startup: SSL inspection disabled (fail-open)
 //   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
+//   "scan_clam_error"       — ClamAV engine error mid-request: content forwarded without AV verdict (fail-open, CHAOS-10)
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)

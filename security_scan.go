@@ -248,6 +248,7 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_scan_timeout":        counters.ScanTimeout,    // Tier 1.2
 		"stat_scan_skipped":        counters.ScanSkipped,    // Tier 1.2
 		"stat_remote_scan_fail":    counters.RemoteScanFail, // Tier 2.2
+		"stat_clam_errors":         counters.ClamError,      // CHAOS-10 (fail-open, uncached)
 
 		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}

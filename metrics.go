@@ -519,6 +519,10 @@ culvert_dpi_blocked_total %d
 # TYPE culvert_clamav_blocked_total counter
 culvert_clamav_blocked_total %d
 
+# HELP culvert_clamav_scan_errors_total ClamAV engine errors mid-request (content forwarded without AV verdict, fail-open)
+# TYPE culvert_clamav_scan_errors_total counter
+culvert_clamav_scan_errors_total %d
+
 # HELP culvert_yara_blocked_total Total requests blocked by YARA rules
 # TYPE culvert_yara_blocked_total counter
 culvert_yara_blocked_total %d
@@ -574,6 +578,7 @@ culvert_auth_sso_required_total %d
 		fileBlocked, int64(fileBlocker.Count()),
 		dpiBlocked,
 		clamBlocked,
+		scanCounters.ClamError,
 		yaraBlocked,
 		feedBlocked,
 		feedEntries,

@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/clamav"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -72,6 +73,7 @@ var (
 	statScanTimeout       int64 // body scans that hit ScanBodyTimeout (fail-closed)
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
 	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
+	statClamError         int64 // ClamAV scan errors mid-request (fail-open, verdict not cached)
 )
 
 // CounterSnapshot is a point-in-time copy of the scan counters.
@@ -82,6 +84,7 @@ type CounterSnapshot struct {
 	ScanTimeout       int64
 	ScanSkipped       int64
 	RemoteScanFail    int64
+	ClamError         int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -93,6 +96,7 @@ func Counters() CounterSnapshot {
 		ScanTimeout:       atomic.LoadInt64(&statScanTimeout),
 		ScanSkipped:       atomic.LoadInt64(&statScanSkipped),
 		RemoteScanFail:    atomic.LoadInt64(&statRemoteScanFail),
+		ClamError:         atomic.LoadInt64(&statClamError),
 	}
 }
 
@@ -501,11 +505,23 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 	clam := ss.clam
 	ss.mu.RUnlock()
 
-	// ClamAV scan.
+	// ClamAV scan. An engine ERROR (daemon crash mid-stream, socket reset) is
+	// fail-open for availability — matching the remote-scanner posture — but it
+	// must be visible (counter + alert) and must NOT produce a cached "clean"
+	// verdict: content that skipped AV during an outage has to be rescanned once
+	// the daemon recovers, not trusted for the cache TTL (CHAOS-10).
+	scanDegraded := false
 	if clam != nil {
 		name, found, err := clam.Scan(data)
 		if err != nil {
-			obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
+			scanDegraded = true
+			atomic.AddInt64(&statClamError, 1)
+			detail := strings.ReplaceAll(err.Error(), "\n", " ")
+			obs.Printf("ERROR SecurityScan: ClamAV error: %s — content forwarded without AV verdict (fail-open, not cached)", detail)
+			go alerts.Fire("scan_clam_error", alerts.Payload{
+				Source: "clamav",
+				Detail: detail,
+			})
 		} else if found {
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
@@ -523,7 +539,13 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 		}
 	}
 
-	// Content is clean — cache the negative result.
+	// Content is clean — cache the negative result. Positive (blocked) verdicts
+	// above are cached even on a degraded run — a YARA hit is trustworthy no
+	// matter what ClamAV did — but a CLEAN verdict from a run where a scanner
+	// errored is not a real verdict, so it is deliberately left uncached.
+	if scanDegraded {
+		return nil
+	}
 	ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
 	return nil
 }
