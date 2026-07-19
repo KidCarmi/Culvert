@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 93
-- **Exempt (≤270-day horizon):** 191
+- **Documented:** 103
+- **Exempt (≤270-day horizon):** 181
 
 ## By domain
 
@@ -17,10 +17,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 4 |
-| policy | 65 | 19 |
+| policy | 65 | 22 |
 | release | 6 | 1 |
-| security | 51 | 15 |
-| settings | 30 | 12 |
+| security | 51 | 18 |
+| settings | 30 | 16 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
 | support | 30 | 6 |
@@ -41,6 +41,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
 | GET | `/api/blocklist/feed` | apiBlocklistFeed | viewer |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
+| POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
 | GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
@@ -63,6 +64,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/config/import` | apiConfigImport | admin |
 | GET | `/api/config/versions` | apiConfigVersions | viewer |
 | GET | `/api/connlimit` | apiConnLimit | viewer |
+| POST | `/api/connlimit` | apiConnLimit | admin |
 | * | `/api/country-traffic` | apiCountryTraffic | viewer |
 | * | `/api/dashboard/health` | apiDashboardHealth | viewer |
 | * | `/api/dashboard/threats` | apiDashboardThreats | viewer |
@@ -73,10 +75,13 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
 | GET | `/api/decryption/health` | apiDecryptionHealth | viewer |
 | GET | `/api/decryption/redaction` | apiDecryptionRedaction | viewer |
+| PUT | `/api/decryption/redaction` | apiDecryptionRedaction | admin |
 | GET | `/api/default-action` | apiDefaultAction | viewer |
+| POST | `/api/default-action` | apiDefaultAction | operator |
 | GET | `/api/diagnostics` | apiDiagnostics | viewer |
 | GET | `/api/dpi` | apiContentScan | viewer |
 | GET | `/api/dpi/bypass` | apiContentScanBypass | viewer |
+| PUT | `/api/dpi/bypass` | apiContentScanBypass | admin |
 | GET | `/api/fileblock` | apiFileblock | viewer |
 | GET | `/api/fileblock/profiles` | apiFileblockProfiles | viewer |
 | GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
@@ -84,8 +89,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/logger` | apiLoggerConfig | viewer |
 | GET | `/api/logs/retention` | apiLogsRetention | viewer |
 | GET | `/api/metrics-config` | apiMetricsConfig | viewer |
+| POST | `/api/metrics-config` | apiMetricsConfig | admin |
 | GET | `/api/objects/references` | apiObjectReferences | viewer |
 | GET | `/api/ocsp` | apiOCSPConfig | viewer |
+| POST | `/api/ocsp` | apiOCSPConfig | admin |
 | GET | `/api/pac-config` | apiPACConfig | viewer |
 | GET | `/api/pac/pools` | apiPACPools | viewer |
 | GET | `/api/pac/posture/inventory` | apiPACPostureInventory | viewer |
@@ -104,12 +111,15 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | GET | `/api/session-secret` | apiSessionSecret | viewer |
 | GET | `/api/session-timeout` | apiSessionTimeout | viewer |
+| POST | `/api/session-timeout` | apiSessionTimeout | admin |
 | GET | `/api/settings` | apiSettings | viewer |
 | GET | `/api/settings/log-level` | apiLogLevel | viewer |
+| PUT | `/api/settings/log-level` | apiLogLevel | admin |
 | GET | `/api/settings/network` | apiNetworkSettings | viewer |
 | POST | `/api/setup/complete` | apiSetupComplete | public |
 | GET | `/api/setup/status` | apiSetupStatus | public |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
+| POST | `/api/ssl-bypass` | apiSSLBypass | operator |
 | * | `/api/stats` | apiStats | viewer |
 | GET | `/api/support/bundles` | apiSupportBundles | viewer |
 | GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |

@@ -812,6 +812,70 @@ components:
         to: { type: integer }
         changes: { type: object, additionalProperties: true, nullable: true }
 
+    # ── Slice 3 tranche 8: write request schemas ──────────────────────────────────
+    SetBlocklistMode:
+      type: object
+      required: [mode]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [block, allow] }
+    SetDefaultAction:
+      type: object
+      required: [action]
+      additionalProperties: false
+      properties:
+        action: { type: string, enum: [allow, deny] }
+    SetLogLevel:
+      type: object
+      required: [level]
+      additionalProperties: false
+      properties:
+        level: { type: string }
+    AddSSLBypass:
+      type: object
+      description: Provide a single pattern or a list.
+      additionalProperties: false
+      properties:
+        pattern: { type: string }
+        patterns: { type: array, items: { type: string } }
+    SetSessionTimeout:
+      type: object
+      required: [hours]
+      additionalProperties: false
+      properties:
+        hours: { type: integer }
+    SetRedaction:
+      type: object
+      required: [redact_hosts]
+      additionalProperties: false
+      properties:
+        redact_hosts: { type: boolean }
+    SetOCSP:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+    SetConnLimit:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        maxPerIP: { type: integer }
+    SetDPIBypass:
+      type: object
+      required: [hosts]
+      additionalProperties: false
+      properties:
+        hosts: { type: array, items: { type: string } }
+    SetMetricsToken:
+      type: object
+      required: [token]
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        token: { type: string, format: password }
+
 paths:
   /healthz:
     get:
@@ -1448,6 +1512,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DefaultActionStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setDefaultAction
+      tags: [policy]
+      summary: Set default policy action
+      description: Sets the default policy action for unmatched traffic.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: policy.default_action.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetDefaultAction' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/blocklist/mode:
     get:
       operationId: getBlocklistMode
@@ -1470,6 +1564,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/BlocklistModeStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setBlocklistMode
+      tags: [policy]
+      summary: Set blocklist mode
+      description: Switches the blocklist between block-list and allow-list mode.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.mode.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetBlocklistMode' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/ssl-bypass:
     get:
       operationId: getSSLBypass
@@ -1492,6 +1616,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SSLBypassList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addSSLBypass
+      tags: [policy]
+      summary: Add TLS-inspection bypass
+      description: Adds host pattern(s) to the TLS-inspection bypass list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: ssl_bypass.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddSSLBypass' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/decryption/health:
     get:
       operationId: getDecryptionHealth
@@ -1558,6 +1712,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OCSPStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setOCSP
+      tags: [security]
+      summary: Toggle OCSP
+      description: Enables or disables OCSP revocation checking.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: ocsp.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetOCSP' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/session-timeout:
     get:
       operationId: getSessionTimeout
@@ -1580,6 +1764,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SessionTimeout' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setSessionTimeout
+      tags: [settings]
+      summary: Set session TTL
+      description: Sets the admin session timeout (hours).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: settings.session_timeout.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSessionTimeout' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/connlimit:
     get:
       operationId: getConnLimit
@@ -1602,6 +1816,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ConnLimitStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setConnLimit
+      tags: [settings]
+      summary: Set connection limit
+      description: Sets the per-IP connection limit.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: connlimit.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetConnLimit' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/logger:
     get:
       operationId: getLoggerConfig
@@ -1691,6 +1935,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LogLevel' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setLogLevel
+      tags: [settings]
+      summary: Set log level
+      description: Sets the runtime log level.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: settings.log_level.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetLogLevel' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/settings/network:
     get:
       operationId: getNetworkSettings
@@ -1779,6 +2053,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/MetricsConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setMetricsToken
+      tags: [settings]
+      summary: Set metrics token
+      description: Sets the /metrics bearer token.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: metrics.token.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetMetricsToken' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/logs/retention:
     get:
       operationId: getLogsRetention
@@ -2066,6 +2370,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DPIBypass' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setDPIBypass
+      tags: [security]
+      summary: Set DPI bypass hosts
+      description: Replaces the DPI content-scan bypass host list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: dpi.bypass.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetDPIBypass' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/security-scan/status:
     get:
       operationId: getSecurityScanStatus
@@ -2199,6 +2533,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DecryptionRedaction' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setDecryptionRedaction
+      tags: [policy]
+      summary: Set decryption redaction
+      description: Enables or disables redaction of decrypted content from logs.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: decryption.redaction.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetRedaction' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/pac/pools:
     get:
       operationId: getPACPools
