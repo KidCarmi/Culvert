@@ -472,6 +472,86 @@ components:
       properties:
         shared: { type: boolean }
 
+    # ── Slice 3 tranche 3: blocklist/urlcat/fileblock/scan read-model schemas ──────
+    HostList:
+      type: object
+      required: [hosts, count]
+      additionalProperties: false
+      properties:
+        hosts: { type: array, items: { type: string }, nullable: true }
+        count: { type: integer }
+    ExtensionList:
+      type: object
+      required: [extensions, count]
+      additionalProperties: false
+      properties:
+        extensions: { type: array, items: { type: string }, nullable: true }
+        count: { type: integer }
+    BlocklistFeedList:
+      type: object
+      required: [feeds]
+      additionalProperties: false
+      properties:
+        feeds:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              url: { type: string }
+              interval: { type: string }
+              last_sync: { type: string }
+              last_error: { type: string }
+              imported_count: { type: integer }
+              attributed_count: { type: integer }
+    URLCategoryList:
+      type: array
+      nullable: true
+      items:
+        type: object
+        additionalProperties: true
+        properties:
+          name: { type: string }
+          feedBacked: { type: boolean }
+    FileblockProfileList:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    ConfigVersionList:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    DecryptionProfiles:
+      type: object
+      required: [profiles, names]
+      additionalProperties: false
+      properties:
+        profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        names: { type: array, items: { type: string }, nullable: true }
+    DPIConfig:
+      type: object
+      required: [patterns, count, blocked_total]
+      additionalProperties: false
+      properties:
+        patterns: { type: array, items: { type: string }, nullable: true }
+        count: { type: integer }
+        blocked_total: { type: integer, format: int64 }
+    DPIBypass:
+      type: object
+      required: [hosts]
+      additionalProperties: false
+      properties:
+        hosts: { type: array, items: { type: string }, nullable: true }
+    SecurityScanStatus:
+      type: object
+      description: Security-scan service status (fields vary by scan-service mode).
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        scan_svc_mode: { type: string }
+
 paths:
   /healthz:
     get:
@@ -1526,4 +1606,225 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SessionSecretStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/blocklist/exceptions:
+    get:
+      operationId: getBlocklistExceptions
+      tags: [policy]
+      summary: Blocklist exception hosts
+      description: Returns hosts exempt from blocklist blocking.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Blocklist exception hosts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/blocklist/feed:
+    get:
+      operationId: getBlocklistFeed
+      tags: [policy]
+      summary: Blocklist feeds
+      description: Returns configured blocklist feed sources with sync state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Blocklist feeds.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlocklistFeedList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat:
+    get:
+      operationId: getURLCategories
+      tags: [policy]
+      summary: URL categories
+      description: Returns URL categories, each flagged if backed by a community feed.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: URL categories.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/URLCategoryList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/fileblock:
+    get:
+      operationId: getFileblock
+      tags: [policy]
+      summary: Blocked file extensions
+      description: Returns the blocked file-extension list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Blocked file extensions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExtensionList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/fileblock/profiles:
+    get:
+      operationId: getFileblockProfiles
+      tags: [policy]
+      summary: File-block profiles
+      description: Returns the named file-block profiles.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: File-block profiles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileblockProfileList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/config/versions:
+    get:
+      operationId: getConfigVersions
+      tags: [config]
+      summary: Config version history
+      description: Returns the saved configuration version snapshots.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Config version history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigVersionList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/decryption-profiles:
+    get:
+      operationId: getDecryptionProfiles
+      tags: [policy]
+      summary: Decryption profiles
+      description: Returns TLS-inspection decryption profiles and their names.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Decryption profiles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecryptionProfiles' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/dpi:
+    get:
+      operationId: getDPI
+      tags: [security]
+      summary: DPI content-scan patterns
+      description: Returns DPI content-scan patterns and the blocked-request counter (canonical path; /api/content-scan is a legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: DPI content-scan patterns.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DPIConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/dpi/bypass:
+    get:
+      operationId: getDPIBypass
+      tags: [security]
+      summary: DPI bypass hosts
+      description: Returns hosts excluded from DPI content scanning (canonical path; /api/content-scan/bypass is a legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: DPI bypass hosts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DPIBypass' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/status:
+    get:
+      operationId: getSecurityScanStatus
+      tags: [security]
+      summary: Security-scan status
+      description: Returns ClamAV/YARA/threat-feed scan-service status.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Security-scan status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SecurityScanStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }

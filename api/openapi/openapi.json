@@ -108,6 +108,43 @@
         ],
         "type": "object"
       },
+      "BlocklistFeedList": {
+        "additionalProperties": false,
+        "properties": {
+          "feeds": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "attributed_count": {
+                  "type": "integer"
+                },
+                "imported_count": {
+                  "type": "integer"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "last_error": {
+                  "type": "string"
+                },
+                "last_sync": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "feeds"
+        ],
+        "type": "object"
+      },
       "BlocklistModeStatus": {
         "additionalProperties": false,
         "properties": {
@@ -205,6 +242,14 @@
         "x-culvert-open-justification": "The backup envelope is intentionally an opaque superset of every config surface; its exact members vary by feature set and version, so it cannot be a closed schema. Sensitivity is enforced operationally (0600 at rest, admin-only + audited transfer), not by the contract shape.",
         "x-culvert-sensitive": true
       },
+      "ConfigVersionList": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
+      },
       "ConnLimitStatus": {
         "additionalProperties": false,
         "properties": {
@@ -249,6 +294,47 @@
         "type": "object",
         "x-culvert-sensitive": true
       },
+      "DPIBypass": {
+        "additionalProperties": false,
+        "properties": {
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts"
+        ],
+        "type": "object"
+      },
+      "DPIConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_total": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "patterns",
+          "count",
+          "blocked_total"
+        ],
+        "type": "object"
+      },
       "DecryptionExclusions": {
         "additionalProperties": true,
         "description": "Adaptive decryption-exclusion cache listing plus stats and blast-radius.",
@@ -290,6 +376,31 @@
         ],
         "type": "object"
       },
+      "DecryptionProfiles": {
+        "additionalProperties": false,
+        "properties": {
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "profiles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "profiles",
+          "names"
+        ],
+        "type": "object"
+      },
       "DefaultActionStatus": {
         "additionalProperties": false,
         "properties": {
@@ -305,6 +416,34 @@
           "defaultAction"
         ],
         "type": "object"
+      },
+      "ExtensionList": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "extensions",
+          "count"
+        ],
+        "type": "object"
+      },
+      "FileblockProfileList": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
       },
       "GovernanceControlPlane": {
         "additionalProperties": true,
@@ -339,6 +478,26 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "HostList": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts",
+          "count"
         ],
         "type": "object"
       },
@@ -713,6 +872,22 @@
         ],
         "type": "object"
       },
+      "SecurityScanStatus": {
+        "additionalProperties": true,
+        "description": "Security-scan service status (fields vary by scan-service mode).",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "scan_svc_mode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
       "SessionSecretStatus": {
         "additionalProperties": false,
         "properties": {
@@ -849,6 +1024,22 @@
           "blocked"
         ],
         "type": "object"
+      },
+      "URLCategoryList": {
+        "items": {
+          "additionalProperties": true,
+          "properties": {
+            "feedBacked": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
       },
       "User": {
         "additionalProperties": true,
@@ -1309,6 +1500,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/blocklist/exceptions": {
+      "get": {
+        "description": "Returns hosts exempt from blocklist blocking.",
+        "operationId": "getBlocklistExceptions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostList"
+                }
+              }
+            },
+            "description": "Blocklist exception hosts."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Blocklist exception hosts",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/blocklist/feed": {
+      "get": {
+        "description": "Returns configured blocklist feed sources with sync state.",
+        "operationId": "getBlocklistFeed",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlocklistFeedList"
+                }
+              }
+            },
+            "description": "Blocklist feeds."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Blocklist feeds",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/blocklist/mode": {
       "get": {
         "description": "Returns the blocklist mode (block-list or allow-list).",
@@ -1669,6 +1938,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/config/versions": {
+      "get": {
+        "description": "Returns the saved configuration version snapshots.",
+        "operationId": "getConfigVersions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigVersionList"
+                }
+              }
+            },
+            "description": "Config version history."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Config version history",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/connlimit": {
       "get": {
         "description": "Returns the per-IP connection-limit configuration and active-IP count.",
@@ -1807,6 +2115,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/decryption-profiles": {
+      "get": {
+        "description": "Returns TLS-inspection decryption profiles and their names.",
+        "operationId": "getDecryptionProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptionProfiles"
+                }
+              }
+            },
+            "description": "Decryption profiles."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Decryption profiles",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/decryption/health": {
       "get": {
         "description": "Returns decryption sessions, failures, coverage, trend, and the adaptive auto-exclude cache state.",
@@ -1874,6 +2221,162 @@
           }
         ],
         "summary": "Global default policy action",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/dpi": {
+      "get": {
+        "description": "Returns DPI content-scan patterns and the blocked-request counter (canonical path; /api/content-scan is a legacy alias).",
+        "operationId": "getDPI",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DPIConfig"
+                }
+              }
+            },
+            "description": "DPI content-scan patterns."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "DPI content-scan patterns",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/dpi/bypass": {
+      "get": {
+        "description": "Returns hosts excluded from DPI content scanning (canonical path; /api/content-scan/bypass is a legacy alias).",
+        "operationId": "getDPIBypass",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DPIBypass"
+                }
+              }
+            },
+            "description": "DPI bypass hosts."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "DPI bypass hosts",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/fileblock": {
+      "get": {
+        "description": "Returns the blocked file-extension list.",
+        "operationId": "getFileblock",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtensionList"
+                }
+              }
+            },
+            "description": "Blocked file extensions."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Blocked file extensions",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/fileblock/profiles": {
+      "get": {
+        "description": "Returns the named file-block profiles.",
+        "operationId": "getFileblockProfiles",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileblockProfileList"
+                }
+              }
+            },
+            "description": "File-block profiles."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "File-block profiles",
         "tags": [
           "policy"
         ],
@@ -2264,6 +2767,45 @@
           }
         ],
         "summary": "IP-filter and rate-limit config",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/status": {
+      "get": {
+        "description": "Returns ClamAV/YARA/threat-feed scan-service status.",
+        "operationId": "getSecurityScanStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityScanStatus"
+                }
+              }
+            },
+            "description": "Security-scan status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Security-scan status",
         "tags": [
           "security"
         ],
@@ -2680,6 +3222,45 @@
         "summary": "Top destination hosts by request volume",
         "tags": [
           "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/urlcat": {
+      "get": {
+        "description": "Returns URL categories, each flagged if backed by a community feed.",
+        "operationId": "getURLCategories",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/URLCategoryList"
+                }
+              }
+            },
+            "description": "URL categories."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "URL categories",
+        "tags": [
+          "policy"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
