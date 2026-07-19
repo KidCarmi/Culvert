@@ -176,7 +176,7 @@ components:
         totp:
           type: string
           description: 6-digit TOTP or a backup code; omitted on the first step.
-    LoginResponse:
+    LoginResult:
       type: object
       description: |
         On success `{ok,user,role}`. When TOTP is enrolled but not yet supplied,
@@ -1600,7 +1600,7 @@ paths:
           description: Authenticated (session cookie set), or TOTP second step required.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/LoginResponse' }
+              schema: { $ref: '#/components/schemas/LoginResult' }
               example: { ok: true, user: admin, role: admin }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '401': { $ref: '#/components/responses/PlainUnauthorized' }

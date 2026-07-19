@@ -1470,7 +1470,7 @@
         ],
         "type": "object"
       },
-      "LoginResponse": {
+      "LoginResult": {
         "additionalProperties": true,
         "description": "On success `{ok,user,role}`. When TOTP is enrolled but not yet supplied,\nthe handler instead returns `{totp_required:true}` with HTTP 200 and no\nsession — the client must resubmit with `totp`.\n",
         "properties": {
@@ -3807,7 +3807,7 @@
                   "user": "admin"
                 },
                 "schema": {
-                  "$ref": "#/components/schemas/LoginResponse"
+                  "$ref": "#/components/schemas/LoginResult"
                 }
               }
             },

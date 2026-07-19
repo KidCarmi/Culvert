@@ -5,7 +5,10 @@ package main
 // validate a realistic rule and reject unknown fields / wrong types — coverage
 // the previous open GenericWriteInput could not provide.
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestConformance_PolicyRule_Request(t *testing.T) {
 	spec := loadContract(t)
@@ -135,5 +138,29 @@ func TestConformance_FinalStructs_Request(t *testing.T) {
 	}
 	if err := spec.ValidateJSONRequest("POST", "/api/releases/dispatch", []byte(`{"agent":"a1","bogus":1}`)); err == nil {
 		t.Fatal("dispatch accepted unknown field")
+	}
+}
+
+// TestOpenAPI_Gate9_NoResponseTypeCollision guards the contract against schema
+// component names that collide with the response wrapper types oapi-codegen
+// generates per operation (<OperationId>Response) — a collision breaks generated
+// client compilation (caught live: LoginResponse vs the login op).
+func TestOpenAPI_Gate9_NoResponseTypeCollision(t *testing.T) {
+	spec := loadContract(t)
+	schemas := map[string]bool{}
+	if spec.Doc.Components != nil {
+		for name := range spec.Doc.Components.Schemas {
+			schemas[name] = true
+		}
+	}
+	for _, op := range spec.Ops {
+		id := op.Op.OperationID
+		if id == "" {
+			continue
+		}
+		gen := strings.ToUpper(id[:1]) + id[1:] + "Response"
+		if schemas[gen] {
+			t.Errorf("schema %q collides with the generated response type for operationId %q — rename the schema (breaks client generation)", gen, id)
+		}
 	}
 }
