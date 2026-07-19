@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 110
-- **Exempt (≤270-day horizon):** 174
+- **Documented:** 118
+- **Exempt (≤270-day horizon):** 166
 
 ## By domain
 
@@ -17,10 +17,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 4 |
-| policy | 65 | 23 |
+| policy | 65 | 28 |
 | release | 6 | 1 |
 | security | 51 | 22 |
-| settings | 30 | 16 |
+| settings | 30 | 19 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
 | support | 30 | 6 |
@@ -38,14 +38,19 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/auth/users` | apiAuthUsers | admin |
 | POST | `/api/auth/users` | apiAuthUsers | admin |
 | GET | `/api/authpolicy` | apiAuthPolicy | viewer |
+| DELETE | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
+| POST | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | GET | `/api/blocklist/feed` | apiBlocklistFeed | viewer |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
 | GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
+| DELETE | `/api/category-groups` | apiCategoryGroups | operator |
 | GET | `/api/category-groups` | apiCategoryGroups | viewer |
+| POST | `/api/category-groups` | apiCategoryGroups | operator |
+| PUT | `/api/category-groups` | apiCategoryGroups | operator |
 | GET | `/api/cluster/audit` | apiClusterAudit | viewer |
 | GET | `/api/cluster/bandwidth` | apiBandwidthPolicies | viewer |
 | GET | `/api/cluster/ca` | apiClusterCA | viewer |
@@ -116,12 +121,15 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
 | GET | `/api/session-secret` | apiSessionSecret | viewer |
+| POST | `/api/session-secret` | apiSessionSecret | admin |
 | GET | `/api/session-timeout` | apiSessionTimeout | viewer |
 | POST | `/api/session-timeout` | apiSessionTimeout | admin |
 | GET | `/api/settings` | apiSettings | viewer |
+| POST | `/api/settings` | apiSettings | admin |
 | GET | `/api/settings/log-level` | apiLogLevel | viewer |
 | PUT | `/api/settings/log-level` | apiLogLevel | admin |
 | GET | `/api/settings/network` | apiNetworkSettings | viewer |
+| POST | `/api/settings/network` | apiNetworkSettings | admin |
 | POST | `/api/setup/complete` | apiSetupComplete | public |
 | GET | `/api/setup/status` | apiSetupStatus | public |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |

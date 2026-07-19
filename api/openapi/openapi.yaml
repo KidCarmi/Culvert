@@ -933,6 +933,45 @@ components:
         retentionMaxGB: { type: number }
         criticalDiskPct: { type: integer }
 
+    # ── Slice 3 tranche 10: write request schemas ─────────────────────────────────
+    UpsertCategoryGroup:
+      type: object
+      required: [name, categories]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        categories: { type: array, items: { type: string } }
+    SetInitialAdmin:
+      type: object
+      required: [user, pass]
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        user: { type: string }
+        pass: { type: string, format: password, minLength: 8 }
+    SetNetworkSettings:
+      type: object
+      additionalProperties: false
+      properties:
+        base_url: { type: string }
+        ui_sans: { type: array, items: { type: string } }
+        trust_forwarded_headers: { type: boolean }
+        trusted_proxy_cidrs: { type: array, items: { type: string } }
+    SetSessionSecret:
+      type: object
+      required: [secret]
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        secret: { type: string, format: password, minLength: 64 }
+    AddBlocklistException:
+      type: object
+      description: Provide a single host or a list.
+      additionalProperties: false
+      properties:
+        host: { type: string }
+        hosts: { type: array, items: { type: string } }
+
 paths:
   /healthz:
     get:
@@ -2000,6 +2039,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SettingsSummary' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setInitialAdmin
+      tags: [settings]
+      summary: Set admin credential
+      description: Sets the admin username/password.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: settings.admin.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetInitialAdmin' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/settings/log-level:
     get:
       operationId: getLogLevel
@@ -2074,6 +2143,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/NetworkSettings' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setNetworkSettings
+      tags: [settings]
+      summary: Set network settings
+      description: Updates external base URL, UI SANs, and trusted-proxy configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: settings.network.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetNetworkSettings' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/rewrite:
     get:
       operationId: getRewrite
@@ -2118,6 +2217,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CategoryGroups' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createCategoryGroup
+      tags: [policy]
+      summary: Create URL category group
+      description: Creates a URL category group.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: category_group.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertCategoryGroup' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateCategoryGroup
+      tags: [policy]
+      summary: Update URL category group
+      description: Updates a URL category group.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: category_group.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertCategoryGroup' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteCategoryGroup
+      tags: [policy]
+      summary: Delete URL category group
+      description: Deletes a URL category group by id or name.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: category_group.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/metrics-config:
     get:
       operationId: getMetricsConfig
@@ -2288,6 +2479,35 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SessionSecretStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setSessionSecret
+      tags: [settings]
+      summary: Set session secret
+      description: Sets the shared session HMAC secret.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: session_secret.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetSessionSecret' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/blocklist/exceptions:
     get:
@@ -2311,6 +2531,65 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HostList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addBlocklistException
+      tags: [policy]
+      summary: Add blocklist exception
+      description: Adds host(s) to the blocklist exception list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.exception.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddBlocklistException' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteBlocklistException
+      tags: [policy]
+      summary: Delete blocklist exception
+      description: Removes a host from the blocklist exception list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.exception.delete
+      parameters:
+        - name: host
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/blocklist/feed:
     get:
       operationId: getBlocklistFeed
