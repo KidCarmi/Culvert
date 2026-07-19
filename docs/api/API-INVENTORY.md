@@ -3,288 +3,38 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 259
-- **Exempt (≤270-day horizon):** 25
+- **Documented:** 275
+- **Exempt:** 9 (all `intentionally-undocumented` non-REST surfaces)
+
+## Intentionally-undocumented (non-REST) surfaces
+
+| Method | Route | Reason class |
+|---|---|---|
+| * | `/` | intentionally-undocumented |
+| * | `/api/cluster/bootstrap/` | intentionally-undocumented |
+| * | `/api/events` | intentionally-undocumented |
+| * | `/api/idp/` | intentionally-undocumented |
+| * | `/auth/logout` | intentionally-undocumented |
+| * | `/auth/oidc/callback` | intentionally-undocumented |
+| POST | `/auth/saml/callback` | intentionally-undocumented |
+| GET | `/auth/saml/metadata` | intentionally-undocumented |
+| GET | `/auth/select` | intentionally-undocumented |
 
 ## By domain
 
 | Domain | Entries | Documented |
 |---|---|---|
 | auth | 18 | 12 |
-| cdr | 11 | 9 |
+| cdr | 11 | 11 |
 | cluster | 31 | 30 |
 | dashboard | 13 | 12 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
-| pac | 23 | 21 |
+| pac | 23 | 23 |
 | policy | 65 | 65 |
 | release | 6 | 6 |
-| security | 51 | 50 |
+| security | 51 | 51 |
 | settings | 30 | 30 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 19 |
-
-## Documented operations
-
-| Method | Route | Handler | Min role |
-|---|---|---|---|
-| DELETE | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
-| GET | `/api/alerts/webhooks` | apiAlertsWebhooks | viewer |
-| POST | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
-| PUT | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
-| GET | `/api/alerts/webhooks/history` | apiAlertsDeliveryHist | viewer |
-| POST | `/api/alerts/webhooks/test` | apiAlertsWebhookTest | operator |
-| GET | `/api/audit` | apiAudit | viewer |
-| POST | `/api/auth/change-password` | apiAuthChangePassword | viewer |
-| GET | `/api/auth/lockouts` | apiAuthLockouts | admin |
-| POST | `/api/auth/lockouts` | apiAuthLockouts | admin |
-| POST | `/api/auth/login` | apiAuthLogin | public |
-| POST | `/api/auth/logout` | apiAuthLogout | public |
-| GET | `/api/auth/status` | apiAuthStatus | public |
-| DELETE | `/api/auth/users` | apiAuthUsers | admin |
-| GET | `/api/auth/users` | apiAuthUsers | admin |
-| POST | `/api/auth/users` | apiAuthUsers | admin |
-| DELETE | `/api/authpolicy` | apiAuthPolicy | admin |
-| GET | `/api/authpolicy` | apiAuthPolicy | viewer |
-| POST | `/api/authpolicy` | apiAuthPolicy | admin |
-| PUT | `/api/authpolicy` | apiAuthPolicy | admin |
-| POST | `/api/authpolicy/reorder` | apiAuthPolicyReorder | admin |
-| DELETE | `/api/blocklist` | apiBlocklist | operator |
-| GET | `/api/blocklist` | apiBlocklist | viewer |
-| POST | `/api/blocklist` | apiBlocklist | operator |
-| DELETE | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
-| GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
-| POST | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
-| DELETE | `/api/blocklist/feed` | apiBlocklistFeed | operator |
-| GET | `/api/blocklist/feed` | apiBlocklistFeed | viewer |
-| POST | `/api/blocklist/feed` | apiBlocklistFeed | operator |
-| POST | `/api/blocklist/feed/sync` | apiBlocklistFeedSync | operator |
-| GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
-| POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
-| GET | `/api/blockpage` | apiBlockPage | viewer |
-| PUT | `/api/blockpage` | apiBlockPage | admin |
-| GET | `/api/ca-cert` | apiCACert | viewer |
-| POST | `/api/ca/cache-clear` | apiCACacheClear | admin |
-| GET | `/api/ca/download` | apiCADownload | viewer |
-| GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
-| POST | `/api/ca/rotate` | apiCARotate | admin |
-| GET | `/api/ca/status` | apiCAStatus | viewer |
-| DELETE | `/api/category-groups` | apiCategoryGroups | operator |
-| GET | `/api/category-groups` | apiCategoryGroups | viewer |
-| POST | `/api/category-groups` | apiCategoryGroups | operator |
-| PUT | `/api/category-groups` | apiCategoryGroups | operator |
-| GET | `/api/cdr/config` | apiCDRConfig | viewer |
-| PUT | `/api/cdr/config` | apiCDRConfig | admin |
-| GET | `/api/cdr/health` | apiCDRHealth | viewer |
-| DELETE | `/api/cdr/instances` | apiCDRInstances | admin |
-| GET | `/api/cdr/instances` | apiCDRInstances | viewer |
-| DELETE | `/api/cdr/policies` | apiCDRPolicies | admin |
-| GET | `/api/cdr/policies` | apiCDRPolicies | viewer |
-| POST | `/api/cdr/policies` | apiCDRPolicies | admin |
-| POST | `/api/cdr/test` | apiCDRTest | admin |
-| GET | `/api/cluster/audit` | apiClusterAudit | viewer |
-| DELETE | `/api/cluster/bandwidth` | apiBandwidthPolicies | admin |
-| GET | `/api/cluster/bandwidth` | apiBandwidthPolicies | viewer |
-| POST | `/api/cluster/bandwidth` | apiBandwidthPolicies | admin |
-| GET | `/api/cluster/ca` | apiClusterCA | viewer |
-| POST | `/api/cluster/ca` | apiClusterCA | admin |
-| POST | `/api/cluster/drain` | apiClusterDrain | admin |
-| GET | `/api/cluster/ha` | apiClusterHA | viewer |
-| POST | `/api/cluster/ha` | apiClusterHA | admin |
-| POST | `/api/cluster/ha/promote` | apiClusterHAPromote | admin |
-| POST | `/api/cluster/labels` | apiClusterLabels | admin |
-| GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
-| POST | `/api/cluster/mode` | apiClusterMode | admin |
-| DELETE | `/api/cluster/node-groups` | apiNodeGroups | admin |
-| GET | `/api/cluster/node-groups` | apiNodeGroups | viewer |
-| POST | `/api/cluster/node-groups` | apiNodeGroups | admin |
-| GET | `/api/cluster/node-groups/membership` | apiNodeGroupMembership | viewer |
-| GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
-| GET | `/api/cluster/rate-limits` | apiClusterRateLimits | viewer |
-| GET | `/api/cluster/revocations` | apiClusterRevocations | viewer |
-| POST | `/api/cluster/revoke` | apiClusterRevoke | admin |
-| GET | `/api/cluster/rotation` | apiClusterRotation | viewer |
-| GET | `/api/cluster/status` | apiClusterStatus | viewer |
-| DELETE | `/api/cluster/tokens` | apiClusterTokens | admin |
-| GET | `/api/cluster/tokens` | apiClusterTokens | viewer |
-| POST | `/api/cluster/tokens` | apiClusterTokens | admin |
-| GET | `/api/config/diff` | apiConfigDiff | viewer |
-| GET | `/api/config/export` | apiConfigExport | admin |
-| POST | `/api/config/import` | apiConfigImport | admin |
-| GET | `/api/config/versions` | apiConfigVersions | viewer |
-| POST | `/api/config/versions` | apiConfigVersions | admin |
-| GET | `/api/connlimit` | apiConnLimit | viewer |
-| POST | `/api/connlimit` | apiConnLimit | admin |
-| DELETE | `/api/content-scan` | apiContentScan | operator |
-| GET | `/api/content-scan` | apiContentScan | viewer |
-| POST | `/api/content-scan` | apiContentScan | operator |
-| GET | `/api/content-scan/bypass` | apiContentScanBypass | viewer |
-| PUT | `/api/content-scan/bypass` | apiContentScanBypass | admin |
-| * | `/api/country-traffic` | apiCountryTraffic | viewer |
-| * | `/api/dashboard/health` | apiDashboardHealth | viewer |
-| * | `/api/dashboard/threats` | apiDashboardThreats | viewer |
-| * | `/api/dashboard/top-rules` | apiDashboardTopRules | viewer |
-| DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator |
-| GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer |
-| GET | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | viewer |
-| PUT | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | admin |
-| DELETE | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
-| GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
-| POST | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
-| PUT | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
-| GET | `/api/decryption/health` | apiDecryptionHealth | viewer |
-| GET | `/api/decryption/redaction` | apiDecryptionRedaction | viewer |
-| PUT | `/api/decryption/redaction` | apiDecryptionRedaction | admin |
-| GET | `/api/default-action` | apiDefaultAction | viewer |
-| POST | `/api/default-action` | apiDefaultAction | operator |
-| POST | `/api/diagnose/all` | apiDiagnoseAll | operator |
-| POST | `/api/diagnose/cluster` | apiDiagnoseCluster | operator |
-| POST | `/api/diagnose/config` | apiDiagnoseConfig | operator |
-| POST | `/api/diagnose/dns` | apiDiagnoseDNS | operator |
-| POST | `/api/diagnose/storage` | apiDiagnoseStorage | operator |
-| POST | `/api/diagnose/support` | apiDiagnoseSupport | operator |
-| POST | `/api/diagnose/tls` | apiDiagnoseTLS | operator |
-| POST | `/api/diagnose/upstream` | apiDiagnoseUpstream | operator |
-| GET | `/api/diagnostics` | apiDiagnostics | viewer |
-| DELETE | `/api/dpi` | apiContentScan | operator |
-| GET | `/api/dpi` | apiContentScan | viewer |
-| POST | `/api/dpi` | apiContentScan | operator |
-| GET | `/api/dpi/bypass` | apiContentScanBypass | viewer |
-| PUT | `/api/dpi/bypass` | apiContentScanBypass | admin |
-| * | `/api/export` | apiExport | viewer |
-| DELETE | `/api/fileblock` | apiFileblock | operator |
-| GET | `/api/fileblock` | apiFileblock | viewer |
-| POST | `/api/fileblock` | apiFileblock | operator |
-| DELETE | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
-| GET | `/api/fileblock/profiles` | apiFileblockProfiles | viewer |
-| POST | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
-| PUT | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
-| * | `/api/geoip` | apiGeoIPConfig | viewer |
-| GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
-| GET | `/api/health/explain` | apiHealthExplain | viewer |
-| GET | `/api/idp` | apiIdPList | viewer |
-| POST | `/api/idp` | apiIdPList | admin |
-| POST | `/api/idp/discover` | apiIdPDiscover | admin |
-| GET | `/api/logger` | apiLoggerConfig | viewer |
-| * | `/api/logs` | apiLogs | viewer |
-| POST | `/api/logs/purge` | apiLogsPurge | admin |
-| GET | `/api/logs/retention` | apiLogsRetention | viewer |
-| PUT | `/api/logs/retention` | apiLogsRetention | admin |
-| GET | `/api/metrics-config` | apiMetricsConfig | viewer |
-| POST | `/api/metrics-config` | apiMetricsConfig | admin |
-| GET | `/api/objects/references` | apiObjectReferences | viewer |
-| GET | `/api/ocsp` | apiOCSPConfig | viewer |
-| POST | `/api/ocsp` | apiOCSPConfig | admin |
-| GET | `/api/otlp` | apiOTLPConfig | admin |
-| POST | `/api/otlp` | apiOTLPConfig | admin |
-| GET | `/api/pac-config` | apiPACConfig | viewer |
-| POST | `/api/pac-config` | apiPACConfig | admin |
-| POST | `/api/pac/analyze` | apiPACAnalyze | viewer |
-| GET | `/api/pac/pools` | apiPACPools | viewer |
-| POST | `/api/pac/pools` | apiPACPools | admin |
-| DELETE | `/api/pac/pools/` | apiPACPoolItem | admin |
-| GET | `/api/pac/pools/` | apiPACPoolItem | viewer |
-| PUT | `/api/pac/pools/` | apiPACPoolItem | admin |
-| POST | `/api/pac/posture/diff` | apiPACPostureDiff | viewer |
-| GET | `/api/pac/posture/exceptions` | apiPACExceptions | viewer |
-| DELETE | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
-| GET | `/api/pac/posture/exceptions/` | apiPACExceptionItem | viewer |
-| PUT | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
-| GET | `/api/pac/posture/inventory` | apiPACPostureInventory | viewer |
-| GET | `/api/pac/profiles` | apiPACProfiles | viewer |
-| POST | `/api/pac/profiles` | apiPACProfiles | admin |
-| DELETE | `/api/pac/profiles/` | apiPACProfileItem | admin |
-| GET | `/api/pac/profiles/` | apiPACProfileItem | viewer |
-| POST | `/api/pac/profiles/` | apiPACProfileItem | admin |
-| PUT | `/api/pac/profiles/` | apiPACProfileItem | admin |
-| POST | `/api/pac/simulate` | apiPACSimulate | viewer |
-| DELETE | `/api/policy` | apiPolicy | operator |
-| GET | `/api/policy` | apiPolicy | viewer |
-| POST | `/api/policy` | apiPolicy | operator |
-| PUT | `/api/policy` | apiPolicy | operator |
-| GET | `/api/policy/draft` | apiPolicyDraft | viewer |
-| PUT | `/api/policy/draft` | apiPolicyDraft | admin |
-| POST | `/api/policy/draft/commit` | apiPolicyDraftCommit | operator |
-| POST | `/api/policy/draft/revert` | apiPolicyDraftRevert | operator |
-| POST | `/api/policy/move` | apiPolicyMove | operator |
-| POST | `/api/policy/reorder` | apiPolicyReorder | operator |
-| POST | `/api/policy/test` | apiPolicyTest | viewer |
-| GET | `/api/releases` | apiReleases | viewer |
-| POST | `/api/releases/catalog-refresh` | apiReleaseCatalogRefresh | admin |
-| GET | `/api/releases/current` | apiReleaseCurrent | viewer |
-| POST | `/api/releases/dispatch` | apiReleaseDispatch | admin |
-| POST | `/api/releases/dispatch/resume` | apiReleaseDispatchResume | admin |
-| GET | `/api/releases/dispatch/status` | apiReleaseDispatchStatus | viewer |
-| DELETE | `/api/rewrite` | apiRewrite | operator |
-| GET | `/api/rewrite` | apiRewrite | viewer |
-| POST | `/api/rewrite` | apiRewrite | operator |
-| GET | `/api/security` | apiSecurity | viewer |
-| POST | `/api/security` | apiSecurity | admin |
-| DELETE | `/api/security-scan/cache` | apiScanCache | admin |
-| GET | `/api/security-scan/cache` | apiScanCache | viewer |
-| GET | `/api/security-scan/exclusions` | apiSecScanExclusions | viewer |
-| PUT | `/api/security-scan/exclusions` | apiSecScanExclusions | admin |
-| GET | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | viewer |
-| PUT | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | admin |
-| POST | `/api/security-scan/feeds/sync` | apiSecFeedsSync | admin |
-| GET | `/api/security-scan/status` | apiSecScanStatus | viewer |
-| GET | `/api/security-scan/svc` | apiScanSvcConfig | viewer |
-| POST | `/api/security-scan/yara/reload` | apiSecYARAReload | admin |
-| DELETE | `/api/security-scan/yara/rules` | apiSecYARARules | admin |
-| GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
-| POST | `/api/security-scan/yara/rules` | apiSecYARARules | admin |
-| PUT | `/api/security-scan/yara/rules` | apiSecYARARules | admin |
-| DELETE | `/api/security-scan/yara/rules/` | apiSecYARARules | admin |
-| GET | `/api/security-scan/yara/rules/` | apiSecYARARules | viewer |
-| PUT | `/api/security-scan/yara/rules/` | apiSecYARARules | admin |
-| GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
-| PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
-| POST | `/api/security-scan/yara/validate` | apiSecYARAValidate | operator |
-| GET | `/api/session-secret` | apiSessionSecret | viewer |
-| POST | `/api/session-secret` | apiSessionSecret | admin |
-| GET | `/api/session-timeout` | apiSessionTimeout | viewer |
-| POST | `/api/session-timeout` | apiSessionTimeout | admin |
-| GET | `/api/settings` | apiSettings | viewer |
-| POST | `/api/settings` | apiSettings | admin |
-| PUT | `/api/settings/default-auth-outcome` | apiDefaultAuthOutcome | admin |
-| GET | `/api/settings/log-level` | apiLogLevel | viewer |
-| PUT | `/api/settings/log-level` | apiLogLevel | admin |
-| GET | `/api/settings/network` | apiNetworkSettings | viewer |
-| POST | `/api/settings/network` | apiNetworkSettings | admin |
-| PUT | `/api/settings/unauth-mode` | apiDefaultAuthOutcome | admin |
-| POST | `/api/setup/complete` | apiSetupComplete | public |
-| GET | `/api/setup/status` | apiSetupStatus | public |
-| DELETE | `/api/ssl-bypass` | apiSSLBypass | operator |
-| GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
-| POST | `/api/ssl-bypass` | apiSSLBypass | operator |
-| * | `/api/stats` | apiStats | viewer |
-| GET | `/api/support/bundles` | apiSupportBundles | viewer |
-| POST | `/api/support/bundles` | apiSupportBundles | admin |
-| DELETE | `/api/support/debug-level` | apiSupportDebugLevel | operator |
-| GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |
-| POST | `/api/support/debug-level` | apiSupportDebugLevel | admin |
-| GET | `/api/support/recipients` | apiSupportRecipients | viewer |
-| POST | `/api/support/recipients` | apiSupportRecipients | admin |
-| GET | `/api/support/retention` | apiSupportRetention | viewer |
-| PUT | `/api/support/retention` | apiSupportRetention | admin |
-| GET | `/api/support/status` | apiSupportStatus | viewer |
-| GET | `/api/syslog` | apiSyslogConfig | admin |
-| POST | `/api/syslog` | apiSyslogConfig | admin |
-| POST | `/api/syslog/test` | apiSyslogTest | admin |
-| * | `/api/timeseries` | apiTimeseries | viewer |
-| * | `/api/top-hosts` | apiTopHosts | viewer |
-| GET | `/api/ui-allow-ips` | apiUIAllowIPs | admin |
-| POST | `/api/ui-allow-ips` | apiUIAllowIPs | admin |
-| GET | `/api/upstream` | apiUpstream | viewer |
-| POST | `/api/upstream` | apiUpstream | admin |
-| POST | `/api/upstream/health` | apiUpstreamHealth | admin |
-| GET | `/api/upstream/settings` | apiUpstreamSettings | viewer |
-| DELETE | `/api/urlcat` | apiURLCat | operator |
-| GET | `/api/urlcat` | apiURLCat | viewer |
-| POST | `/api/urlcat` | apiURLCat | operator |
-| PUT | `/api/urlcat` | apiURLCat | operator |
-| DELETE | `/api/urlcat/host` | apiURLCatHost | operator |
-| POST | `/api/urlcat/host` | apiURLCatHost | operator |
-| GET | `/api/urlcat/lookup` | apiURLCatLookup | viewer |
-| GET | `/healthz` | apiHealthz | public |
+| support | 30 | 30 |

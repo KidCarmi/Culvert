@@ -26,7 +26,7 @@ routes:
     method: "*"
     handler: "serveUIShell"
     domain: "static"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: false
     audit_expected: false
@@ -34,8 +34,8 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: static SPA shell (HTML), not an API surface
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/api/alerts/webhooks"
     method: "GET"
@@ -546,12 +546,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/cdr/instances/revoke"
     method: "POST"
     handler: "apiCDRRevokeRPC"
@@ -561,12 +556,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/cdr/policies"
     method: "GET"
     handler: "apiCDRPolicies"
@@ -616,12 +606,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/cluster/audit"
     method: "GET"
     handler: "apiClusterAudit"
@@ -666,7 +651,7 @@ routes:
     method: "*"
     handler: "apiBootstrapRouter"
     domain: "cluster"
-    visibility: admin-supported
+    visibility: intentionally-undocumented
     min_role: "viewer"
     mutating: false
     audit_expected: false
@@ -674,8 +659,8 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: dynamic bootstrap sub-router (token-gated onboarding); per-sub-action ops out of scope until enumerated (MED-HIGH-4)
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/api/cluster/ca"
     method: "GET"
@@ -1361,7 +1346,7 @@ routes:
     method: "*"
     handler: "apiEvents"
     domain: "dashboard"
-    visibility: admin-supported
+    visibility: intentionally-undocumented
     min_role: "viewer"
     mutating: false
     audit_expected: false
@@ -1369,8 +1354,8 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: Server-Sent Events stream (text/event-stream); not a JSON resource, not modelable in OpenAPI 3.0
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/api/export"
     method: "*"
@@ -1506,7 +1491,7 @@ routes:
     method: "*"
     handler: "apiIdPRouter"
     domain: "auth"
-    visibility: admin-supported
+    visibility: intentionally-undocumented
     min_role: "viewer"
     mutating: true
     audit_expected: true
@@ -1514,8 +1499,8 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: dynamic IdP sub-router; per-sub-action RBAC varies (C4/MED-HIGH-4) - enumerate before documenting
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/api/idp/discover"
     method: "POST"
@@ -2529,12 +2514,7 @@ routes:
     mutating: false
     audit_expected: true
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}"
     method: "DELETE"
     handler: "apiSupportBundleItem"
@@ -2544,12 +2524,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/approve"
     method: "POST"
     handler: "apiSupportBundleApprove"
@@ -2559,12 +2534,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/download-encrypted"
     method: "POST"
     handler: "apiSupportBundleExportEncrypted"
@@ -2574,12 +2544,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/download-sealed"
     method: "POST"
     handler: "apiSupportBundleExportSealed"
@@ -2589,12 +2554,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/exports"
     method: "GET"
     handler: "apiSupportBundleExports"
@@ -2604,12 +2564,7 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/manifest"
     method: "GET"
     handler: "apiSupportBundleManifest"
@@ -2619,12 +2574,7 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/redaction-report"
     method: "GET"
     handler: "apiSupportBundleReport"
@@ -2634,12 +2584,7 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/bundles/{id}/validate"
     method: "GET"
     handler: "apiSupportBundleValidate"
@@ -2649,12 +2594,7 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/debug-level"
     method: "GET"
     handler: "apiSupportDebugLevel"
@@ -2714,12 +2654,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/support/recipients/{name}"
     method: "DELETE"
     handler: "apiSupportRecipientItem"
@@ -2729,12 +2664,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/support/retention"
     method: "GET"
     handler: "apiSupportRetention"
@@ -2949,7 +2879,7 @@ routes:
     method: "*"
     handler: "authLogout"
     domain: "auth"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: false
     audit_expected: false
@@ -2957,14 +2887,14 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: browser SSO redirect flow (public); not a JSON admin API
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/auth/oidc/callback"
     method: "*"
     handler: "authOIDCCallback"
     domain: "auth"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: false
     audit_expected: false
@@ -2972,14 +2902,14 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: browser OIDC callback (public redirect); not a JSON admin API
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/auth/saml/callback"
     method: "POST"
     handler: "authSAMLCallback"
     domain: "auth"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: true
     audit_expected: false
@@ -2987,14 +2917,14 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: browser SAML callback (public redirect); not a JSON admin API
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/auth/saml/metadata"
     method: "GET"
     handler: "authSAMLMetadata"
     domain: "auth"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: false
     audit_expected: false
@@ -3002,14 +2932,14 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: SAML SP metadata (XML, public); not a JSON admin API
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/auth/select"
     method: "GET"
     handler: "authSelectProvider"
     domain: "auth"
-    visibility: public-supported
+    visibility: intentionally-undocumented
     min_role: "public"
     mutating: false
     audit_expected: false
@@ -3017,8 +2947,8 @@ routes:
     documented: false
     exemption:
       owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
+      reason: IdP selection page (public browser flow); not a JSON admin API
+      security_class: non-rest-surface
       expires: *baseline
   - route: "/healthz"
     method: "GET"
@@ -3033,18 +2963,14 @@ routes:
   - route: "/pac/"
     method: "GET"
     handler: "servePACProfileFile"
+    openapi_path: "/pac/{profile}.pac"
     domain: "pac"
     visibility: public-supported
     min_role: "public"
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/proxy.pac"
     method: "GET"
     handler: "servePACFile"
@@ -3054,9 +2980,4 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true

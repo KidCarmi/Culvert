@@ -4777,6 +4777,128 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cdr/instances/enroll": {
+      "post": {
+        "description": "Enroll CDR instance.",
+        "operationId": "enrollCDRInstance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Enroll CDR instance",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cdr.instance.enroll",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cdr/instances/revoke": {
+      "post": {
+        "description": "Revoke CDR instance.",
+        "operationId": "revokeCDRInstance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Revoke CDR instance",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-audit-event": "cdr.instance.revoke",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cdr/policies": {
       "delete": {
         "description": "Delete CDR policy.",
@@ -4968,6 +5090,74 @@
         "x-culvert-audit-event": "cdr.test",
         "x-culvert-danger-level": "low",
         "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/certs/upload": {
+      "post": {
+        "description": "Uploads a TLS certificate and key via multipart form (fields cert, key, target).",
+        "operationId": "uploadCerts",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "cert": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "key": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Uploaded."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Upload TLS certificate/key",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "certs.upload",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
@@ -13609,6 +13799,535 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/support/bundles/{id}": {
+      "delete": {
+        "description": "Delete support bundle.",
+        "operationId": "deleteSupportBundle",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete support bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.bundle.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "get": {
+        "description": "Get support bundle.",
+        "operationId": "getSupportBundle",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Get support bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/support/bundles/{id}/approve": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Approve support bundle.",
+        "operationId": "approveSupportBundle",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Approve support bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.bundle.approve",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/bundles/{id}/download-encrypted": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Download encrypted bundle.",
+        "operationId": "downloadSupportBundleEncrypted",
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Binary bundle export (attachment)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Download encrypted bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.bundle.download_encrypted",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/bundles/{id}/download-sealed": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Download sealed bundle.",
+        "operationId": "downloadSupportBundleSealed",
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Binary bundle export (attachment)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Download sealed bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.bundle.download_sealed",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/bundles/{id}/exports": {
+      "get": {
+        "description": "List bundle exports.",
+        "operationId": "getSupportBundleExports",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List bundle exports",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/support/bundles/{id}/manifest": {
+      "get": {
+        "description": "Get bundle manifest.",
+        "operationId": "getSupportBundleManifest",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Get bundle manifest",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/support/bundles/{id}/redaction-report": {
+      "get": {
+        "description": "Get bundle redaction report.",
+        "operationId": "getSupportBundleReport",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Get bundle redaction report",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/api/support/bundles/{id}/validate": {
+      "get": {
+        "description": "Validate support bundle.",
+        "operationId": "validateSupportBundle",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Validate support bundle",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/api/support/debug-level": {
       "delete": {
         "description": "Clear support debug level.",
@@ -13845,6 +14564,126 @@
           "support"
         ],
         "x-culvert-audit-event": "support.recipient.add",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/recipients/{name}": {
+      "delete": {
+        "description": "Delete support recipient.",
+        "operationId": "deleteSupportRecipientItem",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete support recipient",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.recipient.delete",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "parameters": [
+        {
+          "in": "path",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Update support recipient.",
+        "operationId": "updateSupportRecipient",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenericWriteInput"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericRead"
+                }
+              }
+            },
+            "description": "OK."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Not found. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Update support recipient",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.recipient.update",
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
@@ -14901,6 +15740,87 @@
         "summary": "Node liveness/health probe",
         "tags": [
           "health"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/pac/{profile}.pac": {
+      "get": {
+        "description": "Returns a named-profile PAC file (public; consumed by browsers).",
+        "operationId": "getProfilePAC",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ns-proxy-autoconfig": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "PAC file."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Unknown profile. Body is plain text."
+          }
+        },
+        "security": [],
+        "summary": "Per-profile PAC file",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/proxy.pac": {
+      "get": {
+        "description": "Returns the default PAC file (public; consumed by browsers).",
+        "operationId": "getProxyPAC",
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ns-proxy-autoconfig": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "PAC file."
+          },
+          "304": {
+            "description": "Not modified (ETag)."
+          }
+        },
+        "security": [],
+        "summary": "Proxy auto-config file",
+        "tags": [
+          "pac"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",

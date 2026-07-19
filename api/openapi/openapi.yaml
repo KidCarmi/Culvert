@@ -8148,3 +8148,501 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/GenericRead' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/support/bundles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getSupportBundle
+      tags: [support]
+      summary: Get support bundle
+      description: Get support bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deleteSupportBundle
+      tags: [support]
+      summary: Delete support bundle
+      description: Delete support bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.bundle.delete
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/approve:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: approveSupportBundle
+      tags: [support]
+      summary: Approve support bundle
+      description: Approve support bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.bundle.approve
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/download-encrypted:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: downloadSupportBundleEncrypted
+      tags: [support]
+      summary: Download encrypted bundle
+      description: Download encrypted bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.bundle.download_encrypted
+      responses:
+        '200':
+          description: Binary bundle export (attachment).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/download-sealed:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      operationId: downloadSupportBundleSealed
+      tags: [support]
+      summary: Download sealed bundle
+      description: Download sealed bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.bundle.download_sealed
+      responses:
+        '200':
+          description: Binary bundle export (attachment).
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/exports:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getSupportBundleExports
+      tags: [support]
+      summary: List bundle exports
+      description: List bundle exports.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/manifest:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getSupportBundleManifest
+      tags: [support]
+      summary: Get bundle manifest
+      description: Get bundle manifest.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/redaction-report:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getSupportBundleReport
+      tags: [support]
+      summary: Get bundle redaction report
+      description: Get bundle redaction report.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/bundles/{id}/validate:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: validateSupportBundle
+      tags: [support]
+      summary: Validate support bundle
+      description: Validate support bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/support/recipients/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: updateSupportRecipient
+      tags: [support]
+      summary: Update support recipient
+      description: Update support recipient.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.recipient.update
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deleteSupportRecipientItem
+      tags: [support]
+      summary: Delete support recipient
+      description: Delete support recipient.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.recipient.delete
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/cdr/instances/enroll:
+    post:
+      operationId: enrollCDRInstance
+      tags: [cluster]
+      summary: Enroll CDR instance
+      description: Enroll CDR instance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cdr.instance.enroll
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/cdr/instances/revoke:
+    post:
+      operationId: revokeCDRInstance
+      tags: [cluster]
+      summary: Revoke CDR instance
+      description: Revoke CDR instance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cdr.instance.revoke
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/certs/upload:
+    post:
+      operationId: uploadCerts
+      tags: [security]
+      summary: Upload TLS certificate/key
+      description: Uploads a TLS certificate and key via multipart form (fields cert, key, target).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: certs.upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                cert: { type: string, format: binary }
+                key: { type: string, format: binary }
+                target: { type: string }
+      responses:
+        '200':
+          description: Uploaded.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /proxy.pac:
+    get:
+      operationId: getProxyPAC
+      tags: [pac]
+      summary: Proxy auto-config file
+      description: Returns the default PAC file (public; consumed by browsers).
+      security: []
+      x-culvert-visibility: public-supported
+      x-culvert-permission: public
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC file.
+          content:
+            application/x-ns-proxy-autoconfig:
+              schema: { type: string }
+        '304':
+          description: Not modified (ETag).
+  /pac/{profile}.pac:
+    get:
+      operationId: getProfilePAC
+      tags: [pac]
+      summary: Per-profile PAC file
+      description: Returns a named-profile PAC file (public; consumed by browsers).
+      security: []
+      x-culvert-visibility: public-supported
+      x-culvert-permission: public
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: profile
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: PAC file.
+          content:
+            application/x-ns-proxy-autoconfig:
+              schema: { type: string }
+        '404':
+          description: Unknown profile. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
