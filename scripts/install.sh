@@ -527,6 +527,24 @@ step "Seeding proxy image"
 PINNED_TAG="culvert/proxy:pinned"
 PROXY_REPO="${CULVERT_PROXY_REPO:-ghcr.io/kidcarmi/culvert}"
 
+# ── Signed release catalog: the release AUTHORITY for a fresh install ─────────
+# The signed catalog (not GHCR tag enumeration) decides which immutable image
+# digest a fresh install deploys — the SAME authority that governs day-2 updates.
+# The installer runs the `culvert bootstrap-resolve` verifier (baked trust roots:
+# signature + freshness + rollback) to resolve the channel to a repo@sha256 digest;
+# the shell performs NO cryptography or JSON trust parsing. Origin and trust are
+# independent: overriding the URL never changes the trusted signing identity.
+#   CULVERT_RELEASE_CATALOG_URL  unset ⇒ the baked canonical origin; an explicit
+#     URL ⇒ operator mirror/staging; off/none/disabled ⇒ NO catalog fetch (never
+#     a silent downgrade to tag discovery — an explicit seed is then required).
+#   CULVERT_INSTALL_CHANNEL      install channel (default: stable ⇒ the catalog
+#     "recommended" mainline). stable | lts | critical.
+CATALOG_URL="${CULVERT_RELEASE_CATALOG_URL:-}"
+INSTALL_CHANNEL="${CULVERT_INSTALL_CHANNEL:-stable}"
+# GH_REPO is the source/release repository the signed `culvert-linux-<arch>`
+# verifier asset is published to (distinct from PROXY_REPO, the ghcr.io image).
+GH_REPO="${CULVERT_GITHUB_REPO:-KidCarmi/Culvert}"
+
 # Pinned release-signing identity (PUBLIC — mirrors release_identity.env, kept
 # byte-equal by TestReleaseIdentitySSOT). Used to cosign-verify the proxy image
 # BEFORE we trust the host-root maintenance-agent binary extracted from its
@@ -594,9 +612,17 @@ verify_pinned_image_signature() {
 # drifted a release ahead of the binary and crash-looped the proxy; there is no
 # longer a build path. Offline hosts preload an image and set CULVERT_PROXY_SEED_REF.
 
-# resolve_latest_signed_release_ref — echo "<PROXY_REPO>:vX.Y.Z" for the newest
-# vMAJOR.MINOR.PATCH tag published to the (public) GHCR proxy repo. A default
-# install should seed a SIGNED RELEASE digest: only a release-tag image
+# resolve_latest_signed_release_ref — BREAK-GLASS ONLY (gated on
+# CULVERT_INSTALL_ALLOW_TAG_DISCOVERY=1; never runs on a normal install). This is
+# the LEGACY GHCR tag-enumeration path that the signed catalog replaces: it picks
+# a MUTABLE tag by a naive version sort, which is exactly how a stale legacy
+# `0.0.238` image (predating the /app/deploy bundle) was selected on a fresh host.
+# It is retained solely as a consciously-named operator escape hatch and is NOT a
+# trusted catalog decision.
+#
+# echo "<PROXY_REPO>:vX.Y.Z" for the newest vMAJOR.MINOR.PATCH tag published to the
+# (public) GHCR proxy repo. A default install should seed a SIGNED RELEASE digest:
+# only a release-tag image
 # cosign-verifies against the pinned identity (verify_pinned_image_signature),
 # which is what lets the host maintenance agent install from a trusted image.
 # `:latest` is a main build and can NEVER verify (the pinned SAN anchors to
@@ -636,6 +662,101 @@ resolve_latest_signed_release_ref() {
   printf '%s:%s\n' "$PROXY_REPO" "$latest"
 }
 
+# catalog_fetch_disabled — true when CULVERT_RELEASE_CATALOG_URL is an explicit
+# off/none/disabled sentinel. A disabled origin must NEVER silently downgrade to
+# tag discovery; the caller then requires an explicit verified seed instead.
+catalog_fetch_disabled() {
+  case "$(printf '%s' "${CATALOG_URL:-}" | tr '[:upper:]' '[:lower:]')" in
+    off|none|disabled) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# acquire_bootstrap_verifier — echo the path to a `culvert` binary that carries
+# the `bootstrap-resolve` subcommand, or return 1. The binary is the verifier
+# whose baked trust roots perform the catalog signature/freshness/rollback checks
+# — that verification is the trust gate and is NOT deferred.
+#
+# STAGE NOTE: this stage downloads the signed `culvert-linux-<arch>` release asset
+# over HTTPS from github.com. Hardening the ACQUISITION with a cosign verify-blob
+# of the verifier binary itself (against the pinned release identity) is a
+# deliberately DEFERRED follow-up stage; it does not change what the binary then
+# verifies about the catalog.
+BOOTSTRAP_VERIFIER_BIN=""
+acquire_bootstrap_verifier() {
+  if [[ -n "$BOOTSTRAP_VERIFIER_BIN" && -x "$BOOTSTRAP_VERIFIER_BIN" ]]; then
+    printf '%s\n' "$BOOTSTRAP_VERIFIER_BIN"; return 0
+  fi
+  command -v curl >/dev/null 2>&1 || { warn "curl is required to fetch the catalog verifier"; return 1; }
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) warn "unsupported architecture '$(uname -m)' — the catalog verifier ships linux/amd64 and linux/arm64 only"; return 1 ;;
+  esac
+  local ver
+  ver="${CULVERT_BOOTSTRAP_VERIFIER_VERSION:-}"
+  if [[ -z "$ver" ]]; then
+    # The maintainer-designated latest release (NOT a tag sort — this is why it can
+    # never resurrect a legacy 0.0.238-style tag). The verifier version is decoupled
+    # from the appliance version it resolves: the CATALOG picks the appliance image.
+    ver="$(curl -fsS --max-time 15 "https://api.github.com/repos/${GH_REPO}/releases/latest" 2>/dev/null \
+      | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')" || true
+  fi
+  [[ -n "$ver" ]] || { warn "could not determine the release tag for the catalog verifier"; return 1; }
+  local dir asset
+  dir="$(mktemp -d)" || return 1
+  asset="culvert-linux-${arch}"
+  if ! curl -fsSL --max-time 90 -o "$dir/culvert" "https://github.com/${GH_REPO}/releases/download/${ver}/${asset}"; then
+    warn "could not download the catalog verifier ($asset $ver)"
+    rm -rf "$dir"; return 1
+  fi
+  chmod 0755 "$dir/culvert"
+  BOOTSTRAP_VERIFIER_BIN="$dir/culvert"
+  printf '%s\n' "$BOOTSTRAP_VERIFIER_BIN"
+}
+
+# seed_from_catalog — the TRUSTED fresh-install default: resolve the image digest
+# from the signed catalog and seed $PINNED_TAG from that exact immutable digest.
+# Returns 0 on success (tag seeded), 1 otherwise. Never falls back to a mutable
+# tag; a failure lets the caller apply its own fail-closed policy.
+seed_from_catalog() {
+  if catalog_fetch_disabled; then
+    warn "CULVERT_RELEASE_CATALOG_URL=$CATALOG_URL — catalog fetch is disabled; not auto-seeding from the catalog."
+    return 1
+  fi
+  local verifier decision image_ref errf
+  verifier="$(acquire_bootstrap_verifier)" || return 1
+  decision="$INSTALL_DIR/.catalog-bootstrap.json"
+  info "Resolving the install image from the signed release catalog (channel=$INSTALL_CHANNEL) ..."
+  # bootstrap-resolve performs the FULL verified resolution (signature + freshness
+  # + anti-rollback/replay against the baked trust roots) and prints ONLY the
+  # repo@sha256 image_ref; --out records the decision so the appliance can prove
+  # which catalog decision bootstrapped it. No crypto/JSON parsing happens in shell.
+  local -a rv_args=(bootstrap-resolve --channel "$INSTALL_CHANNEL" --proxy-repo "$PROXY_REPO" --print image_ref --out "$decision")
+  [[ -n "$CATALOG_URL" ]] && rv_args+=(--catalog-url "$CATALOG_URL")
+  errf="$(mktemp)" || return 1
+  if ! image_ref="$("$verifier" "${rv_args[@]}" 2>"$errf")"; then
+    warn "Signed-catalog resolution failed (fail-closed; NOT falling back to tag discovery):"
+    while IFS= read -r line; do warn "  $line"; done <"$errf"
+    rm -f "$errf"
+    return 1
+  fi
+  rm -f "$errf"
+  image_ref="$(printf '%s' "$image_ref" | tr -d '[:space:]')"
+  if [[ "$image_ref" != *@sha256:* ]]; then
+    warn "catalog resolver returned an unexpected image ref; refusing to seed."
+    return 1
+  fi
+  info "Catalog authorized $image_ref — pulling the exact immutable digest ..."
+  if sudo docker pull "$image_ref" && sudo docker tag "$image_ref" "$PINNED_TAG"; then
+    info "Seeded $PINNED_TAG from the signed catalog ($image_ref)"
+    return 0
+  fi
+  warn "Could not pull the catalog-authorized digest $image_ref"
+  return 1
+}
+
 seed_pinned_tag() {
   local had_stale=0
   if sudo docker image inspect "$PINNED_TAG" >/dev/null 2>&1; then
@@ -666,18 +787,19 @@ seed_pinned_tag() {
     had_stale=1
   fi
 
-  # Seed source precedence (mirrors packaging/culvert-maint/install.sh):
-  #   1. CULVERT_PROXY_SEED_REF — operator-supplied (existing-install
-  #      migration: the currently-running repo@sha256 digest).
+  # Seed source precedence:
+  #   1. CULVERT_PROXY_SEED_REF — operator-supplied, explicit break-glass (offline
+  #      / migration: the currently-running repo@sha256 digest). Loud + recorded.
   #   2. The image of an already-running `culvert` container (auto-captured,
-  #      keeps the pinned tag identical to the live daemon — §8.2).
-  #   3. The latest SIGNED release ${PROXY_REPO}:vX.Y.Z — fresh-install default.
-  #      A signed release digest cosign-verifies, so the host maintenance agent
-  #      installs from a trusted image (no override needed).
-  #   4. ${PROXY_REPO}:latest — fallback when no signed release resolves. It
-  #      cannot cosign-verify, so a source-free install seeded here leaves the
-  #      agent unwired unless CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 is set.
-  #   5. Local build from this checkout — air-gapped / registry-down fallback.
+  #      keeps the pinned tag identical to the live daemon — §8.2; a healthy
+  #      existing deployment is NOT replaced merely because the installer re-ran).
+  #   3. The SIGNED RELEASE CATALOG (seed_from_catalog) — the TRUSTED default. The
+  #      catalog is the release authority for both fresh install and day-2 updates;
+  #      it resolves the channel to an immutable repo@sha256 digest, verified.
+  #   4. (NO tag enumeration, NO :latest, NO local build in the trusted path.)
+  #      Legacy GHCR tag discovery survives ONLY as a consciously-named break-glass
+  #      (CULVERT_INSTALL_ALLOW_TAG_DISCOVERY=1), disabled by default and never
+  #      represented as a trusted catalog selection.
   if [[ -n "${CULVERT_PROXY_SEED_REF:-}" ]]; then
     info "Seeding $PINNED_TAG from CULVERT_PROXY_SEED_REF=$CULVERT_PROXY_SEED_REF ..."
     # Prefer an image ALREADY PRESENT locally (a `docker load`-ed tarball on an
@@ -707,28 +829,36 @@ seed_pinned_tag() {
     warn "Could not tag the running container's image — trying the next source..."
   fi
 
-  # Prefer the latest SIGNED release so the image cosign-verifies and the host
-  # agent installs from a trusted image on a normal source-free install. Empty
-  # (no curl / non-ghcr / no releases / network error) ⇒ fall through to :latest.
-  local signed_ref
-  signed_ref="$(resolve_latest_signed_release_ref)"
-  if [[ -n "$signed_ref" ]]; then
-    info "Seeding $PINNED_TAG from the latest signed release $signed_ref ..."
-    if sudo docker pull "$signed_ref" && sudo docker tag "$signed_ref" "$PINNED_TAG"; then
-      info "Seeded $PINNED_TAG from $signed_ref (signed release — the Maintenance Agent installs from a trusted image)"
-      return 0
-    fi
-    warn "Could not seed from $signed_ref — falling back to :latest ..."
+  # The TRUSTED default: resolve the image from the SIGNED CATALOG and seed the
+  # pinned tag from that exact immutable digest. The catalog — not a mutable tag —
+  # is the release authority, identically to day-2 updates.
+  if seed_from_catalog; then
+    return 0
   fi
 
-  # Fallback: :latest is an unsigned main build that cannot cosign-verify against
-  # the pinned release identity, so a source-free install seeded from here leaves
-  # the maintenance agent unwired unless the operator sets
-  # CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1 (or a source checkout is present).
-  info "Seeding $PINNED_TAG from $PROXY_REPO:latest (unsigned main build) ..."
-  if sudo docker pull "$PROXY_REPO:latest" && sudo docker tag "$PROXY_REPO:latest" "$PINNED_TAG"; then
-    info "Seeded $PINNED_TAG"
-    return 0
+  # BREAK-GLASS ONLY: legacy GHCR tag discovery. Disabled by default; it is NOT a
+  # trusted catalog selection (it picks a mutable tag by naive version sort — the
+  # exact mechanism that installed the stale pre-/app/deploy image 0.0.238). It
+  # runs solely when an operator consciously opts in, and says so loudly.
+  if [[ "${CULVERT_INSTALL_ALLOW_TAG_DISCOVERY:-}" == "1" ]]; then
+    warn "CULVERT_INSTALL_ALLOW_TAG_DISCOVERY=1 — BREAK-GLASS: selecting the image by GHCR tag"
+    warn "discovery instead of the signed catalog. This is NOT a trusted catalog decision and"
+    warn "may pick a stale tag; prefer fixing catalog reachability or an explicit CULVERT_PROXY_SEED_REF."
+    local signed_ref
+    signed_ref="$(resolve_latest_signed_release_ref)"
+    if [[ -n "$signed_ref" ]]; then
+      info "Seeding $PINNED_TAG from tag discovery $signed_ref (break-glass) ..."
+      if sudo docker pull "$signed_ref" && sudo docker tag "$signed_ref" "$PINNED_TAG"; then
+        info "Seeded $PINNED_TAG from $signed_ref (break-glass tag discovery)"
+        return 0
+      fi
+      warn "Could not seed from $signed_ref — trying :latest (break-glass) ..."
+    fi
+    info "Seeding $PINNED_TAG from $PROXY_REPO:latest (break-glass, unsigned main build) ..."
+    if sudo docker pull "$PROXY_REPO:latest" && sudo docker tag "$PROXY_REPO:latest" "$PINNED_TAG"; then
+      info "Seeded $PINNED_TAG (break-glass :latest)"
+      return 0
+    fi
   fi
 
   # NO local build. Culvert is a signed-release product: the deployed binary and
@@ -765,17 +895,24 @@ if ! seed_pinned_tag; then
   # drift a release ahead of the binary and crash-loop the proxy; that path is gone.
   # A registry-unreachable / air-gapped host must preload the image and point the
   # installer at it — the ONLY supported offline path.
-  error "Could not obtain $PINNED_TAG: the registry is unreachable (or blocked) and this
-  installer never builds from source.
+  error "Could not obtain $PINNED_TAG from the signed release catalog, and no explicit
+  image seed was provided. The installer never enumerates GHCR tags and never builds
+  from source — the signed catalog is the release authority.
 
-  On a host that CAN reach the registry, note the current signed release tag, then bring
-  that image to THIS host and re-run pointing the installer at it:
-    # on a connected host:  docker pull $PROXY_REPO:<X.Y.Z> && docker save $PROXY_REPO:<X.Y.Z> -o culvert.tar
-    # copy culvert.tar over, then on THIS host:
-    docker load -i culvert.tar
-    CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh
-  (CULVERT_PROXY_SEED_REF may name any image tag/digest already present on this host or in
-  a private/mirror registry it can reach.)"
+  Fix one of the following, then re-run:
+
+  1) Catalog reachable? The default origin is the canonical Culvert catalog. If this
+     host uses a mirror/staging origin, set it (trust is unchanged by the origin):
+       CULVERT_RELEASE_CATALOG_URL=https://mirror.example/release-catalog sudo bash scripts/install.sh
+
+  2) Offline / air-gapped, or catalog fetch disabled? Preload a signed image and seed it
+     explicitly (this is the supported break-glass; it is loud and recorded):
+       # on a connected host:  docker pull $PROXY_REPO:<X.Y.Z> && docker save $PROXY_REPO:<X.Y.Z> -o culvert.tar
+       # copy culvert.tar over, then on THIS host:
+       docker load -i culvert.tar
+       CULVERT_PROXY_SEED_REF=$PROXY_REPO:<X.Y.Z> sudo bash scripts/install.sh
+     (CULVERT_PROXY_SEED_REF may name any image tag/digest already present on this host
+     or in a private/mirror registry it can reach.)"
 fi
 
 ###############################################################################
@@ -1205,6 +1342,19 @@ setup_at_rest_encryption() {
 
 step "Encryption at rest"
 setup_at_rest_encryption
+
+# Persist the catalog config so the appliance's OWN runtime auto-seed (and every
+# later `docker compose up`, reboot, or agent-driven recreate) uses the SAME origin
+# the installer resolved from — not just this one invocation's environment. Only a
+# non-default override is written; an unset URL keeps the baked canonical default.
+# The origin never changes trust (baked roots + pinned identity are independent of
+# where bytes are fetched), and the runtime still verifies on-disk catalogs even
+# when the fetch is disabled. INSTALL_CHANNEL is recorded for the operator + the
+# future verifier-acquisition stage (the runtime resolves catalog channels itself).
+if [[ -n "$CATALOG_URL" ]]; then
+  env_put CULVERT_RELEASE_CATALOG_URL "$CATALOG_URL" "$INSTALL_DIR/.env"
+fi
+env_put CULVERT_INSTALL_CHANNEL "$INSTALL_CHANNEL" "$INSTALL_DIR/.env"
 
 info "Pulling images and starting services (first run may take a few minutes — ClamAV downloads ~250 MB of virus signatures)..."
 
