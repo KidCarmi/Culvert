@@ -1088,6 +1088,11 @@ components:
       description: Endpoint-specific write payload (rich object; open superset — see the handler).
       additionalProperties: true
 
+    GenericRead:
+      type: object
+      description: Endpoint-specific read model (open superset — see the handler).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -2036,6 +2041,39 @@ paths:
       responses:
         '200':
           description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteSSLBypass
+      tags: [policy]
+      summary: Delete TLS-inspection bypass
+      description: Delete TLS-inspection bypass.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: ssl_bypass.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete TLS-inspection bypass.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
@@ -3254,6 +3292,39 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteFileblock
+      tags: [policy]
+      summary: Delete blocked extension
+      description: Delete blocked extension.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: fileblock.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete blocked extension.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/fileblock/profiles:
     get:
@@ -3391,6 +3462,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ConfigVersionList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createConfigVersion
+      tags: [config]
+      summary: Create config snapshot
+      description: Create config snapshot.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: config.version.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create config snapshot.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/decryption-profiles:
     get:
       operationId: getDecryptionProfiles
@@ -3709,6 +3810,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ScanCache' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: purgeScanCache
+      tags: [security]
+      summary: Purge scan cache
+      description: Purge scan cache.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: scan.cache.purge
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Purge scan cache.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/security-scan/feeds/domain-allowlist:
     get:
       operationId: getScanDomainAllowlist
@@ -4953,6 +5088,36 @@ paths:
               schema: { $ref: '#/components/schemas/SupportBundles' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createSupportBundle
+      tags: [support]
+      summary: Create support bundle
+      description: Create support bundle.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.bundle.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create support bundle.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/support/debug-level:
     get:
       operationId: getSupportDebugLevel
@@ -4975,6 +5140,69 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SupportDebugLevel' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setSupportDebugLevel
+      tags: [support]
+      summary: Set support debug level
+      description: Set support debug level.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: support.debug_level.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set support debug level.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: clearSupportDebugLevel
+      tags: [support]
+      summary: Clear support debug level
+      description: Clear support debug level.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: support.debug_level.clear
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Clear support debug level.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/support/recipients:
     get:
       operationId: getSupportRecipients
@@ -6381,6 +6609,27 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    get:
+      operationId: getBlockPage
+      tags: [policy]
+      summary: Block page HTML
+      description: Block page HTML.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Block page HTML.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/diagnose/all:
     post:
@@ -7117,4 +7366,785 @@ paths:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/syslog:
+    get:
+      operationId: getSyslog
+      tags: [settings]
+      summary: Syslog config
+      description: Syslog config.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Syslog config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setSyslog
+      tags: [settings]
+      summary: Set syslog config
+      description: Set syslog config.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: syslog.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set syslog config.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/otlp:
+    get:
+      operationId: getOTLP
+      tags: [settings]
+      summary: OTLP config
+      description: OTLP config.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OTLP config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setOTLP
+      tags: [settings]
+      summary: Set OTLP config
+      description: Set OTLP config.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: otlp.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set OTLP config.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/ui-allow-ips:
+    get:
+      operationId: getUIAllowIPs
+      tags: [settings]
+      summary: UI allow-IPs
+      description: UI allow-IPs.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: UI allow-IPs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: setUIAllowIPs
+      tags: [settings]
+      summary: Set UI allow-IPs
+      description: Set UI allow-IPs.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: ui_allow_ips.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set UI allow-IPs.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/settings/default-auth-outcome:
+    put:
+      operationId: setDefaultAuthOutcome
+      tags: [settings]
+      summary: Set default auth outcome
+      description: Set default auth outcome.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: default_auth_outcome.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set default auth outcome.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/settings/unauth-mode:
+    put:
+      operationId: setUnauthMode
+      tags: [settings]
+      summary: Set unauth mode (legacy alias)
+      description: Set unauth mode (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: unauth_mode.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set unauth mode (legacy alias).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/blocklist:
+    get:
+      operationId: getBlocklist
+      tags: [policy]
+      summary: Blocklist entries
+      description: Blocklist entries.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: string }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Blocklist entries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addBlocklistEntry
+      tags: [policy]
+      summary: Add blocklist entry
+      description: Add blocklist entry.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Add blocklist entry.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteBlocklistEntry
+      tags: [policy]
+      summary: Delete blocklist entry
+      description: Delete blocklist entry.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: blocklist.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+        - name: host
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete blocklist entry.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/auth/lockouts:
+    get:
+      operationId: getLockouts
+      tags: [auth]
+      summary: Auth lockouts
+      description: Auth lockouts.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Auth lockouts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: clearLockout
+      tags: [auth]
+      summary: Clear auth lockout
+      description: Clear auth lockout.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: auth.lockout.clear
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Clear auth lockout.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/idp:
+    get:
+      operationId: getIdPList
+      tags: [auth]
+      summary: List IdP profiles
+      description: List IdP profiles.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: List IdP profiles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createIdP
+      tags: [auth]
+      summary: Create IdP profile
+      description: Create IdP profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: idp.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create IdP profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/geoip:
+    get:
+      operationId: getGeoIP
+      tags: [security]
+      summary: GeoIP status
+      description: GeoIP status.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: GeoIP status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/export:
+    get:
+      operationId: getExport
+      tags: [settings]
+      summary: Export data
+      description: Export data.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Export data.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat/host:
+    post:
+      operationId: addURLCatHost
+      tags: [policy]
+      summary: Add URL-category host
+      description: Add URL-category host.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: urlcat.host.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Add URL-category host.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteURLCatHost
+      tags: [policy]
+      summary: Delete URL-category host
+      description: Delete URL-category host.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: urlcat.host.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+        - name: host
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete URL-category host.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat/lookup:
+    get:
+      operationId: lookupURLCategory
+      tags: [policy]
+      summary: Lookup URL category
+      description: Lookup URL category.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: host
+          in: query
+          required: false
+          schema: { type: string }
+        - name: url
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Lookup URL category.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/alerts/webhooks/history:
+    get:
+      operationId: getAlertHistory
+      tags: [security]
+      summary: Alert delivery history
+      description: Alert delivery history.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Alert delivery history.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/pac/posture/exceptions:
+    get:
+      operationId: getPACExceptions
+      tags: [pac]
+      summary: PAC posture exceptions
+      description: PAC posture exceptions.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC posture exceptions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/content-scan:
+    get:
+      operationId: getContentScan
+      tags: [security]
+      summary: DPI content-scan (legacy alias)
+      description: DPI content-scan (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: DPI content-scan (legacy alias).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addContentScan
+      tags: [security]
+      summary: Add DPI pattern (legacy alias)
+      description: Add DPI pattern (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: dpi.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Add DPI pattern (legacy alias).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteContentScan
+      tags: [security]
+      summary: Delete DPI pattern (legacy alias)
+      description: Delete DPI pattern (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: dpi.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+        - name: host
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete DPI pattern (legacy alias).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/content-scan/bypass:
+    get:
+      operationId: getContentScanBypass
+      tags: [security]
+      summary: DPI bypass (legacy alias)
+      description: DPI bypass (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: DPI bypass (legacy alias).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setContentScanBypass
+      tags: [security]
+      summary: Set DPI bypass (legacy alias)
+      description: Set DPI bypass (legacy alias).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: dpi.bypass.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set DPI bypass (legacy alias).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/logs:
+    get:
+      operationId: getLogs
+      tags: [dashboard]
+      summary: Request logs
+      description: Request logs.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: string }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: string }
+        - name: source
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Request logs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenericRead' }
         '403': { $ref: '#/components/responses/PlainForbidden' }

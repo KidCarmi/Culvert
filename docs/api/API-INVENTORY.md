@@ -3,27 +3,27 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 223
-- **Exempt (≤270-day horizon):** 61
+- **Documented:** 259
+- **Exempt (≤270-day horizon):** 25
 
 ## By domain
 
 | Domain | Entries | Documented |
 |---|---|---|
-| auth | 18 | 8 |
+| auth | 18 | 12 |
 | cdr | 11 | 9 |
 | cluster | 31 | 30 |
-| dashboard | 13 | 11 |
+| dashboard | 13 | 12 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
-| pac | 23 | 20 |
-| policy | 65 | 57 |
+| pac | 23 | 21 |
+| policy | 65 | 65 |
 | release | 6 | 6 |
-| security | 51 | 41 |
-| settings | 30 | 20 |
+| security | 51 | 50 |
+| settings | 30 | 30 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 16 |
+| support | 30 | 19 |
 
 ## Documented operations
 
@@ -33,9 +33,12 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/alerts/webhooks` | apiAlertsWebhooks | viewer |
 | POST | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
 | PUT | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
+| GET | `/api/alerts/webhooks/history` | apiAlertsDeliveryHist | viewer |
 | POST | `/api/alerts/webhooks/test` | apiAlertsWebhookTest | operator |
 | GET | `/api/audit` | apiAudit | viewer |
 | POST | `/api/auth/change-password` | apiAuthChangePassword | viewer |
+| GET | `/api/auth/lockouts` | apiAuthLockouts | admin |
+| POST | `/api/auth/lockouts` | apiAuthLockouts | admin |
 | POST | `/api/auth/login` | apiAuthLogin | public |
 | POST | `/api/auth/logout` | apiAuthLogout | public |
 | GET | `/api/auth/status` | apiAuthStatus | public |
@@ -47,6 +50,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/authpolicy` | apiAuthPolicy | admin |
 | PUT | `/api/authpolicy` | apiAuthPolicy | admin |
 | POST | `/api/authpolicy/reorder` | apiAuthPolicyReorder | admin |
+| DELETE | `/api/blocklist` | apiBlocklist | operator |
+| GET | `/api/blocklist` | apiBlocklist | viewer |
+| POST | `/api/blocklist` | apiBlocklist | operator |
 | DELETE | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
 | GET | `/api/blocklist/exceptions` | apiBlocklistExceptions | viewer |
 | POST | `/api/blocklist/exceptions` | apiBlocklistExceptions | operator |
@@ -56,6 +62,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/blocklist/feed/sync` | apiBlocklistFeedSync | operator |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
+| GET | `/api/blockpage` | apiBlockPage | viewer |
 | PUT | `/api/blockpage` | apiBlockPage | admin |
 | GET | `/api/ca-cert` | apiCACert | viewer |
 | POST | `/api/ca/cache-clear` | apiCACacheClear | admin |
@@ -106,8 +113,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/config/export` | apiConfigExport | admin |
 | POST | `/api/config/import` | apiConfigImport | admin |
 | GET | `/api/config/versions` | apiConfigVersions | viewer |
+| POST | `/api/config/versions` | apiConfigVersions | admin |
 | GET | `/api/connlimit` | apiConnLimit | viewer |
 | POST | `/api/connlimit` | apiConnLimit | admin |
+| DELETE | `/api/content-scan` | apiContentScan | operator |
+| GET | `/api/content-scan` | apiContentScan | viewer |
+| POST | `/api/content-scan` | apiContentScan | operator |
+| GET | `/api/content-scan/bypass` | apiContentScanBypass | viewer |
+| PUT | `/api/content-scan/bypass` | apiContentScanBypass | admin |
 | * | `/api/country-traffic` | apiCountryTraffic | viewer |
 | * | `/api/dashboard/health` | apiDashboardHealth | viewer |
 | * | `/api/dashboard/threats` | apiDashboardThreats | viewer |
@@ -139,16 +152,22 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/dpi` | apiContentScan | operator |
 | GET | `/api/dpi/bypass` | apiContentScanBypass | viewer |
 | PUT | `/api/dpi/bypass` | apiContentScanBypass | admin |
+| * | `/api/export` | apiExport | viewer |
+| DELETE | `/api/fileblock` | apiFileblock | operator |
 | GET | `/api/fileblock` | apiFileblock | viewer |
 | POST | `/api/fileblock` | apiFileblock | operator |
 | DELETE | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
 | GET | `/api/fileblock/profiles` | apiFileblockProfiles | viewer |
 | POST | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
 | PUT | `/api/fileblock/profiles` | apiFileblockProfiles | operator |
+| * | `/api/geoip` | apiGeoIPConfig | viewer |
 | GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin |
 | GET | `/api/health/explain` | apiHealthExplain | viewer |
+| GET | `/api/idp` | apiIdPList | viewer |
+| POST | `/api/idp` | apiIdPList | admin |
 | POST | `/api/idp/discover` | apiIdPDiscover | admin |
 | GET | `/api/logger` | apiLoggerConfig | viewer |
+| * | `/api/logs` | apiLogs | viewer |
 | POST | `/api/logs/purge` | apiLogsPurge | admin |
 | GET | `/api/logs/retention` | apiLogsRetention | viewer |
 | PUT | `/api/logs/retention` | apiLogsRetention | admin |
@@ -157,6 +176,8 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/objects/references` | apiObjectReferences | viewer |
 | GET | `/api/ocsp` | apiOCSPConfig | viewer |
 | POST | `/api/ocsp` | apiOCSPConfig | admin |
+| GET | `/api/otlp` | apiOTLPConfig | admin |
+| POST | `/api/otlp` | apiOTLPConfig | admin |
 | GET | `/api/pac-config` | apiPACConfig | viewer |
 | POST | `/api/pac-config` | apiPACConfig | admin |
 | POST | `/api/pac/analyze` | apiPACAnalyze | viewer |
@@ -166,6 +187,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/pac/pools/` | apiPACPoolItem | viewer |
 | PUT | `/api/pac/pools/` | apiPACPoolItem | admin |
 | POST | `/api/pac/posture/diff` | apiPACPostureDiff | viewer |
+| GET | `/api/pac/posture/exceptions` | apiPACExceptions | viewer |
 | DELETE | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
 | GET | `/api/pac/posture/exceptions/` | apiPACExceptionItem | viewer |
 | PUT | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
@@ -199,6 +221,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/rewrite` | apiRewrite | operator |
 | GET | `/api/security` | apiSecurity | viewer |
 | POST | `/api/security` | apiSecurity | admin |
+| DELETE | `/api/security-scan/cache` | apiScanCache | admin |
 | GET | `/api/security-scan/cache` | apiScanCache | viewer |
 | GET | `/api/security-scan/exclusions` | apiSecScanExclusions | viewer |
 | PUT | `/api/security-scan/exclusions` | apiSecScanExclusions | admin |
@@ -224,25 +247,35 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/session-timeout` | apiSessionTimeout | admin |
 | GET | `/api/settings` | apiSettings | viewer |
 | POST | `/api/settings` | apiSettings | admin |
+| PUT | `/api/settings/default-auth-outcome` | apiDefaultAuthOutcome | admin |
 | GET | `/api/settings/log-level` | apiLogLevel | viewer |
 | PUT | `/api/settings/log-level` | apiLogLevel | admin |
 | GET | `/api/settings/network` | apiNetworkSettings | viewer |
 | POST | `/api/settings/network` | apiNetworkSettings | admin |
+| PUT | `/api/settings/unauth-mode` | apiDefaultAuthOutcome | admin |
 | POST | `/api/setup/complete` | apiSetupComplete | public |
 | GET | `/api/setup/status` | apiSetupStatus | public |
+| DELETE | `/api/ssl-bypass` | apiSSLBypass | operator |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
 | POST | `/api/ssl-bypass` | apiSSLBypass | operator |
 | * | `/api/stats` | apiStats | viewer |
 | GET | `/api/support/bundles` | apiSupportBundles | viewer |
+| POST | `/api/support/bundles` | apiSupportBundles | admin |
+| DELETE | `/api/support/debug-level` | apiSupportDebugLevel | operator |
 | GET | `/api/support/debug-level` | apiSupportDebugLevel | viewer |
+| POST | `/api/support/debug-level` | apiSupportDebugLevel | admin |
 | GET | `/api/support/recipients` | apiSupportRecipients | viewer |
 | POST | `/api/support/recipients` | apiSupportRecipients | admin |
 | GET | `/api/support/retention` | apiSupportRetention | viewer |
 | PUT | `/api/support/retention` | apiSupportRetention | admin |
 | GET | `/api/support/status` | apiSupportStatus | viewer |
+| GET | `/api/syslog` | apiSyslogConfig | admin |
+| POST | `/api/syslog` | apiSyslogConfig | admin |
 | POST | `/api/syslog/test` | apiSyslogTest | admin |
 | * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |
+| GET | `/api/ui-allow-ips` | apiUIAllowIPs | admin |
+| POST | `/api/ui-allow-ips` | apiUIAllowIPs | admin |
 | GET | `/api/upstream` | apiUpstream | viewer |
 | POST | `/api/upstream` | apiUpstream | admin |
 | POST | `/api/upstream/health` | apiUpstreamHealth | admin |
@@ -251,4 +284,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/urlcat` | apiURLCat | viewer |
 | POST | `/api/urlcat` | apiURLCat | operator |
 | PUT | `/api/urlcat` | apiURLCat | operator |
+| DELETE | `/api/urlcat/host` | apiURLCatHost | operator |
+| POST | `/api/urlcat/host` | apiURLCatHost | operator |
+| GET | `/api/urlcat/lookup` | apiURLCatLookup | viewer |
 | GET | `/healthz` | apiHealthz | public |
