@@ -1,22 +1,12 @@
 # API Inventory
 
-Human-readable summary of the Culvert admin-API route inventory. The
-**authoritative, machine-readable** inventory is `api/route-classification.yaml`,
-which is derived from the live `uiRoutes` table and enforced by the
-route-coverage gate (`TestOpenAPI_Gate3_RouteCoverage`). This file is a
-generated summary — do not hand-edit classifications here.
+Human-readable summary. The **authoritative, machine-readable** inventory is
+`api/route-classification.yaml`, derived from the live `uiRoutes` table and
+enforced by the route-coverage gate. Generated — do not hand-edit.
 
 - **Total route method-entries:** 284
-- **Documented in the OpenAPI contract:** 19
-- **Exempt (time-boxed, expiry 2027-01-31):** 265
-
-## By visibility
-
-| Visibility | Count |
-|---|---|
-| admin-supported | 270 |
-| health-ops | 1 |
-| public-supported | 13 |
+- **Documented in the OpenAPI contract:** 31
+- **Exempt (time-boxed, ≤270-day horizon):** 253
 
 ## By domain
 
@@ -28,50 +18,51 @@ generated summary — do not hand-edit classifications here.
 | dashboard | 13 | 2 |
 | governance | 1 | 1 |
 | observability | 2 | 1 |
-| pac | 23 | 0 |
-| policy | 65 | 2 |
+| pac | 23 | 1 |
+| policy | 65 | 7 |
 | release | 6 | 0 |
-| security | 51 | 2 |
-| settings | 30 | 2 |
+| security | 51 | 5 |
+| settings | 30 | 5 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
 | support | 30 | 0 |
 
-## By danger level
+## Documented operations
 
-| Danger | Count |
-|---|---|
-| high | 40 |
-| medium | 133 |
-| none | 111 |
+| Method | Route | Handler | Min role | Danger |
+|---|---|---|---|---|
+| POST | `/api/auth/change-password` | apiAuthChangePassword | viewer | medium |
+| POST | `/api/auth/login` | apiAuthLogin | public | medium |
+| POST | `/api/auth/logout` | apiAuthLogout | public | medium |
+| GET | `/api/auth/status` | apiAuthStatus | public | none |
+| DELETE | `/api/auth/users` | apiAuthUsers | admin | high |
+| GET | `/api/auth/users` | apiAuthUsers | admin | none |
+| POST | `/api/auth/users` | apiAuthUsers | admin | medium |
+| GET | `/api/authpolicy` | apiAuthPolicy | viewer | none |
+| GET | `/api/blocklist/mode` | apiBlocklistMode | viewer | none |
+| POST | `/api/ca/rotate` | apiCARotate | admin | high |
+| GET | `/api/ca/status` | apiCAStatus | viewer | none |
+| GET | `/api/config/export` | apiConfigExport | admin | none |
+| POST | `/api/config/import` | apiConfigImport | admin | high |
+| GET | `/api/connlimit` | apiConnLimit | viewer | none |
+| DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator | high |
+| GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer | none |
+| GET | `/api/decryption/health` | apiDecryptionHealth | viewer | none |
+| GET | `/api/default-action` | apiDefaultAction | viewer | none |
+| GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin | none |
+| GET | `/api/logger` | apiLoggerConfig | viewer | none |
+| GET | `/api/ocsp` | apiOCSPConfig | viewer | none |
+| GET | `/api/pac-config` | apiPACConfig | viewer | none |
+| GET | `/api/policy` | apiPolicy | viewer | none |
+| GET | `/api/security` | apiSecurity | viewer | none |
+| GET | `/api/session-timeout` | apiSessionTimeout | viewer | none |
+| POST | `/api/setup/complete` | apiSetupComplete | public | medium |
+| GET | `/api/setup/status` | apiSetupStatus | public | none |
+| GET | `/api/ssl-bypass` | apiSSLBypass | viewer | none |
+| * | `/api/stats` | apiStats | viewer | medium |
+| * | `/api/top-hosts` | apiTopHosts | viewer | medium |
+| GET | `/healthz` | apiHealthz | public | none |
 
-## Documented operations (baseline contract v1.0.0)
+## Non-REST surfaces (out of OpenAPI scope)
 
-| Method | Route | Handler | Visibility | Min role | Danger |
-|---|---|---|---|---|---|
-| POST | `/api/auth/change-password` | apiAuthChangePassword | admin-supported | viewer | medium |
-| POST | `/api/auth/login` | apiAuthLogin | public-supported | public | medium |
-| POST | `/api/auth/logout` | apiAuthLogout | public-supported | public | medium |
-| GET | `/api/auth/status` | apiAuthStatus | public-supported | public | none |
-| DELETE | `/api/auth/users` | apiAuthUsers | admin-supported | admin | high |
-| GET | `/api/auth/users` | apiAuthUsers | admin-supported | admin | none |
-| POST | `/api/auth/users` | apiAuthUsers | admin-supported | admin | medium |
-| POST | `/api/ca/rotate` | apiCARotate | admin-supported | admin | high |
-| GET | `/api/ca/status` | apiCAStatus | admin-supported | viewer | none |
-| GET | `/api/config/export` | apiConfigExport | admin-supported | admin | none |
-| POST | `/api/config/import` | apiConfigImport | admin-supported | admin | high |
-| DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | admin-supported | operator | high |
-| GET | `/api/decryption-exclusions` | apiDecryptionExclusions | admin-supported | viewer | none |
-| GET | `/api/governance/control-plane` | apiGovernanceControlPlane | admin-supported | admin | none |
-| POST | `/api/setup/complete` | apiSetupComplete | public-supported | public | medium |
-| GET | `/api/setup/status` | apiSetupStatus | public-supported | public | none |
-| * | `/api/stats` | apiStats | admin-supported | viewer | medium |
-| * | `/api/top-hosts` | apiTopHosts | admin-supported | viewer | medium |
-| GET | `/healthz` | apiHealthz | health-ops | public | none |
-
-## Non-REST surfaces (out of OpenAPI scope, documented in the risk register)
-
-- Forward-proxy data path (HTTP CONNECT / plain-HTTP / SOCKS5) on `-port` — a proxy protocol, not a resource API.
-- Control-Plane ↔ Data-Plane **gRPC** stream — described by protobuf.
-- Proxy-listener built-ins (`/health`, `/ready`, `/metrics`, `/proxy.pac`) — see risk register §8.
-- Scan sidecar HTTP service — unauthenticated internal surface, risk register §9 (High).
+- Forward-proxy data path (CONNECT/plain-HTTP/SOCKS5); CP↔DP gRPC; proxy-listener built-ins; scan sidecar (risk register §8/§9).

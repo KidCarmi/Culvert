@@ -57,6 +57,12 @@ tags:
     description: Certificate-authority and TLS-inspection security controls.
   - name: config
     description: Configuration export/import (backup & restore).
+  - name: policy
+    description: Policy engine, blocklist, and TLS-inspection policy reads.
+  - name: pac
+    description: Proxy auto-config (PAC) settings.
+  - name: settings
+    description: Appliance settings — logging, session, connection limits.
 
 # ── Security schemes ──────────────────────────────────────────────────────────
 # The runtime accepts EITHER a signed session cookie (browser flow) OR HTTP Basic
@@ -270,6 +276,118 @@ components:
       type: object
       description: C3 governance surface — route inventory, C2 mode, counters, derived health.
       additionalProperties: true
+
+    # ── Slice 3: read-model schemas ───────────────────────────────────────────────
+    PolicyRule:
+      type: object
+      description: A single policy rule (rich object; open superset — fields vary by rule type/version).
+      additionalProperties: true
+      properties:
+        priority: { type: integer }
+        name: { type: string }
+        action: { type: string }
+        destFQDN: { type: string }
+        sslAction: { type: string }
+        enabled: { type: boolean }
+    PolicyList:
+      type: object
+      required: [rules, count, version, updatedAt, draft]
+      additionalProperties: false
+      properties:
+        rules: { type: array, items: { $ref: '#/components/schemas/PolicyRule' } }
+        count: { type: integer }
+        version: { type: integer, format: int64 }
+        updatedAt: { type: string }
+        draft: { type: boolean }
+    AuthPolicyList:
+      type: object
+      required: [rules, count, defaultAction, note]
+      additionalProperties: false
+      properties:
+        rules: { type: array, items: { type: object, additionalProperties: true } }
+        count: { type: integer }
+        defaultAction: { type: string, enum: [allow, deny] }
+        note: { type: string }
+    DefaultActionStatus:
+      type: object
+      required: [defaultAction]
+      additionalProperties: false
+      properties:
+        defaultAction: { type: string, enum: [allow, deny] }
+    BlocklistModeStatus:
+      type: object
+      required: [mode]
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [block, allow] }
+    SecurityConfig:
+      type: object
+      required: [ipFilterMode, rateLimitRPM, rateLimitOn]
+      additionalProperties: false
+      properties:
+        ipFilterMode: { type: string }
+        ipList: { type: array, items: { type: string }, nullable: true }
+        rateLimitRPM: { type: integer }
+        rateLimitOn: { type: boolean }
+        rateLimitExempt: { type: array, items: { type: string }, nullable: true }
+    SSLBypassList:
+      type: object
+      required: [patterns, count]
+      additionalProperties: false
+      properties:
+        patterns: { type: array, items: { type: string }, nullable: true }
+        count: { type: integer }
+    OCSPStatus:
+      type: object
+      required: [enabled, cacheLen, failClosedTotal, revokedTotal, lastFailClosedAt]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        cacheLen: { type: integer }
+        failClosedTotal: { type: integer, format: int64 }
+        revokedTotal: { type: integer, format: int64 }
+        lastFailClosedAt: { type: string }
+    SessionTimeout:
+      type: object
+      required: [hours]
+      additionalProperties: false
+      properties:
+        hours: { type: integer }
+    PACConfig:
+      type: object
+      required: [proxyHost, proxyPort]
+      additionalProperties: false
+      properties:
+        proxyHost: { type: string }
+        proxyPort: { type: integer }
+        exclusions: { type: array, items: { type: string }, nullable: true }
+    ConnLimitStatus:
+      type: object
+      required: [enabled, maxPerIP, activeIPs]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        maxPerIP: { type: integer }
+        activeIPs: { type: integer }
+    LoggerConfig:
+      type: object
+      required: [logFile, logMaxMB, logFormat]
+      additionalProperties: false
+      properties:
+        logFile: { type: string }
+        logMaxMB: { type: integer }
+        logFormat: { type: string }
+    DecryptionHealth:
+      type: object
+      description: TLS-inspection health — sessions, failures, coverage, trend, and the adaptive auto-exclude cache.
+      required: [sessions, failures, coverage, autoexclude]
+      additionalProperties: true
+      properties:
+        sessions: { type: object, additionalProperties: true }
+        failures: { type: object, additionalProperties: true }
+        coverage: { type: object, additionalProperties: true }
+        trend: { type: array, items: { type: object, additionalProperties: true } }
+        autoexclude: { type: object, additionalProperties: true }
 
 paths:
   /healthz:
@@ -839,4 +957,269 @@ paths:
               schema: { $ref: '#/components/schemas/OkResponse' }
               example: { ok: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/policy:
+    get:
+      operationId: getPolicy
+      tags: [policy]
+      summary: List policy rules
+      description: Returns the effective policy rule list plus version, last-update time, and draft-mode flag.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: List policy rules.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/authpolicy:
+    get:
+      operationId: getAuthPolicy
+      tags: [policy]
+      summary: List authentication-policy rules
+      description: Returns authentication policy rules, the global default action, and the exempt note.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: List authentication-policy rules.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthPolicyList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/default-action:
+    get:
+      operationId: getDefaultAction
+      tags: [policy]
+      summary: Global default policy action
+      description: Returns the default policy action applied when no rule matches (allow or deny).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Global default policy action.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DefaultActionStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/blocklist/mode:
+    get:
+      operationId: getBlocklistMode
+      tags: [policy]
+      summary: Blocklist mode
+      description: Returns the blocklist mode (block-list or allow-list).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Blocklist mode.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlocklistModeStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/ssl-bypass:
+    get:
+      operationId: getSSLBypass
+      tags: [policy]
+      summary: TLS-inspection bypass patterns
+      description: Returns the host patterns excluded from TLS inspection.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: TLS-inspection bypass patterns.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SSLBypassList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/decryption/health:
+    get:
+      operationId: getDecryptionHealth
+      tags: [policy]
+      summary: TLS-inspection health
+      description: Returns decryption sessions, failures, coverage, trend, and the adaptive auto-exclude cache state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: TLS-inspection health.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecryptionHealth' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security:
+    get:
+      operationId: getSecurity
+      tags: [security]
+      summary: IP-filter and rate-limit config
+      description: Returns the IP-filter mode and list plus rate-limit settings and exemptions.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: IP-filter and rate-limit config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SecurityConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/ocsp:
+    get:
+      operationId: getOCSP
+      tags: [security]
+      summary: OCSP status
+      description: Returns OCSP revocation-check status and counters.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: OCSP status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OCSPStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/session-timeout:
+    get:
+      operationId: getSessionTimeout
+      tags: [settings]
+      summary: Admin session TTL
+      description: Returns the admin session timeout in hours.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Admin session TTL.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionTimeout' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/connlimit:
+    get:
+      operationId: getConnLimit
+      tags: [settings]
+      summary: Per-IP connection limit
+      description: Returns the per-IP connection-limit configuration and active-IP count.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Per-IP connection limit.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnLimitStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/logger:
+    get:
+      operationId: getLoggerConfig
+      tags: [settings]
+      summary: Logger configuration
+      description: Returns the log file path, max size, and format.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Logger configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoggerConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/pac-config:
+    get:
+      operationId: getPACConfig
+      tags: [pac]
+      summary: PAC configuration
+      description: Returns the PAC proxy host, port, and exclusion list.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: PAC configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
