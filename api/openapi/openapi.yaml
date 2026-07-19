@@ -1083,6 +1083,11 @@ components:
       description: Release dispatch/upgrade status.
       additionalProperties: true
 
+    GenericWriteInput:
+      type: object
+      description: Endpoint-specific write payload (rich object; open superset — see the handler).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -1675,6 +1680,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PolicyList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createPolicyRule
+      tags: [policy]
+      summary: Create policy rule
+      description: Create policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: policy.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updatePolicyRule
+      tags: [policy]
+      summary: Update policy rule
+      description: Update policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: policy.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Update policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deletePolicyRule
+      tags: [policy]
+      summary: Delete policy rule
+      description: Delete policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: policy.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/authpolicy:
     get:
       operationId: getAuthPolicy
@@ -1697,6 +1794,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/AuthPolicyList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createAuthPolicyRule
+      tags: [policy]
+      summary: Create auth policy rule
+      description: Create auth policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: authpolicy.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create auth policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateAuthPolicyRule
+      tags: [policy]
+      summary: Update auth policy rule
+      description: Update auth policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: authpolicy.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Update auth policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteAuthPolicyRule
+      tags: [policy]
+      summary: Delete auth policy rule
+      description: Delete auth policy rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: authpolicy.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete auth policy rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/default-action:
     get:
       operationId: getDefaultAction
@@ -2656,6 +2845,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PolicyDraftStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setPolicyDraft
+      tags: [policy]
+      summary: Toggle policy draft mode
+      description: Toggle policy draft mode.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: policy.draft.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Toggle policy draft mode.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/session-secret:
     get:
       operationId: getSessionSecret
@@ -2892,6 +3111,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/URLCategoryList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createURLCategory
+      tags: [policy]
+      summary: Create URL category
+      description: Create URL category.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: urlcat.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create URL category.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateURLCategory
+      tags: [policy]
+      summary: Update URL category
+      description: Update URL category.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: urlcat.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Update URL category.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteURLCategory
+      tags: [policy]
+      summary: Delete URL category
+      description: Delete URL category.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: urlcat.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete URL category.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/fileblock:
     get:
       operationId: getFileblock
@@ -2966,6 +3277,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FileblockProfileList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createFileblockProfile
+      tags: [policy]
+      summary: Create file-block profile
+      description: Create file-block profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: fileblock_profile.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create file-block profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateFileblockProfile
+      tags: [policy]
+      summary: Update file-block profile
+      description: Update file-block profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: fileblock_profile.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Update file-block profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteFileblockProfile
+      tags: [policy]
+      summary: Delete file-block profile
+      description: Delete file-block profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: fileblock_profile.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete file-block profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/config/versions:
     get:
       operationId: getConfigVersions
@@ -3124,6 +3527,69 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/DPIConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: addDPIPattern
+      tags: [security]
+      summary: Add DPI pattern
+      description: Add DPI pattern.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: dpi.add
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Add DPI pattern.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteDPIPattern
+      tags: [security]
+      summary: Delete DPI pattern
+      description: Delete DPI pattern.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: dpi.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete DPI pattern.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/dpi/bypass:
     get:
       operationId: getDPIBypass
@@ -3421,6 +3887,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACPools' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createPACPool
+      tags: [pac]
+      summary: Create PAC pool
+      description: Create PAC pool.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: pac.pool.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create PAC pool.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/pac/profiles:
     get:
       operationId: getPACProfiles
@@ -3443,6 +3939,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PACProfiles' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createPACProfile
+      tags: [pac]
+      summary: Create PAC profile
+      description: Create PAC profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: pac.profile.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create PAC profile.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/pac/posture/inventory:
     get:
       operationId: getPACPostureInventory
@@ -3758,6 +4284,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterHA' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: enableHA
+      tags: [cluster]
+      summary: Enable HA
+      description: Enable HA.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.ha.enable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Enable HA.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/support/status:
     get:
       operationId: getSupportStatus
@@ -4008,6 +4564,69 @@ paths:
           description: Bandwidth manager not initialised. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+    post:
+      operationId: setBandwidthPolicy
+      tags: [cluster]
+      summary: Set bandwidth policy
+      description: Set bandwidth policy.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: bandwidth.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set bandwidth policy.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteBandwidthPolicy
+      tags: [cluster]
+      summary: Delete bandwidth policy
+      description: Delete bandwidth policy.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: bandwidth.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete bandwidth policy.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cluster/rate-limits:
     get:
       operationId: getClusterRateLimits
@@ -4482,6 +5101,98 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/YARARules' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createYARARule
+      tags: [security]
+      summary: Create YARA rule
+      description: Create YARA rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.rule.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create YARA rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateYARARulesCollection
+      tags: [security]
+      summary: Update YARA rules
+      description: Update YARA rules.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.rules.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Update YARA rules.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteYARARule
+      tags: [security]
+      summary: Delete YARA rule
+      description: Delete YARA rule.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.rule.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete YARA rule.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/decryption-exclusions/tunables:
     get:
       operationId: getAutoExcludeTunables
@@ -5269,6 +5980,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CDRConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setCDRConfig
+      tags: [cluster]
+      summary: Set CDR config
+      description: Set CDR config.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: cdr.config.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Set CDR config.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cdr/health:
     get:
       operationId: getCDRHealth
@@ -5317,6 +6058,40 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CDRInstances' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteCDRInstance
+      tags: [cluster]
+      summary: Delete CDR instance
+      description: Delete CDR instance.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: cdr.instance.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete CDR instance.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cdr/policies:
     get:
       operationId: getCDRPolicies
@@ -5339,6 +6114,69 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/CDRPolicies' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createCDRPolicy
+      tags: [cluster]
+      summary: Create CDR policy
+      description: Create CDR policy.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: cdr.policy.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Create CDR policy.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteCDRPolicy
+      tags: [cluster]
+      summary: Delete CDR policy
+      description: Delete CDR policy.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: cdr.policy.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Delete CDR policy.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/releases/current:
     get:
       operationId: getReleaseCurrent
@@ -5507,6 +6345,37 @@ paths:
       responses:
         '200':
           description: Resume dispatch initiated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/blockpage:
+    put:
+      operationId: setBlockPage
+      tags: [policy]
+      summary: Set block page HTML
+      description: Sets the custom block-page HTML template.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: blockpage.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+      responses:
+        '200':
+          description: Block page set.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
