@@ -35,7 +35,7 @@ func TestResolveSSLDecision_ClassifiesSource(t *testing.T) {
 	}
 
 	// A learned exclusion under that scope ⇒ bypass, autoexclude_cache, with reason+scope, consulted.
-	autoExclude().Observe(foScope, "fo", "seeded.example", autoexclude.ReasonClientPinned, "id:probe")
+	autoExclude().Observe(foScope, scopeGen(t, "fo"), "fo", "seeded.example", autoexclude.ReasonClientPinned, "id:probe")
 	d := resolveSSLDecision(fo, "seeded.example", "1.2.3.4")
 	if d.Action != SSLBypass || d.Source != decryptobs.DecisionAutoexcludeCache ||
 		d.ExclReason != autoexclude.ReasonClientPinned || d.ScopeID != foScope || !d.Consulted {

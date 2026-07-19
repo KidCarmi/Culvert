@@ -19,6 +19,8 @@
 package decryptprofile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -158,6 +160,79 @@ type Profile struct {
 
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+
+	// securityGen is the precomputed security generation (see computeSecurityGen):
+	// a fingerprint over ONLY the fields whose change alters the meaning/safety of a
+	// learned adaptive-decryption exclusion. Set by the store on every write; read by
+	// the fail-open scope accessors so the CONNECT hot path never hashes. Unexported
+	// ⇒ never JSON-serialized (never persisted, never CP→DP-synced); it is recomputed
+	// identically on every node and across restarts from the fields it fingerprints.
+	securityGen string
+}
+
+// securityGenVersion tags the fingerprint scheme so the encoding can evolve
+// without silently colliding with an old one. Bump on any field-set/encoding change.
+const securityGenVersion = "v1"
+
+// computeSecurityGen returns the profile's security generation: a deterministic
+// fingerprint over ONLY the fields whose change alters the meaning or safety of a
+// learned adaptive-decryption exclusion — OnInspectError (the fail-open gate),
+// CertVerification, OnUnsupported, MinTLSVersion, MaxTLSVersion, and the InspectHTTP2
+// tri-state. Cosmetic/identity fields (ID, Name, CreatedAt, UpdatedAt) and the
+// operational StallTimeoutSecs (a per-stream timeout, not a decrypt-compatibility or
+// bypass-authorization determinant) are DELIBERATELY excluded, so a rename or
+// display-only edit never invalidates learned entries. Pure function of the listed
+// fields ⇒ identical on every node (CP→DP) and across restarts. Not on the hot path
+// (precomputed at store-write time), so the write-time allocation is irrelevant.
+//
+// SCOPE BOUNDARY (deliberate): this fingerprints the PROFILE's own declared posture.
+// When a profile leaves a field to INHERIT — CertVerification=="" or InspectHTTP2==nil
+// — the effective per-session value falls back to the matched rule (rule.TLSSkipVerify
+// / rule.StripALPN, see decryptprofile_resolve.go). Those are RULE-level, and the
+// learned exclusion is PROFILE-scoped ((profileID, host), the mission's fixed isolation
+// boundary), so a rule-level change to an inherited field is NOT a profile edit and does
+// not move the gen. This is safe for the cert-verify axis (an untrusted/expired cert is a
+// BLOCK, never a learn reason, and a bypassed session runs no inspect leg for
+// TLSSkipVerify to govern) and at most leaves a self-healing (TTL-bounded) bypass on the
+// inspection-mode axis. An operator who wants a field to fence learned exclusions should
+// set it EXPLICITLY on the profile (then it is fingerprinted here). Per-RULE effective-
+// posture fencing would re-scope the (profileID, host) boundary and is out of scope for
+// this wave — a separate ADR (see roadmap/PR2-...md §Rejected alternatives).
+func computeSecurityGen(p *Profile) string {
+	h := sha256.New()
+	h.Write([]byte(securityGenVersion))
+	// Fixed order, 0x00-delimited. The values are a closed ASCII vocabulary (enum
+	// strings + "1.2"/"1.3") that never contains NUL, so the delimiter is unambiguous.
+	for _, v := range []string{p.OnInspectError, p.CertVerification, p.OnUnsupported, p.MinTLSVersion, p.MaxTLSVersion} {
+		h.Write([]byte{0x00})
+		h.Write([]byte(v))
+	}
+	h.Write([]byte{0x00, inspectHTTP2Byte(p.InspectHTTP2)})
+	return hex.EncodeToString(h.Sum(nil)[:8]) // 64-bit fingerprint (16 hex chars); collision-negligible for this closed input space
+}
+
+// inspectHTTP2Byte encodes the InspectHTTP2 *bool tri-state (nil=inherit / true /
+// false) into a single distinct byte, so the three states fingerprint distinctly.
+func inspectHTTP2Byte(b *bool) byte {
+	switch {
+	case b == nil:
+		return 0
+	case *b:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// SecurityGen returns the profile's security generation (see computeSecurityGen).
+// The store precomputes it on every write; for a Profile constructed OUTSIDE the
+// store (tests, direct literals, a copyOut value) it computes on demand, so the
+// value is always correct and identical to the stored one.
+func (p *Profile) SecurityGen() string {
+	if p.securityGen != "" {
+		return p.securityGen
+	}
+	return computeSecurityGen(p)
 }
 
 // Store manages persistent decryption profiles with O(1) name lookups.
@@ -289,27 +364,31 @@ func (s *Store) List() []Profile {
 	return out
 }
 
-// FailOpenScope returns the profile's ID and true IFF a profile with the given
-// name exists AND opts into fail-open (OnInspectError=="fail-open"). It is a
-// HOT-PATH accessor (resolveSSLAction calls it per CONNECT for fail-open rules):
-// it reads only two string fields under the RLock and returns NO copy, avoiding
-// the copyOut allocation a full GetByName pays. The learn/cold paths keep the
-// copy-returning accessors.
-func (s *Store) FailOpenScope(name string) (id string, ok bool) {
+// FailOpenScope returns the profile's ID, its precomputed security generation, and
+// true IFF a profile with the given name exists AND opts into fail-open
+// (OnInspectError=="fail-open"). It is a HOT-PATH accessor (resolveSSLAction calls
+// it per CONNECT for fail-open rules): it reads only three stored string fields under
+// the RLock and returns NO copy, avoiding the copyOut allocation a full GetByName
+// pays. The gen fences the learned-exclusion cache to the exact inspection posture,
+// so a security-relevant profile edit invalidates entries without re-hashing here.
+// The learn/cold paths keep the copy-returning accessors.
+func (s *Store) FailOpenScope(name string) (id, gen string, ok bool) {
 	s.mu.RLock()
 	p := s.profiles[strings.ToLower(strings.TrimSpace(name))]
 	if p == nil || p.OnInspectError != "fail-open" {
 		s.mu.RUnlock()
-		return "", false
+		return "", "", false
 	}
 	id = p.ID
+	gen = p.SecurityGen() // precomputed at write time (no hashing); self-heals to a compute iff a write path ever left it empty — same source as the learn path (decryptionScope), so read and learn can never disagree
 	s.mu.RUnlock()
-	return id, true
+	return id, gen, true
 }
 
-// FailOpenScopeByID resolves the autoexclude scope by the profile's stable ULID
-// (references-by-id / rename-safe). resolved=true iff a profile with that id
-// EXISTS; scope is its ID when that profile is fail-open, else "". The ID is
+// FailOpenScopeByID resolves the autoexclude scope + security generation by the
+// profile's stable ULID (references-by-id / rename-safe). resolved=true iff a profile
+// with that id EXISTS; scope is its ID and gen its precomputed security generation
+// when that profile is fail-open, else both "". The ID is
 // AUTHORITATIVE: a resolved fail-close profile returns ("", true) so the caller
 // does NOT fall back to the name — otherwise a rule whose id points at a
 // fail-close profile but whose stale name points at a different fail-open one
@@ -317,21 +396,21 @@ func (s *Store) FailOpenScope(name string) (id string, ok bool) {
 // un-poisonable" invariant. Mirrors resolveDecryptionProfile: name fallback only
 // when the id resolves to no profile at all. No-copy fast path; O(profiles), a
 // small admin set, only on the SSL-inspect CONNECT path.
-func (s *Store) FailOpenScopeByID(id string) (scope string, resolved bool) {
+func (s *Store) FailOpenScopeByID(id string) (scope, gen string, resolved bool) {
 	if id == "" {
-		return "", false
+		return "", "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.profiles {
 		if p.ID == id {
 			if p.OnInspectError == "fail-open" {
-				return p.ID, true // resolved + fail-open → scope
+				return p.ID, p.SecurityGen(), true // resolved + fail-open → scope + security generation (same source as the learn path)
 			}
-			return "", true // resolved but fail-close → no scope, and no name fallback
+			return "", "", true // resolved but fail-close → no scope, and no name fallback
 		}
 	}
-	return "", false // not found → caller may fall back to the name
+	return "", "", false // not found → caller may fall back to the name
 }
 
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
@@ -367,6 +446,7 @@ func (s *Store) Add(p Profile) (*Profile, error) {
 	p.CreatedAt = now
 	p.UpdatedAt = now
 	np := p
+	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
 	s.order = append(s.order, key)
 	c := copyOut(&np)
@@ -391,6 +471,7 @@ func (s *Store) Update(p Profile) error {
 	p.CreatedAt = cur.CreatedAt
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	np := p
+	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
 	return nil
 }
@@ -455,6 +536,7 @@ func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped, c
 			p.ID = uuid.NewString()[:12]
 			migrated++
 		}
+		p.securityGen = computeSecurityGen(&p)
 		// Profile is committed to the new store — now (and only now) report the
 		// certVerification migration for it. Always warns (Load and the sync
 		// paths) and, when wired, emits an audit-ring diagnostic.
@@ -515,6 +597,7 @@ func (s *Store) UpdateByID(id string, p Profile) error {
 			return err
 		}
 		np := p
+		np.securityGen = computeSecurityGen(&np)
 		s.profiles[key] = &np
 		return nil
 	}

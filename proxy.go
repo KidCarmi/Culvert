@@ -683,12 +683,14 @@ func resolveSSLDecision(match *PolicyMatch, host, clientIP string) sslResolution
 	var exclScope string
 	var consulted bool
 	if sslAction == SSLInspect && match != nil && match.Rule != nil {
-		if scopeID, ok := failOpenScopeForRule(match.Rule); ok {
+		if scopeID, gen, ok := failOpenScopeForRule(match.Rule); ok {
 			// The fail-open read path runs here — record it (hit OR miss) and carry the
 			// scope so a consulted-but-missed session is distinguishable in the record.
+			// gen fences the lookup to the profile's CURRENT security posture: an entry
+			// learned under a since-edited posture misses and the session re-inspects.
 			consulted = true
 			exclScope = scopeID
-			if reason, hit := autoExclude().Contains(scopeID, host); hit {
+			if reason, hit := autoExclude().Contains(scopeID, gen, host); hit {
 				sslAction = SSLBypass
 				exclReason = reason
 				recordAutoExcludeHit(scopeID)
@@ -712,21 +714,21 @@ func resolveSSLDecision(match *PolicyMatch, host, clientIP string) sslResolution
 // un-migrated rules. Returns ok=false for a rule with no profile or a
 // fail-close profile (the cache is never touched — feature-off stays
 // allocation-free on this per-CONNECT path).
-func failOpenScopeForRule(rule *PolicyRule) (scope string, ok bool) {
+func failOpenScopeForRule(rule *PolicyRule) (scope, gen string, ok bool) {
 	if id := rule.DecryptionProfileID; id != "" {
 		// ID is authoritative: if it resolves to a profile at all, that
 		// profile's fail-open decision is final. Only fall back to the
 		// name when the id resolves to NO profile (un-migrated / dangling),
 		// mirroring resolveDecryptionProfile — a resolved fail-close profile
 		// must NOT be rescued by a stale name pointing at a fail-open one.
-		if s, resolved := globalDecryptionProfiles.FailOpenScopeByID(id); resolved {
-			return s, s != ""
+		if s, g, resolved := globalDecryptionProfiles.FailOpenScopeByID(id); resolved {
+			return s, g, s != ""
 		}
 	}
 	if rule.DecryptionProfile != "" {
 		return globalDecryptionProfiles.FailOpenScope(rule.DecryptionProfile)
 	}
-	return "", false
+	return "", "", false
 }
 
 // resolveStripALPN and the DecryptionProfile-aware resolve* family live in
