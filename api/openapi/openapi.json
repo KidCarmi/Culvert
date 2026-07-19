@@ -58,6 +58,39 @@
       }
     },
     "schemas": {
+      "AuditLog": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "count",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "type": "object"
+      },
       "AuthPolicyList": {
         "additionalProperties": false,
         "properties": {
@@ -235,6 +268,61 @@
         "type": "object",
         "x-culvert-sensitive": true
       },
+      "ClusterHA": {
+        "additionalProperties": true,
+        "description": "High-availability status.",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "role"
+        ],
+        "type": "object"
+      },
+      "ClusterMetrics": {
+        "additionalProperties": true,
+        "description": "Aggregated per-node cluster metrics.",
+        "type": "object"
+      },
+      "ClusterNodes": {
+        "additionalProperties": true,
+        "properties": {
+          "nodes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes"
+        ],
+        "type": "object"
+      },
+      "ClusterStatus": {
+        "additionalProperties": true,
+        "description": "Cluster node role and enrollment status (fields vary by role).",
+        "properties": {
+          "nodeID": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
       "ConfigBackup": {
         "additionalProperties": true,
         "description": "Opaque configuration backup envelope. May embed sensitive material\n(session HMAC, IdP secrets, upstream credentials) — treat as a secret at\nrest and in transit.\n",
@@ -269,6 +357,14 @@
           "activeIPs"
         ],
         "type": "object"
+      },
+      "CountryTraffic": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "nullable": true,
+        "type": "array"
       },
       "CreateUserRequest": {
         "additionalProperties": false,
@@ -332,6 +428,79 @@
           "patterns",
           "count",
           "blocked_total"
+        ],
+        "type": "object"
+      },
+      "DashboardHealth": {
+        "additionalProperties": true,
+        "properties": {
+          "blocklistSize": {
+            "type": "integer"
+          },
+          "goroutines": {
+            "type": "integer"
+          },
+          "memAllocMB": {
+            "type": "number"
+          },
+          "memSysMB": {
+            "type": "number"
+          },
+          "numGC": {
+            "type": "integer"
+          },
+          "sseClients": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "goroutines",
+          "blocklistSize"
+        ],
+        "type": "object"
+      },
+      "DashboardThreats": {
+        "additionalProperties": true,
+        "properties": {
+          "clamav": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "dpi": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "threatFeed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "yara": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clamav",
+          "yara",
+          "dpi",
+          "threatFeed"
+        ],
+        "type": "object"
+      },
+      "DashboardTopRules": {
+        "additionalProperties": false,
+        "properties": {
+          "rules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules"
         ],
         "type": "object"
       },
@@ -1157,6 +1326,43 @@
         ],
         "type": "object"
       },
+      "SupportStatus": {
+        "additionalProperties": true,
+        "description": "Supportability status (debug level, bundle state, retention).",
+        "type": "object"
+      },
+      "Timeseries": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "items": {
+              "type": "number"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "blocked": {
+            "items": {
+              "type": "number"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "data": {
+            "items": {
+              "type": "number"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "data",
+          "allowed",
+          "blocked"
+        ],
+        "type": "object"
+      },
       "URLCategoryList": {
         "items": {
           "additionalProperties": true,
@@ -1172,6 +1378,27 @@
         },
         "nullable": true,
         "type": "array"
+      },
+      "UpstreamConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "proxies": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "enabled",
+          "proxies"
+        ],
+        "type": "object"
       },
       "User": {
         "additionalProperties": true,
@@ -1232,6 +1459,71 @@
   },
   "openapi": "3.0.4",
   "paths": {
+    "/api/audit": {
+      "get": {
+        "description": "Returns paginated admin audit-log entries.",
+        "operationId": "getAuditLog",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLog"
+                }
+              }
+            },
+            "description": "Audit log."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Audit log",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/auth/change-password": {
       "post": {
         "description": "Changes the authenticated user's own password after verifying the current one. Audited.",
@@ -1953,6 +2245,162 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/ha": {
+      "get": {
+        "description": "Returns high-availability role, peer, and failover state.",
+        "operationId": "getClusterHA",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterHA"
+                }
+              }
+            },
+            "description": "HA status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "HA status",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/metrics": {
+      "get": {
+        "description": "Returns aggregated per-node cluster metrics.",
+        "operationId": "getClusterMetrics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterMetrics"
+                }
+              }
+            },
+            "description": "Cluster metrics."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster metrics",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/nodes": {
+      "get": {
+        "description": "Returns the enrolled cluster nodes.",
+        "operationId": "getClusterNodes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterNodes"
+                }
+              }
+            },
+            "description": "Cluster nodes."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster nodes",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/cluster/status": {
+      "get": {
+        "description": "Returns this node's cluster role and enrollment status.",
+        "operationId": "getClusterStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            },
+            "description": "Cluster status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Cluster status",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/config/export": {
       "get": {
         "description": "Returns the complete configuration backup envelope. May contain secrets\n(session HMAC, IdP secrets, upstream credentials). Admin-only and audited.\n",
@@ -2144,6 +2592,162 @@
         "summary": "Per-IP connection limit",
         "tags": [
           "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/country-traffic": {
+      "get": {
+        "description": "Returns the top destination countries by request volume.",
+        "operationId": "getCountryTraffic",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CountryTraffic"
+                }
+              }
+            },
+            "description": "Traffic by country."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Traffic by country",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/dashboard/health": {
+      "get": {
+        "description": "Returns runtime health — memory, goroutines, SSE clients, blocklist size.",
+        "operationId": "getDashboardHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardHealth"
+                }
+              }
+            },
+            "description": "Runtime health."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Runtime health",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/dashboard/threats": {
+      "get": {
+        "description": "Returns blocked-threat counters by engine (ClamAV/YARA/DPI/threat-feed).",
+        "operationId": "getDashboardThreats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardThreats"
+                }
+              }
+            },
+            "description": "Threat counters."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Threat counters",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/dashboard/top-rules": {
+      "get": {
+        "description": "Returns the most-hit policy rules.",
+        "operationId": "getDashboardTopRules",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardTopRules"
+                }
+              }
+            },
+            "description": "Top policy rules."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Top policy rules",
+        "tags": [
+          "dashboard"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
@@ -3750,6 +4354,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/support/status": {
+      "get": {
+        "description": "Returns supportability status — debug level, bundle state, retention.",
+        "operationId": "getSupportStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportStatus"
+                }
+              }
+            },
+            "description": "Supportability status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Supportability status",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/timeseries": {
+      "get": {
+        "description": "Returns total/allowed/blocked request time-series data.",
+        "operationId": "getTimeseries",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Timeseries"
+                }
+              }
+            },
+            "description": "Request time series."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Request time series",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/top-hosts": {
       "get": {
         "description": "Returns the most-requested destination hosts (approximate lower bounds past the internal counter cap).",
@@ -3781,6 +4463,45 @@
         "summary": "Top destination hosts by request volume",
         "tags": [
           "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/upstream": {
+      "get": {
+        "description": "Returns the upstream proxy pool configuration.",
+        "operationId": "getUpstream",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamConfig"
+                }
+              }
+            },
+            "description": "Upstream proxy pool."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Upstream proxy pool",
+        "tags": [
+          "cluster"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
@@ -3930,6 +4651,14 @@
     {
       "description": "Appliance settings — logging, session, connection limits.",
       "name": "settings"
+    },
+    {
+      "description": "Control-plane / data-plane cluster status and upstream pool.",
+      "name": "cluster"
+    },
+    {
+      "description": "Supportability — status, bundles, diagnostics.",
+      "name": "support"
     }
   ]
 }

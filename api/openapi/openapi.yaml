@@ -63,6 +63,10 @@ tags:
     description: Proxy auto-config (PAC) settings.
   - name: settings
     description: Appliance settings — logging, session, connection limits.
+  - name: cluster
+    description: Control-plane / data-plane cluster status and upstream pool.
+  - name: support
+    description: Supportability — status, bundles, diagnostics.
 
 # ── Security schemes ──────────────────────────────────────────────────────────
 # The runtime accepts EITHER a signed session cookie (browser flow) OR HTTP Basic
@@ -615,6 +619,93 @@ components:
       type: object
       description: Reverse references from named objects (categories, groups, profiles) to policy rules.
       additionalProperties: true
+
+    # ── Slice 3 tranche 5: dashboard/cluster/support read-model schemas ────────────
+    AuditLog:
+      type: object
+      required: [entries, count, total, offset, limit]
+      additionalProperties: false
+      properties:
+        entries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        count: { type: integer }
+        total: { type: integer }
+        offset: { type: integer }
+        limit: { type: integer }
+    CountryTraffic:
+      type: array
+      nullable: true
+      items: { type: object, additionalProperties: true }
+    DashboardHealth:
+      type: object
+      required: [goroutines, blocklistSize]
+      additionalProperties: true
+      properties:
+        memAllocMB: { type: number }
+        memSysMB: { type: number }
+        goroutines: { type: integer }
+        numGC: { type: integer }
+        sseClients: { type: integer }
+        blocklistSize: { type: integer }
+    DashboardThreats:
+      type: object
+      required: [clamav, yara, dpi, threatFeed]
+      additionalProperties: true
+      properties:
+        clamav: { type: integer, format: int64 }
+        yara: { type: integer, format: int64 }
+        dpi: { type: integer, format: int64 }
+        threatFeed: { type: integer, format: int64 }
+    DashboardTopRules:
+      type: object
+      required: [rules]
+      additionalProperties: false
+      properties:
+        rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    Timeseries:
+      type: object
+      required: [data, allowed, blocked]
+      additionalProperties: false
+      properties:
+        data: { type: array, items: { type: number }, nullable: true }
+        allowed: { type: array, items: { type: number }, nullable: true }
+        blocked: { type: array, items: { type: number }, nullable: true }
+    ClusterStatus:
+      type: object
+      description: Cluster node role and enrollment status (fields vary by role).
+      required: [role]
+      additionalProperties: true
+      properties:
+        role: { type: string }
+        nodeID: { type: string }
+    ClusterNodes:
+      type: object
+      required: [nodes]
+      additionalProperties: true
+      properties:
+        nodes: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    ClusterMetrics:
+      type: object
+      description: Aggregated per-node cluster metrics.
+      additionalProperties: true
+    ClusterHA:
+      type: object
+      description: High-availability status.
+      required: [enabled, role]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        role: { type: string }
+    SupportStatus:
+      type: object
+      description: Supportability status (debug level, bundle state, retention).
+      additionalProperties: true
+    UpstreamConfig:
+      type: object
+      required: [enabled, proxies]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        proxies: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
 
 paths:
   /healthz:
@@ -2127,4 +2218,282 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ObjectReferences' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/audit:
+    get:
+      operationId: getAuditLog
+      tags: [dashboard]
+      summary: Audit log
+      description: Returns paginated admin audit-log entries.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Audit log.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditLog' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/country-traffic:
+    get:
+      operationId: getCountryTraffic
+      tags: [dashboard]
+      summary: Traffic by country
+      description: Returns the top destination countries by request volume.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Traffic by country.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CountryTraffic' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/dashboard/health:
+    get:
+      operationId: getDashboardHealth
+      tags: [dashboard]
+      summary: Runtime health
+      description: Returns runtime health — memory, goroutines, SSE clients, blocklist size.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Runtime health.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardHealth' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/dashboard/threats:
+    get:
+      operationId: getDashboardThreats
+      tags: [dashboard]
+      summary: Threat counters
+      description: Returns blocked-threat counters by engine (ClamAV/YARA/DPI/threat-feed).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Threat counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardThreats' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/dashboard/top-rules:
+    get:
+      operationId: getDashboardTopRules
+      tags: [dashboard]
+      summary: Top policy rules
+      description: Returns the most-hit policy rules.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Top policy rules.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardTopRules' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/timeseries:
+    get:
+      operationId: getTimeseries
+      tags: [dashboard]
+      summary: Request time series
+      description: Returns total/allowed/blocked request time-series data.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Request time series.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Timeseries' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/status:
+    get:
+      operationId: getClusterStatus
+      tags: [cluster]
+      summary: Cluster status
+      description: Returns this node's cluster role and enrollment status.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/nodes:
+    get:
+      operationId: getClusterNodes
+      tags: [cluster]
+      summary: Cluster nodes
+      description: Returns the enrolled cluster nodes.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster nodes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterNodes' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/metrics:
+    get:
+      operationId: getClusterMetrics
+      tags: [cluster]
+      summary: Cluster metrics
+      description: Returns aggregated per-node cluster metrics.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Cluster metrics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterMetrics' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/ha:
+    get:
+      operationId: getClusterHA
+      tags: [cluster]
+      summary: HA status
+      description: Returns high-availability role, peer, and failover state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: HA status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterHA' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/status:
+    get:
+      operationId: getSupportStatus
+      tags: [support]
+      summary: Supportability status
+      description: Returns supportability status — debug level, bundle state, retention.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Supportability status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/upstream:
+    get:
+      operationId: getUpstream
+      tags: [cluster]
+      summary: Upstream proxy pool
+      description: Returns the upstream proxy pool configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Upstream proxy pool.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UpstreamConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }

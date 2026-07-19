@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 61
-- **Exempt (≤270-day horizon):** 223
+- **Documented:** 73
+- **Exempt (≤270-day horizon):** 211
 
 ## By domain
 
@@ -12,8 +12,8 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 0 |
-| dashboard | 13 | 3 |
+| cluster | 31 | 5 |
+| dashboard | 13 | 9 |
 | governance | 1 | 1 |
 | observability | 2 | 1 |
 | pac | 23 | 4 |
@@ -23,12 +23,13 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | settings | 30 | 11 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
-| support | 30 | 0 |
+| support | 30 | 1 |
 
 ## Documented operations
 
 | Method | Route | Handler | Min role |
 |---|---|---|---|
+| GET | `/api/audit` | apiAudit | viewer |
 | POST | `/api/auth/change-password` | apiAuthChangePassword | viewer |
 | POST | `/api/auth/login` | apiAuthLogin | public |
 | POST | `/api/auth/logout` | apiAuthLogout | public |
@@ -44,10 +45,18 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
 | GET | `/api/category-groups` | apiCategoryGroups | viewer |
+| GET | `/api/cluster/ha` | apiClusterHA | viewer |
+| GET | `/api/cluster/metrics` | apiClusterMetrics | viewer |
+| GET | `/api/cluster/nodes` | apiClusterNodes | viewer |
+| GET | `/api/cluster/status` | apiClusterStatus | viewer |
 | GET | `/api/config/export` | apiConfigExport | admin |
 | POST | `/api/config/import` | apiConfigImport | admin |
 | GET | `/api/config/versions` | apiConfigVersions | viewer |
 | GET | `/api/connlimit` | apiConnLimit | viewer |
+| * | `/api/country-traffic` | apiCountryTraffic | viewer |
+| * | `/api/dashboard/health` | apiDashboardHealth | viewer |
+| * | `/api/dashboard/threats` | apiDashboardThreats | viewer |
+| * | `/api/dashboard/top-rules` | apiDashboardTopRules | viewer |
 | DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator |
 | GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer |
 | GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
@@ -87,6 +96,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/setup/status` | apiSetupStatus | public |
 | GET | `/api/ssl-bypass` | apiSSLBypass | viewer |
 | * | `/api/stats` | apiStats | viewer |
+| GET | `/api/support/status` | apiSupportStatus | viewer |
+| * | `/api/timeseries` | apiTimeseries | viewer |
 | * | `/api/top-hosts` | apiTopHosts | viewer |
+| GET | `/api/upstream` | apiUpstream | viewer |
 | GET | `/api/urlcat` | apiURLCat | viewer |
 | GET | `/healthz` | apiHealthz | public |
