@@ -12,9 +12,7 @@ package main
 // stays byte-identical (Entry.Dec == nil).
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"strings"
 
@@ -425,6 +423,9 @@ func redactHost(v string, redact bool) string {
 	if !redact || v == "" {
 		return v
 	}
-	sum := sha256.Sum256([]byte(v))
-	return "h_" + hex.EncodeToString(sum[:])[:12]
+	// PR3 Option B: keyed HMAC (pseudonymizeHost) — not the retired unsalted 48-bit
+	// hash — so the dec.host/dec.sni token matches the top-level Host/URI token from
+	// the persistLogEntry chokepoint (one destination contract), and is not
+	// dictionary-recoverable. Fail-closed to a sentinel if the key is missing.
+	return pseudonymizeHost(v)
 }

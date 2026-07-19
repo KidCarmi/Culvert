@@ -1,25 +1,18 @@
 package main
 
-// decryption_redaction.go — ADR-0011 §4 host/SNI privacy posture. A single node-local
-// toggle that, when ON, hashes the host and SNI in every projected decryption block
-// (redactHost → "h_"+12hex) instead of recording the plaintext. OFF by default (the
+// decryption_redaction.go — the admin surface for the destination-privacy posture
+// (ADR-0011 §4 → PR3 Option B). A single node-local toggle that, when ON, pseudonymizes
+// the destination with a keyed HMAC (traffic_redaction.go) at the persistLogEntry
+// chokepoint — the top-level Host/URI, the nested dec.host/dec.sni, AND the top-hosts
+// ranking, across every sink — instead of recording the plaintext. OFF by default (the
 // historical behavior), so upgrading changes nothing until an operator opts in.
 //
-// SCOPE (PR3 B0 honesty fix — the contract is METADATA-ONLY, not full traffic privacy):
-// this posture pseudonymizes ONLY the nested dec.host/dec.sni sub-fields. The SAME log
-// record still carries the plaintext destination in the top-level Entry.Host / Entry.URI,
-// which are emitted to the request feed, the JSONL/history logs, the SIEM/syslog export,
-// and the dashboard drill-down unchanged. The API GET surfaces this scope + warning and
-// the SPA panel shows it, so the toggle no longer advertises privacy it does not deliver.
-// Full traffic-log destination privacy across every sink (opt-in, keyed HMAC, node-local
-// key, fail-closed) is the recommended follow-up in
-// roadmap/PR3-privacy-posture-v2-DECISION.md (Option B).
-//
-// The flag is read at PROJECTION time (toBlock) on the decision/close path, so it must be
-// a lock-free atomic read. It is DURABLE in admin_settings.json but node-local — off
-// export/import, version-rollback, and CP→DP sync (an AdminDurable-only config_surfaces
-// row, like the auto-exclusion tunables): host redaction is a per-appliance privacy choice,
-// not fleet policy.
+// The flag is read at PROJECTION time (toBlock) on the decision/close path and at the
+// persistLogEntry chokepoint, so it is a lock-free atomic read. It is DURABLE in
+// admin_settings.json but node-local — off export/import, version-rollback, and CP→DP
+// sync (AdminDurable-only config_surfaces rows for the flag AND the pseudonym key, like
+// the auto-exclusion tunables): destination privacy is a per-appliance choice, not fleet
+// policy (fleet-wide pseudonym correlation via a synced key is the deferred B3 follow-up).
 
 import (
 	"net/http"
@@ -46,17 +39,18 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		// Surface the TRUTHFUL scope alongside the flag (PR3 B0 honesty fix): this
-		// posture pseudonymizes ONLY the nested dec.host/dec.sni sub-fields. The same
-		// records still carry the plaintext destination in the top-level Host/URI
-		// across the feed, JSONL/history, SIEM, and drill-down. Full traffic-log
-		// destination privacy (opt-in keyed-HMAC across every sink) is the recommended
-		// follow-up recorded in roadmap/PR3-privacy-posture-v2-DECISION.md.
+		// PR3 Option B (supersedes the B0 metadata-only interim): the posture is now a
+		// GLOBAL destination-privacy posture. When on, the destination is pseudonymized
+		// with a keyed HMAC at the persistLogEntry chokepoint across EVERY sink (feed,
+		// JSONL/history, SIEM, drill-down) AND the nested dec.host/dec.sni. Node-local
+		// key; fail-closed to a sentinel if the key is missing. key_provisioned reports
+		// whether the node holds a pseudonym key (the value is NEVER exposed).
 		jsonOK(w, map[string]any{
-			"redact_hosts": decRedactHosts(),
-			"scope":        "decryption_metadata_only",
-			"scope_fields": []string{"dec.host", "dec.sni"},
-			"warning":      "Top-level request-log host and URI remain plaintext across the feed, JSONL/history logs, SIEM export, and dashboard drill-down. This is not full traffic-log destination privacy.",
+			"redact_hosts":    decRedactHosts(),
+			"scope":           "traffic_destination",
+			"scope_fields":    []string{"host", "uri", "dec.host", "dec.sni", "top_hosts"},
+			"key_provisioned": len(getTrafficPseudonymKey()) == trafficKeyLen,
+			"note":            "Global destination privacy: host, URI, dec.host/dec.sni, and the top-hosts ranking are pseudonymized with a node-local keyed HMAC across every sink (feed, JSONL/history, SIEM, drill-down, top-hosts). Fail-closed: a node with the posture on but no key emits a constant sentinel, never plaintext. Node-local (not exported/rolled-back/synced); fleet-wide correlation is a separate follow-up. Limitation: log search by host (?filter=) matches the stored token, not the plaintext, so plaintext host search does not resolve while the posture is on. Rotate the key via PUT {\"rotate_key\":true} — this breaks correlation with older records.",
 		})
 
 	case http.MethodPut:
@@ -65,15 +59,39 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		}
 		var body struct {
 			RedactHosts bool `json:"redact_hosts"`
+			// RotateKey, when true, mints a NEW node-local pseudonym key. All future
+			// tokens change, so correlation with pre-rotation records breaks (the
+			// mission's defined rotation behavior). Admin-only, audited.
+			RotateKey bool `json:"rotate_key,omitempty"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
 		old := decRedactHosts()
+		oldKey := getTrafficPseudonymKey()
+		switch {
+		case body.RotateKey:
+			// Explicit rotation regenerates unconditionally.
+			if err := rotateTrafficPseudonymKey(); err != nil {
+				logger.Printf("decryption redaction: pseudonym key rotation failed: %v", err)
+				http.Error(w, "failed to rotate pseudonym key", http.StatusInternalServerError)
+				return
+			}
+		case body.RedactHosts:
+			// Provision the key BEFORE persisting, so enabling the posture and the key's
+			// durability are one transaction (no window where the posture is on but no
+			// key exists ⇒ no accidental fail-closed sentinel run).
+			if err := ensureTrafficPseudonymKey(); err != nil {
+				logger.Printf("decryption redaction: pseudonym key provisioning failed: %v", err)
+				http.Error(w, "failed to provision pseudonym key", http.StatusInternalServerError)
+				return
+			}
+		}
 		setDecRedactHosts(body.RedactHosts)
 		if err := SaveAdminSettings(); err != nil {
-			setDecRedactHosts(old) // durable write failed — leave the runtime flag unchanged
+			setDecRedactHosts(old)         // durable write failed — leave runtime unchanged
+			setTrafficPseudonymKey(oldKey) // ...including the key (roll back a rotation)
 			logger.Printf("decryption redaction: persist failed, runtime unchanged: %v", err)
 			http.Error(w, "failed to persist redaction setting", http.StatusInternalServerError)
 			return
@@ -82,8 +100,12 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		if body.RedactHosts {
 			state = "enabled"
 		}
-		auditEvent(r, "decryption.redaction", state, "host/SNI redaction in decryption records")
-		jsonOK(w, map[string]any{"redact_hosts": body.RedactHosts})
+		if body.RotateKey {
+			auditEvent(r, "decryption.redaction.key-rotated", state, "traffic-log destination pseudonym key rotated (breaks correlation with older records)")
+		} else {
+			auditEvent(r, "decryption.redaction", state, "traffic-log destination pseudonymization (host/URI/dec.*)")
+		}
+		jsonOK(w, map[string]any{"redact_hosts": body.RedactHosts, "key_rotated": body.RotateKey})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

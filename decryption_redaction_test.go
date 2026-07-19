@@ -24,9 +24,20 @@ func swapDecRedact(t *testing.T, v bool) {
 	t.Cleanup(func() { setDecRedactHosts(prev) })
 }
 
-// TestDecRedaction_DrivesProjection proves toBlock hashes host/SNI iff the flag is on.
-// (The projection sites pass decRedactHosts() as the redact arg.)
+// swapTrafficKey installs a fixed node-local pseudonym key for a test and restores the
+// prior key on cleanup. Use alongside swapDecRedact for any test that asserts on the
+// redacted TOKEN (PR3 Option B: redaction is keyed HMAC, so a key must be present).
+func swapTrafficKey(t *testing.T, key []byte) {
+	t.Helper()
+	prev := getTrafficPseudonymKey()
+	setTrafficPseudonymKey(key)
+	t.Cleanup(func() { setTrafficPseudonymKey(prev) })
+}
+
+// TestDecRedaction_DrivesProjection proves toBlock pseudonymizes host/SNI iff the flag
+// is on. Option B: the token is a keyed HMAC, so a key is installed.
 func TestDecRedaction_DrivesProjection(t *testing.T) {
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef"))
 	o := &DecryptionOutcome{
 		Outcome: decryptobs.OutcomeInspected, DecisionSource: decryptobs.DecisionPolicyInspect,
 		Host: "secret.example", SNI: "secret.example",
@@ -35,9 +46,9 @@ func TestDecRedaction_DrivesProjection(t *testing.T) {
 		t.Fatalf("redact=false must keep plaintext host, got %q", b.Host)
 	}
 	if b := o.toBlock(true); b.Host == "secret.example" || !strings.HasPrefix(b.Host, "h_") {
-		t.Fatalf("redact=true must hash host, got %q", b.Host)
+		t.Fatalf("redact=true must pseudonymize host, got %q", b.Host)
 	} else if b.SNI == "secret.example" || !strings.HasPrefix(b.SNI, "h_") {
-		t.Fatalf("redact=true must hash SNI, got %q", b.SNI)
+		t.Fatalf("redact=true must pseudonymize SNI, got %q", b.SNI)
 	}
 }
 
@@ -121,13 +132,13 @@ func TestApiDecryptionRedaction_GetPutAndRBAC(t *testing.T) {
 	}
 }
 
-// TestDecRedaction_APISurfacesHonestScope pins the PR3 B0 honesty fix: the GET
-// response advertises the TRUTHFUL scope (decryption-metadata-only) and warns that
-// top-level host/URI remain plaintext — so the toggle no longer claims privacy it does
-// not deliver. This is the mission red line ("do not claim 'host/SNI is redacted' if
-// another field in the same record reveals it").
-func TestDecRedaction_APISurfacesHonestScope(t *testing.T) {
+// TestDecRedaction_APISurfacesScope pins the PR3 Option B GET contract: the posture is
+// now a GLOBAL destination-privacy posture — the API advertises the traffic_destination
+// scope covering host, uri, and the dec.* fields, and reports whether a node-local key
+// is provisioned (never the key value).
+func TestDecRedaction_APISurfacesScope(t *testing.T) {
 	swapDecRedact(t, true)
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef"))
 	req := httptest.NewRequest(http.MethodGet, "/api/decryption/redaction", http.NoBody)
 	req = req.WithContext(context.WithValue(req.Context(), uiRoleKey{}, RoleViewer))
 	rw := httptest.NewRecorder()
@@ -139,18 +150,20 @@ func TestDecRedaction_APISurfacesHonestScope(t *testing.T) {
 	if err := json.Unmarshal(rw.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["scope"] != "decryption_metadata_only" {
-		t.Fatalf("scope = %v, want decryption_metadata_only", resp["scope"])
+	if resp["scope"] != "traffic_destination" {
+		t.Fatalf("scope = %v, want traffic_destination", resp["scope"])
 	}
-	warn, _ := resp["warning"].(string)
-	for _, want := range []string{"host", "URI", "plaintext"} {
-		if !strings.Contains(warn, want) {
-			t.Fatalf("warning must mention %q; got %q", want, warn)
-		}
-	}
-	// The scope_fields must name exactly the two nested fields it actually redacts.
 	fields, _ := resp["scope_fields"].([]any)
-	if len(fields) != 2 || fields[0] != "dec.host" || fields[1] != "dec.sni" {
-		t.Fatalf("scope_fields = %v, want [dec.host dec.sni]", fields)
+	if len(fields) != 5 || fields[0] != "host" || fields[1] != "uri" || fields[2] != "dec.host" || fields[3] != "dec.sni" || fields[4] != "top_hosts" {
+		t.Fatalf("scope_fields = %v, want [host uri dec.host dec.sni top_hosts]", fields)
+	}
+	if resp["key_provisioned"] != true {
+		t.Fatalf("key_provisioned = %v, want true", resp["key_provisioned"])
+	}
+	// The response must NEVER carry the key material itself.
+	for k := range resp {
+		if strings.Contains(strings.ToLower(k), "key") && k != "key_provisioned" {
+			t.Fatalf("GET response exposes a key-ish field %q", k)
+		}
 	}
 }

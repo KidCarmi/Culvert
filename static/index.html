@@ -3263,15 +3263,17 @@ Firefox (all platforms):
         <div class="panel-body">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="dechealth-redact" data-change="toggleDecRedaction">
-            Pseudonymize host / SNI in the decryption <code>dec.*</code> block (store a token instead of the plaintext)
+            Pseudonymize destination in traffic logs (store a keyed token instead of the plaintext host/URI)
           </label>
-          <p class="hint" style="margin-top:6px">Scope: this affects <strong>only</strong> the nested <code>dec.host</code> / <code>dec.sni</code> sub-fields.
-            Durable and <strong>node-local</strong> — not exported, rolled back, or synced to the fleet. Off by default.</p>
-          <p class="hint" style="margin-top:6px;color:var(--warn,#b45309)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
-            <strong>Not full traffic-log privacy.</strong> The same records still carry the plaintext destination in the top-level
-            <code>host</code> and <code>uri</code> fields — visible in the request feed, the JSONL/history logs, the SIEM/syslog export,
-            and the dashboard drill-down. Full destination privacy across every sink (opt-in, keyed-HMAC) is tracked separately
-            (see <code>roadmap/PR3-privacy-posture-v2-DECISION.md</code>).</p>
+          <p class="hint" style="margin-top:6px">When on, the destination is pseudonymized with a <strong>keyed HMAC</strong> across
+            <strong>every sink</strong> — the top-level <code>host</code> and <code>uri</code>, the nested <code>dec.host</code> /
+            <code>dec.sni</code>, the request feed, the JSONL/history logs, the SIEM/syslog export, and the dashboard drill-down —
+            so no plaintext destination is recorded. The token is stable, so a SOC can still correlate on it. The key is generated
+            on first enable, <strong>node-local</strong>, and never exported/rolled-back/synced. Off by default.</p>
+          <p class="hint" style="margin-top:6px"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <strong>Fail-closed:</strong> a node with the posture on but no key emits a constant <code>redacted</code> sentinel,
+            never plaintext. Rotating or clearing the key breaks correlation with older records. Fleet-wide (cross-node) pseudonym
+            correlation via a synced key is a separate follow-up.</p>
         </div>
       </div>
     </div>

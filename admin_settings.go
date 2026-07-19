@@ -47,6 +47,13 @@ type AdminSettings struct {
 	MetricsToken string            `json:"metrics_token,omitempty"`
 	LogLevel     string            `json:"log_level,omitempty"`
 
+	// TrafficPseudonymKey is the node-local 32-byte HMAC key for the PR3 Option B
+	// destination-privacy posture (traffic_redaction.go). Sensitive + AdminDurable-only
+	// (0600 file, like MetricsToken): OFF export/import, version-rollback, and CP→DP —
+	// destination pseudonymization is a per-appliance privacy choice, and a synced key
+	// (fleet correlation) is the deferred B3 follow-up. Generated on first enable.
+	TrafficPseudonymKey []byte `json:"traffic_pseudonym_key,omitempty"`
+
 	// History-store retention. LogRetentionSaved is a sentinel (like
 	// YARASettingsSaved): when false the values below are not applied on load,
 	// so a zero value can't override the YAML/CLI-seeded retention on settings
@@ -253,6 +260,24 @@ func applyAdminServices(s *AdminSettings) {
 	}
 	if s.MetricsToken != "" {
 		metricsToken = s.MetricsToken
+	}
+	// PR3 Option B node-local pseudonym key. Accept ONLY a full-length (32-byte) key —
+	// a truncated/corrupt/hand-edited value is ignored so the posture fails closed to a
+	// sentinel rather than HMACing with a weak key.
+	if len(s.TrafficPseudonymKey) == trafficKeyLen {
+		setTrafficPseudonymKey(s.TrafficPseudonymKey)
+	}
+	// If the destination-privacy posture is ON but no valid key was restored (a node
+	// upgrading from the legacy/B0 host/SNI toggle, which had no key), mint one now so
+	// redaction produces real tokens instead of the fail-closed sentinel. Generated
+	// in-memory here; it persists on the next SaveAdminSettings. Logged so the operator
+	// knows a key was minted (pseudonym correlation for this node begins here).
+	if decRedactHosts() && len(getTrafficPseudonymKey()) != trafficKeyLen {
+		if err := ensureTrafficPseudonymKey(); err != nil {
+			logger.Printf("TrafficRedaction: pseudonym key generation failed; destination redaction fails closed to a sentinel: %v", err)
+		} else {
+			logger.Printf("TrafficRedaction: destination-privacy posture is on but no key was stored; minted a node-local pseudonym key (persists on next settings save)")
+		}
 	}
 	if s.LogLevel != "" {
 		SetLogLevel(ParseLogLevel(s.LogLevel))
@@ -566,7 +591,8 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
-	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 host/SNI redaction posture
+	s.DecryptionRedactHosts = decRedactHosts()        // ADR-0011 §4 / PR3 Option B destination-privacy posture
+	s.TrafficPseudonymKey = getTrafficPseudonymKey()  // PR3 Option B node-local pseudonym key (nil when unset)
 
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
