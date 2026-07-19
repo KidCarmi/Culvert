@@ -102,20 +102,36 @@ sudoers_escape_colon() {
     printf '%s' "$1" | sed -e 's/:/\\:/g' -e 's/,/\\,/g'
 }
 
-# Read a TOML basic-string value:  key = "value"  (any leading whitespace,
-# any spacing around =). Ignores commented lines. Prints empty if absent.
-# Strips everything from the FIRST "=" (not FS="="'s second field) so an "="
-# embedded in the value itself is not truncated, and cuts the value at its
-# closing quote so a trailing inline "# comment" after the string does not
-# leak into the extracted value.
+# Read a TOML basic ("value") OR literal ('value') string value:  key = "value"
+# / key = 'value'  (any leading whitespace, any spacing around =). Ignores
+# commented lines. Prints empty if absent. Strips everything from the FIRST
+# "=" (not FS="="'s second field) so an "=" embedded in the value itself is
+# not truncated, and cuts the value at its closing quote so a trailing inline
+# "# comment" after the string does not leak into the extracted value.
+#
+# MUST handle single-quoted (literal) strings, not just double-quoted: TOML
+# literal strings are how a value containing a backslash — e.g.
+# image_allowlist's regex, '^ghcr\.io/...' — is written so the backslash is
+# NOT interpreted as an escape. Handling only "..." left a single-quoted
+# value's surrounding quote CHARACTERS attached to the extracted output
+# (e.g. "'^ghcr\.io/...$'" instead of "^ghcr\.io/...$"), which silently
+# broke anchored regex matching against it (a leading/trailing stray quote
+# defeats a ^...$-anchored pattern).
 extract_toml_string() {
     awk -v k="$1" '
+        BEGIN { q = sprintf("%c", 39) }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
             line=$0
             sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
-            sub(/^"/, "", line)
-            sub(/".*$/, "", line)
+            if (substr(line, 1, 1) == q) {
+                line = substr(line, 2)
+                idx = index(line, q)
+                if (idx > 0) line = substr(line, 1, idx - 1)
+            } else {
+                sub(/^"/, "", line)
+                sub(/".*$/, "", line)
+            }
             print line
             exit
         }
