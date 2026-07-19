@@ -873,6 +873,47 @@
         ],
         "type": "object"
       },
+      "DecryptionProfileFull": {
+        "additionalProperties": false,
+        "description": "A TLS-inspection decryption profile.",
+        "properties": {
+          "certVerification": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inspectHttp2": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "maxTlsVersion": {
+            "type": "string"
+          },
+          "minTlsVersion": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "onInspectError": {
+            "type": "string"
+          },
+          "onUnsupported": {
+            "type": "string"
+          },
+          "stallTimeoutSecs": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "DecryptionProfileInput": {
         "additionalProperties": true,
         "description": "A decryption profile (rich object; open superset).",
@@ -1597,17 +1638,83 @@
         "type": "object"
       },
       "PolicyRule": {
-        "additionalProperties": true,
-        "description": "A single policy rule (rich object; open superset — fields vary by rule type/version).",
+        "additionalProperties": false,
+        "description": "A single Culvert policy rule (Stage-2 access rule). All fields are optional on create/update; read-only fields (hitCount/lastHit/created/modified) are echoed on read.",
         "properties": {
           "action": {
             "type": "string"
+          },
+          "auth": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "authSource": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "decryptionProfile": {
+            "type": "string"
+          },
+          "decryptionProfileId": {
+            "type": "string"
+          },
+          "destCategory": {
+            "type": "string"
+          },
+          "destCategoryGroup": {
+            "type": "string"
+          },
+          "destCategoryGroupId": {
+            "type": "string"
+          },
+          "destCountry": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
           },
           "destFQDN": {
             "type": "string"
           },
           "enabled": {
+            "nullable": true,
             "type": "boolean"
+          },
+          "fileFiltering": {
+            "type": "boolean"
+          },
+          "fileProfile": {
+            "type": "string"
+          },
+          "hitCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastHit": {
+            "type": "string"
+          },
+          "logFullUri": {
+            "type": "boolean"
+          },
+          "logTraffic": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "modifiedAt": {
+            "type": "string"
+          },
+          "modifiedBy": {
+            "type": "string"
           },
           "name": {
             "type": "string"
@@ -1615,7 +1722,59 @@
           "priority": {
             "type": "integer"
           },
+          "redirectURL": {
+            "type": "string"
+          },
+          "ruleType": {
+            "type": "string"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/PolicySchedule"
+          },
+          "sourceGroup": {
+            "type": "string"
+          },
+          "sourceIP": {
+            "type": "string"
+          },
+          "sourceIdentity": {
+            "type": "string"
+          },
           "sslAction": {
+            "type": "string"
+          },
+          "stripAlpn": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "subjectMatch": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "tlsSkipVerify": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "PolicySchedule": {
+        "additionalProperties": false,
+        "properties": {
+          "days": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "timeEnd": {
+            "type": "string"
+          },
+          "timeStart": {
+            "type": "string"
+          },
+          "timezone": {
             "type": "string"
           }
         },
@@ -3618,7 +3777,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -3671,7 +3830,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -7969,7 +8128,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DecryptionProfileInput"
+                "$ref": "#/components/schemas/DecryptionProfileFull"
               }
             }
           },
@@ -8022,7 +8181,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DecryptionProfileInput"
+                "$ref": "#/components/schemas/DecryptionProfileFull"
               }
             }
           },
@@ -11441,7 +11600,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -11494,7 +11653,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },

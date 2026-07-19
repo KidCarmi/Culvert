@@ -284,15 +284,51 @@ components:
     # ── Slice 3: read-model schemas ───────────────────────────────────────────────
     PolicyRule:
       type: object
-      description: A single policy rule (rich object; open superset — fields vary by rule type/version).
-      additionalProperties: true
+      description: A single Culvert policy rule (Stage-2 access rule). All fields are optional on create/update; read-only fields (hitCount/lastHit/created/modified) are echoed on read.
+      additionalProperties: false
       properties:
         priority: { type: integer }
         name: { type: string }
-        action: { type: string }
+        sourceIP: { type: string }
+        sourceIdentity: { type: string }
+        sourceGroup: { type: string }
+        authSource: { type: string }
         destFQDN: { type: string }
+        destCategory: { type: string }
+        destCategoryGroup: { type: string }
+        destCategoryGroupId: { type: string }
+        destCountry: { type: array, items: { type: string }, nullable: true }
+        schedule: { $ref: '#/components/schemas/PolicySchedule' }
         sslAction: { type: string }
-        enabled: { type: boolean }
+        fileFiltering: { type: boolean }
+        fileProfile: { type: string }
+        logFullUri: { type: boolean }
+        logTraffic: { type: boolean, nullable: true }
+        tlsSkipVerify: { type: boolean }
+        stripAlpn: { type: boolean, nullable: true }
+        decryptionProfile: { type: string }
+        decryptionProfileId: { type: string }
+        action: { type: string }
+        redirectURL: { type: string }
+        enabled: { type: boolean, nullable: true }
+        id: { type: string }
+        ruleType: { type: string }
+        subjectMatch: { type: object, additionalProperties: true, nullable: true }
+        auth: { type: object, additionalProperties: true, nullable: true }
+        hitCount: { type: integer, format: int64 }
+        lastHit: { type: string }
+        createdAt: { type: string }
+        modifiedAt: { type: string }
+        modifiedBy: { type: string }
+        comment: { type: string }
+    PolicySchedule:
+      type: object
+      additionalProperties: false
+      properties:
+        days: { type: array, items: { type: string }, nullable: true }
+        timeStart: { type: string }
+        timeEnd: { type: string }
+        timezone: { type: string }
     PolicyList:
       type: object
       required: [rules, count, version, updatedAt, draft]
@@ -1275,6 +1311,23 @@ components:
       properties:
         priorities: { type: array, items: { type: integer } }
 
+    DecryptionProfileFull:
+      type: object
+      description: A TLS-inspection decryption profile.
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        inspectHttp2: { type: boolean, nullable: true }
+        certVerification: { type: string }
+        onUnsupported: { type: string }
+        onInspectError: { type: string }
+        minTlsVersion: { type: string }
+        maxTlsVersion: { type: string }
+        stallTimeoutSecs: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+
 paths:
   /healthz:
     get:
@@ -1887,7 +1940,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Create policy rule.
@@ -1916,7 +1969,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Update policy rule.
@@ -2001,7 +2054,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Create auth policy rule.
@@ -2030,7 +2083,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Update auth policy rule.
@@ -3716,7 +3769,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+            schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
           description: Updated.
@@ -3745,7 +3798,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+            schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
           description: Updated.
