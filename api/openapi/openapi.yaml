@@ -1184,6 +1184,33 @@ components:
         enabled: { type: boolean }
         dbPath: { type: string }
 
+    IdPList:
+      type: object
+      required: [persisted, profiles]
+      additionalProperties: false
+      properties:
+        persisted: { type: boolean }
+        profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    AddURLCatHost:
+      type: object
+      required: [category, host]
+      additionalProperties: false
+      properties:
+        category: { type: string }
+        host: { type: string }
+    AlertHistory:
+      type: object
+      required: [deliveries]
+      additionalProperties: false
+      properties:
+        deliveries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    PACExceptionsList:
+      type: object
+      required: [exceptions]
+      additionalProperties: false
+      properties:
+        exceptions: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+
 paths:
   /healthz:
     get:
@@ -7893,7 +7920,7 @@ paths:
           description: List IdP profiles.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/IdPList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: createIdP
@@ -7989,7 +8016,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AddURLCatHost' }
       responses:
         '200':
           description: Add URL-category host.
@@ -8086,7 +8113,7 @@ paths:
           description: Alert delivery history.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/AlertHistory' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/pac/posture/exceptions:
     get:
@@ -8108,7 +8135,7 @@ paths:
           description: PAC posture exceptions.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/PACExceptionsList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/content-scan:
     get:
@@ -8130,7 +8157,7 @@ paths:
           description: DPI content-scan (legacy alias).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/DPIConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: addContentScan
@@ -8218,7 +8245,7 @@ paths:
           description: DPI bypass (legacy alias).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/DPIBypass' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     put:
       operationId: setContentScanBypass

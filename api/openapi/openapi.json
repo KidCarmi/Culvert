@@ -128,6 +128,39 @@
         },
         "type": "object"
       },
+      "AddURLCatHost": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "host"
+        ],
+        "type": "object"
+      },
+      "AlertHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveries"
+        ],
+        "type": "object"
+      },
       "AlertWebhookInput": {
         "additionalProperties": true,
         "description": "Alert webhook (rich object; open superset).",
@@ -1061,6 +1094,27 @@
         ],
         "type": "object"
       },
+      "IdPList": {
+        "additionalProperties": false,
+        "properties": {
+          "persisted": {
+            "type": "boolean"
+          },
+          "profiles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "persisted",
+          "profiles"
+        ],
+        "type": "object"
+      },
       "LogLevel": {
         "additionalProperties": false,
         "properties": {
@@ -1356,6 +1410,23 @@
       "PACExceptionItem": {
         "additionalProperties": true,
         "description": "A single PAC posture exception (open superset).",
+        "type": "object"
+      },
+      "PACExceptionsList": {
+        "additionalProperties": false,
+        "properties": {
+          "exceptions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "exceptions"
+        ],
         "type": "object"
       },
       "PACPoolItem": {
@@ -2686,7 +2757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/AlertHistory"
                 }
               }
             },
@@ -7123,7 +7194,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/DPIConfig"
                 }
               }
             },
@@ -7215,7 +7286,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/DPIBypass"
                 }
               }
             },
@@ -9287,7 +9358,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/IdPList"
                 }
               }
             },
@@ -10488,7 +10559,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/PACExceptionsList"
                 }
               }
             },
@@ -15923,7 +15994,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AddURLCatHost"
               }
             }
           },
