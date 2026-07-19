@@ -682,10 +682,45 @@ catalog_fetch_disabled() {
 # of the verifier binary itself (against the pinned release identity) is a
 # deliberately DEFERRED follow-up stage; it does not change what the binary then
 # verifies about the catalog.
+# resolve_verifier_version — echo the release tag to fetch the verifier from.
+# CULVERT_BOOTSTRAP_VERIFIER_VERSION pins it; otherwise the MAINTAINER-DESIGNATED
+# latest release (NOT a tag sort — this is why it can never resurrect a legacy
+# 0.0.238-style tag). The verifier version is decoupled from the appliance version
+# it resolves (the CATALOG picks the appliance image). Two independent lookups so a
+# rate-limited api.github.com (60 req/hr/IP, unauthenticated) does not hard-fail the
+# install: the JSON API first, then the non-rate-limited releases/latest HTML
+# redirect whose Location carries the tag.
+resolve_verifier_version() {
+  local v
+  v="${CULVERT_BOOTSTRAP_VERIFIER_VERSION:-}"
+  if [[ -n "$v" ]]; then printf '%s\n' "$v"; return 0; fi
+  v="$(curl -fsS --max-time 15 "https://api.github.com/repos/${GH_REPO}/releases/latest" 2>/dev/null \
+    | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')" || true
+  if [[ -z "$v" ]]; then
+    # Fallback: the HTML redirect from /releases/latest → /releases/tag/<tag> is not
+    # API-rate-limited. Extract the tag from the Location header.
+    v="$(curl -fsSI --max-time 15 "https://github.com/${GH_REPO}/releases/latest" 2>/dev/null \
+      | tr -d '\r' | grep -iE '^location:' | sed -E 's#.*/releases/tag/([^/[:space:]]+).*#\1#' | head -n1)" || true
+  fi
+  [[ -n "$v" ]] || return 1
+  printf '%s\n' "$v"
+}
+
+# acquire_bootstrap_verifier — download a `culvert` binary that carries the
+# `bootstrap-resolve` subcommand and set BOOTSTRAP_VERIFIER_BIN (+ _DIR for
+# cleanup). Returns 1 on any failure. The binary's baked trust roots perform the
+# catalog signature/freshness/rollback checks — that verification is the trust gate.
+#
+# STAGE NOTE: this stage downloads the signed `culvert-linux-<arch>` release asset
+# over HTTPS from github.com. Hardening the ACQUISITION with a cosign verify-blob of
+# the verifier binary itself (against the pinned release identity — MAINT_SIGSTORE_*)
+# is a deliberately DEFERRED follow-up stage; it does not change what the binary then
+# verifies about the catalog.
 BOOTSTRAP_VERIFIER_BIN=""
+BOOTSTRAP_VERIFIER_DIR=""
 acquire_bootstrap_verifier() {
   if [[ -n "$BOOTSTRAP_VERIFIER_BIN" && -x "$BOOTSTRAP_VERIFIER_BIN" ]]; then
-    printf '%s\n' "$BOOTSTRAP_VERIFIER_BIN"; return 0
+    return 0 # already fetched this run
   fi
   command -v curl >/dev/null 2>&1 || { warn "curl is required to fetch the catalog verifier"; return 1; }
   local arch
@@ -695,15 +730,11 @@ acquire_bootstrap_verifier() {
     *) warn "unsupported architecture '$(uname -m)' — the catalog verifier ships linux/amd64 and linux/arm64 only"; return 1 ;;
   esac
   local ver
-  ver="${CULVERT_BOOTSTRAP_VERIFIER_VERSION:-}"
-  if [[ -z "$ver" ]]; then
-    # The maintainer-designated latest release (NOT a tag sort — this is why it can
-    # never resurrect a legacy 0.0.238-style tag). The verifier version is decoupled
-    # from the appliance version it resolves: the CATALOG picks the appliance image.
-    ver="$(curl -fsS --max-time 15 "https://api.github.com/repos/${GH_REPO}/releases/latest" 2>/dev/null \
-      | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')" || true
+  if ! ver="$(resolve_verifier_version)"; then
+    warn "could not determine the release tag for the catalog verifier (api.github.com may be rate-limited);"
+    warn "pin one explicitly with CULVERT_BOOTSTRAP_VERIFIER_VERSION=vX.Y.Z, or preload an image and use CULVERT_PROXY_SEED_REF."
+    return 1
   fi
-  [[ -n "$ver" ]] || { warn "could not determine the release tag for the catalog verifier"; return 1; }
   local dir asset
   dir="$(mktemp -d)" || return 1
   asset="culvert-linux-${arch}"
@@ -712,8 +743,26 @@ acquire_bootstrap_verifier() {
     rm -rf "$dir"; return 1
   fi
   chmod 0755 "$dir/culvert"
+  # Capability probe WITHOUT executing: a `culvert` binary predating this feature
+  # lacks the `bootstrap-resolve` subcommand and would instead treat it as a stray
+  # positional arg and START THE PROXY SERVER — hanging the installer and binding
+  # ports. A static string check (never executing an unknown-capability binary)
+  # avoids that entirely; the timeout in seed_from_catalog is a second backstop.
+  if ! grep -qa 'bootstrap-resolve' "$dir/culvert"; then
+    warn "the downloaded verifier ($asset $ver) does not support 'bootstrap-resolve' (release predates the catalog installer);"
+    warn "pin a newer release with CULVERT_BOOTSTRAP_VERIFIER_VERSION=vX.Y.Z, or preload an image and use CULVERT_PROXY_SEED_REF."
+    rm -rf "$dir"; return 1
+  fi
   BOOTSTRAP_VERIFIER_BIN="$dir/culvert"
-  printf '%s\n' "$BOOTSTRAP_VERIFIER_BIN"
+  BOOTSTRAP_VERIFIER_DIR="$dir"
+  return 0
+}
+
+# cleanup_bootstrap_verifier — remove the throwaway verifier download dir.
+cleanup_bootstrap_verifier() {
+  [[ -n "$BOOTSTRAP_VERIFIER_DIR" && -d "$BOOTSTRAP_VERIFIER_DIR" ]] && rm -rf "$BOOTSTRAP_VERIFIER_DIR"
+  BOOTSTRAP_VERIFIER_BIN=""
+  BOOTSTRAP_VERIFIER_DIR=""
 }
 
 # seed_from_catalog — the TRUSTED fresh-install default: resolve the image digest
@@ -725,20 +774,31 @@ seed_from_catalog() {
     warn "CULVERT_RELEASE_CATALOG_URL=$CATALOG_URL — catalog fetch is disabled; not auto-seeding from the catalog."
     return 1
   fi
-  local verifier decision image_ref errf
-  verifier="$(acquire_bootstrap_verifier)" || return 1
+  acquire_bootstrap_verifier || return 1
+  # Cleanup the throwaway verifier download when this function returns (any path).
+  trap cleanup_bootstrap_verifier RETURN
+  local decision image_ref errf rc
   decision="$INSTALL_DIR/.catalog-bootstrap.json"
   info "Resolving the install image from the signed release catalog (channel=$INSTALL_CHANNEL) ..."
-  # bootstrap-resolve performs the FULL verified resolution (signature + freshness
-  # + anti-rollback/replay against the baked trust roots) and prints ONLY the
-  # repo@sha256 image_ref; --out records the decision so the appliance can prove
-  # which catalog decision bootstrapped it. No crypto/JSON parsing happens in shell.
-  local -a rv_args=(bootstrap-resolve --channel "$INSTALL_CHANNEL" --proxy-repo "$PROXY_REPO" --print image_ref --out "$decision")
-  [[ -n "$CATALOG_URL" ]] && rv_args+=(--catalog-url "$CATALOG_URL")
+  # bootstrap-resolve performs the FULL verified resolution (signature + freshness,
+  # plus best-effort anti-rollback/replay) against the baked trust roots and prints
+  # ONLY the repo@sha256 image_ref; --out records the decision so the appliance can
+  # prove which catalog decision bootstrapped it. No crypto/JSON parsing in shell.
+  # The catalog origin is passed via the ENVIRONMENT (owner-readable /proc/pid/environ),
+  # never argv (world-readable /proc/pid/cmdline), since a mirror URL may be presigned.
+  local -a cmd=("$BOOTSTRAP_VERIFIER_BIN" bootstrap-resolve --channel "$INSTALL_CHANNEL" \
+    --proxy-repo "$PROXY_REPO" --print image_ref --out "$decision")
+  # timeout is a second backstop against a hung/old binary (the capability probe is
+  # the primary guard); tolerate hosts without coreutils `timeout`. Fold everything
+  # into one non-empty array so "${cmd[@]}" is set-u-safe on bash 4.2 (Amazon Linux 2).
+  command -v timeout >/dev/null 2>&1 && cmd=(timeout 120 "${cmd[@]}")
   errf="$(mktemp)" || return 1
-  if ! image_ref="$("$verifier" "${rv_args[@]}" 2>"$errf")"; then
+  rc=0
+  image_ref="$(CULVERT_RELEASE_CATALOG_URL="$CATALOG_URL" "${cmd[@]}" 2>"$errf")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
     warn "Signed-catalog resolution failed (fail-closed; NOT falling back to tag discovery):"
     while IFS= read -r line; do warn "  $line"; done <"$errf"
+    [[ "$rc" -eq 124 ]] && warn "  (verifier timed out — the release may predate 'bootstrap-resolve'; pin CULVERT_BOOTSTRAP_VERIFIER_VERSION)"
     rm -f "$errf"
     return 1
   fi

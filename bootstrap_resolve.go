@@ -16,11 +16,19 @@
 // consumes the strict machine-readable decision on stdout.
 //
 // The binary that carries this subcommand is itself a signed release asset
-// (`culvert-linux-<arch>` + `.sigstore.json`); the installer cosign-verifies it
-// against the SAME pinned identity before executing it. So the whole chain —
-// verifier binary, catalog, and resolved image — is signature-gated under one
-// trust policy that cannot drift from the runtime (TestReleaseIdentitySSOT +
-// the contract tests in bootstrap_resolve_test.go pin this).
+// (`culvert-linux-<arch>` + `.sigstore.json`). CATALOG and RESOLVED-IMAGE trust is
+// fully enforced here (signature + freshness + rollback, baked roots + pinned
+// identity — the SAME functions runtime uses, so trust cannot drift;
+// TestReleaseIdentitySSOT + bootstrap_resolve_test.go pin this). The one control
+// that is NOT yet wired is an independent cosign verify-blob of the VERIFIER BINARY
+// itself against the pinned identity BEFORE execution: this stage's installer
+// TLS-fetches the signed asset from github.com and runs it; hardening the
+// acquisition with cosign verify-blob is a deliberately deferred follow-up stage
+// (it does not change what the binary then verifies about the catalog).
+//
+// Note: this subcommand is inert on a non-official build (empty baked ed25519 roots
+// AND empty Sigstore embed ⇒ enforce with no trusted scheme ⇒ fail closed); the
+// installer always downloads the official signed release asset to run it.
 //
 // Contract: on SUCCESS a single JSON object (the install decision) is written to
 // stdout and the process exits 0. On ANY failure a diagnostic is written to
@@ -202,13 +210,14 @@ func runBootstrapResolve(argv []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Persist the full decision record first (the appliance keeps it to prove which
-	// catalog decision bootstrapped it), then emit the requested stdout content.
+	// Persist the full decision record (the appliance keeps it to prove which
+	// catalog decision bootstrapped it). BEST-EFFORT: a verified decision must not
+	// be discarded because this record file could not be written (e.g. a root-owned
+	// install dir under a non-root invocation) — warn and still emit the result.
 	if path := strings.TrimSpace(*outFlag); path != "" {
 		full, _ := json.MarshalIndent(decision, "", "  ")
 		if err := os.WriteFile(path, append(full, '\n'), 0o600); err != nil {
-			fmt.Fprintf(stderr, "bootstrap-resolve: write decision to %q: %v\n", sanitizeLog(path), err)
-			return 1
+			fmt.Fprintf(stderr, "bootstrap-resolve: warning: could not write decision record to %q: %v\n", sanitizeLog(path), err)
 		}
 	}
 	if scalar, ok := bootstrapScalar(decision, *printFlag); ok {

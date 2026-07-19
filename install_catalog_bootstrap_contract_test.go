@@ -18,8 +18,13 @@ func TestInstaller_CatalogIsTheTrustedSeedSource(t *testing.T) {
 	for _, want := range []string{
 		"seed_from_catalog",
 		"bootstrap-resolve --channel",
-		"--proxy-repo \"$PROXY_REPO\"",
 		"--print image_ref",
+		// The catalog origin must travel via the ENVIRONMENT (not argv) to avoid a
+		// world-readable /proc/pid/cmdline leak of a presigned mirror URL.
+		`CULVERT_RELEASE_CATALOG_URL="$CATALOG_URL"`,
+		// A downloaded verifier must be capability-probed before execution so an old
+		// binary lacking the subcommand can never start the proxy and hang the install.
+		`grep -qa 'bootstrap-resolve'`,
 		// The pulled ref must be an immutable digest, never a mutable tag.
 		"*@sha256:*",
 	} {
