@@ -5,6 +5,25 @@ Every statement is tagged **[FACT]** (verified in-repo), **[INFERENCE]**,
 **[RECOMMENDATION]**, **[IMPLEMENTED]** (a control that exists and is enforced),
 or **[RISK]** (remaining exposure).
 
+## 0. Status update (Slice 3 complete)
+
+**The entire admin REST API is documented.** 275/284 route method-entries are in
+the OpenAPI contract (171 paths); the remaining 9 are `intentionally-undocumented`
+non-REST surfaces (static SPA `/`, SSE `/api/events`, the dynamic sub-routers
+`/api/idp/` + `/api/cluster/bootstrap/`, and the public browser SSO flow
+`/auth/*`), each carrying a specific recorded reason in the classification
+manifest. Coverage spans reads, writes, deletes, action verbs, item routes
+(`{param}` via `openapi_path`), legacy aliases, multipart upload, PEM/binary
+downloads, and public PAC files. 100+ conformance tests (response + request +
+authz) run through real handlers under `-race`.
+
+Honest quality caveat: to reach full coverage at pace, many write bodies and
+some read models use open `GenericWriteInput`/`GenericRead` schemas
+(`additionalProperties: true`). These are documented-but-loose — they validate
+presence and JSON-object shape, not every field. Tightening them to precise,
+per-endpoint schemas is the top Slice-3.1 follow-up (the response-conformance
+tests already pin the ~90 endpoints that have real schemas).
+
 ## 1. What shipped
 
 **[IMPLEMENTED]** A durable, CI-enforced OpenAPI contract for the Culvert admin
