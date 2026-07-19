@@ -61,6 +61,9 @@ Cert-pinned apps, banking, healthcare, and mTLS-protected origins must bypass in
 
 > **GAP-PKI-06 — origin mTLS.** Culvert presents no client certificate to inspected origins; an origin requiring mutual TLS returns `502`. **Bypass** those hosts (opaque relay preserves the client's own mTLS). Non-TLS over CONNECT (SSH/RDP) falls back to a raw relay automatically.
 
+- **Adaptive decryption exclusion (automatic, opt-in fail-open).** Separately from the bypass rules above, a decryption profile can opt a rule into `OnInspectError=="fail-open"`: hosts that repeatedly fail decryption are learned into a scoped, TTL-bounded cache and subsequent CONNECTs to them bypass automatically — see [`docs/operator/decryption-auto-exclusions.md`](../operator/decryption-auto-exclusions.md).
+- **Native HTTP/2 inspection** is a separate, opt-in per-rule/profile setting that inspects the tunnel as HTTP/2 instead of downgrading to HTTP/1.1 — see [`docs/operator/http2-inspection.md`](../operator/http2-inspection.md).
+
 ## 5. Rotation & expiry
 
 - **Automatic:** a 24h loop rotates when the CA is ≤30 days from expiry, with **dual-CA overlap** (old CA retained as secondary; leaves chain both so clients trusting either validate).

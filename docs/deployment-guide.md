@@ -340,7 +340,7 @@ docker compose -f docker-compose.multi.yml up -d
 | Blocklist entries | Rate limit counters |
 | IP filter list + mode | Session cookies |
 | Rate limit config (RPM) | Connection counters |
-| Auth enabled / unauth mode | Leaf cert cache |
+| Auth enabled / default auth outcome | Leaf cert cache |
 | OIDC/SAML IdP profiles | SAML AuthnRequest RelayState |
 | External auth base URL | OIDC PKCE login state |
 | Session HMAC signing key | Browser cookies (client-held) |

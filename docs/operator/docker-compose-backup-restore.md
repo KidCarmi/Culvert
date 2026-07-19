@@ -495,6 +495,8 @@ shown in § 2.
   remember that losing it makes encrypted keys unrecoverable.
 - **Don't mount `/var/run/docker.sock` into `cli`.** The `cli` service
   is intentionally socket-free. Maintenance ops that need the socket
-  belong to the future D1.6 Maintenance Agent.
+  belong to the D1.6 Maintenance Agent (see
+  [`release-management-agent.md`](release-management-agent.md)), which runs
+  host-side, not inside this container.
 - **Don't mount `/backup` into `proxy`.** The proxy must not be able
   to read its own prior backups. `/backup` is `cli`-only by contract.
