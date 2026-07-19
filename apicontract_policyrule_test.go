@@ -97,3 +97,27 @@ func TestConformance_SmallStructs_Request(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_NicheStructs_Request(t *testing.T) {
+	spec := loadContract(t)
+	cases := []struct{ method, path, good, bad string }{
+		{"POST", "/api/pac/pools", `{"name":"p1","endpoints":[{"host":"x"}]}`, `{"endpoints":"x"}`},
+		{"POST", "/api/pac/profiles", `{"name":"pr1","enabled":true,"poolId":"p1"}`, `{"name":"x","bogus":1}`},
+		{"POST", "/api/idp", `{"name":"okta","type":"oidc","emailDomains":["c.com"],"enabled":true}`, `{"name":"x","type":"ldap"}`},
+		{"PUT", "/api/policy/draft", `{"require_commit":true}`, `{"require_commit":"yes"}`},
+		{"POST", "/api/config/versions", `{"version":3,"dry_run":true}`, `{"version":"three"}`},
+		{"POST", "/api/idp/discover", `{"issuer":"https://idp"}`, `{"foo":"bar"}`},
+		{"POST", "/api/cluster/revoke", `{"node_id":"n1","reason":"rotate"}`, `{"node_id":5}`},
+		{"POST", "/api/security-scan/yara/rules", `{"name":"r1","source":"rule x {}"}`, `{"source":"x"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.good)); err != nil {
+				t.Fatalf("valid body rejected: %v", err)
+			}
+			if err := spec.ValidateJSONRequest(c.method, c.path, []byte(c.bad)); err == nil {
+				t.Fatalf("accepted invalid body %s", c.bad)
+			}
+		})
+	}
+}

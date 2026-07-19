@@ -744,6 +744,18 @@
         "nullable": true,
         "type": "array"
       },
+      "CreateConfigVersionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "CreateUserRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1058,6 +1070,18 @@
         ],
         "type": "object"
       },
+      "DiscoverIdPBody": {
+        "additionalProperties": false,
+        "properties": {
+          "issuer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer"
+        ],
+        "type": "object"
+      },
       "DispatchStatus": {
         "additionalProperties": true,
         "description": "Release dispatch/upgrade status.",
@@ -1262,6 +1286,59 @@
         "required": [
           "persisted",
           "profiles"
+        ],
+        "type": "object"
+      },
+      "IdPProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "emailDomains": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "knownGroups": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "oidc": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "saml": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "oidc",
+              "saml"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
         ],
         "type": "object"
       },
@@ -1611,6 +1688,29 @@
         ],
         "type": "object"
       },
+      "PACPoolInput": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "PACPoolItem": {
         "additionalProperties": true,
         "description": "A single PAC pool (open superset).",
@@ -1627,6 +1727,48 @@
       "PACPostureInventory": {
         "additionalProperties": true,
         "description": "Direct-access PAC posture inventory (shape varies).",
+        "type": "object"
+      },
+      "PACProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "availabilityMode": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "poolId": {
+            "type": "string"
+          },
+          "privateNetworks": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "PACProfileItem": {
@@ -1902,6 +2044,18 @@
         "required": [
           "priorities"
         ],
+        "type": "object"
+      },
+      "RevokeClusterBody": {
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "RewriteList": {
@@ -2430,6 +2584,18 @@
         "type": "object",
         "x-culvert-sensitive": true
       },
+      "SetPolicyDraftBody": {
+        "additionalProperties": false,
+        "properties": {
+          "require_commit": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "require_commit"
+        ],
+        "type": "object"
+      },
       "SetRedaction": {
         "additionalProperties": false,
         "description": "Toggle the destination-privacy posture and/or rotate the pseudonym key. A rotate-only call sends {\"rotate_key\":true} and omits redact_hosts (the posture is preserved across a rotation); neither field is individually required.",
@@ -2667,6 +2833,21 @@
       "SupportDebugLevel": {
         "additionalProperties": true,
         "description": "Support debug-level state.",
+        "type": "object"
+      },
+      "SupportRecipientInput": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "SupportRecipients": {
@@ -2957,6 +3138,21 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "YARARuleInput2": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "YARARuleItem": {
@@ -4040,7 +4236,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ReorderPolicy"
               }
             }
           },
@@ -6931,7 +7127,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/RevokeClusterBody"
               }
             }
           },
@@ -7438,7 +7634,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/CreateConfigVersionBody"
               }
             }
           },
@@ -7783,7 +7979,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDPIBypass"
               }
             }
           },
@@ -9855,7 +10051,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/IdPProfileInput"
               }
             }
           },
@@ -9910,7 +10106,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DiscoverIdPBody"
               }
             }
           },
@@ -10734,7 +10930,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PACPoolInput"
               }
             }
           },
@@ -11310,7 +11506,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PACProfileInput"
               }
             }
           },
@@ -11900,7 +12096,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetPolicyDraftBody"
               }
             }
           },
@@ -13272,7 +13468,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/YARARuleInput2"
               }
             }
           },
@@ -13325,7 +13521,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/YARARuleInput2"
               }
             }
           },
@@ -15515,7 +15711,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/SupportRecipientInput"
                 }
               }
             },

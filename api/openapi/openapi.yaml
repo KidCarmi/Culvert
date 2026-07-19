@@ -1383,6 +1383,81 @@ components:
         enabled: { type: boolean }
         secret: { type: string, format: password }
 
+    PACPoolInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        endpoints: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    PACProfileInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        poolId: { type: string }
+        rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        privateNetworks: { type: string }
+        availabilityMode: { type: string }
+        revision: { type: integer, format: int64 }
+    IdPProfileInput:
+      type: object
+      required: [name, type]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [oidc, saml] }
+        emailDomains: { type: array, items: { type: string }, nullable: true }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        knownGroups: { type: array, items: { type: string }, nullable: true }
+        oidc: { type: object, additionalProperties: true, nullable: true }
+        saml: { type: object, additionalProperties: true, nullable: true }
+    SetPolicyDraftBody:
+      type: object
+      required: [require_commit]
+      additionalProperties: false
+      properties:
+        require_commit: { type: boolean }
+    CreateConfigVersionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        version: { type: integer }
+        dry_run: { type: boolean }
+    DiscoverIdPBody:
+      type: object
+      required: [issuer]
+      additionalProperties: false
+      properties:
+        issuer: { type: string }
+    RevokeClusterBody:
+      type: object
+      additionalProperties: false
+      properties:
+        node_id: { type: string }
+        reason: { type: string }
+    YARARuleInput2:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        source: { type: string }
+    SupportRecipientInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        public_key: { type: string }
+
 paths:
   /healthz:
     get:
@@ -3193,7 +3268,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetPolicyDraftBody' }
       responses:
         '200':
           description: Toggle policy draft mode.
@@ -3772,7 +3847,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/CreateConfigVersionBody' }
       responses:
         '200':
           description: Create config snapshot.
@@ -4332,7 +4407,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PACPoolInput' }
       responses:
         '200':
           description: Create PAC pool.
@@ -4384,7 +4459,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PACProfileInput' }
       responses:
         '200':
           description: Create PAC profile.
@@ -5664,7 +5739,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/YARARuleInput2' }
       responses:
         '200':
           description: Create YARA rule.
@@ -5693,7 +5768,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/YARARuleInput2' }
       responses:
         '200':
           description: Update YARA rules.
@@ -7330,7 +7405,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ReorderPolicy' }
       responses:
         '200':
           description: Reorder auth policy rules.
@@ -7507,7 +7582,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/RevokeClusterBody' }
       responses:
         '200':
           description: Revoke cluster sessions.
@@ -7697,7 +7772,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DiscoverIdPBody' }
       responses:
         '200':
           description: Discover IdP metadata.
@@ -8114,7 +8189,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/IdPProfileInput' }
       responses:
         '200':
           description: Create IdP profile.
@@ -8439,7 +8514,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDPIBypass' }
       responses:
         '200':
           description: Set DPI bypass (legacy alias).
@@ -8801,7 +8876,7 @@ paths:
           description: OK.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/SupportRecipientInput' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
