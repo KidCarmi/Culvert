@@ -155,3 +155,32 @@ func TestInstaller_ValidatesVerifierDownloadInputs(t *testing.T) {
 		t.Error("install.sh should stage the verifier under an exec-capable dir (INSTALL_DIR) to survive /tmp noexec")
 	}
 }
+
+// The verifier binary is the root of trust for the whole fresh install; it MUST be
+// cosign verify-blob'd against the pinned release identity BEFORE it is executed,
+// and that verification must run before the binary is assigned to BOOTSTRAP_VERIFIER_BIN.
+func TestInstaller_VerifierIsCosignVerified(t *testing.T) {
+	s := readContractFile(t, "scripts/install.sh")
+	for _, want := range []string{
+		"verify_bootstrap_verifier",
+		"verify-blob",
+		".sigstore.json",
+		`--certificate-identity-regexp "$MAINT_SIGSTORE_SAN_REGEX"`,
+		`--certificate-oidc-issuer "$MAINT_SIGSTORE_ISSUER"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.sh must cosign-verify the verifier binary; missing %q", want)
+		}
+	}
+	// Ordering: verify_bootstrap_verifier must be called (and gate a failure) BEFORE
+	// BOOTSTRAP_VERIFIER_BIN is set, so an unverified binary is never trusted/executed.
+	call := strings.Index(s, "if ! verify_bootstrap_verifier ")
+	assign := strings.Index(s, `BOOTSTRAP_VERIFIER_BIN="$dir/$asset"`)
+	if call < 0 || assign < 0 || call > assign {
+		t.Fatal("verify_bootstrap_verifier must run and gate BEFORE BOOTSTRAP_VERIFIER_BIN is assigned")
+	}
+	// A break-glass skip must exist but be explicit and loud.
+	if !strings.Contains(s, "CULVERT_BOOTSTRAP_SKIP_VERIFY") {
+		t.Error("a documented break-glass (CULVERT_BOOTSTRAP_SKIP_VERIFY) should exist for air-gapped hosts")
+	}
+}

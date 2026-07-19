@@ -16,15 +16,14 @@
 // consumes the strict machine-readable decision on stdout.
 //
 // The binary that carries this subcommand is itself a signed release asset
-// (`culvert-linux-<arch>` + `.sigstore.json`). CATALOG and RESOLVED-IMAGE trust is
-// fully enforced here (signature + freshness + rollback, baked roots + pinned
-// identity — the SAME functions runtime uses, so trust cannot drift;
-// TestReleaseIdentitySSOT + bootstrap_resolve_test.go pin this). The one control
-// that is NOT yet wired is an independent cosign verify-blob of the VERIFIER BINARY
-// itself against the pinned identity BEFORE execution: this stage's installer
-// TLS-fetches the signed asset from github.com and runs it; hardening the
-// acquisition with cosign verify-blob is a deliberately deferred follow-up stage
-// (it does not change what the binary then verifies about the catalog).
+// (`culvert-linux-<arch>` + `.sigstore.json`), and the installer cosign verify-blob's
+// it against the SAME pinned release identity BEFORE executing it
+// (scripts/install.sh: verify_bootstrap_verifier). So the whole chain — verifier
+// binary, catalog, and resolved image — is signature-gated under one trust policy
+// that cannot drift from the runtime (TestReleaseIdentitySSOT +
+// TestInstaller_VerifierIsCosignVerified + bootstrap_resolve_test.go pin this).
+// CATALOG and RESOLVED-IMAGE trust is fully enforced here (signature + freshness +
+// rollback, baked roots + pinned identity — the SAME functions runtime uses).
 //
 // Note: this subcommand is inert on a non-official build (empty baked ed25519 roots
 // AND empty Sigstore embed ⇒ enforce with no trusted scheme ⇒ fail closed); the

@@ -726,11 +726,14 @@ resolve_verifier_version() {
 # cleanup). Returns 1 on any failure. The binary's baked trust roots perform the
 # catalog signature/freshness/rollback checks — that verification is the trust gate.
 #
-# STAGE NOTE: this stage downloads the signed `culvert-linux-<arch>` release asset
-# over HTTPS from github.com. Hardening the ACQUISITION with a cosign verify-blob of
-# the verifier binary itself (against the pinned release identity — MAINT_SIGSTORE_*)
-# is a deliberately DEFERRED follow-up stage; it does not change what the binary then
-# verifies about the catalog.
+# TRUST: the verifier binary is the ROOT OF TRUST for the entire fresh install (it
+# selects the proxy image, whose /app/deploy provides the root-run maintenance-agent
+# packaging). A TLS-only download is NOT sufficient on a host behind a TLS-inspection
+# proxy with a trusted org CA — the product's own deployment reality — so the binary
+# is cosign verify-blob'd against the PINNED release identity (MAINT_SIGSTORE_*) BEFORE
+# it is executed. Fail closed on any verification failure. Break-glass:
+# CULVERT_BOOTSTRAP_SKIP_VERIFY=1 (loud) for air-gapped / egress-filtered hosts that
+# cannot reach the signature bundle or Sigstore endpoints.
 BOOTSTRAP_VERIFIER_BIN=""
 BOOTSTRAP_VERIFIER_DIR=""
 acquire_bootstrap_verifier() {
@@ -755,30 +758,69 @@ acquire_bootstrap_verifier() {
     warn "pin one explicitly with CULVERT_BOOTSTRAP_VERIFIER_VERSION=vX.Y.Z, or preload an image and use CULVERT_PROXY_SEED_REF."
     return 1
   fi
-  local dir asset
+  local dir asset base
   # Stage under an EXEC-CAPABLE dir: the verifier is downloaded THEN executed, so a
   # /tmp mounted `noexec` (CIS-hardened / hardened-EC2 posture) would block the
   # trusted install. Prefer the install dir (root fs, owned by us); fall back to
   # $TMPDIR/mktemp default only if that fails. cleanup_bootstrap_verifier removes it.
   dir="$(mktemp -d "${INSTALL_DIR}/.verifier.XXXXXX" 2>/dev/null)" || dir="$(mktemp -d)" || return 1
   asset="culvert-linux-${arch}"
-  if ! curl -fsSL --max-time 90 -o "$dir/culvert" "https://github.com/${GH_REPO}/releases/download/${ver}/${asset}"; then
+  base="https://github.com/${GH_REPO}/releases/download/${ver}"
+  # Download into the dir under the ASSET name so cosign resolves the sibling
+  # <asset>.sigstore.json by basename.
+  if ! curl -fsSL --max-time 90 -o "$dir/$asset" "$base/$asset"; then
     warn "could not download the catalog verifier ($asset $ver)"
     rm -rf "$dir"; return 1
   fi
-  chmod 0755 "$dir/culvert"
+  if ! verify_bootstrap_verifier "$dir" "$asset" "$ver"; then
+    rm -rf "$dir"; return 1
+  fi
+  chmod 0755 "$dir/$asset"
   # Capability probe WITHOUT executing: a `culvert` binary predating this feature
   # lacks the `bootstrap-resolve` subcommand and would instead treat it as a stray
   # positional arg and START THE PROXY SERVER — hanging the installer and binding
   # ports. A static string check (never executing an unknown-capability binary)
   # avoids that entirely; the timeout in seed_from_catalog is a second backstop.
-  if ! grep -qa 'bootstrap-resolve' "$dir/culvert"; then
+  if ! grep -qa 'bootstrap-resolve' "$dir/$asset"; then
     warn "the downloaded verifier ($asset $ver) does not support 'bootstrap-resolve' (release predates the catalog installer);"
     warn "pin a newer release with CULVERT_BOOTSTRAP_VERIFIER_VERSION=vX.Y.Z, or preload an image and use CULVERT_PROXY_SEED_REF."
     rm -rf "$dir"; return 1
   fi
-  BOOTSTRAP_VERIFIER_BIN="$dir/culvert"
+  BOOTSTRAP_VERIFIER_BIN="$dir/$asset"
   BOOTSTRAP_VERIFIER_DIR="$dir"
+  return 0
+}
+
+# verify_bootstrap_verifier DIR ASSET VER — cosign verify-blob the downloaded
+# verifier against the pinned release identity, in the pinned cosign container (no
+# host cosign needed; docker is already up). Fail-closed. $1=dir $2=asset $3=version.
+verify_bootstrap_verifier() {
+  local dir=$1 asset=$2 ver=$3
+  if [[ "${CULVERT_BOOTSTRAP_SKIP_VERIFY:-}" == "1" ]]; then
+    warn "CULVERT_BOOTSTRAP_SKIP_VERIFY=1 — trusting the catalog verifier WITHOUT cosign verification (BREAK-GLASS; air-gapped/egress-filtered only)."
+    return 0
+  fi
+  if ! curl -fsSL --max-time 60 -o "$dir/$asset.sigstore.json" "https://github.com/${GH_REPO}/releases/download/${ver}/$asset.sigstore.json"; then
+    warn "could not download the verifier signature bundle ($asset.sigstore.json $ver) — refusing to trust an unverified verifier."
+    warn "Preload an image and use CULVERT_PROXY_SEED_REF, or set CULVERT_BOOTSTRAP_SKIP_VERIFY=1 (break-glass)."
+    return 1
+  fi
+  # --user 0:0: the staging dir is mktemp -d (0700, invoking-user-owned); the cosign
+  # image's default nonroot user could not traverse it. Mount read-only.
+  # --certificate-identity-regexp against the PINNED SAN (tagged releases of this
+  # repo's ci.yml) — the SAME identity that gates the proxy image + the maint agent.
+  if ! sudo docker run --rm --user 0:0 -v "$dir:/work:ro" -w /work "$MAINT_COSIGN_IMAGE" \
+      verify-blob \
+      --bundle "$asset.sigstore.json" \
+      --new-bundle-format \
+      --certificate-identity-regexp "$MAINT_SIGSTORE_SAN_REGEX" \
+      --certificate-oidc-issuer "$MAINT_SIGSTORE_ISSUER" \
+      "$asset" >/dev/null 2>&1; then
+    warn "cosign verification FAILED for the catalog verifier ($asset $ver) against the pinned release identity — refusing to run it."
+    warn "If this host cannot reach the Sigstore/Rekor endpoints, preload an image and use CULVERT_PROXY_SEED_REF, or CULVERT_BOOTSTRAP_SKIP_VERIFY=1 (break-glass)."
+    return 1
+  fi
+  info "Catalog verifier cosign-verified against the pinned release identity ($ver)."
   return 0
 }
 
