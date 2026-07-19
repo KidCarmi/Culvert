@@ -48,6 +48,15 @@ go test -race ./...
 - [ ] `textContent` במקום `innerHTML` לטקסט דינמי
 - [ ] ב-Content-Security-Policy אין הרחבת `unsafe-inline` חדשה
 
+### אם הוספת/שינית endpoint של ה-API / If you added or changed an API endpoint
+<!-- The route-coverage gate FAILS CI on any registered route not documented or exempt. -->
+- [ ] הוספתי/עדכנתי את ה-route ב-`uiRoutes` (ui_routes_meta.go) עם MinRole/Mutating/AuditExpected
+- [ ] תיעדתי את ה-operation ב-`api/openapi/openapi.yaml` **או** הוספתי exemption ב-`api/route-classification.yaml` (owner + reason + security_class + expiry)
+- [ ] הרצתי `make api-bundle` וה-commit כולל את `api/openapi/openapi.json` + `index.html` המעודכנים
+- [ ] הרצתי `make api-verify` (validation + style-lint + route-coverage + conformance) בהצלחה
+- [ ] ה-`x-culvert-*` metadata (visibility/permission/stability/danger/audit) תואם להתנהגות ה-handler בפועל
+- [ ] אם זה שינוי לא-תואם לאחור — עקבתי אחר `docs/api/API-VERSIONING-POLICY.md`
+
 ### תיעוד / Documentation
 - [ ] עדכנתי `CHANGELOG.md` (אם שינוי פונקציונלי)
 - [ ] עדכנתי `config.example.yaml` (אם הוספתי שדה חדש ל-config)
