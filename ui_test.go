@@ -252,6 +252,32 @@ func TestAPISetupComplete_ShortPassword(t *testing.T) {
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
+// TestAPISetupComplete_PasswordTooLong proves the first-time setup wizard
+// rejects an over-long password with a clean 400, not a bcrypt internals leak.
+// bcrypt.GenerateFromPassword errors on any password over 72 bytes
+// (golang.org/x/crypto's documented limit), but validatePasswordComplexity
+// only enforces a minimum length — so an admin pasting a long password-manager
+// password (a very plausible first-run action) previously hit SetAuth's
+// bcrypt error and got a raw 500 "internal error: bcrypt: password length
+// exceeds 72 bytes" instead of the same 400 validation response every other
+// weak-password case gets.
+func TestAPISetupComplete_PasswordTooLong(t *testing.T) {
+	resetSetupLockout()
+	t.Cleanup(resetSetupLockout)
+	_ = cfg.SetAuth("", "") // ensure no auth configured
+	defer func() { _ = cfg.SetAuth("", "") }()
+
+	longPass := "Aa1" + strings.Repeat("x", 70) // 73 bytes, otherwise valid
+	w := httptest.NewRecorder()
+	apiSetupComplete(w, jsonReq(http.MethodPost, "/api/setup/complete", map[string]any{
+		"user": "admin", "pass": longPass,
+	}))
+	assertStatus(t, w, http.StatusBadRequest)
+	if cfg.IsConfigured() {
+		t.Error("setup must not be marked complete when the password is rejected")
+	}
+}
+
 func TestAPISetupComplete_UnauthMode(t *testing.T) {
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
