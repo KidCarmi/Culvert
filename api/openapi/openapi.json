@@ -990,6 +990,21 @@
         "description": "Endpoint-specific write payload (rich object; open superset — see the handler).",
         "type": "object"
       },
+      "GeoIPStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "dbPath": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
       "GovernanceControlPlane": {
         "additionalProperties": true,
         "description": "C3 governance surface — route inventory, C2 mode, counters, derived health.",
@@ -1269,6 +1284,27 @@
           "failClosedTotal",
           "revokedTotal",
           "lastFailClosedAt"
+        ],
+        "type": "object"
+      },
+      "OTLPConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "authHeaderName": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "hasAuth": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
         ],
         "type": "object"
       },
@@ -1765,6 +1801,22 @@
         ],
         "type": "object"
       },
+      "SetDefaultAuthOutcomeBody": {
+        "additionalProperties": false,
+        "properties": {
+          "defaultAuthOutcome": {
+            "enum": [
+              "Default",
+              "Exempt"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "defaultAuthOutcome"
+        ],
+        "type": "object"
+      },
       "SetDomainAllowlist": {
         "additionalProperties": false,
         "properties": {
@@ -1879,6 +1931,23 @@
         ],
         "type": "object"
       },
+      "SetOTLPBody": {
+        "additionalProperties": false,
+        "properties": {
+          "authHeaderName": {
+            "type": "string"
+          },
+          "authHeaderValue": {
+            "format": "password",
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "x-culvert-sensitive": true
+      },
       "SetRedaction": {
         "additionalProperties": false,
         "description": "Toggle the destination-privacy posture and/or rotate the pseudonym key. A rotate-only call sends {\"rotate_key\":true} and omits redact_hosts (the posture is preserved across a rotation); neither field is individually required.",
@@ -1936,6 +2005,33 @@
         },
         "required": [
           "hours"
+        ],
+        "type": "object"
+      },
+      "SetSyslogBody": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetUIAllowIPsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "ips": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ips"
         ],
         "type": "object"
       },
@@ -2142,6 +2238,25 @@
         "description": "Supportability status (debug level, bundle state, retention).",
         "type": "object"
       },
+      "SyslogConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "drops": {
+            "type": "integer"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "format"
+        ],
+        "type": "object"
+      },
       "Timeseries": {
         "additionalProperties": false,
         "properties": {
@@ -2177,6 +2292,22 @@
       "TunablesPatch": {
         "additionalProperties": true,
         "description": "Adaptive auto-exclude tunables patch (subset of tunable fields).",
+        "type": "object"
+      },
+      "UIAllowIPs": {
+        "additionalProperties": false,
+        "properties": {
+          "ips": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "ips"
+        ],
         "type": "object"
       },
       "URLCategoryList": {
@@ -9039,7 +9170,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/GeoIPStatus"
                 }
               }
             },
@@ -9797,7 +9928,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/OTLPConfig"
                 }
               }
             },
@@ -9833,7 +9964,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetOTLPBody"
               }
             }
           },
@@ -13316,7 +13447,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDefaultAuthOutcomeBody"
               }
             }
           },
@@ -15034,7 +15165,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/SyslogConfig"
                 }
               }
             },
@@ -15070,7 +15201,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetSyslogBody"
               }
             }
           },
@@ -15250,7 +15381,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/UIAllowIPs"
                 }
               }
             },
@@ -15286,7 +15417,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetUIAllowIPsBody"
               }
             }
           },

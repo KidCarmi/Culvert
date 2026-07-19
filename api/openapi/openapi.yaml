@@ -1127,6 +1127,63 @@ components:
       description: Endpoint-specific read model (open superset — see the handler).
       additionalProperties: true
 
+    SyslogConfig:
+      type: object
+      required: [addr, format]
+      additionalProperties: false
+      properties:
+        addr: { type: string }
+        format: { type: string }
+        drops: { type: integer }
+    SetSyslogBody:
+      type: object
+      additionalProperties: false
+      properties:
+        addr: { type: string }
+        format: { type: string }
+    OTLPConfig:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        endpoint: { type: string }
+        hasAuth: { type: boolean }
+        authHeaderName: { type: string }
+    SetOTLPBody:
+      type: object
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        endpoint: { type: string }
+        authHeaderName: { type: string }
+        authHeaderValue: { type: string, format: password }
+    UIAllowIPs:
+      type: object
+      required: [ips]
+      additionalProperties: false
+      properties:
+        ips: { type: array, items: { type: string }, nullable: true }
+    SetUIAllowIPsBody:
+      type: object
+      required: [ips]
+      additionalProperties: false
+      properties:
+        ips: { type: array, items: { type: string } }
+    SetDefaultAuthOutcomeBody:
+      type: object
+      required: [defaultAuthOutcome]
+      additionalProperties: false
+      properties:
+        defaultAuthOutcome: { type: string, enum: [Default, Exempt] }
+    GeoIPStatus:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        dbPath: { type: string }
+
 paths:
   /healthz:
     get:
@@ -7471,7 +7528,7 @@ paths:
           description: Syslog config.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/SyslogConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setSyslog
@@ -7493,7 +7550,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetSyslogBody' }
       responses:
         '200':
           description: Set syslog config.
@@ -7522,7 +7579,7 @@ paths:
           description: OTLP config.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/OTLPConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setOTLP
@@ -7544,7 +7601,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetOTLPBody' }
       responses:
         '200':
           description: Set OTLP config.
@@ -7573,7 +7630,7 @@ paths:
           description: UI allow-IPs.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/UIAllowIPs' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setUIAllowIPs
@@ -7595,7 +7652,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetUIAllowIPsBody' }
       responses:
         '200':
           description: Set UI allow-IPs.
@@ -7625,7 +7682,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDefaultAuthOutcomeBody' }
       responses:
         '200':
           description: Set default auth outcome.
@@ -7887,7 +7944,7 @@ paths:
           description: GeoIP status.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/GeoIPStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/export:
     get:
