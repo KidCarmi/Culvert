@@ -389,6 +389,89 @@ components:
         trend: { type: array, items: { type: object, additionalProperties: true } }
         autoexclude: { type: object, additionalProperties: true }
 
+    # ── Slice 3 tranche 2: settings/policy read-model schemas ─────────────────────
+    SettingsSummary:
+      type: object
+      required: [authEnabled, user, proxyPort, uiPort, defaultAuthOutcome]
+      additionalProperties: false
+      properties:
+        authEnabled: { type: boolean }
+        user: { type: string }
+        proxyPort: { type: integer }
+        uiPort: { type: integer }
+        defaultAuthOutcome: { type: string, enum: [Default, Exempt] }
+    LogLevel:
+      type: object
+      required: [level]
+      additionalProperties: false
+      properties:
+        level: { type: string }
+    NetworkSettings:
+      type: object
+      required: [base_url, trust_forwarded_headers]
+      additionalProperties: false
+      properties:
+        base_url: { type: string }
+        ui_sans: { type: array, items: { type: string }, nullable: true }
+        trust_forwarded_headers: { type: boolean }
+        trusted_proxy_cidrs: { type: array, items: { type: string }, nullable: true }
+    RewriteList:
+      type: object
+      required: [rules, count]
+      additionalProperties: false
+      properties:
+        rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        count: { type: integer }
+    CategoryGroups:
+      type: object
+      required: [groups, names]
+      additionalProperties: false
+      properties:
+        groups: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        names: { type: array, items: { type: string }, nullable: true }
+    MetricsConfig:
+      type: object
+      required: [tokenSet, path]
+      additionalProperties: false
+      properties:
+        tokenSet: { type: boolean }
+        path: { type: string }
+    LogsRetention:
+      type: object
+      description: Log-store retention posture (fields vary by enabled/disk state).
+      required: [enabled, configurable]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        configurable: { type: boolean }
+        retentionDays: { type: integer }
+        encrypted: { type: boolean }
+    CAKeyProvider:
+      type: object
+      required: [provider, isExternal, caReady, dualCAActive]
+      additionalProperties: false
+      properties:
+        provider: { type: string }
+        isExternal: { type: boolean }
+        caReady: { type: boolean }
+        dualCAActive: { type: boolean }
+    PolicyDraftStatus:
+      type: object
+      description: Policy draft/require-commit state; diff/version/shadows appear only when a draft is active.
+      required: [requireCommit, active, actor, startedAt]
+      additionalProperties: true
+      properties:
+        requireCommit: { type: boolean }
+        active: { type: boolean }
+        actor: { type: string }
+        startedAt: { type: string }
+    SessionSecretStatus:
+      type: object
+      required: [shared]
+      additionalProperties: false
+      properties:
+        shared: { type: boolean }
+
 paths:
   /healthz:
     get:
@@ -1222,4 +1305,225 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PACConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Appliance settings summary
+      description: Returns core appliance settings — auth state, admin user, ports, and default auth outcome (password never returned).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Appliance settings summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SettingsSummary' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/settings/log-level:
+    get:
+      operationId: getLogLevel
+      tags: [settings]
+      summary: Current log level
+      description: Returns the current runtime log level.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Current log level.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogLevel' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/settings/network:
+    get:
+      operationId: getNetworkSettings
+      tags: [settings]
+      summary: Network settings
+      description: Returns external base URL, UI SANs, and trusted-proxy configuration.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Network settings.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NetworkSettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/rewrite:
+    get:
+      operationId: getRewrite
+      tags: [policy]
+      summary: HTTP header rewrite rules
+      description: Returns the configured HTTP header rewrite rules.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: HTTP header rewrite rules.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RewriteList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/category-groups:
+    get:
+      operationId: getCategoryGroups
+      tags: [policy]
+      summary: URL category groups
+      description: Returns URL category groups and their names.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: URL category groups.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CategoryGroups' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/metrics-config:
+    get:
+      operationId: getMetricsConfig
+      tags: [settings]
+      summary: Metrics endpoint config
+      description: Returns whether the /metrics token is set and the metrics path.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Metrics endpoint config.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MetricsConfig' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/logs/retention:
+    get:
+      operationId: getLogsRetention
+      tags: [settings]
+      summary: Log-store retention
+      description: Returns the log-store retention posture (enabled, configurable, days, encryption, usage).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Log-store retention.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LogsRetention' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/ca/key-provider:
+    get:
+      operationId: getCAKeyProvider
+      tags: [security]
+      summary: CA key provider status
+      description: Returns the CA key provider name and readiness (local vs external, dual-CA).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: CA key provider status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CAKeyProvider' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/policy/draft:
+    get:
+      operationId: getPolicyDraft
+      tags: [policy]
+      summary: Policy draft state
+      description: Returns require-commit mode and active policy-draft state (diff/version when active).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Policy draft state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyDraftStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/session-secret:
+    get:
+      operationId: getSessionSecret
+      tags: [settings]
+      summary: Session-secret status
+      description: Returns whether a shared session secret is configured (never returns the secret).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Session-secret status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionSecretStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }

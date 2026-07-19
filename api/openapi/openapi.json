@@ -124,9 +124,58 @@
         ],
         "type": "object"
       },
+      "CAKeyProvider": {
+        "additionalProperties": false,
+        "properties": {
+          "caReady": {
+            "type": "boolean"
+          },
+          "dualCAActive": {
+            "type": "boolean"
+          },
+          "isExternal": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "isExternal",
+          "caReady",
+          "dualCAActive"
+        ],
+        "type": "object"
+      },
       "CAStatus": {
         "additionalProperties": true,
         "description": "Internal CA state (opaque superset; fields depend on rotation/dual-CA mode).",
+        "type": "object"
+      },
+      "CategoryGroups": {
+        "additionalProperties": false,
+        "properties": {
+          "groups": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "groups",
+          "names"
+        ],
         "type": "object"
       },
       "ChangePasswordRequest": {
@@ -293,6 +342,18 @@
         ],
         "type": "object"
       },
+      "LogLevel": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "level"
+        ],
+        "type": "object"
+      },
       "LoggerConfig": {
         "additionalProperties": false,
         "properties": {
@@ -351,6 +412,75 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "LogsRetention": {
+        "additionalProperties": true,
+        "description": "Log-store retention posture (fields vary by enabled/disk state).",
+        "properties": {
+          "configurable": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "encrypted": {
+            "type": "boolean"
+          },
+          "retentionDays": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "configurable"
+        ],
+        "type": "object"
+      },
+      "MetricsConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "tokenSet": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tokenSet",
+          "path"
+        ],
+        "type": "object"
+      },
+      "NetworkSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "trust_forwarded_headers": {
+            "type": "boolean"
+          },
+          "trusted_proxy_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "ui_sans": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "base_url",
+          "trust_forwarded_headers"
+        ],
         "type": "object"
       },
       "OCSPStatus": {
@@ -418,6 +548,31 @@
         ],
         "type": "object"
       },
+      "PolicyDraftStatus": {
+        "additionalProperties": true,
+        "description": "Policy draft/require-commit state; diff/version/shadows appear only when a draft is active.",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "requireCommit": {
+            "type": "boolean"
+          },
+          "startedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requireCommit",
+          "active",
+          "actor",
+          "startedAt"
+        ],
+        "type": "object"
+      },
       "PolicyList": {
         "additionalProperties": false,
         "properties": {
@@ -473,6 +628,27 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "RewriteList": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules",
+          "count"
+        ],
         "type": "object"
       },
       "Role": {
@@ -537,6 +713,18 @@
         ],
         "type": "object"
       },
+      "SessionSecretStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "shared": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "shared"
+        ],
+        "type": "object"
+      },
       "SessionTimeout": {
         "additionalProperties": false,
         "properties": {
@@ -546,6 +734,38 @@
         },
         "required": [
           "hours"
+        ],
+        "type": "object"
+      },
+      "SettingsSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "authEnabled": {
+            "type": "boolean"
+          },
+          "defaultAuthOutcome": {
+            "enum": [
+              "Default",
+              "Exempt"
+            ],
+            "type": "string"
+          },
+          "proxyPort": {
+            "type": "integer"
+          },
+          "uiPort": {
+            "type": "integer"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authEnabled",
+          "user",
+          "proxyPort",
+          "uiPort",
+          "defaultAuthOutcome"
         ],
         "type": "object"
       },
@@ -1128,6 +1348,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/ca/key-provider": {
+      "get": {
+        "description": "Returns the CA key provider name and readiness (local vs external, dual-CA).",
+        "operationId": "getCAKeyProvider",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CAKeyProvider"
+                }
+              }
+            },
+            "description": "CA key provider status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "CA key provider status",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/ca/rotate": {
       "post": {
         "description": "Forces a CA rotation using a two-step confirmation-token flow: the first\nPOST returns `{status:\"pending_confirmation\", confirmation_token}` and\nemits a `ca.rotate_requested` audit event; re-POSTing with the token\napplies the rotation and emits `ca.rotate`. Re-signs future leaf\ncertificates under a new root; clients that pinned the previous root will\nfail until they re-trust. Admin-only and audited.\n",
@@ -1240,6 +1499,45 @@
         "summary": "Internal CA status",
         "tags": [
           "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/category-groups": {
+      "get": {
+        "description": "Returns URL category groups and their names.",
+        "operationId": "getCategoryGroups",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryGroups"
+                }
+              }
+            },
+            "description": "URL category groups."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "URL category groups",
+        "tags": [
+          "policy"
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
@@ -1665,6 +1963,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/logs/retention": {
+      "get": {
+        "description": "Returns the log-store retention posture (enabled, configurable, days, encryption, usage).",
+        "operationId": "getLogsRetention",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogsRetention"
+                }
+              }
+            },
+            "description": "Log-store retention."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Log-store retention",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/metrics-config": {
+      "get": {
+        "description": "Returns whether the /metrics token is set and the metrics path.",
+        "operationId": "getMetricsConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsConfig"
+                }
+              }
+            },
+            "description": "Metrics endpoint config."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Metrics endpoint config",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/ocsp": {
       "get": {
         "description": "Returns OCSP revocation-check status and counters.",
@@ -1782,6 +2158,84 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/policy/draft": {
+      "get": {
+        "description": "Returns require-commit mode and active policy-draft state (diff/version when active).",
+        "operationId": "getPolicyDraft",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyDraftStatus"
+                }
+              }
+            },
+            "description": "Policy draft state."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Policy draft state",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/rewrite": {
+      "get": {
+        "description": "Returns the configured HTTP header rewrite rules.",
+        "operationId": "getRewrite",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RewriteList"
+                }
+              }
+            },
+            "description": "HTTP header rewrite rules."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "HTTP header rewrite rules",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/security": {
       "get": {
         "description": "Returns the IP-filter mode and list plus rate-limit settings and exemptions.",
@@ -1821,6 +2275,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/session-secret": {
+      "get": {
+        "description": "Returns whether a shared session secret is configured (never returns the secret).",
+        "operationId": "getSessionSecret",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSecretStatus"
+                }
+              }
+            },
+            "description": "Session-secret status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Session-secret status",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/session-timeout": {
       "get": {
         "description": "Returns the admin session timeout in hours.",
@@ -1849,6 +2342,123 @@
           }
         ],
         "summary": "Admin session TTL",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "description": "Returns core appliance settings — auth state, admin user, ports, and default auth outcome (password never returned).",
+        "operationId": "getSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsSummary"
+                }
+              }
+            },
+            "description": "Appliance settings summary."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Appliance settings summary",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/settings/log-level": {
+      "get": {
+        "description": "Returns the current runtime log level.",
+        "operationId": "getLogLevel",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogLevel"
+                }
+              }
+            },
+            "description": "Current log level."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Current log level",
+        "tags": [
+          "settings"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/settings/network": {
+      "get": {
+        "description": "Returns external base URL, UI SANs, and trusted-proxy configuration.",
+        "operationId": "getNetworkSettings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkSettings"
+                }
+              }
+            },
+            "description": "Network settings."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Network settings",
         "tags": [
           "settings"
         ],
