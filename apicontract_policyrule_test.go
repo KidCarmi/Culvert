@@ -121,3 +121,19 @@ func TestConformance_NicheStructs_Request(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_FinalStructs_Request(t *testing.T) {
+	spec := loadContract(t)
+	if err := spec.ValidateJSONRequest("POST", "/api/cluster/bandwidth", []byte(`{"name":"eng","max_bytes_per_sec":1000000,"priority":5}`)); err != nil {
+		t.Fatalf("valid bandwidth policy rejected: %v", err)
+	}
+	if err := spec.ValidateJSONRequest("POST", "/api/cluster/bandwidth", []byte(`{"max_bytes_per_sec":"lots"}`)); err == nil {
+		t.Fatal("bandwidth accepted string max_bytes_per_sec")
+	}
+	if err := spec.ValidateJSONRequest("POST", "/api/releases/dispatch", []byte(`{"agent":"a1","channel":"stable","pre_backup":true}`)); err != nil {
+		t.Fatalf("valid dispatch rejected: %v", err)
+	}
+	if err := spec.ValidateJSONRequest("POST", "/api/releases/dispatch", []byte(`{"agent":"a1","bogus":1}`)); err == nil {
+		t.Fatal("dispatch accepted unknown field")
+	}
+}

@@ -342,6 +342,34 @@
         "nullable": true,
         "type": "array"
       },
+      "BandwidthPolicyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "label_selector": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_bytes_per_sec": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "BlockPageConfig": {
         "additionalProperties": false,
         "properties": {
@@ -1079,6 +1107,36 @@
         },
         "required": [
           "issuer"
+        ],
+        "type": "object"
+      },
+      "DispatchReleaseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "no_rollback": {
+            "type": "boolean"
+          },
+          "passphrase_ref": {
+            "type": "string"
+          },
+          "pre_backup": {
+            "type": "boolean"
+          },
+          "release_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent"
         ],
         "type": "object"
       },
@@ -6296,7 +6354,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/BandwidthPolicyInput"
               }
             }
           },
@@ -12548,7 +12606,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DispatchReleaseBody"
               }
             }
           },

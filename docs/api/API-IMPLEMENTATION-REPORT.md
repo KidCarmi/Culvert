@@ -24,6 +24,29 @@ presence and JSON-object shape, not every field. Tightening them to precise,
 per-endpoint schemas is the top Slice-3.1 follow-up (the response-conformance
 tests already pin the ~90 endpoints that have real schemas).
 
+
+## 0b. Slice 3.1 (schema tightening) — complete
+
+Started from 61 open `GenericRead`/`GenericWriteInput` schemas; **~36 operations
+now carry precise schemas** with field-level request/response validation. Every
+meaningful config-resource struct is fully enumerated (`additionalProperties:
+false`) and wired to its create/update: PolicyRule (+PolicySchedule),
+DecryptionProfile, IdPProfile, URLCategory, FileblockProfile, RewriteRule,
+AlertWebhook (secret sensitive), PACPool, PACProfile, BandwidthPolicy, plus the
+config toggles (syslog, otlp, ui-allow-ips, default-auth-outcome, geoip,
+blockpage, cluster labels/mode, policy move/reorder, config-version,
+idp-discover, cluster-revoke, YARA rule, dispatch-release, blocklist/DPI adds).
+Each ships request-conformance tests that reject unknown fields, wrong types,
+and bad nested shapes.
+
+The **remaining ~25 loose ops are intentionally open**, not un-tightened:
+analysis-query inputs (`policyTest`, `analyzePAC`, `simulatePAC`,
+`diffPACPosture`) accept arbitrary evaluation shapes; varied read models
+(support-bundle manifest/report/validate/exports, export, paginated logs) differ
+per instance; and a few inline CDR bodies are rich open configs. For these,
+`additionalProperties: true` is the *accurate* contract. This is the honest
+completion of the tightening sweep.
+
 ## 1. What shipped
 
 **[IMPLEMENTED]** A durable, CI-enforced OpenAPI contract for the Culvert admin

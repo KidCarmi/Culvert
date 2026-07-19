@@ -1458,6 +1458,29 @@ components:
         name: { type: string }
         public_key: { type: string }
 
+    BandwidthPolicyInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        label_selector: { type: object, additionalProperties: { type: string } }
+        max_bytes_per_sec: { type: integer, format: int64 }
+        priority: { type: integer }
+        created_at: { type: string }
+    DispatchReleaseBody:
+      type: object
+      required: [agent]
+      additionalProperties: false
+      properties:
+        release_id: { type: string }
+        channel: { type: string }
+        agent: { type: string }
+        pre_backup: { type: boolean }
+        no_rollback: { type: boolean }
+        passphrase_ref: { type: string }
+        idempotency_key: { type: string }
+
 paths:
   /healthz:
     get:
@@ -5109,7 +5132,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/BandwidthPolicyInput' }
       responses:
         '200':
           description: Set bandwidth policy.
@@ -7742,7 +7765,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DispatchReleaseBody' }
       responses:
         '200':
           description: Dispatch release upgrade.
