@@ -227,10 +227,15 @@ admin only for any future tunables (ADR-0010). All via `requireRole` + `uiRoutes
 - **Cardinality controls** — enums only for labels; profile *name* label reuses `maxAutoExcludeLabels`
   (200) cap with inline sanitisation so CodeQL sees the guard; host/SNI/cipher/identity/cert-subject are
   **record fields, never labels**.
-- **Redaction requirements** — `dec_host` and `dec_sni` are subject to the same redaction posture as the
-  rest of the request feed (an operator privacy toggle may hash/omit them); they are never required for a
-  metric. Log-injection: all string fields pass `auditSafe`/`sanitizeLog` before entering any log/audit/
-  alert projection.
+- **Redaction requirements** — `dec_host` and `dec_sni` may be pseudonymized by the node-local
+  `decryption_redact_hosts` toggle (a hashed fixed-length token, never omission); they are never required
+  for a metric. **Scope (PR3 B0):** this toggle is **metadata-only** — it affects ONLY `dec_host`/`dec_sni`.
+  The SAME record still carries the plaintext destination in the top-level `host`/`uri` fields (feed, JSONL/
+  history, SIEM, drill-down), so the toggle does not provide record- or feed-level destination privacy. The
+  admin API GET and the SPA panel surface this scope + warning. Full traffic-log destination privacy across
+  every sink (opt-in, keyed-HMAC, node-local key, fail-closed) is the recommended follow-up in
+  `roadmap/PR3-privacy-posture-v2-DECISION.md` (Option B). Log-injection: all string fields pass
+  `auditSafe`/`sanitizeLog` before entering any log/audit/alert projection.
 - **Certificate-metadata privacy** — do **not** store full cert subject/issuer strings by default. If a
   cert fingerprint is recorded at all, it is a bounded **SPKI/cert SHA-256 hash** (hex, fixed length),
   redactable, and **record-only** (never a label, never an autoexclude key — see §5). Default posture:

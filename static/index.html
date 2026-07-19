@@ -3263,10 +3263,15 @@ Firefox (all platforms):
         <div class="panel-body">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="dechealth-redact" data-change="toggleDecRedaction">
-            Redact host / SNI in decryption records (store a hash instead of the plaintext)
+            Pseudonymize host / SNI in the decryption <code>dec.*</code> block (store a token instead of the plaintext)
           </label>
-          <p class="hint" style="margin-top:6px">Applies to the <code>dec.*</code> block on request/tunnel records and the SIEM export.
+          <p class="hint" style="margin-top:6px">Scope: this affects <strong>only</strong> the nested <code>dec.host</code> / <code>dec.sni</code> sub-fields.
             Durable and <strong>node-local</strong> — not exported, rolled back, or synced to the fleet. Off by default.</p>
+          <p class="hint" style="margin-top:6px;color:var(--warn,#b45309)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <strong>Not full traffic-log privacy.</strong> The same records still carry the plaintext destination in the top-level
+            <code>host</code> and <code>uri</code> fields — visible in the request feed, the JSONL/history logs, the SIEM/syslog export,
+            and the dashboard drill-down. Full destination privacy across every sink (opt-in, keyed-HMAC) is tracked separately
+            (see <code>roadmap/PR3-privacy-posture-v2-DECISION.md</code>).</p>
         </div>
       </div>
     </div>
