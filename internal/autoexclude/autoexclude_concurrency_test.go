@@ -42,16 +42,16 @@ func TestCache_ConcurrentObserveContainsRemoveListEvict(t *testing.T) {
 			host := "h" + strconv.Itoa(g%hosts) + ".example"
 			switch g % 5 {
 			case 0:
-				c.Observe(scope, scope, host, ReasonUnsupportedParams, "ip:"+strconv.Itoa(g))
+				c.Observe(scope, "", scope, host, ReasonUnsupportedParams, "ip:"+strconv.Itoa(g))
 			case 1:
-				c.Contains(scope, host) // RLock + atomic hit bump on a shared entry
+				c.Contains(scope, "", host) // RLock + atomic hit bump on a shared entry
 			case 2:
 				c.Remove(scope, host)
 			case 3:
 				_ = c.List()
 				_ = c.Stats()
 			case 4:
-				c.Observe(scope, scope, host, ReasonClientPinned, "id:u"+strconv.Itoa(g%3))
+				c.Observe(scope, "", scope, host, ReasonClientPinned, "id:u"+strconv.Itoa(g%3))
 				_ = c.Len()
 			}
 		}(g)

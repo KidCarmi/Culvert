@@ -245,7 +245,7 @@ func TestReplaceAll_MigrationRaceFree(t *testing.T) {
 			for j := 0; j < 50; j++ {
 				_ = s.List()
 				_ = s.GetByName("a")
-				_, _ = s.FailOpenScope("a")
+				_, _, _ = s.FailOpenScope("a")
 			}
 		}()
 	}

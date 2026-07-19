@@ -61,11 +61,11 @@ func TestRolloutRehearsal(t *testing.T) {
 	baseline := time.Now().UnixMilli()
 	for i, reason := range reasons {
 		recordAutoExclude(fo, hosts[i], reason, ProxyIdentity{ClientIP: "10.0.0.1", Identity: "alice"})
-		if _, ok := autoExclude().Contains(scope, hosts[i]); ok {
+		if _, ok := autoExclude().Contains(scope, scopeGen(t, "byod"), hosts[i]); ok {
 			t.Fatalf("step3: %s promoted on ONE identity (confirm-count bypassed)", reason)
 		}
 		recordAutoExclude(fo, hosts[i], reason, ProxyIdentity{ClientIP: "10.0.0.2", Identity: "bob"})
-		if _, ok := autoExclude().Contains(scope, hosts[i]); !ok {
+		if _, ok := autoExclude().Contains(scope, scopeGen(t, "byod"), hosts[i]); !ok {
 			t.Fatalf("step3: %s not excluded after 2 distinct identities", reason)
 		}
 	}
@@ -102,10 +102,10 @@ func TestRolloutRehearsal(t *testing.T) {
 	}
 	// Expiry: advance past the pinned TTL (1h) — pin.example expires, cc/unsup stay (12h).
 	clk.add(90 * time.Minute)
-	if _, ok := autoExclude().Contains(scope, "pin.example"); ok {
+	if _, ok := autoExclude().Contains(scope, scopeGen(t, "byod"), "pin.example"); ok {
 		t.Fatal("step4: client_pinned entry should expire after 1h")
 	}
-	if _, ok := autoExclude().Contains(scope, "cc.example"); !ok {
+	if _, ok := autoExclude().Contains(scope, scopeGen(t, "byod"), "cc.example"); !ok {
 		t.Fatal("step4: server-observed entry should survive to 12h")
 	}
 
@@ -122,7 +122,7 @@ func TestRolloutRehearsal(t *testing.T) {
 	if learned, rescue := maybeFailOpenOrigin("new.example", fc, ProxyIdentity{ClientIP: "10.0.0.3", Identity: "carol"}, errTLS("certificate required")); learned != "" || rescue {
 		t.Fatalf("step6: disabled profile must not learn or rescue (learned=%q rescue=%v)", learned, rescue)
 	}
-	if _, ok := autoExclude().Contains(scope, "new.example"); ok {
+	if _, ok := autoExclude().Contains(scope, scopeGen(t, "byod"), "new.example"); ok {
 		t.Fatal("step6: no new learn after disable")
 	}
 
@@ -143,11 +143,11 @@ func TestRolloutRehearsal(t *testing.T) {
 	fo2, scope2 := bindFailOpenProfile(t, "byod2", "fail-open")
 	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.1", Identity: "alice"})
 	recordAutoExclude(fo2, "persist-check.example", autoExReasonUnsupported, ProxyIdentity{ClientIP: "10.0.0.2", Identity: "bob"})
-	if _, ok := autoExclude().Contains(scope2, "persist-check.example"); !ok {
+	if _, ok := autoExclude().Contains(scope2, scopeGen(t, "byod2"), "persist-check.example"); !ok {
 		t.Fatal("step8: precondition — host should be excluded before the restart")
 	}
 	setAutoExclude(autoexclude.New(autoexclude.Config{})) // == the boot wiring; no on-disk load exists
-	if _, ok := autoExclude().Contains(scope2, "persist-check.example"); ok {
+	if _, ok := autoExclude().Contains(scope2, scopeGen(t, "byod2"), "persist-check.example"); ok {
 		t.Fatal("step8: an exclusion survived a restart — the cache is no longer volatile (a persistence load crept into the boot path)")
 	}
 	if autoExclude().Len() != 0 {
@@ -160,7 +160,7 @@ func TestRolloutRehearsal(t *testing.T) {
 	if _, err := globalDecryptionProfiles.Add(DecryptionProfile{Name: "legacy"}); err != nil { // no OnInspectError
 		t.Fatalf("step9: add legacy: %v", err)
 	}
-	if _, ok := globalDecryptionProfiles.FailOpenScope("legacy"); ok {
+	if _, _, ok := globalDecryptionProfiles.FailOpenScope("legacy"); ok {
 		t.Fatal("step9: a profile without OnInspectError must resolve fail-close")
 	}
 }
@@ -192,7 +192,7 @@ func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 	// Pending flood: one attacker identity across N distinct hosts, none ever
 	// reaching confirmN=5 → must not grow the pending map past the cap.
 	for i := 0; i < n; i++ {
-		c.Observe("scope", "prof", genHost(i), autoexclude.ReasonClientPinned, "id:attacker")
+		c.Observe("scope", "", "prof", genHost(i), autoexclude.ReasonClientPinned, "id:attacker")
 	}
 	if pl := c.PendingLen(); pl > 4096 {
 		t.Fatalf("pending map unbounded under flood: PendingLen=%d > cap 4096", pl)
@@ -206,7 +206,7 @@ func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 	for i := 0; i < n; i++ {
 		h := "active-" + genHost(i)
 		for k := 0; k < 5; k++ {
-			c.Observe("scope", "prof", h, autoexclude.ReasonUnsupportedParams, "id:"+string(rune('a'+k)))
+			c.Observe("scope", "", "prof", h, autoexclude.ReasonUnsupportedParams, "id:"+string(rune('a'+k)))
 		}
 	}
 	if l := c.Len(); l > 4096 {
@@ -230,7 +230,7 @@ func TestResourceBounded_UnderAdversarialLoad(t *testing.T) {
 
 	// Safety: a host that never reached the confirm-count is NOT excluded — pressure
 	// can only evict/re-enable, never bypass.
-	if _, ok := c.Contains("scope", genHost(0)); ok {
+	if _, ok := c.Contains("scope", "", genHost(0)); ok {
 		t.Fatal("pressure created a bypass for an unconfirmed host — MUST NEVER HAPPEN")
 	}
 }

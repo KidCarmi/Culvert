@@ -178,14 +178,18 @@ func classifyClientInspectFailure(err error) (AutoExcludeReason, bool) {
 }
 
 // decryptionScope returns the policy-boundary scope (the matched decryption
-// profile's stable ID + display name) that owns any exclusion learned for this
-// session. A fail-open session always has a concrete profile (resolveFailOpen
-// required it), so the ID is non-empty on the learn/read paths.
-func decryptionScope(match *PolicyMatch) (id, name string) {
+// profile's stable ID + security generation + display name) that owns any exclusion
+// learned for this session. A fail-open session always has a concrete profile
+// (resolveFailOpen required it), so the ID is non-empty on the learn/read paths. The
+// gen fences the learned entry to the profile's CURRENT security posture — an edit
+// that changes cert/TLS/H2/OnUnsupported/OnInspectError changes the gen, so the entry
+// stops matching. Computed from the resolved profile (learn path only, on inspect
+// failure — not the per-CONNECT hot read, which uses the precomputed accessor).
+func decryptionScope(match *PolicyMatch) (id, gen, name string) {
 	if p := resolveDecryptionProfile(match); p != nil {
-		return p.ID, p.Name
+		return p.ID, p.SecurityGen(), p.Name
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // clientEvidence derives the opaque distinct-client token the confirm-count
@@ -236,7 +240,7 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	if reason == "" {
 		return false
 	}
-	scopeID, scopeName := decryptionScope(match)
+	scopeID, scopeGen, scopeName := decryptionScope(match)
 	if scopeID == "" {
 		return false // no fail-open profile to scope to (gated caller, defensive)
 	}
@@ -253,7 +257,7 @@ func recordAutoExclude(match *PolicyMatch, host string, reason AutoExcludeReason
 	}
 	// From here the session HAS fed the learner (the Observe call is the evidence
 	// contribution), so contributed=true whether or not this token tips promotion.
-	if !autoExclude().Observe(scopeID, scopeName, host, reason, client) {
+	if !autoExclude().Observe(scopeID, scopeGen, scopeName, host, reason, client) {
 		return true // still gathering confirmation (or already excluded) — evidence still contributed
 	}
 	// Promotion: inspection is now OFF for this (scope, host) until the entry expires.
@@ -350,7 +354,7 @@ var autoExcludeRescueCounter int64
 // back through maybeFailOpenOrigin's bool return.
 func recordAutoExcludeRescue(match *PolicyMatch, host string, reason AutoExcludeReason, id ProxyIdentity) {
 	atomic.AddInt64(&autoExcludeRescueCounter, 1)
-	_, scopeName := decryptionScope(match)
+	_, _, scopeName := decryptionScope(match)
 	// Strip quotes AND newlines before the audit/alert/log fields (log-injection
 	// DiD — same posture as recordAutoExclude).
 	safeHost := auditSafe(host)
