@@ -1103,19 +1103,29 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	atomic.AddInt64(&statTotal, 1)
 	isAllowed := status == "OK" || status == "POLICY_ALLOW" || status == "POLICY_REDIRECT"
 	tsRecordResult(isAllowed)
-	// Fire webhook alerts for security events (async, non-blocking).
+	// Fire webhook alerts for security events (async, non-blocking). PR3 Option B: the
+	// alert payload is a STREAMED sink (Slack/PagerDuty/SIEM webhook), so the
+	// destination host carries the same pseudonym contract as the logs when the posture
+	// is on — the "no plaintext destination on any streamed sink" guarantee includes
+	// alerts. Off ⇒ plaintext, byte-identical.
+	alertHost := redactDestinationHost(host)
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
 		go fireAlert("threat_detected", AlertPayload{
-			Actor: ip, Host: host, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
+			Actor: ip, Host: alertHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
 		})
 	case "POLICY_BLOCK", "POLICY_DROP":
 		go fireAlert("policy_block", AlertPayload{
-			Actor: ip, Host: host, Detail: ruleMatched, Source: "policy",
+			Actor: ip, Host: alertHost, Detail: ruleMatched, Source: "policy",
 		})
 	}
 	if status == "OK" || status == "POLICY_ALLOW" {
-		topHosts.Record(host)
+		// PR3 Option B: the top-hosts ranking is a viewer-facing sink (/api/top-hosts,
+		// the dashboard widget, PAC sampling), so it must carry the SAME destination
+		// contract as the logs — record the pseudonym token, not the plaintext host,
+		// when the posture is on. Token cardinality is fixed (12 hex), so the
+		// bounded-map behavior is unchanged. Off ⇒ plaintext, byte-identical.
+		topHosts.Record(redactDestinationHost(host))
 	}
 }
 
@@ -1229,14 +1239,22 @@ func recordTunnelCloseGatedDec(match *PolicyMatch, id ProxyIdentity, method, hos
 // history store, and syslog — the logging half shared by recordRequestFull,
 // recordRequestLogOnly, and recordTunnelClose.
 func persistLogEntry(ip, method, host, status, ruleMatched, actionTaken, identity string, bytesSent, bytesRecv, durationMs int64, sslAction, uri string, auth AuthLogFields) {
+	// PR3 Option B: pseudonymize the destination at this single chokepoint when the
+	// privacy posture is on, so every downstream sink (ring, JSONL, history store,
+	// syslog/SIEM, drill-down) inherits the identical token and no plaintext host/URI.
+	// Off ⇒ redactDestination* return the inputs unchanged (byte-identical to today).
+	// The dec.* block is redacted upstream in toBlock via the same keyed helper, so all
+	// three destination fields share one contract. redactedHost is computed once and
+	// threaded into the URI redactor so the host is HMAC'd a single time per record.
+	redactedHost := redactDestinationHost(host)
 	entry := LogEntry{
 		TS:          time.Now().UnixMilli(),
 		Time:        time.Now().Format("15:04:05"),
 		IP:          ip,
 		Identity:    identity,
 		Method:      method,
-		Host:        host,
-		URI:         uri,
+		Host:        redactedHost,
+		URI:         redactDestinationURI(uri, host, redactedHost),
 		Status:      status,
 		Level:       levelForStatus(status),
 		RuleMatched: ruleMatched,

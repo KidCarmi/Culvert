@@ -385,6 +385,11 @@ var configSurfaces = []configSurfaceRow{
 	// sentinel row is needed.
 	{ID: "decryption_redact_hosts", Kind: kindConfig, Owner: "decRedact", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "DecryptionRedactHosts"}}},
+	// PR3 Option B node-local pseudonym key. Sensitive + AdminDurable-only (0600 file,
+	// like metrics_token): OFF export/import, version-rollback, and CP→DP — a
+	// per-appliance privacy secret; fleet-wide key sync is the deferred B3 follow-up.
+	{ID: "traffic_pseudonym_key", Kind: kindConfig, Owner: "trafficRedact", AdminDurable: true, Sensitive: true,
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "TrafficPseudonymKey"}}},
 
 	// Support-bundle retention caps (Slice B). AdminDurable-only — node-local
 	// OPERATIONAL tuning over DURABLE forensic evidence: OFF export/import,

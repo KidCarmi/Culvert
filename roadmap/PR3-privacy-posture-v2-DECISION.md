@@ -1,6 +1,21 @@
 # PR3 — Decryption / Traffic-Log Privacy Posture v2 — DECISION
 
-**Status:** Gating design decision (read-only investigation; no code changed)
+**Status:** DECIDED → **Option B SHIPPED** (node-local key). PR #868 shipped the B0
+honesty fix; the follow-up ships B1 (chokepoint redaction) + B2 (node-local keyed-HMAC
+key), fail-closed. **B3 (fleet-wide CP→DP key sync) is deferred** to a multi-node
+follow-up — the node-local key is the default (a stable per-node pseudonym). See
+`traffic_redaction.go`.
+
+**As-shipped key posture (reconciles the "encrypted under KEK" aspiration below):** the
+`TrafficPseudonymKey` is persisted **plaintext inside the 0600 `admin_settings.json`**,
+byte-consistent with the established `MetricsToken` / `SessionHMAC` secret posture — NOT
+KEK-encrypted. This is the accepted secret-at-rest layer for this appliance (the threat
+model protects against the SIEM/log-reader/DBA without file access, not an attacker with
+`admin_settings.json` read). A key ≠ 32 bytes on load is ignored (fail-closed). Rotation
+is an admin action (`PUT {"rotate_key":true}`); disable keeps the key so re-enable
+correlates. The **top-hosts ranking is redacted too** (it is a viewer-facing sink). The
+`§4/§5` references to "encrypted at rest under the KEK" describe the original aspiration,
+not the shipped code.
 **Author role:** Observability & Privacy Architect
 **Base:** `origin/main` @ e5b7a8b7 (PR1 #855 permissive-retirement + PR2 #860 security-generation fencing merged)
 **Wave:** Adaptive-decryption production-hardening, PR3

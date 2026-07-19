@@ -75,6 +75,7 @@ func TestDecBlock_PresentSerializesExplicitNegatives(t *testing.T) {
 // TestDecBlock_ToBlockMapsEnumsAndRedaction pins the projection: typed enums flatten via
 // String(), and redaction hashes host/SNI to a present token (never omits, never leaks).
 func TestDecBlock_ToBlockMapsEnumsAndRedaction(t *testing.T) {
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef")) // Option B: redaction is keyed
 	o := DecryptionOutcome{
 		Outcome:        decryptobs.OutcomeBypassLearned,
 		DecisionSource: decryptobs.DecisionAutoexcludeCache,
@@ -156,6 +157,7 @@ func TestDecBlock_ZeroAndGarbageEnumsCoerceToSentinels(t *testing.T) {
 // TestRedactHost pins the §4 redaction helper: off = passthrough, on = present
 // fixed-length hash token (never omission), empty stays empty, stable, collision-distinct.
 func TestRedactHost(t *testing.T) {
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef")) // Option B: redaction is keyed
 	if got := redactHost("a.example.com", false); got != "a.example.com" {
 		t.Errorf("redaction off must pass through, got %q", got)
 	}

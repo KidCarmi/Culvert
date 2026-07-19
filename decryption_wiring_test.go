@@ -67,6 +67,11 @@ func TestRecordTunnelCloseReason_NoDecBlock(t *testing.T) {
 // hash token, never the plaintext host (the top-level entry.Host is unaffected — that is
 // the existing feed field, redacted by its own toggle, not this one).
 func TestRecordTunnelCloseDec_Redacts(t *testing.T) {
+	// PR3 Option B made dec.* redaction a KEYED HMAC, so a token requires a node-local
+	// key — without one, pseudonymizeHost fails closed to the "redacted" sentinel (not an
+	// "h_" token). Install a fixed key so the assertion is order-independent (this was the
+	// determinism-shuffle gap: the test only passed when a prior test leaked a key).
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef"))
 	const host = "dec-wire-redact.example"
 	o := &DecryptionOutcome{Outcome: decryptobs.OutcomeBypassManual, DecisionSource: decryptobs.DecisionManualSSLBypass, Host: host}
 	recordTunnelCloseGatedDec(nil, ProxyIdentity{ClientIP: "203.0.113.11"}, "CONNECT", host, 1, 2, time.Now(), "bypass", "", o, true)

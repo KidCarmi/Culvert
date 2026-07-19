@@ -99,6 +99,7 @@ func TestRecordDecryptFailureEntry_LogOnlyNoStatDoubleCount(t *testing.T) {
 // TestRecordDecryptFailureEntry_RedactsHost: with redaction ON the dec block's
 // host/SNI are hashed (the §4 posture), matching the tunnel-close behavior.
 func TestRecordDecryptFailureEntry_RedactsHost(t *testing.T) {
+	swapTrafficKey(t, []byte("0123456789abcdef0123456789abcdef")) // Option B: redaction is keyed
 	const host = "dec-fail-redacted.example"
 	id := ProxyIdentity{ClientIP: "198.51.100.9"}
 
