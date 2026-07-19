@@ -2,9 +2,9 @@ package pac
 
 // inventory.go — PAC Exception Intelligence P0: the config-derived DIRECT
 // inventory. It enumerates every path by which a PAC profile can return
-// DIRECT — a FULL security-path bypass (traffic skips TLS inspection, DLP,
+// DIRECT — a FULL security-path bypass (traffic skips SSL inspection, DLP,
 // CDR, URL filtering, threat inspection, auth, policy, and ALL proxy logging;
-// it never reaches Culvert), which is distinct from a TLS-decryption bypass.
+// it never reaches Culvert), which is distinct from an SSL-inspection bypass.
 //
 // This is an OBSERVABLE read-model: it reports what the configuration makes
 // reachable, never that a bypass was USED. Culvert cannot observe DIRECT

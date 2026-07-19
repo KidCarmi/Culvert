@@ -274,6 +274,7 @@ input or reach a host binary.
 | `storage` | data-dir writability (real create+remove probe), free space, support-tree stat | none |
 | `upstream` | upstream pool health + circuit state (from the existing health loop) | none (no new dial) |
 | `cluster` | cluster/HA posture — role, fencing-lease validity/epoch, write authority, enrolled-node counts, standby sync health | none (in-memory state only) |
+| `etcd` | HA fencing-lease (etcd) backend reachability from this node — a bounded, no-mutation probe against the operator-configured endpoints | connects to the configured etcd endpoints (startup config, not SSRF-relevant) |
 | `config` | live config-snapshot validity — the same cap validation that gates a CP→DP sync — plus non-secret collection sizes (policy rules, blocklist, categories, …); never the snapshot values | none (in-memory assembly) |
 | `support` | support-bundle **store** health — bundle count, aggregate size, age spread, the retention bounds in force, and the janitor's last-sweep time + evicted total; counts + a timestamp only, never bundle content. Answers "why did a bundle disappear?" | none (reads bundle manifests) |
 | `dns <host>` | bounded resolution of a bare hostname | resolves; **refuses** private/internal targets |
