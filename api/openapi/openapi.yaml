@@ -993,6 +993,30 @@ components:
       description: Partial support-bundle retention update.
       additionalProperties: true
 
+    # ── Slice 3 tranche 12: action + CRUD schemas ─────────────────────────────────
+    AlertWebhookList:
+      type: object
+      required: [webhooks]
+      additionalProperties: false
+      properties:
+        webhooks: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    AlertWebhookInput:
+      type: object
+      description: Alert webhook (rich object; open superset).
+      additionalProperties: true
+    UpstreamSettingsUpdate:
+      type: object
+      description: Upstream pool settings update.
+      additionalProperties: true
+    TunablesPatch:
+      type: object
+      description: Adaptive auto-exclude tunables patch (subset of tunable fields).
+      additionalProperties: true
+    ClusterTokenInput:
+      type: object
+      description: Enrollment token request (ttl/label).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -3786,6 +3810,65 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterTokens' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createClusterToken
+      tags: [cluster]
+      summary: Create enrollment token
+      description: Creates a node enrollment token.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: cluster.token.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClusterTokenInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteClusterToken
+      tags: [cluster]
+      summary: Delete enrollment token
+      description: Revokes an enrollment token by hash.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: cluster.token.delete
+      parameters:
+        - name: hash
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/cluster/audit:
     get:
       operationId: getClusterAudit
@@ -4241,6 +4324,36 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/AutoExcludeTunables' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setAutoExcludeTunables
+      tags: [policy]
+      summary: Set auto-exclude tunables
+      description: Updates adaptive decryption auto-exclude tunables.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: decryption.tunables.set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TunablesPatch' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
   /api/config/diff:
     get:
       operationId: getConfigDiff
@@ -4276,4 +4389,191 @@ paths:
           description: Referenced object/version not found. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/ca/cache-clear:
+    post:
+      operationId: clearCACache
+      tags: [security]
+      summary: Clear leaf-cert cache
+      description: Clears the MITM leaf-certificate cache.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: ca.cache_clear
+      responses:
+        '200':
+          description: Clear leaf-cert cache completed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/feeds/sync:
+    post:
+      operationId: syncThreatFeeds
+      tags: [security]
+      summary: Force threat-feed sync
+      description: Forces an immediate threat-feed sync.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: scan.feeds.sync
+      responses:
+        '200':
+          description: Force threat-feed sync completed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/security-scan/yara/reload:
+    post:
+      operationId: reloadYARA
+      tags: [security]
+      summary: Reload YARA rules
+      description: Reloads YARA rules from the rules directory.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: yara.reload
+      responses:
+        '200':
+          description: Reload YARA rules completed.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/alerts/webhooks:
+    get:
+      operationId: getAlertWebhooks
+      tags: [security]
+      summary: List alert webhooks
+      description: Returns configured alert webhooks (secrets redacted).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Alert webhooks.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertWebhookList' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    post:
+      operationId: createAlertWebhook
+      tags: [security]
+      summary: Create alert webhook
+      description: Creates an alert webhook.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: alert.webhook.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: updateAlertWebhook
+      tags: [security]
+      summary: Update alert webhook
+      description: Updates an alert webhook by id.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: alert.webhook.update
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    delete:
+      operationId: deleteAlertWebhook
+      tags: [security]
+      summary: Delete alert webhook
+      description: Deletes an alert webhook by id.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: alert.webhook.delete
+      parameters:
+        - name: id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }

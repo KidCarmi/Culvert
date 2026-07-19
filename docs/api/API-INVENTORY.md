@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 127
-- **Exempt (≤270-day horizon):** 157
+- **Documented:** 137
+- **Exempt (≤270-day horizon):** 147
 
 ## By domain
 
@@ -12,14 +12,14 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 |---|---|---|
 | auth | 18 | 7 |
 | cdr | 11 | 0 |
-| cluster | 31 | 16 |
+| cluster | 31 | 18 |
 | dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
 | pac | 23 | 5 |
-| policy | 65 | 35 |
+| policy | 65 | 36 |
 | release | 6 | 1 |
-| security | 51 | 22 |
+| security | 51 | 29 |
 | settings | 30 | 19 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
@@ -29,6 +29,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 
 | Method | Route | Handler | Min role |
 |---|---|---|---|
+| DELETE | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
+| GET | `/api/alerts/webhooks` | apiAlertsWebhooks | viewer |
+| POST | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
+| PUT | `/api/alerts/webhooks` | apiAlertsWebhooks | operator |
 | GET | `/api/audit` | apiAudit | viewer |
 | POST | `/api/auth/change-password` | apiAuthChangePassword | viewer |
 | POST | `/api/auth/login` | apiAuthLogin | public |
@@ -46,6 +50,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | POST | `/api/blocklist/feed` | apiBlocklistFeed | operator |
 | GET | `/api/blocklist/mode` | apiBlocklistMode | viewer |
 | POST | `/api/blocklist/mode` | apiBlocklistMode | operator |
+| POST | `/api/ca/cache-clear` | apiCACacheClear | admin |
 | GET | `/api/ca/key-provider` | apiCAKeyProvider | viewer |
 | POST | `/api/ca/rotate` | apiCARotate | admin |
 | GET | `/api/ca/status` | apiCAStatus | viewer |
@@ -65,7 +70,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/cluster/revocations` | apiClusterRevocations | viewer |
 | GET | `/api/cluster/rotation` | apiClusterRotation | viewer |
 | GET | `/api/cluster/status` | apiClusterStatus | viewer |
+| DELETE | `/api/cluster/tokens` | apiClusterTokens | admin |
 | GET | `/api/cluster/tokens` | apiClusterTokens | viewer |
+| POST | `/api/cluster/tokens` | apiClusterTokens | admin |
 | GET | `/api/config/diff` | apiConfigDiff | viewer |
 | GET | `/api/config/export` | apiConfigExport | admin |
 | POST | `/api/config/import` | apiConfigImport | admin |
@@ -79,6 +86,7 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | DELETE | `/api/decryption-exclusions` | apiDecryptionExclusions | operator |
 | GET | `/api/decryption-exclusions` | apiDecryptionExclusions | viewer |
 | GET | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | viewer |
+| PUT | `/api/decryption-exclusions/tunables` | apiDecryptionExclusionTunables | admin |
 | DELETE | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
 | GET | `/api/decryption-profiles` | apiDecryptionProfiles | viewer |
 | POST | `/api/decryption-profiles` | apiDecryptionProfiles | operator |
@@ -123,8 +131,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | PUT | `/api/security-scan/exclusions` | apiSecScanExclusions | admin |
 | GET | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | viewer |
 | PUT | `/api/security-scan/feeds/domain-allowlist` | apiDomainAllowlist | admin |
+| POST | `/api/security-scan/feeds/sync` | apiSecFeedsSync | admin |
 | GET | `/api/security-scan/status` | apiSecScanStatus | viewer |
 | GET | `/api/security-scan/svc` | apiScanSvcConfig | viewer |
+| POST | `/api/security-scan/yara/reload` | apiSecYARAReload | admin |
 | GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
