@@ -809,15 +809,21 @@ verify_bootstrap_verifier() {
   # image's default nonroot user could not traverse it. Mount read-only.
   # --certificate-identity-regexp against the PINNED SAN (tagged releases of this
   # repo's ci.yml) — the SAME identity that gates the proxy image + the maint agent.
+  # --timeout bounds the Sigstore/Rekor/TUF network calls so an egress-filtered
+  # appliance fails CLOSED fast (matching verify_pinned_image_signature) instead of
+  # hanging until the operator reaches for CULVERT_BOOTSTRAP_SKIP_VERIFY. Locked-down
+  # networks must allow the Sigstore endpoints (Fulcio, Rekor, the TUF CDN) or use
+  # the offline path (CULVERT_PROXY_SEED_REF); see docs/operator/*.
   if ! sudo docker run --rm --user 0:0 -v "$dir:/work:ro" -w /work "$MAINT_COSIGN_IMAGE" \
       verify-blob \
+      --timeout=60s \
       --bundle "$asset.sigstore.json" \
       --new-bundle-format \
       --certificate-identity-regexp "$MAINT_SIGSTORE_SAN_REGEX" \
       --certificate-oidc-issuer "$MAINT_SIGSTORE_ISSUER" \
       "$asset" >/dev/null 2>&1; then
     warn "cosign verification FAILED for the catalog verifier ($asset $ver) against the pinned release identity — refusing to run it."
-    warn "If this host cannot reach the Sigstore/Rekor endpoints, preload an image and use CULVERT_PROXY_SEED_REF, or CULVERT_BOOTSTRAP_SKIP_VERIFY=1 (break-glass)."
+    warn "If this host cannot reach the Sigstore endpoints (Fulcio/Rekor/TUF CDN), preload an image and use CULVERT_PROXY_SEED_REF, or CULVERT_BOOTSTRAP_SKIP_VERIFY=1 (break-glass)."
     return 1
   fi
   info "Catalog verifier cosign-verified against the pinned release identity ($ver)."
