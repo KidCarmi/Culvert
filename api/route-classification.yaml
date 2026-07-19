@@ -2015,48 +2015,36 @@ routes:
   - route: "/api/pac/pools/"
     method: "GET"
     handler: "apiPACPoolItem"
+    openapi_path: "/api/pac/pools/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "viewer"
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/pools/"
     method: "PUT"
     handler: "apiPACPoolItem"
+    openapi_path: "/api/pac/pools/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/pools/"
     method: "DELETE"
     handler: "apiPACPoolItem"
+    openapi_path: "/api/pac/pools/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/pac/posture/diff"
     method: "POST"
     handler: "apiPACPostureDiff"
@@ -2090,48 +2078,36 @@ routes:
   - route: "/api/pac/posture/exceptions/"
     method: "GET"
     handler: "apiPACExceptionItem"
+    openapi_path: "/api/pac/posture/exceptions/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "viewer"
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/posture/exceptions/"
     method: "PUT"
     handler: "apiPACExceptionItem"
+    openapi_path: "/api/pac/posture/exceptions/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/posture/exceptions/"
     method: "DELETE"
     handler: "apiPACExceptionItem"
+    openapi_path: "/api/pac/posture/exceptions/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/pac/posture/inventory"
     method: "GET"
     handler: "apiPACPostureInventory"
@@ -2170,63 +2146,47 @@ routes:
   - route: "/api/pac/profiles/"
     method: "GET"
     handler: "apiPACProfileItem"
+    openapi_path: "/api/pac/profiles/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "viewer"
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/profiles/"
     method: "POST"
     handler: "apiPACProfileItem"
+    openapi_path: "/api/pac/profiles/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/profiles/"
     method: "PUT"
     handler: "apiPACProfileItem"
+    openapi_path: "/api/pac/profiles/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/pac/profiles/"
     method: "DELETE"
     handler: "apiPACProfileItem"
+    openapi_path: "/api/pac/profiles/{name}"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/pac/simulate"
     method: "POST"
     handler: "apiPACSimulate"
@@ -2695,48 +2655,36 @@ routes:
   - route: "/api/security-scan/yara/rules/"
     method: "GET"
     handler: "apiSecYARARules"
+    openapi_path: "/api/security-scan/yara/rules/{name}"
     domain: "security"
     visibility: admin-supported
     min_role: "viewer"
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/security-scan/yara/rules/"
     method: "PUT"
     handler: "apiSecYARARules"
+    openapi_path: "/api/security-scan/yara/rules/{name}"
     domain: "security"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/security-scan/yara/rules/"
     method: "DELETE"
     handler: "apiSecYARARules"
+    openapi_path: "/api/security-scan/yara/rules/{name}"
     domain: "security"
     visibility: admin-supported
     min_role: "admin"
     mutating: true
     audit_expected: true
     danger_level: high
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
-      security_class: sensitive-operation
-      expires: *baseline
+    documented: true
   - route: "/api/security-scan/yara/settings"
     method: "GET"
     handler: "apiSecYARASettings"

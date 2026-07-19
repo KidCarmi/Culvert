@@ -1034,6 +1034,24 @@ components:
       description: Support-bundle recipient (rich object; open superset).
       additionalProperties: true
 
+    # ── Slice 3 tranche 14: item-route schemas ────────────────────────────────────
+    PACPoolItem:
+      type: object
+      description: A single PAC pool (open superset).
+      additionalProperties: true
+    PACProfileItem:
+      type: object
+      description: A single PAC profile (open superset).
+      additionalProperties: true
+    PACExceptionItem:
+      type: object
+      description: A single PAC posture exception (open superset).
+      additionalProperties: true
+    YARARuleItem:
+      type: object
+      description: A single YARA rule file (open superset).
+      additionalProperties: true
+
 paths:
   /healthz:
     get:
@@ -4766,3 +4784,409 @@ paths:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+
+  /api/pac/pools/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getPACPoolItem
+      tags: [pac]
+      summary: Get PAC pool
+      description: Returns a single PAC pool.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Get PAC pool.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACPoolItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    put:
+      operationId: updatePACPoolItem
+      tags: [pac]
+      summary: Update PAC pool
+      description: Updates a PAC pool.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_pool.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PACPoolItem' }
+      responses:
+        '200':
+          description: Update PAC pool.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACPoolItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deletePACPoolItem
+      tags: [pac]
+      summary: Delete PAC pool
+      description: Deletes a PAC pool.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_pool.delete
+      responses:
+        '200':
+          description: Delete PAC pool.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACPoolItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/pac/profiles/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getPACProfileItem
+      tags: [pac]
+      summary: Get PAC profile
+      description: Returns a single PAC profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Get PAC profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACProfileItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    post:
+      operationId: createPACProfileItem
+      tags: [pac]
+      summary: Create PAC profile
+      description: Creates a PAC profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_profile.create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PACProfileItem' }
+      responses:
+        '200':
+          description: Create PAC profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACProfileItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    put:
+      operationId: updatePACProfileItem
+      tags: [pac]
+      summary: Update PAC profile
+      description: Updates a PAC profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_profile.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PACProfileItem' }
+      responses:
+        '200':
+          description: Update PAC profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACProfileItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deletePACProfileItem
+      tags: [pac]
+      summary: Delete PAC profile
+      description: Deletes a PAC profile.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_profile.delete
+      responses:
+        '200':
+          description: Delete PAC profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACProfileItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/pac/posture/exceptions/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getPACExceptionItem
+      tags: [pac]
+      summary: Get PAC posture exception
+      description: Returns a single PAC posture exception.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Get PAC posture exception.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACExceptionItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    put:
+      operationId: updatePACExceptionItem
+      tags: [pac]
+      summary: Update PAC posture exception
+      description: Updates a PAC posture exception.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_posture_exception.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PACExceptionItem' }
+      responses:
+        '200':
+          description: Update PAC posture exception.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACExceptionItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deletePACExceptionItem
+      tags: [pac]
+      summary: Delete PAC posture exception
+      description: Deletes a PAC posture exception.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_posture_exception.delete
+      responses:
+        '200':
+          description: Delete PAC posture exception.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PACExceptionItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+  /api/security-scan/yara/rules/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getYARARuleItem
+      tags: [security]
+      summary: Get YARA rule
+      description: Returns a single YARA rule file.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Get YARA rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YARARuleItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    put:
+      operationId: updateYARARuleItem
+      tags: [security]
+      summary: Update YARA rule
+      description: Creates or updates a YARA rule file.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.rule.update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/YARARuleItem' }
+      responses:
+        '200':
+          description: Update YARA rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YARARuleItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    delete:
+      operationId: deleteYARARuleItem
+      tags: [security]
+      summary: Delete YARA rule
+      description: Deletes a YARA rule file.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: yara.rule.delete
+      responses:
+        '200':
+          description: Delete YARA rule.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/YARARuleItem' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Not found. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }

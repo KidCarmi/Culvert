@@ -3,8 +3,8 @@
 Authoritative source: `api/route-classification.yaml` (enforced by the route-coverage gate). Generated.
 
 - **Total method-entries:** 284
-- **Documented:** 143
-- **Exempt (≤270-day horizon):** 141
+- **Documented:** 156
+- **Exempt (≤270-day horizon):** 128
 
 ## By domain
 
@@ -16,10 +16,10 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | dashboard | 13 | 10 |
 | governance | 1 | 1 |
 | observability | 2 | 2 |
-| pac | 23 | 5 |
+| pac | 23 | 15 |
 | policy | 65 | 36 |
 | release | 6 | 1 |
-| security | 51 | 32 |
+| security | 51 | 35 |
 | settings | 30 | 19 |
 | setup | 2 | 2 |
 | static | 1 | 0 |
@@ -120,8 +120,18 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/pac-config` | apiPACConfig | viewer |
 | POST | `/api/pac-config` | apiPACConfig | admin |
 | GET | `/api/pac/pools` | apiPACPools | viewer |
+| DELETE | `/api/pac/pools/` | apiPACPoolItem | admin |
+| GET | `/api/pac/pools/` | apiPACPoolItem | viewer |
+| PUT | `/api/pac/pools/` | apiPACPoolItem | admin |
+| DELETE | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
+| GET | `/api/pac/posture/exceptions/` | apiPACExceptionItem | viewer |
+| PUT | `/api/pac/posture/exceptions/` | apiPACExceptionItem | admin |
 | GET | `/api/pac/posture/inventory` | apiPACPostureInventory | viewer |
 | GET | `/api/pac/profiles` | apiPACProfiles | viewer |
+| DELETE | `/api/pac/profiles/` | apiPACProfileItem | admin |
+| GET | `/api/pac/profiles/` | apiPACProfileItem | viewer |
+| POST | `/api/pac/profiles/` | apiPACProfileItem | admin |
+| PUT | `/api/pac/profiles/` | apiPACProfileItem | admin |
 | GET | `/api/policy` | apiPolicy | viewer |
 | GET | `/api/policy/draft` | apiPolicyDraft | viewer |
 | GET | `/api/releases` | apiReleases | viewer |
@@ -140,6 +150,9 @@ Authoritative source: `api/route-classification.yaml` (enforced by the route-cov
 | GET | `/api/security-scan/svc` | apiScanSvcConfig | viewer |
 | POST | `/api/security-scan/yara/reload` | apiSecYARAReload | admin |
 | GET | `/api/security-scan/yara/rules` | apiSecYARARules | viewer |
+| DELETE | `/api/security-scan/yara/rules/` | apiSecYARARules | admin |
+| GET | `/api/security-scan/yara/rules/` | apiSecYARARules | viewer |
+| PUT | `/api/security-scan/yara/rules/` | apiSecYARARules | admin |
 | GET | `/api/security-scan/yara/settings` | apiSecYARASettings | viewer |
 | PUT | `/api/security-scan/yara/settings` | apiSecYARASettings | admin |
 | POST | `/api/security-scan/yara/validate` | apiSecYARAValidate | operator |
