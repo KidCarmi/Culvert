@@ -132,6 +132,51 @@ func TestApiDecryptionRedaction_GetPutAndRBAC(t *testing.T) {
 	}
 }
 
+// TestApiDecryptionRedaction_RotatePreservesPosture — PUT {"rotate_key":true} omits
+// redact_hosts (decodes false), so it must NOT silently disable an enabled posture: the
+// posture is preserved across a rotation, only the key changes. Regression for the Codex
+// P1 "rotation turns plaintext logging back on" finding.
+func TestApiDecryptionRedaction_RotatePreservesPosture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin_settings.json")
+	swapAdminSettingsPath(t, path)
+	swapDecRedact(t, false)
+	swapTrafficKey(t, nil)
+
+	// Enable the posture (mints a key).
+	if w := decRedactReq(t, RoleAdmin, http.MethodPut, `{"redact_hosts":true}`); w.Code != http.StatusOK || !decRedactHosts() {
+		t.Fatalf("enable: code=%d flag=%v", w.Code, decRedactHosts())
+	}
+	before := redactDestinationHost("host.example.com")
+	if !strings.HasPrefix(before, "h_") {
+		t.Fatalf("posture-on token wrong: %q", before)
+	}
+
+	// Rotate the key; the posture MUST stay enabled.
+	w := decRedactReq(t, RoleAdmin, http.MethodPut, `{"rotate_key":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rotate: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if !decRedactHosts() {
+		t.Fatal("rotation silently DISABLED the posture (would re-enable plaintext logging)")
+	}
+	if !strings.Contains(w.Body.String(), `"redact_hosts":true`) {
+		t.Fatalf("rotate response must report the preserved posture, got %s", w.Body.String())
+	}
+	after := redactDestinationHost("host.example.com")
+	if after == before {
+		t.Fatal("rotation must change the token for the same host")
+	}
+	if !strings.HasPrefix(after, "h_") {
+		t.Fatalf("post-rotation token wrong: %q", after)
+	}
+	// Persisted posture is still on.
+	var s AdminSettings
+	data, _ := os.ReadFile(path)
+	if json.Unmarshal(data, &s) != nil || !s.DecryptionRedactHosts {
+		t.Fatalf("rotation must persist the preserved posture, got %+v", s)
+	}
+}
+
 // TestDecRedaction_APISurfacesScope pins the PR3 Option B GET contract: the posture is
 // now a GLOBAL destination-privacy posture — the API advertises the traffic_destination
 // scope covering host, uri, and the dec.* fields, and reports whether a node-local key

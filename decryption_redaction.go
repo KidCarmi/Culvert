@@ -70,6 +70,15 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		}
 		old := decRedactHosts()
 		oldKey := getTrafficPseudonymKey()
+		// Rotation is ORTHOGONAL to the posture. The advertised rotate call is
+		// PUT {"rotate_key":true}, which omits redact_hosts — so it decodes as false.
+		// Honoring that false would SILENTLY DISABLE the posture (and turn plaintext
+		// logging back on) on a node whose operator only meant to roll the key. Preserve
+		// the current posture across a rotation; a posture change is a separate PUT.
+		targetRedact := body.RedactHosts
+		if body.RotateKey {
+			targetRedact = old
+		}
 		switch {
 		case body.RotateKey:
 			// Explicit rotation regenerates unconditionally.
@@ -78,7 +87,7 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "failed to rotate pseudonym key", http.StatusInternalServerError)
 				return
 			}
-		case body.RedactHosts:
+		case targetRedact:
 			// Provision the key BEFORE persisting, so enabling the posture and the key's
 			// durability are one transaction (no window where the posture is on but no
 			// key exists ⇒ no accidental fail-closed sentinel run).
@@ -88,7 +97,7 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		setDecRedactHosts(body.RedactHosts)
+		setDecRedactHosts(targetRedact)
 		if err := SaveAdminSettings(); err != nil {
 			setDecRedactHosts(old)         // durable write failed — leave runtime unchanged
 			setTrafficPseudonymKey(oldKey) // ...including the key (roll back a rotation)
@@ -97,7 +106,7 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state := "disabled"
-		if body.RedactHosts {
+		if targetRedact {
 			state = "enabled"
 		}
 		if body.RotateKey {
@@ -105,7 +114,7 @@ func apiDecryptionRedaction(w http.ResponseWriter, r *http.Request) {
 		} else {
 			auditEvent(r, "decryption.redaction", state, "traffic-log destination pseudonymization (host/URI/dec.*)")
 		}
-		jsonOK(w, map[string]any{"redact_hosts": body.RedactHosts, "key_rotated": body.RotateKey})
+		jsonOK(w, map[string]any{"redact_hosts": targetRedact, "key_rotated": body.RotateKey})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

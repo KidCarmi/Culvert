@@ -119,6 +119,29 @@ func TestTrafficRedaction_URIDoesNotOverRedact(t *testing.T) {
 	}
 }
 
+// TestTrafficRedaction_URIScrubsPortlessHost — when the logged host carries a :port, the
+// token stands for the PORT-STRIPPED host (pseudonymizeHost normalizes the port away), so
+// a bare portless echo of the host in the path must ALSO be scrubbed, not just the
+// with-port authority. Regression for the non-default-port path-echo leak.
+func TestTrafficRedaction_URIScrubsPortlessHost(t *testing.T) {
+	swapDecRedact(t, true)
+	swapTrafficKey(t, []byte(testTrafficKey))
+	const portless = "patient.example.com"
+	got := redactDestinationURI("https://patient.example.com:8443/ref/patient.example.com", "patient.example.com:8443", "")
+	if strings.Contains(strings.ToLower(got), portless) {
+		t.Fatalf("port-bearing host left a plaintext portless echo: %q", got)
+	}
+	if !strings.Contains(got, "h_") {
+		t.Fatalf("redacted URI carries no token: %q", got)
+	}
+	// The authority host and the path echo must collapse to the SAME token (one
+	// destination contract — pseudonymizeHost strips the port).
+	tok := redactDestinationHost("patient.example.com:8443")
+	if strings.Count(got, tok) < 2 {
+		t.Fatalf("authority and path echo must share one token %q, got %q", tok, got)
+	}
+}
+
 // TestTrafficRedaction_TopHostsRedacted — the viewer-facing top-hosts ranking carries
 // the pseudonym token (not the plaintext host) when the posture is on (MAJOR fix).
 func TestTrafficRedaction_TopHostsRedacted(t *testing.T) {

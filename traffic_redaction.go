@@ -146,7 +146,18 @@ func redactDestinationURI(uri, plainHost, tokenHost string) string {
 	if tokenHost == "" || tokenHost == plainHost {
 		tokenHost = pseudonymizeHost(plainHost)
 	}
-	return replaceHostFold(uri, plainHost, tokenHost)
+	// Scrub the host in BOTH the exact logged form (which may carry a :port) and the
+	// port-stripped/normalized form. pseudonymizeHost normalizes away the port, so the
+	// token stands for the PORTLESS host — meaning a non-default-port record
+	// (host="patient.example.com:8443") whose path echoes the bare "patient.example.com"
+	// would otherwise leave that echo in plaintext. Scrub the with-port form first (it is
+	// longer, so the "host:port" authority is replaced whole), then the portless form to
+	// catch any bare-host copy in the path.
+	out := replaceHostFold(uri, plainHost, tokenHost)
+	if portless := hostutil.StripHostPort(plainHost); portless != "" && portless != plainHost {
+		out = replaceHostFold(out, portless, tokenHost)
+	}
+	return out
 }
 
 // hostByteClass reports whether b can be part of a hostname label — used to detect

@@ -272,7 +272,13 @@ func applyAdminServices(s *AdminSettings) {
 	// redaction produces real tokens instead of the fail-closed sentinel. Generated
 	// in-memory here; it persists on the next SaveAdminSettings. Logged so the operator
 	// knows a key was minted (pseudonym correlation for this node begins here).
-	if decRedactHosts() && len(getTrafficPseudonymKey()) != trafficKeyLen {
+	//
+	// Gate on the LOADED posture (s.DecryptionRedactHosts), NOT the live decRedactHosts()
+	// flag: applyAdminServices runs BEFORE setDecRedactHosts restores the flag at the end
+	// of LoadAdminSettings, so the live flag still holds the pre-load default here. Reading
+	// it would make a legacy `decryption_redact_hosts:true` file with no key skip minting,
+	// leaving the node emitting the fail-closed sentinel until the next settings save.
+	if s.DecryptionRedactHosts && len(getTrafficPseudonymKey()) != trafficKeyLen {
 		if err := ensureTrafficPseudonymKey(); err != nil {
 			logger.Printf("TrafficRedaction: pseudonym key generation failed; destination redaction fails closed to a sentinel: %v", err)
 		} else {
