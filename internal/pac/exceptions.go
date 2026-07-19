@@ -175,11 +175,17 @@ func (s *ExceptionStore) Delete(id string) error {
 	return s.persistLocked()
 }
 
+// exceptionsMarshal is the marshaler persistLocked uses. It is a package var
+// (not a direct json.MarshalIndent call) only so a test can force the otherwise
+// unreachable marshal-error path and prove it propagates rather than being
+// swallowed. Production always uses json.MarshalIndent.
+var exceptionsMarshal = func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }
+
 func (s *ExceptionStore) persistLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(s.byID, "", "  ")
+	data, err := exceptionsMarshal(s.byID)
 	if err != nil {
 		return err
 	}

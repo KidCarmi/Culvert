@@ -207,6 +207,7 @@ func (h *HAState) selfFence(reason string) {
 	}
 	h.role = "standby"
 	h.since = time.Now()
+	fencedEpoch := h.leaseEpoch // capture the epoch being fenced before it is zeroed
 	h.leaseEpoch = 0
 	// CLOSE the keepalive stop channel rather than just nil it: when the
 	// loop's own renew round fenced, it exits by returning anyway — but a
@@ -227,6 +228,9 @@ func (h *HAState) selfFence(reason string) {
 	h.promoted.Store(false) // a future (fence-gated) promotion is legitimate
 
 	logger.Printf("HA: SELF-FENCED — demoted to read-only standby: %s", sanitizeLog(reason))
+	// M5: record the demotion in the failover ring (the epoch is the one being
+	// fenced out, captured before the zero above).
+	globalHAFailoverRing.Load().record("leader", "standby", "self-fence: "+reason, fencedEpoch, time.Now())
 	go alerts.Fire("ha_self_fenced", alerts.Payload{
 		Event:  "ha_self_fenced",
 		Detail: "leader lost the fencing lease and demoted to read-only standby: " + reason,
@@ -254,6 +258,24 @@ func (h *HAState) WriteAllowed() bool {
 		return false
 	}
 	return time.Since(h.leaseConfirmedAt) < h.leaseValidFor-haLeaseWriteMargin
+}
+
+// probeLeaseBackend performs a read-only reachability check of the fencing-lease
+// backend (M5 diagnose etcd). configured is false when no lease provider is armed
+// (legacy manual-failover or standalone HA) — the caller reports that as a clean
+// not-configured result, never an error. The Read is bounded by ctx and MUST NOT
+// mutate lease state (Provider.Read contract). It deliberately does NOT touch the
+// leaseEpoch/validity bookkeeping — this is an out-of-band diagnostic, not a
+// keepalive.
+func (h *HAState) probeLeaseBackend(ctx context.Context) (configured bool, st halease.Status, err error) {
+	h.mu.RLock()
+	p := h.lease
+	h.mu.RUnlock()
+	if p == nil {
+		return false, halease.Status{}, nil
+	}
+	st, err = p.Read(ctx)
+	return true, st, err
 }
 
 // leaseHealth reports the lease posture for /healthz: mode ("none" legacy /

@@ -124,9 +124,9 @@ func TestF6_ActiveByScope_Emission(t *testing.T) {
 		t.Fatalf("empty cache must emit no active series, got %q", empty.String())
 	}
 
-	autoExclude().Observe("f6-act-A", "A", "a.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.1")
-	autoExclude().Observe("f6-act-A", "A", "a2.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.2")
-	autoExclude().Observe("f6-act-B", "B", "b.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.3")
+	autoExclude().Observe("f6-act-A", "", "A", "a.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.1")
+	autoExclude().Observe("f6-act-A", "", "A", "a2.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.2")
+	autoExclude().Observe("f6-act-B", "", "B", "b.example", autoexclude.ReasonClientCertRequired, "ip:1.1.1.3")
 
 	var sb strings.Builder
 	writeAutoExcludeActiveByScope(&sb)

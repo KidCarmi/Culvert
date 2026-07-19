@@ -111,7 +111,8 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 	v2 := []string{"a.example", "b.example", "c.example"}
 	bl.ReplaceFeedEntries(v1)
 
-	c := &DataPlaneClient{lastVersion: 5}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(5)
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		if method != methodGetConfigDelta {
 			return nil, fmt.Errorf("unexpected method %s (should not fall through to full sync)", method)
@@ -128,8 +129,8 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 		return b, nil
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 6 {
-		t.Fatalf("lastVersion=%d, want 6 (delta applied)", c.lastVersion)
+	if c.lastVersion.Load() != 6 {
+		t.Fatalf("lastVersion=%d, want 6 (delta applied)", c.lastVersion.Load())
 	}
 	if !bl.IsBlocked("c.example") {
 		t.Fatal("delta add not applied to the blocklist")
@@ -144,7 +145,8 @@ func TestDataPlaneClient_DeltaSyncApplies(t *testing.T) {
 func TestDataPlaneClient_DeltaUnchanged(t *testing.T) {
 	restore := resetDPLastSeenEpochForTest()
 	t.Cleanup(restore)
-	c := &DataPlaneClient{lastVersion: 7}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(7)
 	calls := 0
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		calls++
@@ -155,8 +157,8 @@ func TestDataPlaneClient_DeltaUnchanged(t *testing.T) {
 		return b, nil
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 7 {
-		t.Fatalf("lastVersion changed to %d on unchanged", c.lastVersion)
+	if c.lastVersion.Load() != 7 {
+		t.Fatalf("lastVersion changed to %d on unchanged", c.lastVersion.Load())
 	}
 	if calls != 1 {
 		t.Fatalf("unchanged should be a single delta call, got %d calls", calls)
@@ -176,7 +178,8 @@ func TestDataPlaneClient_DeltaResyncFallsThrough(t *testing.T) {
 	full := []string{"full1.example", "full2.example"}
 	bl.ReplaceFeedEntries([]string{"stale.example"})
 
-	c := &DataPlaneClient{lastVersion: 3}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(3)
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		switch method {
 		case methodGetConfigDelta:
@@ -190,8 +193,8 @@ func TestDataPlaneClient_DeltaResyncFallsThrough(t *testing.T) {
 		}
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 9 {
-		t.Fatalf("lastVersion=%d, want 9 (full resync applied)", c.lastVersion)
+	if c.lastVersion.Load() != 9 {
+		t.Fatalf("lastVersion=%d, want 9 (full resync applied)", c.lastVersion.Load())
 	}
 	if !bl.IsBlocked("full1.example") || bl.IsBlocked("stale.example") {
 		t.Fatal("full resync did not replace the blocklist")
@@ -210,7 +213,8 @@ func TestDataPlaneClient_DeltaUnsupportedFallsThrough(t *testing.T) {
 	t.Cleanup(func() { dataDir = oldDataDir })
 	bl.ReplaceFeedEntries([]string{"stale.example"})
 
-	c := &DataPlaneClient{lastVersion: 2}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(2)
 	deltaCalls := 0
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		switch method {
@@ -225,8 +229,8 @@ func TestDataPlaneClient_DeltaUnsupportedFallsThrough(t *testing.T) {
 		}
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 4 || !bl.IsBlocked("new.example") {
-		t.Fatalf("full path did not apply after Unimplemented delta (lastVersion=%d)", c.lastVersion)
+	if c.lastVersion.Load() != 4 || !bl.IsBlocked("new.example") {
+		t.Fatalf("full path did not apply after Unimplemented delta (lastVersion=%d)", c.lastVersion.Load())
 	}
 	// Second cycle: delta must NOT be re-probed (deltaUnsupported latched).
 	c.fetchAndApply(context.Background())
@@ -249,7 +253,8 @@ func TestDataPlaneClient_DeltaFencedRejected(t *testing.T) {
 
 	bl.ReplaceFeedEntries([]string{"a.example"})
 	before := bl.SyncedFingerprint()
-	c := &DataPlaneClient{lastVersion: 5}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(5)
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		if method != methodGetConfigDelta {
 			return nil, fmt.Errorf("fenced delta must NOT fall through to %s", method)
@@ -264,8 +269,8 @@ func TestDataPlaneClient_DeltaFencedRejected(t *testing.T) {
 		return b, nil
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 5 {
-		t.Fatalf("fenced delta advanced lastVersion to %d", c.lastVersion)
+	if c.lastVersion.Load() != 5 {
+		t.Fatalf("fenced delta advanced lastVersion to %d", c.lastVersion.Load())
 	}
 	if bl.IsBlocked("evil.example") || bl.SyncedFingerprint() != before {
 		t.Fatal("fenced delta mutated the blocklist")
@@ -283,7 +288,8 @@ func TestDataPlaneClient_DeltaBaseMovedFallsThrough(t *testing.T) {
 	t.Cleanup(func() { dataDir = oldDataDir })
 	bl.ReplaceFeedEntries([]string{"stale.example"})
 
-	c := &DataPlaneClient{lastVersion: 3}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(3)
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		switch method {
 		case methodGetConfigDelta:
@@ -299,8 +305,8 @@ func TestDataPlaneClient_DeltaBaseMovedFallsThrough(t *testing.T) {
 		}
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 5 || !bl.IsBlocked("fresh.example") {
-		t.Fatalf("base-moved delta did not fall through to the full path (lastVersion=%d)", c.lastVersion)
+	if c.lastVersion.Load() != 5 || !bl.IsBlocked("fresh.example") {
+		t.Fatalf("base-moved delta did not fall through to the full path (lastVersion=%d)", c.lastVersion.Load())
 	}
 }
 
@@ -317,7 +323,8 @@ func TestDataPlaneClient_DeltaDriftHealsViaFull(t *testing.T) {
 	bl.ReplaceFeedEntries([]string{"v1.example"})
 
 	full := []string{"healed1.example", "healed2.example"}
-	c := &DataPlaneClient{lastVersion: 4}
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(4)
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		switch method {
 		case methodGetConfigDelta:
@@ -334,8 +341,8 @@ func TestDataPlaneClient_DeltaDriftHealsViaFull(t *testing.T) {
 		}
 	}
 	c.fetchAndApply(context.Background())
-	if c.lastVersion != 5 {
-		t.Fatalf("drift did not heal via full resync (lastVersion=%d)", c.lastVersion)
+	if c.lastVersion.Load() != 5 {
+		t.Fatalf("drift did not heal via full resync (lastVersion=%d)", c.lastVersion.Load())
 	}
 	if !bl.IsBlocked("healed1.example") || bl.IsBlocked("partial.example") {
 		t.Fatal("full resync did not replace the drifted blocklist")
@@ -369,7 +376,8 @@ func TestApplyBlocklistDeltaSnapshot_ManualSurvivesEndToEnd(t *testing.T) {
 // the DP re-probes exactly once every deltaReprobeInterval polls (covers the
 // in-place-CP-upgrade case where connect() never runs). (Roll-F1 coverage.)
 func TestDataPlaneClient_DeltaReprobeAfterCooldown(t *testing.T) {
-	c := &DataPlaneClient{lastVersion: 3, deltaUnsupported: true}
+	c := &DataPlaneClient{deltaUnsupported: true}
+	c.lastVersion.Store(3)
 	deltaCalls := 0
 	c.callForTest = func(_ context.Context, method string, _ json.RawMessage) (json.RawMessage, error) {
 		if method == methodGetConfigDelta {

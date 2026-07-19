@@ -132,11 +132,17 @@ type MetricsReport struct {
 	Blocked  int64  `json:"blocked"`
 	AuthFail int64  `json:"auth_fail"`
 	Uptime   string `json:"uptime"`
-	// T3 P1 reverse telemetry: the config version + blocklist synced fingerprint
-	// this DP currently enforces, so the CP can surface fleet convergence and
-	// stragglers. omitempty keeps an old DP's report shape unchanged.
-	ConfigVersion int64  `json:"config_version,omitempty"`
-	SyncedFP      string `json:"synced_fp,omitempty"`
+	// M5 PR-A + T3 P1 reverse telemetry: raw version facts plus the blocklist
+	// synced fingerprint the DP enforces, so the CP (and TAC Cloud) can tell which
+	// config each DP actually applied and surface fleet convergence/stragglers
+	// without correlating on the box. All additive + omitempty: a mixed-version
+	// cluster where an older DP omits them degrades to the zero value, never
+	// errors (the snapshot discipline).
+	ConfigVersion  int64  `json:"config_version,omitempty"`  // applied config-snapshot version (DP-side c.lastVersion)
+	PolicyVersion  int64  `json:"policy_version,omitempty"`  // running policy-store generation on the node
+	Epoch          int64  `json:"epoch,omitempty"`           // highest fencing epoch the node has observed
+	CulvertVersion string `json:"culvert_version,omitempty"` // build version string on the node
+	SyncedFP       string `json:"synced_fp,omitempty"`       // T3 P1: blocklist synced fingerprint (drift detection)
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.

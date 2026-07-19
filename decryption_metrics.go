@@ -10,12 +10,13 @@ package main
 // counter needs NO cardinality cap: the label space is bounded by construction, and every
 // label value is coerced through decEnumOr so only in-vocabulary tokens ever reach a label.
 //
-// Wiring (exactly once per session): recordDecryptSession is called from the two session-
+// Wiring (exactly once per session): recordDecryptSession is called from the session-
 // terminal points — recordTunnelCloseGatedDec (bypass / learned-bypass / rescue /
-// non-TLS-fallback all pass a non-nil DecryptionOutcome there) and handleTunnelInspect
+// non-TLS-fallback all pass a non-nil DecryptionOutcome there), handleTunnelInspect
 // (the inspect-success path, which logs per-inner-request and never reaches the close
-// seam). The `failed` outcome + the culvert_decrypt_failures_total taxonomy are a later
-// slice (failure paths do not yet construct a DecryptionOutcome).
+// seam), and recordDecryptFailureEntry (every FAILED attempt: the origin/client
+// handshake failures AND the pre-handshake tcp_connect failure), which pairs the
+// coverage count with the culvert_decrypt_failures_total taxonomy.
 
 import (
 	"fmt"

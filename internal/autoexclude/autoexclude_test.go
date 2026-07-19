@@ -21,7 +21,7 @@ const sc = "scope-a" // default test scope id
 
 // obs is a terse Observe helper for the default scope.
 func obs(c *Cache, host string, r Reason, client string) bool {
-	return c.Observe(sc, "Scope A", host, r, client)
+	return c.Observe(sc, "", "Scope A", host, r, client)
 }
 
 // TestConfirmCount_DistinctTokens pins the core anti-poison invariant: one
@@ -36,13 +36,13 @@ func TestConfirmCount_DistinctTokens(t *testing.T) {
 			t.Fatalf("single token promoted on attempt %d — self-poison not blocked", i)
 		}
 	}
-	if _, ok := c.Contains(sc, "evil.example"); ok {
+	if _, ok := c.Contains(sc, "", "evil.example"); ok {
 		t.Fatal("host excluded from a single token — confirm-count bypassed")
 	}
 	if !obs(c, "evil.example", ReasonClientPinned, "ip:10.1.0.2") {
 		t.Fatal("second distinct token did not promote")
 	}
-	if r, ok := c.Contains(sc, "evil.example"); !ok || r != ReasonClientPinned {
+	if r, ok := c.Contains(sc, "", "evil.example"); !ok || r != ReasonClientPinned {
 		t.Fatalf("post-promotion Contains = (%q,%v), want (client_pinned,true)", r, ok)
 	}
 }
@@ -53,18 +53,18 @@ func TestConfirmCount_DistinctTokens(t *testing.T) {
 func TestScopeIsolation(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	c := newTestCache(Config{ConfirmN: 1}, clk)
-	c.Observe("prof-A", "A", "shared.example", ReasonClientCertRequired, "ip:1.1.1.1")
-	if _, ok := c.Contains("prof-A", "shared.example"); !ok {
+	c.Observe("prof-A", "", "A", "shared.example", ReasonClientCertRequired, "ip:1.1.1.1")
+	if _, ok := c.Contains("prof-A", "", "shared.example"); !ok {
 		t.Fatal("scope A should have the exclusion")
 	}
-	if _, ok := c.Contains("prof-B", "shared.example"); ok {
+	if _, ok := c.Contains("prof-B", "", "shared.example"); ok {
 		t.Fatal("scope B must NOT see scope A's exclusion (cross-scope contamination)")
 	}
 	// Removing from B is a no-op; A stays.
 	if c.Remove("prof-B", "shared.example") {
 		t.Fatal("Remove on wrong scope should report not-present")
 	}
-	if _, ok := c.Contains("prof-A", "shared.example"); !ok {
+	if _, ok := c.Contains("prof-A", "", "shared.example"); !ok {
 		t.Fatal("scope A entry must survive a wrong-scope remove")
 	}
 }
@@ -90,14 +90,14 @@ func TestExpiry_ReasonTTL(t *testing.T) {
 	obs(c, "pinned.example", ReasonClientPinned, "ip:1.1.1.1")
 	obs(c, "unsup.example", ReasonUnsupportedParams, "ip:1.1.1.1")
 	clk.add(90 * time.Minute)
-	if _, ok := c.Contains(sc, "pinned.example"); ok {
+	if _, ok := c.Contains(sc, "", "pinned.example"); ok {
 		t.Fatal("client_pinned entry should have expired after pinnedTTL")
 	}
-	if _, ok := c.Contains(sc, "unsup.example"); !ok {
+	if _, ok := c.Contains(sc, "", "unsup.example"); !ok {
 		t.Fatal("unsupported entry should still be active within TTL")
 	}
 	clk.add(12 * time.Hour)
-	if _, ok := c.Contains(sc, "unsup.example"); ok {
+	if _, ok := c.Contains(sc, "", "unsup.example"); ok {
 		t.Fatal("unsupported entry should have expired after TTL")
 	}
 	if n := c.Len(); n != 0 {
@@ -115,7 +115,7 @@ func TestWindow_ResetsPartialObservation(t *testing.T) {
 	if obs(c, "drip.example", ReasonClientPinned, "ip:2.2.2.2") {
 		t.Fatal("observations across a lapsed window must not combine to promote")
 	}
-	if _, ok := c.Contains(sc, "drip.example"); ok {
+	if _, ok := c.Contains(sc, "", "drip.example"); ok {
 		t.Fatal("host excluded despite window reset")
 	}
 }
@@ -126,7 +126,7 @@ func TestNormalize_HostOnlyCollision(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	c := newTestCache(Config{ConfirmN: 1}, clk)
 	obs(c, "EXAMPLE.com.", ReasonUnsupportedParams, "ip:1.1.1.1")
-	if _, ok := c.Contains(sc, "example.com:443"); !ok {
+	if _, ok := c.Contains(sc, "", "example.com:443"); !ok {
 		t.Fatal("normalized key mismatch: EXAMPLE.com. did not collide with example.com:443")
 	}
 	if c.Len() != 1 {
@@ -140,7 +140,7 @@ func TestHits_BlastRadius(t *testing.T) {
 	c := newTestCache(Config{ConfirmN: 1}, clk)
 	obs(c, "h.example", ReasonUnsupportedParams, "ip:1.1.1.1")
 	for i := 0; i < 3; i++ {
-		c.Contains(sc, "h.example")
+		c.Contains(sc, "", "h.example")
 	}
 	list := c.List()
 	if len(list) != 1 || list[0].Hits != 3 || list[0].ScopeID != sc {
@@ -157,7 +157,7 @@ func TestRemoveClear(t *testing.T) {
 	if !c.Remove(sc, "A.example:443") { // normalized remove
 		t.Fatal("Remove should normalize and find the entry")
 	}
-	if _, ok := c.Contains(sc, "a.example"); ok {
+	if _, ok := c.Contains(sc, "", "a.example"); ok {
 		t.Fatal("removed host still present")
 	}
 	if n := c.Clear(); n != 1 {
@@ -263,7 +263,7 @@ func TestAllReasons_Exhaustive(t *testing.T) {
 		if !obs(c, host, promoter, "ip:10.0.0.2") {
 			t.Fatalf("%s: host did not promote on the second distinct token", promoter)
 		}
-		if _, ok := c.Contains(sc, host); !ok {
+		if _, ok := c.Contains(sc, "", host); !ok {
 			t.Fatalf("%s: host not excluded after promotion", promoter)
 		}
 		// Every other-reason pending for this host must be gone.
@@ -277,13 +277,13 @@ func TestAllReasons_Exhaustive(t *testing.T) {
 func TestEmptyScopeOrHost_NoOp(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	c := newTestCache(Config{ConfirmN: 1}, clk)
-	if c.Observe("", "", "h.example", ReasonUnsupportedParams, "ip:1.1.1.1") {
+	if c.Observe("", "", "", "h.example", ReasonUnsupportedParams, "ip:1.1.1.1") {
 		t.Fatal("empty scope must not promote")
 	}
 	if obs(c, "", ReasonUnsupportedParams, "ip:1.1.1.1") {
 		t.Fatal("empty host must not promote")
 	}
-	if _, ok := c.Contains("", "h.example"); ok {
+	if _, ok := c.Contains("", "", "h.example"); ok {
 		t.Fatal("empty scope must never match")
 	}
 }
@@ -293,9 +293,9 @@ func TestEmptyScopeOrHost_NoOp(t *testing.T) {
 func TestActiveByScope(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
 	c := newTestCache(Config{ConfirmN: 1, TTL: time.Hour}, clk)
-	c.Observe("prof-A", "A", "a1.example", ReasonClientCertRequired, "ip:1.1.1.1")
-	c.Observe("prof-A", "A", "a2.example", ReasonClientCertRequired, "ip:1.1.1.2")
-	c.Observe("prof-B", "B", "b1.example", ReasonClientCertRequired, "ip:1.1.1.3")
+	c.Observe("prof-A", "", "A", "a1.example", ReasonClientCertRequired, "ip:1.1.1.1")
+	c.Observe("prof-A", "", "A", "a2.example", ReasonClientCertRequired, "ip:1.1.1.2")
+	c.Observe("prof-B", "", "B", "b1.example", ReasonClientCertRequired, "ip:1.1.1.3")
 
 	got := c.ActiveByScope()
 	if got["prof-A"] != 2 || got["prof-B"] != 1 {

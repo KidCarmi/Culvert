@@ -139,6 +139,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"config_versions_readable":   false,
 		"config_rollback_validation": false,
 		"key_at_rest":                false,
+		"memory_backstop":            false,
 	}
 	for i := range c.Checks {
 		assertCheckShape(t, i, c.Checks[i])

@@ -42,11 +42,11 @@ func TestDiagnoseSupport(t *testing.T) {
 	if d.NewestAgeHours != 24 { // 1 day
 		t.Errorf("NewestAgeHours = %d, want 24", d.NewestAgeHours)
 	}
-	if d.RetentionKeep != supportRetentionKeep {
-		t.Errorf("RetentionKeep = %d, want %d", d.RetentionKeep, supportRetentionKeep)
+	if d.RetentionKeep != supportRetentionKeepVal() {
+		t.Errorf("RetentionKeep = %d, want %d", d.RetentionKeep, supportRetentionKeepVal())
 	}
-	if d.RetentionMaxAgeDays != int(supportRetentionMaxAge/(24*time.Hour)) {
-		t.Errorf("RetentionMaxAgeDays = %d, want %d", d.RetentionMaxAgeDays, int(supportRetentionMaxAge/(24*time.Hour)))
+	if d.RetentionMaxAgeDays != int(supportRetentionMaxAgeVal()/(24*time.Hour)) {
+		t.Errorf("RetentionMaxAgeDays = %d, want %d", d.RetentionMaxAgeDays, int(supportRetentionMaxAgeVal()/(24*time.Hour)))
 	}
 	// 2 bundles ≤ keep cap (10) → within_count_cap ok → overall ok.
 	if !d.OK {
@@ -57,7 +57,7 @@ func TestDiagnoseSupport(t *testing.T) {
 		if c.Name == "within_count_cap" {
 			found = true
 			if !c.OK {
-				t.Errorf("within_count_cap should be OK for 2 bundles under a keep=%d cap", supportRetentionKeep)
+				t.Errorf("within_count_cap should be OK for 2 bundles under a keep=%d cap", supportRetentionKeepVal())
 			}
 		}
 	}

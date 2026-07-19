@@ -19,12 +19,15 @@
 package decryptprofile
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,8 +48,17 @@ const (
 
 // Enum value sets. The empty string always means "inherit the engine/rule
 // default" (back-compat: an absent choice never changes today's behavior).
+//
+// certVerification note: "permissive" is DELIBERATELY ABSENT. Earlier builds
+// accepted it and documented it as "verify, allow on failure, and log", but that
+// allow-on-failure enforcement was never implemented — the runtime always
+// verified like "strict" (fail-closed). Rather than ship a misleading operator
+// contract, the value is retired: every write path rejects it, and any existing
+// persisted/synced profile carrying it is fail-closed-migrated to "strict" (see
+// migrateLegacyCertVerification). Re-introducing allow-on-failure requires a
+// separate approved design, not this map.
 var (
-	validCertVerification = map[string]bool{"": true, "strict": true, "permissive": true, "skip": true}
+	validCertVerification = map[string]bool{"": true, "strict": true, "skip": true}
 	validOnUnsupported    = map[string]bool{"": true, "fail-close": true, "fail-open": true}
 	validOnInspectError   = map[string]bool{"": true, "fail-close": true, "fail-open": true}
 	validTLSVersion       = map[string]bool{"": true, "1.2": true, "1.3": true}
@@ -54,6 +66,50 @@ var (
 	// UI); keep it to printable identifier-ish characters to avoid surprises.
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9 ._-]{1,64}$`)
 )
+
+// certVerification migration constants. The retired value verified like the
+// fail-closed strict posture, so the migration is byte-identical at runtime — it
+// only corrects the stored contract so the operator-visible value matches the
+// enforced behavior.
+const (
+	legacyCertVerification = "permissive"
+	strictCertVerification = "strict"
+)
+
+// certMigrationSink, when published, is invoked once per profile whose
+// unsupported certVerification=="permissive" was fail-closed-migrated to
+// "strict" on a BULK install path (disk Load, config import, config-version
+// rollback, CP→DP snapshot apply). package main wires it at startup to emit an
+// audit-ring diagnostic; nil = no-op (the obs.Warnf warning fires regardless).
+// Guarded by an atomic pointer (publish-once at startup, read under replace()
+// which runs concurrently on the CP→DP sync path). Mirrors the obs.SetSink /
+// audit.SetSIEM seam pattern — the engine stays free of a package-main import.
+var certMigrationSink atomic.Pointer[func(profileName string)]
+
+// SetCertMigrationSink publishes the migration-notice callback (see
+// certMigrationSink). A nil fn clears it. Call once at startup, before the store
+// is loaded or any CP→DP sync begins.
+func SetCertMigrationSink(fn func(profileName string)) {
+	if fn == nil {
+		certMigrationSink.Store(nil)
+		return
+	}
+	certMigrationSink.Store(&fn)
+}
+
+// migrateLegacyCertVerification rewrites the retired "permissive" posture to the
+// fail-closed "strict" posture and reports whether it changed the profile.
+// Applied on bulk install paths BEFORE Validate so a legacy entry survives
+// fail-closed instead of being dropped as invalid. The interactive Add/Update
+// paths intentionally do NOT call this — a caller actively submitting the retired
+// value gets an explicit validation error, not a silent rewrite.
+func migrateLegacyCertVerification(p *Profile) bool {
+	if p.CertVerification == legacyCertVerification {
+		p.CertVerification = strictCertVerification
+		return true
+	}
+	return false
+}
 
 // Profile is a named decryption profile. Zero/empty fields mean "inherit the
 // default" so an absent or partially-filled profile never silently changes
@@ -68,7 +124,12 @@ type Profile struct {
 
 	// CertVerification of the upstream (origin) cert on the inspect leg:
 	// "" inherit (rule's TLSSkipVerify) | "strict" (verify, block untrusted/expired)
-	// | "permissive" (verify, allow+log — DEFERRED enforcement) | "skip".
+	// | "skip" (no verification).
+	//
+	// The retired "permissive" value is no longer accepted (its documented
+	// allow-on-failure semantics were never implemented; it verified like
+	// "strict"). A legacy persisted "permissive" is fail-closed-migrated to
+	// "strict" on load/sync — see migrateLegacyCertVerification.
 	CertVerification string `json:"certVerification,omitempty"`
 
 	// OnUnsupported posture when the origin TLS can't be inspected (version/cipher
@@ -99,6 +160,79 @@ type Profile struct {
 
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+
+	// securityGen is the precomputed security generation (see computeSecurityGen):
+	// a fingerprint over ONLY the fields whose change alters the meaning/safety of a
+	// learned adaptive-decryption exclusion. Set by the store on every write; read by
+	// the fail-open scope accessors so the CONNECT hot path never hashes. Unexported
+	// ⇒ never JSON-serialized (never persisted, never CP→DP-synced); it is recomputed
+	// identically on every node and across restarts from the fields it fingerprints.
+	securityGen string
+}
+
+// securityGenVersion tags the fingerprint scheme so the encoding can evolve
+// without silently colliding with an old one. Bump on any field-set/encoding change.
+const securityGenVersion = "v1"
+
+// computeSecurityGen returns the profile's security generation: a deterministic
+// fingerprint over ONLY the fields whose change alters the meaning or safety of a
+// learned adaptive-decryption exclusion — OnInspectError (the fail-open gate),
+// CertVerification, OnUnsupported, MinTLSVersion, MaxTLSVersion, and the InspectHTTP2
+// tri-state. Cosmetic/identity fields (ID, Name, CreatedAt, UpdatedAt) and the
+// operational StallTimeoutSecs (a per-stream timeout, not a decrypt-compatibility or
+// bypass-authorization determinant) are DELIBERATELY excluded, so a rename or
+// display-only edit never invalidates learned entries. Pure function of the listed
+// fields ⇒ identical on every node (CP→DP) and across restarts. Not on the hot path
+// (precomputed at store-write time), so the write-time allocation is irrelevant.
+//
+// SCOPE BOUNDARY (deliberate): this fingerprints the PROFILE's own declared posture.
+// When a profile leaves a field to INHERIT — CertVerification=="" or InspectHTTP2==nil
+// — the effective per-session value falls back to the matched rule (rule.TLSSkipVerify
+// / rule.StripALPN, see decryptprofile_resolve.go). Those are RULE-level, and the
+// learned exclusion is PROFILE-scoped ((profileID, host), the mission's fixed isolation
+// boundary), so a rule-level change to an inherited field is NOT a profile edit and does
+// not move the gen. This is safe for the cert-verify axis (an untrusted/expired cert is a
+// BLOCK, never a learn reason, and a bypassed session runs no inspect leg for
+// TLSSkipVerify to govern) and at most leaves a self-healing (TTL-bounded) bypass on the
+// inspection-mode axis. An operator who wants a field to fence learned exclusions should
+// set it EXPLICITLY on the profile (then it is fingerprinted here). Per-RULE effective-
+// posture fencing would re-scope the (profileID, host) boundary and is out of scope for
+// this wave — a separate ADR (see roadmap/PR2-...md §Rejected alternatives).
+func computeSecurityGen(p *Profile) string {
+	h := sha256.New()
+	h.Write([]byte(securityGenVersion))
+	// Fixed order, 0x00-delimited. The values are a closed ASCII vocabulary (enum
+	// strings + "1.2"/"1.3") that never contains NUL, so the delimiter is unambiguous.
+	for _, v := range []string{p.OnInspectError, p.CertVerification, p.OnUnsupported, p.MinTLSVersion, p.MaxTLSVersion} {
+		h.Write([]byte{0x00})
+		h.Write([]byte(v))
+	}
+	h.Write([]byte{0x00, inspectHTTP2Byte(p.InspectHTTP2)})
+	return hex.EncodeToString(h.Sum(nil)[:8]) // 64-bit fingerprint (16 hex chars); collision-negligible for this closed input space
+}
+
+// inspectHTTP2Byte encodes the InspectHTTP2 *bool tri-state (nil=inherit / true /
+// false) into a single distinct byte, so the three states fingerprint distinctly.
+func inspectHTTP2Byte(b *bool) byte {
+	switch {
+	case b == nil:
+		return 0
+	case *b:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// SecurityGen returns the profile's security generation (see computeSecurityGen).
+// The store precomputes it on every write; for a Profile constructed OUTSIDE the
+// store (tests, direct literals, a copyOut value) it computes on demand, so the
+// value is always correct and identical to the stored one.
+func (p *Profile) SecurityGen() string {
+	if p.securityGen != "" {
+		return p.securityGen
+	}
+	return computeSecurityGen(p)
 }
 
 // Store manages persistent decryption profiles with O(1) name lookups.
@@ -172,18 +306,24 @@ func (s *Store) Load(path string) error {
 		obs.Printf("DecryptionProfiles: unmarshal error from %s", path)
 		return err
 	}
-	migrated, skipped := s.replace(profiles, true)
+	migrated, skipped, certMigrated := s.replace(profiles, true)
 	obs.Printf("DecryptionProfiles: loaded %d profile(s) from %s", len(profiles), path)
-	// Persist backfilled IDs so ?id= addressing is stable across restart
-	// (idempotent: a second load finds all IDs present and writes nothing).
+	// Persist backfilled IDs (?id= stability) and any fail-closed
+	// certVerification migration so the on-disk file stops carrying the retired
+	// value across restarts (idempotent: a clean reload finds nothing to change).
 	// Only when NOTHING was skipped: a Save here rewrites the file with just the
 	// accepted profiles, so persisting while invalid/dup entries were skipped
 	// would permanently delete them (Load's contract is to log-and-leave them on
-	// disk). With skipped entries present we keep the backfilled IDs in-memory
-	// only for this session; a later clean load persists them stably.
-	if migrated > 0 && skipped == 0 {
+	// disk). With skipped entries present we keep the changes in-memory only for
+	// this session; a later clean load persists them stably.
+	if (migrated > 0 || certMigrated > 0) && skipped == 0 {
 		s.Save()
-		obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+		if migrated > 0 {
+			obs.Printf("DecryptionProfiles: assigned stable IDs to %d legacy profile(s)", migrated)
+		}
+		if certMigrated > 0 {
+			obs.Printf("DecryptionProfiles: migrated %d profile(s) from certVerification=permissive to strict", certMigrated)
+		}
 	}
 	return nil
 }
@@ -224,27 +364,31 @@ func (s *Store) List() []Profile {
 	return out
 }
 
-// FailOpenScope returns the profile's ID and true IFF a profile with the given
-// name exists AND opts into fail-open (OnInspectError=="fail-open"). It is a
-// HOT-PATH accessor (resolveSSLAction calls it per CONNECT for fail-open rules):
-// it reads only two string fields under the RLock and returns NO copy, avoiding
-// the copyOut allocation a full GetByName pays. The learn/cold paths keep the
-// copy-returning accessors.
-func (s *Store) FailOpenScope(name string) (id string, ok bool) {
+// FailOpenScope returns the profile's ID, its precomputed security generation, and
+// true IFF a profile with the given name exists AND opts into fail-open
+// (OnInspectError=="fail-open"). It is a HOT-PATH accessor (resolveSSLAction calls
+// it per CONNECT for fail-open rules): it reads only three stored string fields under
+// the RLock and returns NO copy, avoiding the copyOut allocation a full GetByName
+// pays. The gen fences the learned-exclusion cache to the exact inspection posture,
+// so a security-relevant profile edit invalidates entries without re-hashing here.
+// The learn/cold paths keep the copy-returning accessors.
+func (s *Store) FailOpenScope(name string) (id, gen string, ok bool) {
 	s.mu.RLock()
 	p := s.profiles[strings.ToLower(strings.TrimSpace(name))]
 	if p == nil || p.OnInspectError != "fail-open" {
 		s.mu.RUnlock()
-		return "", false
+		return "", "", false
 	}
 	id = p.ID
+	gen = p.SecurityGen() // precomputed at write time (no hashing); self-heals to a compute iff a write path ever left it empty — same source as the learn path (decryptionScope), so read and learn can never disagree
 	s.mu.RUnlock()
-	return id, true
+	return id, gen, true
 }
 
-// FailOpenScopeByID resolves the autoexclude scope by the profile's stable ULID
-// (references-by-id / rename-safe). resolved=true iff a profile with that id
-// EXISTS; scope is its ID when that profile is fail-open, else "". The ID is
+// FailOpenScopeByID resolves the autoexclude scope + security generation by the
+// profile's stable ULID (references-by-id / rename-safe). resolved=true iff a profile
+// with that id EXISTS; scope is its ID and gen its precomputed security generation
+// when that profile is fail-open, else both "". The ID is
 // AUTHORITATIVE: a resolved fail-close profile returns ("", true) so the caller
 // does NOT fall back to the name — otherwise a rule whose id points at a
 // fail-close profile but whose stale name points at a different fail-open one
@@ -252,21 +396,21 @@ func (s *Store) FailOpenScope(name string) (id string, ok bool) {
 // un-poisonable" invariant. Mirrors resolveDecryptionProfile: name fallback only
 // when the id resolves to no profile at all. No-copy fast path; O(profiles), a
 // small admin set, only on the SSL-inspect CONNECT path.
-func (s *Store) FailOpenScopeByID(id string) (scope string, resolved bool) {
+func (s *Store) FailOpenScopeByID(id string) (scope, gen string, resolved bool) {
 	if id == "" {
-		return "", false
+		return "", "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.profiles {
 		if p.ID == id {
 			if p.OnInspectError == "fail-open" {
-				return p.ID, true // resolved + fail-open → scope
+				return p.ID, p.SecurityGen(), true // resolved + fail-open → scope + security generation (same source as the learn path)
 			}
-			return "", true // resolved but fail-close → no scope, and no name fallback
+			return "", "", true // resolved but fail-close → no scope, and no name fallback
 		}
 	}
-	return "", false // not found → caller may fall back to the name
+	return "", "", false // not found → caller may fall back to the name
 }
 
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
@@ -302,6 +446,7 @@ func (s *Store) Add(p Profile) (*Profile, error) {
 	p.CreatedAt = now
 	p.UpdatedAt = now
 	np := p
+	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
 	s.order = append(s.order, key)
 	c := copyOut(&np)
@@ -326,6 +471,7 @@ func (s *Store) Update(p Profile) error {
 	p.CreatedAt = cur.CreatedAt
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	np := p
+	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
 	return nil
 }
@@ -356,15 +502,24 @@ func (s *Store) ReplaceAll(profiles []Profile) { s.replace(profiles, false) }
 
 // replace is the shared install path. skipInvalidLog controls whether skipped
 // entries are logged (Load logs; ReplaceAll stays quiet on the hot sync path).
-// Returns the number of profiles that had a stable ID backfilled (migrated) and
-// the number skipped as invalid/duplicate (skipped) — Load persists the backfill
-// only when migrated>0 AND skipped==0, so a rewrite never drops skipped entries.
-func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped int) {
+// Returns the number of profiles that had a stable ID backfilled (migrated), the
+// number skipped as invalid/duplicate (skipped), and the number whose retired
+// certVerification=permissive was fail-closed-migrated to strict (certMigrated).
+// Load persists (migrated>0 || certMigrated>0) only when skipped==0, so a rewrite
+// never drops skipped entries.
+func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped, certMigrated int) {
 	built := make(map[string]*Profile, len(profiles))
 	order := make([]string, 0, len(profiles))
 	for i := range profiles {
 		p := profiles[i]
 		p.Name = strings.TrimSpace(p.Name)
+		// Fail-closed rewrite of the retired "permissive" cert-verification value
+		// to "strict" BEFORE Validate, so a legacy entry is corrected rather than
+		// dropped as invalid. The migration NOTICE (warn/audit/counter) is deferred
+		// until the profile is actually installed below — a profile that carries
+		// permissive AND an independently-invalid field (or is a duplicate) is
+		// still skipped, and must not be reported as "migrated & retained".
+		wasCertMigrated := migrateLegacyCertVerification(&p)
 		if err := Validate(&p); err != nil {
 			if logSkips {
 				obs.Printf("DecryptionProfiles: skipping invalid profile %q: %v", p.Name, err)
@@ -381,6 +536,18 @@ func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped in
 			p.ID = uuid.NewString()[:12]
 			migrated++
 		}
+		p.securityGen = computeSecurityGen(&p)
+		// Profile is committed to the new store — now (and only now) report the
+		// certVerification migration for it. Always warns (Load and the sync
+		// paths) and, when wired, emits an audit-ring diagnostic.
+		if wasCertMigrated {
+			certMigrated++
+			obs.Warnf("DecryptionProfiles: profile %q used unsupported certVerification=%q; migrated to fail-closed %q (permissive contract removed)",
+				p.Name, legacyCertVerification, strictCertVerification)
+			if sink := certMigrationSink.Load(); sink != nil {
+				(*sink)(p.Name)
+			}
+		}
 		np := p
 		built[key] = &np
 		order = append(order, key)
@@ -389,7 +556,7 @@ func (s *Store) replace(profiles []Profile, logSkips bool) (migrated, skipped in
 	s.profiles = built
 	s.order = order
 	s.mu.Unlock()
-	return migrated, skipped
+	return migrated, skipped, certMigrated
 }
 
 // GetByID returns a copy of the profile with the given stable ID, or nil.
@@ -430,6 +597,7 @@ func (s *Store) UpdateByID(id string, p Profile) error {
 			return err
 		}
 		np := p
+		np.securityGen = computeSecurityGen(&np)
 		s.profiles[key] = &np
 		return nil
 	}

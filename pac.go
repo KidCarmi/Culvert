@@ -278,6 +278,7 @@ func registerPACRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/pac/simulate", apiPACSimulate)
 	mux.HandleFunc("/api/pac/analyze", apiPACAnalyze)
 	mux.HandleFunc("/api/pac/posture/inventory", apiPACPostureInventory)
+	mux.HandleFunc("/api/pac/posture/diff", apiPACPostureDiff)
 	mux.HandleFunc("/api/pac/posture/exceptions", apiPACExceptions)
 	mux.HandleFunc("/api/pac/posture/exceptions/", apiPACExceptionItem)
 }

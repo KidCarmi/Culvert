@@ -49,19 +49,30 @@ func readClusterGRPCCompression() bool {
 // When multiple CP addresses are configured (HA mode), the client automatically
 // fails over to the next address on connection failure, trying each in order.
 type DataPlaneClient struct {
-	nodeID           string
-	conn             *grpc.ClientConn
-	addrs            []string // all CP addresses (for HA failover)
-	activeIdx        int      // index into addrs of current connection
-	certFile         string   // TLS cert for reconnection
-	keyFile          string   // TLS key for reconnection
-	caFile           string   // CA cert for reconnection
-	mu               sync.Mutex
-	lastVersion      int64
-	failCount        int  // consecutive fetch failures for exponential backoff
-	deltaUnsupported bool // set when a CP returns Unimplemented for GetConfigDelta
-	deltaProbeSkips  int  // polls skipped since the delta latch was set (re-probe counter)
-	callForTest      func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	nodeID    string
+	conn      *grpc.ClientConn
+	addrs     []string // all CP addresses (for HA failover)
+	activeIdx int      // index into addrs of current connection
+	certFile  string   // TLS cert for reconnection
+	keyFile   string   // TLS key for reconnection
+	caFile    string   // CA cert for reconnection
+	mu        sync.Mutex
+	// lastVersion / lastPolicyVersion are the version facts of the config
+	// snapshot this node has APPLIED — the config-store version and the CP's
+	// monotonic policy generation carried on that snapshot (NOT the DP-local
+	// policyStore apply counter, which ReplaceAll bumps to 1,2,… regardless of
+	// the CP generation). fetchAndApply is the sole writer; both are seeded from
+	// the last-known-good snapshot at startup so the heartbeat reports the
+	// config the node is already enforcing even before the first successful CP
+	// poll. Atomic because metricsLoop (a separate goroutine) reads them to
+	// stamp the heartbeat report — race-free under -race. (T3 P1 reads
+	// lastVersion.Load() for the delta base + convergence telemetry.)
+	lastVersion       atomic.Int64
+	lastPolicyVersion atomic.Int64
+	failCount         int  // consecutive fetch failures for exponential backoff
+	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
+	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
+	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
 
 // backoff sleeps for an exponentially increasing duration after consecutive
@@ -221,9 +232,9 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 func (c *DataPlaneClient) pollConfig(ctx context.Context) (raw json.RawMessage, ok bool) {
 	// P0-3: report the version we already hold so the CP can reply with a tiny
 	// "unchanged" sentinel instead of the full snapshot when nothing changed.
-	// Safe to read c.lastVersion unlocked — fetchAndApply is the only writer and
-	// runs on a single config-loop goroutine.
-	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion})
+	// fetchAndApply is the only writer and runs on a single config-loop
+	// goroutine; the atomic load keeps metricsLoop's concurrent read race-free.
+	reqBody, _ := json.Marshal(getConfigRequest{KnownVersion: c.lastVersion.Load()})
 	// CL-9 PR4: time the primary config poll (success only). Scope is exactly
 	// this c.call — not the failover retry, unmarshal, validate, or apply.
 	pollStart := time.Now()
@@ -266,14 +277,16 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	// changed, or the delta applied and verified); false falls through to the
 	// full-snapshot path below (fresh DP, resync directive, old CP, or any error
 	// — the full path owns backoff/failover).
-	// LOAD-BEARING INVARIANT: lastVersion MUST reset to 0 on process start (see
-	// NewDataPlaneClient) and MUST NOT be restored from disk. The first
-	// post-restart poll therefore takes the FULL path (this gate is false), which
-	// rewinds any crash-partial forward state and resets syncedFP from
-	// authoritative CP bytes before any delta is applied. Persisting lastVersion to
-	// skip that boot pull would turn several latent hazards (a crash-mid-apply
-	// blocklist, a manual-polluted last-good fingerprint) into live divergence.
-	if c.lastVersion > 0 && c.tryDeltaSync(ctx) {
+	//
+	// Safe across a restart even though lastVersion is now seeded from the
+	// last-known-good snapshot at startup (dp_enrollment.go): both persist paths
+	// write the CP-AUTHORITATIVE (manual-free) blocklist as the last-good
+	// BlockedHosts, so applyDPLastGoodConfigSnapshot restores a syncedFP consistent
+	// with the CP's fingerprint for that version. The KnownFP idle-drift check and
+	// the post-apply fingerprint verification then force a FULL resync on any
+	// inconsistency (e.g. a crash-mid-apply), so a first-poll delta can never
+	// silently persist divergent state.
+	if c.lastVersion.Load() > 0 && c.tryDeltaSync(ctx) {
 		return
 	}
 	raw, ok := c.pollConfig(ctx)
@@ -316,7 +329,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	if !dpObserveEpoch("config snapshot", snap.Epoch) {
 		return
 	}
-	if snap.Version <= c.lastVersion {
+	if snap.Version <= c.lastVersion.Load() {
 		return // nothing changed
 	}
 	snapForDisk := snap
@@ -335,8 +348,8 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
-	c.lastVersion = snap.Version
-	dpAppliedConfigVersion.Store(snap.Version)
+	c.lastVersion.Store(snap.Version)
+	c.lastPolicyVersion.Store(snap.PolicyVersion)
 }
 
 // tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
@@ -366,7 +379,7 @@ func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
 		return false // known-old CP: skip straight to the full path
 	}
 
-	req, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: c.lastVersion, KnownFP: bl.SyncedFingerprint()})
+	req, _ := json.Marshal(getConfigDeltaRequest{KnownVersion: c.lastVersion.Load(), KnownFP: bl.SyncedFingerprint()})
 	raw, err := c.call(ctx, methodGetConfigDelta, req)
 	if err != nil {
 		if status.Code(err) == codes.Unimplemented {
@@ -411,7 +424,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// forward check would let a buggy/hostile CP jump it to a huge value, after
 	// which every full-path snapshot (snap.Version <= lastVersion) is silently
 	// suppressed — a stale-config freeze DoS.
-	if len(reply.Remainder) == 0 || reply.BaseVersion != c.lastVersion || reply.TargetVersion <= reply.BaseVersion {
+	if len(reply.Remainder) == 0 || reply.BaseVersion != c.lastVersion.Load() || reply.TargetVersion <= reply.BaseVersion {
 		return false // malformed, base moved, or non-monotonic target → full resync
 	}
 	var remainder ConfigSnapshot
@@ -444,17 +457,40 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// fingerprint-consistent with the CP's feed-only target: List() would fold in
 	// DP-local manual blocks the CP set never had, poisoning syncedFP on reload.
 	// (Enforcement of manual blocks is unaffected — ReplaceFeedEntries re-injects
-	// them on the restart apply.) This matters only if lastVersion is ever restored
-	// from disk; today lastVersion resets to 0 on boot (see fetchAndApply), forcing
-	// a full pull that resets syncedFP first — a load-bearing invariant.
+	// them on the restart apply.) This is load-bearing: lastVersion IS restored
+	// from the last-good at startup (dp_enrollment.go), so a fingerprint-consistent
+	// on-disk BlockedHosts is what lets a first-poll delta resume safely instead of
+	// forcing a spurious resync every restart (see the fetchAndApply gate).
 	snapForDisk.BlockedHosts = bl.FeedList()
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
 	c.resetBackoff()
-	c.lastVersion = reply.TargetVersion
-	dpAppliedConfigVersion.Store(reply.TargetVersion)
+	c.lastVersion.Store(reply.TargetVersion)
+	c.lastPolicyVersion.Store(remainder.PolicyVersion)
 	logger.Printf("DataPlane: applied config delta → v%d (%d step(s))", reply.TargetVersion, len(reply.Deltas))
 	return true
+}
+
+// buildMetricsReport assembles the DP→CP heartbeat report. The version facts
+// are raw diagnostics (M5 PR-A): ConfigVersion/PolicyVersion are the APPLIED
+// snapshot's identity (seeded from the last-known-good snapshot at startup, so
+// they are populated even before the first successful poll), Epoch is the
+// highest fencing epoch observed, and CulvertVersion is this build. SyncedFP is
+// the T3 P1 blocklist synced fingerprint (fleet convergence/drift). All reads
+// are atomic or set-once — safe from the metricsLoop goroutine.
+func (c *DataPlaneClient) buildMetricsReport() MetricsReport {
+	return MetricsReport{
+		NodeID:         c.nodeID,
+		Total:          atomic.LoadInt64(&statTotal),
+		Blocked:        atomic.LoadInt64(&statBlocked),
+		AuthFail:       atomic.LoadInt64(&statAuthFail),
+		Uptime:         uptime(),
+		ConfigVersion:  c.lastVersion.Load(),
+		PolicyVersion:  c.lastPolicyVersion.Load(),
+		Epoch:          dpLastSeenEpoch.Load(),
+		CulvertVersion: version,
+		SyncedFP:       bl.SyncedFingerprint(),
+	}
 }
 
 func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duration) {
@@ -465,15 +501,7 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report := MetricsReport{
-				NodeID:        c.nodeID,
-				Total:         atomic.LoadInt64(&statTotal),
-				Blocked:       atomic.LoadInt64(&statBlocked),
-				AuthFail:      atomic.LoadInt64(&statAuthFail),
-				Uptime:        uptime(),
-				ConfigVersion: dpAppliedConfigVersion.Load(),
-				SyncedFP:      bl.SyncedFingerprint(),
-			}
+			report := c.buildMetricsReport()
 			b, _ := json.Marshal(report)
 			raw, err := c.call(ctx, methodPushMetrics, b)
 			if err != nil {
@@ -653,12 +681,6 @@ const (
 // connect() (which clears the latch) never runs. At the default poll interval
 // this re-probes a few minutes after an upgrade — cheap, and self-correcting.
 const deltaReprobeInterval = 20
-
-// dpAppliedConfigVersion is the config version this DP currently enforces,
-// published for the metrics loop to read WITHOUT racing c.lastVersion (which is
-// single-goroutine on the config loop). Every path that advances c.lastVersion
-// also stores it here.
-var dpAppliedConfigVersion atomic.Int64
 
 // dpLastFullSnapshotBytes is the size of the most recent FULL config snapshot
 // the DP received (not the tiny version-unchanged sentinel). It predicts how big

@@ -423,3 +423,34 @@ Inventory** card renders the status per row and (for admins) an inline
 ownership.** Governance metadata is asserted by an admin, not observed from
 traffic — it says who *claims* this bypass and why, and it is only ever
 attached to a bypass the configuration genuinely makes reachable.
+
+## DIRECT bypass change-diff (posture)
+
+The inventory is a snapshot; the change-diff answers *"what would this config
+change do to the DIRECT surface?"* before you publish it.
+
+`POST /api/pac/posture/diff` (viewer, read-only) takes a **candidate** steering
+config in the body (`{profiles, pools}`) and returns how its DIRECT (full-
+security-path) bypass surface differs from the **current active** config:
+
+- `deltas[]` — each `profile_gained_direct` / `profile_lost_direct` /
+  `path_added` / `path_removed`, with the profile, the DIRECT `kind`/`detail`,
+  whether the path is `broad`, and `riskIncreasing`.
+- aggregates — `profilesGainedDirect`, `profilesLostDirect`, `pathsAdded`,
+  `pathsRemoved`, `broadPathsAdded`, and `riskIncreased` (true when the change
+  adds any DIRECT surface; a pure narrowing/removal leaves it false).
+
+A **broadening** (e.g. a rule changed from an exact domain to a wildcard) reads
+as a removed narrow path **plus** an added `broad` path, so the risk signal
+rides the addition. The diff is **order-insensitive**: reordering rules does not
+change the *set* of DIRECT paths a profile can emit (that is capability, not
+per-request routing — the latter is what `POST /api/pac/analyze` covers). The
+proxy-host context is held constant across before/after, so the fail-open path
+only appears in the diff when the profiles themselves change it.
+
+**Evidence class: `config` (Observable).** The diff is a pure comparison of two
+config-derived inventories — no traffic, no usage claim. The PAC panel's DIRECT
+Bypass Inventory card has a **Change preview** section: it pre-fills the current
+config, you edit the candidate, and it renders the added/removed/broadened
+bypasses. Read-only — nothing is published (use the profiles editor's
+draft→publish flow to apply a change).

@@ -10,7 +10,31 @@ package main
 // reference into a runtime decision (resolveStripALPN and the resolve*TLS/stall
 // family in proxy.go / proxy_tunnel_h2.go); the engine exposes only the store.
 
-import "github.com/KidCarmi/Culvert/internal/decryptprofile"
+import (
+	"time"
+
+	"github.com/KidCarmi/Culvert/internal/decryptprofile"
+)
+
+// init wires the fail-closed certVerification=permissive → strict migration to
+// the audit ring so a legacy value corrected on any install path (disk load,
+// import, rollback, CP→DP apply) leaves an audit-visible diagnostic in addition
+// to the engine's obs.Warnf log line. Runs before the store is loaded at startup
+// (package-var init of auditAdd precedes all init funcs), so the startup
+// migration is captured. Actor is "system" — the correction is engine-driven,
+// not attributable to an admin request.
+func init() {
+	decryptprofile.SetCertMigrationSink(func(name string) {
+		auditAdd(AuditEntry{
+			TS:     time.Now().UnixMilli(),
+			Time:   time.Now().Format("2006-01-02 15:04:05"),
+			Actor:  "system",
+			Action: "decryption-profile.cert-verification.migrated",
+			Object: name,
+			Detail: "unsupported certVerification=permissive migrated to fail-closed strict (permissive contract removed)",
+		})
+	})
+}
 
 // DecryptionProfile is a named decryption profile (engine type
 // decryptprofile.Profile).

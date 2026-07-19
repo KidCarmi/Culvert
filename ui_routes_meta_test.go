@@ -72,10 +72,18 @@ import (
 //     GET, admin PUT/DELETE).
 //   - 177 — ADR-0011 §4 added /api/decryption/redaction (GET viewer / PUT admin
 //     host/SNI redaction toggle).
-//   - 178 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
+//   - 178 — reconcile parallel-merge drift: /api/diagnose/support (M5, #834) and
+//     /api/decryption/redaction landed together; both carry metadata (parity
+//     green) but the const bump for one was overwritten, leaving actual=178 and
+//     the lock at 177 (main's Fast Gate was red on this). Bumped to match.
+//   - 180 — PAC Exception Intelligence P3 added /api/pac/posture/diff (read-only
+//     candidate DIRECT change-diff; viewer POST), on top of main's 179.
+//   - 181 — M5 supportability added /api/diagnose/etcd (bounded read-only HA
+//     fencing-lease reachability probe; operator POST).
+//   - 182 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
 //     convergence / straggler view; viewer).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 179
+	const want = 182
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
