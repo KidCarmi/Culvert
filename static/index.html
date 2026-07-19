@@ -3836,6 +3836,17 @@ Firefox (all platforms):
               <button class="btn warn" id="ha-promote-btn" data-click="promoteHA">Promote this Control Plane to Leader</button>
               <span style="font-size:.75rem;color:var(--muted);margin-left:8px">Use when the leader is down and automatic failover is off. Confirm the leader is truly gone first - promoting while the leader still serves causes split-brain.</span>
             </div>
+            <!-- Recent role transitions (M5): promotions + self-fences, newest first. Status-only, volatile (cleared on restart). -->
+            <div id="ha-failover-events" style="display:none;margin-top:12px">
+              <div style="font-size:.8rem;font-weight:600;color:var(--muted);margin-bottom:6px">Recent role transitions</div>
+              <div class="tbl-wrap">
+                <table class="tbl" style="width:100%;font-size:.78rem">
+                  <thead><tr><th>When</th><th>From</th><th>To</th><th>Epoch</th><th>Reason</th></tr></thead>
+                  <tbody id="ha-failover-tbody"></tbody>
+                </table>
+              </div>
+              <p style="color:var(--muted);font-size:.68rem;margin:6px 0 0 0">In-memory history (cleared on restart); raw local facts, not a cluster-wide failover analysis.</p>
+            </div>
             <details style="margin-top:12px">
               <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;font-weight:600">Deploy Standby CP</summary>
               <p style="color:var(--muted);font-size:.8rem;margin:8px 0">
@@ -15676,6 +15687,27 @@ async function loadHA(isCP) {
       }
       if (r.deploy_cmd) {
         document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+      }
+      // Recent role transitions (M5) - newest first, from the bounded ring.
+      const fevWrap = document.getElementById('ha-failover-events');
+      const fevBody = document.getElementById('ha-failover-tbody');
+      const events = Array.isArray(r.failover_events) ? r.failover_events : [];
+      if (events.length > 0) {
+        fevWrap.style.display = '';
+        fevBody.innerHTML = events.map(e => {
+          const when = e.ts ? escHtml(timeAgo(new Date(e.ts))) : '-';
+          const toColor = e.to_role === 'leader' ? '#22c55e' : '#f59e0b';
+          return `<tr>
+            <td>${when}</td>
+            <td>${escHtml(String(e.from_role || '-'))}</td>
+            <td><span style="color:${toColor}">${escHtml(String(e.to_role || '-'))}</span></td>
+            <td>${escHtml(String(e.epoch || 0))}</td>
+            <td style="color:var(--muted)">${escHtml(String(e.reason || ''))}</td>
+          </tr>`;
+        }).join('');
+      } else {
+        fevWrap.style.display = 'none';
+        fevBody.innerHTML = '';
       }
     } else {
       disabledSec.style.display = '';
