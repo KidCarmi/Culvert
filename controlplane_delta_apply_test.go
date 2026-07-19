@@ -393,3 +393,42 @@ func TestDataPlaneClient_DeltaReprobeAfterCooldown(t *testing.T) {
 		t.Fatalf("want exactly 1 re-probe over %d polls, got %d", deltaReprobeInterval, deltaCalls)
 	}
 }
+
+// TestApplyDeltaReply_RejectedBlocklistLeavesRemainderUnapplied is the Codex-review
+// regression: a delta whose blocklist fails the fingerprint check must NOT have
+// applied any non-blocklist remainder state (policy/external-auth/IdP) — no
+// partial apply at a version whose blocklist could not be verified.
+func TestApplyDeltaReply_RejectedBlocklistLeavesRemainderUnapplied(t *testing.T) {
+	restoreBlAndIPF(t)
+	origRules := policyStore.List()
+	t.Cleanup(func() { policyStore.ReplaceAll(origRules) })
+	restore := resetDPLastSeenEpochForTest()
+	t.Cleanup(restore)
+	oldDataDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = oldDataDir })
+
+	bl.ReplaceFeedEntries([]string{"a.example"})
+	c := &DataPlaneClient{}
+	c.lastVersion.Store(4)
+	remainder := ConfigSnapshot{
+		PolicyRules: []PolicyRule{{Priority: 1, Name: "must-not-apply-on-reject", DestFQDN: "x.com", Action: "allow"}},
+	}
+	reply := getConfigDeltaReply{
+		Mode: "delta", BaseVersion: 4, TargetVersion: 5, Epoch: 0,
+		Deltas:    []blocklistDelta{{Added: []string{"z.example"}}},
+		TargetFP:  "wrongfp-forces-reject",
+		Remainder: mustRemainder(t, remainder),
+	}
+	if c.applyDeltaReply(reply) {
+		t.Fatal("a delta with a bad blocklist fingerprint must return false (resync)")
+	}
+	for _, r := range policyStore.List() {
+		if r.Name == "must-not-apply-on-reject" {
+			t.Fatal("remainder policy applied despite a rejected blocklist delta — partial apply")
+		}
+	}
+	if c.lastVersion.Load() != 4 {
+		t.Fatalf("lastVersion advanced to %d on a rejected delta", c.lastVersion.Load())
+	}
+}

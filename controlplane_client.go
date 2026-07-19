@@ -409,9 +409,12 @@ func (c *DataPlaneClient) tryDeltaSync(ctx context.Context) bool {
 }
 
 // applyDeltaReply applies a delta-mode reply. Returns true when applied+verified
-// (lastVersion advanced), false to fall through to a full resync. Mirrors the
-// full path's ordering: epoch fence first, then external-auth/IdP before the
-// remaining slices.
+// (lastVersion advanced), false to fall through to a full resync. Ordering
+// (Codex review): epoch fence, then the BLOCKLIST delta + cap + fingerprint
+// verification BEFORE any other store is touched, then the non-blocklist
+// remainder (external-auth/IdP/policy/…). A rejected delta (cap or fingerprint
+// mismatch) therefore leaves auth/IdP/policy UNTOUCHED — never advanced to a
+// version whose blocklist could not be verified.
 func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// ADR-0005 S3: fence before ANY mutation. A fenced-out zombie CP's delta is
 	// rejected; skip the cycle rather than fall through to a full pull that would
@@ -436,17 +439,12 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
 		return false
 	}
-	// External auth + IdP first (SAML/OIDC metadata must use the public origin
-	// before IdP profiles compile) — same as the full path. snapForDisk keeps the
-	// IdP profiles for the last-good file; the applied copy nils them so the
-	// remainder apply below does not re-sync them.
+	// applyBlocklistDeltaSnapshot applies the blocklist chain and verifies the
+	// cap + fingerprint FIRST, and ONLY on success applies the non-blocklist
+	// remainder (external-auth before IdP, then the rest) — so no auth/IdP/policy
+	// mutation happens for a delta whose blocklist is rejected. snapForDisk keeps
+	// the full remainder (incl. IdP profiles) for the last-good file.
 	snapForDisk := remainder
-	applyExternalAuthSnapshotSettings(remainder)
-	if err := syncSnapshotIdPProfiles(remainder); err != nil {
-		logger.Printf("DataPlane: delta v%d IdP sync failed: %v — full resync", reply.TargetVersion, err)
-		return false
-	}
-	remainder.IdPProfiles = nil
 	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
 		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
 		return false

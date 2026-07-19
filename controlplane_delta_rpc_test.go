@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"testing"
 
@@ -231,5 +232,32 @@ func TestGetConfigDelta_UnenrolledExfilThrottled(t *testing.T) {
 	}
 	if _, err := svc.GetConfigDelta(ctx, req); status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("11th unenrolled delta pull: got %v, want ResourceExhausted", err)
+	}
+}
+
+// TestDeltaRemainderCache_VersionGuard is the Codex-review regression: the
+// remainder cache must refuse to marshal/serve a snapshot whose version does not
+// match the requested version (a publish raced between reading `cur`/building the
+// chain and fetching the remainder), so GetConfigDelta resyncs rather than pairing
+// a version-N chain with a version-N+1 remainder.
+func TestDeltaRemainderCache_VersionGuard(t *testing.T) {
+	orig := globalConfigStore
+	t.Cleanup(func() { globalConfigStore = orig; gcMarshalCache.reset(); gcDeltaRemainderCache.reset() })
+	globalConfigStore = &ConfigStore{}
+	gcDeltaRemainderCache.reset()
+	if err := globalConfigStore.Update(ConfigSnapshot{BlockedHosts: []string{"a.example"}}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	cur := globalConfigStore.Version()
+
+	// Serving at the current version succeeds.
+	if _, err := gcDeltaRemainderCache.serve(cur, "", true); err != nil {
+		t.Fatalf("serve at current version %d: %v", cur, err)
+	}
+	gcDeltaRemainderCache.reset()
+	// Serving at a version the store is NOT at (simulating a raced publish) must
+	// signal a version move, not silently marshal the wrong version's remainder.
+	if _, err := gcDeltaRemainderCache.serve(cur-1, "", true); !errors.Is(err, errRemainderVersionMoved) {
+		t.Fatalf("serve at stale version %d: got %v, want errRemainderVersionMoved", cur-1, err)
 	}
 }

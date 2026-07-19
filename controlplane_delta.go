@@ -29,6 +29,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,6 +38,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// errRemainderVersionMoved signals that a config publish raced between the caller
+// reading the target version (and building the delta chain) and the remainder
+// fetch, so the current snapshot no longer matches the requested version.
+// GetConfigDelta turns this into a resync rather than serving a hybrid reply whose
+// remainder belongs to a different version than the delta chain/TargetVersion
+// (Codex review).
+var errRemainderVersionMoved = errors.New("delta remainder version moved")
 
 const (
 	// maxDeltaRingEntries bounds how many recent versions the ring retains.
@@ -308,6 +317,13 @@ func (c *deltaRemainderCache) serve(version int64, caFP string, enrolled bool) (
 		return c.bytes, nil
 	}
 	snap := globalConfigStore.Get()
+	if snap.Version != version {
+		// A publish landed between the caller reading `cur`/building the chain and
+		// this fetch. Refuse rather than cache a remainder from snap.Version under
+		// the requested `version` (which would pair a version-N chain with a
+		// version-N+1 remainder). The caller degrades to a resync.
+		return nil, errRemainderVersionMoved
+	}
 	snap.BlockedHosts = nil // the blocklist rides as the delta chain
 	if caFP != "" {
 		snap.CAFingerprint = caFP
@@ -393,6 +409,12 @@ func (s *controlPlaneServer) GetConfigDelta(ctx context.Context, req json.RawMes
 
 	caFP := globalClusterCA.CACertFingerprint()
 	remainder, err := gcDeltaRemainderCache.serve(cur, caFP, enrolled)
+	if errors.Is(err, errRemainderVersionMoved) {
+		// A publish raced this handler; the chain (version cur) and the current
+		// snapshot no longer agree. Resync rather than ship a mismatched hybrid.
+		statConfigDeltaResync.Add(1)
+		return json.Marshal(getConfigDeltaReply{Mode: "resync", TargetVersion: cur, Epoch: epoch})
+	}
 	if err != nil {
 		return nil, err
 	}
