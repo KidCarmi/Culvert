@@ -142,6 +142,26 @@ byte-identical semantic-parity tests for every method (same verdict, same
 attribution, same cascade-delete set) + a code red-team after implementation (the
 P1 pattern), NOT a design red-team.
 
+### SHIPPED — Slice 1a: intern the feed URLs (map[string]uint32 + feeds table)
+
+Sequencing decision (unattended-implementation discipline): the risky part of the
+merge is changing `exact`'s type and the `IsBlocked` hot path. The URL interning —
+`feedSrc map[string]string` → `map[string]uint32` + an interned `feeds []string`
+(ID 0 = unattributed) + a `feedIDs` intern index — captures a large share of the
+memory win (10 M non-interned ~30-byte URL copies, ~0.5 GiB, collapse to a
+few-hundred-entry table + a 4-byte ID/host) and touches ONLY the ~8 attribution
+methods — NEVER `exact`, `manual`, `wildcards`, or the `IsBlocked` hot path. The
+on-disk `.sources` format (host→URL JSON) and every public accessor
+(SnapshotFeedSources/RestoreFeedSources/ListWithSource return host→URL by
+resolving IDs) are unchanged, so nothing outside `internal/blocklist` moves. This
+alone brings 10 M under an 8 GiB DP.
+
+**Slice 1b (still C1's dominant win, deferred):** merge `feedSrc` INTO `exact`
+(`exact map[string]uint32`, presence = blocked, value = feed-ID) to eliminate the
+DUPLICATE HOST KEY — the ~0.9 GiB the two maps each pay for storing every host
+string. That is the change that unlocks 4 GiB DPs; it touches the `IsBlocked`
+probe (bool → presence check) and warrants its own slice + code red-team.
+
 ## Slicing (each independently shippable + benchmarked)
 
 - **P2.1 — compactSet (arena + open-addressing index), read-only + benchgate.** Build

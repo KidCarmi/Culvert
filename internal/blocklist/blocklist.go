@@ -32,7 +32,43 @@ func New() *Store {
 		wildcards:  map[string]bool{},
 		manual:     map[string]bool{},
 		exceptions: map[string]bool{},
+		feedSrc:    map[string]uint32{},
+		feeds:      []string{""}, // ID 0 reserved for "unattributed"
+		feedIDs:    map[string]uint32{},
 	}
+}
+
+// feedID interns a feed URL and returns its ID. "" → 0 (unattributed). Must be
+// called with b.mu held (write). The feeds/feedIDs tables are tiny (bounded by
+// the number of DISTINCT feed URLs ever seen — hundreds), so interning collapses
+// the per-host URL copies to one shared string per feed.
+func (b *Store) feedID(url string) uint32 {
+	if url == "" {
+		return 0
+	}
+	if b.feedIDs == nil {
+		b.feedIDs = map[string]uint32{}
+	}
+	if id, ok := b.feedIDs[url]; ok {
+		return id
+	}
+	if len(b.feeds) == 0 {
+		b.feeds = []string{""} // ensure the reserved unattributed slot exists
+	}
+	id := uint32(len(b.feeds))
+	b.feeds = append(b.feeds, url)
+	b.feedIDs[url] = id
+	return id
+}
+
+// feedURL resolves a feed-source ID back to its URL. Out-of-range/0 → "" (the
+// unattributed sentinel, matching the old empty-string semantics). Callers hold
+// b.mu (read or write).
+func (b *Store) feedURL(id uint32) string {
+	if id == 0 || int(id) >= len(b.feeds) {
+		return ""
+	}
+	return b.feeds[id]
 }
 
 // Entry is a single blocklist host with its origin.
@@ -51,13 +87,24 @@ type Entry struct {
 // how many wildcard rules are loaded. All methods are safe for concurrent use.
 type Store struct {
 	mu         sync.RWMutex
-	exact      map[string]bool   // exact hostnames
-	wildcards  map[string]bool   // dot-prefixes: ".example.com"
-	manual     map[string]bool   // subset added by an admin (not the feed)
-	exceptions map[string]bool   // hosts that are NEVER blocked, even if listed
-	feedSrc    map[string]string // host → feed URL attribution (lazily initialized)
-	path       string
-	mode       string // "block" (default) or "allow"
+	exact      map[string]bool // exact hostnames
+	wildcards  map[string]bool // dot-prefixes: ".example.com"
+	manual     map[string]bool // subset added by an admin (not the feed)
+	exceptions map[string]bool // hosts that are NEVER blocked, even if listed
+	// feedSrc maps a host → its feed-source ID (T3 P2 slice 1). The ID indexes
+	// the interned `feeds` table instead of storing a fresh feed-URL string copy
+	// per host: at 10 M hosts from a handful of feeds the old map[string]string
+	// held ~10 M non-interned ~30-byte URL copies (~0.5 GiB); the uint32 ID +
+	// a few-hundred-entry `feeds` table is ~40 MiB. ID 0 = unattributed (the same
+	// meaning the old empty-string had — a host absent from the map, or a legacy
+	// entry). The on-disk .sources sidecar and every public accessor
+	// (SnapshotFeedSources/RestoreFeedSources/ListWithSource) stay host→URL by
+	// resolving IDs through `feeds`, so nothing outside this file changes.
+	feedSrc map[string]uint32 // host → feed-source ID (lazily initialized)
+	feeds   []string          // feed-source ID → URL; feeds[0] == "" (unattributed)
+	feedIDs map[string]uint32 // URL → feed-source ID (interning index)
+	path    string
+	mode    string // "block" (default) or "allow"
 
 	// syncedFP is the 256-bit XOR-of-SHA256 fingerprint of the
 	// CP-AUTHORITATIVE host set the cluster delta-sync path last applied
@@ -205,9 +252,21 @@ func (b *Store) Load(path string) error {
 	b.wildcards = wildcards
 	b.manual = manual
 	b.exceptions = exceptions
-	b.feedSrc = feedSrc
+	b.setFeedSourcesLocked(feedSrc) // intern the host→URL sidecar into feed-source IDs
 	b.mu.Unlock()
 	return scanErr
+}
+
+// setFeedSourcesLocked rebuilds the interned feed-source tables from a host→URL
+// map (the .sources sidecar at Load). Called with b.mu held. Distinct URLs are
+// interned into `feeds`, so N hosts from one feed share one URL string.
+func (b *Store) setFeedSourcesLocked(m map[string]string) {
+	b.feedSrc = make(map[string]uint32, len(m))
+	b.feeds = []string{""} // ID 0 = unattributed
+	b.feedIDs = map[string]uint32{}
+	for h, url := range m {
+		b.feedSrc[h] = b.feedID(url)
+	}
 }
 
 // Save persists the main blocklist file and the pruned .sources attribution
@@ -231,9 +290,9 @@ func (b *Store) Save() {
 	// Feed-source attribution sidecar, pruned to currently-listed,
 	// non-manual entries so removed hosts don't accumulate stale rows.
 	sources := map[string]string{}
-	for h, src := range b.feedSrc {
-		if b.manual[h] {
-			continue
+	for h, id := range b.feedSrc {
+		if id == 0 || b.manual[h] {
+			continue // unattributed or admin-managed → no feed-source row
 		}
 		if strings.HasPrefix(h, "*.") {
 			if !b.wildcards[h[1:]] {
@@ -242,7 +301,7 @@ func (b *Store) Save() {
 		} else if !b.exact[h] {
 			continue
 		}
-		sources[h] = src
+		sources[h] = b.feedURL(id) // resolve ID → URL: the .sources format is unchanged
 	}
 	path := b.path
 	b.mu.RUnlock()
@@ -637,7 +696,7 @@ func (b *Store) ListWithSource() []Entry {
 	defer b.mu.RUnlock()
 	out := make([]Entry, 0, len(b.exact)+len(b.wildcards))
 	for h := range b.exact {
-		src, feed := "feed", b.feedSrc[h]
+		src, feed := "feed", b.feedURL(b.feedSrc[h])
 		if b.manual[h] {
 			src, feed = "manual", ""
 		}
@@ -645,7 +704,7 @@ func (b *Store) ListWithSource() []Entry {
 	}
 	for suffix := range b.wildcards {
 		h := "*" + suffix
-		src, feed := "feed", b.feedSrc[h]
+		src, feed := "feed", b.feedURL(b.feedSrc[h])
 		if b.manual[h] {
 			src, feed = "manual", ""
 		}
@@ -668,7 +727,9 @@ func (b *Store) ClearAll() {
 	b.exact = map[string]bool{}
 	b.wildcards = map[string]bool{}
 	b.manual = map[string]bool{}
-	b.feedSrc = map[string]string{}
+	b.feedSrc = map[string]uint32{}
+	b.feeds = []string{""}
+	b.feedIDs = map[string]uint32{}
 	b.mu.Unlock()
 }
 
@@ -677,9 +738,14 @@ func (b *Store) ClearAll() {
 // Admin-added (manual) entries always survive. Returns the removed count.
 func (b *Store) RemoveByFeedSource(feedURL string) int {
 	b.mu.Lock()
+	targetID, ok := b.feedIDs[feedURL]
+	if !ok || targetID == 0 {
+		b.mu.Unlock()
+		return 0 // no host was ever attributed to this feed
+	}
 	removed := 0
-	for h, src := range b.feedSrc {
-		if src != feedURL || b.manual[h] {
+	for h, id := range b.feedSrc {
+		if id != targetID || b.manual[h] {
 			continue
 		}
 		if strings.HasPrefix(h, "*.") {
@@ -705,9 +771,13 @@ func (b *Store) RemoveByFeedSource(feedURL string) int {
 func (b *Store) CountByFeedSource(feedURL string) int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	targetID, ok := b.feedIDs[feedURL]
+	if !ok || targetID == 0 {
+		return 0
+	}
 	n := 0
-	for h, src := range b.feedSrc {
-		if src != feedURL || b.manual[h] {
+	for h, id := range b.feedSrc {
+		if id != targetID || b.manual[h] {
 			continue
 		}
 		if strings.HasPrefix(h, "*.") {
@@ -728,8 +798,11 @@ func (b *Store) SnapshotFeedSources() map[string]string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	snap := make(map[string]string, len(b.feedSrc))
-	for h, src := range b.feedSrc {
-		snap[h] = src
+	for h, id := range b.feedSrc {
+		if id == 0 {
+			continue // unattributed — the old map only held stamped (non-empty) rows
+		}
+		snap[h] = b.feedURL(id)
 	}
 	return snap
 }
@@ -744,7 +817,7 @@ func (b *Store) RestoreFeedSources(snap map[string]string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.feedSrc == nil {
-		b.feedSrc = map[string]string{}
+		b.feedSrc = map[string]uint32{}
 	}
 	for h, src := range snap {
 		if b.manual[h] {
@@ -758,7 +831,7 @@ func (b *Store) RestoreFeedSources(snap map[string]string) {
 			continue
 		}
 		if _, exists := b.feedSrc[h]; !exists {
-			b.feedSrc[h] = src
+			b.feedSrc[h] = b.feedID(src) // intern the restored URL
 		}
 	}
 }
@@ -773,7 +846,7 @@ func (b *Store) RemoveUnattributedFeedEntries() int {
 	b.mu.Lock()
 	removed := 0
 	for h := range b.exact {
-		if b.manual[h] || b.feedSrc[h] != "" {
+		if b.manual[h] || b.feedSrc[h] != 0 {
 			continue
 		}
 		delete(b.exact, h)
@@ -781,7 +854,7 @@ func (b *Store) RemoveUnattributedFeedEntries() int {
 	}
 	for suffix := range b.wildcards {
 		h := "*" + suffix
-		if b.manual[h] || b.feedSrc[h] != "" {
+		if b.manual[h] || b.feedSrc[h] != 0 {
 			continue
 		}
 		delete(b.wildcards, suffix)
@@ -888,10 +961,11 @@ func (b *Store) MergeFromLines(lines []string, source string) int {
 		// trigger a full-file rewrite.
 		if source != "" && !b.manual[line] {
 			if b.feedSrc == nil {
-				b.feedSrc = map[string]string{}
+				b.feedSrc = map[string]uint32{}
 			}
-			if b.feedSrc[line] != source {
-				b.feedSrc[line] = source
+			id := b.feedID(source) // intern once; N hosts of this feed share the ID
+			if b.feedSrc[line] != id {
+				b.feedSrc[line] = id
 				attributed = true
 			}
 		}
