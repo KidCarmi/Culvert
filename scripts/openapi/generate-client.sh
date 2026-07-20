@@ -30,8 +30,11 @@ fail_or_skip() {
 }
 
 tools="$(pwd)/.tools"
-if ! GOBIN="$tools" go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@${OAPI_CODEGEN_VERSION}" 2>/dev/null; then
-  fail_or_skip "oapi-codegen ${OAPI_CODEGEN_VERSION} could not be installed"
+# Reuse a cached binary (CI restores .tools) before reinstalling.
+if [ ! -x "$tools/oapi-codegen" ]; then
+  if ! GOBIN="$tools" go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@${OAPI_CODEGEN_VERSION}" 2>/dev/null; then
+    fail_or_skip "oapi-codegen ${OAPI_CODEGEN_VERSION} could not be installed"
+  fi
 fi
 
 work="$(mktemp -d)"

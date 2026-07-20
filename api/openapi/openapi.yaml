@@ -1,8 +1,8 @@
 openapi: 3.0.4
 info:
   title: Culvert Admin API
-  version: 1.0.0
-  x-culvert-api-contract-version: 1.0.0
+  version: 1.1.0
+  x-culvert-api-contract-version: 1.1.0
   description: |
     Machine-readable contract for the Culvert admin/control-plane REST API served
     on the UI port (`-ui-port`, default 9090).
@@ -873,7 +873,7 @@ components:
         alg: { type: string, description: "Key algorithm (x25519)." }
         public_key: { type: string, description: "Public key material (base64); never a private key." }
         fingerprint: { type: string }
-        source: { type: string, description: "Where the key was resolved from (baked or env)." }
+        source: { type: string, description: "Where the key was resolved from (\"baked\" default root, or \"configured\" via CULVERT_TAC_TRUST_KEYS)." }
         active: { type: boolean }
     TACTrustStatus:
       type: object
@@ -1095,14 +1095,6 @@ components:
       properties:
         url: { type: string }
         interval: { type: string, description: "e.g. 24h, or off" }
-    DecryptionProfileInput:
-      type: object
-      description: A decryption profile (rich object; open superset).
-      additionalProperties: true
-    RewriteRuleInput:
-      type: object
-      description: An HTTP header rewrite rule (rich object; open superset).
-      additionalProperties: true
     SupportRetentionPatch:
       type: object
       description: Partial support-bundle retention update.
@@ -1115,14 +1107,6 @@ components:
       additionalProperties: false
       properties:
         webhooks: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
-    AlertWebhookInput:
-      type: object
-      description: Alert webhook (rich object; open superset).
-      additionalProperties: true
-    UpstreamSettingsUpdate:
-      type: object
-      description: Upstream pool settings update.
-      additionalProperties: true
     TunablesPatch:
       type: object
       description: Adaptive auto-exclude tunables patch (subset of tunable fields).
@@ -1502,13 +1486,6 @@ components:
       properties:
         name: { type: string }
         source: { type: string }
-    SupportRecipientInput:
-      type: object
-      required: [name]
-      additionalProperties: false
-      properties:
-        name: { type: string }
-        public_key: { type: string }
     SupportRecipient:
       type: object
       description: A support-bundle recipient (create/update response — includes derived + rotation metadata).
@@ -7170,7 +7147,7 @@ paths:
           description: Block page set.
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
+              schema: { $ref: '#/components/schemas/OkResponse' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     get:

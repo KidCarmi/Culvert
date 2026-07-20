@@ -7,7 +7,7 @@
 # sections + CODEOWNER approval), never by this script and never by an
 # unreviewed environment variable.
 #
-# Exit codes (consumed by .github/workflows/pr-api-breaking.yml):
+# Exit codes (consumed by .github/workflows/pr-api-governance.yml):
 #   0  no baseline yet, OR no breaking changes  -> gate passes
 #   2  breaking changes detected                -> gate consults the exception
 #   1  tool/other error (e.g. oasdiff unavailable in strict CI mode) -> HARD FAIL
@@ -26,10 +26,13 @@ STRICT="${CULVERT_BREAKING_STRICT:-0}"
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
-# Resolve oasdiff: prefer PATH, else install the pin. In strict CI an install
-# failure is fatal; in dev it is a graceful skip.
+# Resolve oasdiff: prefer PATH, then a cached .tools binary (populated by the CI
+# cache), else install the pin. In strict CI an install failure is fatal; in dev
+# it is a graceful skip.
 if command -v oasdiff >/dev/null 2>&1; then
   OASDIFF=oasdiff
+elif [ -x "$(pwd)/.tools/oasdiff" ]; then
+  OASDIFF="$(pwd)/.tools/oasdiff"
 else
   if GOBIN="$(pwd)/.tools" go install "github.com/oasdiff/oasdiff@${OASDIFF_VERSION}" 2>/dev/null; then
     OASDIFF="$(pwd)/.tools/oasdiff"

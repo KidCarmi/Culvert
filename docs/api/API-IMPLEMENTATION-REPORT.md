@@ -1,5 +1,15 @@
 # OpenAPI Program — Final Implementation & Verification Report
 
+> **AUTHORITATIVE COUNTS (final landing onto `main`):** the machine-enforced,
+> generated inventory `docs/api/API-INVENTORY.md` is the single source of truth.
+> As landed: **289 route method-entries — 280 documented, 9 intentionally-
+> undocumented non-REST surfaces, 0 temporary exemptions** (175 paths). The
+> narrative below was written against the pre-landing stack (≈275/284) and adds
+> the +5 M6 routes reconciled during the landing (`/api/support/tac-trust`,
+> `/api/support/upload/config` GET+PUT, `/api/cluster/convergence`,
+> `/api/diagnose/etcd`); where it cites 275/284/171-paths, read the inventory
+> figures above.
+
 Date: 2026-07-19. Branch: `claude/culvert-openapi-program-iqx2lt`.
 Every statement is tagged **[FACT]** (verified in-repo), **[INFERENCE]**,
 **[RECOMMENDATION]**, **[IMPLEMENTED]** (a control that exists and is enforced),

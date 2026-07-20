@@ -58,7 +58,7 @@ Accepted / latent (in the backlog):
    — additive `writeAPIError` + request-ID middleware; generic-ize 5xx bodies to
    close information disclosure.
 4. **[Med] Make Gate 7 (breaking-change) mandatory** once the baseline merges; add
-   the `api-breaking-change` label workflow.
+   the `api-breaking-approved` label workflow.
 5. **[Med] Commit a generated Go client (Slice 5)** + compile smoke test in the
    deep lane; wire release traceability (contract digest + version in the release
    artifact, Gate 11).

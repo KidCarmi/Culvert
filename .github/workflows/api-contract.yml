@@ -58,20 +58,8 @@ jobs:
       - name: Live coverage + conformance gates
         run: go test . -run 'TestOpenAPI_|TestConformance_' -count=1 -v
 
-  breaking-change:
-    name: "API · breaking-change (oasdiff, advisory)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: oasdiff breaking-change check vs base
-        env:
-          BASE_REF: origin/${{ github.base_ref }}
-        run: |
-          git fetch --no-tags origin "${{ github.base_ref }}" || true
-          ./scripts/openapi/breaking-check.sh
+  # NOTE: the breaking-change (Gate 7) and client-generation (Gate 9) checks now
+  # live in .github/workflows/pr-api-governance.yml as MERGE-BLOCKING checks
+  # (strict mode). The former advisory oasdiff job here was removed to avoid
+  # running oasdiff twice per contract PR; this workflow keeps only the fast
+  # Go-native drift + engine + conformance summary.

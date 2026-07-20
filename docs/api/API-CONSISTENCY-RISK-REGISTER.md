@@ -160,3 +160,32 @@ Adoption rules that preserve backward compatibility:
 **OpenAPI guidance:** generate `security` **per method** (dynamic routers diverge by
 verb), model legacy errors as `text/plain`, mark array fields nullable, and
 enumerate the non-JSON media types in §6 explicitly.
+
+---
+
+## Coverage-gate blind spots (final-landing adversarial review, tracked follow-ups)
+
+Two MEDIUM structural gaps in the route-coverage machinery were confirmed by the
+landing adversarial review. Neither has a live exploit today (verified by spot
+check), so they are accepted with tracked follow-ups rather than blocking the
+landing:
+
+- **CDR-1 — documented wildcard (`*`) rows accept undocumented non-GET verbs.**
+  `methodMatch` treats a manifest row with `method: "*"` as satisfied by ANY
+  single documented spec operation, so a `documented:true` `*` route with only a
+  documented `GET` would pass coverage even if the handler also served an
+  undocumented `POST`. All ~16 live `*` handlers are currently method-agnostic
+  viewer reads (no `r.Method` write branch), so this is dormant. **Follow-up:**
+  require documented `*` rows to document every served method, or forbid
+  `documented:true` on `*` rows (force explicit per-method rows).
+
+- **CDR-2 — no "served methods ⊆ declared methods" enforcement.** The live gate
+  enumerates routes purely from the hand-maintained `uiRoutes[].Methods` list;
+  C1 reverse-parity is path-level only and C1.5 iterates the *declared* methods.
+  A handler serving a verb omitted from its `Methods` list is invisible to the
+  whole chain. No live instance found. **Follow-up:** assert `beh.rawMethods`
+  (already computed by the C1.5 AST walker) ⊆ each entry's declared `Methods`.
+  This also narrows CDR-1.
+
+Owner: platform-team. These narrow the gate's completeness; the route-*existence*
+bijection (Gate 3 + the live `uiRoutes` binding) is otherwise sound.
