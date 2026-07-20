@@ -3522,6 +3522,36 @@ routes:
     audit_expected: false
     danger_level: medium
     documented: true
+  - route: "/api/support/upload/config"
+    method: "GET"
+    handler: "apiSupportUploadConfig"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: added on main during this program (M6 secure-upload posture); documented in the documentation slice of this stack
+      security_class: internal-review-pending
+      expires: *baseline
+  - route: "/api/support/upload/config"
+    method: "PUT"
+    handler: "apiSupportUploadConfig"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: added on main during this program (M6 secure-upload posture); documented in the documentation slice of this stack
+      security_class: internal-review-pending
+      expires: *baseline
   - route: "/api/support/bundles"
     method: "GET"
     handler: "apiSupportBundles"
