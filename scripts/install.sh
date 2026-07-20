@@ -830,11 +830,45 @@ verify_bootstrap_verifier() {
   return 0
 }
 
-# cleanup_bootstrap_verifier — remove the throwaway verifier download dir.
+# cleanup_bootstrap_verifier — remove the throwaway verifier download + floor dirs.
 cleanup_bootstrap_verifier() {
   [[ -n "$BOOTSTRAP_VERIFIER_DIR" && -d "$BOOTSTRAP_VERIFIER_DIR" ]] && rm -rf "$BOOTSTRAP_VERIFIER_DIR"
+  [[ -n "$BOOTSTRAP_FLOOR_DIR" && -d "$BOOTSTRAP_FLOOR_DIR" ]] && rm -rf "$BOOTSTRAP_FLOOR_DIR"
   BOOTSTRAP_VERIFIER_BIN=""
   BOOTSTRAP_VERIFIER_DIR=""
+  BOOTSTRAP_FLOOR_DIR=""
+}
+
+# stage_rollback_floor — if a PRIOR install's proxy-data volume survived (reinstall
+# where the container + stack dir were removed but the /data volume was kept), copy
+# its persisted rollback floor (release_catalog_state.json) into a readable staging
+# dir and echo that dir, so bootstrap-resolve enforces anti-rollback/replay and a
+# reinstall cannot be silently downgraded below the version this host last accepted.
+#
+# Best-effort and CONSERVATIVE: the floor lives inside a ROOT-OWNED named volume, so
+# the copy needs sudo; and we require EXACTLY ONE matching proxy-data volume with a
+# floor file (ambiguity ⇒ skip rather than guess a floor). Does nothing on a
+# first-ever install (no volume ⇒ no floor ⇒ bootstrap-resolve uses floor 0, which is
+# correct for a fresh host). A wrong/unrelated floor can only cause a fail-CLOSED
+# rejection (never a downgrade), so erring toward enforcement is safe.
+BOOTSTRAP_FLOOR_DIR=""
+stage_rollback_floor() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local vols n vol mp fdir
+  vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)proxy-data$' || true)"
+  [[ -n "$vols" ]] || return 1
+  n="$(printf '%s\n' "$vols" | grep -c . || true)"
+  [[ "$n" == "1" ]] || return 1 # ambiguous (0 or many) → do not guess a floor
+  vol="$vols"
+  mp="$(sudo docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null)" || return 1
+  { [[ -n "$mp" ]] && sudo test -f "$mp/release_catalog_state.json"; } || return 1
+  fdir="$(mktemp -d "${INSTALL_DIR}/.floor.XXXXXX" 2>/dev/null)" || fdir="$(mktemp -d)" || return 1
+  if ! sudo cp "$mp/release_catalog_state.json" "$fdir/release_catalog_state.json" 2>/dev/null; then
+    rm -rf "$fdir"; return 1
+  fi
+  sudo chown "$(id -u):$(id -g)" "$fdir/release_catalog_state.json" 2>/dev/null || true
+  BOOTSTRAP_FLOOR_DIR="$fdir"
+  printf '%s\n' "$fdir"
 }
 
 # seed_from_catalog — the TRUSTED fresh-install default: resolve the image digest
@@ -866,6 +900,15 @@ seed_from_catalog() {
   # never argv (world-readable /proc/pid/cmdline), since a mirror URL may be presigned.
   local -a cmd=("$BOOTSTRAP_VERIFIER_BIN" bootstrap-resolve --channel "$INSTALL_CHANNEL" \
     --proxy-repo "$PROXY_REPO" --print image_ref --out "$decision")
+  # Enforce a surviving rollback floor on a reinstall (no-op on a fresh host). The
+  # verifier reads <data-dir>/release_catalog_state.json and refuses a catalog below
+  # the version this host last accepted — closing the mirror-replay downgrade for the
+  # volume-kept reinstall case.
+  local floordir
+  if floordir="$(stage_rollback_floor)"; then
+    info "Enforcing the anti-rollback floor from the surviving proxy-data volume."
+    cmd+=(--data-dir "$floordir")
+  fi
   # timeout is a second backstop against a hung/old binary (the capability probe is
   # the primary guard); tolerate hosts without coreutils `timeout`. Fold everything
   # into one non-empty array so "${cmd[@]}" is set-u-safe on bash 4.2 (Amazon Linux 2).

@@ -184,3 +184,19 @@ func TestInstaller_VerifierIsCosignVerified(t *testing.T) {
 		t.Error("a documented break-glass (CULVERT_BOOTSTRAP_SKIP_VERIFY) should exist for air-gapped hosts")
 	}
 }
+
+// A reinstall over a surviving proxy-data volume must enforce the persisted
+// anti-rollback floor so it cannot be silently downgraded below the last-accepted
+// version. The installer stages that floor and passes it to bootstrap-resolve.
+func TestInstaller_EnforcesRollbackFloorOnReinstall(t *testing.T) {
+	s := readContractFile(t, "scripts/install.sh")
+	for _, want := range []string{
+		"stage_rollback_floor",
+		"release_catalog_state.json",
+		"cmd+=(--data-dir",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.sh must enforce a surviving rollback floor on reinstall; missing %q", want)
+		}
+	}
+}
