@@ -1,6 +1,7 @@
 package apicontract
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -61,7 +62,7 @@ func TestRenderInventory_DeterministicAndCorrect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RenderInventory (rerun %d): %v", i, err)
 		}
-		if string(out) != string(out1) {
+		if !bytes.Equal(out, out1) {
 			t.Fatalf("RenderInventory is non-deterministic across runs")
 		}
 	}

@@ -759,6 +759,25 @@
         ],
         "type": "object"
       },
+      "ConsentUploadRequest": {
+        "additionalProperties": false,
+        "description": "Explicit per-bundle upload consent.",
+        "properties": {
+          "case_id": {
+            "description": "Support case the bundle is evidence for (mandatory).",
+            "type": "string"
+          },
+          "confirm": {
+            "description": "Must be true — explicit operator consent to egress.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "case_id",
+          "confirm"
+        ],
+        "type": "object"
+      },
       "CountryTraffic": {
         "items": {
           "additionalProperties": true,
@@ -2734,6 +2753,15 @@
         "additionalProperties": false,
         "description": "Arm/disarm the upload posture. Enabling requires a non-empty origin; a bare disable ({} or {\"enabled\":false}) is always accepted.",
         "properties": {
+          "clear_credential": {
+            "description": "Explicitly remove the stored credential.",
+            "type": "boolean"
+          },
+          "credential": {
+            "description": "Bearer credential to store; empty keeps the existing one.",
+            "format": "password",
+            "type": "string"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -3213,6 +3241,10 @@
         "additionalProperties": false,
         "description": "Node-local support-bundle upload posture.",
         "properties": {
+          "credential_set": {
+            "description": "Whether a bearer credential is stored (the value is never exposed).",
+            "type": "boolean"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -3234,8 +3266,89 @@
         },
         "required": [
           "enabled",
-          "state"
+          "state",
+          "credential_set"
         ],
+        "type": "object"
+      },
+      "UploadEntry": {
+        "additionalProperties": false,
+        "description": "One support-bundle upload-queue entry (no secret fields).",
+        "properties": {
+          "attempts": {
+            "type": "integer"
+          },
+          "bundle_id": {
+            "type": "string"
+          },
+          "case_id": {
+            "type": "string"
+          },
+          "key_id": {
+            "description": "TAC trust key id the bundle was sealed to.",
+            "type": "string"
+          },
+          "last_error": {
+            "description": "Last delivery error (present only after a failed attempt).",
+            "type": "string"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/UploadReceipt"
+          },
+          "state": {
+            "description": "Upload state machine value.",
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bundle_id",
+          "case_id",
+          "state",
+          "attempts",
+          "key_id",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "UploadQueue": {
+        "additionalProperties": false,
+        "description": "The outbound support-bundle upload queue.",
+        "properties": {
+          "max": {
+            "description": "Maximum queue size.",
+            "type": "integer"
+          },
+          "uploads": {
+            "items": {
+              "$ref": "#/components/schemas/UploadEntry"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "uploads"
+        ],
+        "type": "object"
+      },
+      "UploadReceipt": {
+        "additionalProperties": false,
+        "description": "Signed delivery receipt for an uploaded support bundle.",
+        "properties": {
+          "bundle_sha256": {
+            "type": "string"
+          },
+          "received_at": {
+            "type": "string"
+          },
+          "sig": {
+            "description": "Signature over the receipt (public verification material).",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "UpsertCategoryGroup": {
@@ -11859,68 +11972,6 @@
           }
         }
       ],
-      "post": {
-        "description": "Creates a PAC profile.",
-        "operationId": "createPACProfileItem",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PACProfileItem"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PACProfileItem"
-                }
-              }
-            },
-            "description": "Create PAC profile."
-          },
-          "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
-          },
-          "403": {
-            "$ref": "#/components/responses/PlainForbidden"
-          },
-          "404": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "Not found. Body is plain text."
-          }
-        },
-        "security": [
-          {
-            "sessionCookie": []
-          },
-          {
-            "basicAuth": []
-          }
-        ],
-        "summary": "Create PAC profile",
-        "tags": [
-          "pac"
-        ],
-        "x-culvert-audit-event": "PAC_profile.create",
-        "x-culvert-danger-level": "medium",
-        "x-culvert-idempotency": "idempotent",
-        "x-culvert-introduced-version": "1.0.0",
-        "x-culvert-permission": "admin",
-        "x-culvert-stability": "stable",
-        "x-culvert-tenant-scope": "appliance",
-        "x-culvert-visibility": "admin-supported"
-      },
       "put": {
         "description": "Updates a PAC profile.",
         "operationId": "updatePACProfileItem",
@@ -11977,6 +12028,95 @@
         "x-culvert-audit-event": "PAC_profile.update",
         "x-culvert-danger-level": "medium",
         "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/pac/profiles/{name}/lifecycle": {
+      "post": {
+        "description": "Admin lifecycle action on a PAC profile — save_draft, publish, or rollback (the safe-publishing flow). The `action` field selects the operation; the remaining payload varies per action, so the request/response bodies are open.",
+        "operationId": "pacProfileLifecycle",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "save_draft",
+                      "publish",
+                      "rollback"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Lifecycle action result (shape varies by action)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Mutation not allowed in the current state. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "PAC profile lifecycle action",
+        "tags": [
+          "pac"
+        ],
+        "x-culvert-audit-event": "PAC_profile.lifecycle",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
@@ -15522,6 +15662,154 @@
         }
       ]
     },
+    "/api/support/bundles/{id}/upload": {
+      "get": {
+        "description": "Returns one support bundle's upload-queue entry — state, attempts, and the signed delivery receipt if delivered. Read-only.",
+        "operationId": "getSupportBundleUpload",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadEntry"
+                }
+              }
+            },
+            "description": "Upload status for the bundle."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Bundle not queued for upload. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "One bundle's upload status",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Explicit per-bundle upload consent: seals the READY bundle to the configured TAC recipient and enqueues it for the background worker to deliver. Fails closed unless upload is enabled, a TAC trust key is configured, the bundle is READY, and confirm=true with a valid case_id. Causes outbound egress of the (encrypted) bundle. Admin-only and audited.",
+        "operationId": "consentSupportBundleUpload",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "case_id": "00123456",
+                "confirm": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ConsentUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadEntry"
+                }
+              }
+            },
+            "description": "Bundle sealed and enqueued for upload."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Precondition not met (upload disabled, no TAC key, or bundle not READY). Body is plain text."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Seal/enqueue failed. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Consent to upload a bundle to TAC (DESTRUCTIVE — egress)",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.upload",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.1.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/support/bundles/{id}/validate": {
       "get": {
         "description": "Validate support bundle.",
@@ -16206,6 +16494,45 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.1.0",
         "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/uploads": {
+      "get": {
+        "description": "Lists the outbound support-bundle upload queue — per-bundle state, attempts, and signed receipts. No secret fields. Read-only.",
+        "operationId": "getSupportUploads",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadQueue"
+                }
+              }
+            },
+            "description": "Upload queue."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support-bundle upload queue",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.1.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

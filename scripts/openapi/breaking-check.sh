@@ -55,9 +55,17 @@ if ! git show "${BASE_REF}:${SPEC}" > "$base_spec" 2>/dev/null; then
 fi
 
 echo "breaking-check: diffing ${BASE_REF}:${SPEC} -> working tree with ${OASDIFF_VERSION}"
-if "$OASDIFF" breaking "$base_spec" "$SPEC" --fail-on ERR; then
-  echo "breaking-check: no breaking changes."
-  exit 0
-fi
-echo "breaking-check: BREAKING changes detected against ${BASE_REF}." >&2
-exit 2
+# oasdiff exit codes: 0 = no breaking changes; 1 = breaking changes found
+# (--fail-on ERR); any other non-zero = a tool/load/parse/internal error. Only the
+# breaking-changes case (1) may be routed to the reviewed exception (our exit 2);
+# a genuine tool error must HARD-FAIL (our exit 1) — never be bypassable.
+set +e
+diff_out="$("$OASDIFF" breaking "$base_spec" "$SPEC" --fail-on ERR 2>&1)"
+rc=$?
+set -e
+printf '%s\n' "$diff_out"
+case "$rc" in
+  0) echo "breaking-check: no breaking changes."; exit 0 ;;
+  1) echo "breaking-check: BREAKING changes detected against ${BASE_REF}." >&2; exit 2 ;;
+  *) echo "breaking-check: FATAL — oasdiff errored (exit ${rc}); treating as a HARD failure, not a bypassable breaking change." >&2; exit 1 ;;
+esac

@@ -27,6 +27,29 @@ func TestConformance_M6_Response(t *testing.T) {
 	assertResponseConforms(t, http.MethodGet, "/api/support/tac-trust", apiSupportTACTrust)
 	// Upload posture (viewer) — default not_enabled.
 	assertResponseConforms(t, http.MethodGet, "/api/support/upload/config", apiSupportUploadConfig)
+	// Upload queue (viewer) — empty queue still conforms to UploadQueue.
+	assertResponseConforms(t, http.MethodGet, "/api/support/uploads", apiSupportUploads)
+}
+
+// The per-bundle upload consent body validates against the contract (the POST
+// path is a high-risk egress op; its request shape is pinned here without driving
+// the many-precondition handler).
+func TestConformance_M6_UploadConsent_Request(t *testing.T) {
+	spec := loadContract(t)
+	path := "/api/support/bundles/{id}/upload"
+	if err := spec.ValidateJSONRequest(http.MethodPost, path, []byte(`{"case_id":"00123456","confirm":true}`)); err != nil {
+		t.Fatalf("valid consent body rejected: %v", err)
+	}
+	for _, bad := range []string{
+		`{"confirm":true}`,                         // missing required case_id
+		`{"case_id":"x"}`,                          // missing required confirm
+		`{"case_id":"x","confirm":true,"bogus":1}`, // unknown field
+		`{"case_id":"x","confirm":"yes"}`,          // wrong type
+	} {
+		if err := spec.ValidateJSONRequest(http.MethodPost, path, []byte(bad)); err == nil {
+			t.Fatalf("contract accepted invalid consent body: %s", bad)
+		}
+	}
 }
 
 // PUT request bodies validate against the contract (unknown fields, wrong types).

@@ -1802,7 +1802,7 @@ routes:
   - route: "/api/pac/profiles/"
     method: "POST"
     handler: "apiPACProfileItem"
-    openapi_path: "/api/pac/profiles/{name}"
+    openapi_path: "/api/pac/profiles/{name}/lifecycle"
     domain: "pac"
     visibility: admin-supported
     min_role: "admin"
@@ -2474,6 +2474,36 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
+    documented: true
+  - route: "/api/support/uploads"
+    method: "GET"
+    handler: "apiSupportUploads"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/support/bundles/{id}/upload"
+    method: "GET"
+    handler: "apiSupportBundleUpload"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/support/bundles/{id}/upload"
+    method: "POST"
+    handler: "apiSupportBundleUpload"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: high
     documented: true
   - route: "/api/support/bundles"
     method: "GET"

@@ -848,12 +848,13 @@ components:
       type: object
       description: Node-local support-bundle upload posture.
       additionalProperties: false
-      required: [enabled, state]
+      required: [enabled, state, credential_set]
       properties:
         enabled: { type: boolean }
         state: { type: string, enum: [not_enabled, enabled] }
         origin: { type: string, description: "Configured destination origin (present when set)." }
         origin_host: { type: string, description: "Host derived from the origin, for display." }
+        credential_set: { type: boolean, description: "Whether a bearer credential is stored (the value is never exposed)." }
     SetUploadConfig:
       type: object
       description: >-
@@ -863,6 +864,46 @@ components:
       properties:
         enabled: { type: boolean }
         origin: { type: string, description: "Destination origin URL; required to enable." }
+        credential: { type: string, format: password, description: "Bearer credential to store; empty keeps the existing one." }
+        clear_credential: { type: boolean, description: "Explicitly remove the stored credential." }
+    UploadReceipt:
+      type: object
+      description: Signed delivery receipt for an uploaded support bundle.
+      additionalProperties: false
+      properties:
+        bundle_sha256: { type: string }
+        received_at: { type: string }
+        sig: { type: string, description: "Signature over the receipt (public verification material)." }
+    UploadEntry:
+      type: object
+      description: One support-bundle upload-queue entry (no secret fields).
+      additionalProperties: false
+      required: [bundle_id, case_id, state, attempts, key_id, updated_at]
+      properties:
+        bundle_id: { type: string }
+        case_id: { type: string }
+        state: { type: string, description: "Upload state machine value." }
+        attempts: { type: integer }
+        key_id: { type: string, description: "TAC trust key id the bundle was sealed to." }
+        updated_at: { type: string }
+        last_error: { type: string, description: "Last delivery error (present only after a failed attempt)." }
+        receipt: { $ref: '#/components/schemas/UploadReceipt' }
+    UploadQueue:
+      type: object
+      description: The outbound support-bundle upload queue.
+      additionalProperties: false
+      required: [uploads]
+      properties:
+        uploads: { type: array, items: { $ref: '#/components/schemas/UploadEntry' }, nullable: true }
+        max: { type: integer, description: "Maximum queue size." }
+    ConsentUploadRequest:
+      type: object
+      description: Explicit per-bundle upload consent.
+      additionalProperties: false
+      required: [case_id, confirm]
+      properties:
+        case_id: { type: string, description: "Support case the bundle is evidence for (mandatory)." }
+        confirm: { type: boolean, description: "Must be true — explicit operator consent to egress." }
     TACTrustKey:
       type: object
       description: One TAC recipient trust key (public material only).
@@ -5578,6 +5619,112 @@ paths:
               schema: { $ref: '#/components/schemas/UploadConfigStatus' }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/uploads:
+    get:
+      operationId: getSupportUploads
+      tags: [support]
+      summary: Support-bundle upload queue
+      description: >-
+        Lists the outbound support-bundle upload queue — per-bundle state,
+        attempts, and signed receipts. No secret fields. Read-only.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.1.0
+      responses:
+        '200':
+          description: Upload queue.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadQueue' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/bundles/{id}/upload:
+    get:
+      operationId: getSupportBundleUpload
+      tags: [support]
+      summary: One bundle's upload status
+      description: >-
+        Returns one support bundle's upload-queue entry — state, attempts, and the
+        signed delivery receipt if delivered. Read-only.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.1.0
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Upload status for the bundle.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadEntry' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '404':
+          description: Bundle not queued for upload. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+    post:
+      operationId: consentSupportBundleUpload
+      tags: [support]
+      summary: Consent to upload a bundle to TAC (DESTRUCTIVE — egress)
+      description: >-
+        Explicit per-bundle upload consent: seals the READY bundle to the
+        configured TAC recipient and enqueues it for the background worker to
+        deliver. Fails closed unless upload is enabled, a TAC trust key is
+        configured, the bundle is READY, and confirm=true with a valid case_id.
+        Causes outbound egress of the (encrypted) bundle. Admin-only and audited.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.1.0
+      x-culvert-danger-level: high
+      x-culvert-audit-event: support.upload
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConsentUploadRequest' }
+            example: { case_id: "00123456", confirm: true }
+      responses:
+        '202':
+          description: Bundle sealed and enqueued for upload.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadEntry' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Precondition not met (upload disabled, no TAC key, or bundle not READY). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+        '500':
+          description: Seal/enqueue failed. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/support/tac-trust:
     get:
       operationId: getSupportTACTrust
@@ -6418,6 +6565,54 @@ paths:
           description: Not found. Body is plain text.
           content:
             text/plain: { schema: { type: string } }
+  /api/pac/profiles/{name}/lifecycle:
+    post:
+      operationId: pacProfileLifecycle
+      tags: [pac]
+      summary: PAC profile lifecycle action
+      description: >-
+        Admin lifecycle action on a PAC profile — save_draft, publish, or rollback
+        (the safe-publishing flow). The `action` field selects the operation; the
+        remaining payload varies per action, so the request/response bodies are
+        open.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: PAC_profile.lifecycle
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              additionalProperties: true
+              properties:
+                action: { type: string, enum: [save_draft, publish, rollback] }
+      responses:
+        '200':
+          description: Lifecycle action result (shape varies by action).
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409':
+          description: Mutation not allowed in the current state. Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
   /api/pac/profiles/{name}:
     parameters:
       - name: name
@@ -6441,39 +6636,6 @@ paths:
       responses:
         '200':
           description: Get PAC profile.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/PACProfileItem' }
-        '400': { $ref: '#/components/responses/PlainBadRequest' }
-        '403': { $ref: '#/components/responses/PlainForbidden' }
-        '404':
-          description: Not found. Body is plain text.
-          content:
-            text/plain: { schema: { type: string } }
-    post:
-      operationId: createPACProfileItem
-      tags: [pac]
-      summary: Create PAC profile
-      description: Creates a PAC profile.
-      security:
-        - sessionCookie: []
-        - basicAuth: []
-      x-culvert-visibility: admin-supported
-      x-culvert-permission: admin
-      x-culvert-tenant-scope: appliance
-      x-culvert-stability: stable
-      x-culvert-idempotency: idempotent
-      x-culvert-introduced-version: 1.0.0
-      x-culvert-danger-level: medium
-      x-culvert-audit-event: PAC_profile.create
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/PACProfileItem' }
-      responses:
-        '200':
-          description: Create PAC profile.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PACProfileItem' }
