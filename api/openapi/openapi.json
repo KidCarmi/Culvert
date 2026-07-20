@@ -2444,12 +2444,16 @@
             "type": "string"
           },
           "grpc_addr": {
+            "description": "Control-plane gRPC listen address (host:port); required.",
             "type": "string"
           },
           "key_file": {
             "type": "string"
           }
         },
+        "required": [
+          "grpc_addr"
+        ],
         "type": "object"
       },
       "SetConnLimit": {
@@ -2893,6 +2897,42 @@
         "description": "Support debug-level state.",
         "type": "object"
       },
+      "SupportRecipient": {
+        "additionalProperties": false,
+        "description": "A support-bundle recipient (create/update response — includes derived + rotation metadata).",
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "Derived fingerprint of the public key.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "rotated_at": {
+            "description": "Last in-place key-rotation time.",
+            "type": "string"
+          },
+          "rotated_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "public_key",
+          "fingerprint",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "SupportRecipientInput": {
         "additionalProperties": false,
         "properties": {
@@ -3095,6 +3135,20 @@
           "host",
           "category"
         ],
+        "type": "object"
+      },
+      "URLCategoryUpdate": {
+        "additionalProperties": false,
+        "description": "URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.",
+        "properties": {
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "UpsertCategoryGroup": {
@@ -15769,11 +15823,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SupportRecipientInput"
+                  "$ref": "#/components/schemas/SupportRecipient"
                 }
               }
             },
-            "description": "OK."
+            "description": "Updated recipient."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -16581,11 +16635,21 @@
       "put": {
         "description": "Update URL category.",
         "operationId": "updateURLCategory",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/URLCategoryEntry"
+                "$ref": "#/components/schemas/URLCategoryUpdate"
               }
             }
           },

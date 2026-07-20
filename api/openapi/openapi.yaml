@@ -1291,9 +1291,10 @@ components:
         labels: { type: object, additionalProperties: { type: string } }
     SetClusterMode:
       type: object
+      required: [grpc_addr]
       additionalProperties: false
       properties:
-        grpc_addr: { type: string }
+        grpc_addr: { type: string, description: "Control-plane gRPC listen address (host:port); required." }
         cert_file: { type: string }
         key_file: { type: string }
         ca_file: { type: string }
@@ -1336,6 +1337,12 @@ components:
         name: { type: string }
         hosts: { type: array, items: { type: string }, nullable: true }
         builtIn: { type: boolean }
+    URLCategoryUpdate:
+      type: object
+      description: URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.
+      additionalProperties: false
+      properties:
+        hosts: { type: array, items: { type: string }, nullable: true }
     FileblockProfileFull:
       type: object
       additionalProperties: false
@@ -1457,6 +1464,19 @@ components:
       properties:
         name: { type: string }
         public_key: { type: string }
+    SupportRecipient:
+      type: object
+      description: A support-bundle recipient (create/update response — includes derived + rotation metadata).
+      additionalProperties: false
+      required: [name, public_key, fingerprint, created_at]
+      properties:
+        name: { type: string }
+        public_key: { type: string }
+        fingerprint: { type: string, description: "Derived fingerprint of the public key." }
+        created_at: { type: string }
+        created_by: { type: string }
+        rotated_at: { type: string, description: "Last in-place key-rotation time." }
+        rotated_by: { type: string }
 
     BandwidthPolicyInput:
       type: object
@@ -3582,11 +3602,16 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: urlcat.update
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/URLCategoryEntry' }
+            schema: { $ref: '#/components/schemas/URLCategoryUpdate' }
       responses:
         '200':
           description: Update URL category.
@@ -8896,10 +8921,10 @@ paths:
             schema: { $ref: '#/components/schemas/GenericWriteInput' }
       responses:
         '200':
-          description: OK.
+          description: Updated recipient.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/SupportRecipientInput' }
+              schema: { $ref: '#/components/schemas/SupportRecipient' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.
