@@ -124,6 +124,27 @@ func TestInstaller_ForwardsCatalogConfigToEnv(t *testing.T) {
 	}
 }
 
+// A wrong host clock (pre-NTP cloud first-boot) can make the local-clock freshness
+// check accept a long-expired signed catalog. The installer warns against network
+// time before resolving, with actionable NTP guidance.
+func TestInstaller_WarnsOnClockSkew(t *testing.T) {
+	s := readContractFile(t, "scripts/install.sh")
+	for _, want := range []string{
+		"warn_if_clock_skewed",
+		"set-ntp true", // actionable fix
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.sh must warn on host clock skew before catalog resolution; missing %q", want)
+		}
+	}
+	// Must be invoked from the catalog seed path.
+	def := strings.Index(s, "warn_if_clock_skewed() {")
+	call := strings.LastIndex(s, "\n  warn_if_clock_skewed\n")
+	if def < 0 || call < 0 || call < def {
+		t.Fatal("warn_if_clock_skewed must be defined and invoked in seed_from_catalog")
+	}
+}
+
 func TestInstaller_DisabledCatalogDoesNotDowngrade(t *testing.T) {
 	s := readContractFile(t, "scripts/install.sh")
 	// The off/none/disabled sentinel must be recognized and must NOT downgrade.

@@ -904,11 +904,39 @@ persist_bootstrap_decision() {
 # from the signed catalog and seed $PINNED_TAG from that exact immutable digest.
 # Returns 0 on success (tag seeded), 1 otherwise. Never falls back to a mutable
 # tag; a failure lets the caller apply its own fail-closed policy.
+# warn_if_clock_skewed — a badly-wrong host clock is the sharp edge of catalog
+# freshness: the signature is clock-independent, but expires_at is checked against
+# the LOCAL clock, so a host that thinks it is months in the past can accept a
+# long-expired (genuinely-signed) catalog — a real pre-NTP cloud-first-boot footgun.
+# Compare the host clock to TLS-fetched network time (the Date header from an HTTPS
+# HEAD) and warn if they diverge by more than an hour. Advisory only (the catalog
+# freshness gate remains the hard control); this just tells the operator to sync NTP.
+warn_if_clock_skewed() {
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v date >/dev/null 2>&1 || return 0
+  local hdr server_epoch host_epoch skew
+  hdr="$(curl -fsSI --max-time 10 "https://github.com" 2>/dev/null | tr -d '\r' \
+    | awk -F': ' 'tolower($1)=="date"{print $2; exit}')" || true
+  [[ -n "$hdr" ]] || return 0
+  server_epoch="$(date -u -d "$hdr" +%s 2>/dev/null)" || return 0
+  [[ -n "$server_epoch" ]] || return 0
+  host_epoch="$(date -u +%s)"
+  skew=$(( host_epoch - server_epoch )); [[ "$skew" -lt 0 ]] && skew=$(( -skew ))
+  if [[ "$skew" -gt 3600 ]]; then
+    warn "Host clock differs from network time by ~${skew}s. A wrong clock can make the"
+    warn "signed-catalog freshness check accept a STALE catalog (or reject a fresh one)."
+    warn "Sync time before installing:  sudo timedatectl set-ntp true   (or: sudo chronyc makestep)"
+  fi
+}
+
 seed_from_catalog() {
   if catalog_fetch_disabled; then
     warn "CULVERT_RELEASE_CATALOG_URL=$CATALOG_URL — catalog fetch is disabled; not auto-seeding from the catalog."
     return 1
   fi
+  # Advisory: a pre-NTP / mis-set clock is the main way a fresh install accepts a
+  # stale signed catalog. Warn (non-fatal) before we resolve.
+  warn_if_clock_skewed
   # A plaintext override origin leaves the catalog fetch confidential-only-broken and,
   # worse, leaks any presigned mirror credentials to on-path observers. The signature
   # still protects INTEGRITY over http, but warn loudly — prefer https for mirrors.
