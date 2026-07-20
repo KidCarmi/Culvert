@@ -836,7 +836,7 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 	if replaceMode {
 		mode = "replace"
 	}
-	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	auditEvent(r, "config.import.preview", mode, fmt.Sprintf("from config exported %s", b.ExportedAt))
 	jsonOK(w, map[string]any{
 		"dryRun":     true,
 		"mode":       mode,
@@ -1115,7 +1115,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode {
 		importMode = "replace"
 	}
-	auditEvent(r, "config.import", importMode, fmt.Sprintf("from backup exported %s", b.ExportedAt))
+	auditEvent(r, "config.import", importMode, fmt.Sprintf("from config exported %s", b.ExportedAt))
 	saveConfigVersion(sessionAdmin(r), "config.import")
 	// Snapshot the admin-settings layer (rate limit, IP filter, rewrite
 	// rules, block page, conn limit, upstream pool, …) so the imported state
@@ -1993,8 +1993,8 @@ func registerSettingsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/export", apiExport)
 
 	// ── Backup / restore / config versioning ──────────────────────────────
-	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download backup JSON
-	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from backup JSON
+	mux.HandleFunc("/api/config/export", apiConfigExport)     // GET — download exported config JSON
+	mux.HandleFunc("/api/config/import", apiConfigImport)     // POST — restore from exported config JSON
 	mux.HandleFunc("/api/config/versions", apiConfigVersions) // GET list / POST rollback
 	mux.HandleFunc("/api/config/diff", apiConfigDiff)         // GET diff between versions
 

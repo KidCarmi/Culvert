@@ -1783,9 +1783,9 @@ tr.dragging  { opacity: .4; }
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;line-height:1.6">
             Every PAC path that returns <code>DIRECT</code> - a <strong>full security-path bypass</strong>:
-            matching traffic skips TLS inspection, DLP, CDR, URL filtering, threat inspection,
+            matching traffic skips SSL inspection, DLP, CDR, URL filtering, threat inspection,
             authentication, policy, and all proxy logging - it never reaches Culvert. (This is
-            <em>not</em> the same as a TLS-decryption bypass.) <strong>Derived from configuration:</strong>
+            <em>not</em> the same as an SSL-inspection bypass.) <strong>Derived from configuration:</strong>
             it shows what the config makes reachable, not that a bypass was used - Culvert cannot
             observe DIRECT traffic.
           </p>
@@ -6362,10 +6362,10 @@ function renderImportPreview(data) {
     : '<span style="color:var(--green);font-weight:600">MERGE</span>';
   let html = `<div style="padding:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:.82rem">`;
   html += `<strong>Import preview</strong> - mode: ${modeLabel}`;
-  if (data.exportedAt) html += ` · backup exported ${escHtml(data.exportedAt)}`;
+  if (data.exportedAt) html += ` · exported ${escHtml(data.exportedAt)}`;
   const sections = data.sections || [];
   if (sections.length === 0) {
-    html += `<p style="color:var(--muted);margin-top:8px">No collection sections in this backup would change.</p>`;
+    html += `<p style="color:var(--muted);margin-top:8px">No collection sections in this export would change.</p>`;
   } else {
     html += `<table class="table" style="font-size:.8rem;margin-top:8px"><thead><tr><th>Section</th><th class="text-right">Incoming</th><th class="text-right">Current</th><th>Effect</th></tr></thead><tbody>`;
     sections.forEach(s => {
@@ -7737,9 +7737,9 @@ async function addSSLBypass() {
   const input = document.getElementById('ssl-bypass-input');
   const pattern = input.value.trim();
   if (!pattern) return;
-  // Tier 2: adding a bypass silently disables TLS inspection for the pattern.
+  // Tier 2: adding a bypass silently disables SSL inspection for the pattern.
   const ok = await confirmAction('Add SSL-inspection bypass',
-    'Traffic to "' + pattern + '" will be tunneled WITHOUT TLS inspection.',
+    'Traffic to "' + pattern + '" will be tunneled WITHOUT SSL inspection.',
     'Add bypass',
     {impact: 'Content scanning (ClamAV/YARA/DPI/CDR) cannot see inside these connections - they are relayed encrypted.',
      rollback: 'Remove the pattern from this list to re-enable inspection.',
@@ -10838,7 +10838,7 @@ function polRenderSummary() {
     .filter(Boolean).join(', ') || 'any destination';
   const extras = [];
   if (r.action === 'Redirect' && r.redirectURL) extras.push(`to ${r.redirectURL}`);
-  if (r.sslAction === 'Inspect') extras.push('TLS inspected');
+  if (r.sslAction === 'Inspect') extras.push('SSL inspected');
   if (r.fileProfile) extras.push(`file profile ${r.fileProfile}`);
   if (r.schedule) extras.push('on a schedule');
   if (!r.enabled) extras.push('rule DISABLED');
@@ -12673,13 +12673,13 @@ async function savePACProfile() {
       const data = await resp.clone().json().catch(() => null);
       if (data && data.confirmField === 'confirmDirect') {
         // New DIRECT path - high-friction typed confirmation (type the profile
-        // ID), mirroring the publish lifecycle. DIRECT is a FULL bypass, not a
-        // TLS-decryption bypass.
+        // ID), mirroring the publish lifecycle. DIRECT is a FULL bypass, not an
+        // SSL-inspection bypass.
         const paths = (data.newDirectPaths || []).join('  •  ');
         const ok = await confirmDanger({
           title: 'New DIRECT bypass - confirm',
           msg: 'This profile introduces new DIRECT path(s): ' + paths,
-          impact: 'DIRECT is a FULL security-path bypass - matching traffic skips TLS inspection, DLP, CDR, URL filtering, threat inspection, authentication, policy, and all proxy logging (it never reaches Culvert).',
+          impact: 'DIRECT is a FULL security-path bypass - matching traffic skips SSL inspection, DLP, CDR, URL filtering, threat inspection, authentication, policy, and all proxy logging (it never reaches Culvert).',
           confirmWord: profileId,
           okLabel: 'Publish bypass',
         });
@@ -13723,11 +13723,11 @@ function renderDiagnoseUpstream(d) {
   if (!el) return;
   d = d || {};
   if (!d.enabled) {
-    el.innerHTML = '<p class="hint">Upstream <strong style="color:var(--green)">DIRECT</strong> - no proxy pool configured (direct egress).</p>';
+    el.innerHTML = '<p class="hint">Upstream <strong style="color:var(--green)">DIRECT</strong> - no upstream proxy chain configured (direct egress).</p>';
     return;
   }
   const color = d.ok ? 'var(--green)' : 'var(--red)';
-  const hdr = '<p class="hint">Upstream pool <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
+  const hdr = '<p class="hint">Upstream proxy chain <strong style="color:' + color + '">' + (d.ok ? 'OK' : 'DEGRADED') +
     '</strong> · ' + escHtml(String(d.usable_count || 0)) + '/' + escHtml(String(d.count || 0)) + ' usable (' +
     escHtml(String(d.healthy_count || 0)) + ' healthy)</p>';
   const rows = (d.proxies || []).map(p =>

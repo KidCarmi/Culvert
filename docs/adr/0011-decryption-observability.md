@@ -93,8 +93,7 @@ non-`omitempty`** (explicit `false`/`none` always present when the block is); **
 | ALPN | `dec_alpn` | enum | `h2` \| `http/1.1` \| `` |
 | Cert verification | `dec_cert_verify` | enum | §2.2 `CertVerify` |
 | Failure stage | `dec_fail_stage` | enum | §2.2 `FailStage` |
-| Failure category | `dec_fail_category` | enum | §2.2 `FailCategory` (normalized, PAN Error-Index-like) |
-| Bounded failure reason | `dec_fail_reason` | enum | small fixed token set; **never** a raw Go error string |
+| Failure category | `dec_fail_category` | enum | §2.2 `FailCategory` (normalized, PAN Error-Index-like); resolution (a) below — the single normalized reason, no separate `dec_fail_reason` field |
 | Exclusion reason | `dec_excl_reason` | enum | engine reason: `client_cert_required` \| `unsupported_params` \| `client_pinned` \| `` |
 | Exclusion scope | `dec_excl_scope` | string | owning profile ID (same as `dec_profile_id`; explicit for SIEM joins) |
 | Cache consulted | `dec_cache_consulted` | bool | read path ran (fail-open session) |
@@ -105,7 +104,7 @@ non-`omitempty`** (explicit `false`/`none` always present when the block is); **
 | Node identity | `dec_node_id` | string | CP/DP `NodeID`; empty in single-binary mode |
 | Timestamps | (reuse `Entry.TS`/`Time`/`DurationMs`) | — | no new time fields; decision-to-close duration already on `TUNNEL_CLOSED` |
 
-**Raw error strings never appear.** `dec_fail_reason`/`dec_fail_category` are the *normalized* projection of
+**Raw error strings never appear.** `dec_fail_category` is the *normalized* projection of
 the classifier output; the unbounded Go error text stays out of the record (and out of metrics), matching
 the CWE-117 / log-injection posture (`auditSafe`, `sanitizeLog`).
 
@@ -371,11 +370,11 @@ corrections below are recorded here and are binding on the slices that implement
   `All<Type>` per type, and that every `All<Type>` slice is pinned — the real uiRoutes-style
   reverse parity. `Valid()` is now a compile-time switch (not a scan of the exported slice),
   so mutating an `All<Type>` var cannot corrupt validation.
-- **[design, `dec_fail_reason`] §2.1 lists a `dec_fail_reason` enum with a vocabulary defined
-  nowhere.** It is redundant with `dec_fail_category` (`FailCategory`). **Resolution:** the
-  wiring slice either (a) drops `dec_fail_reason` and lets `FailCategory` be the single
-  normalized reason, or (b) defines a `FailReason` enum in `decryptobs` (with its own pin)
-  before any field references it. No §2.1 field may reference an undefined vocabulary.
+- **[design, `dec_fail_reason`] §2.1 listed a `dec_fail_reason` enum with a vocabulary defined
+  nowhere.** It was redundant with `dec_fail_category` (`FailCategory`). **Resolution taken:**
+  (a) — the wiring slice dropped `dec_fail_reason`; `FailCategory` is the single normalized
+  reason (`internal/logstore.DecryptionBlock` has no `FailReason` field). §2.1 above reflects
+  this — no §2.1 field may reference an undefined vocabulary.
 - **[design, `dec_excl_reason`] the empty "no exclusion" member.** §2.1 lists
   `client_cert_required | unsupported_params | client_pinned | ""` but §2.2 says the field
   reuses `autoexclude.Reason`, whose `allReasons` has **no** empty member. **Resolution:** the
