@@ -64,5 +64,10 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	// to ctx so it exits on shutdown (identical lifetime to the old placement in the
 	// background-services slice, just later in the boot order).
 	go startSupportRetentionJanitor(ctx)
+	// M6 secure upload: start the queue-drain worker AFTER LoadAdminSettings too, so
+	// it observes the restored upload posture. It only ever transfers bundles an
+	// operator explicitly consented to upload (via the consent gate), idles when
+	// upload is disabled, and exits on ctx — no auto-upload, no shutdown hook.
+	go startSupportUploadWorker(ctx)
 	flushStartupAlerts()
 }

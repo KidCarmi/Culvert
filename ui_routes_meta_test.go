@@ -86,8 +86,11 @@ import (
 //     default-off upload posture; GET viewer / PUT admin; no egress).
 //   - 184 — M6 secure-upload PR-4 added /api/support/tac-trust (read-only resolved
 //     TAC recipient trust set for encrypt-to-TAC; GET viewer; no egress).
+//   - 186 — M6 secure-upload PR-5 added /api/support/uploads (GET viewer: upload
+//     queue list) and /api/support/bundles/{id}/upload (GET viewer status+receipt /
+//     POST admin per-bundle upload consent → seal + enqueue).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 184
+	const want = 186
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

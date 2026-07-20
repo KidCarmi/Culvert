@@ -188,6 +188,14 @@ func saveUploadQueueEntry(e uploadQueueEntry) error {
 	return saveUploadQueueEntryLocked(e)
 }
 
+// loadUploadQueueEntry returns one bundle's upload record for the status/receipt
+// surface. Absent/corrupt ⇒ (zero, false).
+func loadUploadQueueEntry(bundleID string) (uploadQueueEntry, bool) {
+	uploadQueueMu.Lock()
+	defer uploadQueueMu.Unlock()
+	return loadUploadQueueEntryLocked(bundleID)
+}
+
 // enqueueUpload records a consented bundle for upload. Idempotent: a re-enqueue
 // of an already delivered (uploaded) or pending (queued/uploading) bundle is a
 // no-op; a re-enqueue of a DEFERRED/REJECTED bundle re-arms it to queued with a
