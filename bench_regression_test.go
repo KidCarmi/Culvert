@@ -234,3 +234,35 @@ func TestBenchGate_ScrubAllocs(t *testing.T) {
 		t.Errorf("REGRESSION: scrubForwardedHeaders allocates %d/op, exceeds bound %d (baseline ~13)", allocs, maxAllocs)
 	}
 }
+
+// TestBenchGate_TracingIDAllocs guards the per-request tracing-ID generators.
+// setupRequestTracing runs both on essentially every proxied request (the
+// request ID and traceparent are generated whenever the client sent none —
+// the norm for direct client traffic). generateTraceparent previously paid
+// fmt.Sprintf + two hex.EncodeToString (5 allocs/op, 144 B); the in-place
+// hex.Encode rewrite is 1 alloc (the returned string), and generateRequestID
+// has always been 1. The bound gives one alloc of headroom while still
+// catching any fmt/strings re-introduction immediately.
+func TestBenchGate_TracingIDAllocs(t *testing.T) {
+	const maxAllocs int64 = 2 // steady state 1 each; pre-fix traceparent was 5
+	for name, fn := range map[string]func() string{
+		"generateRequestID":   generateRequestID,
+		"generateTraceparent": generateTraceparent,
+	} {
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if fn() == "" {
+					b.Fatal("empty tracing ID")
+				}
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("%s: %d allocs/op (bound %d), %d ns/op", name, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: %s allocates %d/op, exceeds bound %d — "+
+				"per-request tracing-ID generation has regained fmt/hex-string overhead "+
+				"(this runs on every proxied request via setupRequestTracing)", name, allocs, maxAllocs)
+		}
+	}
+}

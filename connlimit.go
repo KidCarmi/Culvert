@@ -8,7 +8,6 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 )
 
 // ─── Request ID generation ──────────────────────────────────────────────────
@@ -30,5 +29,14 @@ func generateTraceparent() string {
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "00-00000000000000000000000000000000-0000000000000000-01"
 	}
-	return fmt.Sprintf("00-%s-%s-01", hex.EncodeToString(buf[:16]), hex.EncodeToString(buf[16:]))
+	// Encoded in place: the layout is fixed, so hex.Encode into a stack buffer
+	// costs one allocation (the returned string) instead of the five that
+	// fmt.Sprintf + two hex.EncodeToString paid on every proxied request.
+	var out [55]byte
+	out[0], out[1], out[2] = '0', '0', '-'
+	hex.Encode(out[3:35], buf[:16])
+	out[35] = '-'
+	hex.Encode(out[36:52], buf[16:])
+	out[52], out[53], out[54] = '-', '0', '1'
+	return string(out[:])
 }
