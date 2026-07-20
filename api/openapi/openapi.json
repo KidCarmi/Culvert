@@ -1,0 +1,1389 @@
+{
+  "components": {
+    "responses": {
+      "PlainBadRequest": {
+        "content": {
+          "text/plain": {
+            "example": "invalid JSON",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Malformed request (invalid JSON, missing/invalid parameter). Body is plain text."
+      },
+      "PlainForbidden": {
+        "content": {
+          "text/plain": {
+            "example": "Forbidden: insufficient role",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Authenticated but insufficient RBAC role. Body is plain text."
+      },
+      "PlainMethodNotAllowed": {
+        "content": {
+          "text/plain": {
+            "example": "method not allowed",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "HTTP method not supported by this route. Body is plain text."
+      },
+      "PlainTooManyRequests": {
+        "content": {
+          "text/plain": {
+            "example": "too many attempts, locked for 300s",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Rate-limited / account lockout in effect. Body is plain text."
+      },
+      "PlainUnauthorized": {
+        "content": {
+          "text/plain": {
+            "example": "Invalid credentials",
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "Missing or invalid credentials. Body is plain text."
+      }
+    },
+    "schemas": {
+      "AuthStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "loggedIn": {
+            "type": "boolean"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "loggedIn"
+        ],
+        "type": "object"
+      },
+      "CAStatus": {
+        "additionalProperties": true,
+        "description": "Internal CA state (opaque superset; fields depend on rotation/dual-CA mode).",
+        "type": "object"
+      },
+      "ChangePasswordRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "current_password": {
+            "format": "password",
+            "type": "string"
+          },
+          "new_password": {
+            "format": "password",
+            "minLength": 8,
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "type": "object",
+        "x-culvert-sensitive": true
+      },
+      "ConfigBackup": {
+        "additionalProperties": true,
+        "description": "Opaque configuration backup envelope. May embed sensitive material\n(session HMAC, IdP secrets, upstream credentials) — treat as a secret at\nrest and in transit.\n",
+        "type": "object",
+        "x-culvert-open-justification": "The backup envelope is intentionally an opaque superset of every config surface; its exact members vary by feature set and version, so it cannot be a closed schema. Sensitivity is enforced operationally (0600 at rest, admin-only + audited transfer), not by the contract shape.",
+        "x-culvert-sensitive": true
+      },
+      "CreateUserRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "format": "password",
+            "minLength": 8,
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password",
+          "role"
+        ],
+        "type": "object",
+        "x-culvert-sensitive": true
+      },
+      "DecryptionExclusions": {
+        "additionalProperties": true,
+        "description": "Adaptive decryption-exclusion cache listing plus stats and blast-radius.",
+        "type": "object"
+      },
+      "GovernanceControlPlane": {
+        "additionalProperties": true,
+        "description": "C3 governance surface — route inventory, C2 mode, counters, derived health.",
+        "type": "object"
+      },
+      "HealthStatus": {
+        "additionalProperties": true,
+        "description": "Node health. Additional fields (term, write_authority, lease_*,\nrequest-log health) are present depending on HA mode; the contract pins\nonly the always-present discriminator.\n",
+        "properties": {
+          "leader": {
+            "type": "boolean"
+          },
+          "role": {
+            "enum": [
+              "standalone",
+              "leader",
+              "standby"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "standby"
+            ],
+            "type": "string"
+          },
+          "write_authority": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "pass": {
+            "format": "password",
+            "type": "string"
+          },
+          "totp": {
+            "description": "6-digit TOTP or a backup code; omitted on the first step.",
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "pass"
+        ],
+        "type": "object"
+      },
+      "LoginResponse": {
+        "additionalProperties": true,
+        "description": "On success `{ok,user,role}`. When TOTP is enrolled but not yet supplied,\nthe handler instead returns `{totp_required:true}` with HTTP 200 and no\nsession — the client must resubmit with `totp`.\n",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "totp_required": {
+            "type": "boolean"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OkResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "Role": {
+        "enum": [
+          "admin",
+          "operator",
+          "viewer"
+        ],
+        "type": "string"
+      },
+      "SetupCompleteRequest": {
+        "additionalProperties": false,
+        "description": "Provide credentials, OR set unauth=true for explicit open mode.",
+        "properties": {
+          "pass": {
+            "format": "password",
+            "minLength": 8,
+            "type": "string"
+          },
+          "unauth": {
+            "type": "boolean"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetupStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "needsSetup": {
+            "description": "True until an initial admin credential (or explicit open mode) is configured.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "needsSetup"
+        ],
+        "type": "object"
+      },
+      "StatsSummary": {
+        "additionalProperties": true,
+        "description": "Aggregate proxy counters plus persistence/HA health flags.",
+        "properties": {
+          "allowed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "authEnabled": {
+            "type": "boolean"
+          },
+          "authFail": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "blocked": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "blocklistSz": {
+            "type": "integer"
+          },
+          "c2Mode": {
+            "enum": [
+              "enforce",
+              "shadow"
+            ],
+            "type": "string"
+          },
+          "proxyPort": {
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "uiPort": {
+            "type": "integer"
+          },
+          "uptime": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "total",
+          "allowed",
+          "blocked"
+        ],
+        "type": "object"
+      },
+      "User": {
+        "additionalProperties": true,
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "UserList": {
+        "additionalProperties": false,
+        "properties": {
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "basicAuth": {
+        "description": "HTTP Basic credentials for CLI/API callers, verified against the local\nuser store (bcrypt) or a configured external IdP.\n",
+        "scheme": "basic",
+        "type": "http"
+      },
+      "sessionCookie": {
+        "description": "HMAC-SHA256-signed admin session cookie issued by POST /api/auth/login.\nCarries the authenticated subject and RBAC role. Dynamic Secure flag\nbased on TLS state; default TTL 8h.\n",
+        "in": "cookie",
+        "name": "ps_ui_session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Machine-readable contract for the Culvert admin/control-plane REST API served\non the UI port (`-ui-port`, default 9090).\n\n**Scope.** This document describes the HTTP/JSON admin API only. Two other\nCulvert network surfaces are intentionally NOT modelled here because they are\nnot RESTful and OpenAPI cannot describe them faithfully:\n\n  * the forward-proxy data path (HTTP CONNECT / plain-HTTP forward / SOCKS5)\n    served on `-port` — a proxy protocol, not a resource API;\n  * the Control-Plane ↔ Data-Plane gRPC stream — described by protobuf.\n\n**Accuracy over aspiration.** Every operation, schema, status code, and\ncontent type below reflects the *actual* runtime behavior of the handler, not\na target design. Notably, error responses are currently emitted by\n`http.Error` as `text/plain`; that is documented as-is here. The proposed\nstructured JSON error envelope is a *future* target recorded in\ndocs/api/API-STYLE-GUIDE.md and the consistency risk register — it is NOT yet\nthe runtime behavior and therefore is NOT asserted by this contract.\n\n**Air-gap.** This appliance and its documentation are designed for on-prem,\ninternet-isolated deployment. No operation here depends on an external\nservice, and the rendered documentation vendors all assets locally.\n\nThis baseline (contract version 1.0.0) documents a representative,\nsecurity-spanning subset of operations. The remaining registered routes are\nexplicitly classified — and time-boxed for documentation — in\napi/route-classification.yaml, which the route-coverage CI gate enforces\nagainst the live router.\n",
+    "license": {
+      "name": "See repository LICENSE",
+      "url": "https://github.com/KidCarmi/Culvert"
+    },
+    "title": "Culvert Admin API",
+    "version": "1.0.0",
+    "x-culvert-api-contract-version": "1.0.0"
+  },
+  "openapi": "3.0.4",
+  "paths": {
+    "/api/auth/change-password": {
+      "post": {
+        "description": "Changes the authenticated user's own password after verifying the current one. Audited.",
+        "operationId": "changePassword",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "current_password": "old-pass8",
+                "new_password": "new-pass8"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Password changed."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/PlainUnauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Change the current user's password",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.password.change",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "description": "Verifies credentials (local bcrypt or configured IdP), enforces account\nlockout, and — when TOTP is enrolled — a second step. On success sets the\n`ps_ui_session` cookie and returns `{ok,user,role}`.\n",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "pass": "s3cret",
+                "totp": "123456",
+                "user": "admin"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "role": "admin",
+                  "user": "admin"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Authenticated (session cookie set), or TOTP second step required."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/PlainUnauthorized"
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/PlainTooManyRequests"
+          }
+        },
+        "security": [],
+        "summary": "Authenticate and issue an admin session cookie",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.login",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "description": "Revokes the session token and clears the cookie.",
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Session cleared."
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {}
+        ],
+        "summary": "Revoke the current admin session",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.logout",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/api/auth/status": {
+      "get": {
+        "description": "Returns whether the caller holds a valid session (or Basic credentials) and the resolved role.",
+        "operationId": "getAuthStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "loggedIn": true,
+                  "role": "admin",
+                  "user": "admin"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatus"
+                }
+              }
+            },
+            "description": "Session state."
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          },
+          {}
+        ],
+        "summary": "Current session authentication state",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/api/auth/users": {
+      "delete": {
+        "description": "Removes the user identified by the `username` query parameter.",
+        "operationId": "deleteUser",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "username",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "User removed (no response body)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Delete an admin user",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.user.delete",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "get": {
+        "description": "Returns all admin UI users (without password material).",
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "users": [
+                    {
+                      "role": "admin",
+                      "username": "admin"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/UserList"
+                }
+              }
+            },
+            "description": "User list."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List admin users",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "post": {
+        "description": "Creates a new admin user or updates an existing one's password/role. Admin-only and audited.",
+        "operationId": "upsertUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "password": "operator-pass8",
+                "role": "operator",
+                "username": "operator1"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "User created or updated."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Create or update an admin user",
+        "tags": [
+          "auth"
+        ],
+        "x-culvert-audit-event": "auth.user.upsert",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/ca/rotate": {
+      "post": {
+        "description": "Forces a CA rotation using a two-step confirmation-token flow: the first\nPOST returns `{status:\"pending_confirmation\", confirmation_token}` and\nemits a `ca.rotate_requested` audit event; re-POSTing with the token\napplies the rotation and emits `ca.rotate`. Re-signs future leaf\ncertificates under a new root; clients that pinned the previous root will\nfail until they re-trust. Admin-only and audited.\n",
+        "operationId": "rotateCA",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "confirm": true,
+                "confirmation_token": "abc123"
+              },
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "description": "Set true on the second step to apply the rotation.",
+                    "type": "boolean"
+                  },
+                  "confirmation_token": {
+                    "description": "Token returned by the first (request) step.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "description": "Omit (or send `{}`) on the first step to request rotation and receive a\ntoken. On the second step send `{confirm:true, confirmation_token}` with\nthe token from the first response to apply the rotation.\n",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "confirmation_token": "abc123",
+                  "status": "pending_confirmation"
+                },
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Rotation requested (`status:pending_confirmation` with a token) or\napplied, depending on whether a valid confirmation token was supplied.\n"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Rotation failed. Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Force rotation of the internal CA (DESTRUCTIVE)",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "ca.rotate",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/ca/status": {
+      "get": {
+        "description": "Returns internal CA state — root info, leaf cache, rotation, and dual-CA status.",
+        "operationId": "getCAStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CAStatus"
+                }
+              }
+            },
+            "description": "CA state."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Internal CA status",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/config/export": {
+      "get": {
+        "description": "Returns the complete configuration backup envelope. May contain secrets\n(session HMAC, IdP secrets, upstream credentials). Admin-only and audited.\n",
+        "operationId": "exportConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigBackup"
+                }
+              }
+            },
+            "description": "Configuration backup."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Export the full configuration backup (SENSITIVE)",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-audit-event": "config.export",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/config/import": {
+      "post": {
+        "description": "Replaces configuration from an uploaded backup envelope. Overwrites live\npolicy, security, and cluster settings. Admin-only and audited.\n",
+        "operationId": "importConfig",
+        "parameters": [
+          {
+            "description": "When set, validate and diff without applying.",
+            "in": "query",
+            "name": "dryRun",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "`replace` wipes stores before applying; default is merge.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "enum": [
+                "merge",
+                "replace"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigBackup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Configuration imported."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Import a configuration backup (DESTRUCTIVE)",
+        "tags": [
+          "config"
+        ],
+        "x-culvert-audit-event": "config.import",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/decryption-exclusions": {
+      "delete": {
+        "description": "Evicts a single `(scope,host)` entry, or clears all when no query is given. Operator+ and audited.",
+        "operationId": "evictDecryptionExclusions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Eviction applied."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Evict one or all decryption-exclusion entries",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "decryption.exclusion.evict",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "get": {
+        "description": "Returns the adaptive decryption-exclusion cache listing plus stats and per-scope blast radius.",
+        "operationId": "listDecryptionExclusions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecryptionExclusions"
+                }
+              }
+            },
+            "description": "Cache listing plus stats and per-scope blast radius."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "List adaptive decryption-exclusion cache entries",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/governance/control-plane": {
+      "get": {
+        "description": "Route inventory, C2 enforcement mode, the six C2 counters, and derived governance health.",
+        "operationId": "getGovernanceControlPlane",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceControlPlane"
+                }
+              }
+            },
+            "description": "Governance snapshot."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Control-plane RBAC governance surface",
+        "tags": [
+          "governance"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "admin",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/setup/complete": {
+      "post": {
+        "description": "One-time bootstrap. Sets the first admin credential, or enables explicit\nopen mode with `{unauth:true}`. Returns 403 once auth is already\nconfigured. Rate-limited per source IP.\n",
+        "operationId": "completeSetup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "pass": "changeme-8+chars",
+                "user": "admin"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SetupCompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            },
+            "description": "Initial admin configured."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/PlainTooManyRequests"
+          }
+        },
+        "security": [],
+        "summary": "Set the initial administrator credential (one-time bootstrap)",
+        "tags": [
+          "setup"
+        ],
+        "x-culvert-audit-event": "setup.complete",
+        "x-culvert-danger-level": "high",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/api/setup/status": {
+      "get": {
+        "description": "Unauthenticated. Returns `{needsSetup:true}` until an admin credential (or explicit open mode) is configured.",
+        "operationId": "getSetupStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "needsSetup": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            },
+            "description": "Setup state."
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          }
+        },
+        "security": [],
+        "summary": "Whether first-boot setup is still required",
+        "tags": [
+          "setup"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "description": "Returns aggregate request counters plus persistence, HA, and RBAC-mode health flags for the dashboard.",
+        "operationId": "getStats",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "allowed": 900,
+                  "authFail": 10,
+                  "blocked": 90,
+                  "total": 1000
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/StatsSummary"
+                }
+              }
+            },
+            "description": "Counters snapshot."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Aggregate proxy counters and health flags",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/top-hosts": {
+      "get": {
+        "description": "Returns the most-requested destination hosts (approximate lower bounds past the internal counter cap).",
+        "operationId": "getTopHosts",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Ranked host counters (approximate lower bounds past the internal cap)."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Top destination hosts by request volume",
+        "tags": [
+          "dashboard"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Unauthenticated health check for load balancers. Returns 200 with\n`status:ok` when this node is standalone or the HA leader; returns 503\nwith `status:standby` on a non-leader HA node.\n",
+        "operationId": "getHealthz",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "leader": true,
+                  "role": "standalone",
+                  "status": "ok",
+                  "write_authority": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            },
+            "description": "Node is healthy and holds (or does not require) write authority."
+          },
+          "405": {
+            "$ref": "#/components/responses/PlainMethodNotAllowed"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "leader": false,
+                  "role": "standby",
+                  "status": "standby",
+                  "write_authority": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            },
+            "description": "HA standby node — not currently the writable leader."
+          }
+        },
+        "security": [],
+        "summary": "Node liveness/health probe",
+        "tags": [
+          "health"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "public",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "public-supported"
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "The appliance serves this API relative to the UI host:port. Paths are\nabsolute from the server root (e.g. https://appliance.example:9090/api/stats).\n",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "description": "Unauthenticated liveness/health probes for load balancers and monitors.",
+      "name": "health"
+    },
+    {
+      "description": "First-boot bootstrap of the initial administrator credential.",
+      "name": "setup"
+    },
+    {
+      "description": "Admin session authentication and RBAC user management.",
+      "name": "auth"
+    },
+    {
+      "description": "Read-only operational counters and telemetry.",
+      "name": "dashboard"
+    },
+    {
+      "description": "Control-plane RBAC governance surface (admin-only, read-only).",
+      "name": "governance"
+    },
+    {
+      "description": "Certificate-authority and TLS-inspection security controls.",
+      "name": "security"
+    },
+    {
+      "description": "Configuration export/import (backup & restore).",
+      "name": "config"
+    }
+  ]
+}
