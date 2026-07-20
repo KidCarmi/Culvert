@@ -1117,6 +1117,21 @@ routes:
       reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
       security_class: internal-review-pending
       expires: *baseline
+  - route: "/api/cluster/convergence"
+    method: "GET"
+    handler: "apiClusterConvergence"
+    domain: "cluster"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: added on main during this program (T3 fleet-convergence telemetry); documented in the documentation slice of this stack
+      security_class: internal-review-pending
+      expires: *baseline
   - route: "/api/cluster/nodes"
     method: "GET"
     handler: "apiClusterNodes"
@@ -1710,6 +1725,21 @@ routes:
     exemption:
       owner: platform-team
       reason: baseline import — endpoint not yet in the OpenAPI contract (Slice 3 backlog)
+      security_class: internal-review-pending
+      expires: *baseline
+  - route: "/api/diagnose/etcd"
+    method: "POST"
+    handler: "apiDiagnoseEtcd"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "operator"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: added on main during this program (HA fencing-lease etcd probe); documented in the documentation slice of this stack
       security_class: internal-review-pending
       expires: *baseline
   - route: "/api/diagnose/dns"
