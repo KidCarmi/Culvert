@@ -771,6 +771,11 @@ var uiRoutes = []uiRouteMetadata{
 			{Method: "GET", MinRole: RoleViewer, Note: "current retention caps + defaults + bounds + pending-eviction projection"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 				Note: "set the configurable count/age retention caps (partial {keep, max_age_days}; a change evicting evidence-exempt bundles needs typed confirm_evict); admin; audited as support.retention.set"}}},
+	{Path: "/api/support/upload/config", Handler: "apiSupportUploadConfig", Domain: "support", Public: false,
+		Methods: []uiRouteMethod{
+			{Method: "GET", MinRole: RoleViewer, Note: "M6: read the node-local secure-upload posture (default not_enabled; no secret exposed)"},
+			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
+				Note: "M6: set the upload enable flag + TAC origin (https, non-private literal IP refused); node-local (off export/import/rollback/CP→DP); no egress; audited as support.upload.config"}}},
 	{Path: "/api/diagnose/storage", Handler: "apiDiagnoseStorage", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{{Method: "POST", MinRole: RoleOperator, Mutating: true, AuditExpected: true,
 			Note: "local read-only storage diagnosis (writability probe + free space + data-dir stat); operator+; no network, no shell; audited as diagnose.storage"}}},

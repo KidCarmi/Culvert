@@ -82,8 +82,10 @@ import (
 //     fencing-lease reachability probe; operator POST).
 //   - 182 — T3 P1 added /api/cluster/convergence (read-only config-sync fleet
 //     convergence / straggler view; viewer).
+//   - 183 — M6 secure-upload PR-1 added /api/support/upload/config (node-local
+//     default-off upload posture; GET viewer / PUT admin; no egress).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 182
+	const want = 183
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
