@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +88,71 @@ func TestEnqueueUpload_CapEnforced(t *testing.T) {
 	}
 }
 
+func TestEnqueueUpload_RejectedReArmRespectsCapacity(t *testing.T) {
+	withTempUploadDir(t)
+	prev := maxUploadQueue
+	maxUploadQueue = 2
+	defer func() { maxUploadQueue = prev }()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	// A rejected (terminal) entry, plus a full non-terminal queue.
+	rj := csbID("rjx")
+	e, err := enqueueUpload(rj, "C", "", "h", now)
+	if err != nil {
+		t.Fatalf("enqueue rejected seed: %v", err)
+	}
+	e.State = uploadStateRejected
+	if err := saveUploadQueueEntry(e); err != nil {
+		t.Fatalf("save rejected: %v", err)
+	}
+	if _, err := enqueueUpload(csbID("pxa"), "C", "", "h", now); err != nil {
+		t.Fatalf("enqueue pxa: %v", err)
+	}
+	if _, err := enqueueUpload(csbID("pxb"), "C", "", "h", now); err != nil {
+		t.Fatalf("enqueue pxb: %v", err)
+	}
+	// Re-arming the rejected entry now would make 3 non-terminal entries > cap 2.
+	if _, err := enqueueUpload(rj, "C", "", "h", now); err == nil {
+		t.Fatal("re-arming a rejected entry past the capacity bound must be refused")
+	}
+	// A deferred re-arm (already counted as pending) is NOT blocked by the cap.
+	df := csbID("pxa")
+	d, _ := loadQueueEntryForTest(t, df)
+	d.State = uploadStateDeferred
+	if err := saveUploadQueueEntry(d); err != nil {
+		t.Fatalf("save deferred: %v", err)
+	}
+	if _, err := enqueueUpload(df, "C", "", "h", now); err != nil {
+		t.Fatalf("deferred re-arm should not be capacity-blocked: %v", err)
+	}
+}
+
+func TestLoadUploadQueueEntry_RejectsBundleIDMismatch(t *testing.T) {
+	withTempUploadDir(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	good := csbID("good")
+	if _, err := enqueueUpload(good, "C", "", "h", now); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// Tamper the on-disk record so its BundleID points at a DIFFERENT valid id,
+	// keeping the file valid JSON. The loader must reject it rather than hand back
+	// an entry whose BundleID would delete the wrong path on prune.
+	e, ok := loadQueueEntryForTest(t, good)
+	if !ok {
+		t.Fatal("seed entry missing")
+	}
+	e.BundleID = csbID("evil")
+	b, _ := json.MarshalIndent(e, "", "  ")
+	if err := os.WriteFile(uploadQueuePath(good), b, 0o600); err != nil {
+		t.Fatalf("tamper write: %v", err)
+	}
+	// The mismatched record is skipped, so the queue is empty (not returning a
+	// record keyed to "evil").
+	if list := listUploadQueue(); len(list) != 0 {
+		t.Fatalf("mismatched entry not skipped: %+v", list)
+	}
+}
+
 func TestEnqueueUpload_TerminalRetentionBounded(t *testing.T) {
 	withTempUploadDir(t)
 	prev := maxUploadTerminal
@@ -124,20 +191,39 @@ func TestEnqueueUpload_TerminalRetentionBounded(t *testing.T) {
 func TestDrainUploadEntry_Success(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	e := uploadQueueEntry{BundleID: csbID("ok"), State: uploadStateQueued, BundleSHA256: "h"}
-	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, error) {
-		return &supportupload.Receipt{BundleSHA256: "h", Sig: "sig"}, nil
+	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, string, error) {
+		return &supportupload.Receipt{BundleSHA256: "h", Sig: "sig"}, "up-123", nil
 	}
 	got := drainUploadEntry(context.Background(), e, up, now)
 	if got.State != uploadStateUploaded || got.Receipt == nil || got.Receipt.Sig != "sig" {
 		t.Fatalf("success drain = %+v", got)
+	}
+	if got.UploadID != "up-123" {
+		t.Fatalf("success drain did not capture upload id: %q", got.UploadID)
+	}
+}
+
+func TestDrainUploadEntry_TransientCapturesUploadID(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	e := uploadQueueEntry{BundleID: csbID("rid"), State: uploadStateQueued}
+	// The uploader reaches init (gets a session id) then hits a transient error.
+	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, string, error) {
+		return nil, "sess-9", errors.New("connection reset after init")
+	}
+	got := drainUploadEntry(context.Background(), e, up, now)
+	if got.State != uploadStateQueued {
+		t.Fatalf("transient state = %q, want queued", got.State)
+	}
+	if got.UploadID != "sess-9" {
+		t.Fatalf("transient drain must persist the gateway session id, got %q", got.UploadID)
 	}
 }
 
 func TestDrainUploadEntry_TransientRetryThenDeferred(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	e := uploadQueueEntry{BundleID: csbID("rt"), State: uploadStateQueued}
-	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, error) {
-		return nil, errors.New("connection refused")
+	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, string, error) {
+		return nil, "", errors.New("connection refused")
 	}
 	// Each transient failure re-queues with a backoff until the cap → deferred.
 	for i := 1; i < maxUploadAttempts; i++ {
@@ -168,8 +254,8 @@ func TestDrainUploadEntry_TransientRetryThenDeferred(t *testing.T) {
 func TestDrainUploadEntry_GatewayRejectTerminal(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	e := uploadQueueEntry{BundleID: csbID("rj"), State: uploadStateQueued}
-	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, error) {
-		return nil, &supportupload.GatewayError{Status: 403, Body: "not entitled"}
+	up := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, string, error) {
+		return nil, "", &supportupload.GatewayError{Status: 403, Body: "not entitled"}
 	}
 	got := drainUploadEntry(context.Background(), e, up, now)
 	if got.State != uploadStateRejected {
@@ -180,8 +266,8 @@ func TestDrainUploadEntry_GatewayRejectTerminal(t *testing.T) {
 	}
 	// A 5xx is transient (retried), not terminal.
 	e5 := uploadQueueEntry{BundleID: csbID("g5"), State: uploadStateQueued}
-	up5 := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, error) {
-		return nil, &supportupload.GatewayError{Status: 503, Body: "unavailable"}
+	up5 := func(_ context.Context, _ uploadQueueEntry) (*supportupload.Receipt, string, error) {
+		return nil, "", &supportupload.GatewayError{Status: 503, Body: "unavailable"}
 	}
 	got5 := drainUploadEntry(context.Background(), e5, up5, now)
 	if got5.State != uploadStateQueued {

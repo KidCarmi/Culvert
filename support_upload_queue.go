@@ -80,7 +80,25 @@ type uploadQueueEntry struct {
 	Receipt      *supportupload.Receipt `json:"receipt,omitempty"`    // set on uploaded
 }
 
+// errUploadQueueFull is returned when a new enqueue (or a rejected→queued re-arm)
+// would push the non-terminal queue past maxUploadQueue.
+var errUploadQueueFull = errors.New("upload queue is full")
+
 var uploadQueueMu sync.Mutex
+
+// pendingUploadCountLocked counts the non-terminal (queued/uploading/deferred)
+// entries — the population maxUploadQueue bounds. Caller holds uploadQueueMu.
+func pendingUploadCountLocked() int {
+	pending := 0
+	entries := listUploadQueueLocked()
+	for i := range entries {
+		switch entries[i].State {
+		case uploadStateQueued, uploadStateUploading, uploadStateDeferred:
+			pending++
+		}
+	}
+	return pending
+}
 
 func uploadQueueDir() string { return filepath.Join(dataDir, "support", "upload_queue") }
 
@@ -121,6 +139,14 @@ func loadUploadQueueEntryLocked(bundleID string) (uploadQueueEntry, bool) {
 	}
 	var e uploadQueueEntry
 	if err := json.Unmarshal(b, &e); err != nil {
+		return uploadQueueEntry{}, false
+	}
+	// The filename (validated above) is the authority: reject an entry whose
+	// persisted BundleID disagrees with the file it came from. A hand-edited or
+	// corrupted-but-valid-JSON record could otherwise carry a BundleID pointing at
+	// a DIFFERENT file, and terminal pruning (os.Remove(uploadQueuePath(BundleID)))
+	// would then delete the wrong path instead of skipping the bad record.
+	if e.BundleID != bundleID {
 		return uploadQueueEntry{}, false
 	}
 	return e, true
@@ -174,29 +200,32 @@ func enqueueUpload(bundleID, caseID, keyID, sha256 string, now time.Time) (uploa
 		return uploadQueueEntry{}, errors.New("invalid bundle id")
 	}
 	nowStr := now.UTC().Format(time.RFC3339)
+	rearm := func(e uploadQueueEntry) (uploadQueueEntry, error) {
+		e.State = uploadStateQueued
+		e.Attempts = 0
+		e.NextRetryAt = 0
+		e.LastError = ""
+		e.UpdatedAt = nowStr
+		return e, saveUploadQueueEntryLocked(e)
+	}
 	if existing, ok := loadUploadQueueEntryLocked(bundleID); ok {
 		switch existing.State {
 		case uploadStateUploaded, uploadStateQueued, uploadStateUploading:
 			return existing, nil // already delivered or pending — no-op
-		default: // deferred / rejected → re-arm
-			existing.State = uploadStateQueued
-			existing.Attempts = 0
-			existing.NextRetryAt = 0
-			existing.LastError = ""
-			existing.UpdatedAt = nowStr
-			return existing, saveUploadQueueEntryLocked(existing)
+		case uploadStateDeferred:
+			return rearm(existing) // already counted as pending — consumes no new capacity
+		default: // rejected (terminal) → re-arm moves it back into a live state, so it
+			// must respect the same capacity bound a fresh enqueue does; without this
+			// check, repeated operator retries of rejected records could push the
+			// non-terminal queue past maxUploadQueue.
+			if pendingUploadCountLocked() >= maxUploadQueue {
+				return uploadQueueEntry{}, errUploadQueueFull
+			}
+			return rearm(existing)
 		}
 	}
-	pending := 0
-	entries := listUploadQueueLocked()
-	for i := range entries {
-		switch entries[i].State {
-		case uploadStateQueued, uploadStateUploading, uploadStateDeferred:
-			pending++
-		}
-	}
-	if pending >= maxUploadQueue {
-		return uploadQueueEntry{}, errors.New("upload queue is full")
+	if pendingUploadCountLocked() >= maxUploadQueue {
+		return uploadQueueEntry{}, errUploadQueueFull
 	}
 	e := uploadQueueEntry{
 		BundleID: bundleID, CaseID: caseID, KeyID: keyID, BundleSHA256: sha256,
@@ -230,11 +259,19 @@ func pruneTerminalUploadEntriesLocked() {
 	}
 }
 
-// uploadFunc performs the actual transfer for an entry and returns the receipt.
-// It is injected so the queue engine is testable without a live client; PR-5
-// wires the real implementation (encrypt-to-TAC → PR-2 client). It MUST NOT be
-// called while holding uploadQueueMu (it does network I/O).
-type uploadFunc func(ctx context.Context, e uploadQueueEntry) (*supportupload.Receipt, error)
+// uploadFunc performs the actual transfer for an entry and returns the receipt
+// plus the gateway upload session id. It is injected so the queue engine is
+// testable without a live client; PR-5 wires the real implementation
+// (encrypt-to-TAC → PR-2 client). It MUST NOT be called while holding
+// uploadQueueMu (it does network I/O).
+//
+// The uploadID return carries the gateway session id even when err != nil: an
+// attempt that reaches init (obtaining a fresh upload_id) and THEN hits a
+// transient error must be able to hand that id back, so the persisted entry
+// records it and the next attempt — including one after a restart — can resume
+// from the received offset instead of re-initing. A blank uploadID leaves the
+// entry's existing UploadID untouched.
+type uploadFunc func(ctx context.Context, e uploadQueueEntry) (rec *supportupload.Receipt, uploadID string, err error)
 
 // drainUploadEntry runs ONE attempt for an entry and returns the updated entry
 // (the caller persists it via saveUploadQueueEntry). It does NOT take the queue
@@ -249,7 +286,12 @@ func drainUploadEntry(ctx context.Context, e uploadQueueEntry, upload uploadFunc
 	e.State = uploadStateUploading
 	e.UpdatedAt = nowStr
 
-	rec, err := upload(ctx, e)
+	rec, uploadID, err := upload(ctx, e)
+	if uploadID != "" {
+		// Capture the gateway session id on EVERY path (success or transient
+		// failure) so a drop after init persists the resume point.
+		e.UploadID = uploadID
+	}
 	if err == nil {
 		e.State = uploadStateUploaded
 		e.Receipt = rec
