@@ -545,7 +545,7 @@ jobs:
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
       - name: Attach complete signed catalog bundle to the GitHub Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: ${{ steps.pkg.outputs.bundle }}
 
@@ -924,7 +924,7 @@ jobs:
           cat "subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
 
       - name: Upload proxy release asset + signature bundle
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
@@ -932,7 +932,7 @@ jobs:
 
       - name: Upload culvert-maint release asset + signature bundle (linux)
         if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert-maint-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -945,7 +945,7 @@ jobs:
       # the .sigstore.json is the in-toto attestation binding it to the binary.
       - name: Upload SBOMs + attestation bundles (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
             culvert.sbom.cdx.json
