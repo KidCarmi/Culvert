@@ -58,6 +58,22 @@
       }
     },
     "schemas": {
+      "AddBlocklistEntry": {
+        "additionalProperties": false,
+        "description": "Provide a single host or a list.",
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "AddBlocklistException": {
         "additionalProperties": false,
         "description": "Provide a single host or a list.",
@@ -127,6 +143,73 @@
           }
         },
         "type": "object"
+      },
+      "AddURLCatHost": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "host"
+        ],
+        "type": "object"
+      },
+      "AlertHistory": {
+        "additionalProperties": false,
+        "properties": {
+          "deliveries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "deliveries"
+        ],
+        "type": "object"
+      },
+      "AlertWebhook": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "secret": {
+            "format": "password",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object",
+        "x-culvert-sensitive": true
       },
       "AlertWebhookInput": {
         "additionalProperties": true,
@@ -258,6 +341,46 @@
         },
         "nullable": true,
         "type": "array"
+      },
+      "BandwidthPolicyInput": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "label_selector": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "max_bytes_per_sec": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "BlockPageConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "html": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "html"
+        ],
+        "type": "object"
       },
       "BlocklistFeedList": {
         "additionalProperties": false,
@@ -428,6 +551,18 @@
         ],
         "type": "object",
         "x-culvert-sensitive": true
+      },
+      "ClearLockoutBody": {
+        "additionalProperties": false,
+        "properties": {
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
+        ],
+        "type": "object"
       },
       "ClusterAudit": {
         "additionalProperties": false,
@@ -637,6 +772,18 @@
         "nullable": true,
         "type": "array"
       },
+      "CreateConfigVersionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "CreateUserRequest": {
         "additionalProperties": false,
         "properties": {
@@ -700,6 +847,22 @@
           "count",
           "blocked_total"
         ],
+        "type": "object"
+      },
+      "DPIPatternInput": {
+        "additionalProperties": false,
+        "description": "Provide a single pattern or a list.",
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "patterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "DashboardHealth": {
@@ -816,6 +979,47 @@
         ],
         "type": "object"
       },
+      "DecryptionProfileFull": {
+        "additionalProperties": false,
+        "description": "A TLS-inspection decryption profile.",
+        "properties": {
+          "certVerification": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inspectHttp2": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "maxTlsVersion": {
+            "type": "string"
+          },
+          "minTlsVersion": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "onInspectError": {
+            "type": "string"
+          },
+          "onUnsupported": {
+            "type": "string"
+          },
+          "stallTimeoutSecs": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "DecryptionProfileInput": {
         "additionalProperties": true,
         "description": "A decryption profile (rich object; open superset).",
@@ -894,6 +1098,48 @@
         ],
         "type": "object"
       },
+      "DiscoverIdPBody": {
+        "additionalProperties": false,
+        "properties": {
+          "issuer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer"
+        ],
+        "type": "object"
+      },
+      "DispatchReleaseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "no_rollback": {
+            "type": "boolean"
+          },
+          "passphrase_ref": {
+            "type": "string"
+          },
+          "pre_backup": {
+            "type": "boolean"
+          },
+          "release_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent"
+        ],
+        "type": "object"
+      },
       "DispatchStatus": {
         "additionalProperties": true,
         "description": "Release dispatch/upgrade status.",
@@ -933,6 +1179,25 @@
           "extensions",
           "count"
         ],
+        "type": "object"
+      },
+      "FileblockProfileFull": {
+        "additionalProperties": false,
+        "properties": {
+          "extensions": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "FileblockProfileList": {
@@ -988,6 +1253,21 @@
       "GenericWriteInput": {
         "additionalProperties": true,
         "description": "Endpoint-specific write payload (rich object; open superset — see the handler).",
+        "type": "object"
+      },
+      "GeoIPStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "dbPath": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
         "type": "object"
       },
       "GovernanceControlPlane": {
@@ -1046,6 +1326,97 @@
         ],
         "type": "object"
       },
+      "IdPList": {
+        "additionalProperties": false,
+        "properties": {
+          "persisted": {
+            "type": "boolean"
+          },
+          "profiles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "persisted",
+          "profiles"
+        ],
+        "type": "object"
+      },
+      "IdPProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "emailDomains": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "knownGroups": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "oidc": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "saml": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "oidc",
+              "saml"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "LockoutsList": {
+        "additionalProperties": false,
+        "properties": {
+          "lockouts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "lockouts"
+        ],
+        "type": "object"
+      },
       "LogLevel": {
         "additionalProperties": false,
         "properties": {
@@ -1099,7 +1470,7 @@
         ],
         "type": "object"
       },
-      "LoginResponse": {
+      "LoginResult": {
         "additionalProperties": true,
         "description": "On success `{ok,user,role}`. When TOTP is enrolled but not yet supplied,\nthe handler instead returns `{totp_required:true}` with HTTP 200 and no\nsession — the client must resubmit with `totp`.\n",
         "properties": {
@@ -1155,6 +1526,21 @@
           "tokenSet",
           "path"
         ],
+        "type": "object"
+      },
+      "MovePolicyRule": {
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "targetName": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "NetworkSettings": {
@@ -1272,6 +1658,27 @@
         ],
         "type": "object"
       },
+      "OTLPConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "authHeaderName": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "hasAuth": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
       "ObjectReferences": {
         "additionalProperties": true,
         "description": "Reverse references from named objects (categories, groups, profiles) to policy rules.",
@@ -1322,6 +1729,46 @@
         "description": "A single PAC posture exception (open superset).",
         "type": "object"
       },
+      "PACExceptionsList": {
+        "additionalProperties": false,
+        "properties": {
+          "exceptions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "exceptions"
+        ],
+        "type": "object"
+      },
+      "PACPoolInput": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "PACPoolItem": {
         "additionalProperties": true,
         "description": "A single PAC pool (open superset).",
@@ -1338,6 +1785,48 @@
       "PACPostureInventory": {
         "additionalProperties": true,
         "description": "Direct-access PAC posture inventory (shape varies).",
+        "type": "object"
+      },
+      "PACProfileInput": {
+        "additionalProperties": false,
+        "properties": {
+          "availabilityMode": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "poolId": {
+            "type": "string"
+          },
+          "privateNetworks": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rules": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "PACProfileItem": {
@@ -1434,17 +1923,83 @@
         "type": "object"
       },
       "PolicyRule": {
-        "additionalProperties": true,
-        "description": "A single policy rule (rich object; open superset — fields vary by rule type/version).",
+        "additionalProperties": false,
+        "description": "A single Culvert policy rule (Stage-2 access rule). All fields are optional on create/update; read-only fields (hitCount/lastHit/created/modified) are echoed on read.",
         "properties": {
           "action": {
             "type": "string"
+          },
+          "auth": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "authSource": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "decryptionProfile": {
+            "type": "string"
+          },
+          "decryptionProfileId": {
+            "type": "string"
+          },
+          "destCategory": {
+            "type": "string"
+          },
+          "destCategoryGroup": {
+            "type": "string"
+          },
+          "destCategoryGroupId": {
+            "type": "string"
+          },
+          "destCountry": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
           },
           "destFQDN": {
             "type": "string"
           },
           "enabled": {
+            "nullable": true,
             "type": "boolean"
+          },
+          "fileFiltering": {
+            "type": "boolean"
+          },
+          "fileProfile": {
+            "type": "string"
+          },
+          "hitCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastHit": {
+            "type": "string"
+          },
+          "logFullUri": {
+            "type": "boolean"
+          },
+          "logTraffic": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "modifiedAt": {
+            "type": "string"
+          },
+          "modifiedBy": {
+            "type": "string"
           },
           "name": {
             "type": "string"
@@ -1452,7 +2007,59 @@
           "priority": {
             "type": "integer"
           },
+          "redirectURL": {
+            "type": "string"
+          },
+          "ruleType": {
+            "type": "string"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/PolicySchedule"
+          },
+          "sourceGroup": {
+            "type": "string"
+          },
+          "sourceIP": {
+            "type": "string"
+          },
+          "sourceIdentity": {
+            "type": "string"
+          },
           "sslAction": {
+            "type": "string"
+          },
+          "stripAlpn": {
+            "nullable": true,
+            "type": "boolean"
+          },
+          "subjectMatch": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "tlsSkipVerify": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "PolicySchedule": {
+        "additionalProperties": false,
+        "properties": {
+          "days": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "timeEnd": {
+            "type": "string"
+          },
+          "timeStart": {
+            "type": "string"
+          },
+          "timezone": {
             "type": "string"
           }
         },
@@ -1482,6 +2089,33 @@
         ],
         "type": "object"
       },
+      "ReorderPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "priorities": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "priorities"
+        ],
+        "type": "object"
+      },
+      "RevokeClusterBody": {
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "RewriteList": {
         "additionalProperties": false,
         "properties": {
@@ -1501,6 +2135,54 @@
           "rules",
           "count"
         ],
+        "type": "object"
+      },
+      "RewriteRuleFull": {
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "req_add": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "req_remove": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "req_set": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "resp_add": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "resp_remove": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resp_set": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
         "type": "object"
       },
       "RewriteRuleInput": {
@@ -1706,6 +2388,18 @@
         ],
         "type": "object"
       },
+      "SetBlockPageBody": {
+        "additionalProperties": false,
+        "properties": {
+          "html": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "html"
+        ],
+        "type": "object"
+      },
       "SetBlocklistMode": {
         "additionalProperties": false,
         "properties": {
@@ -1719,6 +2413,46 @@
         },
         "required": [
           "mode"
+        ],
+        "type": "object"
+      },
+      "SetClusterLabels": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "node_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_id"
+        ],
+        "type": "object"
+      },
+      "SetClusterMode": {
+        "additionalProperties": false,
+        "properties": {
+          "ca_file": {
+            "type": "string"
+          },
+          "cert_file": {
+            "type": "string"
+          },
+          "grpc_addr": {
+            "description": "Control-plane gRPC listen address (host:port); required.",
+            "type": "string"
+          },
+          "key_file": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "grpc_addr"
         ],
         "type": "object"
       },
@@ -1762,6 +2496,22 @@
         },
         "required": [
           "action"
+        ],
+        "type": "object"
+      },
+      "SetDefaultAuthOutcomeBody": {
+        "additionalProperties": false,
+        "properties": {
+          "defaultAuthOutcome": {
+            "enum": [
+              "Default",
+              "Exempt"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "defaultAuthOutcome"
         ],
         "type": "object"
       },
@@ -1879,6 +2629,35 @@
         ],
         "type": "object"
       },
+      "SetOTLPBody": {
+        "additionalProperties": false,
+        "properties": {
+          "authHeaderName": {
+            "type": "string"
+          },
+          "authHeaderValue": {
+            "format": "password",
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "x-culvert-sensitive": true
+      },
+      "SetPolicyDraftBody": {
+        "additionalProperties": false,
+        "properties": {
+          "require_commit": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "require_commit"
+        ],
+        "type": "object"
+      },
       "SetRedaction": {
         "additionalProperties": false,
         "description": "Toggle the destination-privacy posture and/or rotate the pseudonym key. A rotate-only call sends {\"rotate_key\":true} and omits redact_hosts (the posture is preserved across a rotation); neither field is individually required.",
@@ -1936,6 +2715,33 @@
         },
         "required": [
           "hours"
+        ],
+        "type": "object"
+      },
+      "SetSyslogBody": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetUIAllowIPsBody": {
+        "additionalProperties": false,
+        "properties": {
+          "ips": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ips"
         ],
         "type": "object"
       },
@@ -2091,6 +2897,57 @@
         "description": "Support debug-level state.",
         "type": "object"
       },
+      "SupportRecipient": {
+        "additionalProperties": false,
+        "description": "A support-bundle recipient (create/update response — includes derived + rotation metadata).",
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "Derived fingerprint of the public key.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "rotated_at": {
+            "description": "Last in-place key-rotation time.",
+            "type": "string"
+          },
+          "rotated_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "public_key",
+          "fingerprint",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "SupportRecipientInput": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "SupportRecipients": {
         "additionalProperties": false,
         "properties": {
@@ -2142,6 +2999,25 @@
         "description": "Supportability status (debug level, bundle state, retention).",
         "type": "object"
       },
+      "SyslogConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "drops": {
+            "type": "integer"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "format"
+        ],
+        "type": "object"
+      },
       "Timeseries": {
         "additionalProperties": false,
         "properties": {
@@ -2179,6 +3055,44 @@
         "description": "Adaptive auto-exclude tunables patch (subset of tunable fields).",
         "type": "object"
       },
+      "UIAllowIPs": {
+        "additionalProperties": false,
+        "properties": {
+          "ips": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "required": [
+          "ips"
+        ],
+        "type": "object"
+      },
+      "URLCategoryEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "builtIn": {
+            "type": "boolean"
+          },
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "URLCategoryList": {
         "items": {
           "additionalProperties": true,
@@ -2194,6 +3108,48 @@
         },
         "nullable": true,
         "type": "array"
+      },
+      "URLCategoryLookup": {
+        "additionalProperties": true,
+        "properties": {
+          "blockSource": {
+            "type": "string"
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "category": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "matchedBy": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "category"
+        ],
+        "type": "object"
+      },
+      "URLCategoryUpdate": {
+        "additionalProperties": false,
+        "description": "URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.",
+        "properties": {
+          "hosts": {
+            "items": {
+              "type": "string"
+            },
+            "nullable": true,
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "UpsertCategoryGroup": {
         "additionalProperties": false,
@@ -2294,6 +3250,21 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "YARARuleInput2": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "YARARuleItem": {
@@ -2436,7 +3407,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlertWebhookInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -2499,7 +3470,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AlertWebhookInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -2555,7 +3526,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/AlertHistory"
                 }
               }
             },
@@ -2593,7 +3564,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AlertWebhook"
               }
             }
           },
@@ -2778,7 +3749,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/LockoutsList"
                 }
               }
             },
@@ -2814,7 +3785,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ClearLockoutBody"
               }
             }
           },
@@ -2890,7 +3861,7 @@
                   "user": "admin"
                 },
                 "schema": {
-                  "$ref": "#/components/schemas/LoginResponse"
+                  "$ref": "#/components/schemas/LoginResult"
                 }
               }
             },
@@ -3269,7 +4240,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -3322,7 +4293,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -3377,7 +4348,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ReorderPolicy"
               }
             }
           },
@@ -3564,7 +4535,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AddBlocklistEntry"
               }
             }
           },
@@ -4047,7 +5018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/BlockPageConfig"
                 }
               }
             },
@@ -4083,7 +5054,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetBlockPageBody"
               }
             }
           },
@@ -5437,7 +6408,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/BandwidthPolicyInput"
               }
             }
           },
@@ -5795,7 +6766,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetClusterLabels"
               }
             }
           },
@@ -5889,7 +6860,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetClusterMode"
               }
             }
           },
@@ -6268,7 +7239,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/RevokeClusterBody"
               }
             }
           },
@@ -6775,7 +7746,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/CreateConfigVersionBody"
               }
             }
           },
@@ -6992,7 +7963,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/DPIConfig"
                 }
               }
             },
@@ -7028,7 +7999,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DPIPatternInput"
               }
             }
           },
@@ -7084,7 +8055,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/DPIBypass"
                 }
               }
             },
@@ -7120,7 +8091,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDPIBypass"
               }
             }
           },
@@ -7620,7 +8591,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DecryptionProfileInput"
+                "$ref": "#/components/schemas/DecryptionProfileFull"
               }
             }
           },
@@ -7673,7 +8644,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DecryptionProfileInput"
+                "$ref": "#/components/schemas/DecryptionProfileFull"
               }
             }
           },
@@ -8493,7 +9464,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DPIPatternInput"
               }
             }
           },
@@ -8930,7 +9901,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/FileblockProfileFull"
               }
             }
           },
@@ -8983,7 +9954,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/FileblockProfileFull"
               }
             }
           },
@@ -9039,7 +10010,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/GeoIPStatus"
                 }
               }
             },
@@ -9156,7 +10127,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/IdPList"
                 }
               }
             },
@@ -9192,7 +10163,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/IdPProfileInput"
               }
             }
           },
@@ -9247,7 +10218,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DiscoverIdPBody"
               }
             }
           },
@@ -9797,7 +10768,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/OTLPConfig"
                 }
               }
             },
@@ -9833,7 +10804,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetOTLPBody"
               }
             }
           },
@@ -10071,7 +11042,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PACPoolInput"
               }
             }
           },
@@ -10357,7 +11328,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/PACExceptionsList"
                 }
               }
             },
@@ -10647,7 +11618,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PACProfileInput"
               }
             }
           },
@@ -11092,7 +12063,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -11145,7 +12116,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/PolicyRule"
               }
             }
           },
@@ -11237,7 +12208,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetPolicyDraftBody"
               }
             }
           },
@@ -11382,7 +12353,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/MovePolicyRule"
               }
             }
           },
@@ -11437,7 +12408,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/ReorderPolicy"
               }
             }
           },
@@ -11689,7 +12660,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/DispatchReleaseBody"
               }
             }
           },
@@ -11918,7 +12889,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RewriteRuleInput"
+                "$ref": "#/components/schemas/RewriteRuleFull"
               }
             }
           },
@@ -12609,7 +13580,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/YARARuleInput2"
               }
             }
           },
@@ -12662,7 +13633,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/YARARuleInput2"
               }
             }
           },
@@ -13316,7 +14287,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDefaultAuthOutcomeBody"
               }
             }
           },
@@ -13555,7 +14526,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetDefaultAuthOutcomeBody"
               }
             }
           },
@@ -14852,11 +15823,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/SupportRecipient"
                 }
               }
             },
-            "description": "OK."
+            "description": "Updated recipient."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -15034,7 +16005,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/SyslogConfig"
                 }
               }
             },
@@ -15070,7 +16041,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetSyslogBody"
               }
             }
           },
@@ -15250,7 +16221,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/UIAllowIPs"
                 }
               }
             },
@@ -15286,7 +16257,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/SetUIAllowIPsBody"
               }
             }
           },
@@ -15615,7 +16586,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/URLCategoryEntry"
               }
             }
           },
@@ -15664,11 +16635,21 @@
       "put": {
         "description": "Update URL category.",
         "operationId": "updateURLCategory",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/URLCategoryUpdate"
               }
             }
           },
@@ -15792,7 +16773,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "$ref": "#/components/schemas/AddURLCatHost"
               }
             }
           },
@@ -15866,7 +16847,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GenericRead"
+                  "$ref": "#/components/schemas/URLCategoryLookup"
                 }
               }
             },

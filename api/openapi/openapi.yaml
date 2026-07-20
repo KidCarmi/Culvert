@@ -176,7 +176,7 @@ components:
         totp:
           type: string
           description: 6-digit TOTP or a backup code; omitted on the first step.
-    LoginResponse:
+    LoginResult:
       type: object
       description: |
         On success `{ok,user,role}`. When TOTP is enrolled but not yet supplied,
@@ -284,15 +284,51 @@ components:
     # ── Slice 3: read-model schemas ───────────────────────────────────────────────
     PolicyRule:
       type: object
-      description: A single policy rule (rich object; open superset — fields vary by rule type/version).
-      additionalProperties: true
+      description: A single Culvert policy rule (Stage-2 access rule). All fields are optional on create/update; read-only fields (hitCount/lastHit/created/modified) are echoed on read.
+      additionalProperties: false
       properties:
         priority: { type: integer }
         name: { type: string }
-        action: { type: string }
+        sourceIP: { type: string }
+        sourceIdentity: { type: string }
+        sourceGroup: { type: string }
+        authSource: { type: string }
         destFQDN: { type: string }
+        destCategory: { type: string }
+        destCategoryGroup: { type: string }
+        destCategoryGroupId: { type: string }
+        destCountry: { type: array, items: { type: string }, nullable: true }
+        schedule: { $ref: '#/components/schemas/PolicySchedule' }
         sslAction: { type: string }
-        enabled: { type: boolean }
+        fileFiltering: { type: boolean }
+        fileProfile: { type: string }
+        logFullUri: { type: boolean }
+        logTraffic: { type: boolean, nullable: true }
+        tlsSkipVerify: { type: boolean }
+        stripAlpn: { type: boolean, nullable: true }
+        decryptionProfile: { type: string }
+        decryptionProfileId: { type: string }
+        action: { type: string }
+        redirectURL: { type: string }
+        enabled: { type: boolean, nullable: true }
+        id: { type: string }
+        ruleType: { type: string }
+        subjectMatch: { type: object, additionalProperties: true, nullable: true }
+        auth: { type: object, additionalProperties: true, nullable: true }
+        hitCount: { type: integer, format: int64 }
+        lastHit: { type: string }
+        createdAt: { type: string }
+        modifiedAt: { type: string }
+        modifiedBy: { type: string }
+        comment: { type: string }
+    PolicySchedule:
+      type: object
+      additionalProperties: false
+      properties:
+        days: { type: array, items: { type: string }, nullable: true }
+        timeStart: { type: string }
+        timeEnd: { type: string }
+        timezone: { type: string }
     PolicyList:
       type: object
       required: [rules, count, version, updatedAt, draft]
@@ -1127,6 +1163,344 @@ components:
       description: Endpoint-specific read model (open superset — see the handler).
       additionalProperties: true
 
+    SyslogConfig:
+      type: object
+      required: [addr, format]
+      additionalProperties: false
+      properties:
+        addr: { type: string }
+        format: { type: string }
+        drops: { type: integer }
+    SetSyslogBody:
+      type: object
+      additionalProperties: false
+      properties:
+        addr: { type: string }
+        format: { type: string }
+    OTLPConfig:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        endpoint: { type: string }
+        hasAuth: { type: boolean }
+        authHeaderName: { type: string }
+    SetOTLPBody:
+      type: object
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        endpoint: { type: string }
+        authHeaderName: { type: string }
+        authHeaderValue: { type: string, format: password }
+    UIAllowIPs:
+      type: object
+      required: [ips]
+      additionalProperties: false
+      properties:
+        ips: { type: array, items: { type: string }, nullable: true }
+    SetUIAllowIPsBody:
+      type: object
+      required: [ips]
+      additionalProperties: false
+      properties:
+        ips: { type: array, items: { type: string } }
+    SetDefaultAuthOutcomeBody:
+      type: object
+      required: [defaultAuthOutcome]
+      additionalProperties: false
+      properties:
+        defaultAuthOutcome: { type: string, enum: [Default, Exempt] }
+    GeoIPStatus:
+      type: object
+      required: [enabled]
+      additionalProperties: true
+      properties:
+        enabled: { type: boolean }
+        dbPath: { type: string }
+
+    IdPList:
+      type: object
+      required: [persisted, profiles]
+      additionalProperties: false
+      properties:
+        persisted: { type: boolean }
+        profiles: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    AddURLCatHost:
+      type: object
+      required: [category, host]
+      additionalProperties: false
+      properties:
+        category: { type: string }
+        host: { type: string }
+    AlertHistory:
+      type: object
+      required: [deliveries]
+      additionalProperties: false
+      properties:
+        deliveries: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    PACExceptionsList:
+      type: object
+      required: [exceptions]
+      additionalProperties: false
+      properties:
+        exceptions: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+
+    BlockPageConfig:
+      type: object
+      required: [html]
+      additionalProperties: false
+      properties:
+        html: { type: string }
+    SetBlockPageBody:
+      type: object
+      required: [html]
+      additionalProperties: false
+      properties:
+        html: { type: string }
+    LockoutsList:
+      type: object
+      required: [lockouts]
+      additionalProperties: false
+      properties:
+        lockouts: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    ClearLockoutBody:
+      type: object
+      required: [username]
+      additionalProperties: false
+      properties:
+        username: { type: string }
+    URLCategoryLookup:
+      type: object
+      required: [host, category]
+      additionalProperties: true
+      properties:
+        host: { type: string }
+        category: { type: string }
+        tier: { type: string }
+        matchedBy: { type: string }
+        blocked: { type: boolean }
+        blockSource: { type: string }
+    SetClusterLabels:
+      type: object
+      required: [node_id]
+      additionalProperties: false
+      properties:
+        node_id: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+    SetClusterMode:
+      type: object
+      required: [grpc_addr]
+      additionalProperties: false
+      properties:
+        grpc_addr: { type: string, description: "Control-plane gRPC listen address (host:port); required." }
+        cert_file: { type: string }
+        key_file: { type: string }
+        ca_file: { type: string }
+    MovePolicyRule:
+      type: object
+      additionalProperties: false
+      properties:
+        priority: { type: integer }
+        position: { type: string }
+        targetName: { type: string }
+    ReorderPolicy:
+      type: object
+      required: [priorities]
+      additionalProperties: false
+      properties:
+        priorities: { type: array, items: { type: integer } }
+
+    DecryptionProfileFull:
+      type: object
+      description: A TLS-inspection decryption profile.
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        inspectHttp2: { type: boolean, nullable: true }
+        certVerification: { type: string }
+        onUnsupported: { type: string }
+        onInspectError: { type: string }
+        minTlsVersion: { type: string }
+        maxTlsVersion: { type: string }
+        stallTimeoutSecs: { type: integer }
+        created_at: { type: string }
+        updated_at: { type: string }
+
+    URLCategoryEntry:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        hosts: { type: array, items: { type: string }, nullable: true }
+        builtIn: { type: boolean }
+    URLCategoryUpdate:
+      type: object
+      description: URL-category update body — the category name is the required `name` query parameter; the body carries only the replacement hosts.
+      additionalProperties: false
+      properties:
+        hosts: { type: array, items: { type: string }, nullable: true }
+    FileblockProfileFull:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        extensions: { type: array, items: { type: string }, nullable: true }
+    RewriteRuleFull:
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: integer }
+        host: { type: string }
+        req_set: { type: object, additionalProperties: { type: string } }
+        req_add: { type: object, additionalProperties: { type: string } }
+        req_remove: { type: array, items: { type: string } }
+        resp_set: { type: object, additionalProperties: { type: string } }
+        resp_add: { type: object, additionalProperties: { type: string } }
+        resp_remove: { type: array, items: { type: string } }
+
+    AddBlocklistEntry:
+      type: object
+      description: Provide a single host or a list.
+      additionalProperties: false
+      properties:
+        host: { type: string }
+        hosts: { type: array, items: { type: string } }
+    DPIPatternInput:
+      type: object
+      description: Provide a single pattern or a list.
+      additionalProperties: false
+      properties:
+        pattern: { type: string }
+        patterns: { type: array, items: { type: string } }
+    AlertWebhook:
+      type: object
+      required: [name, url]
+      additionalProperties: false
+      x-culvert-sensitive: true
+      properties:
+        id: { type: string }
+        name: { type: string }
+        url: { type: string }
+        events: { type: array, items: { type: string }, nullable: true }
+        enabled: { type: boolean }
+        secret: { type: string, format: password }
+
+    PACPoolInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        endpoints: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    PACProfileInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        poolId: { type: string }
+        rules: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        privateNetworks: { type: string }
+        availabilityMode: { type: string }
+        revision: { type: integer, format: int64 }
+    IdPProfileInput:
+      type: object
+      required: [name, type]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [oidc, saml] }
+        emailDomains: { type: array, items: { type: string }, nullable: true }
+        enabled: { type: boolean }
+        priority: { type: integer }
+        knownGroups: { type: array, items: { type: string }, nullable: true }
+        oidc: { type: object, additionalProperties: true, nullable: true }
+        saml: { type: object, additionalProperties: true, nullable: true }
+    SetPolicyDraftBody:
+      type: object
+      required: [require_commit]
+      additionalProperties: false
+      properties:
+        require_commit: { type: boolean }
+    CreateConfigVersionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        version: { type: integer }
+        dry_run: { type: boolean }
+    DiscoverIdPBody:
+      type: object
+      required: [issuer]
+      additionalProperties: false
+      properties:
+        issuer: { type: string }
+    RevokeClusterBody:
+      type: object
+      additionalProperties: false
+      properties:
+        node_id: { type: string }
+        reason: { type: string }
+    YARARuleInput2:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        source: { type: string }
+    SupportRecipientInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        public_key: { type: string }
+    SupportRecipient:
+      type: object
+      description: A support-bundle recipient (create/update response — includes derived + rotation metadata).
+      additionalProperties: false
+      required: [name, public_key, fingerprint, created_at]
+      properties:
+        name: { type: string }
+        public_key: { type: string }
+        fingerprint: { type: string, description: "Derived fingerprint of the public key." }
+        created_at: { type: string }
+        created_by: { type: string }
+        rotated_at: { type: string, description: "Last in-place key-rotation time." }
+        rotated_by: { type: string }
+
+    BandwidthPolicyInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        label_selector: { type: object, additionalProperties: { type: string } }
+        max_bytes_per_sec: { type: integer, format: int64 }
+        priority: { type: integer }
+        created_at: { type: string }
+    DispatchReleaseBody:
+      type: object
+      required: [agent]
+      additionalProperties: false
+      properties:
+        release_id: { type: string }
+        channel: { type: string }
+        agent: { type: string }
+        pre_backup: { type: boolean }
+        no_rollback: { type: boolean }
+        passphrase_ref: { type: string }
+        idempotency_key: { type: string }
+
 paths:
   /healthz:
     get:
@@ -1246,7 +1620,7 @@ paths:
           description: Authenticated (session cookie set), or TOTP second step required.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/LoginResponse' }
+              schema: { $ref: '#/components/schemas/LoginResult' }
               example: { ok: true, user: admin, role: admin }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '401': { $ref: '#/components/responses/PlainUnauthorized' }
@@ -1739,7 +2113,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Create policy rule.
@@ -1768,7 +2142,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Update policy rule.
@@ -1853,7 +2227,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Create auth policy rule.
@@ -1882,7 +2256,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PolicyRule' }
       responses:
         '200':
           description: Update auth policy rule.
@@ -2616,7 +2990,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RewriteRuleInput' }
+            schema: { $ref: '#/components/schemas/RewriteRuleFull' }
       responses:
         '200':
           description: Updated.
@@ -2937,7 +3311,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetPolicyDraftBody' }
       responses:
         '200':
           description: Toggle policy draft mode.
@@ -3203,7 +3577,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/URLCategoryEntry' }
       responses:
         '200':
           description: Create URL category.
@@ -3228,11 +3602,16 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
       x-culvert-audit-event: urlcat.update
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/URLCategoryUpdate' }
       responses:
         '200':
           description: Update URL category.
@@ -3402,7 +3781,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/FileblockProfileFull' }
       responses:
         '200':
           description: Create file-block profile.
@@ -3431,7 +3810,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/FileblockProfileFull' }
       responses:
         '200':
           description: Update file-block profile.
@@ -3516,7 +3895,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/CreateConfigVersionBody' }
       responses:
         '200':
           description: Create config snapshot.
@@ -3568,7 +3947,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+            schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
           description: Updated.
@@ -3597,7 +3976,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/DecryptionProfileInput' }
+            schema: { $ref: '#/components/schemas/DecryptionProfileFull' }
       responses:
         '200':
           description: Updated.
@@ -3682,7 +4061,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DPIPatternInput' }
       responses:
         '200':
           description: Add DPI pattern.
@@ -4076,7 +4455,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PACPoolInput' }
       responses:
         '200':
           description: Create PAC pool.
@@ -4128,7 +4507,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/PACProfileInput' }
       responses:
         '200':
           description: Create PAC profile.
@@ -4778,7 +5157,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/BandwidthPolicyInput' }
       responses:
         '200':
           description: Set bandwidth policy.
@@ -5408,7 +5787,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/YARARuleInput2' }
       responses:
         '200':
           description: Create YARA rule.
@@ -5437,7 +5816,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/YARARuleInput2' }
       responses:
         '200':
           description: Update YARA rules.
@@ -5683,7 +6062,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Created.
@@ -5717,7 +6096,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AlertWebhookInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Updated.
@@ -6655,7 +7034,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetBlockPageBody' }
       responses:
         '200':
           description: Block page set.
@@ -6683,7 +7062,7 @@ paths:
           description: Block page HTML.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/BlockPageConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
   /api/diagnose/all:
@@ -6935,7 +7314,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/MovePolicyRule' }
       responses:
         '200':
           description: Move a policy rule.
@@ -6965,7 +7344,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ReorderPolicy' }
       responses:
         '200':
           description: Reorder policy rules.
@@ -7074,7 +7453,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ReorderPolicy' }
       responses:
         '200':
           description: Reorder auth policy rules.
@@ -7191,7 +7570,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetClusterLabels' }
       responses:
         '200':
           description: Set node labels.
@@ -7221,7 +7600,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetClusterMode' }
       responses:
         '200':
           description: Set cluster mode.
@@ -7251,7 +7630,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/RevokeClusterBody' }
       responses:
         '200':
           description: Revoke cluster sessions.
@@ -7381,7 +7760,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AlertWebhook' }
       responses:
         '200':
           description: Test alert webhook.
@@ -7411,7 +7790,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DispatchReleaseBody' }
       responses:
         '200':
           description: Dispatch release upgrade.
@@ -7441,7 +7820,7 @@ paths:
         required: false
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DiscoverIdPBody' }
       responses:
         '200':
           description: Discover IdP metadata.
@@ -7471,7 +7850,7 @@ paths:
           description: Syslog config.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/SyslogConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setSyslog
@@ -7493,7 +7872,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetSyslogBody' }
       responses:
         '200':
           description: Set syslog config.
@@ -7522,7 +7901,7 @@ paths:
           description: OTLP config.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/OTLPConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setOTLP
@@ -7544,7 +7923,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetOTLPBody' }
       responses:
         '200':
           description: Set OTLP config.
@@ -7573,7 +7952,7 @@ paths:
           description: UI allow-IPs.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/UIAllowIPs' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: setUIAllowIPs
@@ -7595,7 +7974,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetUIAllowIPsBody' }
       responses:
         '200':
           description: Set UI allow-IPs.
@@ -7625,7 +8004,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDefaultAuthOutcomeBody' }
       responses:
         '200':
           description: Set default auth outcome.
@@ -7655,7 +8034,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDefaultAuthOutcomeBody' }
       responses:
         '200':
           description: Set unauth mode (legacy alias).
@@ -7719,7 +8098,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AddBlocklistEntry' }
       responses:
         '200':
           description: Add blocklist entry.
@@ -7785,7 +8164,7 @@ paths:
           description: Auth lockouts.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/LockoutsList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: clearLockout
@@ -7807,7 +8186,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/ClearLockoutBody' }
       responses:
         '200':
           description: Clear auth lockout.
@@ -7836,7 +8215,7 @@ paths:
           description: List IdP profiles.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/IdPList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: createIdP
@@ -7858,7 +8237,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/IdPProfileInput' }
       responses:
         '200':
           description: Create IdP profile.
@@ -7887,7 +8266,7 @@ paths:
           description: GeoIP status.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/GeoIPStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/export:
     get:
@@ -7932,7 +8311,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/AddURLCatHost' }
       responses:
         '200':
           description: Add URL-category host.
@@ -8007,7 +8386,7 @@ paths:
           description: Lookup URL category.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/URLCategoryLookup' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/alerts/webhooks/history:
     get:
@@ -8029,7 +8408,7 @@ paths:
           description: Alert delivery history.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/AlertHistory' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/pac/posture/exceptions:
     get:
@@ -8051,7 +8430,7 @@ paths:
           description: PAC posture exceptions.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/PACExceptionsList' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/content-scan:
     get:
@@ -8073,7 +8452,7 @@ paths:
           description: DPI content-scan (legacy alias).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/DPIConfig' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     post:
       operationId: addContentScan
@@ -8095,7 +8474,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/DPIPatternInput' }
       responses:
         '200':
           description: Add DPI pattern (legacy alias).
@@ -8161,7 +8540,7 @@ paths:
           description: DPI bypass (legacy alias).
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/DPIBypass' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
     put:
       operationId: setContentScanBypass
@@ -8183,7 +8562,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema: { $ref: '#/components/schemas/SetDPIBypass' }
       responses:
         '200':
           description: Set DPI bypass (legacy alias).
@@ -8542,10 +8921,10 @@ paths:
             schema: { $ref: '#/components/schemas/GenericWriteInput' }
       responses:
         '200':
-          description: OK.
+          description: Updated recipient.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/GenericRead' }
+              schema: { $ref: '#/components/schemas/SupportRecipient' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
         '404':
           description: Not found. Body is plain text.

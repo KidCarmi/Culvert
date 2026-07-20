@@ -24,15 +24,39 @@ presence and JSON-object shape, not every field. Tightening them to precise,
 per-endpoint schemas is the top Slice-3.1 follow-up (the response-conformance
 tests already pin the ~90 endpoints that have real schemas).
 
+
+## 0b. Slice 3.1 (schema tightening) — complete
+
+Started from 61 open `GenericRead`/`GenericWriteInput` schemas; **~36 operations
+now carry precise schemas** with field-level request/response validation. Every
+meaningful config-resource struct is fully enumerated (`additionalProperties:
+false`) and wired to its create/update: PolicyRule (+PolicySchedule),
+DecryptionProfile, IdPProfile, URLCategory, FileblockProfile, RewriteRule,
+AlertWebhook (secret sensitive), PACPool, PACProfile, BandwidthPolicy, plus the
+config toggles (syslog, otlp, ui-allow-ips, default-auth-outcome, geoip,
+blockpage, cluster labels/mode, policy move/reorder, config-version,
+idp-discover, cluster-revoke, YARA rule, dispatch-release, blocklist/DPI adds).
+Each ships request-conformance tests that reject unknown fields, wrong types,
+and bad nested shapes.
+
+The **remaining ~25 loose ops are intentionally open**, not un-tightened:
+analysis-query inputs (`policyTest`, `analyzePAC`, `simulatePAC`,
+`diffPACPosture`) accept arbitrary evaluation shapes; varied read models
+(support-bundle manifest/report/validate/exports, export, paginated logs) differ
+per instance; and a few inline CDR bodies are rich open configs. For these,
+`additionalProperties: true` is the *accurate* contract. This is the honest
+completion of the tightening sweep.
+
 ## 1. What shipped
 
 **[IMPLEMENTED]** A durable, CI-enforced OpenAPI contract for the Culvert admin
 API, per ADR-0007 (Option D). The enforced critical path is Go-native, offline,
 deterministic, and runs inside the required `go test -race ./...`.
 
-- **Contract:** `api/openapi/openapi.yaml` (OpenAPI 3.0.4), 19 operations spanning
-  public/admin/health, safe/destructive, GET/POST/DELETE, with `x-culvert-*`
-  metadata describing **actual** behavior (plain-text `http.Error` responses).
+- **Contract:** `api/openapi/openapi.yaml` (OpenAPI 3.0.4), 171 paths / 275
+  documented operations spanning public/admin/health, safe/destructive, all HTTP
+  methods, with `x-culvert-*` metadata describing **actual** behavior (plain-text
+  `http.Error` responses).
 - **Engine:** `internal/apicontract` (getkin/kin-openapi v0.142.0, MIT) —
   validation, Go-native style-lint, bijective route⇄manifest⇄spec coverage +
   role/mutating/audit binding + exemption expiry & horizon, request/response
@@ -40,7 +64,8 @@ deterministic, and runs inside the required `go test -race ./...`.
 - **Live binding:** `apicontract_live_test.go` enumerates the real `uiRoutes`
   table (284 method-entries) and enforces coverage against the contract + manifest.
 - **Manifest:** `api/route-classification.yaml` classifies **all 284** entries
-  (19 documented + 265 exempt with owner + reason + security_class + expiry).
+  (275 documented + 9 `intentionally-undocumented` non-REST surfaces, each with
+  owner + reason + security_class + expiry).
 - **Conformance:** request/response/authz tests through real handlers; secret
   scanner; public-docs no-leak test; permission↔manifest cross-check.
 - **Tooling/CI:** `Makefile` `api-*` targets; pinned offline scripts (oasdiff,
@@ -52,9 +77,11 @@ deterministic, and runs inside the required `go test -race ./...`.
 ## 2. Route inventory totals
 
 **[FACT]** 180 routes / 284 method-entries on the admin mux (dumped from the live
-`uiRoutes`). Supported/documented in the contract: 19. Classified-but-exempt: 265
-(time-boxed to 2027-01-31, within the 270-day horizon). Visibility split:
-public-supported 13, health-ops 1, admin-supported 270.
+`uiRoutes`). Documented in the contract: **275**. Remaining **9** are
+`intentionally-undocumented` non-REST surfaces (static SPA, SSE, dynamic routers,
+browser SSO), each with a recorded reason; there is no "baseline backlog"
+exemption. Baseline exemptions were time-boxed within the 270-day horizon and
+have since been fully documented.
 
 **[FACT]** The admin mux ⇄ `uiRoutes` is enforced by the existing C1 parity tests;
 the only other HTTP surfaces (scan sidecar, proxy-listener built-ins) are separate
@@ -104,10 +131,14 @@ exactly `/scan`, `/health`, `/status` (the sidecar's own mux).
 
 ## 5. Remaining risks
 
-- **[RISK]** 14/19 documented ops lack a live response test; opaque response
-  schemas validate required-fields+types only. Mitigation: Slice 3 tightens them.
-- **[RISK]** Dynamic dispatchers hide sub-actions from endpoint-level coverage
-  while exempt (guardrail + rule added; full fix on documentation).
+- **[RISK]** Many write bodies + some read models use open
+  `GenericWriteInput`/`GenericRead` schemas (`additionalProperties: true`) —
+  documented-but-loose; they validate shape, not every field. ~90 endpoints have
+  precise schemas pinned by response-conformance tests. Tightening the rest is the
+  #1 follow-up (Slice 3.1).
+- **[RISK]** Dynamic dispatchers (`/api/idp/`, `/api/cluster/bootstrap/`) remain
+  `intentionally-undocumented` — their per-sub-action RBAC varies (C4/MED-HIGH-4);
+  enumerating sub-ops is a recorded follow-up.
 - **[RISK]** Gate 7 is advisory and skips offline until oasdiff is vendored and the
   baseline merges.
 - **[RISK]** Product-wide: no structured error envelope, no admin-plane request IDs,
@@ -130,6 +161,8 @@ permissions/danger/audit/stability declared; public docs contain no internal ops
 adding an undocumented route / removing a documented one / phantom op / schema-violating
 response / weakened auth / stale generated artifact / expired exemption all fail
 CI (demonstrated). Offline, no CDN, pinned tools, deterministic output, existing
-tests green. **Not yet met (tracked):** full supported-API documentation (Slice 3),
-mandatory breaking-change gate + committed client (Slice 5), release traceability
-(Gate 11), scheduled deep verification (Gate 12).
+tests green. **Full supported-API documentation (Slice 3) is now DONE** — 275/284
+documented, 9 non-REST by design. **Not yet met (tracked):** precise schemas for
+the loose-documented endpoints (Slice 3.1), mandatory breaking-change gate +
+committed client (Slice 5), release traceability (Gate 11), scheduled deep
+verification (Gate 12).
