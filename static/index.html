@@ -286,6 +286,26 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .btn:focus-visible { box-shadow: var(--focus-ring); outline: none; }
 .btn.danger  { background: var(--crit); }
 .btn.danger:hover { background: #dc2626; }
+/* Quiet destructive variant — for REPEATED row-level actions (Remove/Delete
+   inside table & list rows). It is a LOWER visual tier than solid .btn.danger,
+   NOT a replacement: solid danger stays reserved for high-blast-radius,
+   confirmation-dialog, bulk, and clear-all actions (UX-PRINCIPLES.md §3).
+   Idle = transparent fill + thin --crit border + readable --text; hover fills
+   with --crit; focus-visible shows a --crit-tint ring; active stays filled with
+   a restrained pressed dim. box-sizing:border-box (global, line 13) means the
+   1px border adds ZERO outer size, so there is no layout shift between states
+   or versus the old solid button — row height and button size are unchanged.
+   All transitions are the 150ms token timing and are neutralised by the
+   prefers-reduced-motion floor. No raw hex/rgba; `white` is a named color. */
+.btn.danger-quiet {
+  background: transparent;
+  border: 1px solid var(--crit);
+  color: var(--text);
+  transition: background .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.btn.danger-quiet:hover { background: var(--crit); border-color: var(--crit); color: white; }
+.btn.danger-quiet:focus-visible { border-color: var(--crit); box-shadow: 0 0 0 3px var(--crit-tint); outline: none; }
+.btn.danger-quiet:active { background: var(--crit); border-color: var(--crit); color: white; filter: brightness(.9); }
 .btn.ghost   { background: transparent; border: 1px solid var(--border); color: var(--muted); }
 .btn.ghost:hover { color: var(--text); border-color: var(--border-hi); background: var(--surface2); }
 .btn.sm      { padding: 5px 10px; font-size: .75rem; }
@@ -6209,7 +6229,7 @@ function renderURLCatList(cats) {
         <div style="display:flex;gap:6px">
           <button class="btn ghost sm" data-click="openWhereUsed" data-arg="category" data-arg2="${qn}"
             title="Show policy rules and groups that reference this category">Where used</button>
-          <button class="btn sm danger" data-click="deleteURLCategory" data-arg="${qn}"
+          <button class="btn sm danger-quiet" data-click="deleteURLCategory" data-arg="${qn}"
             title="Delete category">Delete</button>
         </div>
       </div>
@@ -7452,7 +7472,7 @@ function blRowsHTML(list) {
       <td style="color:var(--muted);font-size:.75rem">${wild ? 'Wildcard' : 'Exact'}</td>
       <td>${srcBadge}</td>
       <td class="text-right">
-        <button class="btn danger sm" data-click="removeHost" data-arg="${h}">Remove</button>
+        <button class="btn danger-quiet sm" data-click="removeHost" data-arg="${h}">Remove</button>
       </td>
     </tr>`;
   }).join('');
@@ -7580,7 +7600,7 @@ function renderExceptions(hosts) {
     return `<tr>
       <td class="host-td">${escHtml(h)}${wild ? '<span class="wild-tag">WILDCARD</span>' : ''}</td>
       <td class="text-right">
-        <button class="btn danger sm" data-click="removeException" data-arg="${escHtml(h)}">Remove</button>
+        <button class="btn danger-quiet sm" data-click="removeException" data-arg="${escHtml(h)}">Remove</button>
       </td>
     </tr>`;
   }).join('');
@@ -7654,7 +7674,7 @@ function renderSecIPList() {
   tbody.innerHTML = secIPList.map(ip => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${ip}</td>
     <td class="text-right">
-      <button class="btn danger sm" data-click="secRemoveIP" data-arg="${ip}">Remove</button>
+      <button class="btn danger-quiet sm" data-click="secRemoveIP" data-arg="${ip}">Remove</button>
     </td>
   </tr>`).join('');
 }
@@ -7749,7 +7769,7 @@ function renderSSLBypass() {
   }
   tbody.innerHTML = _sslBypassList.map(p => `<tr>
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p)}</td>
-    <td class="text-right"><button class="btn danger sm" data-click="removeSSLBypass" data-arg="${escHtml(p)}">Remove</button></td>
+    <td class="text-right"><button class="btn danger-quiet sm" data-click="removeSSLBypass" data-arg="${escHtml(p)}">Remove</button></td>
   </tr>`).join('');
 }
 
@@ -8210,7 +8230,7 @@ function renderRewrite() {
       <td style="font-family:monospace;font-size:.82rem">${r.host ? escHtml(r.host) : '<span style="color:var(--muted)">*</span>'}</td>
       <td style="font-size:.78rem">${reqOps || '<span style="color:var(--muted)">-</span>'}</td>
       <td style="font-size:.78rem">${respOps || '<span style="color:var(--muted)">-</span>'}</td>
-      <td class="text-right"><button class="btn danger sm" data-click="removeRewriteRule" data-arg="${r.id}">Remove</button></td>
+      <td class="text-right"><button class="btn danger-quiet sm" data-click="removeRewriteRule" data-arg="${r.id}">Remove</button></td>
     </tr>`;
   }).join('');
 }
@@ -9312,7 +9332,7 @@ async function loadWebhooks() {
       <td style="display:flex;gap:6px">
         <button class="btn ghost sm" data-click="testWebhook" data-arg="${h.id}">Test</button>
         <button class="btn ghost sm" data-click="editWebhook" data-arg="${h.id}">Edit</button>
-        <button class="btn danger sm" data-click="deleteWebhook" data-arg="${h.id}">Del</button>
+        <button class="btn danger-quiet sm" data-click="deleteWebhook" data-arg="${h.id}">Delete</button>
       </td>
     </tr>`).join('');
     loadDeliveryHistory();
@@ -9733,7 +9753,7 @@ function cdrRenderInstances() {
     const actions = isAdmin ? `
         <button class="btn sm ghost" data-click="cdrRevokeInstance" data-arg="${escHtml(i.name)}"
                 title="Remove local registry entry only (Sluice cert stays valid until NotAfter)">Revoke (local)</button>
-        <button class="btn sm danger" data-click="cdrRevokeInstanceRPC" data-arg="${escHtml(i.name)}"
+        <button class="btn sm danger-quiet" data-click="cdrRevokeInstanceRPC" data-arg="${escHtml(i.name)}"
                 title="Calls Sluice.RevokeClient - cert is dead server-side immediately">Revoke on Sluice</button>
       ` : '';
     return `<tr>
@@ -9848,7 +9868,7 @@ function cdrRenderPolicies(count) {
     const modeBadgeCls = r.mode === 'ENFORCE' ? 'badge allow'
                         : r.mode === 'BYPASS_WITH_REPORT' ? 'badge inspect' : 'badge';
     const actions = isAdmin
-      ? `<button class="btn sm danger" data-click="cdrDeletePolicy" data-arg="${escHtml(r.name)}">Delete</button>`
+      ? `<button class="btn sm danger-quiet" data-click="cdrDeletePolicy" data-arg="${escHtml(r.name)}">Delete</button>`
       : '';
     return `<tr>
       <td>${r.priority}</td>
@@ -11773,7 +11793,7 @@ async function loadIdPList() {
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0">
         <button class="btn ghost sm" data-click="editIdP" data-arg="${JSON.stringify(JSON.stringify(p))}">Edit</button>
-        <button class="btn danger sm" data-click="deleteIdP" data-arg="${escHtml(p.id)}" data-arg2="${escHtml(p.name)}">Delete</button>
+        <button class="btn danger-quiet sm" data-click="deleteIdP" data-arg="${escHtml(p.id)}" data-arg2="${escHtml(p.name)}">Delete</button>
       </div>
     </div>`;
   }).join('');
@@ -13234,7 +13254,7 @@ function renderAuthPolicy() {
         <button class="btn ghost sm" data-click="apMoveRule" data-arg="${r.priority}" data-arg2="up" ${i === 0 ? 'disabled' : ''}>↑</button>
         <button class="btn ghost sm" data-click="apMoveRule" data-arg="${r.priority}" data-arg2="down" ${i === apRules.length - 1 ? 'disabled' : ''}>↓</button>
         <button class="btn ghost sm" data-click="apEditRule" data-arg="${r.priority}">Edit</button>
-        <button class="btn danger sm" data-click="apDeleteRule" data-arg="${r.priority}">Delete</button>
+        <button class="btn danger-quiet sm" data-click="apDeleteRule" data-arg="${r.priority}">Delete</button>
       </td>
     </tr>`;
   }).join('');
@@ -15078,7 +15098,7 @@ function renderUpstream() {
     <td style="font-family:monospace;font-size:.82rem">${escHtml(p.url)}</td>
     <td><span class="badge ${p.healthy?'ok':'blocked'}">${p.healthy?'Healthy':'Down'}</span></td>
     <td><span class="badge ${p.circuit==='closed'?'ok':p.circuit==='open'?'blocked':'auth'}">${escHtml(p.circuit)}</span>${p.circuit==='closed'?'':`<div style="font-size:.72rem;color:var(--muted);margin-top:2px">${p.failures||0} failure${p.failures===1?'':'s'}${p.retryAfterMs?`, retry in ${Math.ceil(p.retryAfterMs/1000)}s`:''}</div>`}</td>
-    <td><button class="btn sm danger" data-click="removeUpstreamProxy" data-arg="${i}">Remove</button></td>
+    <td><button class="btn sm danger-quiet" data-click="removeUpstreamProxy" data-arg="${i}">Remove</button></td>
   </tr>`).join('');
 }
 
