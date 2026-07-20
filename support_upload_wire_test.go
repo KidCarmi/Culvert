@@ -359,9 +359,12 @@ func TestStartSupportUploadWorker_StopsOnContext(t *testing.T) {
 	done := make(chan struct{})
 	go func() { startSupportUploadWorker(ctx); close(done) }()
 	cancel()
+	// Generous bound: the worker returns immediately on ctx.Done(), but a heavily
+	// loaded -race/determinism CI run can delay goroutine scheduling by seconds, so
+	// keep this well above any real stop latency to stay flake-free.
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("worker did not stop on ctx cancel")
 	}
 }
