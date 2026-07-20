@@ -1,6 +1,59 @@
 # T3 P2 slice 1b — merge feedSrc INTO exact (eliminate the duplicate host key)
 
-**Status:** DESIGN (decision-complete, pre-red-team). Slice 1a (feed-URL
+## STATUS: DEFERRED (do NOT implement) — verdict of a 4-lens red-team on this design
+
+A 4-lens Palo red-team was run on the design below BEFORE any code was written.
+All four converged on **defer**. The design as written is both **mis-premised** and
+**dangerous**, for a target that does not exist in the shipped product:
+
+- **Memory (measured, Go 1.25 Swiss maps):** the whole premise is misattributed.
+  On a DATA-PLANE node `feedSrc` is EMPTY — it is only populated by the feed
+  syncer (`MergeFromLines` via `internal/blocklistfeed`), which runs on the
+  CP/standalone, never the DP (a DP receives a plain `[]string` and applies it via
+  `ReplaceFeedEntries`, which never touches `feedSrc`). So deleting `feedSrc` saves
+  **~0 MiB on a DP** — the exact node the "4 GiB DP holds 10M" headline names. The
+  real win exists only on a CP/standalone running local feeds, and is **0.43 GiB
+  (live, shared key backing — the common case) to 0.71 GiB (cold load), NOT 0.9**
+  (the 0.9 used pre-Go-1.24 map arithmetic, ~2× inflated). `bool→uint32` is free
+  (both slots 24 B after alignment). There is **no `IsBlocked` benchgate** in the
+  repo, so the plan's "p99 must not regress" gate has no baseline.
+- **Deployment payoff:** none. `maxSnapBlockedHosts = 2_000_000` caps the snapshot
+  and the delta-apply path — **10M cannot even reach a DP today**; the CP rejects a
+  >2M publish wholesale. No sizing guidance recommends a 4 GiB DP (the capacity
+  table stops at "2M → ≥2 GiB"). At the real 2M ceiling the blocklist is ~150 MiB
+  and there is no memory problem to solve. 1a already covers the whole supported
+  envelope with ~1.5 GiB headroom on a 2 GiB DP.
+- **Correctness/attribution risk (untested, on a FROZEN hot-path engine):** the
+  read-path change is safe and guarded, but the attribution rewrite carries **two
+  P0 silent-verdict bugs** — (A) a manual WILDCARD block cascade-deleted by
+  `RemoveByFeedSource` (the `wildcards` suffix key vs the `manual` star key), and
+  (B) a stale `.sources` row resurrecting a PHANTOM block on Load (stamping an id
+  into `exact` for a host not in the main file) — plus a P1 **data-race panic** in
+  the `ReplaceFeedEntries` carry-forward, a catastrophic untested **mass-delete**
+  path (carry-forward miss → every host id-0 → `RemoveUnattributedFeedEntries`
+  wipes the synced blocklist), and a multi-hundred-ms writer-lock stall. None of
+  these are caught by the current test suite.
+
+**Decision: stop at slice 1a.** 1a shipped the low-risk, real win (feed-URL
+interning: pre-1a ~1.5 GiB → ~1.16–1.46 GiB on a live-feed CP/standalone at 10M;
+memory-neutral but harmless on a DP) and covers the supported 2M/2 GiB envelope.
+
+**If a real requirement ever lands** (a concrete customer needing ≥5M hosts on
+sub-8 GiB nodes AND `maxSnapBlockedHosts` raised to match), do NOT build the
+map-merge below. Build the **on-disk / lazy attribution variant**: keep
+`exact map[string]bool` (hot path UNTOUCHED), drop `feedSrc` from RAM, and serve
+attribution from the `.sources` sidecar on demand (attribution is admin-rate and
+already persisted). It delivers the same ~0.43–0.71 GiB win with the blast radius
+on reversible admin ops instead of the security verdict — and it is marginally
+better (keeps `exact`'s 1-byte bool, no uint32 widening). The actual 10M
+prerequisites the T3 scale plan names (D3 off-CP signing; P3 feed distribution +
+the cap raise) gate 10M far more than the duplicate key does.
+
+The original design is retained below for the record.
+
+---
+
+**Status (original):** DESIGN (decision-complete, pre-red-team). Slice 1a (feed-URL
 interning → `feedSrc map[string]uint32` + `feeds` table) shipped. Slice 1b
 eliminates the DUPLICATE HOST KEY: today every host string is stored twice — once
 as a key in `exact` (`map[string]uint32` after... no — `exact` is still

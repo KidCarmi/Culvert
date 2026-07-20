@@ -156,11 +156,18 @@ on-disk `.sources` format (host→URL JSON) and every public accessor
 resolving IDs) are unchanged, so nothing outside `internal/blocklist` moves. This
 alone brings 10 M under an 8 GiB DP.
 
-**Slice 1b (still C1's dominant win, deferred):** merge `feedSrc` INTO `exact`
-(`exact map[string]uint32`, presence = blocked, value = feed-ID) to eliminate the
-DUPLICATE HOST KEY — the ~0.9 GiB the two maps each pay for storing every host
-string. That is the change that unlocks 4 GiB DPs; it touches the `IsBlocked`
-probe (bool → presence check) and warrants its own slice + code red-team.
+**Slice 1b (merge feedSrc INTO exact): DEFERRED after a 4-lens red-team broke the
+design** — see `roadmap/T3-P2-slice1b-exact-merge-plan.md` (STATUS: DEFERRED). In
+short: the "4 GiB DP holds 10M" premise is misattributed (a DP's `feedSrc` is
+EMPTY — only the CP/standalone feed syncer populates it, so 1b saves ~0 on a DP),
+the real win is 0.43–0.71 GiB on a CP/standalone (not 0.9), 10M can't even reach a
+DP (2M `maxSnapBlockedHosts` cap), and the attribution rewrite carries two P0
+silent-verdict bugs + a data-race panic on a frozen hot-path engine. If a real
+≥5M-on-sub-8GiB requirement ever lands (with the cap raised to match), build the
+**on-disk/lazy attribution variant** (keep `exact map[string]bool`, drop `feedSrc`
+from RAM, serve attribution from `.sources` on demand) — same memory win, hot path
+untouched. Slice 1a (interning) is the right stopping point for the supported
+2M/2 GiB envelope.
 
 ## Slicing (each independently shippable + benchmarked)
 
