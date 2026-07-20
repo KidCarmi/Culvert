@@ -4391,6 +4391,17 @@ Firefox (all platforms):
           </div>
 
           <div>
+            <div style="font-weight:600;margin-bottom:6px">TAC secure upload</div>
+            <p class="hint">Optional outbound upload of a bundle to a TAC portal. <strong>Off by default</strong> and never automatic - a bundle only leaves on an explicit, per-bundle, case-bound admin action (added in a later step). Set the TAC origin (https; a private/internal address is refused - use offline export for air-gapped transfer) and enable it here to make upload available.</p>
+            <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
+              <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
+              <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
+              <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
+            </div>
+          </div>
+
+          <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
@@ -4831,6 +4842,7 @@ document.addEventListener('click', e => {
     case 'addRecipient':           addRecipient(); break;
     case 'rotateRecipient':        rotateRecipient(arg); break;
     case 'deleteRecipient':        deleteRecipient(arg); break;
+    case 'saveUploadConfig':       saveUploadConfig(); break;
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -13443,6 +13455,50 @@ async function loadSupport() {
   else if (retEl) retEl.innerHTML = '<p class="hint">Failed to load retention: ' + escHtml(retR.reason.message) + '</p>';
   [healthEl, statusEl, bundlesEl, dlEl, retEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
   loadRecipients();
+  loadUploadConfig();
+}
+
+async function loadUploadConfig() {
+  const el = document.getElementById('support-upload-status');
+  try {
+    const d = await api('/api/support/upload/config');
+    renderUploadStatus(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Could not load upload posture: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderUploadStatus(d) {
+  const el = document.getElementById('support-upload-status');
+  if (!el) return;
+  d = d || {};
+  const enabled = !!d.enabled && d.state === 'enabled';
+  const color = enabled ? 'var(--green)' : 'var(--muted)';
+  const label = enabled ? 'ENABLED' : 'NOT ENABLED';
+  const originLine = d.origin ? ' · origin ' + escHtml(String(d.origin)) : '';
+  el.innerHTML = '<p class="hint">Upload <strong style="color:' + color + '">' + label + '</strong>' + originLine + '</p>';
+  // Reflect current values into the admin form.
+  const originInp = document.getElementById('upload-origin');
+  const enabledInp = document.getElementById('upload-enabled');
+  if (originInp && document.activeElement !== originInp) originInp.value = d.origin || '';
+  if (enabledInp) enabledInp.checked = !!d.enabled;
+}
+
+async function saveUploadConfig() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const originInp = document.getElementById('upload-origin');
+  const enabledInp = document.getElementById('upload-enabled');
+  const origin = (originInp && originInp.value || '').trim();
+  const enabled = !!(enabledInp && enabledInp.checked);
+  try {
+    const r = await apiFetch('/api/support/upload/config',
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, origin: origin }) });
+    if (!r.ok) { toast('Save failed: ' + (await r.text()), 'error'); return; }
+    toast('Upload posture saved (no bundle was sent)', 'success');
+    renderUploadStatus(await r.json());
+  } catch (err) {
+    toast('Save failed: ' + err.message, 'error');
+  }
 }
 
 function renderSupportDebugLevel(d) {

@@ -188,7 +188,7 @@ var d0KnownRoutes = func() []string {
 //   - Remove an entry from uiRoutes only             → fails C1 reverse
 //     (helper-registered route has no metadata) AND this D0 count test.
 func TestD0_RouteInventory_Locked141(t *testing.T) {
-	const want = 182 // main 181 + T3 P1 /api/cluster/convergence
+	const want = 183 // + M6 secure-upload PR-1 /api/support/upload/config
 	if got := len(d0KnownRoutes); got != want {
 		t.Fatalf("d0KnownRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
