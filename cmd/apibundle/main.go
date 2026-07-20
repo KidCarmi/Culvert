@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -66,7 +67,7 @@ func main() {
 	}
 
 	for _, a := range artifacts {
-		if err := os.WriteFile(a.path, a.bytes, 0o644); err != nil {
+		if err := os.WriteFile(a.path, a.bytes, 0o600); err != nil {
 			die("write %s: %v", a.path, err)
 		}
 		fmt.Printf("wrote %s (%d bytes)\n", a.path, len(a.bytes))
@@ -78,7 +79,7 @@ func sameFile(path string, want []byte) bool {
 	if err != nil {
 		return false
 	}
-	return string(got) == string(want)
+	return bytes.Equal(got, want)
 }
 
 func die(format string, a ...any) {

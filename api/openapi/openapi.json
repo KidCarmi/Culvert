@@ -84,19 +84,19 @@
       "ChangePasswordRequest": {
         "additionalProperties": false,
         "properties": {
-          "newPassword": {
+          "current_password": {
             "format": "password",
-            "minLength": 8,
             "type": "string"
           },
-          "oldPassword": {
+          "new_password": {
             "format": "password",
+            "minLength": 8,
             "type": "string"
           }
         },
         "required": [
-          "oldPassword",
-          "newPassword"
+          "current_password",
+          "new_password"
         ],
         "type": "object",
         "x-culvert-sensitive": true
@@ -376,8 +376,8 @@
           "content": {
             "application/json": {
               "example": {
-                "newPassword": "new-pass8",
-                "oldPassword": "old-pass8"
+                "current_password": "old-pass8",
+                "new_password": "new-pass8"
               },
               "schema": {
                 "$ref": "#/components/schemas/ChangePasswordRequest"
@@ -597,18 +597,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "example": {
-                  "ok": true
-                },
-                "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
-                }
-              }
-            },
-            "description": "User removed."
+          "204": {
+            "description": "User removed (no response body)."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -748,6 +738,32 @@
       "post": {
         "description": "Forces a CA rotation using a two-step confirmation-token flow: the first\nPOST returns `{status:\"pending_confirmation\", confirmation_token}` and\nemits a `ca.rotate_requested` audit event; re-POSTing with the token\napplies the rotation and emits `ca.rotate`. Re-signs future leaf\ncertificates under a new root; clients that pinned the previous root will\nfail until they re-trust. Admin-only and audited.\n",
         "operationId": "rotateCA",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "confirm": true,
+                "confirmation_token": "abc123"
+              },
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "confirm": {
+                    "description": "Set true on the second step to apply the rotation.",
+                    "type": "boolean"
+                  },
+                  "confirmation_token": {
+                    "description": "Token returned by the first (request) step.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "description": "Omit (or send `{}`) on the first step to request rotation and receive a\ntoken. On the second step send `{confirm:true, confirmation_token}` with\nthe token from the first response to apply the rotation.\n",
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {

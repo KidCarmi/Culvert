@@ -6,6 +6,7 @@ package main
 // contract without running `make api-bundle` breaks CI.
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestOpenAPI_Gate8_BundleNotStale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read committed openapi.json: %v", err)
 	}
-	if string(committed) != string(jsonBytes) {
+	if !bytes.Equal(committed, jsonBytes) {
 		t.Fatal("api/openapi/openapi.json is stale — run `make api-bundle` and commit the result")
 	}
 
@@ -34,7 +35,7 @@ func TestOpenAPI_Gate8_BundleNotStale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read committed index.html: %v", err)
 	}
-	if string(committedHTML) != string(htmlBytes) {
+	if !bytes.Equal(committedHTML, htmlBytes) {
 		t.Fatal("api/openapi/index.html is stale — run `make api-bundle` and commit the result")
 	}
 
@@ -46,7 +47,7 @@ func TestOpenAPI_Gate8_BundleNotStale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read committed index.public.html: %v", err)
 	}
-	if string(committedPublic) != string(publicHTML) {
+	if !bytes.Equal(committedPublic, publicHTML) {
 		t.Fatal("api/openapi/index.public.html is stale — run `make api-bundle` and commit the result")
 	}
 }

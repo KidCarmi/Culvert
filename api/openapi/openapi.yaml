@@ -214,12 +214,12 @@ components:
         role: { $ref: '#/components/schemas/Role' }
     ChangePasswordRequest:
       type: object
-      required: [oldPassword, newPassword]
+      required: [current_password, new_password]
       additionalProperties: false
       x-culvert-sensitive: true
       properties:
-        oldPassword: { type: string, format: password }
-        newPassword: { type: string, format: password, minLength: 8 }
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password, minLength: 8 }
 
     # ── Dashboard ────────────────────────────────────────────────────────────────
     StatsSummary:
@@ -524,12 +524,8 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200':
-          description: User removed.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/OkResponse' }
-              example: { ok: true }
+        '204':
+          description: User removed (no response body).
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
 
@@ -555,7 +551,7 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
-            example: { oldPassword: "old-pass8", newPassword: "new-pass8" }
+            example: { current_password: "old-pass8", new_password: "new-pass8" }
       responses:
         '200':
           description: Password changed.
@@ -685,6 +681,21 @@ paths:
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: high
       x-culvert-audit-event: ca.rotate
+      requestBody:
+        required: false
+        description: |
+          Omit (or send `{}`) on the first step to request rotation and receive a
+          token. On the second step send `{confirm:true, confirmation_token}` with
+          the token from the first response to apply the rotation.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                confirm: { type: boolean, description: "Set true on the second step to apply the rotation." }
+                confirmation_token: { type: string, description: "Token returned by the first (request) step." }
+            example: { confirm: true, confirmation_token: "abc123" }
       responses:
         '200':
           description: |

@@ -14,7 +14,7 @@ var secretPatterns = []struct {
 	name string
 	re   *regexp.Regexp
 }{
-	{"PEM private key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"PEM private key", regexp.MustCompile(`-{5}BEGIN [A-Z ]*PRIVATE KEY-{5}`)},
 	{"AWS access key id", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
 	{"GitHub token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`)},
 	{"private IPv4 (10/8)", regexp.MustCompile(`\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)},

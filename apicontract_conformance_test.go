@@ -36,7 +36,7 @@ func withRole(r *http.Request, role UIRole) *http.Request {
 func TestConformance_Response_SetupStatus(t *testing.T) {
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/setup/status", http.NoBody)
 	apiSetupStatus(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -52,7 +52,7 @@ func TestConformance_Response_SetupStatus(t *testing.T) {
 func TestConformance_Response_AuthStatus(t *testing.T) {
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/status", http.NoBody)
 	apiAuthStatus(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -65,7 +65,7 @@ func TestConformance_Response_AuthStatus(t *testing.T) {
 func TestConformance_Response_Healthz(t *testing.T) {
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
 	apiHealthz(rec, req)
 	// Standalone node (zero-value globalHA) → 200.
 	if rec.Code != http.StatusOK && rec.Code != http.StatusServiceUnavailable {
@@ -79,7 +79,7 @@ func TestConformance_Response_Healthz(t *testing.T) {
 func TestConformance_Response_Stats(t *testing.T) {
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := withRole(httptest.NewRequest(http.MethodGet, "/api/stats", nil), RoleViewer)
+	req := withRole(httptest.NewRequest(http.MethodGet, "/api/stats", http.NoBody), RoleViewer)
 	apiStats(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -92,7 +92,7 @@ func TestConformance_Response_Stats(t *testing.T) {
 func TestConformance_Response_Governance(t *testing.T) {
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := withRole(httptest.NewRequest(http.MethodGet, "/api/governance/control-plane", nil), RoleAdmin)
+	req := withRole(httptest.NewRequest(http.MethodGet, "/api/governance/control-plane", http.NoBody), RoleAdmin)
 	apiGovernanceControlPlane(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -134,7 +134,7 @@ func TestConformance_Authz_MatchesContract(t *testing.T) {
 	// apiAuthUsers GET is documented admin-only.
 	t.Run("users_viewer_denied", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := withRole(httptest.NewRequest(http.MethodGet, "/api/auth/users", nil), RoleViewer)
+		req := withRole(httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody), RoleViewer)
 		apiAuthUsers(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("viewer on admin route: status = %d, want 403", rec.Code)
@@ -142,7 +142,7 @@ func TestConformance_Authz_MatchesContract(t *testing.T) {
 	})
 	t.Run("users_admin_allowed", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := withRole(httptest.NewRequest(http.MethodGet, "/api/auth/users", nil), RoleAdmin)
+		req := withRole(httptest.NewRequest(http.MethodGet, "/api/auth/users", http.NoBody), RoleAdmin)
 		apiAuthUsers(rec, req)
 		if rec.Code == http.StatusForbidden {
 			t.Fatalf("admin on admin route was forbidden (RBAC contract mismatch)")
@@ -151,7 +151,7 @@ func TestConformance_Authz_MatchesContract(t *testing.T) {
 	// governance control-plane is documented admin-only.
 	t.Run("governance_viewer_denied", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		req := withRole(httptest.NewRequest(http.MethodGet, "/api/governance/control-plane", nil), RoleViewer)
+		req := withRole(httptest.NewRequest(http.MethodGet, "/api/governance/control-plane", http.NoBody), RoleViewer)
 		apiGovernanceControlPlane(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("viewer on admin governance route: status = %d, want 403", rec.Code)

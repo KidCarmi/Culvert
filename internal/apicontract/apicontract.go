@@ -88,9 +88,6 @@ func LoadSpec(path string) (*Spec, error) {
 // Ext reads a string vendor-extension value from an operation.
 func Ext(op *openapi3.Operation, key string) string { return extString(op.Extensions, key) }
 
-// SpecPath is the exported path this row matches against the contract.
-func (r ClassRow) SpecPath() string { return r.specPath() }
-
 // OpForRow returns the operation documenting this manifest row, or nil.
 func (s *Spec) OpForRow(r ClassRow) *openapi3.Operation {
 	for _, o := range s.Ops {
@@ -192,6 +189,9 @@ func (r ClassRow) specPath() string {
 	return r.Route
 }
 
+// SpecPath is the exported path this row matches against the contract.
+func (r ClassRow) SpecPath() string { return r.specPath() }
+
 // Classification is the parsed route-classification manifest.
 type Classification struct {
 	Version                 int        `yaml:"version"`
@@ -251,9 +251,9 @@ func CheckCoverage(routes []Route, spec *Spec, c *Classification) []string {
 
 	rowByKey := map[string]ClassRow{}
 	rowSeen := map[string]int{}
-	for _, r := range c.Rows {
-		k := key(r.Route, r.Method)
-		rowByKey[k] = r
+	for i := range c.Rows {
+		k := key(c.Rows[i].Route, c.Rows[i].Method)
+		rowByKey[k] = c.Rows[i]
 		rowSeen[k]++
 	}
 	for k, n := range rowSeen {
@@ -263,21 +263,32 @@ func CheckCoverage(routes []Route, spec *Spec, c *Classification) []string {
 	}
 
 	routeByKey := map[string]Route{}
-	for _, r := range routes {
-		routeByKey[key(r.Path, r.Method)] = r
+	for i := range routes {
+		routeByKey[key(routes[i].Path, routes[i].Method)] = routes[i]
 	}
 
-	// 1. every live route classified
-	for _, r := range routes {
+	v = append(v, coverageRouteChecks(routes, c, rowByKey, routeByKey)...)
+	v = append(v, coverageRowConsistency(c)...)
+	v = append(v, coverageSpecChecks(spec, c)...)
+
+	sort.Strings(v)
+	return v
+}
+
+// coverageRouteChecks enforces the route⇄manifest bijection (checks 1 & 2) plus
+// the RBAC/mutating/audit drift binding that ties the manifest to uiRoutes
+// (itself bound to the handler by C1.5), so the manifest cannot silently diverge
+// from runtime authorization.
+func coverageRouteChecks(routes []Route, c *Classification, rowByKey map[string]ClassRow, routeByKey map[string]Route) []string {
+	var v []string
+	for i := range routes {
+		r := &routes[i]
 		if _, ok := rowByKey[key(r.Path, r.Method)]; !ok {
 			v = append(v, fmt.Sprintf("UNCLASSIFIED ROUTE: %s %s (%s) — add a row to api/route-classification.yaml (document it or exempt it)", r.Method, r.Path, r.Handler))
 		}
 	}
-	// 2. every row still live AND its recorded RBAC/mutating/audit facts match
-	//    the live router. This BINDS the manifest to uiRoutes (itself bound to
-	//    the handler by C1.5), so the manifest cannot be an independent copy that
-	//    silently diverges from runtime authorization.
-	for _, r := range c.Rows {
+	for i := range c.Rows {
+		r := &c.Rows[i]
 		lr, ok := routeByKey[key(r.Route, r.Method)]
 		if !ok {
 			v = append(v, fmt.Sprintf("STALE CLASSIFICATION: %s %s no longer maps to a registered route — remove the row", r.Method, r.Route))
@@ -293,9 +304,15 @@ func CheckCoverage(routes []Route, spec *Spec, c *Classification) []string {
 			v = append(v, fmt.Sprintf("AUDIT DRIFT: %s %s manifest audit_expected=%v but router=%v", r.Method, r.Route, r.AuditExpected, lr.Audit))
 		}
 	}
+	return v
+}
 
-	// 5. consistency + visibility + exemption completeness
-	for _, r := range c.Rows {
+// coverageRowConsistency checks per-row visibility + documented/exemption
+// consistency + exemption completeness (check 5).
+func coverageRowConsistency(c *Classification) []string {
+	var v []string
+	for i := range c.Rows {
+		r := &c.Rows[i]
 		if r.Visibility == "" || !validVisibilities[r.Visibility] {
 			v = append(v, fmt.Sprintf("classification: %s %s has invalid visibility %q", r.Method, r.Route, r.Visibility))
 		}
@@ -305,58 +322,73 @@ func CheckCoverage(routes []Route, spec *Spec, c *Classification) []string {
 		if !r.Documented && r.Exemption == nil {
 			v = append(v, fmt.Sprintf("classification: %s %s is neither documented nor exempt — add an exemption{owner,reason,security_class,expires} or document it", r.Method, r.Route))
 		}
-		if r.Exemption != nil {
-			if r.Exemption.Owner == "" {
-				v = append(v, fmt.Sprintf("classification: %s %s exemption missing owner", r.Method, r.Route))
-			}
-			if r.Exemption.Reason == "" {
-				v = append(v, fmt.Sprintf("classification: %s %s exemption missing reason", r.Method, r.Route))
-			}
-			if r.Exemption.SecurityClass == "" {
-				v = append(v, fmt.Sprintf("classification: %s %s exemption missing security_class", r.Method, r.Route))
-			}
-			if r.Exemption.Expires == "" {
-				v = append(v, fmt.Sprintf("classification: %s %s exemption missing expires", r.Method, r.Route))
-			}
-		}
+		v = append(v, exemptionCompleteness(r)...)
 	}
+	return v
+}
 
-	// 3. documented ⊆ spec
-	for _, r := range c.Rows {
+func exemptionCompleteness(r *ClassRow) []string {
+	if r.Exemption == nil {
+		return nil
+	}
+	var v []string
+	if r.Exemption.Owner == "" {
+		v = append(v, fmt.Sprintf("classification: %s %s exemption missing owner", r.Method, r.Route))
+	}
+	if r.Exemption.Reason == "" {
+		v = append(v, fmt.Sprintf("classification: %s %s exemption missing reason", r.Method, r.Route))
+	}
+	if r.Exemption.SecurityClass == "" {
+		v = append(v, fmt.Sprintf("classification: %s %s exemption missing security_class", r.Method, r.Route))
+	}
+	if r.Exemption.Expires == "" {
+		v = append(v, fmt.Sprintf("classification: %s %s exemption missing expires", r.Method, r.Route))
+	}
+	return v
+}
+
+// coverageSpecChecks enforces documented⊆spec (check 3) and spec⊆documented, the
+// no-phantom-operation guard (check 4).
+func coverageSpecChecks(spec *Spec, c *Classification) []string {
+	var v []string
+	for i := range c.Rows {
+		r := &c.Rows[i]
 		if !r.Documented {
 			continue
 		}
-		found := false
-		for _, op := range spec.Ops {
-			if op.Path == r.specPath() && methodMatch(r.Method, op.Method) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !specHasOp(spec, r.specPath(), r.Method) {
 			v = append(v, fmt.Sprintf("DOCUMENTED-BUT-MISSING: %s %s is marked documented but has no matching OpenAPI operation", r.Method, r.specPath()))
 		}
 	}
-
-	// 4. spec ⊆ documented (no phantom)
 	for _, op := range spec.Ops {
-		found := false
-		for _, r := range c.Rows {
-			if !r.Documented {
-				continue
-			}
-			if op.Path == r.specPath() && methodMatch(r.Method, op.Method) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !documentedRowFor(c, op.Path, op.Method) {
 			v = append(v, fmt.Sprintf("PHANTOM OPERATION: %s %s (operationId=%s) is in the contract but maps to no documented route", op.Method, op.Path, op.Op.OperationID))
 		}
 	}
-
-	sort.Strings(v)
 	return v
+}
+
+// specHasOp reports whether the contract carries an operation at path whose
+// method matches (row wildcard `*` matches any).
+func specHasOp(spec *Spec, path, rowMethod string) bool {
+	for _, op := range spec.Ops {
+		if op.Path == path && methodMatch(rowMethod, op.Method) {
+			return true
+		}
+	}
+	return false
+}
+
+// documentedRowFor reports whether a documented manifest row covers the given
+// spec operation path+method.
+func documentedRowFor(c *Classification, specPath, specMethod string) bool {
+	for i := range c.Rows {
+		r := &c.Rows[i]
+		if r.Documented && specPath == r.specPath() && methodMatch(r.Method, specMethod) {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxExemptionHorizonDays caps how far in the future an exemption may be set, so
@@ -370,7 +402,8 @@ const MaxExemptionHorizonDays = 270
 func CheckExemptions(c *Classification, now time.Time) []string {
 	var v []string
 	horizon := now.AddDate(0, 0, MaxExemptionHorizonDays)
-	for _, r := range c.Rows {
+	for i := range c.Rows {
+		r := &c.Rows[i]
 		if r.Exemption == nil {
 			continue
 		}
@@ -437,102 +470,119 @@ var (
 func StyleLint(spec *Spec) []string {
 	var v []string
 	seenOpID := map[string]string{}
-
 	for _, o := range spec.Ops {
-		op := o.Op
-		id := op.OperationID
-		where := fmt.Sprintf("%s %s", o.Method, o.Path)
-
-		// operationId: present, unique.
-		if id == "" {
-			v = append(v, fmt.Sprintf("%s: missing operationId", where))
-		} else if prev, dup := seenOpID[id]; dup {
-			v = append(v, fmt.Sprintf("%s: duplicate operationId %q (also %s)", where, id, prev))
-		} else {
-			seenOpID[id] = where
-		}
-
-		if strings.TrimSpace(op.Summary) == "" {
-			v = append(v, fmt.Sprintf("%s: missing summary", where))
-		}
-		if strings.TrimSpace(op.Description) == "" {
-			v = append(v, fmt.Sprintf("%s: missing description", where))
-		}
-		if len(op.Tags) == 0 {
-			v = append(v, fmt.Sprintf("%s: missing tags", where))
-		}
-
-		// security must be explicitly declared ([] for public, or a requirement).
-		if op.Security == nil {
-			v = append(v, fmt.Sprintf("%s: security not declared (use `security: []` for public routes)", where))
-		}
-
-		// responses: at least one 2xx and one error (4xx/5xx).
-		has2xx, hasErr := false, false
-		if op.Responses != nil {
-			for code := range op.Responses.Map() {
-				switch {
-				case strings.HasPrefix(code, "2"):
-					has2xx = true
-				case strings.HasPrefix(code, "4"), strings.HasPrefix(code, "5"):
-					hasErr = true
-				}
-			}
-		}
-		if !has2xx {
-			v = append(v, fmt.Sprintf("%s: no 2xx success response documented", where))
-		}
-		if !hasErr {
-			v = append(v, fmt.Sprintf("%s: no 4xx/5xx error response documented", where))
-		}
-
-		// Culvert vendor extensions (required for every supported operation).
-		vis := extString(op.Extensions, "x-culvert-visibility")
-		if !validVisibilityExt[vis] {
-			v = append(v, fmt.Sprintf("%s: missing/invalid x-culvert-visibility (%q)", where, vis))
-		}
-		perm := extString(op.Extensions, "x-culvert-permission")
-		if !validPermission[perm] {
-			v = append(v, fmt.Sprintf("%s: missing/invalid x-culvert-permission (%q)", where, perm))
-		}
-		if extString(op.Extensions, "x-culvert-stability") == "" {
-			v = append(v, fmt.Sprintf("%s: missing x-culvert-stability", where))
-		}
-		if extString(op.Extensions, "x-culvert-introduced-version") == "" {
-			v = append(v, fmt.Sprintf("%s: missing x-culvert-introduced-version", where))
-		}
-
-		// Stricter rules for mutating/destructive operations.
-		mutating := o.Method != "GET" && o.Method != "HEAD" && o.Method != "OPTIONS"
-		if mutating {
-			danger := extString(op.Extensions, "x-culvert-danger-level")
-			if !validDanger[danger] {
-				v = append(v, fmt.Sprintf("%s: mutating op missing/invalid x-culvert-danger-level (%q)", where, danger))
-			}
-			if extString(op.Extensions, "x-culvert-audit-event") == "" {
-				v = append(v, fmt.Sprintf("%s: mutating op missing x-culvert-audit-event", where))
-			}
-		}
+		v = append(v, lintOperation(o, seenOpID)...)
 	}
-
-	// Sensitive schemas must not silently allow additionalProperties:true.
-	if spec.Doc.Components != nil {
-		for name, ref := range spec.Doc.Components.Schemas {
-			if ref == nil || ref.Value == nil {
-				continue
-			}
-			sch := ref.Value
-			if extString(sch.Extensions, "x-culvert-sensitive") != "true" {
-				continue
-			}
-			openAP := sch.AdditionalProperties.Has != nil && *sch.AdditionalProperties.Has
-			justified := extString(sch.Extensions, "x-culvert-open-justification") != ""
-			if openAP && !justified {
-				v = append(v, fmt.Sprintf("schema %s: x-culvert-sensitive with additionalProperties:true and no x-culvert-open-justification", name))
-			}
-		}
-	}
-
+	v = append(v, lintSensitiveSchemas(spec)...)
 	sort.Strings(v)
+	return v
+}
+
+// lintOperation applies the per-operation style rules (identity, prose, security,
+// responses, and required x-culvert-* metadata). seenOpID is shared across calls
+// to detect duplicate operationIds.
+func lintOperation(o Operation, seenOpID map[string]string) []string {
+	op := o.Op
+	where := fmt.Sprintf("%s %s", o.Method, o.Path)
+	var v []string
+
+	if op.OperationID == "" {
+		v = append(v, fmt.Sprintf("%s: missing operationId", where))
+	} else if prev, dup := seenOpID[op.OperationID]; dup {
+		v = append(v, fmt.Sprintf("%s: duplicate operationId %q (also %s)", where, op.OperationID, prev))
+	} else {
+		seenOpID[op.OperationID] = where
+	}
+
+	if strings.TrimSpace(op.Summary) == "" {
+		v = append(v, fmt.Sprintf("%s: missing summary", where))
+	}
+	if strings.TrimSpace(op.Description) == "" {
+		v = append(v, fmt.Sprintf("%s: missing description", where))
+	}
+	if len(op.Tags) == 0 {
+		v = append(v, fmt.Sprintf("%s: missing tags", where))
+	}
+	if op.Security == nil {
+		v = append(v, fmt.Sprintf("%s: security not declared (use `security: []` for public routes)", where))
+	}
+
+	v = append(v, lintResponses(op, where)...)
+	v = append(v, lintExtensions(o, where)...)
+	return v
+}
+
+// lintResponses requires at least one 2xx success and one 4xx/5xx error.
+func lintResponses(op *openapi3.Operation, where string) []string {
+	has2xx, hasErr := false, false
+	if op.Responses != nil {
+		for code := range op.Responses.Map() {
+			switch {
+			case strings.HasPrefix(code, "2"):
+				has2xx = true
+			case strings.HasPrefix(code, "4"), strings.HasPrefix(code, "5"):
+				hasErr = true
+			}
+		}
+	}
+	var v []string
+	if !has2xx {
+		v = append(v, fmt.Sprintf("%s: no 2xx success response documented", where))
+	}
+	if !hasErr {
+		v = append(v, fmt.Sprintf("%s: no 4xx/5xx error response documented", where))
+	}
+	return v
+}
+
+// lintExtensions requires the x-culvert-* metadata, with stricter rules for
+// mutating/destructive operations.
+func lintExtensions(o Operation, where string) []string {
+	ext := o.Op.Extensions
+	var v []string
+	if vis := extString(ext, "x-culvert-visibility"); !validVisibilityExt[vis] {
+		v = append(v, fmt.Sprintf("%s: missing/invalid x-culvert-visibility (%q)", where, vis))
+	}
+	if perm := extString(ext, "x-culvert-permission"); !validPermission[perm] {
+		v = append(v, fmt.Sprintf("%s: missing/invalid x-culvert-permission (%q)", where, perm))
+	}
+	if extString(ext, "x-culvert-stability") == "" {
+		v = append(v, fmt.Sprintf("%s: missing x-culvert-stability", where))
+	}
+	if extString(ext, "x-culvert-introduced-version") == "" {
+		v = append(v, fmt.Sprintf("%s: missing x-culvert-introduced-version", where))
+	}
+	if o.Method != "GET" && o.Method != "HEAD" && o.Method != "OPTIONS" {
+		if danger := extString(ext, "x-culvert-danger-level"); !validDanger[danger] {
+			v = append(v, fmt.Sprintf("%s: mutating op missing/invalid x-culvert-danger-level (%q)", where, danger))
+		}
+		if extString(ext, "x-culvert-audit-event") == "" {
+			v = append(v, fmt.Sprintf("%s: mutating op missing x-culvert-audit-event", where))
+		}
+	}
+	return v
+}
+
+// lintSensitiveSchemas flags any x-culvert-sensitive schema that silently allows
+// additionalProperties:true without an x-culvert-open-justification.
+func lintSensitiveSchemas(spec *Spec) []string {
+	if spec.Doc.Components == nil {
+		return nil
+	}
+	var v []string
+	for name, ref := range spec.Doc.Components.Schemas {
+		if ref == nil || ref.Value == nil {
+			continue
+		}
+		sch := ref.Value
+		if extString(sch.Extensions, "x-culvert-sensitive") != "true" {
+			continue
+		}
+		openAP := sch.AdditionalProperties.Has != nil && *sch.AdditionalProperties.Has
+		justified := extString(sch.Extensions, "x-culvert-open-justification") != ""
+		if openAP && !justified {
+			v = append(v, fmt.Sprintf("schema %s: x-culvert-sensitive with additionalProperties:true and no x-culvert-open-justification", name))
+		}
+	}
 	return v
 }
