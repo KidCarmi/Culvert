@@ -7,6 +7,7 @@ package main
 // six viewer-gated handlers return 200 rather than 403.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +18,7 @@ func assertResponseConforms(t *testing.T, method, path string, h http.HandlerFun
 	t.Helper()
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := withRole(httptest.NewRequest(method, path, nil), RoleViewer)
+	req := withRole(httptest.NewRequestWithContext(context.Background(), method, path, http.NoBody), RoleViewer)
 	h(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s %s: status = %d, want 200 (body: %s)", method, path, rec.Code, rec.Body.String())

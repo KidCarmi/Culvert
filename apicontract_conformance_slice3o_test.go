@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +14,7 @@ func assertResponseConformsAdmin(t *testing.T, method, path string, h http.Handl
 	t.Helper()
 	spec := loadContract(t)
 	rec := httptest.NewRecorder()
-	req := withRole(httptest.NewRequest(method, path, nil), RoleAdmin)
+	req := withRole(httptest.NewRequestWithContext(context.Background(), method, path, http.NoBody), RoleAdmin)
 	h(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s %s: status = %d, want 200 (body: %s)", method, path, rec.Code, rec.Body.String())
