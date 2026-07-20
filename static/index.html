@@ -11630,6 +11630,10 @@ async function tick() {
   if (currentView === 'policy')    fetchPolicy();
   if (currentView === 'cluster')   loadCluster();
   if (currentView === 'upstream')  loadUpstream(); // keep the circuit-breaker "retry in Ns" ETA live
+  // The background worker advances the upload queue every ~30s with no user
+  // action, so keep the queue table live while the Support panel is open (this
+  // only refetches #support-uploads; it does not disturb the config form inputs).
+  if (currentView === 'support')   loadUploads();
 }
 
 function startTick() {
