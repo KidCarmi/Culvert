@@ -51,7 +51,7 @@ jobs:
       !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: ./.github/actions/setup-go-cache
 
@@ -97,7 +97,7 @@ jobs:
     # its full dependency scorecard for visibility, but a low score no longer
     # blocks the PR. Revisit if the action gains an allowlist/regression mode.
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: KidCarmi/Dependency-Obituary@9a35b0a193035bc746428bfdc9664f0ee0818028 # main @ 2026-07-03
         # step-level continue-on-error so the JOB (and its check run) concludes
         # success — a job-level flag would leave the check red on the PR.
@@ -117,7 +117,7 @@ jobs:
       !(github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/'))
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Build proxy image from branch source
         run: |
@@ -236,7 +236,7 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # full history needed for tag-based version computation
 
@@ -415,7 +415,7 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # full history for the tagged commit's committer date (deterministic generated_at)
       # Tag-path guard: this job keyless-signs the release catalog on a v*
@@ -576,7 +576,7 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # full tag list for the latest-tag assert (SEC-F2a)
       - uses: ./.github/actions/setup-go-cache
@@ -733,7 +733,7 @@ jobs:
             echo "       Create the fine-grained PAT + secret per the SEC-F7 runbook."
             exit 1
           }
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # need full history for tags
           # Persist the PAT (not the default token) so the tag push below is
@@ -817,7 +817,7 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Tag-path guard (assert): refuse to build/sign release binaries unless
       # the tagged commit was green on its main push. Defense-in-depth behind
@@ -1033,7 +1033,7 @@ jobs:
           # cache). If release is ever flipped to egress-policy: block, this job
           # must get the same allowlist.
           egress-policy: audit
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: ./.github/actions/setup-go-cache
 
       # SAME composite + SAME inputs as the release job → an independent rebuild
