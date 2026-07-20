@@ -313,6 +313,7 @@ Beyond ~500 users or ~1 Gbps sustained, scale horizontally with a gRPC Control P
 - **HA fencing** - optional etcd fencing lease (`-ha-etcd-*`) provides fail-closed leader election with epoch-based fencing; without it, the legacy leader/standby model applies. See [`docs/operator/ha-lease-failover.md`](docs/operator/ha-lease-failover.md).
 - **Config versioning** - every mutation snapshots automatically (50-version history) with side-by-side diff and one-click rollback.
 - **Backup / restore** - via the profile-gated `cli` compose service; see [`docs/operator/docker-compose-backup-restore.md`](docs/operator/docker-compose-backup-restore.md).
+- **Catalog-driven install** - a fresh install selects its image from the signed release catalog (not GHCR tags), verifying the verifier binary, catalog, and image under one pinned identity. Operator inputs, fallback matrix, release-cutover checklist, and identity-rotation runbook: [`docs/operator/catalog-bootstrap-install-runbook.md`](docs/operator/catalog-bootstrap-install-runbook.md).
 
 Detailed single-node, multi-node, and upstream-chaining topologies are in the **[Deployment Guide](docs/deployment-guide.md)**. Full sizing tables (per-connection memory, cluster throughput) are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
