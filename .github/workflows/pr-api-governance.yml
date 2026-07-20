@@ -1,0 +1,117 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# API Governance — MERGE-BLOCKING gates for the OpenAPI contract (Gate 7 + Gate 9)
+#
+# These jobs are designed to be REQUIRED status checks in branch protection for
+# PRs targeting `main`. Enable them under:
+#   Settings → Branches → main → Require status checks to pass, adding:
+#     - "API · breaking-change (blocking)"
+#     - "API · client-generation (blocking)"
+#   and "Require review from Code Owners" (CODEOWNERS already scopes api/**,
+#   docs/api/**, internal/apicontract/** to the API owner).
+#
+# Neither gate can pass without actually running: an unavailable pinned tool is a
+# HARD FAILURE in CI (strict mode), never a silent skip. The intentional-breaking
+# exception is activated ONLY by a reviewed PR label plus required PR-body
+# sections plus CODEOWNER approval — never by an environment variable.
+# ─────────────────────────────────────────────────────────────────────────────
+name: API Governance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    paths:
+      - "api/openapi/**"
+      - "api/route-classification.yaml"
+      - "scripts/openapi/**"
+      - ".github/workflows/pr-api-governance.yml"
+
+concurrency:
+  group: api-governance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  breaking-change:
+    name: "API · breaking-change (blocking)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache pinned oasdiff
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: oasdiff-v1.11.7-${{ runner.os }}
+      - name: Fetch base contract
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: git fetch --no-tags origin "${{ github.base_ref }}"
+      - name: Breaking-change gate (strict)
+        id: bc
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          CULVERT_BREAKING_STRICT: "1"
+        run: |
+          set +e
+          ./scripts/openapi/breaking-check.sh
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Evaluate result + reviewed exception
+        if: always() && steps.bc.outputs.code != '0'
+        env:
+          CODE: ${{ steps.bc.outputs.code }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, '|') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if [ "$CODE" = "1" ]; then
+            echo "::error::Breaking-change gate errored (tool unavailable/other). This is a HARD failure — it must not be bypassed." >&2
+            exit 1
+          fi
+          # CODE == 2 -> breaking changes detected. Consult the reviewed exception.
+          echo "Breaking API changes detected against the base contract."
+          if [ "${CODE}" != "2" ]; then exit 1; fi
+          case "|${PR_LABELS}|" in
+            *"|api-breaking-approved|"*) HAS_LABEL=1 ;;
+            *) HAS_LABEL=0 ;;
+          esac
+          if [ "$HAS_LABEL" != "1" ]; then
+            echo "::error::Breaking changes require the reviewed exception: add the 'api-breaking-approved' label AND the required PR-body sections, with CODEOWNER approval (enforced by branch protection). See docs/api/API-VERSIONING-POLICY.md." >&2
+            exit 1
+          fi
+          # Required PR-body sections for an intentional breaking change.
+          missing=0
+          for needle in "Breaking-Change-Rationale:" "Migration-Instructions:" "Version-Impact:"; do
+            if ! printf '%s' "$PR_BODY" | grep -qiF "$needle"; then
+              echo "::error::Missing required section '$needle' in the PR body for an approved breaking change." >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" != "0" ]; then exit 1; fi
+          echo "::notice::Breaking changes accepted under the reviewed exception (label + rationale + migration + version impact present; CODEOWNER approval enforced by branch protection)."
+
+  client-generation:
+    name: "API · client-generation (blocking)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cache pinned oapi-codegen
+        uses: actions/cache@v4
+        with:
+          path: .tools
+          key: oapi-codegen-v2.4.1-${{ runner.os }}
+      - name: Client-generation gate (strict — generate + compile in isolated module)
+        env:
+          CULVERT_CLIENTGEN_STRICT: "1"
+        run: ./scripts/openapi/generate-client.sh

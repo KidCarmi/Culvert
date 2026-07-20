@@ -36,19 +36,43 @@ contract against `origin/main`. Because this is the baseline-establishment chang
 the gate exits 0 when the base has no contract; **it becomes mandatory once the
 baseline merges.** After that, a breaking change fails CI.
 
+## Breaking-change enforcement (Gate 7 — merge-blocking)
+
+Gate 7 runs in `.github/workflows/pr-api-governance.yml` as the check
+**`API · breaking-change (blocking)`** on every PR to `main` that touches the
+contract. It compares the PR contract against the base contract with pinned
+`oasdiff` in **strict mode**: an unavailable tool is a HARD failure (the gate
+never passes without running), and any breaking change fails the job.
+
+**Required branch-protection settings** (an admin must enable these once — they
+cannot be set from the repository):
+
+- Require status check **`API · breaking-change (blocking)`**.
+- Require status check **`API · client-generation (blocking)`** (Gate 9).
+- Require review from **Code Owners** (CODEOWNERS already scopes `api/**`,
+  `docs/api/**`, `internal/apicontract/**` to the API owner).
+
+Until an admin enables the required checks, the workflow is still **technically
+hard-failing** — a breaking change turns the job red — but merge is only
+*blocked* once the check is marked required.
+
 ## Breaking-change exception process
 
-A breaking change may ship only with ALL of:
+An intentional breaking change may ship only with ALL of:
 
-1. A PR label `api-breaking-change` (the reviewed override; never a silent env var).
-2. **Rationale** in the PR body — why the break is necessary.
-3. **Migration instructions** for consumers.
-4. **Deprecation evidence** where applicable (the field/op was deprecated first —
+1. The PR label **`api-breaking-approved`** — the reviewed override. The gate is
+   NEVER relaxed by an environment variable; only this label (which requires repo
+   write access to apply) plus the sections below plus CODEOWNER approval.
+2. A PR-body line **`Breaking-Change-Rationale:`** — why the break is necessary.
+3. A PR-body line **`Migration-Instructions:`** — how consumers migrate.
+4. A PR-body line **`Version-Impact:`** — the MAJOR bump + CHANGELOG entry.
+5. **CODEOWNER approval** for `api/` (enforced by branch protection, above).
+6. **Deprecation evidence** where applicable (the field/op was deprecated first —
    see the deprecation policy).
-5. A **named approver** from CODEOWNERS for `api/`.
-6. The **API version impact** recorded (MAJOR bump + CHANGELOG entry).
 
-The override relaxes Gate 7 for that PR only; the change is still reviewed.
+The workflow verifies (1)–(4) mechanically; CODEOWNER approval (5) is enforced by
+branch protection. The override relaxes Gate 7 for that PR only; the change is
+still fully reviewed.
 
 ## Stability tiers (`x-culvert-stability`)
 
