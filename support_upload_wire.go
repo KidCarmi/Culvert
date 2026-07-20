@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/supportupload"
@@ -183,10 +184,32 @@ func resolveUploadCase(bundleID, reqCase string) (string, error) {
 	return reqCase, nil
 }
 
+// uploadConsentMu serializes the seal→write→enqueue sequence so two concurrent
+// consent POSTs for the same bundle cannot race (one re-sealing a new blob while
+// the other's hash is committed to the queue). Consent is a rare admin action, so
+// a single global lock is free.
+var uploadConsentMu sync.Mutex
+
 // sealAndEnqueueUpload seals the READY bundle to the active TAC key ONCE, persists
 // the sealed blob, and enqueues it. Returns the queue entry. Pure local work (seal
 // + file write + enqueue) — no network.
+//
+// Idempotency (the seal is nondeterministic, so re-sealing must be avoided when it
+// would desync the on-disk blob from the persisted hash): if the bundle is already
+// queued/uploading/uploaded, this is a no-op that returns the existing entry
+// WITHOUT overwriting upload.csb.sealed. Only a new bundle or a deferred/rejected
+// re-arm re-seals — and the re-arm adopts the fresh hash (enqueueUpload).
 func sealAndEnqueueUpload(bundleID, caseID string, now time.Time) (uploadQueueEntry, error) {
+	uploadConsentMu.Lock()
+	defer uploadConsentMu.Unlock()
+
+	if existing, ok := loadUploadQueueEntry(bundleID); ok {
+		switch existing.State {
+		case uploadStateQueued, uploadStateUploading, uploadStateUploaded:
+			return existing, nil // already pending or delivered — do NOT re-seal
+		}
+	}
+
 	tgz, err := os.ReadFile(filepath.Join(supportBundlesDir(), bundleID, "bundle.csb.tgz"))
 	if err != nil {
 		return uploadQueueEntry{}, fmt.Errorf("read bundle: %w", err)

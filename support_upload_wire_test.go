@@ -164,6 +164,93 @@ func TestUploadConsent_Preconditions(t *testing.T) {
 	}
 }
 
+func TestUploadConsent_IdempotentDoesNotReseal(t *testing.T) {
+	withTempUploadDir(t)
+	enableUploadForTest(t)
+	_, _, pubB64 := newTACKey(t)
+	withBakedTACKeys(t, tacKeyJSON("tac-1", pubB64))
+	t.Setenv(envTACTrustKeys, "")
+	t.Setenv(envTACActiveKeyID, "")
+
+	id := csbID("idem")
+	writeReadyBundle(t, id, "")
+	post := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := roleReq(RoleAdmin, http.MethodPost, "/api/support/bundles/"+id+"/upload", map[string]any{"confirm": true, "case_id": "C1"})
+		req.SetPathValue("id", id)
+		apiSupportBundleUpload(rec, req)
+		return rec
+	}
+	if rec := post(); rec.Code != http.StatusAccepted {
+		t.Fatalf("first consent = %d, want 202", rec.Code)
+	}
+	first, _ := os.ReadFile(sealedUploadPath(id))
+	e1, _ := loadUploadQueueEntry(id)
+
+	// A second consent (double-click / retry) while queued must NOT re-seal — the
+	// blob and the persisted hash must stay in lock-step.
+	if rec := post(); rec.Code != http.StatusAccepted {
+		t.Fatalf("second consent = %d, want 202 (idempotent)", rec.Code)
+	}
+	second, _ := os.ReadFile(sealedUploadPath(id))
+	e2, _ := loadUploadQueueEntry(id)
+	if !bytes.Equal(first, second) {
+		t.Fatal("idempotent re-consent overwrote the sealed blob (hash would desync)")
+	}
+	if e1.BundleSHA256 != e2.BundleSHA256 {
+		t.Fatal("idempotent re-consent changed the persisted hash")
+	}
+}
+
+func TestUploadConsent_ReArmRefreshesMetadata(t *testing.T) {
+	withTempUploadDir(t)
+	enableUploadForTest(t)
+	_, _, pubB64 := newTACKey(t)
+	withBakedTACKeys(t, tacKeyJSON("tac-1", pubB64))
+	t.Setenv(envTACTrustKeys, "")
+	t.Setenv(envTACActiveKeyID, "")
+
+	id := csbID("rearm")
+	writeReadyBundle(t, id, "")
+	rec := httptest.NewRecorder()
+	req := roleReq(RoleAdmin, http.MethodPost, "/api/support/bundles/"+id+"/upload", map[string]any{"confirm": true, "case_id": "C1"})
+	req.SetPathValue("id", id)
+	apiSupportBundleUpload(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first consent = %d, want 202", rec.Code)
+	}
+	// Simulate a rejected attempt that carried a session id + stale hash, and whose
+	// sealed blob was cleaned up (as finishUploadDrain does on rejection).
+	e, _ := loadUploadQueueEntry(id)
+	e.State = uploadStateRejected
+	e.UploadID = "old-session"
+	e.BundleSHA256 = "staaaale"
+	e.Attempts = maxUploadAttempts
+	_ = saveUploadQueueEntry(e)
+	removeSealedUpload(id)
+
+	// Re-consent → re-seal + re-arm. The entry must adopt the FRESH hash and drop
+	// the stale session, and a fresh sealed blob must be on disk matching the hash.
+	rec2 := httptest.NewRecorder()
+	req2 := roleReq(RoleAdmin, http.MethodPost, "/api/support/bundles/"+id+"/upload", map[string]any{"confirm": true, "case_id": "C1"})
+	req2.SetPathValue("id", id)
+	apiSupportBundleUpload(rec2, req2)
+	if rec2.Code != http.StatusAccepted {
+		t.Fatalf("re-consent = %d, want 202", rec2.Code)
+	}
+	got, _ := loadUploadQueueEntry(id)
+	if got.State != uploadStateQueued || got.UploadID != "" || got.Attempts != 0 {
+		t.Fatalf("re-arm did not reset session/attempts: %+v", got)
+	}
+	sealed, err := os.ReadFile(sealedUploadPath(id))
+	if err != nil {
+		t.Fatalf("re-seal did not write a fresh blob: %v", err)
+	}
+	if got.BundleSHA256 != sha256hex(sealed) {
+		t.Fatalf("re-arm hash %q != sha256(fresh sealed blob)", got.BundleSHA256)
+	}
+}
+
 func TestUploadConsent_CaseMismatchRefused(t *testing.T) {
 	withTempUploadDir(t)
 	enableUploadForTest(t)
