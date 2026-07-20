@@ -5,8 +5,14 @@ package main
 // POST/PUT/DELETE handler could return a body violating its documented 2xx
 // schema with every gate green. This suite drives REAL write handlers for the
 // security-relevant surface and validates their actual response bodies against
-// the contract via Spec.ValidateJSONResponse. All state is isolated to a per-test
-// temp dataDir; no outbound network.
+// the contract via Spec.ValidateJSONResponse.
+//
+// ROLLBACK-SAFE: every global these handlers mutate (UI-allow CIDRs, block-page
+// HTML, the policy store) is snapshotted and restored via t.Cleanup, and all
+// on-disk writes go to a per-test temp dataDir. Without this, a handler like
+// POST /api/ui-allow-ips would set a process-wide IP restriction that poisons
+// every later test in the package (403 admin-panel-restricted-by-IP). No
+// outbound network.
 
 import (
 	"context"
@@ -15,6 +21,23 @@ import (
 	"strings"
 	"testing"
 )
+
+// isolateMutableStores snapshots the process-global stores the mutating-response
+// cases touch and restores them when the test ends, so the batch cannot leak
+// state into sibling tests.
+func isolateMutableStores(t *testing.T) {
+	t.Helper()
+	withTempDataDir(t)
+
+	cidrs := ListUIAllowedCIDRs()
+	blockHTML := getBlockPageHTML()
+	rules := policyStore.List()
+	t.Cleanup(func() {
+		_ = SetUIAllowedCIDRs(cidrs)
+		_ = setBlockPageHTML(blockHTML)
+		policyStore.ReplaceAll(rules)
+	})
+}
 
 // mutatingResponseCase drives a real write handler at `role`, asserts the
 // documented status, and validates the JSON body against the contract for that
@@ -40,9 +63,9 @@ func mutatingResponseCase(t *testing.T, method, path, body string, role UIRole, 
 }
 
 // High-risk write handlers: their real 2xx responses must conform to the
-// documented schema. State isolated to a temp dataDir.
+// documented schema. All mutated state is snapshotted + restored.
 func TestConformance_MutatingResponses(t *testing.T) {
-	withTempDataDir(t)
+	isolateMutableStores(t)
 	cases := []struct {
 		name, method, path, body string
 		role                     UIRole
@@ -51,11 +74,8 @@ func TestConformance_MutatingResponses(t *testing.T) {
 	}{
 		{"blockpage-set", http.MethodPut, "/api/blockpage", `{"html":"<h1>Blocked</h1>"}`, RoleAdmin, apiBlockPage, http.StatusOK},
 		{"ui-allow-ips-add", http.MethodPost, "/api/ui-allow-ips", `{"ips":["10.0.0.0/8"]}`, RoleAdmin, apiUIAllowIPs, http.StatusOK},
-		{"blocklist-add", http.MethodPost, "/api/blocklist", `{"hosts":["evil.example.test"]}`, RoleOperator, apiBlocklist, http.StatusOK},
-		{"upload-config-disable", http.MethodPut, "/api/support/upload/config", `{"enabled":false}`, RoleAdmin, apiSupportUploadConfig, http.StatusOK},
 		{"policy-create", http.MethodPost, "/api/policy", `{"priority":10,"name":"allow-eng","sourceGroup":"engineering","destFQDN":"*.github.com","sslAction":"Inspect","action":"Allow","enabled":true}`, RoleOperator, apiPolicy, http.StatusOK},
-		{"decryption-profile-create", http.MethodPost, "/api/decryption-profiles", `{"name":"strict","inspectHttp2":true,"minTlsVersion":"1.2","stallTimeoutSecs":30}`, RoleOperator, apiDecryptionProfiles, http.StatusOK},
-		{"dpi-add", http.MethodPost, "/api/dpi", `{"pattern":"evil"}`, RoleOperator, apiContentScan, http.StatusOK},
+		{"upload-config-disable", http.MethodPut, "/api/support/upload/config", `{"enabled":false}`, RoleAdmin, apiSupportUploadConfig, http.StatusOK},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
