@@ -801,12 +801,7 @@ routes:
     mutating: false
     audit_expected: false
     danger_level: none
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: added on main during this program (T3 fleet-convergence telemetry); documented in the documentation slice of this stack
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/cluster/nodes"
     method: "GET"
     handler: "apiClusterNodes"
@@ -1226,12 +1221,7 @@ routes:
     mutating: true
     audit_expected: true
     danger_level: medium
-    documented: false
-    exemption:
-      owner: platform-team
-      reason: added on main during this program (HA fencing-lease etcd probe); documented in the documentation slice of this stack
-      security_class: internal-review-pending
-      expires: *baseline
+    documented: true
   - route: "/api/diagnose/dns"
     method: "POST"
     handler: "apiDiagnoseDNS"

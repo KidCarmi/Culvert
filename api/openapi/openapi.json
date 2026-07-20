@@ -848,9 +848,29 @@
       },
       "DecryptionRedaction": {
         "additionalProperties": false,
+        "description": "Global destination-privacy posture (traffic-log host pseudonymization).",
         "properties": {
+          "key_provisioned": {
+            "description": "Whether this node holds a pseudonym key (the key value is never exposed).",
+            "type": "boolean"
+          },
+          "note": {
+            "description": "Human-readable explanation of the posture's behavior and limitations.",
+            "type": "string"
+          },
           "redact_hosts": {
-            "description": "false (redaction off) or an array of redacted hosts."
+            "description": "Boolean posture flag (false = off), or an array of redacted hosts on legacy builds."
+          },
+          "scope": {
+            "description": "The privacy scope this posture governs (traffic_destination).",
+            "type": "string"
+          },
+          "scope_fields": {
+            "description": "The destination fields pseudonymized when the posture is on.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -922,6 +942,43 @@
         },
         "nullable": true,
         "type": "array"
+      },
+      "FleetConvergence": {
+        "additionalProperties": false,
+        "description": "Control-plane aggregate of fleet config-sync convergence.",
+        "properties": {
+          "converged": {
+            "type": "integer"
+          },
+          "cp_fp": {
+            "description": "Newest blocklist fingerprint for the current version (\"\" when the ring has none).",
+            "type": "string"
+          },
+          "cp_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "node_count": {
+            "type": "integer"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeConvergence"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "stragglers": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cp_version",
+          "node_count",
+          "converged",
+          "stragglers"
+        ],
+        "type": "object"
       },
       "GenericRead": {
         "additionalProperties": true,
@@ -1127,6 +1184,46 @@
         "required": [
           "base_url",
           "trust_forwarded_headers"
+        ],
+        "type": "object"
+      },
+      "NodeConvergence": {
+        "additionalProperties": false,
+        "description": "One data-plane node's convergence state relative to the control plane.",
+        "properties": {
+          "config_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "converged": {
+            "type": "boolean"
+          },
+          "fp_mismatch": {
+            "description": "At the CP version but a different blocklist fingerprint (drift).",
+            "type": "boolean"
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "reporting": {
+            "description": "Node reported T3 telemetry (old data planes omit it).",
+            "type": "boolean"
+          },
+          "uptime": {
+            "type": "string"
+          },
+          "versions_behind": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "node_id",
+          "config_version",
+          "versions_behind",
+          "converged",
+          "fp_mismatch",
+          "reporting"
         ],
         "type": "object"
       },
@@ -1784,14 +1881,17 @@
       },
       "SetRedaction": {
         "additionalProperties": false,
+        "description": "Toggle the destination-privacy posture and/or rotate the pseudonym key. A rotate-only call sends {\"rotate_key\":true} and omits redact_hosts (the posture is preserved across a rotation); neither field is individually required.",
         "properties": {
           "redact_hosts": {
+            "description": "Enable (true) or disable (false) the posture. Omitted on a rotate-only call.",
+            "type": "boolean"
+          },
+          "rotate_key": {
+            "description": "When true, mint a new node-local pseudonym key (breaks correlation with older records).",
             "type": "boolean"
           }
         },
-        "required": [
-          "redact_hosts"
-        ],
         "type": "object"
       },
       "SetScanExclusions": {
@@ -5449,6 +5549,45 @@
         "x-culvert-visibility": "admin-supported"
       }
     },
+    "/api/cluster/convergence": {
+      "get": {
+        "description": "Read-only fleet-convergence view: which data-plane nodes are current with the control plane's authoritative config version, which lag, and which are at the current version but report a mismatched blocklist fingerprint (drift).",
+        "operationId": "getClusterConvergence",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FleetConvergence"
+                }
+              }
+            },
+            "description": "Fleet convergence view."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Fleet config-sync convergence",
+        "tags": [
+          "cluster"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
     "/api/cluster/drain": {
       "post": {
         "description": "Drains this node for maintenance.",
@@ -7958,6 +8097,51 @@
           "support"
         ],
         "x-culvert-audit-event": "diagnose.dns",
+        "x-culvert-danger-level": "low",
+        "x-culvert-idempotency": "non-idempotent",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/diagnose/etcd": {
+      "post": {
+        "description": "Runs a bounded, read-only reachability probe against the operator-configured etcd fencing-lease endpoints from this node and classifies the result (reachable, lease holder, epoch). No mutation of lease state.",
+        "operationId": "diagnoseEtcd",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "etcd fencing-lease diagnosis."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Probe the HA fencing-lease (etcd) backend",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "diagnose.etcd",
         "x-culvert-danger-level": "low",
         "x-culvert-idempotency": "non-idempotent",
         "x-culvert-introduced-version": "1.0.0",

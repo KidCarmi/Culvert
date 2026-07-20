@@ -585,11 +585,16 @@ components:
       additionalProperties: true
     DecryptionRedaction:
       type: object
+      description: Global destination-privacy posture (traffic-log host pseudonymization).
       required: [redact_hosts]
       additionalProperties: false
       properties:
         redact_hosts:
-          description: "false (redaction off) or an array of redacted hosts."
+          description: "Boolean posture flag (false = off), or an array of redacted hosts on legacy builds."
+        scope: { type: string, description: The privacy scope this posture governs (traffic_destination). }
+        scope_fields: { type: array, items: { type: string }, description: The destination fields pseudonymized when the posture is on. }
+        key_provisioned: { type: boolean, description: Whether this node holds a pseudonym key (the key value is never exposed). }
+        note: { type: string, description: Human-readable explanation of the posture's behavior and limitations. }
     PACPools:
       type: array
       nullable: true
@@ -683,6 +688,31 @@ components:
       additionalProperties: true
       properties:
         nodes: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+    NodeConvergence:
+      type: object
+      description: One data-plane node's convergence state relative to the control plane.
+      additionalProperties: false
+      required: [node_id, config_version, versions_behind, converged, fp_mismatch, reporting]
+      properties:
+        node_id: { type: string }
+        config_version: { type: integer, format: int64 }
+        versions_behind: { type: integer, format: int64 }
+        converged: { type: boolean }
+        fp_mismatch: { type: boolean, description: At the CP version but a different blocklist fingerprint (drift). }
+        reporting: { type: boolean, description: Node reported T3 telemetry (old data planes omit it). }
+        uptime: { type: string }
+    FleetConvergence:
+      type: object
+      description: Control-plane aggregate of fleet config-sync convergence.
+      additionalProperties: false
+      required: [cp_version, node_count, converged, stragglers]
+      properties:
+        cp_version: { type: integer, format: int64 }
+        cp_fp: { type: string, description: Newest blocklist fingerprint for the current version ("" when the ring has none). }
+        node_count: { type: integer }
+        converged: { type: integer }
+        stragglers: { type: integer }
+        nodes: { type: array, items: { $ref: '#/components/schemas/NodeConvergence' }, nullable: true }
     ClusterMetrics:
       type: object
       description: Aggregated per-node cluster metrics.
@@ -846,10 +876,14 @@ components:
         hours: { type: integer }
     SetRedaction:
       type: object
-      required: [redact_hosts]
+      description: >-
+        Toggle the destination-privacy posture and/or rotate the pseudonym key. A
+        rotate-only call sends {"rotate_key":true} and omits redact_hosts (the
+        posture is preserved across a rotation); neither field is individually required.
       additionalProperties: false
       properties:
-        redact_hosts: { type: boolean }
+        redact_hosts: { type: boolean, description: "Enable (true) or disable (false) the posture. Omitted on a rotate-only call." }
+        rotate_key: { type: boolean, description: "When true, mint a new node-local pseudonym key (breaks correlation with older records)." }
     SetOCSP:
       type: object
       required: [enabled]
@@ -4375,6 +4409,31 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ClusterNodes' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/cluster/convergence:
+    get:
+      operationId: getClusterConvergence
+      tags: [cluster]
+      summary: Fleet config-sync convergence
+      description: >-
+        Read-only fleet-convergence view: which data-plane nodes are current with
+        the control plane's authoritative config version, which lag, and which are
+        at the current version but report a mismatched blocklist fingerprint (drift).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: Fleet convergence view.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetConvergence' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/cluster/metrics:
     get:
       operationId: getClusterMetrics
@@ -6726,6 +6785,34 @@ paths:
       responses:
         '200':
           description: Run DNS diagnostics.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/diagnose/etcd:
+    post:
+      operationId: diagnoseEtcd
+      tags: [support]
+      summary: Probe the HA fencing-lease (etcd) backend
+      description: >-
+        Runs a bounded, read-only reachability probe against the operator-configured
+        etcd fencing-lease endpoints from this node and classifies the result
+        (reachable, lease holder, epoch). No mutation of lease state.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: operator
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: non-idempotent
+      x-culvert-introduced-version: 1.0.0
+      x-culvert-danger-level: low
+      x-culvert-audit-event: diagnose.etcd
+      responses:
+        '200':
+          description: etcd fencing-lease diagnosis.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
