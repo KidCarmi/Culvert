@@ -1,6 +1,145 @@
 # T3 D3 — Off-CP config signing (the H5 control that unblocks a larger trusted fleet)
 
-**Status:** DESIGN (decision-complete, pre-red-team). This is the concrete "real
+## STATUS: RESCOPE + DEFER implementation — verdict of a 4-lens red-team on this design
+
+A 4-lens Palo red-team (key-custody, cryptographic-binding, scope/threat-honesty,
+ops/lifecycle) was run on the design below BEFORE any code was written. Verdict
+tally: **1 RESCOPE + 3 FIX-THEN-SHIP**, but the FIX-THEN-SHIP verdicts collectively
+name **6 P0s** across three axes, and the lenses **converged independently** on the
+same core defects. Integrated call: **the design's KERNEL is sound and worth
+building eventually — but D3 as scoped, sequenced, and constructed does NOT ship,
+and it gates ZERO capacity today, so implementation is DEFERRED** behind a corrected
+design (captured below) and a concrete trigger.
+
+### What the red-team CONFIRMED holds (do not re-litigate)
+- **The kernel works.** Sign the ABSOLUTE state (per-version manifest of canonical
+  per-surface hashes) with an off-CP key; the DP recomputes and re-binds the hash of
+  the state it applied. All three lenses that examined it agree this **defeats the
+  post-sign content-swap TOCTOU** (CP shows diff A, publishes B → DP hash-bind
+  rejects B). Replay-of-signed-older-version is correctly delegated to the monotonic
+  version + `dpLastSeenEpoch` ratchet, not the signature. Zombie-leader (H5 form 1)
+  is rejected at the epoch fence. Signature ⟂ fence orthogonality is correct. The
+  release-catalog crypto reuse (`TrustStore`/`parseSigEnvelope`/`sigstoreVerifier`)
+  with a DISTINCT config-signing root is clean.
+
+### The 6 P0s (why it can't ship as written)
+1. **Version-bind fleet-brick** (custody P0-1 **and** ops P0-1, found independently).
+   `ConfigStore.Update` does `s.version++` on EVERY publish (controlplane_snapshot.go:467),
+   but a signed manifest is minted only when the *signed* surface changes. Strict
+   `manifest.config_version == applied V` (§3.3, §9-inv-2) then **freezes the whole
+   fleet the instant an admin edits any UNSIGNED surface** (PAC/policy/node-group):
+   V+1 exists with no V+1 manifest → enforce rejects. Self-inflicted, common-case.
+2. **Canonical-hash recompute-from-`FeedList()` brick** (crypto BREAK 1; ops P1-6).
+   §2.1 reintroduces the EXACT anti-pattern delta.go:34–39 documents as the reason
+   `syncedFP` is wire-fed and never recomputed: a host that is a CP feed entry AND a
+   DP-local manual block is in the CP's `FeedList()` but not the DP's → DP recompute
+   ≠ signed hash → enforce rejects forever. Recompute-from-enforcement is wrong by
+   construction.
+3. **Non-injective hash → signature-equivalence forge** (crypto BREAK 2). `"\n".join`
+   over `normDeltaHost` tokens (ToLower+TrimSpace only, internal newlines survive, no
+   host-format gate on the delta path) lets a compromised CP merge two adjacent
+   signed tokens `{X,Y}` into one bogus `"X\nY"` that canonicalizes byte-identically →
+   same hash → validly signed → silently drops enforcement of X and Y. A forge by the
+   exact H5 adversary D3 exists to stop.
+4. **Pre-sign hash substitution voids the "detached-admin UI-preserving" mode**
+   (custody P0-2). The DP bind proves *served content == signed hash*, never *signed
+   hash == the diff the human reviewed*. A compromised CP renders diff A in the panel
+   but hands the signing device `hash(B)` (opaque hex the human can't distinguish) →
+   admin blind-signs evil. Only GitOps/offline (content originates off-CP) survives;
+   a UI-preserving mode must be a LOCAL-verifying signer (losing the ergonomic).
+5. **Enforce-default self-DoS + wrong rollout order** (ops P0-2/P0-3). §5.4 "enforce
+   whenever a root is present" means *provisioning a root to PREPARE instantly bricks
+   DPs*, and §9-inv-10's "roots→enforce→sign" ordering is inverted (signing starts
+   AFTER roots roll → enforce DP hits missing-manifest → reject). Old-CP (no manifest
+   field) + any enforce DP also freezes the fleet. Needs observe-first + CP-first.
+6. **Bootstrap brick** (custody #4, crypto BREAK 4, ops P0-3 — TRIPLE). A fresh DP
+   (no last-good, version/epoch floor 0) under enforce with a CP not yet publishing
+   manifests has NO config to fall back to → default-deny everything; and a compromised
+   CP can hand it a genuinely-signed OLD config (no anti-rollback floor at enrollment).
+
+### Notable P1s to carry into the corrected design
+- **Scope is aimed at the wrong surface** (scope Finding 1; custody #6). Signing
+  `cp_authoritative_hosts` closes the HARD attack path (forging removals from a 2M
+  denylist) while leaving the CHEAP one open: a compromised CP pushes one UNSIGNED
+  `policy_rules` allow-rule for its C2 domain (allow overrides blocklist). Host-set is
+  huge/high-churn/low-marginal-value; policy is small/low-churn/high-value. Lead with
+  `policy_rules`, or sign both in the first manifest.
+- **Apply-then-verify leaves the malicious set LIVE on the `IsBlocked` hot path**
+  (custody #3) — verification must gate the commit to the live store, not just the
+  version counter (snapshot-and-rollback, or verify the would-be set before swap).
+- **HA `(version, manifest)` non-atomic** (custody #5, ops P1-4) — and the delta ring
+  is NOT replicated to the standby at all today (`applyHABundle`/`seedReplicatedSnapshot`
+  carry only `bundle.Config`), so §4's "alongside the delta ring" describes a path
+  that doesn't exist. Manifest must be added to `HAStateBundle` and replicated
+  atomically with `bundle.Config`; promotion must refuse to serve a version it lacks a
+  matching manifest for.
+- **Trust ring is read-once env** (ops P1-5) → rotation/revocation need a rolling
+  restart; a manifest under new key N arriving before a DP restarts = reject, and a
+  revoked key keeps verifying until restart. Needs a runtime-reloadable ring +
+  signed `revoked_key_ids` carried in the manifest.
+- **Silent fleet-freeze observability gap** (ops P1-6) — a frozen DP reports
+  `verified=true` for the OLD version and looks healthy; §8's straggler alert keys on
+  *unverified*, not *rejecting*. Needs a reason-coded `config_signature_reject_total`
+  counter + a fleet alert that fires on DP REJECT.
+- **CP-side pre-distribute signature check is security-null vs H5** (custody #7) —
+  keep it as honest-operator-error catching only; never let it substitute for DP
+  verify or read as the integrity boundary in the UI.
+
+### The corrected design (decision-advanced; build THIS, not §1–§10 below, when the trigger lands)
+1. **Reframe:** D3 is **capacity-orthogonal H5 config-integrity hardening**, NOT "the
+   10M prerequisite." `maxSnapBlockedHosts = 2_000_000` (controlplane_snapshot.go:136,
+   enforced on both snapshot and delta-apply paths) gates 10M; 10M cannot reach a DP
+   today regardless of signing. The real 10M gates are the cap raise + P2 (compact
+   host set) + P3 (feed distribution). D3 may proceed in PARALLEL but stops claiming
+   to gate scale.
+2. **Canonical hash — wire-fed, injective, enforcement-normalized.** Maintain a
+   SEPARATE canonical set fed PURELY by the CP wire stream (applied `added`/`removed` +
+   full-apply list), mirroring the `syncedFP` architecture (never recomputed from the
+   enforcement maps / `FeedList()`). Encode INJECTIVELY (length-prefix per token, or
+   hash-of-sorted-per-token-`SHA-256` digests — fixed-width, separator-free) and
+   normalize with the ENFORCEMENT normalizer (`hostutil.NormalizeHostStrict`,
+   fail-closed on IDNA) so the hash pins the ENFORCED set. Reject non-host bytes at
+   ingest. One shared advertise/recompute function + a fuzz/property test (idempotent,
+   CP-advertise ≡ DP-recompute over an IDN/wildcard/trailing-dot/newline corpus),
+   pinned by `wire_contract_version`. Accept the real 10M-scale state cost honestly.
+3. **Version-decoupled binding.** Bind the manifest to `(surface → hash)` identity +
+   the existing monotonic-version/epoch floor for anti-rollback — NOT `config_version
+   ==`. The CP carries the last signed host-manifest FORWARD across unsigned-surface
+   publishes; the DP re-binds hash, accepting version W if each enforced surface's
+   applied hash equals a signed hash whose manifest generation ≥ its last-good.
+4. **Custody:** ship **GitOps/offline only** as the Full-H5 mode. Drop
+   "detached-admin UI-preserving" (blind-sign). Keep co-located as honestly-weak
+   transitional. A future UI-preserving mode = a LOCAL-verifying signer that
+   independently canonicalizes the raw content off-CP.
+5. **Lifecycle:** **observe-first** default (root present + never-seen-a-manifest ⇒
+   observe: accept-missing, reject-invalid, `verified=false` telemetry; auto-promote
+   to enforce only after ≥1 verified manifest, OR explicit env flip). **CP-first**
+   rollout: upgrade+sign+publish → roots+observe to fleet → convergence panel all
+   `verified=true` → flip enforce. Runtime-reloadable trust ring. Atomic HA
+   `(version, manifest)` (add to `HAStateBundle`). Reason-coded reject counter + a
+   DP-REJECT fleet alert. Verify gates the LIVE-store commit (rollback on reject).
+   Explicit bootstrap state machine (accept-unsigned-to-establish-floor-then-latch,
+   or startup-refuse enforce-with-no-CP-manifest; enrollment-delivered version floor).
+6. **Scope:** sign **`policy_rules` first** (the cheap-attack, low-churn, high-value
+   surface) — or `policy_rules` + `cp_authoritative_hosts` together — never host-set
+   only. Ideally also cover PAC/upstream + the sensitive auth material, or scope the
+   H5 claim down explicitly and never surface a "signed config" fleet-integrity green
+   check for a partial surface set.
+
+### Trigger to build (mirrors the slice-1b defer discipline)
+Do NOT implement until BOTH: (a) a **concrete H5-facing deployment requirement**
+lands (a customer/deployment whose threat model names a compromised-CP), AND (b) the
+capacity work that actually RAISES the trusted blast radius (cap raise + P2 + P3) is
+shipping. Unlike slice-1b (which saved ~0 and was worthless), the D3 kernel is
+genuinely valuable, so this is DEFER-with-a-corrected-design-ready, not abandon. When
+the trigger lands, build the corrected design above (start with `policy_rules`), and
+red-team the IMPLEMENTATION (not just the design) before enforce ships.
+
+The original pre-red-team design is retained below for the record.
+
+---
+
+**Status (original):** DESIGN (decision-complete, pre-red-team). This is the concrete "real
 10M prerequisite" the T3 scale plan names: before a fleet can safely trust a
 larger CP-authoritative config surface pushed over CP→DP sync, the integrity of
 that surface must be anchored OFF the CP, so a compromised-but-authenticated CP

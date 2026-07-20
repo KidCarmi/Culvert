@@ -191,3 +191,13 @@ optimize with a blocklist generation counter + coalesced last-good in a follow-u
 - CP delta-ring byte bound + published resync-frequency SLO.
 - Air-gap story for feed distribution (mandatory CP mirror vs. offline sideload).
 - D3 signing slice (covers both full + delta paths) + Perf-F3/F4 efficiency debt.
+  **D3 designed + 4-lens red-teamed → RESCOPE + DEFER** (`T3-D3-offcp-signing-plan.md`
+  STATUS block). The kernel (absolute-state manifest + off-CP key + DP hash-rebind)
+  was CONFIRMED to defeat the post-sign TOCTOU, but the design as scoped/constructed
+  named 6 P0s (version-bind fleet-brick; `FeedList()`-recompute brick; non-injective
+  hash forge; blind-sign in the UI-preserving custody mode; enforce-default self-DoS;
+  bootstrap brick) and is **capacity-orthogonal** — `maxSnapBlockedHosts=2M` gates
+  10M, not integrity, so D3 is NOT "the 10M prerequisite." A corrected,
+  decision-advanced design is captured; build trigger = a concrete H5-facing
+  requirement AND the capacity work (cap raise + P2 + P3) shipping. Correct first
+  surface is `policy_rules` (the cheap-attack path), not the host set.
