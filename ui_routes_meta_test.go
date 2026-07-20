@@ -84,8 +84,10 @@ import (
 //     convergence / straggler view; viewer).
 //   - 183 — M6 secure-upload PR-1 added /api/support/upload/config (node-local
 //     default-off upload posture; GET viewer / PUT admin; no egress).
+//   - 184 — M6 secure-upload PR-4 added /api/support/tac-trust (read-only resolved
+//     TAC recipient trust set for encrypt-to-TAC; GET viewer; no egress).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 183
+	const want = 184
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

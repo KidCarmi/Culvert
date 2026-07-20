@@ -103,6 +103,7 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/debug-level", apiSupportDebugLevel)
 	mux.HandleFunc("/api/support/retention", apiSupportRetention)
 	mux.HandleFunc("/api/support/upload/config", apiSupportUploadConfig)
+	mux.HandleFunc("/api/support/tac-trust", apiSupportTACTrust)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
 }
 
