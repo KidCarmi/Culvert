@@ -75,12 +75,17 @@ func TestValidateUploadOrigin(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"http://tac.example.com",   // not https
-		"ftp://tac.example.com",    // wrong scheme
-		"https://",                 // no host
-		"https://10.0.0.5",         // private literal IP (RFC1918)
-		"https://192.168.1.1:8443", // private literal IP
-		"https://169.254.169.254",  // link-local metadata
+		"http://tac.example.com",        // not https
+		"ftp://tac.example.com",         // wrong scheme
+		"https://",                      // no host
+		"https://10.0.0.5",              // private literal IP (RFC1918)
+		"https://192.168.1.1:8443",      // private literal IP
+		"https://169.254.169.254",       // link-local metadata (IPv4)
+		"https://[::1]",                 // IPv6 loopback literal
+		"https://[fc00::1]",             // IPv6 ULA literal
+		"https://[fe80::1]",             // IPv6 link-local literal
+		"https://[fe80::1%25eth0]",      // scoped IPv6 link-local (zone id) — Codex P2
+		"https://[fe80::1%25eth0]:8443", // scoped IPv6 with port
 	}
 	for _, o := range bad {
 		if err := validateUploadOrigin(o); err == nil {

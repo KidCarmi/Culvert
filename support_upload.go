@@ -116,6 +116,14 @@ func validateUploadOrigin(origin string) error {
 	if host == "" {
 		return errors.New("origin must include a host")
 	}
+	// Strip an IPv6 zone (e.g. "fe80::1%eth0" → "fe80::1") before parsing: a
+	// scoped literal like https://[fe80::1%25eth0] otherwise makes net.ParseIP
+	// return nil, so the private-IP check would mistake a link-local literal for
+	// a hostname and let it save (Codex). The dial-time guard fails closed on
+	// zoned IPv6 too, but the config-time gate must reject it up front.
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
 	if ip := net.ParseIP(host); ip != nil && isPrivateIP(ip) {
 		return errors.New("origin is a private/internal address; refused (use offline export for air-gapped transfer)")
 	}
