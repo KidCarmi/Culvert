@@ -162,9 +162,9 @@ func TestInstaller_DisabledCatalogDoesNotDowngrade(t *testing.T) {
 func TestInstaller_ValidatesVerifierDownloadInputs(t *testing.T) {
 	s := readContractFile(t, "scripts/install.sh")
 	for _, want := range []string{
-		"safe_release_tag",                        // release-tag charset guard
+		"safe_release_tag", // release-tag charset guard
 		`GH_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`, // owner/name guard
-		`"$GH_REPO" == *".."*`,                    // no traversal in repo
+		`"$GH_REPO" == *".."*`,                          // no traversal in repo
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("install.sh must validate verifier download inputs; missing %q", want)

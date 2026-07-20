@@ -116,73 +116,24 @@ func runBootstrapResolve(argv []string, stdout, stderr io.Writer) int {
 		return 2 // flag package already wrote usage to stderr
 	}
 	if !validBootstrapPrint(*printFlag) {
-		fmt.Fprintf(stderr, "bootstrap-resolve: --print %q is not one of json|image_ref|digest|version_id|repo|catalog_version\n", *printFlag)
+		bfprintf(stderr, "bootstrap-resolve: --print %q is not one of json|image_ref|digest|version_id|repo|catalog_version\n", *printFlag)
 		return 2
 	}
 
-	// ── Trust config: the SAME inputs runtime startup uses. ────────────────────
-	// Bootstrap ALWAYS enforces: the installer must never accept an unsigned or
-	// stale catalog. The break-glass CULVERT_RELEASE_CATALOG_VERIFY (permissive/
-	// disabled) is deliberately NOT honored here — the only supported override for
-	// a fresh install is an explicit, verified image seed (CULVERT_PROXY_SEED_REF),
-	// handled entirely in the installer, never a relaxed catalog trust mode.
-	keys, err := combinedReleaseTrustKeys(os.Getenv(envReleaseCatalogTrustKeys))
-	if err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: trust keys: %v\n", err)
+	// Trust config + origin are resolved by helpers (identical inputs to runtime
+	// startup); each fails closed with a stderr message and ok=false.
+	trust, keys, sigActive, ok := resolveBootstrapTrust(stderr)
+	if !ok {
 		return 1
 	}
-	sig := resolveSigstoreWiring(os.Getenv)
-	if sig.err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: sigstore trust: %v\n", sig.err)
+	catURL, originSource, ok := resolveBootstrapOrigin(*catalogURLFlag, stderr)
+	if !ok {
 		return 1
 	}
-	if sig.warn != "" {
-		fmt.Fprintf(stderr, "bootstrap-resolve: %s\n", sig.warn)
-	}
-	trust, err := NewTrustStoreWithSigstore(keys, VerifyEnforce, sig.verifier)
-	if err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: %v\n"+
-			"  (this build carries no release-catalog trust roots; a fresh install requires a\n"+
-			"   trusted verifier binary. Use an official signed build, or supply roots via %s.)\n",
-			err, envReleaseCatalogTrustKeys)
-		return 1
-	}
-
-	// ── Catalog origin. The flag wins over the env; the env is parsed with the
-	// SAME resolver runtime uses so the off/none/disabled sentinels mean the same
-	// thing. A disabled origin is a HARD ERROR here — bootstrap must never silently
-	// downgrade to tag enumeration; the installer requires an explicit seed instead.
-	catURL := strings.TrimSpace(*catalogURLFlag)
-	var originSource string
-	if catURL != "" {
-		if isCatalogFetchDisabled(catURL) {
-			fmt.Fprintf(stderr, "bootstrap-resolve: --catalog-url is a disable sentinel (%q); refusing to resolve. "+
-				"Supply a real catalog origin or an explicit verified image seed.\n", catURL)
-			return 1
-		}
-		originSource = catalogURLSourceOverride
-	} else {
-		catURL, originSource = resolveCatalogURL(os.Getenv(envReleaseCatalogURL))
-	}
-	if originSource == catalogURLSourceDisabled || catURL == "" {
-		fmt.Fprintf(stderr, "bootstrap-resolve: catalog fetch is DISABLED via %s; there is no trusted source to resolve.\n"+
-			"  A fresh install cannot proceed without either a catalog origin or an explicit verified image seed (CULVERT_PROXY_SEED_REF).\n"+
-			"  This never falls back to GHCR tag discovery.\n", envReleaseCatalogURL)
-		return 1
-	}
-
 	channel, err := mapInstallChannel(*channelFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: %v\n", err)
+		bfprintf(stderr, "bootstrap-resolve: %v\n", err)
 		return 1
-	}
-
-	proxyRepo := strings.TrimSpace(*proxyRepoFlag)
-	if proxyRepo == "" {
-		proxyRepo = strings.TrimSpace(os.Getenv(envReleaseProxyRepo))
-	}
-	if proxyRepo == "" {
-		proxyRepo = defaultReleaseProxyRepo
 	}
 
 	statePath := ""
@@ -199,34 +150,109 @@ func runBootstrapResolve(argv []string, stdout, stderr io.Writer) int {
 		trust:          trust,
 		channel:        channel,
 		installChannel: strings.ToLower(strings.TrimSpace(*channelFlag)),
-		proxyRepo:      proxyRepo,
+		proxyRepo:      resolveBootstrapProxyRepo(*proxyRepoFlag),
 		statePath:      statePath,
 		stageBase:      strings.TrimSpace(*stageDirFlag),
-		trustSchemes:   trustSchemesOf(keys, sig.active),
+		trustSchemes:   trustSchemesOf(keys, sigActive),
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: %v\n", err)
+		bfprintf(stderr, "bootstrap-resolve: %v\n", err)
 		return 1
 	}
+	return emitBootstrapDecision(decision, *printFlag, *outFlag, stdout, stderr)
+}
 
-	// Persist the full decision record (the appliance keeps it to prove which
-	// catalog decision bootstrapped it). BEST-EFFORT: a verified decision must not
-	// be discarded because this record file could not be written (e.g. a root-owned
-	// install dir under a non-root invocation) — warn and still emit the result.
-	if path := strings.TrimSpace(*outFlag); path != "" {
+// bfprintf / bfprintln are errcheck-quiet diagnostic writers: the subcommand emits
+// human-readable diagnostics to stderr and the scalar/JSON result to stdout, and a
+// write failure on those streams is not actionable (the process is exiting anyway).
+func bfprintf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+func bfprintln(w io.Writer, a ...any)               { _, _ = fmt.Fprintln(w, a...) }
+
+// resolveBootstrapTrust builds the enforce-mode TrustStore from the SAME env inputs
+// runtime startup uses (baked ∪ operator ed25519 roots + Sigstore). Bootstrap ALWAYS
+// enforces: the break-glass CULVERT_RELEASE_CATALOG_VERIFY is deliberately NOT honored
+// — the only fresh-install override is an explicit verified image seed. ok=false (with
+// a stderr message) on any failure.
+func resolveBootstrapTrust(stderr io.Writer) (trust TrustStore, keys []TrustKey, sigActive, ok bool) {
+	keys, err := combinedReleaseTrustKeys(os.Getenv(envReleaseCatalogTrustKeys))
+	if err != nil {
+		bfprintf(stderr, "bootstrap-resolve: trust keys: %v\n", err)
+		return TrustStore{}, nil, false, false
+	}
+	sig := resolveSigstoreWiring(os.Getenv)
+	if sig.err != nil {
+		bfprintf(stderr, "bootstrap-resolve: sigstore trust: %v\n", sig.err)
+		return TrustStore{}, nil, false, false
+	}
+	if sig.warn != "" {
+		bfprintf(stderr, "bootstrap-resolve: %s\n", sig.warn)
+	}
+	trust, err = NewTrustStoreWithSigstore(keys, VerifyEnforce, sig.verifier)
+	if err != nil {
+		bfprintf(stderr, "bootstrap-resolve: %v\n"+
+			"  (this build carries no release-catalog trust roots; a fresh install requires a\n"+
+			"   trusted verifier binary. Use an official signed build, or supply roots via %s.)\n",
+			err, envReleaseCatalogTrustKeys)
+		return TrustStore{}, nil, false, false
+	}
+	return trust, keys, sig.active, true
+}
+
+// resolveBootstrapOrigin resolves the effective catalog origin: the flag wins over
+// the env, with the SAME off/none/disabled sentinel semantics runtime uses. A disabled
+// origin is a HARD failure — bootstrap must never downgrade to tag enumeration; the
+// installer requires an explicit seed instead. ok=false (with a stderr message) then.
+func resolveBootstrapOrigin(flagVal string, stderr io.Writer) (origin, source string, ok bool) {
+	catURL := strings.TrimSpace(flagVal)
+	if catURL != "" {
+		if isCatalogFetchDisabled(catURL) {
+			bfprintf(stderr, "bootstrap-resolve: --catalog-url is a disable sentinel (%q); refusing to resolve. "+
+				"Supply a real catalog origin or an explicit verified image seed.\n", catURL)
+			return "", "", false
+		}
+		return catURL, catalogURLSourceOverride, true
+	}
+	catURL, source = resolveCatalogURL(os.Getenv(envReleaseCatalogURL))
+	if source == catalogURLSourceDisabled || catURL == "" {
+		bfprintf(stderr, "bootstrap-resolve: catalog fetch is DISABLED via %s; there is no trusted source to resolve.\n"+
+			"  A fresh install cannot proceed without either a catalog origin or an explicit verified image seed (CULVERT_PROXY_SEED_REF).\n"+
+			"  This never falls back to GHCR tag discovery.\n", envReleaseCatalogURL)
+		return "", "", false
+	}
+	return catURL, source, true
+}
+
+// resolveBootstrapProxyRepo returns the repo allowlist: --proxy-repo, else the env,
+// else the baked default.
+func resolveBootstrapProxyRepo(flagVal string) string {
+	if r := strings.TrimSpace(flagVal); r != "" {
+		return r
+	}
+	if r := strings.TrimSpace(os.Getenv(envReleaseProxyRepo)); r != "" {
+		return r
+	}
+	return defaultReleaseProxyRepo
+}
+
+// emitBootstrapDecision persists the full decision record (best-effort) and writes
+// the requested stdout content, returning the process exit code.
+func emitBootstrapDecision(decision *bootstrapDecision, printSel, outPath string, stdout, stderr io.Writer) int {
+	// BEST-EFFORT record: a verified decision must not be discarded because the record
+	// file could not be written (e.g. a root-owned install dir under a non-root run).
+	if path := strings.TrimSpace(outPath); path != "" {
 		full, _ := json.MarshalIndent(decision, "", "  ")
 		if err := os.WriteFile(path, append(full, '\n'), 0o600); err != nil {
-			fmt.Fprintf(stderr, "bootstrap-resolve: warning: could not write decision record to %q: %v\n", sanitizeLog(path), err)
+			bfprintf(stderr, "bootstrap-resolve: warning: could not write decision record to %q: %v\n", sanitizeLog(path), err)
 		}
 	}
-	if scalar, ok := bootstrapScalar(decision, *printFlag); ok {
-		fmt.Fprintln(stdout, scalar)
+	if scalar, ok := bootstrapScalar(decision, printSel); ok {
+		bfprintln(stdout, scalar)
 		return 0
 	}
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(decision); err != nil {
-		fmt.Fprintf(stderr, "bootstrap-resolve: encode decision: %v\n", err)
+		bfprintf(stderr, "bootstrap-resolve: encode decision: %v\n", err)
 		return 1
 	}
 	return 0
@@ -288,28 +314,15 @@ type bootstrapResolveOpts struct {
 // resolve → repo allowlist → digest. Any failure returns a non-nil error and NO
 // decision (fail closed).
 func bootstrapResolve(ctx context.Context, opts bootstrapResolveOpts) (*bootstrapDecision, error) {
-	// Defense-in-depth inline SSRF preflight (url.Parse + scheme + isPrivateHost)
-	// at the call site so CodeQL sees the guard; the provider ALSO guards at dial
-	// time and on redirects (the authoritative, DNS-rebind-proof check).
-	u, err := url.Parse(opts.catalogURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse catalog URL: %w", err)
-	}
-	if u.Scheme != "https" && u.Scheme != "http" {
-		return nil, fmt.Errorf("catalog URL scheme %q must be http or https", u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, errors.New("catalog URL has no host")
-	}
-	if !opts.insecureGuard {
-		if err := isPrivateHost(u.Host); err != nil {
-			return nil, fmt.Errorf("catalog origin rejected (SSRF guard): %w", err)
-		}
+	// Defense-in-depth inline SSRF preflight so CodeQL sees the guard; the provider
+	// ALSO guards at dial time and on redirects (the authoritative, DNS-rebind check).
+	if err := bootstrapCheckOrigin(opts.catalogURL, opts.insecureGuard); err != nil {
+		return nil, err
 	}
 
 	prov, err := NewHTTPCatalogProvider(opts.catalogURL, opts.trust)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(redactSeedError(err, opts.catalogURL))
 	}
 	if opts.stageBase != "" {
 		prov.SetStageBase(opts.stageBase)
@@ -325,7 +338,11 @@ func bootstrapResolve(ctx context.Context, opts bootstrapResolveOpts) (*bootstra
 			// misbehaving — treat as no catalog staged (fail closed).
 			return nil, errors.New("catalog origin returned 304 to an unconditional request; no catalog staged")
 		}
-		return nil, fmt.Errorf("fetch/stage catalog: %w", err)
+		// A transport error wraps net/http's *url.Error, whose string embeds the full
+		// request URL (path + query + any userinfo) — a presigned/credentialed operator
+		// mirror URL would otherwise leak into the installer's logs. Redact to host-only
+		// (the SAME pattern the runtime auto-seed uses).
+		return nil, fmt.Errorf("fetch/stage catalog: %s", redactSeedError(err, opts.catalogURL))
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 
@@ -343,58 +360,13 @@ func bootstrapResolve(ctx context.Context, opts bootstrapResolveOpts) (*bootstra
 	if err := checkCatalogFreshness(cat, now(), catalogClockSkew); err != nil {
 		return nil, fmt.Errorf("catalog freshness: %w", err)
 	}
-
-	// Anti-rollback + replay against the appliance's persisted floor, when a data
-	// dir was supplied and it exists. A missing floor file is the normal fresh-host
-	// state (zero floor). The AUTHORITATIVE floor ratchet still happens inside the
-	// appliance's own enforce-mode startup; this is a best-effort bootstrap guard
-	// so a re-run over an existing deployment never resolves a rolled-back catalog.
-	floorVersion := 0
-	var floorGen time.Time
-	if opts.statePath != "" {
-		st, err := (freshnessPolicy{enabled: true, statePath: opts.statePath}).readFloorState()
-		if err != nil {
-			return nil, fmt.Errorf("read rollback floor %q: %w", sanitizeLog(opts.statePath), err)
-		}
-		floorVersion = st.HighestVersion
-		if floorGen, err = parseFloorGen(st.HighestGeneratedAt); err != nil {
-			return nil, fmt.Errorf("parse rollback floor: %w", err)
-		}
-	}
-	if err := checkCatalogRollback(cat, floorVersion); err != nil {
-		return nil, fmt.Errorf("catalog rollback: %w", err)
-	}
-	if err := checkCatalogReplay(cat, floorVersion, floorGen); err != nil {
-		return nil, fmt.Errorf("catalog replay: %w", err)
-	}
-
-	// Resolve the channel forward to its immutable pinned ref.
-	rr, err := cat.Resolve(opts.channel)
-	if err != nil {
+	if err := bootstrapCheckFloor(cat, opts.statePath); err != nil {
 		return nil, err
 	}
-	rel, ok := cat.Lookup(rr.PinnedRef)
-	if !ok {
-		// Cannot happen for a well-formed catalog (Resolve returns a catalog ref),
-		// but never trust an internal invariant when the result gates a pull.
-		return nil, fmt.Errorf("resolved release %q is not present in the catalog index", rr.ReleaseID)
-	}
 
-	// Repository allowlist: the resolved image MUST live in the expected repo. The
-	// catalog already binds each ref to repo@sha256:<64hex>; this rejects a catalog
-	// (even a validly-signed one) that points at an unexpected registry/repo.
-	repo, digest, ok := strings.Cut(rr.PinnedRef, "@")
-	if !ok || repo == "" || !strings.HasPrefix(digest, "sha256:") {
-		return nil, fmt.Errorf("resolved pinned ref %q is not repo@sha256:<digest>", sanitizeLog(rr.PinnedRef))
-	}
-	if repo != opts.proxyRepo {
-		return nil, fmt.Errorf("resolved repo %q is outside the allowlist (expected %q)",
-			sanitizeLog(repo), sanitizeLog(opts.proxyRepo))
-	}
-
-	origin := ""
-	if h := seedHost(opts.catalogURL); h != "" {
-		origin = h
+	rel, repo, digest, err := bootstrapResolveDigest(cat, opts.channel, opts.proxyRepo)
+	if err != nil {
+		return nil, err
 	}
 
 	return &bootstrapDecision{
@@ -402,7 +374,7 @@ func bootstrapResolve(ctx context.Context, opts bootstrapResolveOpts) (*bootstra
 		InstallChannel: opts.installChannel,
 		CatalogChannel: string(opts.channel),
 		Repo:           repo,
-		ImageRef:       rr.PinnedRef,
+		ImageRef:       repo + "@" + digest,
 		Digest:         digest,
 		ReleaseID:      rel.ReleaseID,
 		VersionID:      rel.VersionID,
@@ -411,8 +383,82 @@ func bootstrapResolve(ctx context.Context, opts bootstrapResolveOpts) (*bootstra
 		GeneratedAt:    cat.GeneratedAt().UTC().Format(time.RFC3339),
 		ExpiresAt:      cat.ExpiresAt().UTC().Format(time.RFC3339),
 		TrustSchemes:   opts.trustSchemes,
-		CatalogOrigin:  origin,
+		CatalogOrigin:  seedHost(opts.catalogURL), // host only (never a credentialed URL)
 	}, nil
+}
+
+// bootstrapCheckOrigin is the inline SSRF preflight: url.Parse + scheme + host +
+// isPrivateHost (skipped only for loopback test origins via insecureGuard).
+func bootstrapCheckOrigin(catalogURL string, insecureGuard bool) error {
+	u, err := url.Parse(catalogURL)
+	if err != nil {
+		return fmt.Errorf("parse catalog URL: %w", err)
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("catalog URL scheme %q must be http or https", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("catalog URL has no host")
+	}
+	if !insecureGuard {
+		if err := isPrivateHost(u.Host); err != nil {
+			return fmt.Errorf("catalog origin rejected (SSRF guard): %w", err)
+		}
+	}
+	return nil
+}
+
+// bootstrapCheckFloor applies anti-rollback + replay against the appliance's
+// persisted floor when a data dir was supplied. A missing floor file is the normal
+// fresh-host state (zero floor). The AUTHORITATIVE ratchet still runs in the
+// appliance's own enforce-mode startup; this is a best-effort bootstrap guard so a
+// re-run over an existing deployment never resolves a rolled-back catalog.
+func bootstrapCheckFloor(cat *Catalog, statePath string) error {
+	floorVersion := 0
+	var floorGen time.Time
+	if statePath != "" {
+		st, err := (freshnessPolicy{enabled: true, statePath: statePath}).readFloorState()
+		if err != nil {
+			return fmt.Errorf("read rollback floor %q: %w", sanitizeLog(statePath), err)
+		}
+		floorVersion = st.HighestVersion
+		if floorGen, err = parseFloorGen(st.HighestGeneratedAt); err != nil {
+			return fmt.Errorf("parse rollback floor: %w", err)
+		}
+	}
+	if err := checkCatalogRollback(cat, floorVersion); err != nil {
+		return fmt.Errorf("catalog rollback: %w", err)
+	}
+	if err := checkCatalogReplay(cat, floorVersion, floorGen); err != nil {
+		return fmt.Errorf("catalog replay: %w", err)
+	}
+	return nil
+}
+
+// bootstrapResolveDigest resolves the channel to its release and validated
+// repo/digest, enforcing the repo allowlist. The catalog binds each ref to
+// repo@sha256:<64hex>; this rejects a (validly-signed) catalog pointing at an
+// unexpected registry/repo.
+func bootstrapResolveDigest(cat *Catalog, channel Channel, proxyRepo string) (rel Release, repo, digest string, err error) {
+	rr, err := cat.Resolve(channel)
+	if err != nil {
+		return Release{}, "", "", err
+	}
+	rel, ok := cat.Lookup(rr.PinnedRef)
+	if !ok {
+		// Cannot happen for a well-formed catalog (Resolve returns a catalog ref),
+		// but never trust an internal invariant when the result gates a pull.
+		return Release{}, "", "", fmt.Errorf("resolved release %q is not present in the catalog index", rr.ReleaseID)
+	}
+	repo, digest, ok = strings.Cut(rr.PinnedRef, "@")
+	if !ok || repo == "" || !strings.HasPrefix(digest, "sha256:") {
+		return Release{}, "", "", fmt.Errorf("resolved pinned ref %q is not repo@sha256:<digest>", sanitizeLog(rr.PinnedRef))
+	}
+	if repo != proxyRepo {
+		return Release{}, "", "", fmt.Errorf("resolved repo %q is outside the allowlist (expected %q)",
+			sanitizeLog(repo), sanitizeLog(proxyRepo))
+	}
+	return rel, repo, digest, nil
 }
 
 // mapInstallChannel maps an operator-facing install channel to a catalog Channel.

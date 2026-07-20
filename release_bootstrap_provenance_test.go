@@ -32,7 +32,7 @@ func TestAddBootstrapProvenance(t *testing.T) {
 		CatalogVersion: 5,
 	}
 	b, _ := json.Marshal(dec)
-	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out = map[string]any{}
@@ -46,7 +46,7 @@ func TestAddBootstrapProvenance(t *testing.T) {
 	}
 
 	// Malformed record → omitted (best-effort, never errors the handler).
-	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out = map[string]any{}
@@ -56,7 +56,7 @@ func TestAddBootstrapProvenance(t *testing.T) {
 	}
 
 	// A record missing the load-bearing image_ref → omitted.
-	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), []byte(`{"schema_version":1}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, bootstrapDecisionFile), []byte(`{"schema_version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out = map[string]any{}

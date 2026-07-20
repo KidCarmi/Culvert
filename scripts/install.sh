@@ -889,9 +889,20 @@ stage_rollback_floor() {
 # volume ⇒ silently skip; never fail the install. World-readable (0644) — the record
 # is non-secret metadata and the container runs as a non-root user.
 persist_bootstrap_decision() {
-  local src mp
+  local src mp rec_ref cur_ref
   src="$INSTALL_DIR/.catalog-bootstrap.json"
   [[ -f "$src" ]] || return 0
+  # Publish ONLY a record that matches the ACTUALLY-seeded image. A stale record from
+  # a prior failed catalog attempt (followed by a break-glass/SEED_REF reseed) must
+  # not misreport /api/releases as a catalog-authorized digest that was never
+  # deployed. Compare the record's image_ref to the pinned image's registry digest.
+  rec_ref="$(grep -oE '"image_ref"[[:space:]]*:[[:space:]]*"[^"]+"' "$src" 2>/dev/null \
+    | head -n1 | sed -E 's/.*"([^"]+)"[[:space:]]*$/\1/')" || true
+  cur_ref="$(sudo docker image inspect "$PINNED_TAG" \
+    --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' 2>/dev/null || true)"
+  if [[ -z "$rec_ref" || "$rec_ref" != "$cur_ref" ]]; then
+    return 0 # record does not match the running image (stale / non-catalog seed) — skip
+  fi
   mp="$(proxy_data_volume_mountpoint)" || return 0
   [[ -n "$mp" ]] || return 0
   if sudo cp "$src" "$mp/bootstrap_decision.json" 2>/dev/null; then
@@ -1000,6 +1011,10 @@ seed_from_catalog() {
     info "Seeded $PINNED_TAG from the signed catalog ($image_ref)"
     return 0
   fi
+  # Resolution succeeded but the pull/tag failed: drop the decision record so a later
+  # break-glass reseed cannot publish a catalog digest that was never deployed. (The
+  # persist step also digest-matches against the running image as a second guard.)
+  rm -f "$decision"
   warn "Could not pull the catalog-authorized digest $image_ref"
   return 1
 }
