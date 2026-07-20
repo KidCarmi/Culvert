@@ -85,8 +85,13 @@ type Client struct {
 	base       *url.URL
 	credential string
 	http       *http.Client
-	// redirectGuard rejects a redirect to a private host; nil disables it (only
-	// the in-package tests, which target a loopback httptest gateway, set nil).
+	// originGuard rejects a request whose origin host is private/internal,
+	// resolving the host and failing closed. It runs BEFORE every request so the
+	// origin is validated even when HTTPS_PROXY is set and the SSRF dial guard
+	// only sees the proxy address. nil disables it (only the in-package tests,
+	// which target a loopback httptest gateway).
+	originGuard func(hostport string) error
+	// redirectGuard rejects a redirect to a private host; nil disables it (tests).
 	redirectGuard func(hostport string) error
 }
 
@@ -112,6 +117,7 @@ func NewClient(cfg Config) (*Client, error) {
 	c := &Client{
 		base:          u,
 		credential:    cfg.Credential,
+		originGuard:   ssrf.PrivateHost,
 		redirectGuard: ssrf.PrivateHost,
 	}
 	c.http = &http.Client{
@@ -130,10 +136,17 @@ func NewClient(cfg Config) (*Client, error) {
 	return c, nil
 }
 
-// checkRedirect re-applies the SSRF guard to each redirect target and caps hops.
+// checkRedirect re-applies the SSRF guard to each redirect target, refuses any
+// downgrade off https, and caps hops. The https check matters because Go
+// preserves the Authorization header and replays the PUT body on a same-host
+// redirect, so an http:// redirect target would leak the bearer credential and
+// chunk bytes over plaintext despite the initial https validation.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return errors.New("upload: too many redirects")
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("upload: refusing non-https redirect to %s", req.URL.Scheme+"://"+req.URL.Host)
 	}
 	if c.redirectGuard != nil {
 		if err := c.redirectGuard(req.URL.Host); err != nil {
@@ -191,12 +204,18 @@ func (c *Client) PutChunk(ctx context.Context, uploadID string, offset int64, ch
 }
 
 // Complete finalizes the upload. The gateway re-verifies bundleSHA256 against the
-// bytes it received and returns the signed receipt.
+// bytes it received and returns the signed receipt; Complete ALSO re-checks the
+// receipt's hash equals the expected bundleSHA256 so EVERY completion path — the
+// Upload convenience wrapper and the queue's direct Init/Status/PutChunk/Complete
+// resume path — rejects a corrupted or mis-issued receipt identically.
 func (c *Client) Complete(ctx context.Context, uploadID, bundleSHA256 string) (Receipt, error) {
 	var rec Receipt
 	body := map[string]string{"bundle_sha256": bundleSHA256}
 	if err := c.do(ctx, http.MethodPost, "/v1/uploads/"+url.PathEscape(uploadID)+":complete", "application/json", body, &rec); err != nil {
 		return Receipt{}, err
+	}
+	if rec.BundleSHA256 != bundleSHA256 {
+		return Receipt{}, fmt.Errorf("upload: receipt hash %q does not match bundle hash %q", rec.BundleSHA256, bundleSHA256)
 	}
 	return rec, nil
 }
@@ -235,14 +254,8 @@ func (c *Client) Upload(ctx context.Context, m Meta, ra io.ReaderAt, size int64)
 		}
 		offset = recv
 	}
-	rec, err := c.Complete(ctx, uploadID, m.BundleSHA256)
-	if err != nil {
-		return Receipt{}, err
-	}
-	if rec.BundleSHA256 != m.BundleSHA256 {
-		return Receipt{}, fmt.Errorf("upload: receipt hash %q does not match bundle hash %q", rec.BundleSHA256, m.BundleSHA256)
-	}
-	return rec, nil
+	// Complete re-checks the receipt hash for every completion path.
+	return c.Complete(ctx, uploadID, m.BundleSHA256)
 }
 
 // rawBody wraps chunk bytes for a raw PUT; nil chunk → empty body.
@@ -252,6 +265,15 @@ func rawBody(chunk []byte) *bytes.Reader { return bytes.NewReader(chunk) }
 // when contentType is application/json, sent raw when it is a *bytes.Reader, and
 // omitted when nil. Uses http.NewRequestWithContext; bounded response read.
 func (c *Client) do(ctx context.Context, method, path, contentType string, reqBody, out any) error {
+	// Preflight the ORIGIN host before every request. SafeDialContext guards the
+	// actual dial, but with HTTPS_PROXY set that dial is to the proxy — so a
+	// private origin would otherwise be tunneled through an allowed proxy. This
+	// resolving check fails closed on the configured origin regardless of proxy.
+	if c.originGuard != nil {
+		if err := c.originGuard(c.base.Host); err != nil {
+			return fmt.Errorf("upload: origin SSRF guard: %w", err)
+		}
+	}
 	body, err := requestBody(contentType, reqBody)
 	if err != nil {
 		return err

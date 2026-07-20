@@ -214,11 +214,40 @@ func TestCheckRedirect_GuardsPrivateAndCapsHops(t *testing.T) {
 	if err := c.checkRedirect(req, nil); err == nil {
 		t.Error("redirect to a private host must be refused")
 	}
+	// A downgrade to http is refused (would leak the bearer credential + body).
+	downgrade := &http.Request{URL: mustURL(t, "http://tac.example.com/downgrade")}
+	if err := c.checkRedirect(downgrade, nil); err == nil {
+		t.Error("non-https redirect must be refused")
+	}
 	// Too many hops is refused.
 	pub := &http.Request{URL: mustURL(t, "https://tac.example.com/next")}
 	via := make([]*http.Request, maxRedirects)
 	if err := c.checkRedirect(pub, via); err == nil {
 		t.Error("too many redirects must be refused")
+	}
+}
+
+// TestComplete_RejectsMismatchedReceipt proves the receipt-hash check lives in
+// Complete, so the queue's direct Init/PutChunk/Complete resume path rejects a
+// corrupted/mis-issued receipt identically to the Upload wrapper.
+func TestComplete_RejectsMismatchedReceipt(t *testing.T) {
+	g := &mockGateway{chunkSize: 64, corruptReceiptHash: true}
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	c := testClient(t, srv)
+	ctx := context.Background()
+
+	data := []byte("resume-path-completion-must-verify-the-receipt-hash")
+	m := Meta{CaseID: "CASE-4", BundleID: "csb_r", BundleSHA256: sha256hex(data)}
+	uploadID, _, err := c.Init(ctx, m)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if _, err := c.PutChunk(ctx, uploadID, 0, data); err != nil {
+		t.Fatalf("PutChunk: %v", err)
+	}
+	if _, err := c.Complete(ctx, uploadID, m.BundleSHA256); err == nil || !strings.Contains(err.Error(), "receipt hash") {
+		t.Fatalf("Complete must reject a mismatched receipt hash, got %v", err)
 	}
 }
 
