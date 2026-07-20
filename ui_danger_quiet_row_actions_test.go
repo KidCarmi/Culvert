@@ -113,6 +113,30 @@ func TestDangerQuiet_VariantExistsAndUsesTokens(t *testing.T) {
 	}
 }
 
+// ── 1b. The 1px border is compensated by padding (no size regression) ───────
+
+func TestDangerQuiet_BorderCompensatedByPadding(t *testing.T) {
+	data, err := os.ReadFile(staticIndexHTMLPath())
+	if err != nil {
+		t.Fatalf("read static/index.html: %v", err)
+	}
+	s := string(data)
+	// Base .btn has border:none; these auto-width inline-flex buttons have no
+	// explicit width/height, so box-sizing:border-box does NOT absorb the added
+	// 1px border. The quiet variant must trim exactly 1px per edge so its OUTER
+	// box is identical to the border-less solid button it replaces — otherwise
+	// every row action grows 2px and table density regresses. Base .btn padding
+	// is 8px 16px → 7px 15px; .btn.sm is 5px 10px → 4px 9px. (Verified in-browser:
+	// solid .sm and quiet .sm both measure 66.69×24.)
+	idle := cssBlock(t, s, ".btn.danger-quiet {")
+	if !strings.Contains(idle, "padding: 7px 15px") {
+		t.Errorf("`.btn.danger-quiet` must trim base padding to 7px 15px to offset its 1px border; got:\n%s", idle)
+	}
+	if !strings.Contains(s, ".btn.danger-quiet.sm { padding: 4px 9px; }") {
+		t.Error("`.btn.danger-quiet.sm` must trim .sm padding to 4px 9px to offset its 1px border (row-density guard)")
+	}
+}
+
 // ── 2. Solid `.btn.danger` is NOT weakened or replaced ──────────────────────
 
 func TestDangerQuiet_SolidDangerIntact(t *testing.T) {

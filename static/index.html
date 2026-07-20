@@ -292,17 +292,23 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
    confirmation-dialog, bulk, and clear-all actions (UX-PRINCIPLES.md §3).
    Idle = transparent fill + thin --crit border + readable --text; hover fills
    with --crit; focus-visible shows a --crit-tint ring; active stays filled with
-   a restrained pressed dim. box-sizing:border-box (global, line 13) means the
-   1px border adds ZERO outer size, so there is no layout shift between states
-   or versus the old solid button — row height and button size are unchanged.
+   a restrained pressed dim.
+   METRICS: base .btn has border:none; these buttons are auto-width inline-flex
+   with no explicit width/height, so box-sizing:border-box does NOT absorb the
+   added 1px border — it would otherwise make each quiet button 2px larger than
+   the solid one it replaces and grow row height. We therefore trim 1px off each
+   padding edge (base 8px16px→7px15px; .sm 5px10px→4px9px) so the OUTER box is
+   byte-identical to the border-less solid button and to itself across states.
    All transitions are the 150ms token timing and are neutralised by the
    prefers-reduced-motion floor. No raw hex/rgba; `white` is a named color. */
 .btn.danger-quiet {
   background: transparent;
   border: 1px solid var(--crit);
   color: var(--text);
+  padding: 7px 15px;
   transition: background .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease;
 }
+.btn.danger-quiet.sm { padding: 4px 9px; }
 .btn.danger-quiet:hover { background: var(--crit); border-color: var(--crit); color: white; }
 .btn.danger-quiet:focus-visible { border-color: var(--crit); box-shadow: 0 0 0 3px var(--crit-tint); outline: none; }
 .btn.danger-quiet:active { background: var(--crit); border-color: var(--crit); color: white; filter: brightness(.9); }
