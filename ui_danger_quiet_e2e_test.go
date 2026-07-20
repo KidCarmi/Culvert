@@ -41,6 +41,26 @@ func computedStyle(t *testing.T, page playwright.Page, sel, prop string) string 
 	return strings.TrimSpace(s)
 }
 
+// hoverAndReadBg hovers btn and returns its background-color once the 150ms
+// hover transition has settled. It re-hovers and polls (the pointer can drift
+// off if layout nudges, and a mid-transition read would report an interpolated
+// color), returning the first solid-red reading or the last value seen.
+func hoverAndReadBg(t *testing.T, page playwright.Page, btn playwright.Locator, sel string) string {
+	t.Helper()
+	var last string
+	for i := 0; i < 10; i++ {
+		if err := btn.Hover(); err != nil {
+			t.Fatalf("hover: %v", err)
+		}
+		page.WaitForTimeout(200) // > the 150ms background transition
+		last = computedStyle(t, page, sel, "background-color")
+		if isSolidRed(last) {
+			return last
+		}
+	}
+	return last
+}
+
 // setTheme forces dark (attribute removed) or light (data-theme="light").
 func setTheme(t *testing.T, page playwright.Page, light bool) {
 	t.Helper()
@@ -92,6 +112,15 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 	}
 	const sel = `#bl-table .btn.danger-quiet`
 
+	// Freeze the SPA's 3s polling tick: it re-renders #bl-table, replacing the
+	// hovered <button> node with a fresh one that is NOT under the pointer, so a
+	// tick landing between Hover() and the style read would report the idle
+	// (transparent) background. Clearing all timers keeps the node stable for the
+	// duration of the style assertions.
+	if _, err := page.Evaluate(`() => { for (let i = 1; i < 100000; i++) window.clearInterval(i); }`); err != nil {
+		t.Fatalf("freeze polling timers: %v", err)
+	}
+
 	// ── Dark theme ──────────────────────────────────────────────────────────
 	setTheme(t, page, false)
 
@@ -109,10 +138,7 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 		t.Fatalf("bounding box (idle): %v", err)
 	}
 
-	if err := btn.Hover(); err != nil {
-		t.Fatalf("hover: %v", err)
-	}
-	hoverBg := computedStyle(t, page, sel, "background-color")
+	hoverBg := hoverAndReadBg(t, page, btn, sel)
 	if !isSolidRed(hoverBg) {
 		t.Errorf("dark hover background = %q; want a solid destructive red fill", hoverBg)
 	}
@@ -147,10 +173,7 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 	if !isTransparent(lightIdleBg) {
 		t.Errorf("light idle background = %q; want transparent (not solid red)", lightIdleBg)
 	}
-	if err := btn.Hover(); err != nil {
-		t.Fatalf("hover (light): %v", err)
-	}
-	if lightHoverBg := computedStyle(t, page, sel, "background-color"); !isSolidRed(lightHoverBg) {
+	if lightHoverBg := hoverAndReadBg(t, page, btn, sel); !isSolidRed(lightHoverBg) {
 		t.Errorf("light hover background = %q; want a solid destructive red fill", lightHoverBg)
 	}
 	if err := page.Mouse().Move(0, 0); err != nil {

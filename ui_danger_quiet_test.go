@@ -40,6 +40,37 @@ func classForDataClick(t *testing.T, html, handler string) string {
 	return m[1]
 }
 
+// classForID returns the class attribute of the first element carrying id, or
+// "" if the element (or its class attribute) is absent.
+func classForID(t *testing.T, html, id string) string {
+	t.Helper()
+	tag := regexp.MustCompile(`<[a-zA-Z]+[^>]*\bid="` + regexp.QuoteMeta(id) + `"[^>]*>`).FindString(html)
+	if tag == "" {
+		return ""
+	}
+	m := regexp.MustCompile(`\bclass="([^"]*)"`).FindStringSubmatch(tag)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// assertSolidDanger fails unless cls is the SOLID .btn.danger tier (has danger,
+// not danger-quiet). label names the control for the failure message.
+func assertSolidDanger(t *testing.T, label, cls string) {
+	t.Helper()
+	if cls == "" {
+		t.Errorf("%s: not found (or missing class)", label)
+		return
+	}
+	if hasClass(cls, "danger-quiet") {
+		t.Errorf("%s must stay SOLID danger, not quiet: %q", label, cls)
+	}
+	if !hasClass(cls, "danger") {
+		t.Errorf("%s must carry .danger: %q", label, cls)
+	}
+}
+
 func hasClass(classAttr, want string) bool {
 	for _, c := range strings.Fields(classAttr) {
 		if c == want {
@@ -146,24 +177,7 @@ func TestDangerQuiet_RowLevelActionsUseQuietVariant(t *testing.T) {
 
 // 4. The confirmation dialog's final destructive button stays SOLID .btn.danger.
 func TestDangerQuiet_ConfirmDialogStaysSolidDanger(t *testing.T) {
-	s := loadIndexHTML(t)
-
-	okRe := regexp.MustCompile(`<button[^>]*id="confirm-dialog-ok"[^>]*>`)
-	tag := okRe.FindString(s)
-	if tag == "" {
-		t.Fatal(`confirm-dialog-ok button not found`)
-	}
-	clsRe := regexp.MustCompile(`\bclass="([^"]*)"`)
-	m := clsRe.FindStringSubmatch(tag)
-	if m == nil {
-		t.Fatalf("confirm-dialog-ok has no class attribute: %q", tag)
-	}
-	if hasClass(m[1], "danger-quiet") {
-		t.Errorf("confirmation-dialog final button must stay SOLID danger, not quiet: %q", m[1])
-	}
-	if !hasClass(m[1], "danger") {
-		t.Errorf("confirmation-dialog final button must carry .danger: %q", m[1])
-	}
+	assertSolidDanger(t, "confirmation-dialog final button", classForID(t, loadIndexHTML(t), "confirm-dialog-ok"))
 }
 
 //  5. Bulk delete remains visually stronger (solid) than a single row-level
@@ -172,22 +186,7 @@ func TestDangerQuiet_HighProminenceActionsStaySolid(t *testing.T) {
 	s := loadIndexHTML(t)
 
 	// Bulk delete is a static-markup button with a stable id.
-	if idx := strings.Index(s, `id="bl-bulk-del"`); idx >= 0 {
-		tag := regexp.MustCompile(`<button[^>]*id="bl-bulk-del"[^>]*>`).FindString(s)
-		clsRe := regexp.MustCompile(`\bclass="([^"]*)"`)
-		if m := clsRe.FindStringSubmatch(tag); m != nil {
-			if hasClass(m[1], "danger-quiet") {
-				t.Errorf("bulk delete (bl-bulk-del) must stay SOLID danger, not quiet: %q", m[1])
-			}
-			if !hasClass(m[1], "danger") {
-				t.Errorf("bulk delete (bl-bulk-del) must carry .danger: %q", m[1])
-			}
-		} else {
-			t.Errorf("bulk delete button has no class: %q", tag)
-		}
-	} else {
-		t.Error(`id="bl-bulk-del" not found — bulk-delete control missing`)
-	}
+	assertSolidDanger(t, "bulk delete (bl-bulk-del)", classForID(t, s, "bl-bulk-del"))
 
 	// Clear-all, CA rotation, and the high-blast CDR revoke stay solid.
 	for _, h := range []string{
@@ -196,17 +195,7 @@ func TestDangerQuiet_HighProminenceActionsStaySolid(t *testing.T) {
 		"forceRotateCA",        // CA rotation (high blast radius)
 		"cdrRevokeInstanceRPC", // server-side cert revoke (high blast radius)
 	} {
-		cls := classForDataClick(t, s, h)
-		if cls == "" {
-			t.Errorf("no element found for data-click=%q", h)
-			continue
-		}
-		if hasClass(cls, "danger-quiet") {
-			t.Errorf("high-prominence action %q must stay SOLID danger, not quiet: %q", h, cls)
-		}
-		if !hasClass(cls, "danger") {
-			t.Errorf("high-prominence action %q must carry .danger: %q", h, cls)
-		}
+		assertSolidDanger(t, "high-prominence action "+h, classForDataClick(t, s, h))
 	}
 }
 
