@@ -23,6 +23,8 @@ func main() {
 	jsonOut := flag.String("json", "api/openapi/openapi.json", "canonical JSON output path")
 	htmlOut := flag.String("html", "api/openapi/index.html", "admin offline HTML docs output path")
 	publicHTMLOut := flag.String("public-html", "api/openapi/index.public.html", "public-only offline HTML docs output path")
+	manifest := flag.String("manifest", "api/route-classification.yaml", "path to the route-classification manifest")
+	inventoryOut := flag.String("inventory", "docs/api/API-INVENTORY.md", "generated API inventory output path")
 	check := flag.Bool("check", false, "verify committed artifacts match regeneration (no writes); exit 1 on drift")
 	flag.Parse()
 
@@ -41,6 +43,10 @@ func main() {
 	if err != nil {
 		die("render public html: %v", err)
 	}
+	inventory, err := apicontract.RenderInventory(*manifest)
+	if err != nil {
+		die("render inventory: %v", err)
+	}
 
 	artifacts := []struct {
 		path  string
@@ -49,6 +55,7 @@ func main() {
 		{*jsonOut, jsonBytes},
 		{*htmlOut, adminHTML},
 		{*publicHTMLOut, publicHTML},
+		{*inventoryOut, inventory},
 	}
 
 	if *check {

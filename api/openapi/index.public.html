@@ -14,6 +14,9 @@ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;col
 <div class="op"><span class="m GET">GET</span><span class="path">/api/auth/status</span><div class="sum">Current session authentication state</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag">getAuthStatus</span></div></div>
 <h2>health</h2>
 <div class="op"><span class="m GET">GET</span><span class="path">/healthz</span><div class="sum">Node liveness/health probe</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag">getHealthz</span></div></div>
+<h2>pac</h2>
+<div class="op"><span class="m GET">GET</span><span class="path">/pac/{profile}.pac</span><div class="sum">Per-profile PAC file</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag">getProfilePAC</span></div></div>
+<div class="op"><span class="m GET">GET</span><span class="path">/proxy.pac</span><div class="sum">Proxy auto-config file</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag">getProxyPAC</span></div></div>
 <h2>setup</h2>
 <div class="op"><span class="m POST">POST</span><span class="path">/api/setup/complete</span><div class="sum">Set the initial administrator credential (one-time bootstrap)</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag danger-high">danger:high</span><span class="tag">completeSetup</span></div></div>
 <div class="op"><span class="m GET">GET</span><span class="path">/api/setup/status</span><div class="sum">Whether first-boot setup is still required</div><div class="tags"><span class="tag">public</span><span class="tag">public-supported</span><span class="tag">getSetupStatus</span></div></div>

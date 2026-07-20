@@ -50,6 +50,18 @@ func TestOpenAPI_Gate8_BundleNotStale(t *testing.T) {
 	if !bytes.Equal(committedPublic, publicHTML) {
 		t.Fatal("api/openapi/index.public.html is stale — run `make api-bundle` and commit the result")
 	}
+
+	inventory, err := apicontract.RenderInventory("api/route-classification.yaml")
+	if err != nil {
+		t.Fatalf("render inventory: %v", err)
+	}
+	committedInv, err := os.ReadFile("docs/api/API-INVENTORY.md")
+	if err != nil {
+		t.Fatalf("read committed API-INVENTORY.md: %v", err)
+	}
+	if !bytes.Equal(committedInv, inventory) {
+		t.Fatal("docs/api/API-INVENTORY.md is stale — run `make api-bundle` and commit the result")
+	}
 }
 
 // TestOpenAPI_PublicDocs_NoInternalLeak proves the public documentation build

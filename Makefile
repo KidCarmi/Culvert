@@ -33,7 +33,7 @@ api-lint:
 
 # Regenerate the canonical JSON + offline HTML from the YAML contract.
 api-bundle:
-	$(GO) run ./cmd/apibundle -spec $(SPEC) -json api/openapi/openapi.json -html api/openapi/index.html
+	$(GO) run ./cmd/apibundle -spec $(SPEC) -json api/openapi/openapi.json -html api/openapi/index.html -public-html api/openapi/index.public.html -manifest api/route-classification.yaml -inventory docs/api/API-INVENTORY.md
 
 # Gate 8: fail if the committed generated artifacts are stale.
 api-bundle-check:
