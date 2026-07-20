@@ -69,6 +69,26 @@ func TestParseTACTrustKeys_ValidatesAlgAndKey(t *testing.T) {
 	}
 }
 
+func TestParseTACTrustKeys_DuplicateIDSameSourceFailsClosed(t *testing.T) {
+	_, _, p1 := newTACKey(t)
+	_, _, p2 := newTACKey(t)
+	// Same key_id, DIFFERENT keys within one source ⇒ malformed, fail closed
+	// (the manifest records only key_id; an ambiguous id could seal undecryptably).
+	dup := `[{"key_id":"tac","alg":"x25519","public_key":"` + p1 + `"},{"key_id":"tac","alg":"x25519","public_key":"` + p2 + `"}]`
+	if _, err := parseTACTrustKeys(dup, "test"); err == nil {
+		t.Fatal("same-source duplicate key_id with a different key must fail closed")
+	}
+	// Same key_id, SAME key is a harmless exact dup ⇒ deduped, no error.
+	same := `[{"key_id":"tac","alg":"x25519","public_key":"` + p1 + `"},{"key_id":"tac","alg":"x25519","public_key":"` + p1 + `"}]`
+	keys, err := parseTACTrustKeys(same, "test")
+	if err != nil {
+		t.Fatalf("exact-duplicate key must dedup, not error: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("exact-duplicate key not deduped: %+v", keys)
+	}
+}
+
 func TestResolveTACTrustKeys_ConfiguredExtendBaked(t *testing.T) {
 	_, _, bakedPub := newTACKey(t)
 	_, _, cfgPub := newTACKey(t)

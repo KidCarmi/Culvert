@@ -99,6 +99,7 @@ func parseTACTrustKeys(raw, source string) ([]tacTrustKey, error) {
 		return nil, fmt.Errorf("must be a JSON array of trust keys: %w", err)
 	}
 	out := make([]tacTrustKey, 0, len(in))
+	seen := make(map[string]string, len(in)) // key_id → fingerprint, within THIS source
 	for i := range in {
 		k := in[i]
 		id := strings.TrimSpace(k.KeyID)
@@ -112,11 +113,25 @@ func parseTACTrustKeys(raw, source string) ([]tacTrustKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("trust key %q: %v", sanitizeLog(id), err)
 		}
+		fp := tacKeyFingerprint(pub)
+		if prev, dup := seen[id]; dup {
+			// A same-source key_id repeated with a DIFFERENT key is malformed: the
+			// upload manifest records only key_id, so a bundle could seal to one key
+			// while TAC selects the other private key for that id (undecryptable).
+			// Fail closed. An EXACT repeat (same fingerprint) is a harmless dup — drop
+			// it. (A cross-source baked↔configured collision is handled in resolve,
+			// where baked deliberately wins.)
+			if prev != fp {
+				return nil, fmt.Errorf("duplicate key_id %q with a different public key", sanitizeLog(id))
+			}
+			continue
+		}
+		seen[id] = fp
 		out = append(out, tacTrustKey{
 			KeyID:       id,
 			Alg:         tacAlgX25519,
 			PublicKey:   k.PublicKey,
-			Fingerprint: tacKeyFingerprint(pub),
+			Fingerprint: fp,
 			Source:      source,
 		})
 	}
