@@ -4392,13 +4392,20 @@ Firefox (all platforms):
 
           <div>
             <div style="font-weight:600;margin-bottom:6px">TAC secure upload</div>
-            <p class="hint">Optional outbound upload of a bundle to a TAC portal. <strong>Off by default</strong> and never automatic - a bundle only leaves on an explicit, per-bundle, case-bound admin action (added in a later step). Set the TAC origin (https; a private/internal address is refused - use offline export for air-gapped transfer) and enable it here to make upload available.</p>
+            <p class="hint">Optional outbound upload of a bundle to a TAC portal. <strong>Off by default</strong> and never automatic - a bundle only leaves on an explicit, per-bundle, case-bound admin action (the <em>Upload to TAC</em> button on a ready bundle below). The bundle is sealed end-to-end to TAC's public key before it leaves. Set the TAC origin (https; a private/internal address is refused - use offline export for air-gapped transfer) and enable it here to make upload available.</p>
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
+              <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
             </div>
+            <div style="margin-top:10px;font-size:.85rem;font-weight:600">TAC trust keys</div>
+            <p class="hint">The public recipient key(s) a bundle is sealed to. Verify a key's fingerprint against TAC's published value out-of-band. Read-only (baked into the build or set via <code>CULVERT_TAC_TRUST_KEYS</code>).</p>
+            <div id="support-tac-trust" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
+            <div style="margin-top:10px;font-size:.85rem;font-weight:600">Upload queue</div>
+            <div id="support-uploads" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
           <div>
@@ -4846,6 +4853,7 @@ document.addEventListener('click', e => {
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
+    case 'supportUploadBundle':    supportUploadBundle(arg); break;
     case 'releaseCatalogRefresh':  releaseCatalogRefresh(); break;
     case 'releaseDispatchOpen':    releaseDispatchOpen(); break;
     case 'releaseDispatchCancel':  releaseDispatchCancel(); break;
@@ -11622,6 +11630,10 @@ async function tick() {
   if (currentView === 'policy')    fetchPolicy();
   if (currentView === 'cluster')   loadCluster();
   if (currentView === 'upstream')  loadUpstream(); // keep the circuit-breaker "retry in Ns" ETA live
+  // The background worker advances the upload queue every ~30s with no user
+  // action, so keep the queue table live while the Support panel is open (this
+  // only refetches #support-uploads; it does not disturb the config form inputs).
+  if (currentView === 'support')   loadUploads();
 }
 
 function startTick() {
@@ -13456,6 +13468,8 @@ async function loadSupport() {
   [healthEl, statusEl, bundlesEl, dlEl, retEl].forEach(el => { if (el) el.removeAttribute('aria-busy'); });
   loadRecipients();
   loadUploadConfig();
+  loadTacTrust();
+  loadUploads();
 }
 
 async function loadUploadConfig() {
@@ -13476,7 +13490,8 @@ function renderUploadStatus(d) {
   const color = enabled ? 'var(--green)' : 'var(--muted)';
   const label = enabled ? 'ENABLED' : 'NOT ENABLED';
   const originLine = d.origin ? ' · origin ' + escHtml(String(d.origin)) : '';
-  el.innerHTML = '<p class="hint">Upload <strong style="color:' + color + '">' + label + '</strong>' + originLine + '</p>';
+  const credLine = d.credential_set ? ' · credential set' : '';
+  el.innerHTML = '<p class="hint">Upload <strong style="color:' + color + '">' + label + '</strong>' + originLine + credLine + '</p>';
   // Reflect current values into the admin form.
   const originInp = document.getElementById('upload-origin');
   const enabledInp = document.getElementById('upload-enabled');
@@ -13488,17 +13503,86 @@ async function saveUploadConfig() {
   if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
   const originInp = document.getElementById('upload-origin');
   const enabledInp = document.getElementById('upload-enabled');
+  const credInp = document.getElementById('upload-credential');
+  const clearInp = document.getElementById('upload-clear-cred');
   const origin = (originInp && originInp.value || '').trim();
   const enabled = !!(enabledInp && enabledInp.checked);
+  const body = { enabled: enabled, origin: origin };
+  // Empty credential = keep the existing one; an explicit checkbox clears it.
+  if (clearInp && clearInp.checked) body.clear_credential = true;
+  else if (credInp && credInp.value) body.credential = credInp.value;
   try {
     const r = await apiFetch('/api/support/upload/config',
-      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled, origin: origin }) });
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) { toast('Save failed: ' + (await r.text()), 'error'); return; }
     toast('Upload posture saved (no bundle was sent)', 'success');
+    if (credInp) credInp.value = '';
+    if (clearInp) clearInp.checked = false;
     renderUploadStatus(await r.json());
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');
   }
+}
+
+async function loadTacTrust() {
+  const el = document.getElementById('support-tac-trust');
+  try {
+    const d = await api('/api/support/tac-trust');
+    renderTacTrust(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Could not load TAC trust keys: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderTacTrust(d) {
+  const el = document.getElementById('support-tac-trust');
+  if (!el) return;
+  d = d || {};
+  const keys = d.keys || [];
+  if (!keys.length) {
+    const why = d.error ? escHtml(String(d.error)) : 'no TAC recipient key is baked in or configured — encrypt-to-TAC is unavailable (use offline export)';
+    el.innerHTML = '<p class="hint">No trust keys · ' + why + '</p>';
+    return;
+  }
+  const rows = keys.map(k => {
+    const active = k.active ? ' <span style="color:var(--green)" title="new bundles seal to this key">(active)</span>' : '';
+    return '<tr><td>' + escHtml(String(k.key_id)) + active + '</td><td>' + escHtml(String(k.source || '')) +
+      '</td><td style="font-family:monospace;font-size:.72rem">' + escHtml(String(k.fingerprint || '')) + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<table class="tbl"><thead><tr><th>Key id</th><th>Source</th><th>SHA-256 fingerprint (verify out-of-band)</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+async function loadUploads() {
+  const el = document.getElementById('support-uploads');
+  try {
+    const d = await api('/api/support/uploads');
+    renderUploads((d && d.uploads) || []);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Could not load upload queue: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function uploadStateColor(s) {
+  if (s === 'uploaded') return 'var(--green)';
+  if (s === 'rejected' || s === 'deferred') return 'var(--red)';
+  return 'var(--muted)';
+}
+
+function renderUploads(list) {
+  const el = document.getElementById('support-uploads');
+  if (!el) return;
+  if (!list.length) { el.innerHTML = '<p class="hint">No bundles queued for upload.</p>'; return; }
+  const rows = list.map(u => {
+    const st = String(u.state || '');
+    const receipt = u.receipt ? ' · receipt ' + escHtml(String(u.receipt.sig || '').slice(0, 16)) : '';
+    const err = u.last_error ? ' · ' + escHtml(String(u.last_error)) : '';
+    return '<tr><td style="font-family:monospace;font-size:.72rem">' + escHtml(String(u.bundle_id)) +
+      '</td><td>' + escHtml(String(u.case_id || '')) +
+      '</td><td><strong style="color:' + uploadStateColor(st) + '">' + escHtml(st) + '</strong></td>' +
+      '<td>' + escHtml(String(u.attempts != null ? u.attempts : '')) + '</td>' +
+      '<td>' + receipt + err + '</td></tr>';
+  }).join('');
+  el.innerHTML = '<table class="tbl"><thead><tr><th>Bundle</th><th>Case</th><th>State</th><th>Att.</th><th>Detail</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 function renderSupportDebugLevel(d) {
@@ -13614,6 +13698,9 @@ function renderSupportBundles(list) {
             ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>' +
             ' <button class="btn ghost sm" data-click="supportExportSealed" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download sealed to a recipient public key (E2E - appliance holds no decrypt key)">Seal</button>'
           : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
+        if (ready && uiRole === 'admin') {
+          ops += ' <button class="btn ghost sm" data-click="supportUploadBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Seal to TAC and upload (consent-gated; requires upload enabled, a TAC trust key, and a case id)">Upload to TAC</button>';
+        }
         if (!ready && uiRole === 'admin') {
           ops += ' <button class="btn primary sm" data-click="supportApproveBundle" data-arg="' + escHtml(String(b.bundle_id)) + '">Approve</button>';
         }
@@ -14166,6 +14253,32 @@ async function supportApproveBundle(id) {
     await loadSupport();
   } catch (err) {
     toast('Approve failed: ' + err.message, 'error');
+  }
+}
+
+async function supportUploadBundle(id) {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  if (!id) return;
+  const b = (_supportBundles || []).find(x => String(x.bundle_id) === String(id)) || {};
+  // The prompt's OK is the explicit per-bundle consent; a case id is mandatory.
+  const caseId = await promptAction({
+    title: 'Upload bundle to TAC?',
+    msg: 'This seals ' + String(id) + ' end-to-end to TAC’s public key and queues it for outbound upload. Requires upload enabled and a TAC trust key configured. Enter the support case id to consent.',
+    label: 'Case id',
+    placeholder: 'CASE-1234',
+    value: b.case_id || '',
+    okLabel: 'Seal & upload',
+    okStyle: 'primary' });
+  const cid = (caseId || '').trim();
+  if (!cid) return; // cancelled or no case entered
+  try {
+    const r = await apiFetch('/api/support/bundles/' + encodeURIComponent(String(id)) + '/upload',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: true, case_id: cid }) });
+    if (!r.ok) { toast('Upload consent failed: ' + (await r.text()), 'error'); return; }
+    toast('Bundle sealed and queued for upload to TAC', 'success');
+    await loadSupport();
+  } catch (err) {
+    toast('Upload failed: ' + err.message, 'error');
   }
 }
 

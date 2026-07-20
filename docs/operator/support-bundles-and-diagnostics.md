@@ -191,6 +191,10 @@ SIEM stream remains the system of record.
 
 Hand a redacted bundle to TAC over an untrusted channel without sharing a stored key.
 
+> **Outbound upload (optional):** to send a bundle to the TAC Cloud directly over a
+> consent-gated, end-to-end-encrypted, outbound-only channel (instead of manual
+> export), see **`docs/operator/secure-upload.md`**. It is off by default.
+
 **UI:** Support panel → **Encrypt** on a ready bundle → enter a passphrase → the
 `.csb.enc` downloads.
 **API:** `POST /api/support/bundles/{id}/download-encrypted` (operator, body
