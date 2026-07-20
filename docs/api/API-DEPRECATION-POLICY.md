@@ -37,7 +37,7 @@ manifest and, if documented, note the canonical path in the operation descriptio
 
 - [ ] Deprecated for ≥1 MINOR release with CHANGELOG evidence.
 - [ ] Consumers notified / migration guide published.
-- [ ] `api-breaking-change` label + named CODEOWNERS approver.
+- [ ] `api-breaking-approved` label + named CODEOWNERS approver.
 - [ ] MAJOR contract version bump.
 - [ ] Route removed from `uiRoutes`, the contract, and the classification manifest
       in the same PR (the coverage gate enforces consistency).
