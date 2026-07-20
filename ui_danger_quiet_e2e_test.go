@@ -70,6 +70,24 @@ func setTheme(t *testing.T, page playwright.Page, light bool) {
 	}
 }
 
+// setThemeSettled switches theme and waits past the 150ms token transition so a
+// following computed-style read reflects the new theme, not a mid-interpolation.
+func setThemeSettled(t *testing.T, page playwright.Page, light bool) {
+	t.Helper()
+	setTheme(t, page, light)
+	page.WaitForTimeout(200)
+}
+
+// moveAway parks the pointer at the top-left corner (off the row button) and
+// waits past the hover transition, so a following idle read sees no :hover.
+func moveAway(t *testing.T, page playwright.Page) {
+	t.Helper()
+	if err := page.Mouse().Move(2, 2); err != nil {
+		t.Fatalf("mouse move away: %v", err)
+	}
+	page.WaitForTimeout(200)
+}
+
 func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 	const adminUser, viewerUser, pass = "admin-dq", "viewer-dq", "Dq-e2e-pass-1!" // #nosec G101 -- test-only fixture credentials
 
@@ -121,28 +139,35 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 		t.Fatalf("freeze polling timers: %v", err)
 	}
 
-	// ── Dark theme ──────────────────────────────────────────────────────────
-	setTheme(t, page, false)
+	// ── Idle colors FIRST, before any hover ────────────────────────────────
+	// Measure both themes' idle backgrounds while the button has never been
+	// hovered, so a residual :hover can never contaminate the "quiet at rest"
+	// assertion. moveAway keeps the pointer off the button; setThemeSettled lets
+	// the 150ms transition finish before the read.
+	moveAway(t, page)
 
-	idleBg := computedStyle(t, page, sel, "background-color")
-	if !isTransparent(idleBg) {
-		t.Errorf("dark idle background = %q; want transparent (quiet, not a wall of red)", idleBg)
+	setThemeSettled(t, page, false)
+	if bg := computedStyle(t, page, sel, "background-color"); !isTransparent(bg) {
+		t.Errorf("dark idle background = %q; want transparent (quiet, not a wall of red)", bg)
 	}
 	if border := computedStyle(t, page, sel, "border-top-color"); !isRedish(border) {
 		t.Errorf("dark idle border-color = %q; want a destructive red", border)
 	}
 
-	// Size before hover.
+	setThemeSettled(t, page, true)
+	if bg := computedStyle(t, page, sel, "background-color"); !isTransparent(bg) {
+		t.Errorf("light idle background = %q; want transparent (not solid red)", bg)
+	}
+
+	// ── Hover fills solid destructive red, in both themes ───────────────────
+	setThemeSettled(t, page, false)
 	boxIdle, err := btn.BoundingBox()
 	if err != nil {
 		t.Fatalf("bounding box (idle): %v", err)
 	}
-
-	hoverBg := hoverAndReadBg(t, page, btn, sel)
-	if !isSolidRed(hoverBg) {
-		t.Errorf("dark hover background = %q; want a solid destructive red fill", hoverBg)
+	if bg := hoverAndReadBg(t, page, btn, sel); !isSolidRed(bg) {
+		t.Errorf("dark hover background = %q; want a solid destructive red fill", bg)
 	}
-
 	boxHover, err := btn.BoundingBox()
 	if err != nil {
 		t.Fatalf("bounding box (hover): %v", err)
@@ -151,13 +176,15 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 		t.Errorf("button changed size on hover: idle %gx%g vs hover %gx%g (layout shift / density regression)",
 			boxIdle.Width, boxIdle.Height, boxHover.Width, boxHover.Height)
 	}
+	moveAway(t, page)
 
-	// Move the pointer away so :hover clears before the focus check.
-	if err := page.Mouse().Move(0, 0); err != nil {
-		t.Fatalf("mouse move away: %v", err)
+	setThemeSettled(t, page, true)
+	if bg := hoverAndReadBg(t, page, btn, sel); !isSolidRed(bg) {
+		t.Errorf("light hover background = %q; want a solid destructive red fill", bg)
 	}
+	moveAway(t, page)
 
-	// Keyboard focus (:focus-visible) must be visibly ringed.
+	// ── Keyboard focus (:focus-visible) must be visibly ringed ──────────────
 	fv, err := page.Evaluate(`(sel) => { const el = document.querySelector(sel); el.focus({focusVisible:true}); return { visible: el.matches(':focus-visible'), shadow: getComputedStyle(el).boxShadow }; }`, sel)
 	if err != nil {
 		t.Fatalf("focus eval: %v", err)
@@ -165,19 +192,6 @@ func TestUIE2E_DangerQuietRowButton(t *testing.T) {
 	fvMap, _ := fv.(map[string]interface{})
 	if shadow, _ := fvMap["shadow"].(string); shadow == "" || shadow == "none" {
 		t.Errorf("focus-visible box-shadow = %q; want a visible focus ring", shadow)
-	}
-
-	// ── Light theme ─────────────────────────────────────────────────────────
-	setTheme(t, page, true)
-	lightIdleBg := computedStyle(t, page, sel, "background-color")
-	if !isTransparent(lightIdleBg) {
-		t.Errorf("light idle background = %q; want transparent (not solid red)", lightIdleBg)
-	}
-	if lightHoverBg := hoverAndReadBg(t, page, btn, sel); !isSolidRed(lightHoverBg) {
-		t.Errorf("light hover background = %q; want a solid destructive red fill", lightHoverBg)
-	}
-	if err := page.Mouse().Move(0, 0); err != nil {
-		t.Fatalf("mouse move away (light): %v", err)
 	}
 
 	// ── Confirmation flow: click opens the dialog; Cancel issues no DELETE ───
