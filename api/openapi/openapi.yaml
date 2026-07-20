@@ -5711,7 +5711,7 @@ paths:
       parameters:
         - name: id
           in: query
-          required: false
+          required: true
           schema: { type: string }
       requestBody:
         required: true
@@ -5745,7 +5745,7 @@ paths:
       parameters:
         - name: id
           in: query
-          required: false
+          required: true
           schema: { type: string }
       responses:
         '200':
@@ -6362,13 +6362,9 @@ paths:
       x-culvert-danger-level: medium
       x-culvert-audit-event: cdr.instance.delete
       parameters:
-        - name: id
-          in: query
-          required: false
-          schema: { type: string }
         - name: name
           in: query
-          required: false
+          required: true
           schema: { type: string }
       responses:
         '200':
@@ -8600,10 +8596,18 @@ paths:
       x-culvert-danger-level: high
       x-culvert-audit-event: cdr.instance.enroll
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/GenericWriteInput' }
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, endpoint, token, serverFingerprint]
+              properties:
+                name: { type: string, description: "Instance name ([A-Za-z0-9][A-Za-z0-9_.-]{0,63})." }
+                endpoint: { type: string, description: "CDR sidecar endpoint (host:port)." }
+                token: { type: string, description: "One-time enrollment token." }
+                serverFingerprint: { type: string, description: "TOFU pin of the server certificate." }
       responses:
         '200':
           description: OK.

@@ -2346,7 +2346,7 @@
           {
             "in": "query",
             "name": "id",
-            "required": false,
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -2489,7 +2489,7 @@
           {
             "in": "query",
             "name": "id",
-            "required": false,
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -4784,16 +4784,8 @@
         "parameters": [
           {
             "in": "query",
-            "name": "id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
             "name": "name",
-            "required": false,
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -4885,11 +4877,36 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GenericWriteInput"
+                "additionalProperties": false,
+                "properties": {
+                  "endpoint": {
+                    "description": "CDR sidecar endpoint (host:port).",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Instance name ([A-Za-z0-9][A-Za-z0-9_.-]{0,63}).",
+                    "type": "string"
+                  },
+                  "serverFingerprint": {
+                    "description": "TOFU pin of the server certificate.",
+                    "type": "string"
+                  },
+                  "token": {
+                    "description": "One-time enrollment token.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "endpoint",
+                  "token",
+                  "serverFingerprint"
+                ],
+                "type": "object"
               }
             }
           },
-          "required": false
+          "required": true
         },
         "responses": {
           "200": {
