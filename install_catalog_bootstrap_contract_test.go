@@ -200,3 +200,25 @@ func TestInstaller_EnforcesRollbackFloorOnReinstall(t *testing.T) {
 		}
 	}
 }
+
+// The appliance must be able to prove which catalog decision provisioned it: the
+// installer records the decision into /data (the proxy-data volume) after the stack
+// is up, and the Go side surfaces it on /api/releases.
+func TestInstaller_PersistsBootstrapProvenance(t *testing.T) {
+	s := readContractFile(t, "scripts/install.sh")
+	for _, want := range []string{
+		"persist_bootstrap_decision",
+		"bootstrap_decision.json",
+		".catalog-bootstrap.json",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("install.sh must persist the bootstrap decision into /data; missing %q", want)
+		}
+	}
+	// The persist call must come AFTER the compose-up block (the volume must exist).
+	up := strings.Index(s, "docker compose up -d --wait")
+	call := strings.LastIndex(s, "\npersist_bootstrap_decision\n")
+	if up < 0 || call < 0 || call < up {
+		t.Fatal("persist_bootstrap_decision must be invoked after the stack is up")
+	}
+}

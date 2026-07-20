@@ -852,15 +852,25 @@ cleanup_bootstrap_verifier() {
 # correct for a fresh host). A wrong/unrelated floor can only cause a fail-CLOSED
 # rejection (never a downgrade), so erring toward enforcement is safe.
 BOOTSTRAP_FLOOR_DIR=""
-stage_rollback_floor() {
+
+# proxy_data_volume_mountpoint — echo the host mountpoint of the SINGLE proxy-data
+# named volume, or return 1 if absent/ambiguous. Root-owned; callers use sudo to
+# read/write. Conservative single-match so we never touch an unrelated project's
+# volume (ambiguity ⇒ skip).
+proxy_data_volume_mountpoint() {
   command -v docker >/dev/null 2>&1 || return 1
-  local vols n vol mp fdir
+  local vols n vol
   vols="$(sudo docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E '(^|_)proxy-data$' || true)"
   [[ -n "$vols" ]] || return 1
   n="$(printf '%s\n' "$vols" | grep -c . || true)"
-  [[ "$n" == "1" ]] || return 1 # ambiguous (0 or many) → do not guess a floor
+  [[ "$n" == "1" ]] || return 1
   vol="$vols"
-  mp="$(sudo docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null)" || return 1
+  sudo docker volume inspect "$vol" --format '{{.Mountpoint}}' 2>/dev/null
+}
+
+stage_rollback_floor() {
+  local mp fdir
+  mp="$(proxy_data_volume_mountpoint)" || return 1
   { [[ -n "$mp" ]] && sudo test -f "$mp/release_catalog_state.json"; } || return 1
   fdir="$(mktemp -d "${INSTALL_DIR}/.floor.XXXXXX" 2>/dev/null)" || fdir="$(mktemp -d)" || return 1
   if ! sudo cp "$mp/release_catalog_state.json" "$fdir/release_catalog_state.json" 2>/dev/null; then
@@ -869,6 +879,25 @@ stage_rollback_floor() {
   sudo chown "$(id -u):$(id -g)" "$fdir/release_catalog_state.json" 2>/dev/null || true
   BOOTSTRAP_FLOOR_DIR="$fdir"
   printf '%s\n' "$fdir"
+}
+
+# persist_bootstrap_decision — after the stack is up (so the proxy-data volume
+# exists), copy the host-side catalog decision record into /data so the RUNNING
+# appliance can read it and surface it read-only on /api/releases (provenance /
+# incident forensics: which digest + catalog_version + trust scheme provisioned this
+# host). Best-effort: no record (SEED_REF / break-glass install) or no resolvable
+# volume ⇒ silently skip; never fail the install. World-readable (0644) — the record
+# is non-secret metadata and the container runs as a non-root user.
+persist_bootstrap_decision() {
+  local src mp
+  src="$INSTALL_DIR/.catalog-bootstrap.json"
+  [[ -f "$src" ]] || return 0
+  mp="$(proxy_data_volume_mountpoint)" || return 0
+  [[ -n "$mp" ]] || return 0
+  if sudo cp "$src" "$mp/bootstrap_decision.json" 2>/dev/null; then
+    sudo chmod 0644 "$mp/bootstrap_decision.json" 2>/dev/null || true
+    info "Recorded the bootstrap catalog decision to /data (provenance on /api/releases)."
+  fi
 }
 
 # seed_from_catalog — the TRUSTED fresh-install default: resolve the image digest
@@ -1600,6 +1629,11 @@ if [[ "$COMPOSE_UP_OK" != "1" ]]; then
     sudo docker compose ps -a
     sudo docker compose logs"
 fi
+
+# The stack is up and the proxy-data volume now exists — record the signed-catalog
+# decision that provisioned this host into /data so the appliance can prove its
+# provenance on /api/releases (best-effort; no-op for a non-catalog seed).
+persist_bootstrap_decision
 
 # Backstop for the silent-SSL-inspection-loss class: a CA that fails to load is
 # non-fatal (the proxy serves TLS tunnel-only), so `docker compose up --wait`

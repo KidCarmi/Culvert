@@ -342,6 +342,10 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 			unavail["trust_schemes"] = rm.trustSchemes
 		}
 		rm.addRefreshFields(unavail)
+		// Provenance is independent of the current catalog — surface it even when no
+		// catalog is published (an appliance whose catalog lapsed still knows how it
+		// was provisioned).
+		addBootstrapProvenance(unavail)
 		jsonOK(w, unavail)
 		return
 	}
@@ -366,6 +370,7 @@ func apiReleases(w http.ResponseWriter, r *http.Request) {
 		out["expires_in_days"] = int(math.Floor(time.Until(exp).Hours() / 24))
 	}
 	rm.addRefreshFields(out)
+	addBootstrapProvenance(out)
 	jsonOK(w, out)
 }
 
