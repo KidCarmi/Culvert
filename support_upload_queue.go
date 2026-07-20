@@ -188,6 +188,14 @@ func saveUploadQueueEntry(e uploadQueueEntry) error {
 	return saveUploadQueueEntryLocked(e)
 }
 
+// loadUploadQueueEntry returns one bundle's upload record for the status/receipt
+// surface. Absent/corrupt ⇒ (zero, false).
+func loadUploadQueueEntry(bundleID string) (uploadQueueEntry, bool) {
+	uploadQueueMu.Lock()
+	defer uploadQueueMu.Unlock()
+	return loadUploadQueueEntryLocked(bundleID)
+}
+
 // enqueueUpload records a consented bundle for upload. Idempotent: a re-enqueue
 // of an already delivered (uploaded) or pending (queued/uploading) bundle is a
 // no-op; a re-enqueue of a DEFERRED/REJECTED bundle re-arms it to queued with a
@@ -201,10 +209,20 @@ func enqueueUpload(bundleID, caseID, keyID, sha256 string, now time.Time) (uploa
 	}
 	nowStr := now.UTC().Format(time.RFC3339)
 	rearm := func(e uploadQueueEntry) (uploadQueueEntry, error) {
+		// A re-arm follows a FRESH re-seal (the consent path writes a new,
+		// nondeterministic upload.csb.sealed and passes its new hash/key), so adopt
+		// that metadata and drop any prior session/receipt — the old UploadID points
+		// at bytes that no longer exist on disk, and resuming it would verify the new
+		// blob against the stale hash and be rejected. Fresh blob ⇒ fresh session.
 		e.State = uploadStateQueued
 		e.Attempts = 0
 		e.NextRetryAt = 0
 		e.LastError = ""
+		e.CaseID = caseID
+		e.KeyID = keyID
+		e.BundleSHA256 = sha256
+		e.UploadID = ""
+		e.Receipt = nil
 		e.UpdatedAt = nowStr
 		return e, saveUploadQueueEntryLocked(e)
 	}

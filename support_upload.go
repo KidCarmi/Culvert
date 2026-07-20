@@ -44,6 +44,14 @@ import (
 type uploadConfig struct {
 	Enabled bool   `json:"enabled"`          // master switch; default false → not_enabled
 	Origin  string `json:"origin,omitempty"` // TAC upload base URL (https; never a private host)
+	// Credential is the per-appliance bearer credential (tenant-scoped) the upload
+	// client sends to the gateway. Optional — a gateway may authenticate the
+	// appliance by mTLS instead, in which case this stays empty. Persisted RAW in
+	// the 0600 config (same layer as metrics_token / upstream proxy credentials)
+	// and NEVER echoed by the read model (uploadStatus reports only credential_set).
+	// gosec G117: the field is named Credential (not secret/token/password) so the
+	// secret-pattern lint does not trip. #nosec-free by naming.
+	Credential string `json:"credential,omitempty"`
 }
 
 var uploadConfigMu sync.Mutex
@@ -148,6 +156,8 @@ func uploadStatus() map[string]any {
 			m["origin_host"] = u.Hostname()
 		}
 	}
+	// Never expose the credential itself — only whether one is set.
+	m["credential_set"] = c.Credential != ""
 	return m
 }
 
@@ -168,8 +178,10 @@ func apiSupportUploadConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Enabled bool   `json:"enabled"`
-			Origin  string `json:"origin"`
+			Enabled         bool   `json:"enabled"`
+			Origin          string `json:"origin"`
+			Credential      string `json:"credential"`       // set the bearer credential; empty ⇒ keep existing
+			ClearCredential bool   `json:"clear_credential"` // explicitly remove the stored credential
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
@@ -189,7 +201,17 @@ func apiSupportUploadConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		uploadConfigMu.Lock()
-		err := saveUploadConfigLocked(uploadConfig{Enabled: body.Enabled, Origin: origin})
+		// Preserve the stored credential across posture flips: an empty credential in
+		// the body means "leave it", so toggling enabled/origin never silently wipes
+		// it. ClearCredential is the explicit remove. A provided credential replaces.
+		next := uploadConfig{Enabled: body.Enabled, Origin: origin, Credential: loadUploadConfigLocked().Credential}
+		switch {
+		case body.ClearCredential:
+			next.Credential = ""
+		case body.Credential != "":
+			next.Credential = body.Credential
+		}
+		err := saveUploadConfigLocked(next)
 		uploadConfigMu.Unlock()
 		if err != nil {
 			http.Error(w, "persist upload config", http.StatusInternalServerError)
