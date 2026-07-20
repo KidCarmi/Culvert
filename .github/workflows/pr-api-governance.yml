@@ -56,7 +56,7 @@ jobs:
             echo "api=0" >> "$GITHUB_OUTPUT"
             echo "No OpenAPI contract changes in this PR — breaking-change gate trivially satisfied."
           fi
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: steps.changed.outputs.api == '1'
         with:
           go-version-file: go.mod
@@ -130,7 +130,7 @@ jobs:
             echo "api=0" >> "$GITHUB_OUTPUT"
             echo "No OpenAPI contract changes in this PR — client-generation gate trivially satisfied."
           fi
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: steps.changed.outputs.api == '1'
         with:
           go-version-file: go.mod
