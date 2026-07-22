@@ -690,6 +690,10 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/api/governance/control-plane", Handler: "apiGovernanceControlPlane", Domain: "governance", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleAdmin, Note: "C3: read-only governance surface; admin-only by design"}}},
 
+	// ── OpenAPI docs + spec (runtime contract viewer; non-REST surface) ──
+	{Path: "/api/openapi/", Handler: "apiOpenAPI", Domain: "observability", Public: false,
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RoleViewer, Note: "serves embedded OpenAPI docs (index.html) + raw spec (openapi.json/.yaml); read-only file server"}}},
+
 	// ── Release management (P1.6d-0; dispatch service backend, no GUI) ─────
 	{Path: "/api/releases", Handler: "apiReleases", Domain: "release", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer}}},

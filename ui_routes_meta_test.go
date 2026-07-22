@@ -89,8 +89,9 @@ import (
 //   - 186 — M6 secure-upload PR-5 added /api/support/uploads (GET viewer: upload
 //     queue list) and /api/support/bundles/{id}/upload (GET viewer status+receipt /
 //     POST admin per-bundle upload consent → seal + enqueue).
+//   - 187 — runtime OpenAPI viewer added /api/openapi/ (embedded docs + raw spec).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 186
+	const want = 187
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
@@ -198,6 +199,7 @@ var helperSourceFiles = []string{
 	"release_api.go",
 	"ui_support.go",
 	"diagnose.go",
+	"ui_openapi.go",
 }
 
 // scanRegisteredRoutes returns every route path registered by a

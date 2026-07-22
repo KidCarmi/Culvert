@@ -1602,6 +1602,21 @@ routes:
     audit_expected: true
     danger_level: medium
     documented: true
+  - route: "/api/openapi/"
+    method: "*"
+    handler: "apiOpenAPI"
+    domain: "observability"
+    visibility: intentionally-undocumented
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: false
+    exemption:
+      owner: platform-team
+      reason: read-only file server for the embedded OpenAPI docs (index.html) and raw spec (openapi.json/.yaml); serves generated documentation artifacts, not a REST surface
+      security_class: non-rest-surface
+      expires: *baseline
   - route: "/api/otlp"
     method: "GET"
     handler: "apiOTLPConfig"
