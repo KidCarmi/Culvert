@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -84,13 +85,13 @@ func GetLogLevel() LogLevel {
 
 func logWarnf(format string, args ...any) {
 	if GetLogLevel() <= LevelWarn {
-		logger.Printf("WARN "+format, args...)
+		logger.Print("WARN " + sanitizeLog(fmt.Sprintf(format, args...)))
 	}
 }
 
 func logErrorf(format string, args ...any) {
 	// Error is always logged regardless of level.
-	logger.Printf("ERROR "+format, args...)
+	logger.Print("ERROR " + sanitizeLog(fmt.Sprintf(format, args...)))
 }
 
 // ── Rotating file writer ─────────────────────────────────────────────────────

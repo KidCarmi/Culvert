@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -141,6 +142,34 @@ func TestSetGetLogLevel(t *testing.T) {
 	SetLogLevel(LevelDebug)
 	if GetLogLevel() != LevelDebug {
 		t.Errorf("GetLogLevel() = %v after SetLogLevel(DEBUG)", GetLogLevel())
+	}
+}
+
+func TestLogHelpers_SanitizeRenderedMessage(t *testing.T) {
+	var buf bytes.Buffer
+	oldLogger := logger
+	oldLevel := GetLogLevel()
+	logger = log.New(&buf, "", 0)
+	SetLogLevel(LevelWarn)
+	t.Cleanup(func() {
+		logger = oldLogger
+		SetLogLevel(oldLevel)
+	})
+
+	logWarnf("warn %s", "bad\nuser\t\x1b")
+	logErrorf("error %s", "bad\ruser\t\x1b")
+
+	out := buf.String()
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("log output contains unsanitized control characters: %q", out)
+		}
+	}
+	if !strings.Contains(out, "WARN warn bad_user__\n") {
+		t.Fatalf("warn log output missing sanitized message: %q", out)
+	}
+	if !strings.Contains(out, "ERROR error bad_user__\n") {
+		t.Fatalf("error log output missing sanitized message: %q", out)
 	}
 }
 
