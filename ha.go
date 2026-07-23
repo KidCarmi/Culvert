@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -276,7 +277,9 @@ func (h *HAState) EnableAsLeader(peerAddr string, autoFailover bool) (string, er
 	h.mu.Unlock()
 	h.startLeaseKeepalive()
 
-	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", sanitizeLog(peerAddr), autoFailover, term)
+	logPeerAddr := strings.ReplaceAll(peerAddr, "\n", "_")
+	logPeerAddr = strings.ReplaceAll(logPeerAddr, "\r", "_")
+	logger.Printf("HA: enabled as leader (peer=%q, auto_failover=%v, term=%d)", logPeerAddr, autoFailover, term)
 	return token, nil
 }
 
