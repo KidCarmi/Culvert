@@ -763,8 +763,8 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	}
 	if firstByte[0] != 0x16 { // not a TLS handshake record
 		proto := detectProtocolName(firstByte[0])
-		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
-			sanitizeLog(hostOnly), firstByte[0], proto)
+		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%s, proto=%s) — falling back to raw relay",
+			sanitizeLog(hostOnly), strings.ReplaceAll(fmt.Sprintf("%02x", firstByte[0]), "\n", ""), sanitizeLog(proto))
 		// Raw relay: splice the peeked reader (client) ↔ upstream (already
 		// TLS-connected). This is a non-TLS tunnel that bypasses HTTP-level
 		// inspection, so — like the CONNECT-bypass / WebSocket / SOCKS5 relays —
