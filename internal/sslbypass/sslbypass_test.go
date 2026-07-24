@@ -123,3 +123,54 @@ func TestCompilePattern(t *testing.T) {
 		t.Error("compilePattern invalid regex should error")
 	}
 }
+
+// TestMatcher_NormalizedPatternMatches pins the compile-time-normalization
+// contract behind pattern.norm: an admin-entered glob that needs
+// normalization (uppercase, trailing dot, Unicode/IDN) must keep matching the
+// canonicalized request host exactly as it did when Matches normalized the
+// pattern on every call via MatchFQDN. NormalizeHost is pure, so precompute
+// and per-call normalization are byte-identical — this test is the wall
+// against a future edit that stores the raw pattern in norm.
+func TestMatcher_NormalizedPatternMatches(t *testing.T) {
+	m := &Matcher{}
+	for _, p := range []string{"*.Corp.Example.COM.", "münchen.example"} {
+		if err := m.Add(p); err != nil {
+			t.Fatalf("Add(%q): %v", p, err)
+		}
+	}
+
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"app.corp.example.com", true},         // case + trailing dot normalized at compile
+		{"APP.CORP.EXAMPLE.COM", true},         // host side normalized per call
+		{"xn--mnchen-3ya.example", true},       // IDN pattern matches punycode host
+		{"sub.xn--mnchen-3ya.example", true},   // bare-domain glob includes subdomains
+		{"münchen.example", true},              // Unicode host normalizes to the same form
+		{"xn--mnchen-3ya.example.evil", false}, // suffix confusion must not match
+	}
+	for _, c := range cases {
+		if got := m.Matches(c.host); got != c.want {
+			t.Errorf("Matches(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+// TestMatcher_EmptyFastPath pins the empty-list fast path: a matcher with no
+// patterns (the unconfigured default) must report no match for any host.
+func TestMatcher_EmptyFastPath(t *testing.T) {
+	m := &Matcher{}
+	if m.Matches("anything.example.com") {
+		t.Error("empty matcher must not match")
+	}
+	// And after removing the last pattern the fast path re-engages.
+	_ = m.Add("*.example.com")
+	if !m.Matches("a.example.com") {
+		t.Error("pattern should match before removal")
+	}
+	m.Remove("*.example.com")
+	if m.Matches("a.example.com") {
+		t.Error("must not match after the last pattern is removed")
+	}
+}

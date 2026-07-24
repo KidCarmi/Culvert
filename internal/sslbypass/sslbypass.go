@@ -28,6 +28,7 @@ import (
 // Regex patterns are prefixed with "~" (e.g. "~^.*\.gov\.il$").
 type pattern struct {
 	raw  string
+	norm string // hostutil.NormalizeHost(raw), precomputed for glob patterns ("" for regex)
 	isRE bool
 	re   *regexp.Regexp
 }
@@ -53,7 +54,13 @@ func compilePattern(p string) (pattern, error) {
 		}
 		bp.isRE = true
 		bp.re = re
+		return bp, nil
 	}
+	// Normalize the glob pattern ONCE at compile time so Matches can use
+	// MatchFQDNNorm — the same precompute the policy engine applies to rule
+	// FQDNs (PolicyRule.normFQDN). NormalizeHost is pure/deterministic, so
+	// this is byte-identical to normalizing per call inside MatchFQDN.
+	bp.norm = hostutil.NormalizeHost(p)
 	return bp, nil
 }
 
@@ -163,6 +170,15 @@ func (m *Matcher) List() []string {
 func (m *Matcher) Matches(host string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// Fast path: no patterns configured (the default) — skip the IDNA
+	// normalization entirely.
+	if len(m.compiled) == 0 {
+		return false
+	}
+	// Normalize the host ONCE; each glob compares against the pattern's
+	// precomputed normalized form (MatchFQDNNorm). The previous per-pattern
+	// MatchFQDN re-normalized BOTH arguments on every iteration — ~735 ns +
+	// 4 allocs per pattern per inspected CONNECT.
 	h := hostutil.NormalizeHost(host)
 	for _, p := range m.compiled {
 		if p.isRE {
@@ -170,7 +186,7 @@ func (m *Matcher) Matches(host string) bool {
 				return true
 			}
 		} else {
-			if hostutil.MatchFQDN(p.raw, h) {
+			if hostutil.MatchFQDNNorm(p.norm, h) {
 				return true
 			}
 		}
