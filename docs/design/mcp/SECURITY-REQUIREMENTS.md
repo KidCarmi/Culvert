@@ -12,6 +12,14 @@ rationale, threat IDs, control owner, implementation owner, verification method,
 Column key per table: **ID · Normative statement · Rationale · Threats · Owner (Control / Impl) ·
 Verification · Evidence · Gate**. Status is `Proposed` for all rows unless noted.
 
+> **Decision provenance (2026-07-24).** Options for five families are now fixed by
+> [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md): **MCP-AUTH** (D-2 —
+> resource-server + reframed MCP-AUTH-006 sender-constraint/DPoP-proof replay), **MCP-EVENT** (D-5 —
+> durable spool + per-action fail-closed matrix), **MCP-CONNECT** (D-8 — Model A only V1; connector
+> post-V1), **MCP-CONNECT-003 / MCP-INSP-008** (D-9 — DMZ default-off; host-allowlist + Origin-per-protocol
+> on every listener), **MCP-MGMT** (D-13 — read-only + draft/validate/simulate; mutation excluded). The
+> requirement **IDs and statements are unchanged** except MCP-AUTH-006, whose framing is corrected below.
+
 ---
 
 ## MCP-AUTH — Authentication & token validation
@@ -23,7 +31,7 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 | MCP-AUTH-003 | The gateway **MUST** validate the resource indicator (RFC 8707) binding the token to the target MCP server; unbound tokens **MUST** be denied for write/high-risk. | Prevent token reuse across resources. **Not present today** (0 matches). | MCP-T-004 | Sec / Eng | Resource-binding negative tests | Denials for mismatched resource | PR-3 |
 | MCP-AUTH-004 | Tokens **MUST** be short-TTL and expiry **MUST** be enforced. | Bound the stolen-token window. Repo enforces exp (`auth_oidc_flow.go:653-659`). | MCP-T-001 | Sec / Eng | Expiry tests | Expired-token rejection | PR-3 |
 | MCP-AUTH-005 | The client token **MUST NOT** be forwarded unchanged upstream (no passthrough). | Isolate agent token from upstream privilege. Precedent only (`proxy.go:46-73`); net MCP impl required. | MCP-T-005 | Sec / Eng | Upstream-capture test | Upstream request carries no client token | PR-4 |
-| MCP-AUTH-006 | The gateway **MUST** implement bearer-token replay protection (e.g. jti tracking, nonce, or sender-constraint). | **Net-new; NOT VERIFIED as present** — reusable path has no access-token replay defense (VRC §6). | MCP-T-002 | Sec / Eng | Replay test suite | Second presentation of same token rejected/flagged | PR-3 |
+| MCP-AUTH-006 | The gateway **MUST** implement anti-replay / token-abuse defense as a layered posture — TLS every request, short TTL, audience/resource restriction, issuer/sig/exp/tenant/scope validation, introspection/revocation where applicable, client/session correlation + rate limits + anomaly signals, and **sender-constrained tokens (mTLS or DPoP) for high-risk or externally reachable profiles**. It **MUST NOT** be defined as one-time-use rejection of an access-token `jti` (reuse of a still-valid token is not itself replay). **When DPoP is used, replay detection applies to the per-request DPoP proof** (proof `jti`, method, URI, `iat`, `ath`, server nonce), never the underlying access token. | **Net-new; NOT VERIFIED as present** — reusable path has no access-token replay defense (VRC §6). Reframed by [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) items 7–9. | MCP-T-002 | Sec / Eng | Replay/DPoP-proof test suite + anomaly/rate-limit tests | Replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles; stolen-token abuse rate-limited/flagged | PR-3 |
 | MCP-AUTH-007 | Session/token binding **MUST** prevent cross-user session confusion. | One caller's session cannot serve another's identity. | MCP-T-008 | Sec / Eng | Cross-session tests | No identity bleed across concurrent sessions | PR-3 |
 | MCP-AUTH-008 | Management MCP and Gateway MCP **MUST** use separate OAuth client registrations and scopes. | Separate authorization planes. | MCP-T-034 | Sec / IAM | Config/scope review + tests | Distinct clients/scopes enforced | PR-3 |
 
@@ -92,7 +100,7 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 | MCP-INSP-005 | DNS resolution **MUST** be pinned across resolve→connect (rebinding TOCTOU guard). | Prevent rebinding. Prior art: dialer `Control`. | MCP-T-037,030 | Sec / Eng | DNS-rebinding lab | Rebinding blocked | PR-7 |
 | MCP-INSP-006 | Redirects **MUST** be limited and re-checked per hop; a shared MCP redirect guard **SHOULD** replace per-client copies. | Redirect abuse. | MCP-T-041 | Sec / Eng | Redirect-chain tests | Hop cap + re-check | PR-7 |
 | MCP-INSP-007 | Output content that attempts to influence the agent **MUST** be labeled/reported (not silently trusted). | Injection defense (best-effort). | MCP-T-038,039 | Sec / Eng | Injection corpus | Labels emitted | PR-7 |
-| MCP-INSP-008 | The inbound MCP/SSE listener **MUST** validate Origin/Host to prevent DNS-rebinding against the local server. | **Missing today** (`isSafeRedirectURL` captive-portal-only). | MCP-T-031,055,052 | Sec / Eng | Inbound-rebinding tests | Bad Origin/Host rejected | PR-1 |
+| MCP-INSP-008 | The inbound MCP/SSE listener **MUST** validate Origin/Host to prevent DNS-rebinding against the local server: **host validation + configured-host allowlisting are mandatory on every HTTP MCP listener**, and the listener **MUST** bind only to explicitly configured interfaces (never default to unrestricted public ingress). Origin validation follows the supported MCP protocol baseline — validate `Origin` on incoming Streamable HTTP and reject a **present-but-invalid** Origin with the protocol-required response; do **not** require every non-browser client to always send `Origin` unless the selected protocol version mandates it ([`ADR-0023 §D-9`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) items 3–5). | **Missing today** (`isSafeRedirectURL` captive-portal-only). | MCP-T-031,055,052 | Sec / Eng | Inbound-rebinding tests + host-allowlist fail-closed + bind-interface tests | Bad Origin/Host rejected; empty allowlist fails closed; no default public bind | PR-1 |
 
 ## MCP-EVENT — Durable decision events
 

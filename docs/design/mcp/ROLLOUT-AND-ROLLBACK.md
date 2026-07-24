@@ -34,8 +34,8 @@ to actually operate a promotion decision.
 |---|---|
 | Enforcement | No listener bound, no traffic accepted. Both `/mcp/management` and `/mcp/gateway/{server-id}` are absent from the mux — not merely denying, **not registered**. |
 | Entry criteria | Default state. Also the landing state of any rollback (§3). |
-| Exit criteria | PR-0 design package approved (this package); ADR proposal ([ADR-PROPOSAL-mcp-trust-boundary.md](ADR-PROPOSAL-mcp-trust-boundary.md)) promoted to a numbered `docs/adr/NNNN` per the Option-B gate; build/test artifacts and lab environment ready. |
-| Evidence required | PR-0 review sign-off ([PR0-REVIEW-CHECKLIST.md](PR0-REVIEW-CHECKLIST.md)); ADR Accepted. |
+| Exit criteria | PR-0 design package approved (this package); the ADR promoted to [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (done 2026-07-24, `Status: Proposed`) and **ratified to Accepted by ARB + Security Architecture**; **D-1 protocol baseline externally verified + approved**; **build/test baseline run + recorded**; lab environment ready. |
+| Evidence required | PR-0 review sign-off ([PR0-REVIEW-CHECKLIST.md](PR0-REVIEW-CHECKLIST.md)); **ADR-0023 Accepted** (currently `Proposed`); recorded build/test baseline. |
 | Owner | Staff / Principal Engineer (architecture); Product Lead (scope). |
 | Approval authority | Architecture Review Board (ADR); Executive Sponsor / GM (scope). |
 

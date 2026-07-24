@@ -2,6 +2,15 @@
 
 Status: PR-0 design artifact (Proposed)
 
+> **Decision provenance (2026-07-24, [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> The Proposed gates are now decision-backed: the **OAuth/replay negative matrix (PR-3)** enforces the
+> reframed D-2 posture (sender-constraint / DPoP-proof replay, not access-token one-time-use); the
+> **event-durability-under-saturation gate (PR-8)** enforces the D-5 per-action fail-closed matrix; the
+> **inbound Origin/Host + SSRF/rebinding gate (PR-1/PR-7)** enforces D-9 (host-allowlist + Origin-per-
+> protocol on every listener). Connector CI (D-8) is a **post-V1** slice gate; Management-vs-Gateway
+> separation (D-13) is carried by the Existing `api-contract`/`pr-api-governance` gates plus the PR-9
+> mutation-negative tests. No CI file is modified in PR-0.
+
 This document inventories every CI/CD gate relevant to the two MCP capabilities — the **Culvert
 Management MCP Server** (Capability A) and the **MCP Security Gateway** (Capability B) — and classifies
 each one as `Existing`, `Existing-but-insufficient`, `Proposed`, `Blocking`, or `Advisory`. Its purpose is
@@ -119,7 +128,7 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 | Proposed gate | Enforces requirement(s) | Threat ID(s) | Target PR |
 |---|---|---|---|
 | Malicious-MCP-server test suite (fixture servers with poisoned tools, rug-pull updates, schema/description drift, unknown-tool responses) | MCP-TOOL-001..006 | MCP-T-011..017 | PR-2 |
-| OAuth/audience/replay negative matrix (MCP-AUTH-*): wrong audience, wrong resource, token passthrough, replayed access token, expired/forged token | MCP-AUTH-001..008 | MCP-T-002,003,004,005 | PR-3 |
+| OAuth/audience/replay negative matrix (MCP-AUTH-*): wrong audience, wrong resource, token passthrough, expired/forged token, **replayed DPoP proof** + sender-constraint enforcement + rate-limit/anomaly on token abuse (**not** access-token one-time-use — [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)) | MCP-AUTH-001..008 | MCP-T-002,003,004,005 | PR-3 |
 | SSRF private-IP matrix + DNS-rebinding lab + inbound Origin/Host tests | MCP-INSP-004, MCP-INSP-005, MCP-INSP-008 | MCP-T-036,037,030,031,055,052 | PR-7 (INSP-004/005), PR-1 (INSP-008 — inbound listener ships in PR-1) |
 | SSE-exhaustion / slowloris / queue-saturation load tests | MCP-OPS-002, MCP-EVENT-002 | MCP-T-040,042,043,044 | PR-5 (bounds), PR-8 (event durability under saturation) |
 | Mixed-version / stale-epoch / corrupt-snapshot CP↔DP tests | MCP-CPDP-001..003, MCP-HA-001..002 | MCP-T-047,048,049,050 | PR-10 |

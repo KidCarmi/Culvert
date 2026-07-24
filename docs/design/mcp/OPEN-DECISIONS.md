@@ -7,6 +7,12 @@ status. **Status: PR-0 design artifact (Proposed).** Recommendations are `[REC]`
 Blocking status: **GO/NO-GO** = must be resolved before the stage in "Due"; **PR-1 gate** = blocks PR-1
 start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 
+> **Update 2026-07-24 — five decisions closed.** **D-2, D-5, D-8, D-9, D-13 are CLOSED** and recorded in
+> the numbered ADR [`docs/adr/0023-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+> (per-decision closure blocks below). **D-0** is promoted to ADR-0023 (`Status: Proposed`) — the PR-1 gate
+> closes only on ARB + Security Architecture ratification. **D-1** is **elevated to a hard PR-1 entry gate**
+> and remains OPEN. All other decisions are unchanged.
+
 ---
 
 ### D-0 — ADR scope (Option A vs Option B)
@@ -17,6 +23,10 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** task absolute restrictions; `docs/adr/0001` ADR mandate.
 - **Owner:** Eng/Arch. **Approver:** ARB. **Due:** PR-1 gate. **Closure:** numbered ADR accepted.
 - **Blocking:** PR-1 gate. *(Proposal authored: [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md).)*
+- **STATUS — PROMOTED, RATIFICATION PENDING (2026-07-24):** the proposal was promoted to a numbered ADR
+  [`docs/adr/0023-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).
+  The ADR is `Status: Proposed`; the PR-1 gate closes only when ARB + Security Architecture record
+  ratification (ADR-0023 "Ratification"). The in-package proposal file is now a non-authoritative pointer.
 
 ### D-1 — Protocol baseline
 - **Question:** which stable MCP protocol version(s) to freeze, and the adapter policy?
@@ -25,6 +35,10 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [EXT] — protocol versions are externally unverified ([`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md)).
 - **Owner:** Eng. **Approver:** Arch. **Due:** PR-1. **Closure:** compatibility matrix approved + tested.
 - **Blocking:** Slice (PR-1). **[EXT] EXTERNAL VERIFICATION REQUIRED.**
+- **ELEVATED TO A HARD PR-1 ENTRY GATE (2026-07-24, ADR-0023 PR-1 entry gate item 5):** because PR-1 *is*
+  the Protocol Kernel (parser, lifecycle, transport, compatibility all depend on D-1), D-1 **MUST** be
+  externally verified and human-approved **before** PR-1 implementation begins — it may **not** be left
+  for closure during implementation. **Still OPEN.**
 
 ### D-2 — Authentication deployment model
 - **Question:** MCP as OAuth resource server, gateway-issued token, or enterprise-broker integration; RFC 8707 adoption?
@@ -33,6 +47,19 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [FACT] SWG OIDC binds audience to client_id (`auth_oidc_flow.go:523`), no RFC 8707, no replay defense (VRC §6).
 - **Owner:** IAM/Sec Arch. **Approver:** Sec Arch. **Due:** PR-3. **Closure:** threat model + interop tests approved.
 - **Blocking:** GO/NO-GO (identity) + Slice (PR-3).
+- **CLOSED — 2026-07-24 (approved by the PR-0 facilitator; ratified in [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) §D-2, pending ARB/Sec-Arch formal ratification).**
+  - **Decision:** **Option A** — Culvert is the OAuth protected resource server. Client token terminates at
+    Culvert (no passthrough); audience + RFC 8707 resource identify the canonical Culvert MCP resource
+    (`/mcp/management`, `/mcp/gateway/{server-id}` or an approved Culvert-controlled logical resource);
+    upstream server/tool/resource are policy + broker-scope inputs; separate Mgmt/Gateway OAuth clients +
+    disjoint scopes. Option C = issuer topology under A; Option B = edge token-exchange only, separate
+    review. **Replay defense is NOT access-token `jti` one-time-use** — it is TLS + short TTL +
+    audience/resource + issuer/sig/exp/tenant/scope validation + introspection/revocation + correlation +
+    rate limits/anomaly + **sender-constrained (mTLS/DPoP) tokens for high-risk/external profiles**; DPoP
+    replay detection applies to the per-request DPoP proof, not the access token.
+  - **Approver role:** IAM / Security Architecture (facilitator approval recorded; ARB + Sec-Arch ratification pending).
+  - **Evidence:** VRC §6 (no access-token replay defense; audience=client_id); AUTH-AND-CREDENTIAL-MODEL §4–§7; MCP-AUTH-001..008.
+  - **Residual risk:** MCP-T-002 replay defense is net-new (must be built + tested, PR-3); DPoP/mTLS availability is deployment-profile-dependent.
 
 ### D-3 — Credential providers for MVP
 - **Question:** which of Vault/KMS/Secrets Manager/workload-identity are in V1?
@@ -57,6 +84,20 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [FACT] audit ring `MaxRing=500`; no durable pipeline exists ([`EVENT-MODEL.md`](EVENT-MODEL.md)).
 - **Owner:** SRE/Sec. **Approver:** Sec Arch. **Due:** PR-8. **Closure:** loss policy + load evidence approved.
 - **Blocking:** GO/NO-GO (events) + Slice (PR-8).
+- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) §D-5, pending ARB/Sec-Arch ratification).**
+  - **Decision:** **Option C** — local encrypted durable spool on every relevant DP, bounded queues +
+    backpressure + replay IDs + pluggable async exporters; message bus/SIEM is an adapter, never a
+    mandatory runtime dependency. Durability-unavailable is fixed by action class (EVENT-MODEL §4a table):
+    read-only/low-risk → proceed only under explicit degraded-mode policy + alarm + integrity-protected
+    loss counter + bounded retry, never silent; write/destructive/config-publication/credential/
+    state-affecting-Mgmt → **fail closed**; auth-failure/authz-denial → request already denied (not
+    relabeled), but on non-persistable denial enter **critical degraded state**, alert, and **block new
+    write/high-risk operations until critical-event durability is restored** (unless approved emergency
+    policy). Design MUST specify ordering scope, dedup, replay cursor, encryption-at-rest, corruption
+    recovery, tenant isolation, retention, disk-pressure, restart/failover recovery.
+  - **Approver role:** SRE / Security Architecture (facilitator approval recorded; ratification pending).
+  - **Evidence:** VRC §5/§8 (no durable pipeline; audit ring `MaxRing=500`); EVENT-MODEL §4–§6; MCP-EVENT-001..006.
+  - **Residual risk:** critical-event blocking of new writes during a persistence outage is an availability trade-off (accepted, alertable); exporter-adapter integrations verified per deployment.
 
 ### D-6 — Inspection depth
 - **Question:** built-in patterns vs external DLP/AI-security service?
@@ -81,6 +122,18 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [EXT] vendor connector requirements unverified ([`ON-PREM-CONNECTIVITY.md`](ON-PREM-CONNECTIVITY.md)).
 - **Owner:** Net/Sec/Privacy. **Approver:** Arch/Privacy. **Due:** PR-11. **Closure:** vendor + data-flow + failure semantics validated.
 - **Blocking:** GO/NO-GO (connectivity) + Slice (PR-11). **[EXT] EXTERNAL VERIFICATION REQUIRED.**
+- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) §D-8, pending ARB/Privacy ratification).**
+  - **Decision:** **Model A (local enterprise client) is the ONLY supported V1 connectivity model.** The
+    outbound connector (Model B) is a **post-V1 roadmap extension** and is **NOT** assigned to PR-11 (PR-11
+    stays Shadow/Canary); it gets its **own future implementation slice + design gate** unless a
+    human-approved roadmap change renumbers slices. No ChatGPT/Claude/other-vendor support is claimed until
+    a named integration is verified against **authoritative, date-stamped** vendor requirements and tested.
+    The future connector must be customer-initiated, tenant-bound, mTLS-identified, revocable,
+    cert-rotating, bounded, observable, and **must not store/receive production upstream credentials**;
+    DLP/redaction/destination run before egress.
+  - **Approver role:** Network/Security + Privacy (facilitator approval recorded; ratification pending).
+  - **Evidence:** ON-PREM-CONNECTIVITY §2–§6; MCP-CONNECT-001/002/004; MCP-PRIVACY-001; residual R-5.
+  - **Residual risk:** cloud-AI clients without a local path are unserved in V1 (accepted); vendor connector semantics remain **[EXT]** unverified until per-vendor validation.
 
 ### D-9 — DMZ support
 - **Question:** offer a routable remote MCP endpoint at all, and accept its risk?
@@ -89,6 +142,19 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** threat MCP-T-052; MCP-CONNECT-003, MCP-INSP-008.
 - **Owner:** Sec Arch/Exec. **Approver:** Arch + Exec. **Due:** PR-11. **Closure:** risk acceptance signed or DMZ deferred.
 - **Blocking:** GO/NO-GO (connectivity).
+- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) §D-9, pending ARB/Exec ratification).**
+  - **Decision:** a publicly routable / externally reachable hardened DMZ MCP endpoint (Model C) is **NOT
+    supported in V1 and is disabled by default.** Model A is **sufficient for V1** (the future connector
+    need not exist first). Future DMZ needs a separate architecture + production-readiness approval, signed
+    customer risk acceptance, OAuth/reverse-proxy/WAF/rate-limits/DDoS/internal-mTLS/monitoring/runbooks.
+    **Host validation + configured-host allowlisting are mandatory on every HTTP MCP listener.** Origin
+    validation follows the MCP protocol baseline (validate Origin on incoming Streamable HTTP; reject
+    present-but-invalid with the protocol-required response; do **not** invent a blanket "always send
+    Origin" rule unless the protocol version requires it). Local deployment binds only to explicitly
+    configured interfaces. Inbound Origin/Host (MCP-INSP-008) remains a **PR-1** requirement.
+  - **Approver role:** Security Architecture + Executive (facilitator approval recorded; ratification pending).
+  - **Evidence:** ON-PREM-CONNECTIVITY §4/§7; MCP-CONNECT-003, MCP-INSP-008; MCP-T-052/031.
+  - **Residual risk:** connector-less cloud clients unserved in V1 (accepted); DMZ, if ever offered, carries the only public-ingress surface (explicit signed risk acceptance required).
 
 ### D-10 — Snapshot signing scheme
 - **Question:** reuse the release-catalog ed25519/keyless prior art, or a new scheme, for the MCP snapshot content-hash + signature?
@@ -121,18 +187,35 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** BLUEPRINT §03; MCP-MGMT-001.
 - **Owner:** Sec/Eng. **Approver:** Sec Arch. **Due:** PR-9. **Closure:** separate threat model + RBAC + plan/validate/approve/apply approved.
 - **Blocking:** GO/NO-GO (dual MCP surfaces) + Slice (PR-9).
+- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) §D-13, pending Sec-Arch ratification).**
+  - **Decision:** V1 Management MCP = **read-only + draft/validate/simulate, NO activation.** Permitted:
+    explain decision, inspect bounded effective config, desired-vs-actual, bounded health, bounded/redacted
+    security-event summaries, validate policy syntax/semantics, simulate impact, generate a non-activating
+    draft. Prohibited (V1): config activation, policy publication, credential/secret ops, raw-trace export,
+    arbitrary log export, arbitrary command exec, service restart, cluster mutation, node removal, cert
+    replacement, emergency-bypass creation, any other state-changing op. **Mutation is excluded from V1.**
+    Isolation: separate listener/OAuth-client/resource/scopes/policy-namespace/rule-bundles/quotas/audit/
+    threat-model/runbook; **may** share reviewed libraries + selected CP infra; **may** share the durable
+    event transport **only** with authorization-domain/tenant/category/partition/retention/query
+    separation (two physical event systems NOT required when logical+security isolation is enforced +
+    tested); **may** share a policy-engine library but **not** active state/rule-bundles/namespaces/
+    decisions; outputs tenant-scoped, RBAC, paginated, redacted, size- and time-bounded.
+  - **Approver role:** Security Architecture (facilitator approval recorded; ratification pending).
+  - **Evidence:** PRODUCT-SCOPE §8; RECOMMENDED-ARCHITECTURE §1; MCP-POLICY-MODEL §8; MCP-MGMT-001..004.
+  - **Residual risk:** shared durable transport / shared policy-engine library must be proven logically isolated by test (MCP-T-034/035); mutation deferred to a separate post-V1 plan→validate→approve→apply ADR.
 
 ---
 
 ## Blocking summary
 
-| Decision | Blocking | Due |
-|---|---|---|
-| D-0 ADR scope | PR-1 gate | PR-1 |
-| D-2 auth model | GO/NO-GO + PR-3 | PR-3 |
-| D-5 event durability | GO/NO-GO + PR-8 | PR-8 |
-| D-8 connector model | GO/NO-GO + PR-11 | PR-11 |
-| D-9 DMZ support | GO/NO-GO | PR-11 |
-| D-13 Mgmt MCP scope | GO/NO-GO + PR-9 | PR-9 |
-| D-1, D-3, D-4, D-6, D-10, D-12 | Slice | per slice |
-| D-7, D-11 | Non-blocking / GA | post-V1 / GA |
+| Decision | Blocking | Due | Status (2026-07-24) |
+|---|---|---|---|
+| D-0 ADR scope | PR-1 gate | PR-1 | **Promoted → ADR-0023 (`Proposed`); PR-1 gate closes on ARB/Sec-Arch ratification** |
+| D-2 auth model | GO/NO-GO + PR-3 | PR-3 | **CLOSED (Option A; ADR-0023 §D-2)** |
+| D-5 event durability | GO/NO-GO + PR-8 | PR-8 | **CLOSED (Option C; ADR-0023 §D-5)** |
+| D-8 connector model | GO/NO-GO + PR-11 | PR-11 | **CLOSED (Model A only V1; connector post-V1 own slice; ADR-0023 §D-8)** |
+| D-9 DMZ support | GO/NO-GO | PR-11 | **CLOSED (not supported V1, default-off; ADR-0023 §D-9)** |
+| D-13 Mgmt MCP scope | GO/NO-GO + PR-9 | PR-9 | **CLOSED (read-only+draft/validate/simulate; mutation excluded; ADR-0023 §D-13)** |
+| **D-1 protocol baseline** | **HARD PR-1 entry gate** (elevated; was Slice) | **PR-1** | **OPEN — [EXT] external verification + human approval required BEFORE PR-1** |
+| D-3, D-4, D-6, D-10, D-12 | Slice | per slice | Open (slice-scoped) |
+| D-7, D-11 | Non-blocking / GA | post-V1 / GA | Open (post-V1 / GA) |

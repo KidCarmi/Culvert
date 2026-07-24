@@ -9,9 +9,10 @@ threat IDs or requirement IDs — those are owned by [`THREAT-MODEL.md`](THREAT-
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) and are only referenced here.
 
 **Status: PR-0 design artifact (Proposed).** Package names and file boundaries in this document are
-**[REC]** — evaluated, not adopted. Adoption requires the ADR promotion described in
-[`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0) and
-[`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md).
+**[REC]** — evaluated, not adopted. The trust-boundary decisions are now recorded in
+[`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (`Status: Proposed` —
+adoption completes on ARB + Security Architecture ratification); the exact package split/naming stays
+[REC] pending that ratification. See [`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0-promoted-2026-07-24).
 
 ---
 
@@ -44,9 +45,20 @@ here; the operative constraint for this document is:
   failure semantics, rate limits, audit/event categories, threat models, runbooks.
 
 Concretely: Capability A and Capability B **MUST NOT** share a listener, a policy engine instance, a
-credential broker instance, or a decision-event stream with each other or with the SWG runtime, even
-though all three may run inside the same `culvert` process and reuse the same admin-UI shell, RBAC
-middleware chain, and config-snapshot transport.
+credential broker instance, or an **active/logical decision-event stream** with each other or with the SWG
+runtime, even though all three may run inside the same `culvert` process and reuse the same admin-UI shell,
+RBAC middleware chain, and config-snapshot transport.
+
+> **Refinement — D-13 (2026-07-24, [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+> items 3–6).** "Do not share" is scoped to **active state and logical planes**, not to reviewed
+> implementation code or physical infrastructure. The two capabilities **may** share reviewed
+> implementation libraries and selected Control-Plane infrastructure; **may** share a policy-engine
+> **implementation library** (but never shared active policy state, rule bundles, namespaces or
+> authorization decisions — those stay per-capability); and **may** share the **underlying durable event
+> transport** *only when* events are separated by authorization domain, tenant, category, partitioning,
+> retention and query policy. Two **physically** separate event systems are **not** required when logical +
+> security isolation is enforceable and tested. What must never be shared: a listener, an active policy
+> engine instance / rule set, a credential-broker instance, or a logical (unpartitioned) event stream.
 
 ---
 

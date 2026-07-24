@@ -8,7 +8,14 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 (race, gosec, govulncheck, gitleaks, benchgate, fuzz-nightly) exist ([`CI-GATES.md`](CI-GATES.md)).
 
 > Test-baseline caveat: **Low for the read-only Phase 1 investigation, but the current repository test
-> baseline remains unverified in this session** — no build or test was executed while authoring PR-0.
+> baseline remains unverified in this session** — no build or test was executed while authoring PR-0. Per
+> [`ADR-0023` PR-1 entry gate](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md), the repository
+> build/test baseline **MUST** be run and recorded before any PR-1 code change begins.
+>
+> **Decision provenance (2026-07-24):** the replay row (MCP-T-002 / MCP-AUTH-006) is reframed per
+> [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (sender-constraint /
+> DPoP-proof, not access-token one-time-use). All other rows keep their IDs; the D-5/D-8/D-9/D-13 rows are
+> now decision-backed. No threat or requirement ID was added or removed.
 
 IDs: threats `MCP-T-*` ([`THREAT-MODEL.md`](THREAT-MODEL.md)); requirements `MCP-*-*`
 ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); abuse cases `MCP-AC-*` ([`ABUSE-CASES.md`](ABUSE-CASES.md)).
@@ -21,7 +28,7 @@ Gate = slice/CI gate that must be green.
 | Threat | Requirement | Control | Test (type) | Evidence | Owner | Gate |
 |---|---|---|---|---|---|---|
 | MCP-T-001 token theft | MCP-AUTH-001,004 | Token validation + short TTL | Auth negative matrix (unit/integration) | Rejections logged | IAM/Sec | PR-3 |
-| MCP-T-002 token replay | MCP-AUTH-006 | Replay defense (net-new) | Replay matrix (integration) | 2nd-use rejected/flagged | IAM/Sec | PR-3 |
+| MCP-T-002 token replay | MCP-AUTH-006 | Sender-constraint (mTLS/DPoP-proof) + short-TTL/aud/resource + correlation/rate-limit/anomaly — **not** access-token one-time-use ([`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)) | DPoP-proof replay + anomaly/rate-limit matrix (integration) | Replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles | IAM/Sec | PR-3 |
 | MCP-T-003 wrong audience | MCP-AUTH-002 | Audience validation | Wrong-audience (negative) | Foreign `aud` denied | IAM/Sec | PR-3 |
 | MCP-T-004 wrong resource | MCP-AUTH-003 | RFC 8707 resource binding | Wrong-resource (negative) | Mismatch denied | IAM/Sec | PR-3 |
 | MCP-T-005 token passthrough | MCP-AUTH-005, MCP-CRED-001 | No passthrough + broker | Upstream-capture (integration) | No client token upstream | IAM/Sec | PR-4 |

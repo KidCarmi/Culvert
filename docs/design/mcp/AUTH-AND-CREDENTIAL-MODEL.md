@@ -10,6 +10,14 @@ after a policy decision. It is the authoritative source for requirement IDs in t
 
 **Status: PR-0 design artifact (Proposed).**
 
+> **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> Culvert is the **OAuth protected resource server** (Option A): client tokens terminate at Culvert;
+> audience + RFC 8707 resource identify the canonical Culvert MCP resource (`/mcp/management` or
+> `/mcp/gateway/{server-id}`, or an approved Culvert-controlled logical resource); the upstream server/tool/
+> resource are **policy + credential-broker inputs, never the token audience**; separate Mgmt/Gateway OAuth
+> clients + disjoint scopes. Option C = an issuer topology under A; Option B = edge token-exchange only.
+> **Replay protection is reframed (see §5, corrected below): it is NOT access-token `jti` one-time-use.**
+
 ---
 
 ## 1 · Scope and Doctrine
@@ -132,12 +140,29 @@ path provides no defense against MCP access-token replay.** Specifically:
 - **[FACT]** There is **no DPoP, no `cnf` claim, and no other sender-constraint mechanism** anywhere in
   the codebase (grep 0). A stolen bearer token is fully usable by any holder from any origin.
 
-**Conclusion: MCP replay protection is net-new and its presence in the current codebase is NOT VERIFIED.**
-Do not assume introspection, caching, or the browser-flow nonce provide it — none of the three closes
-**MCP-T-002** (token replay). **MCP-AUTH-006** therefore requires the gateway to implement its own
-bearer-token replay protection (e.g. `jti` tracking with a replay cache, a per-request nonce, or a
-sender-constraint scheme such as DPoP) before Capability B can be trusted to sit in front of write or
-high-risk upstream actions. This requirement is PR-3 scope; it is a hard gate, not an optimization.
+**Conclusion: MCP anti-replay / token-abuse defense is net-new and its presence in the current codebase is
+NOT VERIFIED.** Do not assume introspection, caching, or the browser-flow nonce provide it.
+
+**Corrected model (D-2, [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+items 7–9).** MCP-AUTH-006 **MUST NOT** be defined as one-time-use rejection of an access-token `jti`:
+**reuse of a still-valid access token is not, by itself, evidence of replay.** Instead the required
+posture is a layered set of controls:
+
+- **TLS on every request** (transport confidentiality/integrity).
+- **Short token lifetime** and enforced expiry (MCP-AUTH-004).
+- **Audience and resource restriction** to the canonical Culvert MCP resource (MCP-AUTH-002/003).
+- **Issuer, signature, expiry, tenant and scope validation** on every call.
+- **Introspection or revocation support** where applicable (RFC 7662 / revocation lists).
+- **Client / session correlation, rate limits, and anomaly signals** (detect abnormal reuse patterns
+  rather than treating each reuse as replay).
+- **Sender-constrained tokens (mTLS or DPoP)** for **high-risk or externally reachable deployment
+  profiles** when supported.
+
+**When DPoP is used, replay detection applies to the per-request DPoP proof** — proof `jti`, HTTP method,
+URI, issue time (`iat`), access-token hash (`ath`), and server nonce where required — **not** to the
+underlying access token, which is never treated as one-time-use. This is the anti-replay boundary that
+lets Capability B sit in front of write / high-risk upstream actions. MCP-AUTH-006 is PR-3 scope and a
+hard gate, not an optimization.
 
 ---
 

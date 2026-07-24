@@ -70,7 +70,7 @@ results. Any capability is described as existing **only** if it is verified in t
 | [`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md) | Blocking conditions and hard NO-GO lines. |
 | [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) | Human decisions with options, recommendation, owner, closure. |
 | [`PR0-REVIEW-CHECKLIST.md`](PR0-REVIEW-CHECKLIST.md) | Per-role reviewer checklists. |
-| [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md) | Option-B ADR **proposal** (see below). |
+| [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md) | **Superseded** — non-authoritative pointer to [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md). |
 | [`source/`](source/) | Preserved original DOCX (unchanged). |
 | [`assets/`](assets/) | Diagrams extracted from the DOCX. |
 
@@ -80,7 +80,10 @@ results. Any capability is described as existing **only** if it is verified in t
 PR-0 authored (this package)
       → Reviewer checklists (PR0-REVIEW-CHECKLIST.md) completed per role
       → GO-NO-GO-CHECKLIST.md blocking conditions cleared
-      → Human promotes the ADR proposal to a numbered, Accepted docs/adr/NNNN
+      → ADR promoted to docs/adr/0023 (Proposed; DONE 2026-07-24)
+      → ARB + Security Architecture ratify ADR-0023 → Accepted  [PENDING]
+      → D-1 protocol baseline externally verified + approved     [PENDING]
+      → repository build/test baseline run + recorded            [PENDING]
       → PR-1 may begin
 ```
 
@@ -91,14 +94,18 @@ PR-0 authored (this package)
 Because the MCP subsystem introduces new trust boundaries (a new listener, a new auth surface, an
 outbound-fetch path, a new persistence/snapshot surface), an ADR is mandatory.
 
-### ADR scope — Option B (adopted for PR-0)
+### ADR scope — Option B (adopted for PR-0); PROMOTED 2026-07-24
 
-- **During PR-0:** an ADR **proposal** (`Status: Proposed`) lives inside this directory as
-  [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md). This keeps PR-0 confined to
-  `docs/design/mcp/`.
-- **Before PR-1:** a human promotes that proposal to a numbered, **Accepted** ADR under `docs/adr/NNNN-*`.
-  That promotion is a **hard, human-controlled PR-1 entry gate** — it is intentionally **not** performed
-  by PR-0, because writing under `docs/adr/` is outside the PR-0 change boundary.
+- **During PR-0:** an ADR **proposal** (`Status: Proposed`) lived inside this directory as
+  `ADR-PROPOSAL-mcp-trust-boundary.md`. This kept PR-0 confined to `docs/design/mcp/`.
+- **Promotion (done 2026-07-24):** the proposal was promoted to the numbered ADR
+  [`docs/adr/0023-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md),
+  which also records the five closed PR-1 entry decisions (D-2, D-5, D-8, D-9, D-13). The in-package
+  proposal file is now a **non-authoritative pointer** to ADR-0023.
+- **ADR status is `Proposed`, not yet `Accepted`.** The hard, human-controlled PR-1 entry gate closes only
+  when the **Architecture Review Board and Security Architecture record ratification** in ADR-0023's
+  "Ratification" section. In addition, **D-1 (protocol baseline) is elevated to a hard PR-1 entry gate**
+  and the **repository build/test baseline must be run and recorded** before PR-1 code begins.
 
 ## Trust-boundary changes require an ADR
 

@@ -8,6 +8,11 @@ debug trail. Each capability emits events into its **own** decision namespace; t
 shared schema shape, not a merged event stream (see [`README.md`](README.md) doctrine: separate
 enforcement engines and trust boundaries, shared conventions only).
 
+> **Decision status — D-5 CLOSED (2026-07-24, [`ADR-0023 §D-5`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Option C:** local encrypted durable spool on every relevant Data Plane, bounded queues + backpressure
+> + replay IDs + pluggable asynchronous exporters; a message bus / SIEM is an **adapter**, never a
+> mandatory runtime dependency. The per-action durability-unavailable semantics are fixed in **§4a** below.
+
 **Status:** PR-0 design artifact (Proposed). No event pipeline described here is implemented; this
 document is normative input to PR-8 (Durable decision events) per
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events) and
@@ -175,6 +180,32 @@ are **required**, each grounded in a stable requirement ID from
 > threat registry. A dropped `MONITOR` event on a low-risk `ALLOW` is a durability nuisance; a dropped
 > `DENY`, auth-failure, config-change, or high-risk event is a security-evidence failure and must be
 > treated as one architecturally, not just operationally.
+
+---
+
+## 4a. Durability-unavailable semantics by action class (D-5, closed)
+
+Per [`ADR-0023 §D-5`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md), when a decision event
+**cannot be durably persisted**, behavior is fixed by the class of action, not left to the moment:
+
+| Action class | Behavior when the decision event cannot be durably persisted |
+|---|---|
+| Read-only / low-risk `ALLOW` or `MONITOR` | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an **integrity-protected loss/degradation counter**; keep retrying persistence/export within bounded budgets; **never fail silently**. |
+| Write action | **Fail closed** (deny the operation). |
+| Destructive / production action | **Fail closed.** |
+| Configuration publication | **Fail closed** — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed.** |
+| State-affecting Management MCP operation | **Fail closed** (and out of V1 regardless — see [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)). |
+| Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
+
+**Required design coverage (PR-8).** The durable-event design **MUST** specify, in addition to the §4
+elements: event-**ordering scope**, **deduplication**, **replay cursor**, **encryption at rest**,
+**corruption recovery**, **tenant isolation**, **retention**, **disk-pressure behavior**, and
+**restart/failover recovery**. (Management MCP and Gateway MCP **may** share the underlying durable event
+transport only when events are separated by authorization domain, tenant, category, partitioning,
+retention and query policy — [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+items 4–5; two physically separate event systems are not required when logical + security isolation is
+enforced and tested.)
 
 ---
 
