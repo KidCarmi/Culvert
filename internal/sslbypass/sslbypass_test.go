@@ -157,6 +157,40 @@ func TestMatcher_NormalizedPatternMatches(t *testing.T) {
 	}
 }
 
+// TestMatcher_TrailingDotHostMatches pins the two-pass normalization parity
+// flagged in the PR #918 Codex review: NormalizeHost is not idempotent for a
+// host with an empty trailing DNS label ("example.com.." normalizes to
+// "example.com.", not "example.com"), and such hosts pass the request path's
+// NormalizeHostStrict gate. The pre-precompute code re-normalized the host
+// inside per-pattern MatchFQDN, so these hosts matched their bypass pattern —
+// an explicitly bypassed CONNECT destination must not silently become
+// inspected. The expectations below are the measured OLD behavior (two
+// normalization passes total: ≥3 trailing dots did not match then either).
+func TestMatcher_TrailingDotHostMatches(t *testing.T) {
+	m := &Matcher{}
+	if err := m.Add("example.com"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"example.com", true},
+		{"example.com.", true},        // single root-anchor dot
+		{"example.com..", true},       // empty trailing label — the review case
+		{"sub.example.com..", true},   // subdomain variant
+		{"EXAMPLE.com..", true},       // plus case normalization
+		{"example.com...", false},     // two passes were never enough pre-change either
+		{"example.com..evil", false},  // dots in the middle must not collapse
+		{"evil-example.com..", false}, // suffix confusion must not match
+	}
+	for _, c := range cases {
+		if got := m.Matches(c.host); got != c.want {
+			t.Errorf("Matches(%q) = %v, want %v (old two-pass semantics)", c.host, got, c.want)
+		}
+	}
+}
+
 // TestMatcher_EmptyFastPath pins the empty-list fast path: a matcher with no
 // patterns (the unconfigured default) must report no match for any host.
 func TestMatcher_EmptyFastPath(t *testing.T) {

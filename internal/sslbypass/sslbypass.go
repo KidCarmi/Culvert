@@ -180,6 +180,17 @@ func (m *Matcher) Matches(host string) bool {
 	// MatchFQDN re-normalized BOTH arguments on every iteration — ~735 ns +
 	// 4 allocs per pattern per inspected CONNECT.
 	h := hostutil.NormalizeHost(host)
+	// NormalizeHost is not idempotent for a host carrying an empty trailing
+	// DNS label ("example.com.." — TrimSuffix strips one dot, IDNA keeps the
+	// other), and such hosts pass the request path's NormalizeHostStrict gate.
+	// The pre-optimization code re-normalized h inside per-pattern MatchFQDN,
+	// so "example.com.." matched the bypass pattern "example.com"; preserve
+	// those exact two-pass semantics with a second pass paid ONLY on the
+	// pathological trailing-dot shape — the common path stays single-pass
+	// (Codex review, PR #918).
+	if strings.HasSuffix(h, ".") {
+		h = hostutil.NormalizeHost(h)
+	}
 	for _, p := range m.compiled {
 		if p.isRE {
 			if p.re.MatchString(h) {
