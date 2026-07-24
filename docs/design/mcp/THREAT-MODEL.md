@@ -292,5 +292,18 @@ A threat is closed for PR-1 entry when: (1) it appears in this register with a s
 without an owner is a NO-GO** ([`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md)).
 
 > **Note on MCP-T-002 (token replay):** per [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md)
-> §6, the reusable SWG bearer path provides **no** access-token replay defense. MCP replay protection is
-> **net-new and NOT VERIFIED as present**; `MCP-AUTH-006` is therefore a build requirement, not a reuse.
+> §6, the reusable SWG bearer path provides **no** access-token replay defense. MCP anti-replay is
+> **net-new and NOT VERIFIED as present**; `MCP-AUTH-006` is a build requirement, not a reuse.
+> **Reframed by [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (items 7–9):**
+> the control is **not** access-token `jti` one-time-use (a still-valid token replaying is not itself
+> evidence of replay). It is a layered posture — short TTL, audience/resource, issuer/sig/exp/tenant/scope
+> validation, introspection/revocation, correlation + rate limits + anomaly, and **sender-constrained
+> (mTLS/DPoP) tokens for high-risk/external profiles**, with DPoP replay detection applied to the
+> per-request DPoP proof.
+
+> **Decision closure (2026-07-24).** The threats governing the five closed decisions have accountable
+> owners and are recorded in [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md):
+> D-2 → MCP-T-001..010 (esp. MCP-T-005 Critical passthrough); D-5 → MCP-T-044 Critical / MCP-T-028 /
+> MCP-T-045; D-8 → MCP-T-051 / MCP-T-053 (residual R-5) / MCP-T-010; D-9 → MCP-T-052 / MCP-T-031 (inbound
+> Origin/Host, Missing-today → MCP-INSP-008 in PR-1); D-13 → MCP-T-034 Critical / MCP-T-035. No closure
+> removes a threat's owner or residual acceptance in §12.

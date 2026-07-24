@@ -8,6 +8,14 @@ not about running code (none exists).
 How to use: each role signs off its section. Any unchecked blocking item holds the gate. Link findings to
 the specific document and ID.
 
+> **Decision status (2026-07-24).** Five blocking decisions are closed and recorded in
+> [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md): **D-2** (Architecture /
+> IAL below), **D-5** (Privacy / events), **D-8 + D-9** (Privacy / connectivity), **D-13** (Product /
+> Architecture / dual-surface). The ADR is `Status: Proposed`; the per-role sign-offs in this checklist
+> plus **ARB + Security Architecture ratification of ADR-0023** are the remaining gate steps. **D-1
+> (protocol baseline) is elevated to a hard PR-1 entry gate** and the **build/test baseline must be run +
+> recorded** before PR-1 code.
+
 ---
 
 ## Product
@@ -22,7 +30,7 @@ the specific document and ID.
 - [ ] Proposed `internal/mcp/*` boundaries are **evaluated, not adopted**; consistent with ADR-0002.
 - [ ] Prohibited coupling is explicit (no SWG `PolicyRule` fields; no OIDC-flow reuse; no audit-ring reuse; no shared listeners; no policy-eval I/O).
 - [ ] Trust boundaries TB-1..TB-7 are coherent across [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) and [`THREAT-MODEL.md`](THREAT-MODEL.md).
-- [ ] **ADR proposal** [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md) is complete; ready to promote to `docs/adr/NNNN` (D-0, Option B). *(Blocking for PR-1.)*
+- [x] ADR proposal promoted to [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (D-0, Option B); the in-package file is now a pointer. *(ADR is `Status: Proposed` — **PR-1 gate closes only on ARB + Security Architecture ratification**.)*
 
 ## Product Security
 - [ ] [`THREAT-MODEL.md`](THREAT-MODEL.md) covers all listed threat classes; every Critical/High has controls, tests, owner, closure.
@@ -30,12 +38,12 @@ the specific document and ID.
 - [ ] [`ATTACK-TREES.md`](ATTACK-TREES.md) leaves all map to defined threat IDs.
 - [ ] [`ABUSE-CASES.md`](ABUSE-CASES.md) cover token passthrough, unknown-tool auto-allow, credential-to-agent, critical-event loss (hard NO-GO lines 2,3,4,6).
 - [ ] [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) IDs are unique; every requirement maps to a threat/verification/evidence/gate.
-- [ ] Replay protection is stated as **net-new / NOT VERIFIED**, not implied as present.
+- [ ] Replay protection is stated as **net-new / NOT VERIFIED**, not implied as present, **and framed per [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) as sender-constraint / DPoP-proof replay — NOT access-token `jti` one-time-use**.
 - [ ] Inbound Origin/Host anti-rebinding is a stated new requirement (MCP-INSP-008).
 
 ## IAM / PAM
 - [ ] [`AUTH-AND-CREDENTIAL-MODEL.md`](AUTH-AND-CREDENTIAL-MODEL.md) defines all principals + delegation; human `Identity` reuse is post-refactor only.
-- [ ] No token passthrough; audience + RFC 8707 resource validation required; separate Mgmt/Gateway clients (D-2).
+- [ ] No token passthrough; audience + RFC 8707 resource validation required; separate Mgmt/Gateway clients (**D-2 CLOSED — [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md); Culvert = resource server, Option C = issuer topology, Option B = edge only**).
 - [ ] Credential broker: scoped, short-lived, revocable, fail-closed; **agent never holds a secret** (hard NO-GO line 2).
 - [ ] Credential providers for MVP captured as a decision (D-3).
 - [ ] No secrets in events/logs (MCP-CRED-004, MCP-EVENT-003).

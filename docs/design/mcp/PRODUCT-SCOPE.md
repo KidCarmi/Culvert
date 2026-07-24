@@ -184,8 +184,10 @@ must be represented honestly in every customer-facing scoping conversation:
 
 A **Desktop/Endpoint Bridge** that could extend coverage to stdio/localhost MCP traffic is a roadmap idea,
 not a V1 commitment. Its priority, design, and whether it ships at all is an open decision — see
-[`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) **D-8**. Until that decision is made and a bridge is delivered,
-sales and product messaging must state local-MCP coverage as absent, not "coming soon."
+[`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) **D-7** (local MCP / endpoint-bridge roadmap). *(Corrected
+2026-07-24: the endpoint bridge is tracked under D-7, not D-8; D-8 is the outbound-connector model.)*
+Until that decision is made and a bridge is delivered, sales and product messaging must state local-MCP
+coverage as absent, not "coming soon."
 
 ---
 
@@ -230,6 +232,16 @@ Culvert's MCP work spans **two capabilities that share a platform shell but must
 policy schema, or threat model.** This separation is a hard product and architecture doctrine, not a
 phased convenience — see the "Shared vs. Separate" table below and
 [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md) for the trust-boundary detail.
+
+> **Decision status — D-13 CLOSED (2026-07-24, [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **V1 Management MCP = read-only + draft / validate / simulate, with NO activation. Mutation and
+> publication are excluded from V1.** Isolation is at the level of listener, OAuth client/resource/scopes,
+> policy namespace, rule bundles, quotas, audit category, threat model and runbook; the two capabilities
+> **may** share reviewed implementation libraries, selected Control-Plane infrastructure, a shared
+> policy-engine **library** (never shared active state/rule-bundles/namespaces/decisions), and even the
+> underlying durable event **transport** — but only when events are separated by authorization domain,
+> tenant, category, partitioning, retention and query policy. Two physically separate event systems are
+> not required when logical + security isolation is enforced and tested.
 
 ### Capability A — Culvert Management MCP Server (read-only by default)
 

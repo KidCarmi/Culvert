@@ -7,14 +7,25 @@ plan; **no slice is implemented.** Per-slice fields: objective, scope, non-goals
 dependencies, security requirements, tests, acceptance criteria, rollback, owner, reviewer, release gate.
 
 > **Editorial normalization:** the source DOCX listed connectivity adapters (PR-11) and shadow/canary
-> (PR-12) as separate slices. Per the PR-0 execution instruction, shadow/canary is **PR-11** and
-> connectivity adapters fold into **PR-5** (dedicated listener/runtime) and **PR-10** (CP/DP + connector
-> snapshot semantics); the connectors themselves harden during **PR-11** and are proven at Production
-> Qualification. `SOURCE REVIEW REQUIRED` for the folding.
+> (PR-12) as separate slices. Per the PR-0 execution instruction, shadow/canary is **PR-11**. The
+> **local-listener** wiring for Model A folds into **PR-5** (dedicated listener/runtime) and CP/DP snapshot
+> semantics into **PR-10**. `SOURCE REVIEW REQUIRED` for the folding.
+>
+> **Updated by D-8 (2026-07-24, [`ADR-0023 §D-8`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)):**
+> the **outbound connector (Model B) is NOT assigned to PR-11** and is **not** in V1 — PR-11 stays
+> Shadow/Canary. The connector is a **post-V1 slice with its own design gate** (unless a human-approved
+> roadmap change renumbers slices). The DMZ endpoint (Model C, D-9) is **default-off and deferred**.
+> Inbound Origin/Host validation (MCP-INSP-008) remains in **PR-1**.
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
-(Option B — see [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md)).
+(Option B — now [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).
+
+> **PR-1 entry gate (updated 2026-07-24, [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> ADR-0023 is `Status: Proposed`; PR-1 also requires: **(a)** ARB + Security Architecture ratification of
+> ADR-0023 (→ Accepted); **(b)** **D-1 (protocol-version baseline) externally verified and human-approved**
+> — because PR-1 *is* the Protocol Kernel, D-1 **must not** be left for closure during implementation; and
+> **(c)** the **repository build/test baseline run and recorded** (the PR-0 session executed neither).
 
 ---
 
@@ -37,8 +48,8 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Scope:** `internal/mcp/protocol` (name [REC], pending ADR); inbound Origin/Host validation.
 - **Non-goals:** policy, identity, upstream calls.
 - **Trust boundary:** TB-1 (agent/client ↔ Culvert).
-- **Dependencies:** PR-0 approved; ADR accepted.
-- **Security requirements:** MCP-INSP-008, MCP-OPS-002, protocol bounds.
+- **Dependencies:** PR-0 approved; **ADR-0023 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**. *(All three are hard PR-1 entry gates — [`ADR-0023` PR-1 entry gate](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).)*
+- **Security requirements:** MCP-INSP-008 (inbound Origin/Host per protocol baseline; host-allowlist + bind-configured-interfaces), MCP-OPS-002, protocol bounds.
 - **Tests:** fuzz, race, compatibility fixtures, inbound-rebinding, malformed JSON-RPC (all **new**).
 - **Acceptance:** no public listener; fuzz/race/compat block; Origin/Host validated.
 - **Rollback:** feature-flag disabled build; no listener bound.
@@ -155,16 +166,31 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Owner:** Eng/SRE. **Reviewer:** Arch. **Release gate:** mixed-version + corrupt-snapshot + rollback green.
 
 ## PR-11 — Shadow & Canary
-- **Objective:** rollout modes, scope controls, dashboards, rollout guardrails; **connector/DMZ hardening**.
-- **Scope:** mode ladder (Disabled→Observe→Shadow→Canary→Production); connector/DMZ controls.
-- **Non-goals:** production enablement without Production Qualification.
-- **Trust boundary:** TB-1, TB-6.
+- **Objective:** rollout modes, scope controls, dashboards, rollout guardrails for the **Model A (local
+  enterprise client)** deployment. *(D-8: connector/DMZ hardening is **out of PR-11** — see the post-V1
+  connector slice below.)*
+- **Scope:** mode ladder (Disabled→Observe→Shadow→Canary→Production) for the local-client model.
+- **Non-goals:** production enablement without Production Qualification; the outbound connector (Model B, post-V1); any DMZ endpoint (Model C, default-off/deferred).
+- **Trust boundary:** TB-1.
 - **Dependencies:** PR-1..PR-10.
-- **Security requirements:** MCP-CONNECT-001..004; MCP-PRIVACY-001; hard-fail-in-shadow set.
-- **Tests:** shadow decision parity, connector impersonation/rollover/replay, DMZ-abuse, egress DLP gate.
+- **Security requirements:** MCP-PRIVACY-001 (DLP-before-egress); hard-fail-in-shadow set. *(MCP-CONNECT-001..004 move to the post-V1 connector slice.)*
+- **Tests:** shadow decision parity, egress DLP gate.
 - **Acceptance:** production-readiness evidence complete; hard failures blocked even in Shadow.
 - **Rollback:** emergency disable → Observe/Disabled; snapshot rollback.
-- **Owner:** SRE/Sec. **Reviewer:** Ops Readiness. **Release gate:** rollout guardrails + connector suites green.
+- **Owner:** SRE/Sec. **Reviewer:** Ops Readiness. **Release gate:** rollout guardrails green.
+
+## PR-C (post-V1) — Outbound Connector (Model B) *(D-8 — not in V1; own design gate)*
+- **Objective:** the outbound-only connector for approved cloud-AI vendors — **only** after a named vendor
+  integration is verified against authoritative, date-stamped requirements.
+- **Scope:** customer-initiated, tenant-bound, mTLS-identified, revocable, cert-rotating, bounded,
+  observable connector; **no production upstream credentials stored/received**; DLP-before-egress.
+- **Non-goals:** any V1 commitment; any claim of vendor support pre-verification; a public DMZ endpoint (D-9).
+- **Trust boundary:** TB-6.
+- **Dependencies:** V1 GA; a separate connector design ADR/gate.
+- **Security requirements:** MCP-CONNECT-001..004; MCP-PRIVACY-001.
+- **Tests:** connector impersonation/rollover/replay, egress DLP gate, per-vendor compatibility validation.
+- **Acceptance:** named vendor validated; failure/reconnect/HA/upgrade/incident behavior proven.
+- **Owner:** Net/Sec/Privacy. **Reviewer:** Arch/Privacy. **Release gate:** connector suites + vendor validation green.
 
 ## Production Qualification (separate gate — not a PR slice)
 - **Objective:** full evidence pack + Joint Go/No-Go sign-off.

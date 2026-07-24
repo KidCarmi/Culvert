@@ -9,6 +9,15 @@ architecture review has to improvise a connectivity story.
 
 **Status: PR-0 design artifact (Proposed).**
 
+> **Decision status — D-8 and D-9 CLOSED (2026-07-24, [`ADR-0023 §D-8`/`§D-9`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Model A (local enterprise client) is the ONLY supported V1 connectivity model.** The outbound
+> connector (**Model B**) is a **post-V1 roadmap extension with its own future implementation slice** — it
+> is **NOT** assigned to PR-11 (PR-11 stays Shadow/Canary) and its vendor compatibility stays **[EXT]**
+> unverified until a named, date-stamped integration is validated. A hardened **DMZ endpoint (Model C)** is
+> **not supported in V1 and is disabled by default.** Host validation + configured-host allowlisting are
+> mandatory on **every** HTTP MCP listener; local deployments bind only to explicitly configured
+> interfaces; inbound Origin/Host validation (MCP-INSP-008) ships in **PR-1**.
+
 **Naming note (`SOURCE REVIEW REQUIRED`):** the source DOCX blueprint index named this document
 `ONPREM-CONNECTIVITY-MODEL.md`; PR-0 uses the task-specified filename `ON-PREM-CONNECTIVITY.md`. This is
 recorded once here and in [`BLUEPRINT.md`](BLUEPRINT.md) §23 (PR-0 Document Package); no other document
@@ -67,6 +76,13 @@ inbound port** opened on the customer's perimeter for this path. **[REC]**
 **Who this fits:** approved cloud AI vendors whose product supports an enterprise connector or reverse
 tunnel mechanism (vendor-specific — see §6). **[REC]**
 
+> **V1 posture (D-8, closed).** Model B is a **post-V1 roadmap extension**. It receives its **own future
+> implementation slice and design gate** after V1 (it is **not** folded into PR-11, which remains
+> Shadow/Canary) unless a human-approved roadmap change explicitly renumbers the slices. No ChatGPT/Claude/
+> other-vendor connector is claimed supported until a named integration is verified against authoritative,
+> date-stamped vendor requirements and tested. The future connector must not store or receive production
+> upstream credentials. See [`ADR-0023 §D-8`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).
+
 **Key properties:**
 
 | Property | Requirement |
@@ -98,6 +114,18 @@ Do not promise universal compatibility (see §5).
 
 **Topology:** `Cloud AI client → public internet → routable remote MCP endpoint (DMZ) → internal mTLS →
 Culvert`. This is the only model that exposes a routable, internet-reachable MCP endpoint. **[REC]**
+
+> **V1 posture (D-9, closed).** Model C is **not supported in V1 and is disabled by default.** Model A is
+> **sufficient for V1**; the future connector (Model B) does not need to exist first. If ever offered, DMZ
+> requires a separate architecture + production-readiness approval and a **signed customer risk
+> acceptance**. **Independent of DMZ**, two controls are mandatory on **every** HTTP MCP listener now:
+> (1) **host validation + configured-host allowlisting**, and (2) **binding only to explicitly configured
+> interfaces** — a local deployment must never default to unrestricted public ingress. **Origin
+> validation follows the supported MCP protocol baseline**: validate the `Origin` header on incoming
+> Streamable HTTP connections and reject a present-but-invalid Origin with the protocol-required HTTP
+> response; do **not** invent a blanket rule that every non-browser client must always send an `Origin`
+> header unless the selected protocol version explicitly requires it. Inbound Origin/Host anti-rebinding
+> (MCP-INSP-008) remains a **PR-1** requirement. See [`ADR-0023 §D-9`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).
 
 **Who this fits:** cloud AI clients that have no supported outbound-connector mechanism and therefore
 require a directly reachable remote MCP URL. **[REC]**
@@ -135,6 +163,10 @@ sequence for any customer rollout — do not skip Model A to sell Model C first.
 | 1 | Local enterprise client | Claude Desktop/Code, IDEs, internal agents, VDI and private AI platforms. | No public ingress; direct LAN/VPN access; simplest first production model. |
 | 2 | Outbound-only connector | Approved cloud AI services where an enterprise connector/tunnel is supported. | Customer initiates the encrypted connection; no unsolicited inbound port. |
 | 3 | Hardened DMZ endpoint | Cloud clients that require a routable remote MCP URL. | OAuth, WAF, origin/host validation, rate limits, internal mTLS and explicit risk acceptance. |
+
+> **V1 support (D-8/D-9, closed):** **only Priority 1 (Model A) is supported in V1.** Priority 2 (Model B
+> connector) is a **post-V1 roadmap slice**; Priority 3 (Model C DMZ) is **not supported in V1 and is
+> default-off**. The ordering above is the adoption *sequence*, not a statement that all three ship in V1.
 
 ---
 
@@ -204,10 +236,12 @@ matrix, DFD-12/13/14 rows) and §11 (risk register).
 - Data-flow diagrams: [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-12 (local enterprise client),
   DFD-13 (outbound-only connector), DFD-14 (hardened DMZ endpoint).
 - Deployment priority and product framing: [`BLUEPRINT.md`](BLUEPRINT.md) §04.
-- Implementation sequencing note: per the PR-0 implementation-sequence correction, connectivity adapters
-  fold into **PR-5** (Observe runtime) and **PR-10** (CP/DP & HA) — there is no separate connectivity PR.
-  Any distinct connectivity slice that does not fit those two PRs is deferred to
-  [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md).
+- Implementation sequencing note (updated by D-8/D-9, [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)):
+  the **local-listener** wiring for Model A folds into **PR-5** (Observe runtime), and CP/DP snapshot
+  semantics into **PR-10** (CP/DP & HA). The **outbound connector (Model B) is NOT part of PR-11** and is
+  **not** V1 — it is a **post-V1 slice** with its own design gate. DMZ (Model C) is deferred and
+  default-off. Inbound Origin/Host validation (MCP-INSP-008) ships in **PR-1**. Any distinct connectivity
+  slice remains tracked in [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) (D-8/D-12).
 
 ---
 
