@@ -60,6 +60,33 @@ type SpanExporter struct {
 	buf   []SpanRecord
 	head  int
 	count int
+
+	// Push-health diagnostics (read-only; never gates or alters push
+	// behavior) — see MetricsExporter's identical fields for rationale.
+	pushFailures  atomic.Int64
+	lastErr       atomic.Value // string
+	lastErrAt     atomic.Int64 // UnixNano; 0 = never
+	lastSuccessAt atomic.Int64 // UnixNano; 0 = never
+	droppedSpans  atomic.Int64 // ring-buffer overwrites (collector unreachable + buffer full)
+}
+
+// Health returns the current push-loop diagnostic snapshot, including spans
+// dropped by ring-buffer overflow.
+func (e *SpanExporter) Health() PushHealth {
+	h := PushHealth{
+		FailureCount: e.pushFailures.Load(),
+		DroppedSpans: e.droppedSpans.Load(),
+	}
+	if v, _ := e.lastErr.Load().(string); v != "" {
+		h.LastError = v
+	}
+	if t := e.lastErrAt.Load(); t != 0 {
+		h.LastErrorAt = time.Unix(0, t).UTC().Format(time.RFC3339)
+	}
+	if t := e.lastSuccessAt.Load(); t != 0 {
+		h.LastSuccessAt = time.Unix(0, t).UTC().Format(time.RFC3339)
+	}
+	return h
 }
 
 // NewSpans builds a span exporter.
@@ -126,6 +153,8 @@ func (e *SpanExporter) RecordSpan(s SpanRecord) {
 	e.head++
 	if e.count < spanBufferCap {
 		e.count++
+	} else {
+		e.droppedSpans.Add(1)
 	}
 	e.mu.Unlock()
 }
@@ -166,7 +195,7 @@ func (e *SpanExporter) pushLoop(ctx context.Context) {
 	}
 }
 
-func (e *SpanExporter) push(ctx context.Context) error {
+func (e *SpanExporter) push(ctx context.Context) (err error) {
 	spans := e.drain()
 	if len(spans) == 0 {
 		return nil
@@ -180,6 +209,15 @@ func (e *SpanExporter) push(ctx context.Context) error {
 	if endpoint == "" {
 		return nil
 	}
+	defer func() {
+		if err != nil {
+			e.pushFailures.Add(1)
+			e.lastErr.Store(err.Error())
+			e.lastErrAt.Store(time.Now().UnixNano())
+		} else {
+			e.lastSuccessAt.Store(time.Now().UnixNano())
+		}
+	}()
 
 	if !validEndpoint.MatchString(endpoint) {
 		return fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)

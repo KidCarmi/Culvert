@@ -1681,11 +1681,38 @@
           },
           "hasAuth": {
             "type": "boolean"
+          },
+          "metricsHealth": {
+            "$ref": "#/components/schemas/OTLPPushHealth"
+          },
+          "tracesHealth": {
+            "$ref": "#/components/schemas/OTLPPushHealth"
           }
         },
         "required": [
           "enabled"
         ],
+        "type": "object"
+      },
+      "OTLPPushHealth": {
+        "additionalProperties": true,
+        "properties": {
+          "droppedSpans": {
+            "type": "integer"
+          },
+          "failureCount": {
+            "type": "integer"
+          },
+          "lastError": {
+            "type": "string"
+          },
+          "lastErrorAt": {
+            "type": "string"
+          },
+          "lastSuccessAt": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "ObjectReferences": {

@@ -1247,6 +1247,15 @@ components:
       properties:
         addr: { type: string }
         format: { type: string }
+    OTLPPushHealth:
+      type: object
+      additionalProperties: true
+      properties:
+        failureCount: { type: integer }
+        lastError: { type: string }
+        lastErrorAt: { type: string }
+        lastSuccessAt: { type: string }
+        droppedSpans: { type: integer }
     OTLPConfig:
       type: object
       required: [enabled]
@@ -1256,6 +1265,8 @@ components:
         endpoint: { type: string }
         hasAuth: { type: boolean }
         authHeaderName: { type: string }
+        metricsHealth: { $ref: '#/components/schemas/OTLPPushHealth' }
+        tracesHealth: { $ref: '#/components/schemas/OTLPPushHealth' }
     SetOTLPBody:
       type: object
       additionalProperties: false

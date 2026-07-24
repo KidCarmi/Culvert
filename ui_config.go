@@ -1920,6 +1920,8 @@ func apiOTLPConfig(w http.ResponseWriter, r *http.Request) {
 			"endpoint":       globalOTLP.Endpoint(),
 			"hasAuth":        hasAuth,
 			"authHeaderName": authName,
+			"metricsHealth":  globalOTLP.Health(),
+			"tracesHealth":   globalOTLPTraces.Health(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {

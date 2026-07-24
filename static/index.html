@@ -2476,6 +2476,7 @@ Firefox (all platforms):
             </div>
           </div>
           <div id="s-otlp-status" style="display:none;margin-top:8px;font-size:.8rem"></div>
+          <div id="s-otlp-health" style="display:none;margin-top:8px;font-size:.78rem;flex-direction:column;gap:4px"></div>
         </div>
       </div>
 
@@ -9269,7 +9270,38 @@ async function loadOTLPConfig() {
     } else {
       el.style.display = 'none';
     }
+    renderOTLPHealth(r.enabled, r.metricsHealth, r.tracesHealth);
   } catch(e) { console.error(e); }
+}
+
+// renderOTLPHealth - surfaces push-loop failures that otherwise only show up
+// as a log line: without this, "enabled: true" looks healthy forever even
+// when the collector endpoint has been unreachable for weeks.
+function renderOTLPHealth(enabled, metricsHealth, tracesHealth) {
+  const el = document.getElementById('s-otlp-health');
+  const rows = [];
+  [['Metrics', metricsHealth], ['Traces', tracesHealth]].forEach(([label, h]) => {
+    if (!h) return;
+    if (h.failureCount > 0) {
+      const since = h.lastSuccessAt
+        ? ' (last delivered ' + new Date(h.lastSuccessAt).toLocaleString() + ')'
+        : ' (never delivered successfully)';
+      rows.push('<div style="color:var(--red)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' +
+        label + ' push failing - ' + fmt(h.failureCount) + ' failure(s)' + since + '<br>' +
+        '<span style="opacity:.75">' + escHtml(h.lastError || 'unknown error') + '</span></div>');
+    }
+    if (h.droppedSpans > 0) {
+      rows.push('<div style="color:var(--red)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' +
+        fmt(h.droppedSpans) + ' trace span(s) dropped (buffer full - collector unreachable)</div>');
+    }
+  });
+  if (!enabled || rows.length === 0) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = 'flex';
+  el.innerHTML = rows.join('');
 }
 
 async function saveOTLP() {
@@ -9307,6 +9339,7 @@ async function disableOTLP() {
     el.style.display = '';
     el.textContent = 'OTLP export disabled';
     el.style.color = 'var(--muted)';
+    renderOTLPHealth(false, null, null);
     toast('OTLP export disabled', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
