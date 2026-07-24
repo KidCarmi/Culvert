@@ -7,7 +7,7 @@ stricter requirements than read-only ones.
 
 ## Contract targets OpenAPI 3.0.4
 
-See ADR-0007 §"Why 3.0.4". Do not use 3.1-only idioms (`type: [x, "null"]`,
+See ADR-0018 §"Why 3.0.4". Do not use 3.1-only idioms (`type: [x, "null"]`,
 top-level `webhooks`) until the contract is migrated.
 
 ## Operations (ENFORCED)

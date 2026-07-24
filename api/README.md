@@ -16,7 +16,7 @@ root (`apicontract_*_test.go`) that bind the **live** `uiRoutes` table. Because
 they are ordinary Go tests, they run in the required `go test -race ./...` fast PR
 gate — the contract cannot silently drift from the router.
 
-See `docs/api/API-CONTRIBUTING.md` for the workflow, `docs/adr/ADR-0007-openapi-contract.md`
+See `docs/api/API-CONTRIBUTING.md` for the workflow, `docs/adr/0018-openapi-contract.md`
 for the architecture decision, and `docs/api/` for the style guide, versioning
 and deprecation policies, inventory, research, and risk register.
 
