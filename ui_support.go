@@ -107,6 +107,7 @@ func registerSupportRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/support/uploads", apiSupportUploads)
 	mux.HandleFunc("/api/support/bundles/{id}/upload", apiSupportBundleUpload)
 	mux.HandleFunc("/api/health/explain", apiHealthExplain)
+	mux.HandleFunc("/api/support/telemetry/preview", apiSupportTelemetryPreview)
 }
 
 // debugLevelView is the read-only status of the capture-level controller.

@@ -4427,6 +4427,12 @@ Firefox (all platforms):
             <div id="support-uploads" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
+          <div data-min-role="admin">
+            <div style="font-weight:600;margin-bottom:6px">Telemetry preview</div>
+            <p class="hint">M7 Slice 1: a read-only preview of the exact governed support-health sample that would be sealed and sent if telemetry were ever enabled. <strong>There is no telemetry consent switch, sender, or egress in this build</strong> - this only shows what future values would look like.</p>
+            <div id="support-telemetry-preview" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
+          </div>
+
           <div>
             <div style="font-weight:600;margin-bottom:6px">Collectors</div>
             <div id="support-status" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
@@ -13489,6 +13495,36 @@ async function loadSupport() {
   loadUploadConfig();
   loadTacTrust();
   loadUploads();
+  loadSupportTelemetryPreview();
+}
+
+// M7 Slice 1: read-only preview only — GET /api/support/telemetry/preview
+// never enables or sends anything; there is no consent switch or sender to
+// wire up yet.
+async function loadSupportTelemetryPreview() {
+  const el = document.getElementById('support-telemetry-preview');
+  if (!el) return;
+  try {
+    const d = await api('/api/support/telemetry/preview');
+    renderSupportTelemetryPreview(d);
+  } catch (err) {
+    el.innerHTML = '<p class="hint">Could not load telemetry preview: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderSupportTelemetryPreview(d) {
+  const el = document.getElementById('support-telemetry-preview');
+  if (!el) return;
+  d = d || {};
+  const metrics = d.metrics || {};
+  const rows = Object.keys(metrics).sort().map(id =>
+    '<tr><td style="font-family:monospace;font-size:.78rem">' + escHtml(id) + '</td><td>' + escHtml(String(metrics[id])) + '</td></tr>'
+  ).join('');
+  el.innerHTML =
+    '<p class="hint">schema_version <strong>' + escHtml(String(d.schema_version)) +
+    '</strong> · registry_hash <span style="font-family:monospace;font-size:.72rem">' + escHtml(String(d.registry_hash || '')) +
+    '</span> · generated_at ' + escHtml(String(d.generated_at || '')) + '</p>' +
+    '<table class="tbl"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 async function loadUploadConfig() {

@@ -25,14 +25,7 @@ type healthReport struct {
 // Shared by handleHealth and the health support collector.
 func computeHealth() healthReport {
 	// CA cert expiry
-	caExpiresDays := -1
-	if info := certMgr.CACertInfo(); info["ready"] == true {
-		if notAfterStr, ok := info["notAfter"].(string); ok {
-			if t, err := time.Parse("2006-01-02", notAfterStr); err == nil {
-				caExpiresDays = int(time.Until(t).Hours() / 24)
-			}
-		}
-	}
+	caExpiresDays := caExpiryDaysRemaining()
 
 	// Threat feed entry count
 	tfEntries, _, _ := globalThreatFeed.Stats()
@@ -258,6 +251,28 @@ func strictVerdictFails(r *http.Request, checks map[string]*readinessCheck) bool
 		}
 	}
 	return false
+}
+
+// caExpiryDaysRemaining returns the number of days until the internal CA
+// certificate expires, or -1 when no CA is loaded/ready. Shared by
+// computeHealth and the support-telemetry registry's
+// support_health_ca_expiry_bucket read (support_telemetry_registry.go) so
+// there is exactly one place that reads the CA's notAfter — not a second,
+// independently-computed source of truth.
+func caExpiryDaysRemaining() int {
+	info := certMgr.CACertInfo()
+	if info["ready"] != true {
+		return -1
+	}
+	notAfterStr, ok := info["notAfter"].(string)
+	if !ok {
+		return -1
+	}
+	t, err := time.Parse("2006-01-02", notAfterStr)
+	if err != nil {
+		return -1
+	}
+	return int(time.Until(t).Hours() / 24)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

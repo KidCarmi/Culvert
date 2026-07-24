@@ -89,8 +89,11 @@ import (
 //   - 186 — M6 secure-upload PR-5 added /api/support/uploads (GET viewer: upload
 //     queue list) and /api/support/bundles/{id}/upload (GET viewer status+receipt /
 //     POST admin per-bundle upload consent → seal + enqueue).
+//   - 187 — M7 Slice 1 added /api/support/telemetry/preview (GET admin: read-only
+//     preview of the current support-telemetry sample; no consent, sender, or
+//     egress exists yet).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 186
+	const want = 187
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

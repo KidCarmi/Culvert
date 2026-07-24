@@ -930,6 +930,25 @@ components:
         max: { type: integer, description: "Maximum trust keys accepted." }
         alg: { type: string, description: "Expected key algorithm." }
         error: { type: string, description: "Sanitized configuration error (present only on misconfiguration)." }
+    SupportTelemetryPreview:
+      type: object
+      description: >-
+        Live preview of the exact support-telemetry sample that would be
+        sealed and sent right now, IF telemetry were enabled — it is not; no
+        consent switch, sender, or egress exists in this build. schema_version
+        and registry_hash identify the governed metric schema (any eligible-
+        metric or bucket-definition change bumps registry_hash); metrics are
+        the current values of exactly the telemetry-eligible entries in the
+        scoped support-metric registry. Does not imply future previews will
+        be byte-for-byte identical — only the schema/eligible-set identity is
+        stable.
+      additionalProperties: false
+      required: [schema_version, registry_hash, generated_at, metrics]
+      properties:
+        schema_version: { type: integer, description: "Governed telemetry wire-schema version." }
+        registry_hash: { type: string, description: "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition)." }
+        generated_at: { type: string, description: "RFC3339 UTC timestamp this sample was built." }
+        metrics: { type: object, description: "Telemetry-eligible metric id -> current scalar value.", additionalProperties: { type: number } }
     SupportRecipients:
       type: object
       required: [recipients, max]
@@ -5751,6 +5770,34 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TACTrustStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/telemetry/preview:
+    get:
+      operationId: getSupportTelemetryPreview
+      tags: [support]
+      summary: Support-telemetry sample preview (read-only; no sender exists)
+      description: >-
+        M7 Slice 1. Renders the exact current support-telemetry sample —
+        governed metric names/values plus schema_version and registry_hash —
+        that would be sealed and sent if telemetry were ever enabled. There
+        is no telemetry consent switch, no sender, and no egress anywhere in
+        this build; this route creates no persistent state, enables nothing,
+        and sends nothing.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.1.0
+      responses:
+        '200':
+          description: Current governed telemetry sample preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportTelemetryPreview' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/support/bundles:
     get:
