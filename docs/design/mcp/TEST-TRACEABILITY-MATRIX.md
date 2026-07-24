@@ -1,0 +1,110 @@
+# MCP Test Traceability Matrix
+
+`Threat → Security requirement → Control → Test → Evidence → Owner → Gate` for every Critical/High threat
+and the full test taxonomy. **Status: PR-0 design artifact (Proposed).** No test below exists today; each
+is a build target. Per [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md), the MCP-specific
+suites (malicious-server, OAuth-negative, DNS-rebinding lab, inbound Origin/Host, SSE-exhaustion,
+mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; the reusable harnesses
+(race, gosec, govulncheck, gitleaks, benchgate, fuzz-nightly) exist ([`CI-GATES.md`](CI-GATES.md)).
+
+> Test-baseline caveat: **Low for the read-only Phase 1 investigation, but the current repository test
+> baseline remains unverified in this session** — no build or test was executed while authoring PR-0.
+
+IDs: threats `MCP-T-*` ([`THREAT-MODEL.md`](THREAT-MODEL.md)); requirements `MCP-*-*`
+([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); abuse cases `MCP-AC-*` ([`ABUSE-CASES.md`](ABUSE-CASES.md)).
+Gate = slice/CI gate that must be green.
+
+---
+
+## 1. Core traceability (Critical/High threats)
+
+| Threat | Requirement | Control | Test (type) | Evidence | Owner | Gate |
+|---|---|---|---|---|---|---|
+| MCP-T-001 token theft | MCP-AUTH-001,004 | Token validation + short TTL | Auth negative matrix (unit/integration) | Rejections logged | IAM/Sec | PR-3 |
+| MCP-T-002 token replay | MCP-AUTH-006 | Replay defense (net-new) | Replay matrix (integration) | 2nd-use rejected/flagged | IAM/Sec | PR-3 |
+| MCP-T-003 wrong audience | MCP-AUTH-002 | Audience validation | Wrong-audience (negative) | Foreign `aud` denied | IAM/Sec | PR-3 |
+| MCP-T-004 wrong resource | MCP-AUTH-003 | RFC 8707 resource binding | Wrong-resource (negative) | Mismatch denied | IAM/Sec | PR-3 |
+| MCP-T-005 token passthrough | MCP-AUTH-005, MCP-CRED-001 | No passthrough + broker | Upstream-capture (integration) | No client token upstream | IAM/Sec | PR-4 |
+| MCP-T-006 agent impersonation | MCP-ID-002 | Agent attribution | Attribution (unit) | Agent fields present | IAM/Sec | PR-3 |
+| MCP-T-007 workload impersonation | MCP-ID-003 | Workload attestation | Workload-auth (integration) | Spoof rejected | IAM/Sec | PR-3 |
+| MCP-T-008 cross-user session | MCP-AUTH-007, MCP-ID-006 | Session binding | Cross-session (integration) | No identity bleed | IAM/Sec | PR-3 |
+| MCP-T-009/010 cross-tenant/binding | MCP-ID-007, MCP-PRIVACY-002 | Tenant binding + isolation | Tenant-escape (integration) | Cross-tenant denied | IAM/Sec | PR-3 |
+| MCP-T-011 tool poisoning | MCP-TOOL-001,004 | Fingerprint + quarantine | Malicious-server fixture | Poisoned tool quarantined | Sec/Eng | PR-2 |
+| MCP-T-012 tool shadowing | MCP-TOOL-002 | Disambiguate by fingerprint | Shadowing (unit) | Collision flagged | Sec/Eng | PR-2 |
+| MCP-T-013/014 schema/desc drift | MCP-TOOL-003 | Drift classification | Canonicalization + drift fixtures | Correct class | Sec/Eng | PR-2 |
+| MCP-T-015 rug pull | MCP-TOOL-004 | Quarantine on expansion | Rug-pull fixture | No auto-allow | Sec/Eng | PR-6 |
+| MCP-T-016 server identity change | MCP-SERVER-003 | Disable until re-verified | Identity-change (integration) | Auto-disable | Sec/Eng | PR-2 |
+| MCP-T-017 unknown-tool auto-allow | MCP-TOOL-006, MCP-POLICY-001 | Quarantine + default-deny | Unknown-tool (integration) | No auto-allow | Sec/Eng | PR-6 |
+| MCP-T-018 policy bypass | MCP-POLICY-001,002 | Default-deny + no-I/O | Determinism + property tests | Pure eval proof | Sec/Eng | PR-6 |
+| MCP-T-019 privilege expansion | MCP-TOOL-004, MCP-POLICY-003 | Quarantine + reason code | Privilege-expansion fixture | Quarantined | Sec/Eng | PR-6 |
+| MCP-T-046 confused deputy | MCP-POLICY-004 | Credential after decision | Ordering (unit) | No cred pre-decision | Sec/Eng | PR-6 |
+| MCP-T-022 over-privileged cred | MCP-CRED-002 | Scope match | Scope-mismatch (integration) | Over-broad denied | IAM/PAM | PR-4 |
+| MCP-T-023 credential leakage | MCP-CRED-004, MCP-EVENT-003 | No secret in logs/events | Secret-scan + event-redaction | gitleaks clean | IAM/PAM | PR-4 |
+| MCP-T-024 cache compromise | MCP-CRED-005,006 | Bounded encrypted cache + fail-closed | Broker-failure (integration) | Fail-closed proven | IAM/PAM | PR-4 |
+| MCP-T-026/027 exfiltration | MCP-INSP-001,002,003 | Bounds + DLP | Synthetic-secret corpus | Blocked/redacted | Sec/Privacy | PR-7 |
+| MCP-T-028 secret in events | MCP-EVENT-003, MCP-CRED-004 | No-store + redaction | Event secret-scan | No secret stored | Sec/Privacy | PR-8 |
+| MCP-T-036 SSRF | MCP-INSP-004 | Destination policy (ssrf Control) | Private-IP matrix | Private denied | Sec/Eng | PR-7 |
+| MCP-T-037 DNS rebinding | MCP-INSP-005 | resolve→connect pin | DNS-rebinding lab | Rebinding blocked | Sec/Eng | PR-7 |
+| MCP-T-041 redirect abuse | MCP-INSP-006 | Redirect cap + re-check | Redirect-chain | Hop cap enforced | Sec/Eng | PR-7 |
+| MCP-T-031 inbound rebinding | MCP-INSP-008 | Inbound Origin/Host validate | Inbound-rebinding | Bad Origin rejected | Sec/Eng | PR-1 |
+| MCP-T-020 malicious server | MCP-SERVER-001,002 | Allowlist + TLS pin | Non-compliant/malicious fixtures | Unregistered denied | Sec/Eng | PR-2 |
+| MCP-T-021 compromised server | MCP-SERVER-003, MCP-INSP-002 | Drift + output inspection | Compromised-server fixture | Contained | Sec/Eng | PR-7 |
+| MCP-T-029 destructive calls | MCP-POLICY-006 | Approval/deny default | Destructive-tool (integration) | Approval enforced | Sec/Eng | PR-6 |
+| MCP-T-038/039 injection/elicitation | MCP-INSP-007 | Label/report | Injection corpus | Labels emitted | Sec/Eng | PR-7 |
+| MCP-T-040 oversized payloads | MCP-INSP-001, MCP-OPS-002 | Bounds | Fuzz + limit tests | Oversized rejected | SRE/Sec | PR-5 |
+| MCP-T-042/043 SSE exhaustion/slow | MCP-OPS-002 | Stream bounds + rate limit | Load/soak/slowloris | Bounds hold | SRE/Sec | PR-5 |
+| MCP-T-044 queue saturation/loss | MCP-EVENT-001,002 | Backpressure + fail-closed | Queue-saturation + durability | Zero critical loss | SRE/Sec | PR-8 |
+| MCP-T-045 audit tampering | MCP-EVENT-005 | Integrity fields | Tamper-evidence (unit) | Tamper detected | Sec | PR-8 |
+| MCP-T-047 stale snapshot | MCP-HA-001, MCP-CPDP-002 | Epoch fence + whole-reject | Stale-epoch + corrupt-snapshot | Rejected; last-good served | Eng/SRE | PR-10 |
+| MCP-T-048 split-brain | MCP-HA-001,002 | Fence + rollback | HA/failover tests | No split-brain | Eng/SRE | PR-10 |
+| MCP-T-050 mixed-version | MCP-CPDP-003 | minimum_dp_version gate | Mixed-version tests | Version gate holds | Eng/SRE | PR-10 |
+| MCP-T-034 mgmt escalation | MCP-MGMT-001,002,003 | Read-only + tool RBAC | Mutation-negative + tenant-escape | No mutation reachable | Sec/Eng | PR-9 |
+| MCP-T-035 mgmt overexposure | MCP-MGMT-004, MCP-PRIVACY-001 | Bounded redacted output | Output-bound tests | Redacted | Sec/Privacy | PR-9 |
+| MCP-T-051 connector compromise | MCP-CONNECT-001,002 | mTLS identity + rotation | Impersonation + rollover + replay | Impersonation blocked | Net/Sec | PR-11 |
+| MCP-T-052 DMZ abuse | MCP-CONNECT-003, MCP-INSP-008 | OAuth/WAF/Origin/rate | DMZ-abuse tests | Controls enforced | Net/Sec | PR-11 |
+| MCP-T-053 data residency | MCP-PRIVACY-001,003 | DLP-before-egress | Egress-gate tests | DLP proven | Privacy/Legal | PR-11 |
+| MCP-T-054/055/056 bypass | MCP-OPS-004, MCP-INSP-008 | Documented limit + inbound guard | Doc review + inbound tests | Limitation documented | Product/Sec | PR-0/PR-1 |
+
+## 2. Full test taxonomy → requirement coverage
+
+| Test category | Primary requirements | Present today? | Gate |
+|---|---|---|---|
+| Unit | all | Harness exists (`go test -race`) | PR-1+ |
+| Integration | all runtime | Harness exists | PR-1+ |
+| Compatibility (protocol conformance) | MCP-TOOL-*, protocol | **Missing** ([EXT] version fixtures) | PR-1 |
+| Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Missing** | PR-2 |
+| Non-compliant server fixtures | MCP-SERVER-*, protocol | **Missing** | PR-2 |
+| Fuzzing | MCP-INSP-001, protocol kernel | fuzz-nightly harness exists (not merge gate) | PR-1 |
+| Race | concurrency invariants | `-race` gate exists | PR-1+ |
+| Property tests | MCP-POLICY-002 (determinism) | **Missing** | PR-6 |
+| Authentication negative matrix | MCP-AUTH-001..004 | **Missing** | PR-3 |
+| Authorization negative matrix | MCP-POLICY-*, MCP-MGMT-* | **Missing** | PR-6/PR-9 |
+| Replay | MCP-AUTH-006 | **Missing** | PR-3 |
+| Wrong audience / wrong resource | MCP-AUTH-002,003 | **Missing** | PR-3 |
+| SSRF (private-IP matrix) | MCP-INSP-004 | ssrf unit tests exist; MCP matrix **missing** | PR-7 |
+| DNS rebinding lab | MCP-INSP-005 | **Missing** | PR-7 |
+| Redirect chains | MCP-INSP-006 | per-client tests exist; shared MCP **missing** | PR-7 |
+| Inbound Origin/Host | MCP-INSP-008 | **Missing** | PR-1 |
+| Tool canonicalization | MCP-TOOL-001 | **Missing** | PR-2 |
+| Tool drift / privilege expansion | MCP-TOOL-003,004 | **Missing** | PR-2/PR-6 |
+| Streaming / cancellation / reconnect | protocol, MCP-OPS-002 | **Missing** | PR-1/PR-5 |
+| Load / soak | MCP-OPS-002 | nightly load harness exists (not gate) | PR-5 |
+| Slow clients / queue saturation | MCP-OPS-002, MCP-EVENT-001 | **Missing** | PR-5/PR-8 |
+| Event durability | MCP-EVENT-001,002 | **Missing** | PR-8 |
+| Restart / failover | MCP-HA-001,002 | HA harness (proxy) exists; MCP **missing** | PR-10 |
+| Mixed versions / stale epoch / corrupt snapshot | MCP-CPDP-002,003, MCP-HA-001 | **Missing** for MCP | PR-10 |
+| Rollback | MCP-HA-002 | configver tests exist; MCP **missing** | PR-10 |
+| SWG regression | MCP-OPS-001 | benchgate harness exists | PR-5 |
+| MCP-disabled overhead | MCP-OPS-001 | **Missing** (specific assertion) | PR-5 |
+| Secret logging | MCP-CRED-004, MCP-EVENT-003 | gitleaks exists; event-scan **missing** | PR-4/PR-8 |
+| Privacy | MCP-PRIVACY-001,002,003 | **Missing** | PR-8/PR-11 |
+| Supply-chain verification | MCP-SUPPLY-003 | cosign/SLSA/SBOM exist | Prod-Qual |
+
+## 3. Coverage assertions (validated in Phase 5)
+
+- Every Critical/High threat in [`THREAT-MODEL.md`](THREAT-MODEL.md) §11 appears in §1 with a requirement,
+  test, evidence expectation, owner and gate.
+- Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §2
+  row (test coverage).
+- Every abuse case `MCP-AC-*` maps to a §1 row via its threat/requirement IDs.
+- Missing suites are labeled **Missing** here and in [`CI-GATES.md`](CI-GATES.md); none is claimed present.

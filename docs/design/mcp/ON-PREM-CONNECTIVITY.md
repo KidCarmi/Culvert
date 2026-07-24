@@ -1,0 +1,221 @@
+# On-Premises Connectivity and Data Residency Model
+
+Culvert's MCP capabilities (Management MCP and MCP Security Gateway) run inside the customer's own
+environment. Neither capability assumes that a cloud AI client — Claude, ChatGPT, or any other vendor —
+can simply "reach" a private network. This document defines the three supported connectivity models, the
+security posture of each, the recommended adoption order, and the data-residency truth customers must be
+told before any deployment. It exists so that no PR-1+ implementation, sales conversation, or customer
+architecture review has to improvise a connectivity story.
+
+**Status: PR-0 design artifact (Proposed).**
+
+**Naming note (`SOURCE REVIEW REQUIRED`):** the source DOCX blueprint index named this document
+`ONPREM-CONNECTIVITY-MODEL.md`; PR-0 uses the task-specified filename `ON-PREM-CONNECTIVITY.md`. This is
+recorded once here and in [`BLUEPRINT.md`](BLUEPRINT.md) §23 (PR-0 Document Package); no other document
+should re-litigate it.
+
+---
+
+## 1. Why this exists
+
+`AI Client → Culvert MCP endpoint → enterprise system` only works if the AI client can physically establish
+a connection to Culvert. That connection path is a security decision, not an implementation detail: it
+determines whether Culvert exposes any inbound listener to the public internet, whether the customer or the
+vendor initiates the session, and what a compromised endpoint on either side can reach. **[INFER]** Three
+models cover the realistic deployment space for both Capability A (Management MCP) and Capability B (MCP
+Security Gateway); they are architecturally independent of which capability is deployed, though the two
+capabilities never share a listener, endpoint, or trust boundary (see [`BLUEPRINT.md`](BLUEPRINT.md) §03 and
+[`THREAT-MODEL.md`](THREAT-MODEL.md)). **[REC]**
+
+---
+
+## 2. Model A — Local Enterprise Client
+
+**Topology:** `Internal AI client (Claude Desktop/Code, IDE, internal agent, private AI platform, VDI) →
+LAN/VPN → Culvert MCP endpoint`. The Culvert endpoint is reachable only from inside the corporate network
+or over an already-established VPN tunnel. **No public ingress exists.** **[REC]**
+
+**Who this fits:** Claude Desktop or Claude Code running on a managed workstation, IDE-integrated agents,
+internal automation agents, and private/self-hosted AI platforms that already sit inside the perimeter.
+**[REC]**
+
+**Security position:** this is the **simplest first production model** — it introduces no new inbound
+attack surface, relies on network controls the customer already operates (LAN segmentation, VPN
+authentication), and defers OAuth/WAF/DMZ hardening entirely. **[REC]**
+
+**Requirements engaged:**
+- **MCP-CONNECT-004** — every session, including a LAN/VPN-local one, **MUST** be tenant-bound; "internal
+  network" is not itself a tenant boundary. See [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md).
+- **MCP-INSP-008** — the inbound MCP/SSE listener **MUST** validate Origin/Host to prevent DNS-rebinding
+  attacks that would let a malicious local web page pivot into the local listener, even when the listener
+  is LAN-only. **[FACT]** No such inbound Origin/Host anti-rebinding guard exists in the repository today —
+  `isSafeRedirectURL` (`proxy_portal.go:152`) is captive-portal-only and does not cover an inbound MCP/SSE
+  listener (`internal/ssrf/ssrf.go` guards outbound dials, not inbound Origin/Host). See
+  [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-INSP-008 and
+  [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-031/MCP-T-055.
+
+**Data-flow reference:** [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-12.
+
+---
+
+## 3. Model B — Outbound-Only Connector
+
+**Topology:** `Culvert (customer environment) → outbound encrypted connection → approved cloud AI
+service's connector/tunnel endpoint`. The connection is **customer-initiated**; there is **no unsolicited
+inbound port** opened on the customer's perimeter for this path. **[REC]**
+
+**Who this fits:** approved cloud AI vendors whose product supports an enterprise connector or reverse
+tunnel mechanism (vendor-specific — see §6). **[REC]**
+
+**Key properties:**
+
+| Property | Requirement |
+|---|---|
+| Initiation | Customer-initiated outbound only; no unsolicited inbound port. **MCP-CONNECT-001**. |
+| Tenant binding | Every connector session **MUST** be tenant-bound. **MCP-CONNECT-004**. |
+| Connector identity | mTLS connector identity — the far end authenticates the connector, not just the transport. **MCP-CONNECT-001**. |
+| Certificate rotation | Connector certificates **MUST** rotate on a defined schedule without requiring an outage. **MCP-CONNECT-002**. |
+| Reconnect behavior | Reconnect attempts **MUST** be bounded (backoff, retry ceiling) — an unbounded reconnect loop is itself an availability risk. **MCP-CONNECT-002**. |
+| Degraded mode | A defined degraded mode **MUST** exist for when the connector is down (e.g. fail-closed: no tool calls proxied) rather than an undefined hang or silent fallback. **MCP-CONNECT-002**. |
+| Vendor compatibility | Vendor-specific connector/tunnel support **MUST** be verified during integration — do not assume feature parity across vendors. **[EXT]** |
+| Data classification | Only policy-approved request/response content is eligible to cross this path (see §5). **MCP-PRIVACY-001**. |
+
+**Threat model engaged:** **MCP-T-051** (outbound connector compromise) is the primary threat this model
+must defend against — a compromised connector could be repurposed to originate traffic the customer did not
+intend, or to leak the mTLS connector identity. See [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-051 (mapped
+to MCP-CONNECT-001/002) and the risk register entry (High severity).
+
+**Data-flow reference:** [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-13.
+
+**Vendor-specific compatibility verification `[EXT]`:** whether a given cloud AI vendor's outbound
+connector/tunnel product exists, and what identity/rotation/reconnect semantics it offers, is external to
+this repository and must be verified per-vendor before this model is marketed as supported for that vendor.
+Do not promise universal compatibility (see §5).
+
+---
+
+## 4. Model C — Hardened DMZ Endpoint
+
+**Topology:** `Cloud AI client → public internet → routable remote MCP endpoint (DMZ) → internal mTLS →
+Culvert`. This is the only model that exposes a routable, internet-reachable MCP endpoint. **[REC]**
+
+**Who this fits:** cloud AI clients that have no supported outbound-connector mechanism and therefore
+require a directly reachable remote MCP URL. **[REC]**
+
+**Required controls, all simultaneously:**
+
+| Control | Purpose | Requirement |
+|---|---|---|
+| OAuth | Authenticate the calling client before any MCP traffic is proxied inward. | **MCP-CONNECT-003**. |
+| WAF | Filter malicious HTTP traffic before it reaches the reverse proxy / Culvert. | **MCP-CONNECT-003**. |
+| Reverse proxy | Terminate public TLS, present a controlled surface, isolate the DMZ from internal segments. | **MCP-CONNECT-003**. |
+| Origin/Host validation | Reject requests whose Origin/Host does not match the expected value — the DNS-rebinding defense for an internet-reachable listener. | **MCP-INSP-008**. |
+| Rate limits | Bound abusive or runaway request volume against a now-public endpoint. | **MCP-CONNECT-003**. |
+| Internal mTLS | The DMZ-to-Culvert hop is itself mutually authenticated — the DMZ is not implicitly trusted internal network. | **MCP-CONNECT-003**. |
+| Explicit risk acceptance | A documented, signed-off risk acceptance is required before this model goes into production — it is the only model with public ingress. | **MCP-CONNECT-003**. |
+| Monitoring | Continuous monitoring of the DMZ endpoint (traffic, auth failures, WAF blocks) is required, not optional, given the exposed surface. **[REC]** |
+| Abuse response | A defined runbook for responding to detected abuse (e.g. rate-limit trips, WAF blocks, auth-failure spikes) must exist before go-live. **[REC]** |
+
+**Threat model engaged:** **MCP-T-052** (DMZ endpoint abuse) is the threat this model exists to contain,
+mapped to MCP-CONNECT-003 and MCP-INSP-008. See [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-052 (risk
+register, High severity) and MCP-T-031 (inbound DNS-rebinding against the MCP/SSE listener, currently
+**Missing today** per the SSRF note in §6).
+
+**Data-flow reference:** [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-14.
+
+---
+
+## 5. Recommended Deployment Priority
+
+This ordering is carried forward from [`BLUEPRINT.md`](BLUEPRINT.md) §04 and is the canonical adoption
+sequence for any customer rollout — do not skip Model A to sell Model C first. **[REC]**
+
+| Priority | Model | Best For | Security Position |
+|---|---|---|---|
+| 1 | Local enterprise client | Claude Desktop/Code, IDEs, internal agents, VDI and private AI platforms. | No public ingress; direct LAN/VPN access; simplest first production model. |
+| 2 | Outbound-only connector | Approved cloud AI services where an enterprise connector/tunnel is supported. | Customer initiates the encrypted connection; no unsolicited inbound port. |
+| 3 | Hardened DMZ endpoint | Cloud clients that require a routable remote MCP URL. | OAuth, WAF, origin/host validation, rate limits, internal mTLS and explicit risk acceptance. |
+
+---
+
+## 6. Data Residency Truth
+
+State this to every customer and in every deployment conversation, without softening it:
+
+> **Culvert controls which content may leave the environment, but it does not turn a cloud AI model into
+> an on-premises model.**
+
+What that means concretely:
+
+- **Stays on-prem, always, regardless of connectivity model:** production credentials, policy, the tool
+  catalog, approval state, and internal server connections. None of these cross any of the three
+  connectivity models above.
+- **What may cross:** only policy-approved request and response content — content that has already passed
+  the policy engine's decision (see [`BLUEPRINT.md`](BLUEPRINT.md) §11) — is eligible to leave the
+  environment over the selected connectivity path (Model A, B, or C).
+- **What runs before that content leaves:** DLP, redaction, and destination controls execute before any
+  approved content crosses the boundary. This is a hard requirement, not a best-effort filter. **MCP-PRIVACY-001**.
+- **What every deployment needs, no exceptions:** a documented data-flow diagram (see
+  [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md)), a retention model, a privacy review, and a
+  customer-owned allowlist of approved destinations. **MCP-PRIVACY-003**.
+- **What the product must not promise:** universal compatibility with ChatGPT, Claude, or any specific
+  cloud vendor's connectivity mechanism, until that vendor's connector requirements have actually been
+  validated (§3, `[EXT]`). Marketing or sales language that implies unconditional cross-vendor support gets
+  ahead of what has been verified.
+
+This is why a cloud AI service processing Culvert-approved content still does so under **that vendor's**
+contract and configuration — Culvert's data-residency control is a gate on what leaves, not a guarantee of
+where it is subsequently processed. Threat **MCP-T-053** (cloud AI data-residency risk) captures this
+residual risk explicitly; it is accepted per deployment via customer contract, allowlist, and
+DLP-before-egress, not eliminated. See [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-053 (risk register entry
+R-5, owner Privacy/Legal).
+
+---
+
+## 7. SSRF and Inbound-Listener Constraints
+
+**[FACT]** The repository's existing SSRF guard (`internal/ssrf/ssrf.go`) rejects private-IP origins:
+`PrivateIP` (`ssrf.go:36-72`) covers RFC1918 + CGN + link-local + metadata + NAT64 + ULA ranges,
+`PrivateHost` (`ssrf.go:86-103`) fails closed, and the dialer's `Control` callback re-checks the peer IP at
+connect time (`ssrf.go:126-139`) specifically to close the DNS-rebinding TOCTOU window between a resolved
+hostname and the socket that is actually dialed. This is a recorded **constraint**, not a capability to
+build on directly: it protects **outbound** dials Culvert itself makes (e.g. to an internal mirror or a
+connector's origin), and is the correct reference pattern for any new outbound leg introduced by Models B
+or C. It does **not** cover the **inbound** side — validating the Origin/Host header presented by a client
+connecting *to* Culvert's own MCP/SSE listener is a distinct, currently-unimplemented control
+(**MCP-INSP-008**; see §2 and §4). Both directions matter for these connectivity models: an internal
+mirror or connector origin must not resolve to a private/metadata address unexpectedly (outbound, existing
+guard), and the MCP/SSE listener itself must not accept a rebound Origin/Host (inbound, not yet built).
+
+**Threats engaged:** **MCP-T-053** (data-residency, §6), **MCP-T-036** (SSRF), **MCP-T-037** (DNS
+rebinding), and **MCP-T-031** (inbound DNS-rebinding against the MCP/SSE listener — the inbound-specific
+threat that MCP-INSP-008 exists to close). See [`THREAT-MODEL.md`](THREAT-MODEL.md) §9 (DFD-to-threat
+matrix, DFD-12/13/14 rows) and §11 (risk register).
+
+---
+
+## 8. Cross-References
+
+- Connectivity requirements: [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-CONNECT-001..004,
+  MCP-INSP-008, MCP-PRIVACY-001/003.
+- Threats: [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-051 (outbound connector compromise), MCP-T-052 (DMZ
+  abuse), MCP-T-053 (cloud AI data-residency), MCP-T-036 (SSRF), MCP-T-037 (DNS rebinding), MCP-T-031
+  (inbound DNS-rebinding vs the MCP/SSE listener).
+- Data-flow diagrams: [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-12 (local enterprise client),
+  DFD-13 (outbound-only connector), DFD-14 (hardened DMZ endpoint).
+- Deployment priority and product framing: [`BLUEPRINT.md`](BLUEPRINT.md) §04.
+- Implementation sequencing note: per the PR-0 implementation-sequence correction, connectivity adapters
+  fold into **PR-5** (Observe runtime) and **PR-10** (CP/DP & HA) — there is no separate connectivity PR.
+  Any distinct connectivity slice that does not fit those two PRs is deferred to
+  [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md).
+
+---
+
+## 9. Risk Note
+
+Consistent with the rest of the PR-0 package: this document describes a design baseline, not a validated
+implementation. No connectivity model above has been exercised end-to-end in this repository — there is no
+existing MCP/JSON-RPC listener in the inspected paths **[FACT]**, and Model C's inbound Origin/Host
+validation (MCP-INSP-008) is explicitly **not yet built**. Risk from untested connectivity paths is Low for
+the read-only Phase 1 investigation, but the current repository test baseline remains unverified in this
+session.
