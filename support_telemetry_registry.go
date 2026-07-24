@@ -101,7 +101,16 @@ var supportMetricRegistry = supportmetrics.Registry{
 	},
 }
 
+// readSupportHealthCAReady mirrors computeReadiness's "ca" check
+// (healthcheck.go): a CA that was configured but failed to load/persist
+// (sslInspectionLoadFailure) is NOT ready, even though certMgr.Ready() can
+// still report true in that window (CHAOS-06) — the SSL-inspect path is
+// effectively degraded (tunnel-only bypass), and this telemetry bit must
+// reflect that instead of a stale "usable" signal.
 func readSupportHealthCAReady() float64 {
+	if sslInspectionLoadFailure() != "" {
+		return 0
+	}
 	if certMgr.Ready() {
 		return 1
 	}
@@ -143,7 +152,15 @@ func readSupportHealthConfigSnapshotValid() float64 {
 	return 0
 }
 
+// readSupportHealthCAExpiryBucket keeps the same posture as
+// readSupportHealthCAReady: a recorded SSL-inspect load failure is at least
+// as urgent as an imminently-expiring cert, so it reports the most urgent
+// bucket rather than a possibly-stale expiry computed from a CA that never
+// actually persisted.
 func readSupportHealthCAExpiryBucket() float64 {
+	if sslInspectionLoadFailure() != "" {
+		return supportmetrics.CAExpiryBucket(-1)
+	}
 	return supportmetrics.CAExpiryBucket(caExpiryDaysRemaining())
 }
 

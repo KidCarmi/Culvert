@@ -128,3 +128,27 @@ func TestSupportHealthReadCallbacks_ReturnBinaryOrBucketValues(t *testing.T) {
 		}
 	}
 }
+
+// TestSupportHealthCAReady_HonorsLoadFailure — a CA that failed to
+// load/persist (sslInspectionLoadError, CHAOS-06) must report NOT ready even
+// when certMgr.Ready() still returns true in that window, matching
+// computeReadiness's "ca" check (healthcheck.go). Without this, the
+// telemetry sample would tell an admin/TAC the CA is usable while the
+// appliance is actually degraded to tunnel-only bypass.
+func TestSupportHealthCAReady_HonorsLoadFailure(t *testing.T) {
+	prev := sslInspectionLoadFailure()
+	t.Cleanup(func() { sslInspectionLoadError.Store(prev) })
+
+	sslInspectionLoadError.Store("Root CA load/init failed: boom")
+	if got := readSupportHealthCAReady(); got != 0 {
+		t.Errorf("readSupportHealthCAReady() = %v during a recorded load failure, want 0", got)
+	}
+	if got := readSupportHealthCAExpiryBucket(); got != 3 {
+		t.Errorf("readSupportHealthCAExpiryBucket() = %v during a recorded load failure, want 3 (most urgent)", got)
+	}
+
+	sslInspectionLoadError.Store("")
+	// With no recorded failure, both reads fall back to their normal
+	// certMgr-derived posture (not asserted further here — process CA state
+	// is exercised by TestSupportHealthReadCallbacks_ReturnBinaryOrBucketValues).
+}
