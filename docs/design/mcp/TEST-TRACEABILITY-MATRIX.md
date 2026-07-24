@@ -55,15 +55,31 @@ Gate = slice/CI gate that must be green.
 | MCP-T-030 private-network access | MCP-INSP-004,005 | Destination policy + DNS pin | Private-IP matrix + DNS-rebinding lab | Private/rebind denied | Sec/Eng | PR-7 |
 | MCP-T-037 DNS rebinding | MCP-INSP-005 | resolve→connect pin | DNS-rebinding lab | Rebinding blocked | Sec/Eng | PR-7 |
 | MCP-T-041 redirect abuse | MCP-INSP-006 | Redirect cap + re-check | Redirect-chain | Hop cap enforced | Sec/Eng | PR-7 |
-| MCP-T-031 inbound rebinding | MCP-INSP-008 | Inbound Origin/Host validate | Inbound-rebinding | Bad Origin rejected | Sec/Eng | PR-1 |
+| MCP-T-031 inbound rebinding (validation primitive) | MCP-INSP-008 | Pure Origin/Host accept/reject decision + fail-closed empty allowlist | Primitive unit tests (no socket) | Bad Origin/Host rejected; empty allowlist fails closed | Sec/Eng | PR-1 |
+| MCP-T-031 inbound rebinding (listener E2E) | MCP-INSP-009 | Listener binds configured interfaces + host allowlist at accept + invokes the primitive | E2E rebinding against a live listener | No default public bind; E2E rebinding rejected | SRE/Eng | PR-5 |
 | MCP-T-058 parser differential | MCP-PROTO-001 | Strict single-parse decode; duplicate-key reject/canonical | Parser-differential + duplicate-key + malformed corpus | Validated == forwarded message | Sec/Eng | PR-1 |
 | MCP-T-060 request-ID mis-correlation | MCP-PROTO-003 | Bounded per-session ID table + type/edge validation | ID-correlation + int/string/null edge tests | Mis-correlated response rejected; table bounded | Sec/Eng | PR-1 |
 | MCP-T-063 parse-time exhaustion (size/depth/field/string) | MCP-PROTO-006, MCP-PROTO-008 | Structural bounds + per-session resource budget | Limit + fuzz + resource-budget assertions | Oversized/deep rejected; budget holds | SRE/Sec | PR-1 |
 | MCP-T-066 version-negotiation confusion | MCP-PROTO-010 | Version allowlist; reject unknown; record negotiated version | Version-conformance fixtures (**D-1-gated**) | Unknown version rejected; version recorded | Sec/Eng | PR-1 (fixtures gated on D-1) |
 | MCP-T-067 protocol downgrade | MCP-PROTO-010 | No silent downgrade; explicit negotiation failure | Downgrade fixtures (**D-1-gated**) | Weaker-semantics negotiation rejected | Sec/Eng | PR-1 (fixtures gated on D-1) |
 | MCP-T-068 version-adapter differential | MCP-PROTO-011 | Adapter equivalence to one internal representation | Adapter-equivalence fixtures (**D-1-gated**) | No cross-adapter differential | Sec/Eng | PR-1 (fixtures gated on D-1) |
-| MCP-T-069 protocol-state/session confusion | MCP-PROTO-012 | One identity/session; no mid-flight rebind; lifecycle validated | Protocol-state + cancellation-race + reconnect tests | No mid-session rebind; races handled | Sec/Eng | PR-1 |
+| MCP-T-069 protocol-state confusion (lifecycle) | MCP-PROTO-012 | Immutable opaque session context; lifecycle validated; cancel/reconnect handled (no identity) | Protocol-lifecycle + cancellation-race + reconnect tests | Opaque context; races handled; reconnect re-validated | Sec/Eng | PR-1 |
+| MCP-T-069 identity rebind | MCP-ID-008 | One resolved identity bound per session; mid-session rebind denied | Identity-binding + no-rebind + cross-session tests | No mid-session identity rebind | IAM/Eng | PR-3 |
 | MCP-T-074 hostile-input crash/panic | MCP-PROTO-009, MCP-PROTO-013 | Crash-resistant parse/adapter; bounded error + cleanup | Fuzz (panic/crash detection) + race | No panic/crash on corpus; bounded error | Sec/Eng | PR-1 |
+| MCP-T-057/065 UTF-8 / Unicode identifier handling | MCP-PROTO-014 | Reject invalid UTF-8; NFC-normalize method/identifier names before compare/dispatch | Invalid-UTF-8 + NFC-normalization + confusable-identifier fixtures | Invalid UTF-8 rejected; identifiers normalized; confusables collapsed | Sec/Eng | PR-1 |
+
+### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
+
+These requirements were previously reachable only via family/range shorthand or the catch-all "Unit | all"
+row; the follow-up remediation (finding 6) gives each an explicit Threat → Requirement → Test → Evidence →
+Owner → Gate chain.
+
+| Threat | Requirement | Control | Test (type) | Evidence | Owner | Gate |
+|---|---|---|---|---|---|---|
+| MCP-T-034 mgmt escalation (auth plane separation) | MCP-AUTH-008 | Separate OAuth client registrations + disjoint scopes for Mgmt vs Gateway | Config/scope review + separate-client negative tests | Distinct clients/scopes enforced; cross-plane token rejected | IAM/Sec | PR-3 |
+| MCP-T-044/045 event reconstruction | MCP-EVENT-004 | Replay/correlation IDs on every event | Replay-id tests (uniqueness + correlation) | `event_id`/`correlation_id` present + unique | Sec/Eng | PR-8 |
+| MCP-T-035/045 cross-tenant export | MCP-EVENT-006 | Export authorization + tenant separation | Export-authz + tenant-separation tests | Cross-tenant export denied; export RBAC-gated | Sec/Privacy | PR-8 |
+| MCP-T-010 connector/DMZ tenant binding | MCP-CONNECT-004 | Tenant-bound connector/DMZ session | Tenant-binding tests | Session bound to tenant; cross-tenant denied | Net/Sec | PR-C (connector) / Future DMZ gate |
 | MCP-T-020 malicious server | MCP-SERVER-001,002 | Allowlist + TLS pin | Non-compliant/malicious fixtures | Unregistered denied | Sec/Eng | PR-2 |
 | MCP-T-021 compromised server | MCP-SERVER-003, MCP-INSP-002 | Drift + output inspection | Compromised-server fixture | Contained | Sec/Eng | PR-7 |
 | MCP-T-029 destructive calls | MCP-POLICY-006 | Approval/deny default | Destructive-tool (integration) | Approval enforced | Sec/Eng | PR-6 |
@@ -78,8 +94,9 @@ Gate = slice/CI gate that must be green.
 | MCP-T-050 mixed-version | MCP-CPDP-003 | minimum_dp_version gate | Mixed-version tests | Version gate holds | Eng/SRE | PR-10 |
 | MCP-T-034 mgmt escalation | MCP-MGMT-001,002,003 | Read-only + tool RBAC | Mutation-negative + tenant-escape | No mutation reachable | Sec/Eng | PR-9 |
 | MCP-T-035 mgmt overexposure | MCP-MGMT-004, MCP-PRIVACY-001 | Bounded redacted output | Output-bound tests | Redacted | Sec/Privacy | PR-9 |
-| MCP-T-051 connector compromise | MCP-CONNECT-001,002 | mTLS identity + rotation | Impersonation + rollover + replay | Impersonation blocked | Net/Sec | PR-11 |
-| MCP-T-052 DMZ abuse | MCP-CONNECT-003, MCP-INSP-008 | OAuth/WAF/Origin/rate | DMZ-abuse tests | Controls enforced | Net/Sec | PR-11 |
+| MCP-T-051 connector compromise | MCP-CONNECT-001,002 | mTLS identity + rotation | Impersonation + rollover + replay | Impersonation blocked | Net/Sec | **PR-C** (post-V1 connector slice) |
+| MCP-T-052 DMZ abuse | MCP-CONNECT-003, MCP-INSP-009 | OAuth/WAF/Origin/rate + listener-side host allowlist | DMZ-abuse tests | Controls enforced | Net/Sec | **Future DMZ Architecture & Production-Readiness Gate** |
+| MCP-T-010 tenant-binding failure (connector/DMZ session) | MCP-CONNECT-004, MCP-ID-007 | Tenant-bound connector/DMZ session | Tenant-binding tests | Session bound to tenant; cross-tenant denied | Net/Sec | **PR-C** (connector) / Future DMZ gate |
 | MCP-T-053 data residency | MCP-PRIVACY-001,003 | DLP-before-egress | Egress-gate tests | DLP proven | Privacy/Legal | PR-11 |
 | MCP-T-054, MCP-T-055, MCP-T-056 bypass (stdio/localhost/direct-egress) | MCP-OPS-004, MCP-INSP-008 | Documented limit + inbound guard | Doc review + inbound tests | Limitation documented | Product/Sec | PR-0/PR-1 |
 
@@ -87,7 +104,7 @@ Gate = slice/CI gate that must be green.
 
 | Test category | Primary requirements | Present today? | Gate |
 |---|---|---|---|
-| Unit | all | Harness exists (`go test -race`) | PR-1+ |
+| Unit | (harness only — **NOT** requirement-specific proof; see §1 and §1a for per-requirement chains) | Harness exists (`go test -race`) | PR-1+ |
 | Integration | all runtime | Harness exists | PR-1+ |
 | Compatibility (protocol conformance) | MCP-PROTO-010,011 | **Missing** — `[EXT]`/`[D-1]` version fixtures; content gated on D-1 closure; must become a **blocking PR-1** gate ([`CI-GATES.md`](CI-GATES.md)) | PR-1 (D-1-gated) |
 | Malformed JSON-RPC / parser-differential / classification / batch | MCP-PROTO-001,002,003,004,005,007,013 | **Missing** — malformed + duplicate-key + framing + batch-policy corpus | PR-1 |
@@ -106,7 +123,8 @@ Gate = slice/CI gate that must be green.
 | SSRF (private-IP matrix) | MCP-INSP-004 | ssrf unit tests exist; MCP matrix **missing** | PR-7 |
 | DNS rebinding lab | MCP-INSP-005 | **Missing** | PR-7 |
 | Redirect chains | MCP-INSP-006 | per-client tests exist; shared MCP **missing** | PR-7 |
-| Inbound Origin/Host | MCP-INSP-008 | **Missing** | PR-1 |
+| Origin/Host validation primitive (no listener) | MCP-INSP-008 | **Missing** | PR-1 |
+| Listener bind + host-allowlist + E2E rebinding enforcement | MCP-INSP-009 | **Missing** | PR-5 |
 | Tool canonicalization | MCP-TOOL-001 | **Missing** | PR-2 |
 | Tool drift / privilege expansion | MCP-TOOL-003,004 | **Missing** | PR-2/PR-6 |
 | Streaming / cancellation / reconnect | MCP-PROTO-012 (protocol-state, PR-1); MCP-OPS-002 (stream bounds under load, PR-5) | **Missing** | PR-1 (state) / PR-5 (load) |

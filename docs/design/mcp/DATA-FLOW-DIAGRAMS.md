@@ -163,10 +163,10 @@ Crosses TB-4. Threats: MCP-T-028, MCP-T-044, MCP-T-045.
 flowchart LR
   DEC[Decision + inspection + execution] --> RDX[Redact: no tokens/secrets/raw]
   RDX --> Q[[Bounded queue + backpressure]]
-  Q -->|ok| SPOOL[Disk spool / durable export]
-  Q -->|saturated + critical class| FC[Fail closed or degraded mode + alert]
+  Q -->|ok| SPOOL[Mandatory local encrypted durable spool per DP]
+  Q -->|saturated + critical write/destructive/config/credential| FC[Fail closed AND degraded mode + alert + loss counter]
   SPOOL --> INT[Integrity + replay-id + tenant tag]
-  INT --> EXP[Authorized, tenant-separated export]
+  INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
 Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`).
 
@@ -249,7 +249,7 @@ MCP-OPS-002).
 
 Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
-`MCP-PROTO-001..013`. No policy, credential, or upstream execution happens here.
+`MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here.
 
 ```mermaid
 flowchart LR

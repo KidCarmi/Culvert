@@ -55,9 +55,10 @@ authentication), and defers OAuth/WAF/DMZ hardening entirely. **[REC]**
 **Requirements engaged:**
 - **MCP-CONNECT-004** — every session, including a LAN/VPN-local one, **MUST** be tenant-bound; "internal
   network" is not itself a tenant boundary. See [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md).
-- **MCP-INSP-008** — the inbound MCP/SSE listener **MUST** validate Origin/Host to prevent DNS-rebinding
-  attacks that would let a malicious local web page pivot into the local listener, even when the listener
-  is LAN-only. **[FACT]** No such inbound Origin/Host anti-rebinding guard exists in the repository today —
+- **MCP-INSP-008 / MCP-INSP-009** — Origin/Host validation prevents DNS-rebinding that would let a malicious
+  local web page pivot into the local listener, even when the listener is LAN-only. The **validation
+  primitive** is `MCP-INSP-008` (PR-1, no listener); the **listener that binds configured interfaces and
+  enforces it end-to-end** is `MCP-INSP-009` (PR-5). **[FACT]** No such inbound Origin/Host anti-rebinding guard exists in the repository today —
   `isSafeRedirectURL` (`proxy_portal.go:152`) is captive-portal-only and does not cover an inbound MCP/SSE
   listener (`internal/ssrf/ssrf.go` guards outbound dials, not inbound Origin/Host). See
   [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-INSP-008 and

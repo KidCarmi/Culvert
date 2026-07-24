@@ -49,7 +49,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** policy, identity, upstream calls.
 - **Trust boundary:** TB-1 (agent/client ↔ Culvert).
 - **Dependencies:** PR-0 approved; **ADR-0024 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**. *(All three are hard PR-1 entry gates — [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).)*
-- **Security requirements:** **MCP-PROTO-001..013** (protocol-kernel framing, structural bounds, version negotiation/adapter equivalence, protocol-state — the concrete replacement for the former undefined "protocol bounds", finding H-2) and **MCP-INSP-008** (inbound Origin/Host per protocol baseline; host-allowlist + bind-configured-interfaces). **`MCP-OPS-002` is NOT a PR-1 requirement** — it is the deployed-listener/runtime bounding requirement gated at **PR-5** (finding H-4); PR-1's parse-time bounds live in `MCP-PROTO-006/008`.
+- **Security requirements:** **MCP-PROTO-001..014** (protocol-kernel framing, structural bounds, UTF-8/Unicode identifier handling, version negotiation/adapter equivalence, protocol-lifecycle/opaque-session-context — the concrete replacement for the former undefined "protocol bounds") and **MCP-INSP-008** (the **pure Origin/Host validation primitive + test harness — NO listener**). **PR-1 binds no listener:** listener binding, configured-interface binding, host-allowlist enforcement and end-to-end rebinding are **MCP-INSP-009 at PR-5**. **`MCP-OPS-002` is NOT a PR-1 requirement** — deployed-listener/runtime bounding is **PR-5**; PR-1's parse-time bounds live in `MCP-PROTO-006/008`. **Identity is a non-goal in PR-1** — `MCP-PROTO-012` covers protocol lifecycle + an *immutable opaque* session context only; resolved-identity binding / no-rebind is **MCP-ID-008 at PR-3**.
 - **Tests:** protocol-kernel fuzz (parser/framing/adapter/cancellation, panic/crash detection), race, structural-limit + parser-differential + protocol-state suite, compatibility fixtures (**D-1-gated**), inbound-rebinding, malformed JSON-RPC (all **new**; see [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) and [`CI-GATES.md`](CI-GATES.md)).
 - **Acceptance:** no public listener; the protocol-kernel fuzz + race + structural/differential/protocol-state suites are green as **blocking PR-1 gates**; Origin/Host validated. **Compatibility conformance is green only after D-1 (protocol baseline) is externally verified and its fixtures exist — it MUST NOT be reported green before D-1 closes.**
 - **Rollback:** feature-flag disabled build; no listener bound.
@@ -99,9 +99,9 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** enforcement, upstream execution in production.
 - **Trust boundary:** TB-1, TB-4.
 - **Dependencies:** PR-1..PR-4.
-- **Security requirements:** MCP-OPS-001,002.
-- **Tests:** MCP-off overhead regression, load/soak/slowloris/queue bounds, streaming/reconnect.
-- **Acceptance:** MCP disabled → no measurable SWG regression; bounds hold under load.
+- **Security requirements:** MCP-OPS-001,002; **MCP-INSP-009** (inbound listener: bind configured interfaces + host-allowlist at accept + invoke the PR-1 `MCP-INSP-008` primitive + **E2E** rebinding enforcement — the listener the PR-1 Protocol Kernel deliberately did not bind).
+- **Tests:** MCP-off overhead regression, load/soak/slowloris/queue bounds, streaming/reconnect, **E2E inbound-rebinding against the live listener (MCP-INSP-009)**.
+- **Acceptance:** MCP disabled → no measurable SWG regression; bounds hold under load; **listener binds only configured interfaces and rejects rebinding end-to-end**.
 - **Rollback:** listener disabled; runtime dormant.
 - **Owner:** SRE/Eng. **Reviewer:** SRE. **Release gate:** MCP-off benchmark ≈ zero overhead.
 
@@ -188,10 +188,20 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** any V1 commitment; any claim of vendor support pre-verification; a public DMZ endpoint (D-9).
 - **Trust boundary:** TB-6.
 - **Dependencies:** V1 GA; a separate connector design ADR/gate.
-- **Security requirements:** MCP-CONNECT-001..004; MCP-PRIVACY-001.
-- **Tests:** connector impersonation/rollover/replay, egress DLP gate, per-vendor compatibility validation.
+- **Security requirements:** MCP-CONNECT-001, 002, 004 (connector tenant-binding) + MCP-PRIVACY-001. **MCP-CONNECT-003 is NOT in PR-C** — it belongs to the Future DMZ gate below.
+- **Tests:** connector impersonation/rollover/replay, tenant-binding, egress DLP gate, per-vendor compatibility validation.
 - **Acceptance:** named vendor validated; failure/reconnect/HA/upgrade/incident behavior proven.
 - **Owner:** Net/Sec/Privacy. **Reviewer:** Arch/Privacy. **Release gate:** connector suites + vendor validation green.
+
+## Future DMZ Architecture & Production-Readiness Gate (post-V1, not a PR slice) *(D-9 — DMZ default-off/deferred)*
+- **Objective:** a hardened, publicly routable DMZ MCP endpoint (Model C) — considered **only** under a
+  separate architecture + production-readiness approval with signed customer risk acceptance (ADR-0024 §D-9).
+- **Non-goals:** any V1 exposure; enabling public ingress by default.
+- **Security requirements:** **MCP-CONNECT-003** (OAuth/WAF/Origin-Host/rate-limit/internal-mTLS) and the
+  DMZ aspect of **MCP-CONNECT-004** (tenant-bound DMZ session), plus **MCP-INSP-009** (listener-side host
+  allowlist + bind-configured-interfaces + E2E rebinding enforcement).
+- **Tests:** DMZ-abuse, OAuth/WAF/rate-limit, listener-side rebinding E2E.
+- **Owner:** Sec Arch/Exec. **Reviewer:** Arch + Exec. **Gate:** signed risk acceptance + production-readiness approval; **not** reachable via PR-11.
 
 ## Production Qualification (separate gate — not a PR slice)
 - **Objective:** full evidence pack + Joint Go/No-Go sign-off.

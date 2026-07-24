@@ -37,12 +37,17 @@ claimed to already exist.
 - **Threats — `MCP-T-057 … MCP-T-074`** (18). Prior allocation was the contiguous `MCP-T-001..056`; the new
   block starts at `057`. Eight are **High** (`058, 060, 063, 066, 067, 068, 069, 074`) and carry a full
   Threat→Requirement→Control→Test→Evidence→Owner→Gate row; ten are **Medium**.
-- **Requirements — new family `MCP-PROTO-001 … MCP-PROTO-013`** (13), all gated **PR-1**. Total requirements
-  75 → **88** across 15 → **16** namespaces.
+- **Requirements — new family `MCP-PROTO-001 … MCP-PROTO-013`** (13, round 1), all gated **PR-1**.
 - **Abuse cases — `MCP-AC-021 … MCP-AC-027`** (7). Prior allocation was `MCP-AC-001..020`.
 - **Attack tree — `AT-10`** (protocol-kernel subversion). Prior: AT-1..AT-9.
 - **Data-flow diagram — `DFD-15`** (protocol-kernel decode path). Prior: DFD-1..DFD-14.
 - **Open decision — `D-14`** (protocol-kernel concrete limit values + batch policy; values-only, PR-1).
+
+> **IDs are NOT a closed set — this remediation adds IDs (correcting any prior impression otherwise).**
+> Round 1 added the `MCP-PROTO-001..013` family. The **follow-up round** (below) added **three more
+> requirement IDs** — `MCP-PROTO-014`, `MCP-INSP-009`, `MCP-ID-008` — so the total moved **75 → 88 (round 1)
+> → 91 (follow-up)** across **16 namespaces** (`MCP-PROTO` 14, `INSP` 9, `ID` 8). Any statement in earlier
+> reporting that the requirement set was final / that no IDs were added is superseded by this record.
 
 ---
 
@@ -209,6 +214,42 @@ with D-12 and closes at PR-0 sign-off. This is a human reviewer action, not a do
 | Panic / crash / uncontrolled allocation | MCP-T-074 | MCP-PROTO-009,013 |
 
 ---
+
+## Follow-up remediation (round 2 — independently-verified findings 1–7)
+
+Applied on top of the round-1 commit `5c59e04`. Documentation-only; ADR-0024 stays `Proposed`; PR-1 stays
+protocol-kernel-only; PR-5 stays the first listener runtime.
+
+1. **Durability (F-1/F-2) restored.** `MCP-EVENT-001` now mandates a **local encrypted, bounded, durable
+   spool on every relevant Data Plane**, with external export **additive, never a substitute**.
+   `MCP-EVENT-002` and the EVENT-MODEL §4a table make the critical **write/destructive/config/credential**
+   classes **fail closed AND enter degraded mode + alert + integrity-protected loss counter** (both, not
+   either). Aligned across SECURITY-REQUIREMENTS, EVENT-MODEL (§4, §4a, CRITICAL constraint, §6 flow),
+   DFD-9, and ADR-0024 §D-5.
+2. **Connector gates reassigned.** `MCP-CONNECT-001/002/004` → **PR-C** (post-V1 connector slice);
+   `MCP-CONNECT-003` → **Future DMZ Architecture & Production-Readiness Gate**; **PR-11 stays
+   Shadow/Canary only**. Updated SECURITY-REQUIREMENTS, TEST-TRACEABILITY-MATRIX, IMPLEMENTATION-SLICES
+   (PR-C refined + explicit Future DMZ gate slice).
+3. **`MCP-INSP-008` split.** PR-1 = the **pure, listener-independent Origin/Host validation primitive +
+   test harness (no listener)**; **new `MCP-INSP-009`** (PR-5) = listener binding, configured interfaces,
+   host allowlist at accept, and **E2E rebinding enforcement**. The false "an inbound listener ships in
+   PR-1" claim is removed (SECURITY-REQUIREMENTS, THREAT-MODEL, TEST-TRACEABILITY, IMPLEMENTATION-SLICES
+   PR-1/PR-5, GO-NO-GO).
+4. **`MCP-PROTO-012` split.** PR-1 = protocol lifecycle, cancellation, reconnect, **immutable opaque
+   session context (no identity)**; **new `MCP-ID-008`** (PR-3) = resolved-identity binding + no
+   mid-session rebind. **PR-1 retains identity as a non-goal** (stated in the PR-1 slice and PROTO-012).
+5. **UTF-8/Unicode control added.** **New `MCP-PROTO-014`** (PR-1): reject invalid UTF-8 and NFC-normalize
+   method/identifier names before compare/dispatch (covers `MCP-T-057`/`MCP-T-065`), with fixtures and a
+   traceability row.
+6. **Traceability completeness.** Explicit §1a rows added for `MCP-AUTH-008`, `MCP-EVENT-004`,
+   `MCP-EVENT-006`, `MCP-CONNECT-004`; the "Unit | all" row is annotated as **not** requirement-specific
+   proof; the outdated "no IDs added/removed" impression is corrected (three IDs added — see the callout
+   above).
+7. **THREAT-MODEL residual R-1** corrected from **D-8 → D-7** (the local-MCP/stdio-localhost roadmap
+   decision; D-8 is the distinct connector model).
+
+**Follow-up IDs added:** `MCP-PROTO-014`, `MCP-INSP-009`, `MCP-ID-008` (requirements 88 → **91**). No ID
+removed; no duplicates/orphans (re-validated). No new threat/DFD/abuse-case IDs were required.
 
 ## Files changed
 

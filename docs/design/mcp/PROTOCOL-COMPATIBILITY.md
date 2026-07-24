@@ -98,9 +98,10 @@ fields), and keep-alive/heartbeat convention are external specification facts.**
 this layer, independent of those specifics:
 
 - **Connect**: the inbound HTTP request that establishes the Streamable HTTP/SSE channel **MUST** pass
-  Origin/Host validation before the channel is established — `MCP-INSP-008` ("The inbound MCP/SSE
-  listener MUST validate Origin/Host to prevent DNS-rebinding against the local server") is a hard
-  precondition on connect, not a post-hoc check. This closes a gap the repository does not have a general
+  Origin/Host validation before the channel is established — the `MCP-INSP-008` Origin/Host validation
+  **primitive** (a pure decision, PR-1) is a hard precondition on connect, not a post-hoc check; the
+  **listener that invokes it at connect and binds only configured interfaces is `MCP-INSP-009` at PR-5**
+  (PR-1 ships no listener). This closes a gap the repository does not have a general
   answer for today: `isSafeRedirectURL` (`proxy_portal.go:152`) is captive-portal-only and does not cover
   an inbound MCP/SSE listener (VERIFIED EVIDENCE). Relevant threats: MCP-T-031 (inbound DNS-rebinding vs
   MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse).
@@ -258,7 +259,8 @@ later slices must add, and is intentionally a **requirements list**, not a claim
 | Protocol-version conformance fixtures | Prove the kernel negotiates every allowlisted version, rejects every non-allowlisted version, refuses silent downgrade, and that version adapters are equivalent. | MCP-T-066,067,068 (version negotiation/downgrade/adapter differential); MCP-T-050 (mixed CP/DP version, distinct) | `MCP-PROTO-010,011` | PR-1 (**fixtures + greenness gated on D-1**) |
 | Malformed/non-compliant JSON-RPC fixtures | Prove the kernel bounds and rejects malformed envelopes without a crash, panic, or unbounded resource use, and that parsing is non-differential. | MCP-T-057,058,063,073,074 (malformed/differential/exhaustion/crash) | `MCP-PROTO-001,006,009,013` | PR-1 |
 | Malicious/non-compliant MCP **server** fixtures | Prove the kernel and downstream tool-discovery layer do not trust a hostile server's self-reported tool list, schema, or identity claims. | MCP-T-011..017 (tool poisoning, shadowing, schema drift, description drift, rug pull, server identity change, unknown-tool auto-allow) | `MCP-TOOL-001..006`, `MCP-SERVER-001..003` | PR-2 |
-| Inbound Origin/Host rebinding fixtures | Prove the inbound MCP/SSE listener rejects a bad Origin/Host at connect (§4). | MCP-T-031 (inbound DNS-rebinding vs MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse) | `MCP-INSP-008` | PR-1 |
+| Origin/Host validation primitive fixtures | Prove the pure Origin/Host accept/reject decision + empty-allowlist fail-closed (no socket, no listener). | MCP-T-031, MCP-T-055 | `MCP-INSP-008` | PR-1 |
+| Inbound listener rebinding E2E fixtures | Prove the running listener binds only configured interfaces and rejects a bad Origin/Host at connect (§4). | MCP-T-031 (inbound DNS-rebinding vs MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse) | `MCP-INSP-009` | PR-5 |
 | SSE-exhaustion / slow-client / queue-saturation load fixtures | Prove connection/stream/queue bounds hold under adversarial load. | MCP-T-042 (SSE exhaustion), MCP-T-043 (slow-client), MCP-T-044 (queue saturation/event-loss) | `MCP-OPS-002` | PR-5 |
 | OAuth-negative matrix | Prove missing/invalid/query-string/wrong-audience/wrong-resource/replayed tokens are all rejected. | MCP-T-001..005 | `MCP-AUTH-001..006` | PR-3 |
 | Mixed-version CP/DP fixtures | Prove a DP below minimum_dp_version does not apply a snapshot, distinct from client-protocol-version mixing. | MCP-T-050, MCP-T-047 | `MCP-CPDP-003` | PR-10 |

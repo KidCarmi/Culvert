@@ -161,7 +161,7 @@ are **required**, each grounded in a stable requirement ID from
 | Element | Requirement | Design intent |
 |---|---|---|
 | Bounded queue + backpressure | MCP-EVENT-001 | The decision path enqueues into a bounded, in-memory queue sized for burst absorption, not unbounded growth; backpressure signals (queue depth, enqueue latency) are observable before loss occurs. |
-| Disk spool **or** durable export | MCP-EVENT-001 | On sustained backpressure, events spool to local durable storage (survives process restart) **or** are exported synchronously to a durable sink (e.g. SIEM/object store) before being considered committed — at least one of the two, not neither. |
+| Mandatory local encrypted durable spool (+ additive export) | MCP-EVENT-001 | Every relevant Data Plane **MUST** have a **local, encrypted, bounded, durable spool** (survives process restart); on sustained backpressure events are persisted there before being considered committed. An external durable sink (SIEM / message bus / object store) is an **additive exporter**, **never a substitute** for the local spool — the spool is required even when an exporter is configured, and export being unavailable does not by itself constitute durability. |
 | Replay / correlation IDs | MCP-EVENT-004 | Every event carries a unique `event_id` plus a `correlation_id` linking related events (e.g. a `REQUIRE_APPROVAL` event and its later `approval_granted` follow-up) so an investigator or a replay tool can reconstruct a full decision sequence deterministically. |
 | Explicit loss policy | MCP-EVENT-001, -002 | The system states, in advance, what happens when the bounded queue and the spool/export path are both saturated — see the CRITICAL constraint below. Silence is not an acceptable answer. |
 | Degraded mode | MCP-EVENT-002 | A named, alertable state (distinct from normal operation) that the gateway enters when event durability cannot be guaranteed, so operators are not silently blind. |
@@ -173,9 +173,11 @@ are **required**, each grounded in a stable requirement ID from
 ### CRITICAL constraint
 
 > Loss of authentication, deny, configuration, or high-risk decision events **MUST NOT** occur silently.
-> If the durability path (bounded queue → spool/export) cannot preserve such an event, the corresponding
-> write/high-risk operation **MUST fail closed**, or the system **MUST** enter the defined degraded mode
-> (above) and alert. This is [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
+> If the durability path (bounded queue → **mandatory local encrypted spool** → additive export) cannot
+> preserve such an event, the corresponding **critical write / destructive / config-publication / credential**
+> operation **MUST fail closed AND** the system **MUST** enter the defined degraded mode (above) with alert
+> and an integrity-protected loss counter — both, not either. This is
+> [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
 > tied to [MCP-T-044](THREAT-MODEL.md) (queue saturation / event-loss, **Critical**) in the canonical
 > threat registry. A dropped `MONITOR` event on a low-risk `ALLOW` is a durability nuisance; a dropped
 > `DENY`, auth-failure, config-change, or high-risk event is a security-evidence failure and must be
@@ -191,11 +193,11 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 | Action class | Behavior when the decision event cannot be durably persisted |
 |---|---|
 | Read-only / low-risk `ALLOW` or `MONITOR` | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an **integrity-protected loss/degradation counter**; keep retrying persistence/export within bounded budgets; **never fail silently**. |
-| Write action | **Fail closed** (deny the operation). |
-| Destructive / production action | **Fail closed.** |
-| Configuration publication | **Fail closed** — do not publish a configuration change without a durable change event. |
-| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed.** |
-| State-affecting Management MCP operation | **Fail closed** (and out of V1 regardless — see [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)). |
+| Write action | **Fail closed** (deny the operation) **AND** enter the defined degraded mode + alert + integrity-protected loss counter. |
+| Destructive / production action | **Fail closed AND** enter degraded mode + alert + loss counter. |
+| Configuration publication | **Fail closed AND** enter degraded mode + alert — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** enter degraded mode + alert + loss counter. |
+| State-affecting Management MCP operation | **Fail closed AND** degraded mode + alert (and out of V1 regardless — see [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)). |
 | Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
 
 **Required design coverage (PR-8).** The durable-event design **MUST** specify, in addition to the §4
@@ -242,21 +244,20 @@ flowchart TD
     Q["Bounded queue\n(backpressure signal)"]
     SAT{"Saturated?"}
     CRIT{"Critical class?\n(auth / deny / config / high-risk)"}
-    SPOOL["Disk spool"]
-    EXPORT["Durable export\n(SIEM / object store)"]
+    SPOOL["Mandatory local encrypted\ndurable spool (per DP)"]
+    EXPORT["Additive export\n(SIEM / bus / object store)\n— never a substitute"]
     INT["Integrity + replay ID\n(event_id, correlation_id,\nsnapshot_hash, dp_id, timestamp)"]
     FAIL["Fail closed\nthe triggering operation"]
-    DEG["Enter degraded mode\n+ alert (MCP-EVENT-002)"]
+    DEG["Enter degraded mode\n+ alert + loss counter\n(MCP-EVENT-002)"]
 
     D --> Q
     Q --> SAT
     SAT -- "no" --> SPOOL
-    SAT -- "no" --> EXPORT
     SPOOL --> INT
-    EXPORT --> INT
+    SPOOL -. "additive, async" .-> EXPORT
     SAT -- "yes" --> CRIT
-    CRIT -- "yes" --> FAIL
-    CRIT -- "yes" --> DEG
+    CRIT -- "yes (write/destructive/config/credential)" --> FAIL
+    CRIT -- "yes (AND, not either)" --> DEG
     CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> DEG
 ```
 

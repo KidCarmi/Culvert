@@ -101,19 +101,20 @@ These five decisions were the blocking GO/NO-GO items required before PR-1. They
 
 #### D-5 — Durable decision-event architecture: local encrypted durable spool + pluggable export (Option C)
 
-Every relevant Data Plane uses a **local encrypted durable spool** with bounded queues, backpressure,
-replay identifiers and pluggable asynchronous exporters. An external message bus or SIEM is an **adapter**,
-not a mandatory runtime dependency. Durability-unavailable semantics are fixed by action class
-(MCP-EVENT-002):
+Every relevant Data Plane has a **mandatory local encrypted, bounded, durable spool** with bounded queues,
+backpressure and replay identifiers. An external message bus or SIEM is an **additive adapter/exporter** —
+**never a substitute** for the local spool and not a mandatory runtime dependency (the spool is required even
+when an exporter is configured). Durability-unavailable semantics are fixed by action class (MCP-EVENT-002);
+for the critical write classes, fail-closed **and** degraded-mode-with-alert are **both** required:
 
 | Action class | Behavior when a decision event cannot be durably persisted |
 |---|---|
 | Read-only / low-risk ALLOW or MONITOR | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an integrity-protected loss/degradation counter; keep retrying persistence/export within bounded budgets; **never fail silently**. |
-| Write action | **Fail closed.** |
-| Destructive / production action | **Fail closed.** |
-| Configuration publication | **Fail closed** — do not publish a configuration change without a durable change event. |
-| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed.** |
-| State-affecting Management MCP operation | **Fail closed** (and such operations remain out of V1 regardless — see D-13). |
+| Write action | **Fail closed AND** enter degraded mode + alert + integrity-protected loss counter. |
+| Destructive / production action | **Fail closed AND** degraded mode + alert + loss counter. |
+| Configuration publication | **Fail closed AND** degraded mode + alert — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** degraded mode + alert + loss counter. |
+| State-affecting Management MCP operation | **Fail closed AND** degraded mode + alert (and such operations remain out of V1 regardless — see D-13). |
 | Authentication failure or authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
 
 The in-memory audit ring (`MaxRing=500`), SSE hub, syslog queue and best-effort OTLP exporters are **not**
@@ -268,7 +269,7 @@ requirements are defined; only their numeric values are open.
 
 **PR-1 Protocol-Kernel scope (post-remediation).** The PR-1 attack surface — MCP parser, JSON-RPC framing,
 version adapters and protocol state — is modeled by threats **MCP-T-057..074**, bounded by requirements
-**MCP-PROTO-001..013**, and gated by blocking PR-1 fuzz + structural/differential/protocol-state suites plus
+**MCP-PROTO-001..014**, and gated by blocking PR-1 fuzz + structural/differential/protocol-state suites plus
 a **D-1-gated** compatibility gate (see `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`, `CI-GATES.md`, and
 `PR1-READINESS-REMEDIATION.md`). Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
 the exact leaf-package names remain `[REC]`, subject to implementation review (not fixed by this ADR).

@@ -260,7 +260,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
 | MCP-T-054 | Local stdio bypass | High (residual) | MCP-OPS-004 (documented limitation) | Product/Sec |
-| MCP-T-055 | localhost bypass | High (residual) | MCP-OPS-004; MCP-INSP-008 (inbound Origin/Host) | Product/Sec |
+| MCP-T-055 | localhost bypass | High (residual) | MCP-OPS-004; MCP-INSP-008 (Origin/Host primitive, PR-1) + MCP-INSP-009 (listener enforcement, PR-5) | Product/Sec |
 | MCP-T-056 | Direct egress bypass | High (residual) | MCP-OPS-004 (documented V1 limitation, R-1) — the only **in-product** control; a customer-owned network egress policy is a **compensating control outside Culvert**, not an MCP requirement ID | Net/Sec |
 
 ### Management MCP
@@ -275,14 +275,14 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
 | MCP-T-051 | Outbound connector compromise | High | MCP-CONNECT-001,002 | Net/Sec |
-| MCP-T-052 | DMZ endpoint abuse | High | MCP-CONNECT-003, MCP-INSP-008 | Net/Sec |
+| MCP-T-052 | DMZ endpoint abuse | High | MCP-CONNECT-003, MCP-INSP-009 (listener-side Origin/Host enforcement) | Net/Sec |
 | MCP-T-053 | Cloud AI data-residency risk | High | MCP-PRIVACY-001,003 | Privacy/Legal |
 
 ### Inbound listener (new requirement surfaced in Phase 1)
 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
-| MCP-T-031 | Inbound DNS-rebinding against the MCP/SSE listener | High | MCP-INSP-008 (**Missing today** — `isSafeRedirectURL` is captive-portal-only, `proxy_portal.go:152`) | Sec/Eng |
+| MCP-T-031 | Inbound DNS-rebinding against the MCP/SSE listener | High | MCP-INSP-008 (Origin/Host validation **primitive** + harness, PR-1 — **no listener**) + MCP-INSP-009 (listener binding + host-allowlist + **E2E** rebinding enforcement, PR-5). **Missing today** — `isSafeRedirectURL` is captive-portal-only, `proxy_portal.go:152`. | Sec/Eng |
 
 ### Protocol kernel — parsing, framing, version, protocol state (PR-1)
 
@@ -296,7 +296,7 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 
 | ID | Threat | Sev | Primary controls (req IDs) | Owner |
 |---|---|---|---|---|
-| MCP-T-057 | Malformed JSON-RPC envelope / invalid UTF-8 not safely rejected | Medium | MCP-PROTO-001,013 | Sec/Eng |
+| MCP-T-057 | Malformed JSON-RPC envelope / invalid UTF-8 not safely rejected | Medium | MCP-PROTO-001,013,014 | Sec/Eng |
 | MCP-T-058 | Parser differential (duplicate/ambiguous keys, conflicting fields) → downstream sees a different message than was validated | High | MCP-PROTO-001 | Sec/Eng |
 | MCP-T-059 | JSON-RPC message-type misclassification / unknown-or-unsupported method or extension dispatched | Medium | MCP-PROTO-002 | Sec/Eng |
 | MCP-T-060 | Request-ID confusion / response mis-correlation (integer/string/null edge cases, duplicate/absent id) | High | MCP-PROTO-003 | Sec/Eng |
@@ -304,11 +304,11 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 | MCP-T-062 | Framing ambiguity / truncated / partial message mishandled | Medium | MCP-PROTO-005,013 | Sec/Eng |
 | MCP-T-063 | Oversized message / excessive JSON depth / field-count / string-size (parse-time exhaustion) | High | MCP-PROTO-006,008 | SRE/Sec |
 | MCP-T-064 | Numeric overflow / pathological number encodings | Medium | MCP-PROTO-007 | Sec/Eng |
-| MCP-T-065 | Unicode-normalization confusion in method/identifier names | Medium | MCP-PROTO-001 | Sec/Eng |
+| MCP-T-065 | Unicode-normalization confusion in method/identifier names | Medium | MCP-PROTO-014 (NFC-normalize identifiers before compare/dispatch) + MCP-PROTO-001 | Sec/Eng |
 | MCP-T-066 | Version-negotiation confusion / unknown-version accepted best-effort | High | MCP-PROTO-010 | Sec/Eng |
 | MCP-T-067 | Downgrade to an unsupported/weaker protocol semantics | High | MCP-PROTO-010 | Sec/Eng |
 | MCP-T-068 | Version-adapter differential (same input → divergent normalized message across adapters) | High | MCP-PROTO-011 | Sec/Eng |
-| MCP-T-069 | Protocol-state / session confusion (mid-session identity rebind, out-of-order lifecycle) | High | MCP-PROTO-012 | Sec/Eng |
+| MCP-T-069 | Protocol-state / session confusion (mid-session identity rebind, out-of-order lifecycle) | High | MCP-PROTO-012 (protocol lifecycle + immutable opaque session context, PR-1) + MCP-ID-008 (resolved-identity binding / no rebind, PR-3) | Sec/Eng |
 | MCP-T-070 | Cancellation race (cancel-and-retry as a decision bypass; unclean cancel) | Medium | MCP-PROTO-012 | Sec/Eng |
 | MCP-T-071 | Duplicate completion / in-session response replay | Medium | MCP-PROTO-003,012 | Sec/Eng |
 | MCP-T-072 | Reconnect / replay of protocol messages (resumption abuse) | Medium | MCP-PROTO-012 | Sec/Eng |
@@ -324,7 +324,7 @@ protocol-kernel fuzz + structural-limit test classes there.
 
 | ID | Residual risk | Owner | Acceptance condition |
 |---|---|---|---|
-| R-1 | stdio/localhost/direct-egress bypass (MCP-T-054..056) | Product/Sec | Documented V1 limitation; endpoint bridge is roadmap ([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) D-8). |
+| R-1 | stdio/localhost/direct-egress bypass (MCP-T-054..056) | Product/Sec | Documented V1 limitation; endpoint bridge is roadmap ([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) **D-7** — the local-MCP/stdio-localhost roadmap decision; D-8 is the distinct connector model). |
 | R-2 | Pattern inspection cannot catch every secret/injection (MCP-T-026,027,038) | Sec/Privacy | Defense-in-depth + approvals; accepted with monitoring. |
 | R-3 | Approved server later compromised (MCP-T-021) | Sec/Eng | Drift + destination + output controls; accepted. |
 | R-4 | Human approval social engineering (MCP-T-032,033) | Product Sec | Explicit, auditable approval UX; accepted. |

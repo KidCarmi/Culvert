@@ -33,8 +33,8 @@ These six are non-negotiable and apply at every stage.
 | **Threat model** | All Critical/High threats map to controls, tests, owners (closure criteria met). | Any open critical threat or residual risk without an owner. |
 | **Policy** | Default-deny, drift quarantine, simulator, reason codes (MCP-POLICY-001/003, MCP-TOOL-006). | Unknown tool auto-allows, or decisions are opaque. |
 | **Credentials** | Brokered, scoped, revocable, no secret leakage (MCP-CRED-001..004). | Agent receives a production secret, or logs contain credentials. |
-| **Protocol kernel** | PR-1 parser/framing/version/protocol-state attack surface modeled (MCP-T-057..074) and bounded by MCP-PROTO-001..013; blocking PR-1 fuzz + structural/differential/protocol-state gates defined; compatibility gate defined and **D-1-gated**. | Protocol-kernel threats unmodeled, "protocol bounds" undefined, or fuzz/compat claimed green with no blocking gate / before D-1 closes. |
-| **Inspection** | Semantic input/output schema + DLP + SSRF + inbound Origin/Host (MCP-INSP-001..008); structural parse-time bounds owned by the kernel (MCP-PROTO-006). | SSRF/rebinding unguarded, or inbound Origin/Host missing on the listener. |
+| **Protocol kernel** | PR-1 parser/framing/version/protocol-state attack surface modeled (MCP-T-057..074) and bounded by MCP-PROTO-001..014; blocking PR-1 fuzz + structural/differential/protocol-state gates defined; compatibility gate defined and **D-1-gated**. | Protocol-kernel threats unmodeled, "protocol bounds" undefined, or fuzz/compat claimed green with no blocking gate / before D-1 closes. |
+| **Inspection** | Semantic input/output schema + DLP + SSRF + Origin/Host (MCP-INSP-001..009: the Origin/Host **primitive** is `MCP-INSP-008` at PR-1, the **listener binding + E2E rebinding** is `MCP-INSP-009` at PR-5); structural parse-time bounds owned by the kernel (MCP-PROTO-006). | SSRF/rebinding unguarded, or listener (PR-5) binds default-public / skips the allowlist. |
 | **Events** | Critical decision events durable + exportable; loss policy defined (MCP-EVENT-001/002). | Loss policy undefined, or critical events can silently disappear. |
 | **Reliability** | Bounds, HA, rollback + load/soak/chaos evidence (MCP-OPS-002, MCP-HA-002). | Unbounded streams/queues, or rollback not rehearsed. |
 | **On-prem connectivity** | Local/connector/DMZ deployment validated with data-flow + failure semantics (MCP-CONNECT-*). | Connector assumed; tenant binding unproven. |
@@ -62,7 +62,7 @@ GO to begin PR-1 requires ALL of:
 - [ ] **A numbered ADR is Accepted under `docs/adr/`** (Option B, D-0) — **ADR-0024 CREATED as `Proposed`; still requires ARB + Security Architecture ratification to become Accepted.**
 - [ ] **D-1 (protocol-version baseline) externally verified and human-approved** — elevated to a hard PR-1 entry gate; PR-1 *is* the Protocol Kernel, so D-1 must not be deferred to implementation.
 - [ ] **Repository build/test baseline run and recorded** before any PR-1 code change (not done in the PR-0 session — VRC §11).
-- [x] **PR-1 protocol-kernel attack surface modeled** (MCP-T-057..074) and mapped to **MCP-PROTO-001..013** with PR-1 **blocking** fuzz + structural/differential/protocol-state gates, and a **D-1-gated** compatibility gate defined (remediation findings H-1..H-4). *(Documentation done; the gates themselves are wired in PR-1 and compatibility greenness still depends on D-1.)*
+- [x] **PR-1 protocol-kernel attack surface modeled** (MCP-T-057..074) and mapped to **MCP-PROTO-001..014** with PR-1 **blocking** fuzz + structural/differential/protocol-state gates, and a **D-1-gated** compatibility gate defined (remediation findings H-1..H-4). *(Documentation done; the gates themselves are wired in PR-1 and compatibility greenness still depends on D-1.)*
 - [ ] Two capabilities (Management vs Gateway) confirmed separate across all documents.
 
 ## Production Qualification gate

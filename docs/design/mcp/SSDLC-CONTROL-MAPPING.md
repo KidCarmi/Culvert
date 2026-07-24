@@ -153,7 +153,7 @@ gap list, with the requirement IDs and release stage that will close it.
 |---|---|---|---|
 | Malicious-MCP-server test corpus | SSDF PW.8, BSIMM SSDL Touchpoints, API Security API8/API10 | `MCP-SERVER-001..003` | PR-2 |
 | OAuth audience/resource/replay negative matrix | SSDF PW.8, SDL Verification, ASVS V2, API Security API2 | `MCP-AUTH-001..006` | PR-3 |
-| DNS-rebinding lab (outbound) + inbound Origin/Host anti-rebinding tests | ASVS V10, API Security API7, SDL Verification | `MCP-INSP-005`, `MCP-INSP-008` | PR-7 (outbound), PR-1 (inbound listener) |
+| DNS-rebinding lab (outbound) + Origin/Host anti-rebinding tests | ASVS V10, API Security API7, SDL Verification | `MCP-INSP-005`, `MCP-INSP-008` (primitive), `MCP-INSP-009` (listener) | PR-7 (outbound); PR-1 (Origin/Host **primitive**, no listener); PR-5 (listener **E2E** rebinding) |
 | SSE-exhaustion / resource-exhaustion tests | SSDF PW.9, API Security API4 | `MCP-OPS-002` | PR-5 |
 | Mixed-version / stale-epoch / corrupt-snapshot MCP gates | BSIMM Deployment, ASVS V14, API Security API8 | `MCP-CPDP-001..003`, `MCP-HA-001..002` | PR-10 |
 | MCP-off overhead regression benchmark | SSDF PW.9, SAMM Operations | `MCP-OPS-001` | PR-5 |
