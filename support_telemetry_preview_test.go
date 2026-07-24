@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -100,8 +101,11 @@ func TestSupportTelemetryPreviewReadOnly(t *testing.T) {
 	}
 
 	after := listDirTree(t, dataDir)
-	if len(after) != len(before) {
-		t.Fatalf("preview calls created filesystem state under dataDir: before=%v after=%v", before, after)
+	// Compare the exact path sets, not just their lengths — a create paired
+	// with an unrelated delete would leave len(after) == len(before) while
+	// still proving the handler is not read-only.
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("preview calls changed filesystem state under dataDir: before=%v after=%v", before, after)
 	}
 }
 
