@@ -179,7 +179,7 @@ func TestSupportTelemetryPayloadNoDrift(t *testing.T) {
 		t.Fatalf("fixture expected all-eligible; got %d/%d", len(eligible), len(r))
 	}
 
-	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
+	sample, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}

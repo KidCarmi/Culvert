@@ -308,6 +308,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
+		markConfigSnapshotApplyRejected()
 		return
 	}
 	// H5: validate per-slice caps BEFORE advancing lastVersion so that a
@@ -437,6 +438,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	var remainder ConfigSnapshot
 	if err := json.Unmarshal(reply.Remainder, &remainder); err != nil {
 		logger.Printf("DataPlane: parse delta remainder v%d: %v — full resync", reply.TargetVersion, err)
+		markConfigSnapshotApplyRejected()
 		return false
 	}
 	if err := validateConfigSnapshot(remainder); err != nil {

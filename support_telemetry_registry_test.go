@@ -87,17 +87,20 @@ func TestBuildSupportTelemetrySample_SchemaAndHashPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSupportTelemetrySample: %v", err)
 	}
-	if sample.SchemaVersion == 0 {
+	if sample.SchemaVersion() == 0 {
 		t.Error("sample missing schema_version")
 	}
-	if sample.RegistryHash == "" {
+	if sample.RegistryHash() == "" {
 		t.Error("sample missing registry_hash")
 	}
-	if sample.RegistryHash != supportMetricRegistry.Hash() {
-		t.Errorf("sample registry_hash %q does not match live registry hash %q", sample.RegistryHash, supportMetricRegistry.Hash())
+	if sample.RegistryHash() != supportMetricRegistry.Hash() {
+		t.Errorf("sample registry_hash %q does not match live registry hash %q", sample.RegistryHash(), supportMetricRegistry.Hash())
 	}
-	if sample.GeneratedAt.IsZero() {
+	if sample.GeneratedAt().IsZero() {
 		t.Error("sample missing generated_at")
+	}
+	if sample.SampleEpoch() == "" {
+		t.Error("sample missing sample_epoch")
 	}
 }
 

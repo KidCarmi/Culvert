@@ -27,9 +27,13 @@ func withSupportTelemetryNow(t *testing.T, now func() time.Time) {
 
 // TestSupportTelemetryPreviewMatchesBuiltSample — §8: build ONE immutable
 // sample, render that SAME sample through the preview serialization path,
-// and compare exact bytes; separately prove the real HTTP handler (given the
-// same injected clock) renders byte-identical output, i.e. it does not
-// substitute a different rendering path.
+// and prove the rendered bytes are byte-for-byte identical to
+// json.Marshal(sample) directly — i.e. the preview is a LOSSLESS rendering
+// of the complete §3.3 sample (schema_version, registry_hash, generated_at,
+// sample_epoch, sequence, metrics), not a partial projection of it.
+// Separately proves the real HTTP handler (given the same injected clock)
+// renders byte-identical output, i.e. it does not substitute a different
+// rendering path or rebuild a second sample.
 func TestSupportTelemetryPreviewMatchesBuiltSample(t *testing.T) {
 	withSupportTelemetryNow(t, fixedSupportTelemetryTime)
 
@@ -38,8 +42,18 @@ func TestSupportTelemetryPreviewMatchesBuiltSample(t *testing.T) {
 		t.Fatalf("buildSupportTelemetrySample: %v", err)
 	}
 
+	wantBytes, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatalf("json.Marshal(sample): %v", err)
+	}
+	// json.NewEncoder (jsonOK) appends a trailing newline json.Marshal does not.
+	want := append(append([]byte(nil), wantBytes...), '\n')
+
 	direct := httptest.NewRecorder()
 	writeSupportTelemetryPreview(direct, sample)
+	if !bytes.Equal(direct.Body.Bytes(), want) {
+		t.Fatalf("preview rendering is not byte-equivalent to json.Marshal(sample):\npreview: %s\nsample:  %s", direct.Body.String(), wantBytes)
+	}
 
 	req := withRole(httptest.NewRequest(http.MethodGet, "/api/support/telemetry/preview", http.NoBody), RoleAdmin)
 	viaHandler := httptest.NewRecorder()
@@ -52,15 +66,15 @@ func TestSupportTelemetryPreviewMatchesBuiltSample(t *testing.T) {
 		t.Fatalf("preview rendering diverges from the handler's response:\ndirect:  %s\nhandler: %s", direct.Body.String(), viaHandler.Body.String())
 	}
 
-	var view supportTelemetryPreviewView
-	if err := json.Unmarshal(direct.Body.Bytes(), &view); err != nil {
+	// Confirm the complete §3.3 shape is present — not a subset.
+	var raw map[string]any
+	if err := json.Unmarshal(direct.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("unmarshal rendered preview: %v", err)
 	}
-	if view.SchemaVersion != sample.SchemaVersion || view.RegistryHash != sample.RegistryHash {
-		t.Fatalf("rendered preview does not match the built sample's schema identity: %+v vs sample %+v", view, sample)
-	}
-	if len(view.Metrics) != len(sample.Metrics()) {
-		t.Fatalf("rendered preview has %d metrics, sample has %d", len(view.Metrics), len(sample.Metrics()))
+	for _, field := range []string{"schema_version", "registry_hash", "generated_at", "sample_epoch", "sequence", "metrics"} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("preview is missing §3.3 field %q — it must be a lossless rendering of the sample", field)
+		}
 	}
 }
 
@@ -145,8 +159,9 @@ func TestSupportTelemetryPreviewRBAC(t *testing.T) {
 // TestSupportTelemetryPreviewNoSensitiveFields proves the preview response
 // never exposes credential state, a TAC endpoint, node id, or bundle
 // content — none of which this route has access to in the first place, but
-// pinned here so a future field addition to supportTelemetryPreviewView is
-// forced to justify itself against this list.
+// pinned here so a future field addition to Sample's wire shape is forced to
+// justify itself against this list. sample_epoch/sequence ARE expected —
+// they are the non-identifying §3.3 delivery-identity fields, not secrets.
 func TestSupportTelemetryPreviewNoSensitiveFields(t *testing.T) {
 	withSupportTelemetryNow(t, fixedSupportTelemetryTime)
 	req := withRole(httptest.NewRequest(http.MethodGet, "/api/support/telemetry/preview", http.NoBody), RoleAdmin)
@@ -157,7 +172,10 @@ func TestSupportTelemetryPreviewNoSensitiveFields(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	allowed := map[string]bool{"schema_version": true, "registry_hash": true, "generated_at": true, "metrics": true}
+	allowed := map[string]bool{
+		"schema_version": true, "registry_hash": true, "generated_at": true,
+		"sample_epoch": true, "sequence": true, "metrics": true,
+	}
 	for k := range raw {
 		if !allowed[k] {
 			t.Errorf("preview response has unexpected top-level field %q", k)

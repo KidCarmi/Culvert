@@ -139,6 +139,9 @@ func (r Registry) Validate() error {
 		if d.Read == nil {
 			return fmt.Errorf("supportmetrics: metric %q has no Read callback", d.ID)
 		}
+		if err := d.Buckets.Validate(); err != nil {
+			return fmt.Errorf("supportmetrics: metric %q: %w", d.ID, err)
+		}
 		if d.TelemetryEligible {
 			if strings.TrimSpace(d.TelemetryReason) == "" {
 				return fmt.Errorf("supportmetrics: metric %q is telemetry-eligible but has no TelemetryReason", d.ID)

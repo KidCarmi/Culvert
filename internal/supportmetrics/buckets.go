@@ -1,6 +1,10 @@
 package supportmetrics
 
-import "time"
+import (
+	"fmt"
+	"math"
+	"time"
+)
 
 // BucketLadder is a canonical, single-source-of-truth definition of a coarse
 // bucket function: an ordered set of Labels (len N) and the ascending
@@ -42,6 +46,44 @@ func (b *BucketLadder) Index(x float64) float64 {
 		return float64(len(b.Labels) - 1 - rank)
 	}
 	return float64(rank)
+}
+
+// Validate enforces the structural invariants a BucketLadder must satisfy to
+// be a well-formed, unambiguous step function: at least one label, exactly
+// len(Labels)-1 thresholds, no empty or duplicate label, and thresholds that
+// are finite and strictly ascending (a non-ascending or repeated threshold
+// would make Index's step function ambiguous, and NaN/Inf can never be a
+// meaningful day/duration cut point). A nil ladder is valid (it simply means
+// "this descriptor has no bucket definition").
+func (b *BucketLadder) Validate() error {
+	if b == nil {
+		return nil
+	}
+	if len(b.Labels) == 0 {
+		return fmt.Errorf("supportmetrics: bucket ladder has no labels")
+	}
+	if len(b.Thresholds) != len(b.Labels)-1 {
+		return fmt.Errorf("supportmetrics: bucket ladder has %d label(s) but %d threshold(s) (want %d)", len(b.Labels), len(b.Thresholds), len(b.Labels)-1)
+	}
+	seen := make(map[string]bool, len(b.Labels))
+	for _, l := range b.Labels {
+		if l == "" {
+			return fmt.Errorf("supportmetrics: bucket ladder has an empty label")
+		}
+		if seen[l] {
+			return fmt.Errorf("supportmetrics: bucket ladder has duplicate label %q", l)
+		}
+		seen[l] = true
+	}
+	for i, t := range b.Thresholds {
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return fmt.Errorf("supportmetrics: bucket ladder threshold %d is not finite (%v)", i, t)
+		}
+		if i > 0 && !(t > b.Thresholds[i-1]) {
+			return fmt.Errorf("supportmetrics: bucket ladder thresholds must be strictly ascending (threshold %d = %v is not greater than threshold %d = %v)", i, t, i-1, b.Thresholds[i-1])
+		}
+	}
+	return nil
 }
 
 // CAExpiryBucketLadder is the canonical, hash-participating definition for

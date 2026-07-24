@@ -3,6 +3,7 @@ package supportmetrics
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -10,6 +11,10 @@ import (
 func fixedNow() time.Time {
 	return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 }
+
+// fixedTestEpoch is a well-formed 128-bit-hex sample_epoch for tests that
+// don't care about the epoch's specific value.
+func fixedTestEpoch() string { return "0123456789abcdef0123456789abcdef" }
 
 // TestSupportTelemetrySampleHasNoStableIdentity — the sample carries no
 // node_id/hostname/IP/tenant identifier: its JSON encoding contains only the
@@ -77,7 +82,7 @@ func jsonContainsKey(doc, key string) bool {
 // code-reviewed vocabulary, but this proves it structurally too).
 func TestSupportTelemetrySampleForbiddenFieldSerialization(t *testing.T) {
 	r := fixedTestRegistry()
-	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
+	sample, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
@@ -93,7 +98,7 @@ func TestSupportTelemetrySampleForbiddenFieldSerialization(t *testing.T) {
 // therefore never affect a later Metrics() call or MarshalJSON).
 func TestSupportTelemetrySampleMetricsIsImmutable(t *testing.T) {
 	r := fixedTestRegistry()
-	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
+	sample, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
@@ -137,7 +142,7 @@ func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 		InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health",
 		Read: func() float64 { calls++; return 1 },
 	}}
-	if _, err := r.BuildSample(fixedNow(), "epoch-1", 0); err != nil {
+	if _, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0); err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
 	if calls != 1 {
@@ -151,7 +156,7 @@ func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 // governance-incomplete sample.
 func TestSupportTelemetrySampleRejectsInvalidRegistry(t *testing.T) {
 	r := Registry{{ID: "support_health_x", Type: Gauge, PrivacyClass: Aggregate, TelemetryEligible: true, InSupportBundle: true, Read: func() float64 { return 0 }}}
-	if _, err := r.BuildSample(fixedNow(), "epoch-1", 0); err == nil {
+	if _, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0); err == nil {
 		t.Fatal("BuildSample must reject an invalid registry")
 	}
 }
@@ -161,11 +166,11 @@ func TestSupportTelemetrySampleRejectsInvalidRegistry(t *testing.T) {
 // byte-identical JSON (map-order independence: encoding/json sorts map keys).
 func TestSupportTelemetrySampleDeterministicForFixedInputs(t *testing.T) {
 	r := fixedTestRegistry()
-	s1, err := r.BuildSample(fixedNow(), "epoch-1", 7)
+	s1, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 7)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
-	s2, err := r.BuildSample(fixedNow(), "epoch-1", 7)
+	s2, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 7)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
@@ -173,6 +178,90 @@ func TestSupportTelemetrySampleDeterministicForFixedInputs(t *testing.T) {
 	b2, _ := json.Marshal(s2)
 	if !bytes.Equal(b1, b2) {
 		t.Fatalf("two builds with identical inputs produced different bytes:\n%s\nvs\n%s", b1, b2)
+	}
+}
+
+// TestSupportTelemetryBuildSampleValidatesEpochFormat — epoch must be
+// exactly 32 lowercase-hex characters (128 bits, §5); anything else
+// (wrong length, uppercase, non-hex) is rejected.
+func TestSupportTelemetryBuildSampleValidatesEpochFormat(t *testing.T) {
+	r := fixedTestRegistry()
+	bad := []string{
+		"", "epoch-1", "not-hex-at-all-not-hex-at-all!!",
+		"0123456789ABCDEF0123456789ABCDEF",  // uppercase
+		"0123456789abcdef0123456789abcde",   // 31 chars, one short
+		"0123456789abcdef0123456789abcdef0", // 33 chars, one long
+	}
+	for _, epoch := range bad {
+		if _, err := r.BuildSample(fixedNow(), epoch, 0); err == nil {
+			t.Errorf("epoch %q must be rejected", epoch)
+		}
+	}
+	if _, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0); err != nil {
+		t.Errorf("well-formed epoch must be accepted: %v", err)
+	}
+}
+
+// TestSupportTelemetryBuildSampleRejectsZeroTime — now must be non-zero;
+// a zero time.Time is never a legitimate "current" generation timestamp.
+func TestSupportTelemetryBuildSampleRejectsZeroTime(t *testing.T) {
+	r := fixedTestRegistry()
+	if _, err := r.BuildSample(time.Time{}, fixedTestEpoch(), 0); err == nil {
+		t.Fatal("a zero time.Time must be rejected")
+	}
+}
+
+// TestSupportTelemetryBuildSampleRejectsNonFiniteMetric — a Read() closure
+// returning NaN/Inf must fail BuildSample rather than silently emit
+// unrepresentable/misleading JSON.
+func TestSupportTelemetryBuildSampleRejectsNonFiniteMetric(t *testing.T) {
+	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		r := Registry{{
+			ID: "support_health_x", Type: Gauge, PrivacyClass: Aggregate,
+			InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "x",
+			Read: func() float64 { return bad },
+		}}
+		if _, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0); err == nil {
+			t.Errorf("non-finite metric value %v must be rejected", bad)
+		}
+	}
+}
+
+// TestSupportTelemetrySampleFieldsAreImmutable proves there is no exported
+// API on Sample that can alter any field after construction — every
+// accessor returns either an immutable value type or, for Metrics(), a
+// fresh defensive copy.
+func TestSupportTelemetrySampleFieldsAreImmutable(t *testing.T) {
+	r := fixedTestRegistry()
+	sample, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 7)
+	if err != nil {
+		t.Fatalf("BuildSample: %v", err)
+	}
+	want, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Reading every accessor and mutating whatever comes back (value types
+	// can't be mutated through the accessor at all; Metrics() is checked by
+	// TestSupportTelemetrySampleMetricsIsImmutable) must never change what
+	// the sample itself reports afterward.
+	_ = sample.SchemaVersion()
+	_ = sample.RegistryHash()
+	_ = sample.GeneratedAt()
+	_ = sample.SampleEpoch()
+	_ = sample.Sequence()
+	m := sample.Metrics()
+	for k := range m {
+		delete(m, k)
+	}
+
+	got, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatalf("marshal after accessor calls: %v", err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Fatalf("sample changed after calling its own accessors:\nbefore: %s\nafter:  %s", want, got)
 	}
 }
 
