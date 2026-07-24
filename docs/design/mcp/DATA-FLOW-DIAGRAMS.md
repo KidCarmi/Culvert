@@ -1,10 +1,11 @@
 # MCP Data-Flow Diagrams
 
-Fourteen numbered data-flow diagrams (DFD-1 … DFD-14) for the MCP subsystem. Each marks its **trust
+Fifteen numbered data-flow diagrams (DFD-1 … DFD-15) for the MCP subsystem. Each marks its **trust
 boundaries** (TB-1 … TB-7 from [`THREAT-MODEL.md`](THREAT-MODEL.md)) and the dominant threats. **Status:
 PR-0 design artifact (Proposed).** These are design flows; no runtime exists. Diagrams are Mermaid so they
 render on GitHub and diff cleanly. Management MCP (Capability A) and the Security Gateway (Capability B)
-are kept as **separate** flows.
+are kept as **separate** flows. **DFD-15 (the PR-1 protocol-kernel decode path) was added by the PR-1
+remediation** (`PR1-READINESS-REMEDIATION.md`, finding M-3).
 
 Trust-boundary legend: **TB-1** agent/client↔Culvert · **TB-2** Culvert↔MCP server · **TB-3** CP↔DP ·
 **TB-4** runtime↔events · **TB-5** admin↔publication · **TB-6** cloud AI↔customer network · **TB-7**
@@ -128,7 +129,7 @@ Crosses TB-1. Threats: MCP-T-026, MCP-T-036, MCP-T-037, MCP-T-041, MCP-T-040.
 
 ```mermaid
 flowchart LR
-  ARG[Tool arguments] --> SCH[Schema/size/depth/field-count bounds]
+  ARG[Tool arguments] --> SCH[Semantic schema conformance MCP-INSP-001<br/>structural size/depth/field bounds already enforced at the protocol kernel — DFD-15, MCP-PROTO-006]
   SCH --> SEC[Secret/DLP detection]
   SEC --> DST[Destination check: scheme/host/IP private policy]
   DST --> DNS[DNS pin: resolve->connect rebinding guard]
@@ -244,6 +245,35 @@ flowchart LR
 Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits mandatory (MCP-INSP-008,
 MCP-OPS-002).
 
+## DFD-15 — Protocol-kernel decode path (Capability B, PR-1)
+
+Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **PR-1 ships this decode
+path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
+`MCP-PROTO-001..013`. No policy, credential, or upstream execution happens here.
+
+```mermaid
+flowchart LR
+  BYTES["Hostile client bytes<br/>(untrusted)"] --> FRAME[Bounded transport / framing<br/>MCP-PROTO-005/006/008]
+  FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
+  DEC --> CLASS[Classify req/resp/notif + method<br/>reject unknown/unsupported<br/>MCP-PROTO-002; ID correlation MCP-PROTO-003]
+  CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
+  STRUCT --> VER[Protocol-version adapter<br/>allowlist + equivalence, no downgrade<br/>MCP-PROTO-010/011]
+  VER --> NORM["Normalized internal message"]
+  NORM --> STATE[Protocol-state machine<br/>one identity/session, cancellation/reconnect<br/>MCP-PROTO-012]
+  STATE --> HANDOFF{{"Test harness (PR-1)<br/>/ later runtime boundary (PR-5)"}}
+  FRAME -. limit exceeded / truncated .-> ERR[Bounded JSON-RPC error<br/>no state leak + deterministic cleanup<br/>MCP-PROTO-013]
+  DEC -. malformed / differential .-> ERR
+  CLASS -. unknown method / bad id .-> ERR
+  STRUCT -. over-limit .-> ERR
+  VER -. unsupported version / downgrade .-> ERR
+  STATE -. race / duplicate / rebind .-> ERR
+  classDef tb fill:#fee,stroke:#c00;
+  class FRAME,DEC tb
+```
+Untrusted bytes are bounded and strictly decoded before any downstream stage; every reject path yields a
+bounded, non-leaky error with deterministic cleanup (MCP-PROTO-013). No hostile input may panic the kernel
+(MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
+
 ---
 
 ## Trust-boundary coverage summary
@@ -264,3 +294,4 @@ MCP-OPS-002).
 | 12 | connectivity | TB-1, TB-6 | 036, 037, 030, 031/055 |
 | 13 | connectivity | TB-6 | 051, 052, 010 |
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
+| 15 | B (gateway, PR-1 kernel) | TB-1 | 057–074 (parser/framing/version/state) |

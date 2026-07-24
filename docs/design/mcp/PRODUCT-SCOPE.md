@@ -233,7 +233,7 @@ policy schema, or threat model.** This separation is a hard product and architec
 phased convenience — see the "Shared vs. Separate" table below and
 [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md) for the trust-boundary detail.
 
-> **Decision status — D-13 CLOSED (2026-07-24, [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Decision status — D-13 CLOSED (2026-07-24, [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > **V1 Management MCP = read-only + draft / validate / simulate, with NO activation. Mutation and
 > publication are excluded from V1.** Isolation is at the level of listener, OAuth client/resource/scopes,
 > policy namespace, rule bundles, quotas, audit category, threat model and runbook; the two capabilities

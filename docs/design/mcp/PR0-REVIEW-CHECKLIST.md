@@ -9,10 +9,10 @@ How to use: each role signs off its section. Any unchecked blocking item holds t
 the specific document and ID.
 
 > **Decision status (2026-07-24).** Five blocking decisions are closed and recorded in
-> [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md): **D-2** (Architecture /
+> [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **D-2** (Architecture /
 > IAL below), **D-5** (Privacy / events), **D-8 + D-9** (Privacy / connectivity), **D-13** (Product /
 > Architecture / dual-surface). The ADR is `Status: Proposed`; the per-role sign-offs in this checklist
-> plus **ARB + Security Architecture ratification of ADR-0023** are the remaining gate steps. **D-1
+> plus **ARB + Security Architecture ratification of ADR-0024** are the remaining gate steps. **D-1
 > (protocol baseline) is elevated to a hard PR-1 entry gate** and the **build/test baseline must be run +
 > recorded** before PR-1 code.
 
@@ -30,7 +30,7 @@ the specific document and ID.
 - [ ] Proposed `internal/mcp/*` boundaries are **evaluated, not adopted**; consistent with ADR-0002.
 - [ ] Prohibited coupling is explicit (no SWG `PolicyRule` fields; no OIDC-flow reuse; no audit-ring reuse; no shared listeners; no policy-eval I/O).
 - [ ] Trust boundaries TB-1..TB-7 are coherent across [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) and [`THREAT-MODEL.md`](THREAT-MODEL.md).
-- [x] ADR proposal promoted to [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (D-0, Option B); the in-package file is now a pointer. *(ADR is `Status: Proposed` — **PR-1 gate closes only on ARB + Security Architecture ratification**.)*
+- [x] ADR proposal promoted to [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (D-0, Option B); the in-package file is now a pointer. *(ADR is `Status: Proposed` — **PR-1 gate closes only on ARB + Security Architecture ratification**.)*
 
 ## Product Security
 - [ ] [`THREAT-MODEL.md`](THREAT-MODEL.md) covers all listed threat classes; every Critical/High has controls, tests, owner, closure.
@@ -38,12 +38,13 @@ the specific document and ID.
 - [ ] [`ATTACK-TREES.md`](ATTACK-TREES.md) leaves all map to defined threat IDs.
 - [ ] [`ABUSE-CASES.md`](ABUSE-CASES.md) cover token passthrough, unknown-tool auto-allow, credential-to-agent, critical-event loss (hard NO-GO lines 2,3,4,6).
 - [ ] [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) IDs are unique; every requirement maps to a threat/verification/evidence/gate.
-- [ ] Replay protection is stated as **net-new / NOT VERIFIED**, not implied as present, **and framed per [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) as sender-constraint / DPoP-proof replay — NOT access-token `jti` one-time-use**.
+- [ ] Replay protection is stated as **net-new / NOT VERIFIED**, not implied as present, **and framed per [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) as sender-constraint / DPoP-proof replay — NOT access-token `jti` one-time-use**.
 - [ ] Inbound Origin/Host anti-rebinding is a stated new requirement (MCP-INSP-008).
+- [ ] **PR-1 protocol-kernel attack surface is modeled (findings H-1..H-4):** parser/framing/version/protocol-state threats **MCP-T-057..074** exist with owners; the former undefined "protocol bounds" acceptance item is now the **MCP-PROTO-001..013** requirement family; **fuzz** and **compatibility** have defined **blocking PR-1** gate homes ([`CI-GATES.md`](CI-GATES.md)) with compatibility **D-1-gated**; and `MCP-OPS-002` is PR-5 (runtime), not PR-1.
 
 ## IAM / PAM
 - [ ] [`AUTH-AND-CREDENTIAL-MODEL.md`](AUTH-AND-CREDENTIAL-MODEL.md) defines all principals + delegation; human `Identity` reuse is post-refactor only.
-- [ ] No token passthrough; audience + RFC 8707 resource validation required; separate Mgmt/Gateway clients (**D-2 CLOSED — [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md); Culvert = resource server, Option C = issuer topology, Option B = edge only**).
+- [ ] No token passthrough; audience + RFC 8707 resource validation required; separate Mgmt/Gateway clients (**D-2 CLOSED — [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md); Culvert = resource server, Option C = issuer topology, Option B = edge only**).
 - [ ] Credential broker: scoped, short-lived, revocable, fail-closed; **agent never holds a secret** (hard NO-GO line 2).
 - [ ] Credential providers for MVP captured as a decision (D-3).
 - [ ] No secrets in events/logs (MCP-CRED-004, MCP-EVENT-003).
@@ -71,7 +72,7 @@ the specific document and ID.
 - [ ] [`SUPPLY-CHAIN-SECURITY.md`](SUPPLY-CHAIN-SECURITY.md) distinguishes Existing vs Proposed controls accurately.
 - [ ] [`CI-GATES.md`](CI-GATES.md) classifies every gate (Existing/Insufficient/Proposed/Blocking/Advisory); no gate claimed present that isn't.
 - [ ] Signed SBOM + provenance verify-before-deploy required (MCP-SUPPLY-003).
-- [ ] CodeQL path extension + MCP-specific gates are noted as PR-1+ CI changes (not done in PR-0).
+- [ ] **CodeQL is described accurately (finding M-1):** `codeql.yml` **already analyzes `internal/mcp/**`** via its `internal/**` PR path filter (no path-filter edit needed), but it is **non-blocking** (not a branch-protection-required check); the only MCP CodeQL "change" is the optional policy choice to make it blocking via branch protection. The MCP-specific **fuzz / structural / compatibility** gates (PR-1) and other proposed gates are genuine PR-1+ CI additions.
 - [ ] [`SSDLC-CONTROL-MAPPING.md`](SSDLC-CONTROL-MAPPING.md) maps controls to SSDF/SDL/SAMM/BSIMM/ASVS/API-Sec/SLSA.
 
 ---
@@ -80,7 +81,7 @@ the specific document and ID.
 - [ ] No document presents a roadmap feature as implemented.
 - [ ] Every repository claim carries file · symbol · line evidence or is marked `NOT VERIFIED` / `[EXT]`.
 - [ ] Management MCP and Security Gateway are never merged.
-- [ ] Only files under `docs/design/mcp/` changed; the source DOCX is unchanged; no code/CI/config/runtime change; no listener; no commit/push.
+- [ ] Only files under `docs/design/mcp/` **plus the promoted `docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`** changed; the source DOCX and diagram assets are unchanged; no code/CI/config/runtime change; no listener.
 - [ ] Implementation sequence is PR-0 … PR-11 + separate Production Qualification (no PR-12 unless justified in [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) D-12).
 
 ## Sign-off

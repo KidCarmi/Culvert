@@ -11,7 +11,7 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 > **local-listener** wiring for Model A folds into **PR-5** (dedicated listener/runtime) and CP/DP snapshot
 > semantics into **PR-10**. `SOURCE REVIEW REQUIRED` for the folding.
 >
-> **Updated by D-8 (2026-07-24, [`ADR-0023 §D-8`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)):**
+> **Updated by D-8 (2026-07-24, [`ADR-0024 §D-8`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)):**
 > the **outbound connector (Model B) is NOT assigned to PR-11** and is **not** in V1 — PR-11 stays
 > Shadow/Canary. The connector is a **post-V1 slice with its own design gate** (unless a human-approved
 > roadmap change renumbers slices). The DMZ endpoint (Model C, D-9) is **default-off and deferred**.
@@ -19,11 +19,11 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**
-(Option B — now [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).
+(Option B — now [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).
 
-> **PR-1 entry gate (updated 2026-07-24, [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
-> ADR-0023 is `Status: Proposed`; PR-1 also requires: **(a)** ARB + Security Architecture ratification of
-> ADR-0023 (→ Accepted); **(b)** **D-1 (protocol-version baseline) externally verified and human-approved**
+> **PR-1 entry gate (updated 2026-07-24, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
+> ADR-0024 is `Status: Proposed`; PR-1 also requires: **(a)** ARB + Security Architecture ratification of
+> ADR-0024 (→ Accepted); **(b)** **D-1 (protocol-version baseline) externally verified and human-approved**
 > — because PR-1 *is* the Protocol Kernel, D-1 **must not** be left for closure during implementation; and
 > **(c)** the **repository build/test baseline run and recorded** (the PR-0 session executed neither).
 
@@ -45,15 +45,16 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 
 ## PR-1 — Protocol Kernel
 - **Objective:** MCP parser/framing, version adapters, bounds, and a test harness — **no public listener**.
-- **Scope:** `internal/mcp/protocol` (name [REC], pending ADR); inbound Origin/Host validation.
+- **Scope:** an `internal/mcp/*` protocol-kernel package (**working name `internal/mcp/protocol` — `[REC]`, subject to implementation review**); inbound Origin/Host validation. **ADR-0024 §Decision item 8 ratifies the `internal/mcp/*` *namespace and boundary*, not the exact leaf-package name** — the concrete name/split stays `[REC]` in [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md) even after ADR-0024 is Accepted.
 - **Non-goals:** policy, identity, upstream calls.
 - **Trust boundary:** TB-1 (agent/client ↔ Culvert).
-- **Dependencies:** PR-0 approved; **ADR-0023 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**. *(All three are hard PR-1 entry gates — [`ADR-0023` PR-1 entry gate](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).)*
-- **Security requirements:** MCP-INSP-008 (inbound Origin/Host per protocol baseline; host-allowlist + bind-configured-interfaces), MCP-OPS-002, protocol bounds.
-- **Tests:** fuzz, race, compatibility fixtures, inbound-rebinding, malformed JSON-RPC (all **new**).
-- **Acceptance:** no public listener; fuzz/race/compat block; Origin/Host validated.
+- **Dependencies:** PR-0 approved; **ADR-0024 Accepted (ARB + Sec-Arch ratified)**; **D-1 protocol baseline externally verified + approved**; **repository build/test baseline recorded**. *(All three are hard PR-1 entry gates — [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).)*
+- **Security requirements:** **MCP-PROTO-001..013** (protocol-kernel framing, structural bounds, version negotiation/adapter equivalence, protocol-state — the concrete replacement for the former undefined "protocol bounds", finding H-2) and **MCP-INSP-008** (inbound Origin/Host per protocol baseline; host-allowlist + bind-configured-interfaces). **`MCP-OPS-002` is NOT a PR-1 requirement** — it is the deployed-listener/runtime bounding requirement gated at **PR-5** (finding H-4); PR-1's parse-time bounds live in `MCP-PROTO-006/008`.
+- **Tests:** protocol-kernel fuzz (parser/framing/adapter/cancellation, panic/crash detection), race, structural-limit + parser-differential + protocol-state suite, compatibility fixtures (**D-1-gated**), inbound-rebinding, malformed JSON-RPC (all **new**; see [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) and [`CI-GATES.md`](CI-GATES.md)).
+- **Acceptance:** no public listener; the protocol-kernel fuzz + race + structural/differential/protocol-state suites are green as **blocking PR-1 gates**; Origin/Host validated. **Compatibility conformance is green only after D-1 (protocol baseline) is externally verified and its fixtures exist — it MUST NOT be reported green before D-1 closes.**
 - **Rollback:** feature-flag disabled build; no listener bound.
-- **Owner:** Eng. **Reviewer:** Product Sec. **Release gate:** fuzz+race+compat green; CodeQL wired for `internal/mcp/**`.
+- **Owner:** Eng. **Reviewer:** Product Sec.
+- **Release gate:** the **new blocking PR-1 protocol-kernel fuzz gate** (a bounded PR-time `go test -fuzz` wired into the Fast/Deep gate — **not** the advisory `fuzz-nightly.yml`), `-race`, and the structural/differential/protocol-state suites are green; **compatibility green only after D-1**. **CodeQL:** MCP code under `internal/mcp/**` is **already analyzed** by `codeql.yml` (its PR filter globs `internal/**`, verified at `origin/main` `2eef667`); `codeql.yml` is **not** branch-protection-required, so making it *block* MCP PRs is an optional branch-protection change, not a path-filter edit (finding M-1). See [`CI-GATES.md`](CI-GATES.md) for the gate homes; **no CI file is changed by PR-0 or this remediation**.
 
 ## PR-2 — Registry & Catalog
 - **Objective:** server registration/discovery, tool fingerprints, drift classification, quarantine.

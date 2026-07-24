@@ -10,7 +10,7 @@ threat IDs or requirement IDs — those are owned by [`THREAT-MODEL.md`](THREAT-
 
 **Status: PR-0 design artifact (Proposed).** Package names and file boundaries in this document are
 **[REC]** — evaluated, not adopted. The trust-boundary decisions are now recorded in
-[`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (`Status: Proposed` —
+[`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (`Status: Proposed` —
 adoption completes on ARB + Security Architecture ratification); the exact package split/naming stays
 [REC] pending that ratification. See [`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0-promoted-2026-07-24).
 
@@ -49,7 +49,7 @@ credential broker instance, or an **active/logical decision-event stream** with 
 runtime, even though all three may run inside the same `culvert` process and reuse the same admin-UI shell,
 RBAC middleware chain, and config-snapshot transport.
 
-> **Refinement — D-13 (2026-07-24, [`ADR-0023 §D-13`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+> **Refinement — D-13 (2026-07-24, [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
 > items 3–6).** "Do not share" is scoped to **active state and logical planes**, not to reviewed
 > implementation code or physical infrastructure. The two capabilities **may** share reviewed
 > implementation libraries and selected Control-Plane infrastructure; **may** share a policy-engine
@@ -72,13 +72,16 @@ wiring. New engines are expected to land under `internal/`, not re-inlined into 
 `BLUEPRINT.md` §09 proposes eleven `internal/mcp/*` subpackages. Splitting the MCP subsystem into
 `internal/mcp/*` leaf packages is **consistent with the ADR-0002 pattern** — subpackages under a shared
 `internal/mcp/` parent rather than 11 flat `internal/` siblings is a reasonable refinement given the
-subsystem's size, but the **exact split, naming, and file boundaries are [REC]**, pending the ADR
-promotion. The table below evaluates each proposed package's responsibility and prohibition, mirroring the
-component table in `BLUEPRINT.md` §09.
+subsystem's size, but the **exact split, naming, and file boundaries are [REC]**. **[ADR-0024 §Decision
+item 8](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) ratifies the `internal/mcp/*`
+*namespace and trust boundary*, NOT the exact leaf-package names** — so the specific names in the table
+below (`internal/mcp/protocol`, `…/policy`, `…/runtime`, etc.) remain **`[REC]`, subject to implementation
+review, even after ADR-0024 is Accepted** (finding L-4). The table below evaluates each proposed package's
+responsibility and prohibition, mirroring the component table in `BLUEPRINT.md` §09.
 
 | Proposed Package | Responsibility (evaluated) | Must NOT (evaluated) |
 |---|---|---|
-| `internal/mcp/protocol` | MCP listener/protocol kernel: transport termination, JSON-RPC/SSE framing, version adapters, connection lifecycle, size/connection/stream bounds. | Decide business policy or embed business rules (Blueprint §09: "Decide business policy or contain business rules"). Must not be the place tool-risk or credential logic lives. |
+| `internal/mcp/protocol` | MCP listener/protocol kernel: transport termination, JSON-RPC/SSE framing, version adapters, connection lifecycle, and the structural/size/depth/framing/state bounds now specified by **`MCP-PROTO-001..013`** ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)). | Decide business policy or embed business rules (Blueprint §09: "Decide business policy or contain business rules"). Must not be the place tool-risk or credential logic lives. |
 | `internal/mcp/identity` | Resolve and validate the calling principal: token validation, audience/resource checks, agent/client/workload attribution, tenant binding. | Rely on IP alone or invent/assume identity when validation is inconclusive (Blueprint §09). Must not perform policy evaluation itself. |
 | `internal/mcp/registry` | Server registry: registered upstream MCP server endpoints, ownership, TLS identity, environment, connection status. | Allow traffic to an unregistered server (Blueprint §09). Must not itself execute or proxy calls. |
 | `internal/mcp/catalog` | Tool catalog: tool definitions, canonical fingerprints/hashes, risk classification, approval history, drift detection inputs. | Trust server-supplied annotations/descriptions as the sole security boundary (Blueprint §09) — catalog data informs policy, it does not decide. |
@@ -92,7 +95,9 @@ component table in `BLUEPRINT.md` §09.
 
 **[REC]**: Whether Capability A (`internal/mcp/management`) and Capability B (`internal/mcp/runtime` +
 friends) end up as fully separate package trees (e.g. `internal/mcpmgmt/*` vs `internal/mcpgw/*`) or as a
-shared `internal/mcp/*` tree with capability-scoped subpackages is an open naming question for the ADR —
+shared `internal/mcp/*` tree with capability-scoped subpackages is an **open naming/decomposition question
+left to implementation review** — ADR-0024 fixes the `internal/mcp/*` namespace and the separation
+doctrine, not the leaf-package tree shape —
 either is consistent with ADR-0002, but the doctrine in §1 requires that whichever layout is chosen, the
 **runtime instances** (listeners, policy engine instances, credential broker instances, event streams) are
 never shared between the two capabilities, regardless of package tree shape.

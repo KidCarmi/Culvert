@@ -242,7 +242,7 @@ from this fixed enum; no field introduces a tenth action.
 - [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) — the deferred choice of extending `config_surfaces.go`
   itself vs. introducing a parallel MCP-specific registry, and the deferred snapshot signing-scheme
   selection.
-- [`docs/adr/0023-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+- [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
   — the numbered ADR (promoted from the in-package proposal on 2026-07-24; `Status: Proposed`, ratification
   pending) recording the trust-boundary decisions and the D-2/D-5/D-8/D-9/D-13 closures. This matrix's
   config-surface plan is downstream of that decision — notably: `mcp_gateway_connector_*` fields are a

@@ -1,6 +1,7 @@
 # MCP Attack Trees
 
-Nine attack trees. Every **leaf** maps to one or more threat IDs from
+Ten attack trees (AT-10, protocol-kernel subversion, added by the PR-1 remediation —
+`PR1-READINESS-REMEDIATION.md`, finding H-1). Every **leaf** maps to one or more threat IDs from
 [`THREAT-MODEL.md`](THREAT-MODEL.md); mitigations are the requirement IDs from
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md). **Status: PR-0 design artifact (Proposed).**
 Trees are ASCII for reviewable diffs; each is followed by a leaf→threat→requirement table.
@@ -167,6 +168,28 @@ Goal: Hijack the on-prem ↔ cloud trust link
 | Tunnel replay | MCP-T-051 | MCP-CONNECT-002 |
 | DMZ abuse | MCP-T-052,031 | MCP-CONNECT-003, MCP-INSP-008 |
 | Break tenant binding | MCP-T-010,053 | MCP-CONNECT-004 |
+
+## AT-10 — Protocol-kernel subversion (PR-1)
+
+```
+Goal: Subvert the MCP protocol kernel before identity/policy ever run
+├─ Parser differential (duplicate/ambiguous keys) so downstream sees a different message
+├─ Confuse request/response classification or request-ID correlation
+├─ Exhaust the parser (oversized / depth / field / string / slow-input) or crash it
+├─ Negotiate an unknown/weaker protocol version, or exploit adapter differential
+└─ Confuse protocol/session state (mid-session rebind, cancellation race, reconnect replay)
+```
+
+| Leaf | Threats | Mitigations |
+|---|---|---|
+| Parser differential | MCP-T-058,057,065 | MCP-PROTO-001,013 |
+| Classification / ID confusion | MCP-T-059,060,061,071 | MCP-PROTO-002,003,004 |
+| Parse-time exhaustion / crash | MCP-T-063,064,073,074,062 | MCP-PROTO-005,006,007,008,009,013 |
+| Version confusion / adapter differential | MCP-T-066,067,068 | MCP-PROTO-010,011 |
+| Protocol-state confusion | MCP-T-069,070,072 | MCP-PROTO-012 |
+
+All leaves are gated at **PR-1**; version-confusion fixtures depend on **D-1** closure
+([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md)). This tree covers the surface DFD-15 diagrams.
 
 ---
 

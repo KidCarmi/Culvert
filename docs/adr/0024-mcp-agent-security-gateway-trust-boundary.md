@@ -1,10 +1,11 @@
-# ADR-0023: MCP Agent Security Gateway — trust boundaries, separation from the SWG, and PR-1 entry decisions
+# ADR-0024: MCP Agent Security Gateway — trust boundaries, separation from the SWG, and PR-1 entry decisions
 
 - **Status:** Proposed (design decisions approved by the PR-0 facilitator on 2026-07-24; **awaiting formal ratification by the Architecture Review Board and Security Architecture** — see "Ratification" below). Do not treat as organizationally Accepted until that step is recorded.
 - **Date:** 2026-07-24
 - **Deciders:** Staff/Principal Engineer + Product Security Architect (proposer). **Ratifiers (pending):** Architecture Review Board (ARB) + Security Architecture, with domain approvers IAM/PAM (D-2), SRE/Security (D-5), Privacy/Legal + Network Security (D-8, D-9), Security Architecture (D-13).
 - **Supersedes:** [`docs/design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md`](../design/mcp/ADR-PROPOSAL-mcp-trust-boundary.md) (the in-package Option-B proposal, now a non-authoritative pointer to this ADR).
 - **Related:** ADR-0001 (record architecture decisions), ADR-0002 (flat `package main` → `internal/`), ADR-0007 (OpenAPI contract); the C1/C1.5/C2 admin-route metadata program; the PR-0 design package under [`docs/design/mcp/`](../design/mcp/README.md).
+- **Numbering:** `0024` is the **next free number across the repository-wide ADR/RFC allocation**, not merely "next in `docs/adr/`". `docs/adr/` reaches `0017` (with legacy duplicate numbers at `0008`–`0011` and an `ADR-0007-openapi-contract.md`) and `docs/support/rfc/` holds `0012` and `0018`–`0022`, so `0022` was the highest allocated on `main`. **`0023` is claimed by the unrelated Durable Configuration Publication ADR in open PR #854** (`docs/adr/0023-durable-config-publication.md`, head `claude/adr-0012-to-main`) — a documentation-only ADR about `internal/filetxn` durability, wholly separate from MCP. This MCP ADR was therefore **renumbered `0023 → 0024`** to avoid the collision. (Verified at `origin/main` `2eef667` and against open PR #854.)
 
 ## Context
 
@@ -261,7 +262,16 @@ PR-1 (Protocol Kernel) may begin only when **all** of the following hold:
    begins (the PR-0 session did not run it — VRC §11).
 
 This ADR closes **D-2, D-5, D-8, D-9, D-13**. **D-1** remains open and is elevated to a hard PR-1 entry
-gate (item 5). **D-3, D-4, D-6, D-10, D-12** remain slice-scoped; **D-7, D-11** remain post-V1 / GA.
+gate (item 5). **D-3, D-4, D-6, D-10, D-12** remain slice-scoped; **D-7, D-11** remain post-V1 / GA. **D-14**
+(concrete protocol-kernel limit values + batch policy) is added slice-scoped to PR-1 — the `MCP-PROTO-*`
+requirements are defined; only their numeric values are open.
+
+**PR-1 Protocol-Kernel scope (post-remediation).** The PR-1 attack surface — MCP parser, JSON-RPC framing,
+version adapters and protocol state — is modeled by threats **MCP-T-057..074**, bounded by requirements
+**MCP-PROTO-001..013**, and gated by blocking PR-1 fuzz + structural/differential/protocol-state suites plus
+a **D-1-gated** compatibility gate (see `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`, `CI-GATES.md`, and
+`PR1-READINESS-REMEDIATION.md`). Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
+the exact leaf-package names remain `[REC]`, subject to implementation review (not fixed by this ADR).
 
 ## Ratification
 

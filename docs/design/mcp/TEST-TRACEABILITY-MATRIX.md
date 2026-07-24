@@ -9,11 +9,11 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 
 > Test-baseline caveat: **Low for the read-only Phase 1 investigation, but the current repository test
 > baseline remains unverified in this session** — no build or test was executed while authoring PR-0. Per
-> [`ADR-0023` PR-1 entry gate](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md), the repository
+> [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md), the repository
 > build/test baseline **MUST** be run and recorded before any PR-1 code change begins.
 >
 > **Decision provenance (2026-07-24):** the replay row (MCP-T-002 / MCP-AUTH-006) is reframed per
-> [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md) (sender-constraint /
+> [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (sender-constraint /
 > DPoP-proof, not access-token one-time-use). All other rows keep their IDs; the D-5/D-8/D-9/D-13 rows are
 > now decision-backed. No threat or requirement ID was added or removed.
 
@@ -28,7 +28,7 @@ Gate = slice/CI gate that must be green.
 | Threat | Requirement | Control | Test (type) | Evidence | Owner | Gate |
 |---|---|---|---|---|---|---|
 | MCP-T-001 token theft | MCP-AUTH-001,004 | Token validation + short TTL | Auth negative matrix (unit/integration) | Rejections logged | IAM/Sec | PR-3 |
-| MCP-T-002 token replay | MCP-AUTH-006 | Sender-constraint (mTLS/DPoP-proof) + short-TTL/aud/resource + correlation/rate-limit/anomaly — **not** access-token one-time-use ([`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)) | DPoP-proof replay + anomaly/rate-limit matrix (integration) | Replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles | IAM/Sec | PR-3 |
+| MCP-T-002 token replay | MCP-AUTH-006 | Sender-constraint (mTLS/DPoP-proof) + short-TTL/aud/resource + correlation/rate-limit/anomaly — **not** access-token one-time-use ([`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)) | DPoP-proof replay + anomaly/rate-limit matrix (integration) | Replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles | IAM/Sec | PR-3 |
 | MCP-T-003 wrong audience | MCP-AUTH-002 | Audience validation | Wrong-audience (negative) | Foreign `aud` denied | IAM/Sec | PR-3 |
 | MCP-T-004 wrong resource | MCP-AUTH-003 | RFC 8707 resource binding | Wrong-resource (negative) | Mismatch denied | IAM/Sec | PR-3 |
 | MCP-T-005 token passthrough | MCP-AUTH-005, MCP-CRED-001 | No passthrough + broker | Upstream-capture (integration) | No client token upstream | IAM/Sec | PR-4 |
@@ -56,11 +56,19 @@ Gate = slice/CI gate that must be green.
 | MCP-T-037 DNS rebinding | MCP-INSP-005 | resolve→connect pin | DNS-rebinding lab | Rebinding blocked | Sec/Eng | PR-7 |
 | MCP-T-041 redirect abuse | MCP-INSP-006 | Redirect cap + re-check | Redirect-chain | Hop cap enforced | Sec/Eng | PR-7 |
 | MCP-T-031 inbound rebinding | MCP-INSP-008 | Inbound Origin/Host validate | Inbound-rebinding | Bad Origin rejected | Sec/Eng | PR-1 |
+| MCP-T-058 parser differential | MCP-PROTO-001 | Strict single-parse decode; duplicate-key reject/canonical | Parser-differential + duplicate-key + malformed corpus | Validated == forwarded message | Sec/Eng | PR-1 |
+| MCP-T-060 request-ID mis-correlation | MCP-PROTO-003 | Bounded per-session ID table + type/edge validation | ID-correlation + int/string/null edge tests | Mis-correlated response rejected; table bounded | Sec/Eng | PR-1 |
+| MCP-T-063 parse-time exhaustion (size/depth/field/string) | MCP-PROTO-006, MCP-PROTO-008 | Structural bounds + per-session resource budget | Limit + fuzz + resource-budget assertions | Oversized/deep rejected; budget holds | SRE/Sec | PR-1 |
+| MCP-T-066 version-negotiation confusion | MCP-PROTO-010 | Version allowlist; reject unknown; record negotiated version | Version-conformance fixtures (**D-1-gated**) | Unknown version rejected; version recorded | Sec/Eng | PR-1 (fixtures gated on D-1) |
+| MCP-T-067 protocol downgrade | MCP-PROTO-010 | No silent downgrade; explicit negotiation failure | Downgrade fixtures (**D-1-gated**) | Weaker-semantics negotiation rejected | Sec/Eng | PR-1 (fixtures gated on D-1) |
+| MCP-T-068 version-adapter differential | MCP-PROTO-011 | Adapter equivalence to one internal representation | Adapter-equivalence fixtures (**D-1-gated**) | No cross-adapter differential | Sec/Eng | PR-1 (fixtures gated on D-1) |
+| MCP-T-069 protocol-state/session confusion | MCP-PROTO-012 | One identity/session; no mid-flight rebind; lifecycle validated | Protocol-state + cancellation-race + reconnect tests | No mid-session rebind; races handled | Sec/Eng | PR-1 |
+| MCP-T-074 hostile-input crash/panic | MCP-PROTO-009, MCP-PROTO-013 | Crash-resistant parse/adapter; bounded error + cleanup | Fuzz (panic/crash detection) + race | No panic/crash on corpus; bounded error | Sec/Eng | PR-1 |
 | MCP-T-020 malicious server | MCP-SERVER-001,002 | Allowlist + TLS pin | Non-compliant/malicious fixtures | Unregistered denied | Sec/Eng | PR-2 |
 | MCP-T-021 compromised server | MCP-SERVER-003, MCP-INSP-002 | Drift + output inspection | Compromised-server fixture | Contained | Sec/Eng | PR-7 |
 | MCP-T-029 destructive calls | MCP-POLICY-006 | Approval/deny default | Destructive-tool (integration) | Approval enforced | Sec/Eng | PR-6 |
 | MCP-T-038/039 injection/elicitation | MCP-INSP-007 | Label/report | Injection corpus | Labels emitted | Sec/Eng | PR-7 |
-| MCP-T-040 oversized payloads | MCP-INSP-001, MCP-OPS-002 | Bounds | Fuzz + limit tests | Oversized rejected | SRE/Sec | PR-5 |
+| MCP-T-040 oversized payloads | MCP-PROTO-006 (parse-time, PR-1), MCP-OPS-002 (runtime under load, PR-5) | Structural bounds at the kernel + listener bounds under load | Fuzz + limit tests (PR-1); load/soak (PR-5) | Oversized rejected at parse; bounds hold under load | SRE/Sec | PR-1 (parse) / PR-5 (runtime) |
 | MCP-T-042/043 SSE exhaustion/slow | MCP-OPS-002 | Stream bounds + rate limit | Load/soak/slowloris | Bounds hold | SRE/Sec | PR-5 |
 | MCP-T-044 queue saturation/loss | MCP-EVENT-001,002 | Backpressure + fail-closed | Queue-saturation + durability | Zero critical loss | SRE/Sec | PR-8 |
 | MCP-T-045 audit tampering | MCP-EVENT-005 | Integrity fields | Tamper-evidence (unit) | Tamper detected | Sec | PR-8 |
@@ -81,10 +89,14 @@ Gate = slice/CI gate that must be green.
 |---|---|---|---|
 | Unit | all | Harness exists (`go test -race`) | PR-1+ |
 | Integration | all runtime | Harness exists | PR-1+ |
-| Compatibility (protocol conformance) | MCP-TOOL-*, protocol | **Missing** ([EXT] version fixtures) | PR-1 |
+| Compatibility (protocol conformance) | MCP-PROTO-010,011 | **Missing** — `[EXT]`/`[D-1]` version fixtures; content gated on D-1 closure; must become a **blocking PR-1** gate ([`CI-GATES.md`](CI-GATES.md)) | PR-1 (D-1-gated) |
+| Malformed JSON-RPC / parser-differential / classification / batch | MCP-PROTO-001,002,003,004,005,007,013 | **Missing** — malformed + duplicate-key + framing + batch-policy corpus | PR-1 |
+| Protocol structural limits (size/depth/field/string/number) | MCP-PROTO-006,007,008 | **Missing** — limit + resource-budget assertions | PR-1 |
+| Version negotiation / downgrade / adapter equivalence | MCP-PROTO-010,011 | **Missing** — D-1-gated fixtures | PR-1 (D-1-gated) |
+| Protocol-state / cancellation / duplicate-completion | MCP-PROTO-012 | **Missing** — protocol-state machine tests | PR-1 |
 | Malicious MCP server fixtures | MCP-SERVER-*, MCP-TOOL-* | **Missing** | PR-2 |
 | Non-compliant server fixtures | MCP-SERVER-*, protocol | **Missing** | PR-2 |
-| Fuzzing | MCP-INSP-001, protocol kernel | fuzz-nightly harness exists (not merge gate) | PR-1 |
+| Fuzzing (protocol kernel: parser/framing/adapter/cancellation) | MCP-PROTO-009 (+006,008) | `fuzz-nightly.yml` exists but is **advisory/nightly — not a merge gate**; a **new bounded blocking PR-1 fuzz gate** is required ([`CI-GATES.md`](CI-GATES.md)) | PR-1 |
 | Race | concurrency invariants | `-race` gate exists | PR-1+ |
 | Property tests | MCP-POLICY-002 (determinism) | **Missing** | PR-6 |
 | Authentication negative matrix | MCP-AUTH-001..004 | **Missing** | PR-3 |
@@ -97,7 +109,7 @@ Gate = slice/CI gate that must be green.
 | Inbound Origin/Host | MCP-INSP-008 | **Missing** | PR-1 |
 | Tool canonicalization | MCP-TOOL-001 | **Missing** | PR-2 |
 | Tool drift / privilege expansion | MCP-TOOL-003,004 | **Missing** | PR-2/PR-6 |
-| Streaming / cancellation / reconnect | protocol, MCP-OPS-002 | **Missing** | PR-1/PR-5 |
+| Streaming / cancellation / reconnect | MCP-PROTO-012 (protocol-state, PR-1); MCP-OPS-002 (stream bounds under load, PR-5) | **Missing** | PR-1 (state) / PR-5 (load) |
 | Load / soak | MCP-OPS-002 | nightly load harness exists (not gate) | PR-5 |
 | Slow clients / queue saturation | MCP-OPS-002, MCP-EVENT-001 | **Missing** | PR-5/PR-8 |
 | Event durability | MCP-EVENT-001,002 | **Missing** | PR-8 |

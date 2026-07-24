@@ -39,20 +39,28 @@ architectural inference from facts · **[REC]** recommendation · **[EXT]** exte
 
 Each row: what it is, evidence, what the evidence proves, and the reuse classification for MCP.
 
+> **Citation-correction note (PR-1 remediation, findings L-1/L-2).** The overall inspection baseline for
+> this document remains HEAD `c0ae2bc` (§1). Rows marked **⟳** had line-range slips or missing symbol·line
+> evidence that were **re-verified against `origin/main` `2eef667`** during the PR-1 remediation and updated
+> to the current-tree symbols/lines (`newHistogram :360`; `ssrf.go PrivateIP :72-79`, `PrivateHost :86-113`,
+> `Control :126-139`; `ui_routes_meta.go uiRoutes` var `:87`; `auth_oidc_flow.go validateIDToken :499-566`;
+> `internal/secret` `Provider :64`; `internal/redaction` `DataClass :12`). Non-⟳ rows are unchanged. See
+> `PR1-READINESS-REMEDIATION.md`.
+
 | Primitive | Evidence `path · symbol · lines` | Proves | Class for MCP |
 |---|---|---|---|
-| SSRF peer-IP recheck (TOCTOU) | `internal/ssrf/ssrf.go · Control · 126-139`; `PrivateIP · 36-72`; `PrivateHost · 86-103` | Dialer `Control` re-checks the actual peer IP immediately before `connect(2)`, fail-closed on DNS error | **Reusable as-is — low-level primitive only** |
+| SSRF peer-IP recheck (TOCTOU) | `internal/ssrf/ssrf.go · Control · 126-139`; `PrivateIP · 72-79`; `PrivateHost · 86-113` ⟳ | Dialer `Control` re-checks the actual peer IP immediately before `connect(2)`, fail-closed on DNS error | **Reusable as-is — low-level primitive only** |
 | Header scrub / hop-by-hop strip | `proxy.go · scrubForwardedHeaders · 46-73`; `proxy_tunnel.go · removeHopHeaders · 1288-1304` (deletes `Proxy-Authorization` :1300); `proxy_tunnel_h2.go:80` | SWG strips client `X-User-Identity` and `Proxy-Authorization` before upstream; injects no upstream auth | Reusable as-is (primitive); MCP-level reclassification in §5 |
 | HA fencing / epoch | `internal/halease` (etcd lease, epoch = create_revision); `ha_fencing.go · dpObserveEpoch · 122-150`; `ha_lease.go · WriteAllowed · 251-261` | Monotonic epoch ratchet + write-authority gate + stale-CP rejection | Reusable as-is |
 | DP fail-static / last-known-good | `controlplane_snapshot.go · applyDPLastGoodConfigSnapshot · 981-997`, `persistDPLastGoodConfigSnapshot · 1013-1037` | DP decides on last valid snapshot; request path needs no per-call CP round-trip | Reusable as-is |
 | Config versioning + rollback | `internal/configver/configver.go · Store · DefaultMax=50 :33, SaveWithNote :108-137`; `configversion.go · capture/apply/diff · 43-577` | Numbered `v{N}.json` history + diff + dry-run rollback + re-publish | Engine reusable as-is; typed DTO after refactor |
 | Config-surface anti-drift registry | `config_surfaces.go · configSurfaces · 104-455`; `config_surfaces_test.go` (parity) | Declares field membership across 5 hand-maintained surfaces; parity-enforced | Reusable as-is (pattern; MCP must add rows) |
-| Admin-API convention | `ui.go · newAdminUIHandler · 64-98`; `ui_routes_meta.go · uiRoutes · 48-87`; `ui_rbac.go · requireRole · 46-53`; `ui_metadata_enforcement.go · 451-508` | `apiXxx`+`register*Routes`+`uiRoutes`+`requireRole`+C1/C1.5/C2/C2c/C4 parity | Reusable as-is |
+| Admin-API convention | `ui.go · newAdminUIHandler · 64-98`; `ui_routes_meta.go · uiRoutes (var) · 87`; `ui_rbac.go · requireRole · 46-53`; `ui_metadata_enforcement.go · uiMetadataEnforcement · 451` ⟳ | `apiXxx`+`register*Routes`+`uiRoutes`+`requireRole`+C1/C1.5/C2/C2c/C4 parity | Reusable as-is |
 | OpenAPI contract + CI gate | `api/openapi/openapi.yaml`; `ADR-0007`; `.github/workflows/pr-api-governance.yml`, `api-contract.yml` | Coverage gate binds spec to the live route table; breaking-change gate merge-blocking | Reusable as-is |
-| Metrics | `metrics.go · handleMetrics :431, ruleMetrics :26-78 (maxRuleMetrics=200 :24), newHistogram :348-408` | `culvert_*` namespace, cardinality-capped counters, lock-free histogram | Reusable as-is |
+| Metrics | `metrics.go · handleMetrics :431, ruleMetrics :26-78 (maxRuleMetrics=200 :24), newHistogram :360` ⟳ | `culvert_*` namespace, cardinality-capped counters, lock-free histogram | Reusable as-is |
 | GUI/SPA panel convention | `static/index.html` nav-item/`view-div`/`data-view`/`data-min-role` (:553-645, :706+) | Deterministic panel pattern used by ~30 panels | Reusable as-is |
-| Secret containment / provider seam | `internal/secret/provider.go`, `internal/secret/secret.go` (KEK containment, ADR-0007-secret) | Compiler-enforced KEK boundary + provider model | Reusable after refactoring (broker prior art) |
-| Redaction taxonomy | `internal/redaction/{class,redactor,scrubber}.go` (fail-closed `DataClass`) | Structural, fail-closed-to-SENSITIVE redaction at source | Reusable after refactoring (inspection/event prior art) |
+| Secret containment / provider seam | `internal/secret/secret.go · Provider · 64` (redacting `Name :70`/`Format`/`String`), `kekSource · 54`; `internal/secret/provider.go · fileProvider · 27-45` (KEK containment; ADR `docs/adr/0007-secret-containment-boundary.md` — **note: the repo has two `0007`-numbered ADRs; this is the secret-containment one, distinct from `docs/adr/ADR-0007-openapi-contract.md`**) ⟳ | Compiler-enforced KEK boundary + provider model | Reusable after refactoring (broker prior art) |
+| Redaction taxonomy | `internal/redaction/class.go · DataClass · 12`; `internal/redaction/redactor.go · Redactor · 77` (`Result · 17`); `internal/redaction/scrubber.go · Scrubber · 27` (fail-closed to most-restricted `DataClass`) ⟳ | Structural, fail-closed-to-SENSITIVE redaction at source | Reusable after refactoring (inspection/event prior art) |
 | OIDC ID-token validation | `auth_oidc_flow.go · validateIDToken · 499-566` | JWKS RSA signature + issuer + `WithExpirationRequired` (:524) + 60s leeway | Reusable as-is (sig/exp/iss only) |
 | Supply chain | `pr-fast-gate.yml` (race, coverage floors, gosec, govulncheck, gitleaks, benchgate); `pr-deep-gate.yml` (staticcheck, trivy, hadolint, go-licenses, determinism); `ci.yml` (cosign keyless, SLSA L3 verifiable, syft SBOM); SHA-pinned actions | Signing/provenance/SBOM/SAST/SCA/secret-scan present, mostly merge-blocking | Reusable as-is |
 
@@ -83,7 +91,7 @@ Each row: what it is, evidence, what the evidence proves, and the reuse classifi
 
 | Mechanism | Evidence `path · symbol · lines` | Proves | Does NOT prove | Class |
 |---|---|---|---|---|
-| OIDC nonce validation | `auth_oidc_flow.go · validateIDToken · 497-561`; nonce minted `CaptiveLoginURL:381-392`, checked via `ExchangeCode→validateIDToken(...,entry.nonce):472` | Nonce verified on browser PKCE ID-token flow; `expectedNonce=""` on introspection path is deliberate (comment :359 — access tokens carry no nonce) | Anything about access-token replay | [FACT] R (ID-token flow) |
+| OIDC nonce validation | `auth_oidc_flow.go · validateIDToken · 499-566` ⟳; nonce minted `CaptiveLoginURL:381-392`, checked via `ExchangeCode→validateIDToken(...,entry.nonce):472` | Nonce verified on browser PKCE ID-token flow; `expectedNonce=""` on introspection path is deliberate (comment :359 — access tokens carry no nonce) | Anything about access-token replay | [FACT] R (ID-token flow) |
 | Authorization-code replay | `auth_oidc_flow.go · pkceStore.pop · 248-259` (single-use delete); PKCE S256 `:386-388`; `pkceEntryTTL=10m :221` | `state`/code single-use + TTL-bounded; PKCE binds code to verifier | Bearer access-token reuse after exchange | [FACT] R (code flow) |
 | ID-token validation | `auth_oidc_flow.go · validateIDToken · 499-566` | Sig/exp/issuer/audience(=client_id) enforced | Audience = an MCP server/resource; no RFC 8707 | [FACT] R (sig/exp/iss) / AI (audience semantics) |
 | **Bearer access-token replay** | `auth_oidc.go · introspect/ResolveIdentity · 166-265`; `auth_oidc_flow.go` introspection `617-695` | RFC 7662 introspection: `active` + `exp` + optional `aud`/`scope` | **No** one-time-use, jti tracking, or replay list — an unexpired, un-revoked token replays as active | **[FACT] Missing (no replay defense)** |

@@ -2,7 +2,7 @@
 
 Status: PR-0 design artifact (Proposed)
 
-> **Decision provenance (2026-07-24, [`docs/adr/0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Decision provenance (2026-07-24, [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > The Proposed gates are now decision-backed: the **OAuth/replay negative matrix (PR-3)** enforces the
 > reframed D-2 posture (sender-constraint / DPoP-proof replay, not access-token one-time-use); the
 > **event-durability-under-saturation gate (PR-8)** enforces the D-5 per-action fail-closed matrix; the
@@ -92,7 +92,7 @@ tagged release, with no MCP-specific SBOM/provenance content (e.g., no MCP-tool-
 
 | Gate | Scope today | Classification |
 |---|---|---|
-| `codeql.yml` | Main pushes, weekly, and **PRs touching the proxy/security/release surface** — path-scoped | **Existing-but-insufficient.** `internal/mcp/**` paths are **NOT VERIFIED** as wired into CodeQL's PR path filter today. Wiring them in is a CI-config change and belongs to PR-1+, not PR-0 (see note at bottom). |
+| `codeql.yml` | Main pushes, weekly, and path-scoped PRs. **[FACT, verified at `origin/main` `2eef667`, `.github/workflows/codeql.yml`]** the `pull_request` path filter **already includes `internal/**`**, which matches `internal/mcp/**` — so MCP Go code under `internal/mcp/**` is analyzed by CodeQL on PRs **automatically once it exists, with no path-filter change needed**. (Root-package MCP files, if any land at repo root, would still need their filenames added to the filter.) | **Existing but non-blocking.** CodeQL analyzes `internal/mcp/**`, but `codeql.yml` is **not** a branch-protection-required check (see "Required-merge-gate fact" above), so it **runs but does not block a merge**. What remains for MCP is a **policy choice**, not a path-filter edit: if CodeQL must *block* MCP PRs, add it as a required check in branch protection (a repo-settings change, PR-1+). |
 | `fuzz-nightly.yml` | Mon/Wed/Fri coverage-guided fuzzing | Advisory / nightly only — never blocks a PR |
 | Dependency Obituary | Advisory dependency-health signal | Advisory — not a merge gate, not a hard no-new-deps check |
 | `proxy-nightly-e2e.yml`, `proxy-weekly-stress.yml`, `proxy-ui-e2e.yml` (playwright), `auth-idp-interop.yml` | Nightly/weekly load, stress, UI e2e, auth-interop | Advisory / scheduled only — never blocks a PR |
@@ -127,8 +127,11 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 
 | Proposed gate | Enforces requirement(s) | Threat ID(s) | Target PR |
 |---|---|---|---|
+| **Protocol-kernel fuzz gate (PR-time, blocking)** — a **bounded** `go test -fuzz` run over the JSON-RPC parser, framing, version adapters and cancellation state, with **panic/crash detection**, `-race`, **resource-budget assertions**, a checked-in **seed + malformed-JSON-RPC corpus**, **corpus-regression storage**, and **reproduction of discovered crashes**. Distinct from `fuzz-nightly.yml`, which stays advisory (see scheduled note below). | MCP-PROTO-001,002,006,007,008,009,013 | MCP-T-057..065,073,074 | **PR-1** |
+| **Protocol-kernel structural + protocol-state test suite (blocking)** — parser-differential/duplicate-key, message classification, request-ID correlation edge cases, structural size/depth/field/string limits, framing/truncation, protocol-state machine, cancellation race, reconnect re-validation, duplicate completion. | MCP-PROTO-001,002,003,004,005,006,007,008,012,013 | MCP-T-057..063,069,070,071,072 | **PR-1** |
+| **Protocol-compatibility conformance gate (blocking; content gated on D-1)** — per supported protocol version: negotiation, unsupported-version rejection, downgrade behavior, invalid lifecycle sequences, malicious/non-compliant peers, version-adapter equivalence, required error responses. **Fixtures cannot be authored — and this gate must not be marked green — until [D-1](OPEN-DECISIONS.md) (the supported-version baseline) is externally verified and human-approved.** | MCP-PROTO-010,011 | MCP-T-066,067,068 | **PR-1** (fixtures/greenness gated on D-1 closure) |
 | Malicious-MCP-server test suite (fixture servers with poisoned tools, rug-pull updates, schema/description drift, unknown-tool responses) | MCP-TOOL-001..006 | MCP-T-011..017 | PR-2 |
-| OAuth/audience/replay negative matrix (MCP-AUTH-*): wrong audience, wrong resource, token passthrough, expired/forged token, **replayed DPoP proof** + sender-constraint enforcement + rate-limit/anomaly on token abuse (**not** access-token one-time-use — [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)) | MCP-AUTH-001..008 | MCP-T-002,003,004,005 | PR-3 |
+| OAuth/audience/replay negative matrix (MCP-AUTH-*): wrong audience, wrong resource, token passthrough, expired/forged token, **replayed DPoP proof** + sender-constraint enforcement + rate-limit/anomaly on token abuse (**not** access-token one-time-use — [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)) | MCP-AUTH-001..008 | MCP-T-002,003,004,005 | PR-3 |
 | SSRF private-IP matrix + DNS-rebinding lab + inbound Origin/Host tests | MCP-INSP-004, MCP-INSP-005, MCP-INSP-008 | MCP-T-036,037,030,031,055,052 | PR-7 (INSP-004/005), PR-1 (INSP-008 — inbound listener ships in PR-1) |
 | SSE-exhaustion / slowloris / queue-saturation load tests | MCP-OPS-002, MCP-EVENT-002 | MCP-T-040,042,043,044 | PR-5 (bounds), PR-8 (event durability under saturation) |
 | Mixed-version / stale-epoch / corrupt-snapshot CP↔DP tests | MCP-CPDP-001..003, MCP-HA-001..002 | MCP-T-047,048,049,050 | PR-10 |
@@ -136,6 +139,17 @@ surface it covers — i.e. these are hard entry gates for PR-1 through PR-10, no
 | Tool canonicalization + drift-classification + privilege-expansion fixture tests | MCP-TOOL-001..006 | MCP-T-011..015,019 | PR-2 (canonicalization/drift), PR-6 (quarantine enforcement) |
 | Secret-in-events scan (decision-event payload redaction assertions) | MCP-CRED-004, MCP-EVENT-003 | MCP-T-023,028 | PR-4 (credential broker), PR-8 (event model) |
 | Event durability under saturation (no silent loss of auth/deny/high-risk events) | MCP-EVENT-002 | MCP-T-044 | PR-8 |
+
+> **Fuzz gate — blocking (PR-time) vs. advisory (scheduled).** PR-1's acceptance requires **fuzz green**,
+> so a **bounded, blocking** protocol-kernel fuzz job must be wired into `pr-fast-gate.yml`/`pr-deep-gate.yml`
+> (the first row above). `fuzz-nightly.yml` is **not** that gate and **must not be described as
+> merge-blocking**; it remains **advisory/scheduled** and should be **extended** with a deeper, longer
+> protocol-kernel corpus as an additional non-blocking deep signal. **No CI workflow file is changed by this
+> documentation task** — the implementation owner (Eng/Sec) wires these jobs during PR-1.
+>
+> **Compatibility gate — blocking but D-1-gated.** PR-1's **compat green** likewise requires a blocking
+> conformance job; its *content* (which protocol versions) is blocked on **D-1** external verification.
+> Compatibility **must not be reported green before D-1 is closed and the fixtures exist**.
 
 Also missing and Proposed, cross-cutting (not tied to one PR):
 
@@ -167,12 +181,16 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 | determinism + reproducible build | deep | Existing | Yes, if `*_test.go` changed | Build reproducibility | Yes |
 | cosign keyless / SLSA L3 / syft SBOM | release | Existing | Tag path only, not PR-blocking | Supply-chain | Yes |
 | catalog gate | release | Existing | Tag path only | Release-catalog trust | Yes |
-| `codeql.yml` | advisory/scheduled | Existing-but-insufficient | No (PR path-scoped, MCP paths not wired) | — | Partial |
+| `codeql.yml` | advisory/scheduled | Existing, non-blocking | No — analyzes `internal/**` (⊇ `internal/mcp/**`) on PRs but is **not** a branch-protection-required check | — | Yes (analysis); **not** a merge gate |
 | `fuzz-nightly.yml` | advisory/scheduled | Advisory | No | — | Yes |
 | Dependency Obituary | advisory/scheduled | Advisory | No | — | Yes |
 | DAST / load / stress nightlies | advisory/scheduled | Advisory | No | — | Yes |
 | `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0007 contract | Yes |
 | Production Qualification evidence pack | prod-readiness | Proposed | Human sign-off gate, not automated PR check | All MCP-* IDs (aggregate) | No |
+| Protocol-kernel fuzz gate (PR-time, bounded) | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001,002,006,007,008,009,013 | No |
+| Protocol-kernel structural + protocol-state suite | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001..008,012,013 | No |
+| Protocol-compatibility conformance gate (D-1-gated) | proposed (target PR-1) | Proposed | Yes, for PR-1 (green only after D-1) | MCP-PROTO-010,011 | No |
+| Deeper scheduled protocol-kernel fuzzing | proposed (extends `fuzz-nightly.yml`) | Advisory | No (scheduled/deep signal) | MCP-PROTO-009 | Partial (harness exists) |
 | Malicious-MCP-server test suite | proposed (target PR-2) | Proposed | Yes, for PR-2 | MCP-TOOL-001..006 | No |
 | OAuth/audience/replay negative matrix | proposed (target PR-3) | Proposed | Yes, for PR-3 | MCP-AUTH-001..008 | No |
 | SSRF private-IP matrix + DNS-rebinding lab + inbound Origin/Host tests | proposed (target PR-1/PR-7) | Proposed | Yes, for PR-1 (inbound) / PR-7 (SSRF/rebinding) | MCP-INSP-004,005,008 | No |
@@ -188,12 +206,15 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 
 ## Scope note
 
-**[FACT]** Wiring `codeql.yml`'s PR path filter to include `internal/mcp/**`, and adding every "Proposed"
-gate in this document as an actual workflow job, are **CI/config changes**. Per the PR-0 scope boundary
-(see [`README.md`](README.md) and the shared PR-0 authoring brief), **PR-0 is documentation-only and
-modifies no CI file** — these changes belong to PR-1 and later, scoped per the "Target PR" column above.
-This document records what is required so that each of those PRs can carry its own gate as a **hard entry
-condition**, not a follow-up.
+**[FACT]** CodeQL's PR path filter **already covers `internal/mcp/**`** via its `internal/**` glob
+(verified at `origin/main` `2eef667`), so **no path-filter edit is required** for CodeQL to *analyze* MCP
+code; making CodeQL a *blocking* MCP gate is a **branch-protection settings change** (adding it as a
+required check), not a workflow edit. Adding every "Proposed" gate in this document as an actual workflow
+job (the fuzz, compatibility, and other MCP-specific gates below) **is** a CI/workflow change. Per the
+PR-0 scope boundary (see [`README.md`](README.md) and the shared PR-0 authoring brief), **PR-0 — and this
+remediation — is documentation-only and modifies no CI file**; these changes belong to PR-1 and later,
+scoped per the "Target PR" column above. This document records what is required so that each of those PRs
+can carry its own gate as a **hard entry condition**, not a follow-up.
 
 ## Cross-references
 

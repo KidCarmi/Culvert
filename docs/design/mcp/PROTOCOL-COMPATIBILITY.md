@@ -77,7 +77,7 @@ exact external rules:
 
 | Lifecycle element | Culvert protocol-kernel intent | External fact status |
 |---|---|---|
-| Request | Bounded parse (size/depth/field-count — see `MCP-INSP-001`); the kernel decodes the envelope only — it **MUST NOT** decide business policy on it (that is the Policy Engine's job, per `BLUEPRINT.md` §09 "Must Not: Decide business policy or contain business rules"). | `[EXT]` exact JSON-RPC request shape |
+| Request | Bounded parse (size/depth/field-count — see `MCP-PROTO-006`; strict single-parse decode `MCP-PROTO-001`); the kernel decodes the envelope only — it **MUST NOT** decide business policy on it (that is the Policy Engine's job, per `BLUEPRINT.md` §09 "Must Not: Decide business policy or contain business rules"). | `[EXT]` exact JSON-RPC request shape |
 | Response | Bounded encode (size/type/schema, truncation policy — `MCP-INSP-002`); responses from an upstream/approved server pass through the Inspection Pipeline before being returned to the agent. | `[EXT]` exact response shape |
 | Notification | Treated as a one-way message with no correlatable response; the kernel **MUST** apply the same size/rate bounds as a request (a notification flood is still an availability threat — MCP-T-042/043/044). | `[EXT]` whether/how notifications differ structurally from requests |
 | `id` correlation | The kernel **MUST** track outstanding request `id`s per session within a bounded table (never unbounded — an attacker sending many uncorrelated/duplicate `id`s is a queue-saturation vector, MCP-T-044) and **MUST** reject or ignore a response/notification whose `id` cannot be correlated to an outstanding request from the same session. | `[EXT]` exact `id` uniqueness/reuse rules in the spec |
@@ -117,9 +117,11 @@ this layer, independent of those specifics:
   `CLAUDE.md` "Relay pattern" — read-deadline-armed idle bounding — cited here as **prior-art precedent
   only**, not as a claim that the MCP kernel reuses that code).
 
-Both `MCP-OPS-002` and `MCP-INSP-008` are PR-1/PR-5-gated requirements (see
-[`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); this section states the design intent those
-requirements bind the protocol kernel to, not an implementation.
+`MCP-INSP-008` (inbound Origin/Host) and the protocol-kernel bounds `MCP-PROTO-005/006/008` are **PR-1**
+requirements; `MCP-OPS-002` (deployed-listener stream/connection/rate bounds under load) is a **PR-5**
+requirement that depends on the Observe Runtime (see [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md),
+finding H-4). This section states the design intent those requirements bind the protocol kernel to, not an
+implementation.
 
 ---
 
@@ -245,15 +247,16 @@ silent attempt to proceed with an unverified assumption about what the peer mean
 Per the PR-0 brief's CI evidence, **these fixtures do not exist today** — VERIFIED EVIDENCE lists, among
 the items "MISSING for MCP": malicious-MCP-server tests, OAuth-negative matrix, DNS-rebinding lab, inbound
 Origin/Host tests, SSE-exhaustion, mixed-version/stale-epoch/corrupt-snapshot MCP gates, and MCP-off
-overhead regression. None of these are present in the current CI pipeline
-(`pr-fast-gate.yml`/`pr-deep-gate.yml`/`ci.yml`/`codeql.yml` — MCP paths not wired). This section states
-what PR-1 and later slices must add, and is intentionally a **requirements list**, not a claim that any of
-it exists.
+overhead regression. None of these MCP-specific **fixtures/gates** exist in the current CI pipeline
+(`pr-fast-gate.yml`/`pr-deep-gate.yml`/`ci.yml`). (`codeql.yml` **does** already analyze `internal/mcp/**`
+via its `internal/**` PR path filter, but is non-blocking — see [`CI-GATES.md`](CI-GATES.md), finding M-1;
+that is CodeQL SAST, not the MCP compatibility/fuzz fixtures listed here.) This section states what PR-1 and
+later slices must add, and is intentionally a **requirements list**, not a claim that any of it exists.
 
 | Fixture class | Purpose | Threats exercised | Requirement(s) | Gate |
 |---|---|---|---|---|
-| Protocol-version conformance fixtures | Prove the kernel correctly negotiates every version in the allowlist and correctly rejects every version outside it. | MCP-T-050 (mixed version) | `MCP-SERVER-*` adjacency, adapter policy (§8) | PR-1 |
-| Malformed/non-compliant JSON-RPC fixtures | Prove the kernel bounds and rejects malformed envelopes without a crash, panic, or unbounded resource use. | MCP-T-040 (oversized payloads), MCP-T-044 (queue saturation) | `MCP-INSP-001` | PR-1 |
+| Protocol-version conformance fixtures | Prove the kernel negotiates every allowlisted version, rejects every non-allowlisted version, refuses silent downgrade, and that version adapters are equivalent. | MCP-T-066,067,068 (version negotiation/downgrade/adapter differential); MCP-T-050 (mixed CP/DP version, distinct) | `MCP-PROTO-010,011` | PR-1 (**fixtures + greenness gated on D-1**) |
+| Malformed/non-compliant JSON-RPC fixtures | Prove the kernel bounds and rejects malformed envelopes without a crash, panic, or unbounded resource use, and that parsing is non-differential. | MCP-T-057,058,063,073,074 (malformed/differential/exhaustion/crash) | `MCP-PROTO-001,006,009,013` | PR-1 |
 | Malicious/non-compliant MCP **server** fixtures | Prove the kernel and downstream tool-discovery layer do not trust a hostile server's self-reported tool list, schema, or identity claims. | MCP-T-011..017 (tool poisoning, shadowing, schema drift, description drift, rug pull, server identity change, unknown-tool auto-allow) | `MCP-TOOL-001..006`, `MCP-SERVER-001..003` | PR-2 |
 | Inbound Origin/Host rebinding fixtures | Prove the inbound MCP/SSE listener rejects a bad Origin/Host at connect (§4). | MCP-T-031 (inbound DNS-rebinding vs MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse) | `MCP-INSP-008` | PR-1 |
 | SSE-exhaustion / slow-client / queue-saturation load fixtures | Prove connection/stream/queue bounds hold under adversarial load. | MCP-T-042 (SSE exhaustion), MCP-T-043 (slow-client), MCP-T-044 (queue saturation/event-loss) | `MCP-OPS-002` | PR-5 |

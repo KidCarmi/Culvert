@@ -10,7 +10,7 @@ after a policy decision. It is the authoritative source for requirement IDs in t
 
 **Status: PR-0 design artifact (Proposed).**
 
-> **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > Culvert is the **OAuth protected resource server** (Option A): client tokens terminate at Culvert;
 > audience + RFC 8707 resource identify the canonical Culvert MCP resource (`/mcp/management` or
 > `/mcp/gateway/{server-id}`, or an approved Culvert-controlled logical resource); the upstream server/tool/
@@ -143,7 +143,7 @@ path provides no defense against MCP access-token replay.** Specifically:
 **Conclusion: MCP anti-replay / token-abuse defense is net-new and its presence in the current codebase is
 NOT VERIFIED.** Do not assume introspection, caching, or the browser-flow nonce provide it.
 
-**Corrected model (D-2, [`ADR-0023 §D-2`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)
+**Corrected model (D-2, [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
 items 7–9).** MCP-AUTH-006 **MUST NOT** be defined as one-time-use rejection of an access-token `jti`:
 **reuse of a still-valid access token is not, by itself, evidence of replay.** Instead the required
 posture is a layered set of controls:

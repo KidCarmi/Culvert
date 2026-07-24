@@ -9,7 +9,7 @@ architecture review has to improvise a connectivity story.
 
 **Status: PR-0 design artifact (Proposed).**
 
-> **Decision status — D-8 and D-9 CLOSED (2026-07-24, [`ADR-0023 §D-8`/`§D-9`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Decision status — D-8 and D-9 CLOSED (2026-07-24, [`ADR-0024 §D-8`/`§D-9`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > **Model A (local enterprise client) is the ONLY supported V1 connectivity model.** The outbound
 > connector (**Model B**) is a **post-V1 roadmap extension with its own future implementation slice** — it
 > is **NOT** assigned to PR-11 (PR-11 stays Shadow/Canary) and its vendor compatibility stays **[EXT]**
@@ -81,7 +81,7 @@ tunnel mechanism (vendor-specific — see §6). **[REC]**
 > Shadow/Canary) unless a human-approved roadmap change explicitly renumbers the slices. No ChatGPT/Claude/
 > other-vendor connector is claimed supported until a named integration is verified against authoritative,
 > date-stamped vendor requirements and tested. The future connector must not store or receive production
-> upstream credentials. See [`ADR-0023 §D-8`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).
+> upstream credentials. See [`ADR-0024 §D-8`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
 
 **Key properties:**
 
@@ -125,7 +125,7 @@ Culvert`. This is the only model that exposes a routable, internet-reachable MCP
 > Streamable HTTP connections and reject a present-but-invalid Origin with the protocol-required HTTP
 > response; do **not** invent a blanket rule that every non-browser client must always send an `Origin`
 > header unless the selected protocol version explicitly requires it. Inbound Origin/Host anti-rebinding
-> (MCP-INSP-008) remains a **PR-1** requirement. See [`ADR-0023 §D-9`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md).
+> (MCP-INSP-008) remains a **PR-1** requirement. See [`ADR-0024 §D-9`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
 
 **Who this fits:** cloud AI clients that have no supported outbound-connector mechanism and therefore
 require a directly reachable remote MCP URL. **[REC]**
@@ -236,7 +236,7 @@ matrix, DFD-12/13/14 rows) and §11 (risk register).
 - Data-flow diagrams: [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-12 (local enterprise client),
   DFD-13 (outbound-only connector), DFD-14 (hardened DMZ endpoint).
 - Deployment priority and product framing: [`BLUEPRINT.md`](BLUEPRINT.md) §04.
-- Implementation sequencing note (updated by D-8/D-9, [`ADR-0023`](../../adr/0023-mcp-agent-security-gateway-trust-boundary.md)):
+- Implementation sequencing note (updated by D-8/D-9, [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)):
   the **local-listener** wiring for Model A folds into **PR-5** (Observe runtime), and CP/DP snapshot
   semantics into **PR-10** (CP/DP & HA). The **outbound connector (Model B) is NOT part of PR-11** and is
   **not** V1 — it is a **post-V1 slice** with its own design gate. DMZ (Model C) is deferred and

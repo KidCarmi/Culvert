@@ -216,11 +216,83 @@ when its test passes with the expected control, event and policy result.
 - **Expected policy result:** DENY; tenant-bound.
 - **Test:** impersonation + tunnel-replay + rollover + DMZ-abuse. **Owner:** Net/Sec. **Severity:** High. **Closure:** impersonation/replay blocked; tenant binding holds.
 
+### MCP-AC-021 — Parser differential via duplicate JSON keys
+- **Attacker:** client sending a crafted JSON-RPC envelope with duplicate/ambiguous keys.
+- **Preconditions:** reachable protocol kernel (PR-1 harness or later listener).
+- **Path:** send `{"method":"safe", ... ,"method":"dangerous"}` so the validator and a downstream reader disagree (MCP-T-058).
+- **Affected assets:** A-3, A-9.
+- **Expected control:** MCP-PROTO-001 strict single-parse decode; duplicate-key reject/canonicalize.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.MALFORMED`.
+- **Expected policy result:** DENY (message rejected before downstream stages).
+- **Test:** parser-differential + duplicate-key fixtures. **Owner:** Sec/Eng. **Severity:** High. **Closure:** validated message == forwarded message, always.
+
+### MCP-AC-022 — Response mis-correlation / request-ID confusion
+- **Attacker:** client replaying/forging response or notification IDs.
+- **Preconditions:** an active session with outstanding requests.
+- **Path:** send a response whose `id` matches no outstanding request, or a duplicate/null/oversized id (MCP-T-060,071).
+- **Affected assets:** A-9, A-3.
+- **Expected control:** MCP-PROTO-003 bounded per-session ID table + type/edge validation.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.ID_MISCORRELATION`.
+- **Expected policy result:** rejected/ignored; no cross-correlation.
+- **Test:** ID-correlation + int/string/null edge tests. **Owner:** Sec/Eng. **Severity:** High. **Closure:** uncorrelated responses rejected; table bounded.
+
+### MCP-AC-023 — Depth/size bomb (parse-time exhaustion)
+- **Attacker:** client sending a deeply nested / huge-field / long-string envelope.
+- **Preconditions:** reachable protocol kernel.
+- **Path:** send a payload exceeding depth/field/string/size bounds to exhaust CPU/memory at parse time (MCP-T-063,073).
+- **Affected assets:** availability.
+- **Expected control:** MCP-PROTO-006 structural limits + MCP-PROTO-008 per-session resource budget.
+- **Expected event:** `MCP.PROTOCOL.LIMIT_EXCEEDED`.
+- **Expected policy result:** rejected with bounded cleanup; session budget enforced.
+- **Test:** limit + fuzz + resource-budget assertions. **Owner:** SRE/Sec. **Severity:** High. **Closure:** over-limit rejected; budget holds.
+
+### MCP-AC-024 — Protocol-version downgrade
+- **Attacker:** client negotiating an unknown or weaker protocol version.
+- **Preconditions:** version negotiation at session establishment.
+- **Path:** offer a version outside the allowlist expecting best-effort/downgrade acceptance (MCP-T-066,067).
+- **Affected assets:** A-3, security invariants.
+- **Expected control:** MCP-PROTO-010 version allowlist; reject unknown; no silent downgrade.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.VERSION_REJECTED`.
+- **Expected policy result:** explicit negotiation failure (not a narrowed-security connection).
+- **Test:** version-conformance/downgrade fixtures (**D-1-gated**). **Owner:** Sec/Eng. **Severity:** High. **Closure:** unknown/downgrade rejected; only allowlisted versions accepted.
+
+### MCP-AC-025 — Version-adapter differential
+- **Attacker:** sends equivalent inputs across two supported versions to obtain divergent normalized messages.
+- **Preconditions:** ≥2 versions in the allowlist with adapters.
+- **Path:** exploit an adapter that normalizes the same intent differently so downstream policy differs by version (MCP-T-068).
+- **Affected assets:** A-3.
+- **Expected control:** MCP-PROTO-011 adapter equivalence to one internal representation.
+- **Expected event:** n/a (equivalence proven in test); divergence → `MCP.PROTOCOL.ADAPTER_DIVERGENCE`.
+- **Expected policy result:** identical normalized message regardless of version.
+- **Test:** adapter-equivalence fixtures (**D-1-gated**). **Owner:** Sec/Eng. **Severity:** High. **Closure:** no cross-adapter differential.
+
+### MCP-AC-026 — Mid-session identity rebind / protocol-state confusion
+- **Attacker:** attempts to re-bind a session to a different identity mid-flight or drive out-of-order lifecycle.
+- **Preconditions:** an established session.
+- **Path:** inject a lifecycle/auth message to swap the bound principal or reorder establishment (MCP-T-069).
+- **Affected assets:** A-2, A-10.
+- **Expected control:** MCP-PROTO-012 one-identity-per-session; no mid-flight rebind; validated lifecycle.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.STATE_VIOLATION`.
+- **Expected policy result:** DENY; session not rebound.
+- **Test:** protocol-state + reconnect tests. **Owner:** Sec/Eng. **Severity:** High. **Closure:** one identity for the session lifetime.
+
+### MCP-AC-027 — Hostile input crash / panic
+- **Attacker:** fuzzing the kernel to trigger a panic or uncontrolled allocation.
+- **Preconditions:** reachable protocol kernel.
+- **Path:** feed adversarial bytes to parser/framing/adapter/cancellation paths (MCP-T-074).
+- **Affected assets:** availability.
+- **Expected control:** MCP-PROTO-009 crash-resistance; MCP-PROTO-013 bounded error + cleanup.
+- **Expected event:** `MCP.PROTOCOL.MALFORMED` (bounded error), never a crash.
+- **Expected policy result:** bounded error; process stays up.
+- **Test:** fuzz (panic/crash detection) + race. **Owner:** Sec/Eng. **Severity:** High. **Closure:** no panic/crash on the corpus.
+
 ---
 
 ## Coverage
 
-20 abuse cases spanning all Critical/High threat classes. Each maps to ≥1 requirement and a named test;
-the consolidated chain is in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Residual-only
-cases (stdio/localhost/direct-egress bypass) are covered as documented limitations (MCP-OPS-004) rather
-than abuse cases, per [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 R-1.
+27 abuse cases spanning all Critical/High threat classes, including the seven PR-1 protocol-kernel cases
+(MCP-AC-021..027, added by the remediation — `PR1-READINESS-REMEDIATION.md`, finding H-1). Each maps to
+≥1 requirement and a named test; the consolidated chain is in
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Residual-only cases
+(stdio/localhost/direct-egress bypass) are covered as documented limitations (MCP-OPS-004) rather than
+abuse cases, per [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 R-1.
