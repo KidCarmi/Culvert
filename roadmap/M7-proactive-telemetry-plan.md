@@ -1,0 +1,279 @@
+# M7 — Proactive support & opt-in telemetry: design + red-team + 4-slice plan
+
+- **Status:** Proposed (design). Final milestone of the supportability roadmap
+  (`docs/support/SUPPORTABILITY-ROADMAP.md` §M7). M0–M6 shipped.
+- **Depends on:** M1–M6; the metric `{in_bundle, local_only, telemetry_eligible}`
+  registry (HEALTH-AND-EVENT §7 — **does not exist yet; M7 builds it**); the M6
+  consent/SSRF/outbound machinery it reuses.
+- **Mandatory invariants (P6 / ADR-0011/0014):** four independent consent switches,
+  four audit trails; telemetry is a **strict subset of bundle-eligible aggregate**
+  metrics (no identities, no bundle contents); everything **default-off**; proactive
+  collection is **local-only** (no auto-send); every byte is **outbound-initiated**
+  (the cloud can never dial in).
+
+---
+
+## 1. What M7 delivers
+
+Three capabilities, all off by default and consent-separated:
+
+1. **Opt-in telemetry** — a 4th independent consent switch that periodically sends a
+   *proven strict subset* of bundle-eligible **aggregate** metrics (counts/gauges,
+   no per-user/per-host raw, no bundle bytes, no identities) to a consented TAC
+   endpoint, over authenticated HTTPS. An admin can preview the **exact** payload
+   before enabling.
+2. **Proactive health self-checks** — a bounded loop that, on a health/readiness
+   threshold crossing, **pre-stages an incident-scoped bundle locally** (no
+   auto-send — the operator still consents to any upload).
+3. **Alert → scope linkage** — a fired alert *suggests* the matching support
+   incident scope for a bundle (suggestion only; never auto-collects).
+
+**Non-goals:** telemetry-on-by-default; conflating telemetry with support/upload;
+any cloud→appliance push; remote interactive support (still deferred).
+
+---
+
+## 2. The load-bearing constraint: there is no metric registry today
+
+`culvert_*` metrics are emitted as hardcoded `fmt.Fprintf` blocks + per-subsystem
+`WritePrometheus` appenders (`metrics.go`); the `prometheus` client library is not
+used. The nearest struct-shaped seam is the OTLP snapshot builders
+(`otlpCounterMetrics`/`otlpGaugeMetrics` in `otlp.go`, which already hold
+`{name, desc, val}` slices). **M7 must introduce a registry** that tags each metric
+`{in_bundle, local_only, telemetry_eligible}`. This registry is the single source of
+truth for "what a telemetry payload may contain" and is therefore the security spine
+of the whole milestone — it is Slice 1, and it carries the strictest walls.
+
+Everything else clones a proven M6 seam:
+- Consent switch ← `support_upload.go` `uploadConfig` (node-local JSON, fail-closed,
+  atomic 0600, `xxxEnabled()` gate, redacted read model).
+- Outbound sender ← `internal/otlp` `pushLoop`/`push` (SSRF-guarded transport,
+  `validEndpoint` regex sanitiser) + `internal/supportupload`'s per-request
+  `ssrf.PrivateHost` origin preflight (matters under `HTTPS_PROXY`).
+- Config-time endpoint check ← `validateUploadOrigin` (https-only, private-IP refused).
+- Background worker start ← `loadPersistentAdminState` **after `LoadAdminSettings`**
+  (next to the upload worker), so it observes restored consent.
+- Proactive self-check loop ← `startSupportRetentionJanitor` (boot sweep + tick).
+- Incident scope selection ← `resolveSupportScope` + `supportIncidentScopes`
+  (`support_scopes.go`); `createSupportBundle(ctx, scope, level, caseID)`.
+- Alert seam ← `fireAlert(event, AlertPayload{Source,…})` (`alerts.go`).
+
+---
+
+## 3. Four-slice decomposition
+
+Egress is isolated to **Slice 3**. Slices 1–2 are zero-egress foundations; Slice 4
+is local-only. This mirrors the M6 shape (spine → consent → egress → polish),
+consolidated to four.
+
+### Slice 1 — Telemetry metric registry + strict-subset wall + payload builder (ZERO EGRESS)
+
+**Ships**
+- A metric registry: `telemetryMetric{Name, Help, Type, InBundle, LocalOnly,
+  TelemetryEligible}` — a curated list over the scalar aggregate `culvert_*` metrics.
+  Built over the OTLP `{name,desc,val}` seam so it is a real struct list.
+- `buildTelemetryPayload()` — a **pure** function: registry ∩ telemetry_eligible →
+  `{schema_version, generated_at, node_id, metrics:{name:value}}`. Scalar values
+  only. `node_id` is an **opaque random appliance id** (not hostname/IP/user;
+  generated once, persisted node-local) so the cloud can group without identifying.
+- `GET /api/support/telemetry/preview` (admin) — returns the exact payload that
+  *would* be sent. Read-only; no consent, no sender.
+
+**Walls / tests (`telemetry_registry_test.go`)**
+- `TestTelemetrySubset` — telemetry_eligible ⊆ in_bundle **and** no local_only metric
+  is telemetry_eligible (the §7 strict-subset invariant).
+- `TestTelemetryNoIdentityLabels` — no telemetry_eligible metric carries a
+  high-cardinality/identity label (host/user/ip/sni/url/rule); telemetry is scalar
+  aggregates only, or labels from a fixed low-cardinality allowlist (e.g.
+  `result="ok|fail"`).
+- `TestTelemetryPayloadNoDrift` — the builder emits **exactly** the registered
+  telemetry_eligible names (no raw-store reads, no drift).
+- `TestTelemetryRegistryCoversEmittedMetrics` — reverse-parity: every emitted
+  `culvert_*` name has a registry row (or an explicit exemption), so a new metric
+  cannot silently escape governance (mirrors the `config_surfaces`/`uiRoutes` walls).
+
+**Why first:** it is the security spine. Nothing can be sent that the registry does
+not bless, and the wall makes "provably non-sensitive" a machine-checked fact.
+
+---
+
+### Slice 2 — Telemetry consent switch + config + preview GUI (ZERO EGRESS)
+
+**Ships**
+- `telemetryConfig{Enabled, Endpoint, Credential}` at
+  `<dataDir>/support/telemetry_config.json` — cloned 1:1 from `uploadConfig`
+  (fail-closed load, atomic 0600 save, `telemetryEnabled()` = `Enabled && Endpoint!=""`,
+  redacted read model reporting only `credential_set`). **Its own** endpoint +
+  credential — never borrows upload's.
+- `validateTelemetryEndpoint` (https-only, non-private literal IP refused; mirrors
+  `validateUploadOrigin`).
+- `GET/PUT /api/support/telemetry/config` (viewer/admin), audited
+  `support.telemetry.config`, node-local (no `saveConfigVersion`).
+- GUI: a Telemetry panel in the Support view with the **payload preview** (from
+  Slice 1) shown *before* enabling — the "clear payload preview" the roadmap requires.
+
+**Walls / tests**
+- `TestConsentSeparation` **extended**: enabling telemetry writes **only**
+  `telemetry_config.json` — never the upload/bundle/remote surfaces (the 4-switch
+  invariant, now with 2 of 4 real).
+- Config round-trip + fail-closed-on-corrupt; RBAC + audit; credential redaction
+  (never echoed; preserved across posture flips; explicit clear).
+
+**Still zero egress:** no sender is wired. This isolates the consent model + preview
+from the phone-home.
+
+---
+
+### Slice 3 — The telemetry sender (EGRESS — most security-sensitive; CHECKPOINT before building)
+
+**Ships**
+- A bounded periodic sender: mirror `otlp.pushLoop`/`push` (SSRF-guarded
+  `http.Client` with `ssrf.SafeDialContext`) + `supportupload`'s per-request
+  `ssrf.PrivateHost` origin preflight + `validateTelemetryEndpoint`. POSTs **only**
+  `buildTelemetryPayload()` to the consented endpoint, on a jittered bounded cadence
+  (default hourly, min clamp), gated on `telemetryEnabled()`. Bearer credential via
+  `Authorization: Bearer`; **no** http-downgrade redirects (bearer never leaks).
+- Started in `loadPersistentAdminState` next to the upload worker; idles when
+  disabled; exits on ctx.
+
+**No E2E seal — a deliberate, documented boundary.** M6 bundles are sealed E2E to
+TAC's key because they carry redacted-but-sensitive detail. Telemetry carries a
+**proven non-sensitive aggregate** (Slice 1 wall), so TLS transport auth is
+sufficient; a MITM sees only aggregate counts. **This is safe *only because* the
+subset wall holds** — the wall is load-bearing for skipping E2E, and if telemetry
+ever carries anything sensitive, E2E becomes mandatory. Recorded here so it is a
+conscious decision, not an omission.
+
+**Walls / tests**
+- `TestNoAutoTelemetry` — static scan of startup/background sources for
+  `telemetryEnabled(`/`telemetryConfigGet(` (mirrors `TestNoAutoUpload`): the gate
+  lives in the sender, not a startup file; nothing sends unless explicitly enabled.
+- `TestTelemetrySSRFGuarded` — a private/internal endpoint is refused (config-time
+  and dial-time).
+- `TestTelemetrySendMatchesPreview` — the send path serializes the **same**
+  `buildTelemetryPayload()` bytes the preview shows (modulo timestamp): the preview
+  cannot lie about what leaves the box.
+- No-egress source wall extended to the telemetry files (dials only via the sender's
+  guarded client).
+
+---
+
+### Slice 4 — Proactive self-checks + alert→scope linkage + GUI + runbook (LOCAL-ONLY)
+
+**Ships**
+- A proactive self-check loop (model on `startSupportRetentionJanitor`: boot sweep +
+  tick) reading `computeReadiness()` rows / CHR verdicts. On a threshold crossing
+  (a check flips `ok→fail`), it **pre-stages an incident-scoped bundle locally**
+  (`createSupportBundle` with the matched scope) — **no auto-send**. Debounced: at
+  most one staged bundle per incident per cooldown; single-flight (the existing
+  bundle lock); off by default (its own flag); bounded by the §8 bundle budgets +
+  retention.
+- `alertSourceToScope map[string]string` bridging `AlertPayload.Source`
+  (`ca`,`storage`,`proxy`,`scan`,`policy`,`auth`…) → `supportIncidentScopes` keys
+  (`tls`,`storage`,`upstream`,`scan`,`policy`,`dns`…). A fired alert is annotated
+  with a **suggested** scope; the operator acts.
+- GUI: proactive config + a "we noticed X degrading — here is a pre-staged bundle"
+  affordance; telemetry panel polish.
+- `docs/operator/proactive-telemetry.md` runbook.
+
+**Walls / tests**
+- `TestProactiveStaysLocal` — a threshold crossing pre-stages a bundle but never
+  calls the upload/telemetry sender (no auto-send).
+- `TestProactiveDebounced` — rapid threshold flaps produce at most one staged bundle
+  per cooldown (no storm).
+- `TestAlertScopeMapValid` — every `alertSourceToScope` target is a real scope
+  (mirrors `TestSupportScopes_ReferenceRealCollectors`).
+- `TestConsentSeparation` (final form: all four switches independent).
+
+---
+
+## 4. Red-team (adversarial analysis)
+
+The dominant threat class is **exfiltration through a channel the operator opted
+into for a narrow purpose**. Each item is attack → defense → test.
+
+### R1 — Data exfiltration via the telemetry payload (CRITICAL)
+- **A. Identity-bearing metric slips into the telemetry set.** A future dev tags a
+  per-host/per-user/per-URL metric `telemetry_eligible` (high-cardinality label =
+  identity). → **Defense:** the subset wall (⊆ in_bundle ∧ ¬local_only) **plus** the
+  no-identity-label wall (telemetry metrics are scalar aggregates; labels only from a
+  fixed non-identity allowlist). → `TestTelemetrySubset`, `TestTelemetryNoIdentityLabels`.
+- **B. Builder reads a raw store directly** (e.g. `topHosts`, the request ring),
+  bypassing the registry. → **Defense:** the builder emits only registered
+  telemetry_eligible names; drift test asserts builder keys == registry set. →
+  `TestTelemetryPayloadNoDrift`.
+- **C. `node_id`/envelope carries identity** (hostname, public IP, license id tied to
+  a person). → **Defense:** `node_id` is an opaque random appliance id, generated
+  once and node-local; never the hostname/IP/user. Payload heuristic scrub test
+  (no IP-shaped or hostname strings in the serialized payload).
+
+### R2 — Consent conflation
+- **Attack:** enabling telemetry also arms upload (shared config / shared
+  endpoint+credential / a UI toggle that flips both), or vice versa. → **Defense:**
+  separate node-local file, separate `telemetryEnabled()` gate, separate audit
+  action, telemetry's **own** endpoint+credential. → `TestConsentSeparation`
+  (extended to assert enabling telemetry touches only its file).
+
+### R3 — Auto-send / default-on
+- **Attack:** a startup or background path sends telemetry, or auto-uploads a
+  pre-staged bundle, without opt-in. → **Defense:** sender gated on
+  `telemetryEnabled()` (default false); proactive staging is local-only and never
+  calls a sender; both switches default-off and independently rollback-able. →
+  `TestNoAutoTelemetry`, `TestProactiveStaysLocal`.
+
+### R4 — SSRF on the telemetry endpoint
+- **Attack:** point telemetry at `169.254.169.254` (cloud metadata) or internal
+  infra to exfiltrate/pivot. → **Defense:** `validateTelemetryEndpoint` (config-time
+  https-only + private-IP refusal) + `ssrf.SafeDialContext` (dial-time, DNS-rebind
+  safe) + per-request `ssrf.PrivateHost` origin preflight (defeats the `HTTPS_PROXY`
+  bypass). → `TestTelemetrySSRFGuarded`.
+
+### R5 — Preview integrity ("the preview lies")
+- **Attack:** the preview shows a minimal payload but the sender adds fields, so
+  consent is given against a false representation. → **Defense:** sender and preview
+  call the **same** `buildTelemetryPayload()`. → `TestTelemetrySendMatchesPreview`.
+
+### R6 — Proactive resource storm / hot-path starvation
+- **Attack:** a flapping health signal drives continuous bundle builds, starving the
+  relay hot path or filling disk. → **Defense:** debounce (one staged bundle per
+  incident per cooldown), single-flight, off by default, bounded by the §8
+  generation budgets + retention. → `TestProactiveDebounced`.
+
+### R7 — Bearer credential leak
+- **Attack:** an http-downgrade redirect or a log line leaks the telemetry bearer.
+  → **Defense:** https-only + refuse non-https redirects (reuse the M6 redirect
+  guard); credential 0600, never echoed (redacted read model), never logged.
+
+### R8 — Metric-registry governance drift
+- **Attack:** a new `culvert_*` metric ships unclassified and escapes both the bundle
+  and telemetry governance. → **Defense:** reverse-parity wall — every emitted
+  `culvert_*` name must have a registry row or an explicit exemption. →
+  `TestTelemetryRegistryCoversEmittedMetrics`.
+
+### R9 — Alert→scope suggestion abuse
+- **Attack:** the linkage auto-collects on every alert (storm), or an attacker floods
+  alerts to trigger collection. → **Defense:** suggestion-only (no auto-collect from
+  the linkage); proactive staging is separately debounced.
+
+### R10 — Trust boundary / no E2E for telemetry
+- **Consideration:** telemetry skips the E2E seal M6 bundles get. → **Justification:**
+  the payload is a proven non-sensitive aggregate (R1 walls), so TLS auth suffices —
+  but this is **conditional on the walls holding**. Documented as a load-bearing
+  assumption; a MITM sees only aggregate counts.
+
+---
+
+## 5. Cross-milestone invariants honored
+1. No ship on a red Security gate.
+2. Every new route has `uiRoutes` metadata + a UI affordance + a
+   `route-classification.yaml` row (GUI parity + OpenAPI coverage gate).
+3. Every new persisted state (`telemetry_config.json`, `node_id`, staged bundles)
+   lives under `<dataDir>/support` and is bounded (retention/preflight).
+4. Additive-only wire/format; telemetry opt-in defaults off; telemetry + proactive
+   are independent, both default-off (clean rollback).
+
+## 6. Build order + checkpoints
+- **Slice 1 → 2** back-to-back (zero egress).
+- **Checkpoint before Slice 3** (the phone-home slice), as with M6's PR-5.
+- **Slice 4** last (local-only + GUI + docs).
+Each slice is an independent PR off main; Slice 3 is the only one that opens egress.
