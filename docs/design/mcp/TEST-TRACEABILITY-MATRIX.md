@@ -28,7 +28,7 @@ Gate = slice/CI gate that must be green.
 | MCP-T-006 agent impersonation | MCP-ID-002 | Agent attribution | Attribution (unit) | Agent fields present | IAM/Sec | PR-3 |
 | MCP-T-007 workload impersonation | MCP-ID-003 | Workload attestation | Workload-auth (integration) | Spoof rejected | IAM/Sec | PR-3 |
 | MCP-T-008 cross-user session | MCP-AUTH-007, MCP-ID-006 | Session binding | Cross-session (integration) | No identity bleed | IAM/Sec | PR-3 |
-| MCP-T-009/010 cross-tenant/binding | MCP-ID-007, MCP-PRIVACY-002 | Tenant binding + isolation | Tenant-escape (integration) | Cross-tenant denied | IAM/Sec | PR-3 |
+| MCP-T-009, MCP-T-010 cross-tenant / tenant-binding failure | MCP-ID-007, MCP-PRIVACY-002 | Tenant binding + isolation | Tenant-escape (integration) | Cross-tenant denied | IAM/Sec | PR-3 |
 | MCP-T-011 tool poisoning | MCP-TOOL-001,004 | Fingerprint + quarantine | Malicious-server fixture | Poisoned tool quarantined | Sec/Eng | PR-2 |
 | MCP-T-012 tool shadowing | MCP-TOOL-002 | Disambiguate by fingerprint | Shadowing (unit) | Collision flagged | Sec/Eng | PR-2 |
 | MCP-T-013/014 schema/desc drift | MCP-TOOL-003 | Drift classification | Canonicalization + drift fixtures | Correct class | Sec/Eng | PR-2 |
@@ -39,11 +39,13 @@ Gate = slice/CI gate that must be green.
 | MCP-T-019 privilege expansion | MCP-TOOL-004, MCP-POLICY-003 | Quarantine + reason code | Privilege-expansion fixture | Quarantined | Sec/Eng | PR-6 |
 | MCP-T-046 confused deputy | MCP-POLICY-004 | Credential after decision | Ordering (unit) | No cred pre-decision | Sec/Eng | PR-6 |
 | MCP-T-022 over-privileged cred | MCP-CRED-002 | Scope match | Scope-mismatch (integration) | Over-broad denied | IAM/PAM | PR-4 |
+| MCP-T-025 scope mismatch not rejected | MCP-CRED-002 | Scope match → deny + security event | Scope-mismatch (integration) | Mismatch denied + security event | IAM/PAM | PR-4 |
 | MCP-T-023 credential leakage | MCP-CRED-004, MCP-EVENT-003 | No secret in logs/events | Secret-scan + event-redaction | gitleaks clean | IAM/PAM | PR-4 |
 | MCP-T-024 cache compromise | MCP-CRED-005,006 | Bounded encrypted cache + fail-closed | Broker-failure (integration) | Fail-closed proven | IAM/PAM | PR-4 |
-| MCP-T-026/027 exfiltration | MCP-INSP-001,002,003 | Bounds + DLP | Synthetic-secret corpus | Blocked/redacted | Sec/Privacy | PR-7 |
+| MCP-T-026, MCP-T-027 exfiltration (input/output) | MCP-INSP-001,002,003 | Bounds + DLP | Synthetic-secret corpus | Blocked/redacted | Sec/Privacy | PR-7 |
 | MCP-T-028 secret in events | MCP-EVENT-003, MCP-CRED-004 | No-store + redaction | Event secret-scan | No secret stored | Sec/Privacy | PR-8 |
 | MCP-T-036 SSRF | MCP-INSP-004 | Destination policy (ssrf Control) | Private-IP matrix | Private denied | Sec/Eng | PR-7 |
+| MCP-T-030 private-network access | MCP-INSP-004,005 | Destination policy + DNS pin | Private-IP matrix + DNS-rebinding lab | Private/rebind denied | Sec/Eng | PR-7 |
 | MCP-T-037 DNS rebinding | MCP-INSP-005 | resolve→connect pin | DNS-rebinding lab | Rebinding blocked | Sec/Eng | PR-7 |
 | MCP-T-041 redirect abuse | MCP-INSP-006 | Redirect cap + re-check | Redirect-chain | Hop cap enforced | Sec/Eng | PR-7 |
 | MCP-T-031 inbound rebinding | MCP-INSP-008 | Inbound Origin/Host validate | Inbound-rebinding | Bad Origin rejected | Sec/Eng | PR-1 |
@@ -57,13 +59,14 @@ Gate = slice/CI gate that must be green.
 | MCP-T-045 audit tampering | MCP-EVENT-005 | Integrity fields | Tamper-evidence (unit) | Tamper detected | Sec | PR-8 |
 | MCP-T-047 stale snapshot | MCP-HA-001, MCP-CPDP-002 | Epoch fence + whole-reject | Stale-epoch + corrupt-snapshot | Rejected; last-good served | Eng/SRE | PR-10 |
 | MCP-T-048 split-brain | MCP-HA-001,002 | Fence + rollback | HA/failover tests | No split-brain | Eng/SRE | PR-10 |
+| MCP-T-049 stale CP publication | MCP-HA-001 | Epoch fence rejects fenced-out CP | Stale-epoch + no-live-holder tests | Stale CP rejected; last-good served | Eng/SRE | PR-10 |
 | MCP-T-050 mixed-version | MCP-CPDP-003 | minimum_dp_version gate | Mixed-version tests | Version gate holds | Eng/SRE | PR-10 |
 | MCP-T-034 mgmt escalation | MCP-MGMT-001,002,003 | Read-only + tool RBAC | Mutation-negative + tenant-escape | No mutation reachable | Sec/Eng | PR-9 |
 | MCP-T-035 mgmt overexposure | MCP-MGMT-004, MCP-PRIVACY-001 | Bounded redacted output | Output-bound tests | Redacted | Sec/Privacy | PR-9 |
 | MCP-T-051 connector compromise | MCP-CONNECT-001,002 | mTLS identity + rotation | Impersonation + rollover + replay | Impersonation blocked | Net/Sec | PR-11 |
 | MCP-T-052 DMZ abuse | MCP-CONNECT-003, MCP-INSP-008 | OAuth/WAF/Origin/rate | DMZ-abuse tests | Controls enforced | Net/Sec | PR-11 |
 | MCP-T-053 data residency | MCP-PRIVACY-001,003 | DLP-before-egress | Egress-gate tests | DLP proven | Privacy/Legal | PR-11 |
-| MCP-T-054/055/056 bypass | MCP-OPS-004, MCP-INSP-008 | Documented limit + inbound guard | Doc review + inbound tests | Limitation documented | Product/Sec | PR-0/PR-1 |
+| MCP-T-054, MCP-T-055, MCP-T-056 bypass (stdio/localhost/direct-egress) | MCP-OPS-004, MCP-INSP-008 | Documented limit + inbound guard | Doc review + inbound tests | Limitation documented | Product/Sec | PR-0/PR-1 |
 
 ## 2. Full test taxonomy → requirement coverage
 
