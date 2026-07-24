@@ -1,7 +1,26 @@
 # M7 — Proactive support & opt-in telemetry: design + red-team + 4-slice plan
 
-- **Status:** Proposed (design). Final milestone of the supportability roadmap
-  (`docs/support/SUPPORTABILITY-ROADMAP.md` §M7). M0–M6 shipped.
+- **Status:** Proposed (design), **Revision 1** — the red-team below is now folded
+  back into the design as concrete changes, not just a threat list. Final milestone
+  of the supportability roadmap (`docs/support/SUPPORTABILITY-ROADMAP.md` §M7). M0–M6 shipped.
+
+> **Revision 1 (red-team-driven design changes).** Three red-team findings are
+> resolved *in the design* rather than only by tests:
+> - **R1-C → `node_id` removed from the payload entirely.** The gateway already
+>   authenticates the appliance (per-appliance credential / mTLS) and knows the
+>   tenant, so it groups server-side with **nothing identifying in the body**. This
+>   deletes an identity-leak vector by construction rather than trying to make an
+>   in-body id "safe".
+> - **R10 → telemetry payload is E2E-sealed to the TAC key** (reuse M6 `sealbox` +
+>   the merged TAC trust store), *in addition to* the subset wall + TLS. The no-E2E
+>   posture made confidentiality "load-bearing on the walls holding"; sealing makes a
+>   wall regression **non-catastrophic** (a leaked payload is still opaque to a MITM
+>   and to everything short of TAC's KMS). Cost is trivial — the payload is a few
+>   dozen scalars.
+> - **R1-A → telemetry metrics are structurally label-free scalars** (no label
+>   allowlist to mis-curate), and eligibility is **default-deny**: a metric is
+>   telemetry-ineligible unless explicitly marked with a recorded per-metric
+>   justification.
 - **Depends on:** M1–M6; the metric `{in_bundle, local_only, telemetry_eligible}`
   registry (HEALTH-AND-EVENT §7 — **does not exist yet; M7 builds it**); the M6
   consent/SSRF/outbound machinery it reuses.
@@ -70,22 +89,28 @@ consolidated to four.
 
 **Ships**
 - A metric registry: `telemetryMetric{Name, Help, Type, InBundle, LocalOnly,
-  TelemetryEligible}` — a curated list over the scalar aggregate `culvert_*` metrics.
-  Built over the OTLP `{name,desc,val}` seam so it is a real struct list.
+  TelemetryEligible}` — a curated list over the **label-free scalar aggregate**
+  `culvert_*` metrics. Built over the OTLP `{name,desc,val}` seam so it is a real
+  struct list. Eligibility is **default-deny**: `TelemetryEligible` is false unless a
+  metric is explicitly marked with a recorded justification (R1-A/R8).
 - `buildTelemetryPayload()` — a **pure** function: registry ∩ telemetry_eligible →
-  `{schema_version, generated_at, node_id, metrics:{name:value}}`. Scalar values
-  only. `node_id` is an **opaque random appliance id** (not hostname/IP/user;
-  generated once, persisted node-local) so the cloud can group without identifying.
+  `{schema_version, generated_at, metrics:{name:value}}`. Scalar values only. **No
+  `node_id`, no appliance/host/user identifier of any kind** — the receiving gateway
+  attributes the payload from the authenticated transport (credential/mTLS + tenant),
+  so nothing identifying is ever in the body (R1-C).
 - `GET /api/support/telemetry/preview` (admin) — returns the exact payload that
-  *would* be sent. Read-only; no consent, no sender.
+  *would* be sent (the plaintext, pre-seal, so the admin sees the real content).
+  Read-only; no consent, no sender.
 
 **Walls / tests (`telemetry_registry_test.go`)**
 - `TestTelemetrySubset` — telemetry_eligible ⊆ in_bundle **and** no local_only metric
   is telemetry_eligible (the §7 strict-subset invariant).
-- `TestTelemetryNoIdentityLabels` — no telemetry_eligible metric carries a
-  high-cardinality/identity label (host/user/ip/sni/url/rule); telemetry is scalar
-  aggregates only, or labels from a fixed low-cardinality allowlist (e.g.
-  `result="ok|fail"`).
+- `TestTelemetryLabelFree` — no telemetry_eligible metric carries **any** label
+  (structurally label-free scalars — no allowlist to mis-curate). A label is the
+  identity/cardinality vector, so telemetry admits none (R1-A).
+- `TestTelemetryPayloadHasNoIdentity` — the serialized payload contains no `node_id`
+  or identifier key, and no IP-shaped / hostname-shaped string (heuristic scrub over
+  the exact bytes that would be sealed) (R1-C).
 - `TestTelemetryPayloadNoDrift` — the builder emits **exactly** the registered
   telemetry_eligible names (no raw-store reads, no drift).
 - `TestTelemetryRegistryCoversEmittedMetrics` — reverse-parity: every emitted
@@ -129,20 +154,24 @@ from the phone-home.
 **Ships**
 - A bounded periodic sender: mirror `otlp.pushLoop`/`push` (SSRF-guarded
   `http.Client` with `ssrf.SafeDialContext`) + `supportupload`'s per-request
-  `ssrf.PrivateHost` origin preflight + `validateTelemetryEndpoint`. POSTs **only**
-  `buildTelemetryPayload()` to the consented endpoint, on a jittered bounded cadence
-  (default hourly, min clamp), gated on `telemetryEnabled()`. Bearer credential via
-  `Authorization: Bearer`; **no** http-downgrade redirects (bearer never leaks).
+  `ssrf.PrivateHost` origin preflight + `validateTelemetryEndpoint`. Takes
+  `buildTelemetryPayload()`, **E2E-seals it to the active TAC trust key** (reuse
+  `sealBundleToTAC` / `sealbox` + the merged M6 TAC trust store — no new trust
+  material), and POSTs the sealed blob to the consented endpoint on a jittered
+  bounded cadence (default hourly, min clamp), gated on `telemetryEnabled()`. Bearer
+  credential via `Authorization: Bearer`; **no** http-downgrade redirects (bearer
+  never leaks).
 - Started in `loadPersistentAdminState` next to the upload worker; idles when
   disabled; exits on ctx.
 
-**No E2E seal — a deliberate, documented boundary.** M6 bundles are sealed E2E to
-TAC's key because they carry redacted-but-sensitive detail. Telemetry carries a
-**proven non-sensitive aggregate** (Slice 1 wall), so TLS transport auth is
-sufficient; a MITM sees only aggregate counts. **This is safe *only because* the
-subset wall holds** — the wall is load-bearing for skipping E2E, and if telemetry
-ever carries anything sensitive, E2E becomes mandatory. Recorded here so it is a
-conscious decision, not an omission.
+**E2E-sealed, as defense-in-depth (R10).** The payload is a proven non-sensitive
+aggregate (Slice 1 wall), so in principle TLS transport auth would suffice — but
+resting confidentiality on "the walls hold" is fragile. Sealing the payload to TAC's
+public key (the same mechanism M6 bundles use; the appliance holds no decryption
+key) makes a wall regression **non-catastrophic**: even a payload that wrongly
+included sensitive data would be opaque to a MITM and to anything short of TAC's KMS.
+Cost is trivial (a few dozen scalars). If no TAC trust key is configured, telemetry
+is **unavailable** (fail-closed) — the same posture as encrypt-to-TAC upload.
 
 **Walls / tests**
 - `TestNoAutoTelemetry` — static scan of startup/background sources for
@@ -150,9 +179,10 @@ conscious decision, not an omission.
   lives in the sender, not a startup file; nothing sends unless explicitly enabled.
 - `TestTelemetrySSRFGuarded` — a private/internal endpoint is refused (config-time
   and dial-time).
-- `TestTelemetrySendMatchesPreview` — the send path serializes the **same**
-  `buildTelemetryPayload()` bytes the preview shows (modulo timestamp): the preview
-  cannot lie about what leaves the box.
+- `TestTelemetrySendMatchesPreview` — the send path **seals the same
+  `buildTelemetryPayload()` bytes** the preview shows (modulo timestamp): sealing a
+  test key pair and opening the sent blob yields exactly the previewed plaintext, so
+  the preview cannot lie about what leaves the box.
 - No-egress source wall extended to the telemetry files (dials only via the sender's
   guarded client).
 
@@ -194,18 +224,22 @@ into for a narrow purpose**. Each item is attack → defense → test.
 
 ### R1 — Data exfiltration via the telemetry payload (CRITICAL)
 - **A. Identity-bearing metric slips into the telemetry set.** A future dev tags a
-  per-host/per-user/per-URL metric `telemetry_eligible` (high-cardinality label =
-  identity). → **Defense:** the subset wall (⊆ in_bundle ∧ ¬local_only) **plus** the
-  no-identity-label wall (telemetry metrics are scalar aggregates; labels only from a
-  fixed non-identity allowlist). → `TestTelemetrySubset`, `TestTelemetryNoIdentityLabels`.
+  per-host/per-user/per-URL metric `telemetry_eligible` (a label = identity +
+  cardinality). → **Resolved by design (Rev 1):** telemetry metrics are
+  **structurally label-free scalars** — no allowlist to mis-curate — and eligibility
+  is **default-deny** (per-metric sign-off). → `TestTelemetrySubset`,
+  `TestTelemetryLabelFree`.
 - **B. Builder reads a raw store directly** (e.g. `topHosts`, the request ring),
   bypassing the registry. → **Defense:** the builder emits only registered
   telemetry_eligible names; drift test asserts builder keys == registry set. →
   `TestTelemetryPayloadNoDrift`.
-- **C. `node_id`/envelope carries identity** (hostname, public IP, license id tied to
-  a person). → **Defense:** `node_id` is an opaque random appliance id, generated
-  once and node-local; never the hostname/IP/user. Payload heuristic scrub test
-  (no IP-shaped or hostname strings in the serialized payload).
+- **C. In-body identifier carries identity** (`node_id`, hostname, public IP, a
+  license id tied to a person). → **Resolved by design (Rev 1):** there is **no
+  identifier in the payload at all** — the gateway attributes it from the
+  authenticated transport (credential/mTLS + tenant). → `TestTelemetryPayloadHasNoIdentity`.
+- **D. Defense-in-depth for A–C:** even a payload that *wrongly* included sensitive
+  data is **E2E-sealed to TAC's key** (Rev 1, R10), so a wall regression is not an
+  immediate leak.
 
 ### R2 — Consent conflation
 - **Attack:** enabling telemetry also arms upload (shared config / shared
@@ -255,11 +289,14 @@ into for a narrow purpose**. Each item is attack → defense → test.
   alerts to trigger collection. → **Defense:** suggestion-only (no auto-collect from
   the linkage); proactive staging is separately debounced.
 
-### R10 — Trust boundary / no E2E for telemetry
-- **Consideration:** telemetry skips the E2E seal M6 bundles get. → **Justification:**
-  the payload is a proven non-sensitive aggregate (R1 walls), so TLS auth suffices —
-  but this is **conditional on the walls holding**. Documented as a load-bearing
-  assumption; a MITM sees only aggregate counts.
+### R10 — Trust boundary / E2E for telemetry
+- **Original consideration:** should telemetry skip the E2E seal M6 bundles get,
+  since the payload is a proven non-sensitive aggregate? Resting confidentiality on
+  "the walls hold" is fragile. → **Resolved by design (Rev 1):** telemetry **is
+  E2E-sealed** to the active TAC trust key (reuse `sealbox` + the merged M6 trust
+  store), *in addition to* the subset wall + TLS. Confidentiality no longer depends
+  solely on the walls; a wall regression is non-catastrophic. Fail-closed with no
+  trust key (telemetry unavailable), same as encrypt-to-TAC upload.
 
 ---
 
@@ -267,8 +304,9 @@ into for a narrow purpose**. Each item is attack → defense → test.
 1. No ship on a red Security gate.
 2. Every new route has `uiRoutes` metadata + a UI affordance + a
    `route-classification.yaml` row (GUI parity + OpenAPI coverage gate).
-3. Every new persisted state (`telemetry_config.json`, `node_id`, staged bundles)
-   lives under `<dataDir>/support` and is bounded (retention/preflight).
+3. Every new persisted state (`telemetry_config.json`, staged bundles) lives under
+   `<dataDir>/support` and is bounded (retention/preflight). (No `node_id` is
+   persisted — Rev 1 removed in-body identifiers entirely.)
 4. Additive-only wire/format; telemetry opt-in defaults off; telemetry + proactive
    are independent, both default-off (clean rollback).
 
