@@ -950,11 +950,11 @@ components:
       additionalProperties: false
       required: [schema_version, registry_hash, generated_at, sample_epoch, sequence, metrics]
       properties:
-        schema_version: { type: integer, description: "Governed telemetry wire-schema version." }
-        registry_hash: { type: string, description: "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition)." }
-        generated_at: { type: string, description: "RFC3339 UTC timestamp this sample was built." }
-        sample_epoch: { type: string, description: "Non-identifying, caller-supplied per-process-lifetime random token (128-bit hex). Never a stable appliance fingerprint." }
-        sequence: { type: integer, description: "Per-epoch delivery sequence number. Always 0 in Slice 1 (no delivery counter exists yet)." }
+        schema_version: { type: integer, enum: [3], description: "Governed telemetry wire-schema version." }
+        registry_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition)." }
+        generated_at: { type: string, format: date-time, description: "RFC3339 UTC timestamp this sample was built." }
+        sample_epoch: { type: string, pattern: "^[0-9a-f]{32}$", description: "Non-identifying, caller-supplied per-process-lifetime random token (128-bit hex). Never a stable appliance fingerprint." }
+        sequence: { type: integer, minimum: 0, description: "Per-epoch delivery sequence number. Always 0 in Slice 1 (no delivery counter exists yet)." }
         metrics: { type: object, description: "Telemetry-eligible metric id -> current scalar value.", additionalProperties: { type: number } }
     SupportRecipients:
       type: object

@@ -13523,7 +13523,9 @@ function renderSupportTelemetryPreview(d) {
   el.innerHTML =
     '<p class="hint">schema_version <strong>' + escHtml(String(d.schema_version)) +
     '</strong> · registry_hash <span style="font-family:monospace;font-size:.72rem">' + escHtml(String(d.registry_hash || '')) +
-    '</span> · generated_at ' + escHtml(String(d.generated_at || '')) + '</p>' +
+    '</span> · generated_at ' + escHtml(String(d.generated_at || '')) +
+    ' · sample_epoch <span style="font-family:monospace;font-size:.72rem">' + escHtml(String(d.sample_epoch || '')) +
+    '</span> · sequence ' + escHtml(String(d.sequence)) + '</p>' +
     '<table class="tbl"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>' + rows + '</tbody></table>';
 }
 

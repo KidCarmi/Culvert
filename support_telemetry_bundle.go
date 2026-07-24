@@ -16,7 +16,7 @@ import (
 // telemetry preview/send from the same node.
 type supportMetricsSection struct {
 	RegistryHash string             `json:"registry_hash" redact:"public"`
-	Metrics      map[string]float64 `json:"metrics" redact:"public"`
+	Metrics      map[string]float64 `json:"metrics" redact:"internal"`
 }
 
 // computeSupportMetricsSection reads every InSupportBundle descriptor in
@@ -37,7 +37,7 @@ func (supportMetricsCollector) Meta() support.CollectorMeta {
 		ID: "support_metrics", Path: "sections/support_metrics.json", Owner: "core", SchemaVersion: 1,
 		Description: "M7 scoped support-metric registry snapshot (own-health bits/buckets only — the same registry and values a telemetry preview/send would use)",
 		Timeout:     2 * time.Second, ByteBudget: 8 << 10, Mandatory: false, MinLevel: support.L0,
-		MaxClass: redaction.ClassPublic, Sensitivity: redaction.ClassPublic,
+		MaxClass: redaction.ClassInternal, Sensitivity: redaction.ClassInternal,
 	}
 }
 

@@ -3017,6 +3017,7 @@
         "properties": {
           "generated_at": {
             "description": "RFC3339 UTC timestamp this sample was built.",
+            "format": "date-time",
             "type": "string"
           },
           "metrics": {
@@ -3028,18 +3029,24 @@
           },
           "registry_hash": {
             "description": "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition).",
+            "pattern": "^[0-9a-f]{64}$",
             "type": "string"
           },
           "sample_epoch": {
             "description": "Non-identifying, caller-supplied per-process-lifetime random token (128-bit hex). Never a stable appliance fingerprint.",
+            "pattern": "^[0-9a-f]{32}$",
             "type": "string"
           },
           "schema_version": {
             "description": "Governed telemetry wire-schema version.",
+            "enum": [
+              3
+            ],
             "type": "integer"
           },
           "sequence": {
             "description": "Per-epoch delivery sequence number. Always 0 in Slice 1 (no delivery counter exists yet).",
+            "minimum": 0,
             "type": "integer"
           }
         },
