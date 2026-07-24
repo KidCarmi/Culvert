@@ -2,11 +2,17 @@ package supportmetrics
 
 import "testing"
 
+var testCAExpiryLadder = &BucketLadder{
+	Labels:     []string{"gt90d", "le90d", "le30d", "le7d"},
+	Thresholds: []float64{7, 30, 90},
+	Descending: true,
+}
+
 func fixedTestRegistry() Registry {
 	return Registry{
 		{ID: "support_health_ca_ready", Type: Gauge, PrivacyClass: Aggregate, InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health", Read: func() float64 { return 1 }},
 		{ID: "support_health_clamav_ready", Type: Gauge, PrivacyClass: Aggregate, InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health", Read: func() float64 { return 0 }},
-		{ID: "support_health_ca_expiry_bucket", Type: Gauge, PrivacyClass: Aggregate, InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "renewal signal", Buckets: []string{"gt90d", "le90d", "le30d", "le7d"}, Read: func() float64 { return 0 }},
+		{ID: "support_health_ca_expiry_bucket", Type: Gauge, PrivacyClass: Aggregate, InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "renewal signal", Buckets: testCAExpiryLadder, Read: func() float64 { return 0 }},
 	}
 }
 
@@ -83,7 +89,7 @@ func TestSupportTelemetryRegistryHashChangesOnSchemaChange(t *testing.T) {
 
 	t.Run("change privacy class", func(t *testing.T) {
 		r := fixedTestRegistry()
-		r[0].PrivacyClass = LocalOnly
+		r[0].PrivacyClass = Public
 		if r.Hash() == baseHash {
 			t.Fatal("hash unchanged after changing PrivacyClass")
 		}
@@ -97,11 +103,48 @@ func TestSupportTelemetryRegistryHashChangesOnSchemaChange(t *testing.T) {
 		}
 	})
 
-	t.Run("change bucket definition", func(t *testing.T) {
+	t.Run("change bucket label", func(t *testing.T) {
 		r := fixedTestRegistry()
-		r[2].Buckets = []string{"gt90d", "le90d", "le45d", "le7d"}
+		r[2].Buckets = &BucketLadder{
+			Labels:     []string{"gt90d", "le90d", "le45d", "le7d"},
+			Thresholds: []float64{7, 30, 90},
+			Descending: true,
+		}
 		if r.Hash() == baseHash {
 			t.Fatal("hash unchanged after changing a governed bucket boundary label")
+		}
+	})
+
+	// The review-mandated test: changing an EXECUTABLE threshold (not just a
+	// label string) must change the hash, since Buckets is the same
+	// BucketLadder value Read evaluates against.
+	t.Run("change bucket threshold (90 -> 120)", func(t *testing.T) {
+		r := fixedTestRegistry()
+		r[2].Buckets = &BucketLadder{
+			Labels:     []string{"gt90d", "le90d", "le30d", "le7d"},
+			Thresholds: []float64{7, 30, 120},
+			Descending: true,
+		}
+		if r.Hash() == baseHash {
+			t.Fatal("hash unchanged after changing a governed bucket threshold")
+		}
+		// And the new threshold is genuinely live: a value between the old
+		// and new boundary now evaluates differently.
+		if got := r[2].Buckets.Index(100); got != 1 {
+			t.Fatalf("Index(100) with threshold 120 = %v, want 1 (le90d)", got)
+		}
+		if got := testCAExpiryLadder.Index(100); got != 0 {
+			t.Fatalf("Index(100) with threshold 90 = %v, want 0 (gt90d)", got)
+		}
+	})
+
+	t.Run("bucket label vs comma collision is not ambiguous", func(t *testing.T) {
+		a := fixedTestRegistry()
+		a[2].Buckets = &BucketLadder{Labels: []string{"a,b"}, Descending: true}
+		b := fixedTestRegistry()
+		b[2].Buckets = &BucketLadder{Labels: []string{"a", "b"}, Descending: true}
+		if a.Hash() == b.Hash() {
+			t.Fatal("[\"a,b\"] and [\"a\",\"b\"] must not hash identically")
 		}
 	})
 
@@ -136,19 +179,20 @@ func TestSupportTelemetryPayloadNoDrift(t *testing.T) {
 		t.Fatalf("fixture expected all-eligible; got %d/%d", len(eligible), len(r))
 	}
 
-	sample, err := r.BuildSample(fixedNow())
+	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
-	if len(sample.Metrics) != len(eligible) {
-		t.Fatalf("sample has %d metrics, want exactly %d eligible", len(sample.Metrics), len(eligible))
+	metrics := sample.Metrics()
+	if len(metrics) != len(eligible) {
+		t.Fatalf("sample has %d metrics, want exactly %d eligible", len(metrics), len(eligible))
 	}
 	for _, d := range eligible {
-		if _, ok := sample.Metrics[d.ID]; !ok {
+		if _, ok := metrics[d.ID]; !ok {
 			t.Errorf("sample missing eligible metric %q", d.ID)
 		}
 	}
-	for id := range sample.Metrics {
+	for id := range metrics {
 		found := false
 		for _, d := range eligible {
 			if d.ID == id {

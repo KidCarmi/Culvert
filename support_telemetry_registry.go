@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"sync"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/supportmetrics"
@@ -86,7 +89,7 @@ var supportMetricRegistry = supportmetrics.Registry{
 		InSupportBundle:   true,
 		TelemetryEligible: true,
 		TelemetryReason:   "proactive renewal signal; bucketed to avoid a precise cert-timeline fingerprint",
-		Buckets:           supportmetrics.CAExpiryBucketLabels,
+		Buckets:           supportmetrics.CAExpiryBucketLadder,
 		Read:              readSupportHealthCAExpiryBucket,
 	},
 	{
@@ -96,7 +99,7 @@ var supportMetricRegistry = supportmetrics.Registry{
 		InSupportBundle:   true,
 		TelemetryEligible: true,
 		TelemetryReason:   "coarse stability signal; exact uptime rejected (fingerprint/correlation)",
-		Buckets:           supportmetrics.UptimeBucketLabels,
+		Buckets:           supportmetrics.UptimeBucketLadder,
 		Read:              readSupportUptimeBucket,
 	},
 }
@@ -145,8 +148,17 @@ func readSupportHealthSessionReady() float64 {
 	return 0
 }
 
+// readSupportHealthConfigSnapshotValid reports "last config snapshot
+// validated" (§7) as TWO conditions, both required: the pure validator
+// itself accepts the empty baseline (configSnapshotValidatorOK — the same
+// self-test computeReadiness's "config_snapshot_validator" row uses), AND
+// the last REAL snapshot/delta apply this node actually attempted did not
+// get rejected (lastConfigSnapshotApplyOK, configsnapshot_apply_health.go —
+// set at the exact validate/apply call sites in controlplane_client.go).
+// Without the second condition this bit could report healthy while a
+// reachable CP kept pushing a snapshot this node rejects on every poll.
 func readSupportHealthConfigSnapshotValid() float64 {
-	if configSnapshotValidatorOK() {
+	if configSnapshotValidatorOK() && lastConfigSnapshotApplyOK() {
 		return 1
 	}
 	return 0
@@ -168,25 +180,41 @@ func readSupportUptimeBucket() float64 {
 	return supportmetrics.UptimeBucket(time.Since(startTime))
 }
 
-// supportTelemetryNow is the injectable clock BuildSupportTelemetrySample
+// supportTelemetryNow is the injectable clock buildSupportTelemetrySample
 // uses. Tests swap it for a fixed clock so the preview handler and a
 // directly-built sample can be proven to render identically (§8
 // TestSupportTelemetryPreviewMatchesBuiltSample) without depending on
 // wall-clock timing.
 var supportTelemetryNow = time.Now
 
+// supportTelemetryProcessEpoch is a 128-bit random hex token generated once,
+// lazily, on first use per process lifetime — matching the merged design's
+// sample_epoch semantics (§5: "128-bit random per process start/counter-
+// reset epoch; lets TAC detect resets without an appliance id"). It is
+// NEVER persisted and never derived from any appliance identity, so it
+// carries no stable identity across restarts; it is deliberately STABLE
+// within one process run so repeated preview calls (and, unchanged, a
+// future sender within the same process) share the same epoch, exactly as
+// the wire contract intends. Slice 1 has no delivery sequence counter yet
+// (that belongs to Slice 3's sender/spool), so every sample built in this
+// slice uses sequence 0 — honest, since there is no counter to advance.
+var supportTelemetryProcessEpoch = sync.OnceValue(func() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand.Read on a supported platform does not fail; a non-nil
+		// err here indicates a broken entropy source, which the process
+		// cannot recover from safely. Panicking (rather than silently
+		// falling back to a zero/predictable epoch) matches the "fail
+		// closed, never invent a fake identity token" posture.
+		panic("supportmetrics: crypto/rand unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+})
+
 // buildSupportTelemetrySample constructs ONE immutable current support
 // telemetry sample (roadmap/M7-proactive-telemetry-plan.md §3.3/§8) from the
 // live registry. Side-effect-free: reads eligible descriptors' Read()
 // closures only; no I/O, no goroutines, no persistence, no audit event.
-//
-// Slice 1 scope: unlike the merged design's illustrative
-// buildSupportTelemetrySample(now, epoch, sequence) signature, this builder
-// takes no epoch/sequence — those are Slice 3 delivery-retry state (§5) with
-// no sender to consume them yet; adding placeholder values here would be
-// invented behavior, not implemented behavior. Slice 3 extends the sample
-// shape when it adds the sender/spool, without changing this function's
-// existing contract.
 func buildSupportTelemetrySample(now time.Time) (supportmetrics.Sample, error) {
-	return supportMetricRegistry.BuildSample(now)
+	return supportMetricRegistry.BuildSample(now, supportTelemetryProcessEpoch(), 0)
 }

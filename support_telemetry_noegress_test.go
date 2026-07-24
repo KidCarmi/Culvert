@@ -106,8 +106,19 @@ func TestSupportTelemetrySlice1HasNoEgress(t *testing.T) {
 // Mirrors the design's Slice-3-only "TestNoAutoTelemetry: static scan: gate
 // not in startup files" precedent, applied here to prove Slice 1 introduces
 // no startup coupling at all.
+//
+// Scans the ACTUAL seam the merged design names for the future sender
+// (§14 Slice 3: "Sender started in loadPersistentAdminState next to the
+// upload worker") — persistent_admin_state_startup.go, not just main.go —
+// plus main.go/main_shutdown.go/background_services_startup.go for
+// defense-in-depth, so an accidental reference in the real future-sender
+// seam fails this wall instead of passing it silently.
 func TestSupportTelemetrySlice1NoStartupWiring(t *testing.T) {
-	startupFiles := []string{"main.go", "main_shutdown.go"}
+	startupFiles := []string{
+		"main.go", "main_shutdown.go",
+		"persistent_admin_state_startup.go", // the named Slice-3 sender seam (§14)
+		"background_services_startup.go",
+	}
 	for _, name := range startupFiles {
 		b, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
 		if err != nil {

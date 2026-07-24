@@ -59,8 +59,8 @@ func TestSupportTelemetryPreviewMatchesBuiltSample(t *testing.T) {
 	if view.SchemaVersion != sample.SchemaVersion || view.RegistryHash != sample.RegistryHash {
 		t.Fatalf("rendered preview does not match the built sample's schema identity: %+v vs sample %+v", view, sample)
 	}
-	if len(view.Metrics) != len(sample.Metrics) {
-		t.Fatalf("rendered preview has %d metrics, sample has %d", len(view.Metrics), len(sample.Metrics))
+	if len(view.Metrics) != len(sample.Metrics()) {
+		t.Fatalf("rendered preview has %d metrics, sample has %d", len(view.Metrics), len(sample.Metrics()))
 	}
 }
 

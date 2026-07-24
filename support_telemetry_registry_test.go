@@ -72,11 +72,11 @@ func TestBuildSupportTelemetrySample_EmitsExactlyEligibleIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSupportTelemetrySample: %v", err)
 	}
-	if len(sample.Metrics) != len(supportMetricRegistry.Eligible()) {
-		t.Fatalf("sample has %d metrics, want %d", len(sample.Metrics), len(supportMetricRegistry.Eligible()))
+	if len(sample.Metrics()) != len(supportMetricRegistry.Eligible()) {
+		t.Fatalf("sample has %d metrics, want %d", len(sample.Metrics()), len(supportMetricRegistry.Eligible()))
 	}
 	for _, d := range supportMetricRegistry.Eligible() {
-		if _, ok := sample.Metrics[d.ID]; !ok {
+		if _, ok := sample.Metrics()[d.ID]; !ok {
 			t.Errorf("sample missing eligible metric %q", d.ID)
 		}
 	}

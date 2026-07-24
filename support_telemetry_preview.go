@@ -36,7 +36,7 @@ func renderSupportTelemetryPreview(s supportmetrics.Sample) supportTelemetryPrev
 		SchemaVersion: s.SchemaVersion,
 		RegistryHash:  s.RegistryHash,
 		GeneratedAt:   s.GeneratedAt,
-		Metrics:       s.Metrics,
+		Metrics:       s.Metrics(),
 	}
 }
 

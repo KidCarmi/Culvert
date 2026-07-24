@@ -13,10 +13,13 @@ func fixedNow() time.Time {
 
 // TestSupportTelemetrySampleHasNoStableIdentity — the sample carries no
 // node_id/hostname/IP/tenant identifier: its JSON encoding contains only the
-// governed schema fields and eligible metric id/value pairs.
+// governed schema fields and eligible metric id/value pairs. sample_epoch is
+// present (per the wire contract) but is explicitly NOT a stable identity —
+// it is a caller-supplied, per-process-lifetime random token, never an
+// appliance fingerprint (§5).
 func TestSupportTelemetrySampleHasNoStableIdentity(t *testing.T) {
 	r := fixedTestRegistry()
-	sample, err := r.BuildSample(fixedNow())
+	sample, err := r.BuildSample(fixedNow(), "0123456789abcdef0123456789abcdef", 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
@@ -37,12 +40,15 @@ func TestSupportTelemetrySampleHasNoStableIdentity(t *testing.T) {
 		}
 	}
 
-	// Only the four documented top-level fields exist.
+	// Only the documented top-level wire fields exist (§3.3).
 	var raw map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("unmarshal sample: %v", err)
 	}
-	wantKeys := map[string]bool{"schema_version": true, "registry_hash": true, "generated_at": true, "metrics": true}
+	wantKeys := map[string]bool{
+		"schema_version": true, "registry_hash": true, "generated_at": true,
+		"sample_epoch": true, "sequence": true, "metrics": true,
+	}
 	for k := range raw {
 		if !wantKeys[k] {
 			t.Errorf("sample JSON has unexpected top-level field %q", k)
@@ -71,14 +77,54 @@ func jsonContainsKey(doc, key string) bool {
 // code-reviewed vocabulary, but this proves it structurally too).
 func TestSupportTelemetrySampleForbiddenFieldSerialization(t *testing.T) {
 	r := fixedTestRegistry()
-	sample, err := r.BuildSample(fixedNow())
+	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
-	for id := range sample.Metrics {
+	for id := range sample.Metrics() {
 		if !idPattern.MatchString(id) {
 			t.Errorf("metric key %q in serialized sample is not label-free-scalar-safe", id)
 		}
+	}
+}
+
+// TestSupportTelemetrySampleMetricsIsImmutable proves Metrics() returns a
+// defensive copy: mutating it must never affect the Sample's own state (and
+// therefore never affect a later Metrics() call or MarshalJSON).
+func TestSupportTelemetrySampleMetricsIsImmutable(t *testing.T) {
+	r := fixedTestRegistry()
+	sample, err := r.BuildSample(fixedNow(), "epoch-1", 0)
+	if err != nil {
+		t.Fatalf("BuildSample: %v", err)
+	}
+	m := sample.Metrics()
+	for k := range m {
+		m[k] = -999
+	}
+	m["totally_new_key"] = 1
+
+	again := sample.Metrics()
+	for k, v := range again {
+		if v == -999 {
+			t.Fatalf("mutating a Metrics() copy leaked into the Sample: key %q = %v", k, v)
+		}
+	}
+	if _, ok := again["totally_new_key"]; ok {
+		t.Fatal("adding a key to a Metrics() copy leaked into the Sample")
+	}
+
+	b, err := json.Marshal(sample)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire struct {
+		Metrics map[string]float64 `json:"metrics"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := wire.Metrics["totally_new_key"]; ok {
+		t.Fatal("MarshalJSON serialized a mutation made to a Metrics() copy")
 	}
 }
 
@@ -91,7 +137,7 @@ func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 		InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health",
 		Read: func() float64 { calls++; return 1 },
 	}}
-	if _, err := r.BuildSample(fixedNow()); err != nil {
+	if _, err := r.BuildSample(fixedNow(), "epoch-1", 0); err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
 	if calls != 1 {
@@ -104,22 +150,22 @@ func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 // metric missing its justification) rather than silently emitting a
 // governance-incomplete sample.
 func TestSupportTelemetrySampleRejectsInvalidRegistry(t *testing.T) {
-	r := Registry{{ID: "support_health_x", TelemetryEligible: true, InSupportBundle: true, Read: func() float64 { return 0 }}}
-	if _, err := r.BuildSample(fixedNow()); err == nil {
+	r := Registry{{ID: "support_health_x", Type: Gauge, PrivacyClass: Aggregate, TelemetryEligible: true, InSupportBundle: true, Read: func() float64 { return 0 }}}
+	if _, err := r.BuildSample(fixedNow(), "epoch-1", 0); err == nil {
 		t.Fatal("BuildSample must reject an invalid registry")
 	}
 }
 
 // TestSupportTelemetrySampleDeterministicForFixedInputs — building twice with
-// the same clock and unchanged Read values yields byte-identical JSON
-// (map-order independence: encoding/json sorts map keys).
+// the same clock/epoch/sequence and unchanged Read values yields
+// byte-identical JSON (map-order independence: encoding/json sorts map keys).
 func TestSupportTelemetrySampleDeterministicForFixedInputs(t *testing.T) {
 	r := fixedTestRegistry()
-	s1, err := r.BuildSample(fixedNow())
+	s1, err := r.BuildSample(fixedNow(), "epoch-1", 7)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}
-	s2, err := r.BuildSample(fixedNow())
+	s2, err := r.BuildSample(fixedNow(), "epoch-1", 7)
 	if err != nil {
 		t.Fatalf("BuildSample: %v", err)
 	}

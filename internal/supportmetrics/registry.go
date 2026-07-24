@@ -17,12 +17,16 @@ import (
 
 // MetricType is the wire kind of a governed metric. Every value is a
 // label-free scalar regardless of kind — Counter is reserved for a future
-// monotonic support-health signal; Slice 1 uses Gauge exclusively.
+// monotonic support-health signal; Slice 1 uses Gauge exclusively. The zero
+// value is MetricTypeUnknown (fails Validate) rather than a real kind like
+// Gauge, so an omitted/forgotten classification is caught, not silently
+// treated as valid (fail-closed).
 type MetricType int
 
 // MetricType values.
 const (
-	Gauge MetricType = iota
+	MetricTypeUnknown MetricType = iota
+	Gauge
 	Counter
 )
 
@@ -37,15 +41,20 @@ func (t MetricType) String() string {
 	}
 }
 
+func (t MetricType) valid() bool { return t == Gauge || t == Counter }
+
 // PrivacyClass records why a metric is (or would be) safe to leave the
-// appliance. Public/LocalOnly are defined for completeness and future
-// entries; Slice 1's entire eligible set is Aggregate (appliance-own-health,
-// non-identifying).
+// appliance. The zero value is PrivacyClassUnknown (fails Validate) rather
+// than Public, so an omitted classification is caught instead of defaulting
+// to the most permissive class (fail-closed). LocalOnly is defined for
+// completeness/future entries that are support-bundle-only and must never
+// be telemetry-eligible — enforced below.
 type PrivacyClass int
 
 // PrivacyClass values.
 const (
-	Public PrivacyClass = iota
+	PrivacyClassUnknown PrivacyClass = iota
+	Public
 	Aggregate
 	LocalOnly
 )
@@ -63,6 +72,8 @@ func (c PrivacyClass) String() string {
 	}
 }
 
+func (c PrivacyClass) valid() bool { return c == Public || c == Aggregate || c == LocalOnly }
+
 // idPattern constrains metric IDs to a closed, delimiter-safe vocabulary
 // (lowercase snake_case) — the same discipline that keeps them safe to use
 // as canonical-hash field values and rules out anything label/template-shaped
@@ -75,9 +86,9 @@ var idPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // bundle's health section, whether it is approved for telemetry (default
 // DENY — the zero value is false), a mandatory justification when eligible,
 // and the live read. Buckets is populated only for coarse-bucketed metrics
-// and canonically names each bucket boundary — it participates in
-// registry_hash so a bucket-boundary change is a governed schema change,
-// not a silent behavior change.
+// and is the SAME BucketLadder value the Read closure evaluates against
+// (see buckets.go) — it participates in registry_hash so a threshold change
+// is a governed schema change, not a silent behavior change.
 //
 // Descriptors are read-only after Registry construction: nothing in this
 // package mutates a Descriptor once assembled into a Registry.
@@ -88,7 +99,7 @@ type Descriptor struct {
 	InSupportBundle   bool
 	TelemetryEligible bool
 	TelemetryReason   string
-	Buckets           []string
+	Buckets           *BucketLadder
 	Read              func() float64
 }
 
@@ -98,11 +109,14 @@ type Descriptor struct {
 type Registry []Descriptor
 
 // Validate enforces the structural invariants every descriptor must satisfy:
-// non-empty label-free-safe ID, no duplicate IDs, a live Read callback, and —
-// the default-deny contract — a non-empty TelemetryReason on every
-// TelemetryEligible entry, which must also be marked InSupportBundle (the
-// telemetry-eligible set is always a subset of the support-bundle set, §15
-// TestSupportTelemetrySubset).
+// non-empty label-free-safe ID, no duplicate IDs, a valid (non-Unknown) Type
+// and PrivacyClass, a live Read callback, and — the default-deny contract —
+// a non-empty TelemetryReason on every TelemetryEligible entry, which must
+// also be marked InSupportBundle (the telemetry-eligible set is always a
+// subset of the support-bundle set, §15 TestSupportTelemetrySubset) and must
+// NOT be PrivacyClass LocalOnly (a LocalOnly classification is a positive
+// declaration that the value must never leave the box; TelemetryEligible on
+// such an entry is a contradiction, not a policy choice).
 func (r Registry) Validate() error {
 	seen := make(map[string]bool, len(r))
 	for _, d := range r {
@@ -116,6 +130,12 @@ func (r Registry) Validate() error {
 			return fmt.Errorf("supportmetrics: duplicate metric id %q", d.ID)
 		}
 		seen[d.ID] = true
+		if !d.Type.valid() {
+			return fmt.Errorf("supportmetrics: metric %q has invalid/unclassified Type (%v)", d.ID, d.Type)
+		}
+		if !d.PrivacyClass.valid() {
+			return fmt.Errorf("supportmetrics: metric %q has invalid/unclassified PrivacyClass (%v)", d.ID, d.PrivacyClass)
+		}
 		if d.Read == nil {
 			return fmt.Errorf("supportmetrics: metric %q has no Read callback", d.ID)
 		}
@@ -125,6 +145,9 @@ func (r Registry) Validate() error {
 			}
 			if !d.InSupportBundle {
 				return fmt.Errorf("supportmetrics: metric %q is telemetry-eligible but not marked InSupportBundle (telemetry_eligible must be a subset of in_support_bundle)", d.ID)
+			}
+			if d.PrivacyClass == LocalOnly {
+				return fmt.Errorf("supportmetrics: metric %q is telemetry-eligible but classified LocalOnly (LocalOnly must never leave the box)", d.ID)
 			}
 		}
 	}
@@ -141,4 +164,36 @@ func (r Registry) Eligible() []Descriptor {
 		}
 	}
 	return out
+}
+
+// InBundle returns the subset of descriptors marked InSupportBundle, in
+// registry order.
+func (r Registry) InBundle() []Descriptor {
+	out := make([]Descriptor, 0, len(r))
+	for _, d := range r {
+		if d.InSupportBundle {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// BundleSnapshot reads every InSupportBundle descriptor's current value.
+// This is what makes the registry an ACTUAL shared source for support-bundle
+// health (§6) rather than only a metadata claim: the support bundle's
+// health section (package main) calls this directly — the exact same
+// Read closures and the exact same registry the telemetry sample/preview
+// use — so a metric present in the bundle is provably the same metric (and
+// the same live value) telemetry would show, not a separately-maintained
+// mirror. Side-effect-free, like BuildSample.
+func (r Registry) BundleSnapshot() (map[string]float64, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	inBundle := r.InBundle()
+	out := make(map[string]float64, len(inBundle))
+	for _, d := range inBundle {
+		out[d.ID] = d.Read()
+	}
+	return out, nil
 }
