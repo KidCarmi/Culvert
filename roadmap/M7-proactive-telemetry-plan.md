@@ -1,8 +1,19 @@
 # M7 — Proactive support & opt-in telemetry: design + red-team + 4-slice plan
 
-- **Status:** Proposed (design), **Revision 1** — the red-team below is now folded
-  back into the design as concrete changes, not just a threat list. Final milestone
-  of the supportability roadmap (`docs/support/SUPPORTABILITY-ROADMAP.md` §M7). M0–M6 shipped.
+- **Status:** Proposed (design), **Revision 2** — the red-team (Rev 1) and Codex
+  review (Rev 2) are folded back into the design as concrete changes, not just a
+  threat list. Final milestone of the supportability roadmap
+  (`docs/support/SUPPORTABILITY-ROADMAP.md` §M7). M0–M6 shipped.
+
+> **Revision 2 (Codex-review design changes).**
+> - **Telemetry requires an authenticated identity to enable.** Rev 1 removed
+>   `node_id`, making authenticated transport the *sole* attribution mechanism — so
+>   `telemetryEnabled()` now mandates a bearer credential **or** explicit mTLS
+>   (`Enabled && Endpoint!="" && (Credential!="" || MTLS)`); an endpoint-only config
+>   is refused. The sender can never emit unauthenticated/unattributable telemetry.
+> - **The `node_id` removal is scoped to the telemetry payload/config**, not to
+>   locally pre-staged support bundles — those keep their normal node identity in the
+>   manifest (expected, redaction-governed, never sent without separate upload consent).
 
 > **Revision 1 (red-team-driven design changes).** Three red-team findings are
 > resolved *in the design* rather than only by tests:
@@ -125,11 +136,18 @@ not bless, and the wall makes "provably non-sensitive" a machine-checked fact.
 ### Slice 2 — Telemetry consent switch + config + preview GUI (ZERO EGRESS)
 
 **Ships**
-- `telemetryConfig{Enabled, Endpoint, Credential}` at
-  `<dataDir>/support/telemetry_config.json` — cloned 1:1 from `uploadConfig`
-  (fail-closed load, atomic 0600 save, `telemetryEnabled()` = `Enabled && Endpoint!=""`,
-  redacted read model reporting only `credential_set`). **Its own** endpoint +
-  credential — never borrows upload's.
+- `telemetryConfig{Enabled, Endpoint, Credential, MTLS}` at
+  `<dataDir>/support/telemetry_config.json` — cloned from `uploadConfig`
+  (fail-closed load, atomic 0600 save, redacted read model reporting only
+  `credential_set`). **Its own** endpoint + credential — never borrows upload's.
+- **`telemetryEnabled()` requires an authenticated identity (Rev 2, Codex):**
+  `Enabled && Endpoint!="" && (Credential!="" || MTLS)`. Because Rev 1 removed
+  `node_id` from the payload, the gateway attributes the appliance **solely** from
+  authenticated transport — so a bearer credential (or explicit client-cert/mTLS
+  config) is **mandatory** to enable telemetry. An endpoint-only config is refused at
+  PUT time (400) and `telemetryEnabled()` stays false, so the sender can never emit
+  unauthenticated/unattributable telemetry. The PUT validates this alongside the
+  endpoint; the credential is stored 0600, never echoed.
 - `validateTelemetryEndpoint` (https-only, non-private literal IP refused; mirrors
   `validateUploadOrigin`).
 - `GET/PUT /api/support/telemetry/config` (viewer/admin), audited
@@ -143,6 +161,8 @@ not bless, and the wall makes "provably non-sensitive" a machine-checked fact.
   invariant, now with 2 of 4 real).
 - Config round-trip + fail-closed-on-corrupt; RBAC + audit; credential redaction
   (never echoed; preserved across posture flips; explicit clear).
+- `TestTelemetryRequiresAuth` — enabling with an endpoint but no credential and no
+  mTLS is refused (400) and `telemetryEnabled()` stays false (Rev 2).
 
 **Still zero egress:** no sender is wired. This isolates the consent model + preview
 from the phone-home.
@@ -305,8 +325,12 @@ into for a narrow purpose**. Each item is attack → defense → test.
 2. Every new route has `uiRoutes` metadata + a UI affordance + a
    `route-classification.yaml` row (GUI parity + OpenAPI coverage gate).
 3. Every new persisted state (`telemetry_config.json`, staged bundles) lives under
-   `<dataDir>/support` and is bounded (retention/preflight). (No `node_id` is
-   persisted — Rev 1 removed in-body identifiers entirely.)
+   `<dataDir>/support` and is bounded (retention/preflight). The `node_id` removal
+   (Rev 1) applies to the **telemetry payload/config only**; locally pre-staged
+   support bundles (Slice 4) keep their normal node identity in the manifest
+   (`clusterRole.nodeID`, `SUPPORT-BUNDLE-SPEC.md`) — that is expected, redaction-
+   governed, and never leaves the box without the operator's separate upload consent
+   (Rev 2, Codex).
 4. Additive-only wire/format; telemetry opt-in defaults off; telemetry + proactive
    are independent, both default-off (clean rollback).
 
