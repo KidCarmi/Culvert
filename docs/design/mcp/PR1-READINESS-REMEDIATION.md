@@ -1925,3 +1925,71 @@ it survived.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 (v2) and the outcome-lane check
 clean, each proven to fire on seeded positives; no non-ASCII strays; documentation only; PR-1 not begun.
+
+---
+
+## Round 28 — round 27's low-risk arm dropped every successful call; and the kernel was modelled for one capability (`13f04b66` → next)
+
+Four Codex findings. Three are round 24/27 work; one is an older structural gap in the DFD set.
+
+### R28-1 (P1) — the read-only/low-risk arm terminated at integrity, so successful calls vanished
+
+Round 27 added `GATE -->|read-only / low-risk: not execution-gated| INT`. I had read "not execution-gated" as
+"does not proceed to execution", which is wrong: it means execution is **not conditioned on the commit**. Since
+DFD-5 routes **all** ALLOW-class traffic through this path, following the diagrams literally either **drops every
+successful low-risk call or discards its outcome event**.
+
+**Fix.** `GATE → XLOW["Execute read-only / low-risk call — proceeds WITHOUT a commit gate"] → OUT`, so low-risk
+traffic executes and its outcome enters the outcome lane like any other. Only the **already-denied** classes
+terminate at `INT` without execution, because there is nothing left to run — that distinction is now stated.
+
+### R28-2 (P1) — the rollback assertions passed vacuously
+
+Round 27 gated DFD-11 and pointed PR-10's re-run at the forward publication path. But **rollback's side effect
+is a swap, not a revision** — so "no new revision / nothing signed or pushed / prior epoch retained" is
+**vacuously true for an act-first rollback**. The gate I had just written could not fail on the path I had just
+gated.
+
+**Fix.** PR-10's Tests and the blocking gate now require a **separate rollback failure-injection case**: invoke
+rollback with the decision event non-persistable and assert **no swap occurred and the current snapshot remains
+active**. This is amendment 15's test-side corollary again — an absence assertion must name **that path's own**
+side effect.
+
+### R28-3 (P2) — the unconditional cleanup clause could delete the state round 24 protected
+
+`MCP-PROTO-013` ends "**MUST** deterministically release all resources associated with the offending
+message/session". Round 24 had added, earlier in the same row, the rule that an outstanding-request entry must
+be **retained** unless trustworthily correlated. An implementer reading the final clause as session cleanup
+would delete exactly the entry the earlier sentence protects — **the row contradicted itself**, and the
+contradiction was introduced by my own fix landing next to inherited text I did not re-read.
+
+**Fix.** Cleanup is now "unconditional but **scoped**": always release what was allocated to the **offending
+message**; **never** release unrelated session correlation state on the strength of a rejected message.
+"Unconditional" is defined explicitly as *the offending message is always cleaned up*, not *everything reachable
+from its session is*.
+
+### R28-4 (P2) — the protocol kernel was drawn for one capability out of two
+
+DFD-15 was scoped "Capability B", while the config surface instantiates `MCP-PROTO-*` bounds for **both**.
+DFD-1 and DFD-2 began at the Management listener and went straight to authorization/tool handling, so the DFD
+set contained **no structural path showing hostile Management traffic through strict decoding, version
+negotiation, lifecycle checks and bounds**.
+
+**Fix.** DFD-15 is now Capability **A and B**, with its entry node and caption stating that the same kernel
+evaluates each listener against **its own** bound set; DFD-1 and DFD-2 now show the kernel explicitly upstream
+of the Management listener, so they read as downstream of DFD-15 rather than as a path around it.
+
+**Twenty-first amendment — a per-capability requirement needs a per-capability *structure*, not only
+per-capability rows.** Rounds 16–17 established that paired config rows and paired tests are required; this
+round shows the same split must exist in the **flow model**. A capability whose traffic has no drawn path
+through a control has no structural evidence that the control applies to it, whatever the config matrix says.
+
+**Standing note.** Rounds 22–28: eight consecutive rounds in which each round's fix produced the next round's
+findings. Fourteen of the last seventeen rounds found defects in the immediately preceding round's new text.
+Round 27's low-risk arm is the clearest case yet of a fix that read correctly and broke the flow it was
+describing.
+
+**Unchanged by round 28:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean;
+`SPOOL` still has zero unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.

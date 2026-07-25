@@ -19,7 +19,8 @@ Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010.
 
 ```mermaid
 flowchart LR
-  AC[AI Client] -- bearer: mgmt scope --> L1{{/mcp/management listener}}
+  AC[AI Client] -- bearer: mgmt scope --> K15["Protocol kernel — see DFD-15<br/>strict decode + structural bounds<br/>+ version + lifecycle (Management bound set)"]
+  K15 --> L1{{/mcp/management listener}}
   subgraph Culvert Management MCP
     L1 --> AZ[Mgmt authz: RBAC + tenant + read-only default]
     AZ --> RO[Bounded read-only tool]
@@ -38,7 +39,8 @@ Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046.
 
 ```mermaid
 flowchart LR
-  AC[AI Client] --> L1{{/mcp/management}}
+  AC[AI Client] --> K15["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle"]
+  K15 --> L1{{/mcp/management}}
   L1 --> DR[Draft policy tool]
   DR --> VAL[Validate syntax + simulate blast radius]
   VAL --> AUD[Full audit: no activation]
@@ -175,7 +177,8 @@ flowchart LR
   GATE -->|"configuration publication"| XPUB["Snapshot SIGN → push → apply<br/>enters DFD-10 at SIGN, never earlier"]
   GATE -->|"credential issue / rotate / revoke"| XCRED["Broker MATERIALIZATION<br/>mint / rotate / revoke"]
   GATE -->|"state-affecting Management op"| XMGMT["Management state change<br/>out of V1 — ADR-0024 D-13"]
-  GATE -->|"read-only / low-risk: not execution-gated"| INT
+  GATE -->|"read-only / low-risk: NOT execution-gated"| XLOW["Execute read-only / low-risk call<br/>proceeds WITHOUT a commit gate<br/>see LOSS for the non-persistable case"]
+  XLOW --> OUT
   GATE -->|"auth-failure / authz-denial event, commit CONFIRMED:<br/>request already denied, nothing to gate"| INT
   XUP --> OUT["Outcome event — emitted AFTER the irreversible action<br/>NOT the fail-closed gate"]
   XPUB --> OUT
@@ -195,6 +198,8 @@ flowchart LR
   INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
+**The gate decides whether execution is *gated*, not whether it happens.** A committed **read-only / low-risk** decision proceeds to execution (`XLOW`) **without** being gated on the commit, and its outcome enters the outcome lane like any other — routing it straight to integrity/export would either drop every successful low-risk call or silently discard its outcome event, since DFD-5 sends **all** ALLOW-class traffic through this path. Only the **already-denied** classes terminate at `INT` without execution, because there is nothing left to run.
+
 **`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor the lockout — which would make the single dispatch below decorative. A **successfully committed** denial event is routed to `INT` **through `GATE`**, after classification, not around it.
 
 **Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); read-only/low-risk to degraded only. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
@@ -287,9 +292,9 @@ Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits m
 **listener-side** Origin/Host enforcement on this public path is **MCP-INSP-009** (Future DMZ gate;
 `MCP-INSP-008` is the PR-1 validation primitive only), plus MCP-OPS-002.
 
-## DFD-15 — Protocol-kernel decode path (Capability B, PR-1)
+## DFD-15 — Protocol-kernel decode path (Capability **A and B**, PR-1)
 
-Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **PR-1 ships this decode
+Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, classification, structural bounds, version negotiation and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. DFD-1 and DFD-2 therefore begin **downstream of this diagram** (both now show the kernel explicitly); they are not an alternative path around it. **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
 `MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here. **PR-1 is
 identity-agnostic:** the `MCP-PROTO-012` state machine holds an **immutable, opaque session context that
@@ -298,7 +303,7 @@ so the **identity half of MCP-T-069 is NOT closed by this diagram**.
 
 ```mermaid
 flowchart LR
-  BYTES["Hostile client bytes<br/>(untrusted)"] --> FRAME[Bounded transport / framing<br/>MCP-PROTO-005/006/008]
+  BYTES["Hostile client bytes (untrusted)<br/>EITHER listener: Gateway or Management"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
   FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
   DEC --> CLASS[Classify req/resp/notif + method<br/>reject unknown/unsupported<br/>MCP-PROTO-002; ID correlation MCP-PROTO-003]
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
