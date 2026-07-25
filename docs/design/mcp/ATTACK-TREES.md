@@ -133,7 +133,7 @@ Goal: Prevent a decision/security event from being recorded
 | Queue saturation | MCP-T-044 | MCP-EVENT-001,002 |
 | Wedge export | MCP-T-044 | MCP-EVENT-001,002 |
 | Tamper stored events | MCP-T-045 | MCP-EVENT-005 |
-| Undefined loss policy | MCP-T-044 | MCP-EVENT-002 (fail closed/degraded) |
+| Undefined loss policy | MCP-T-044 | MCP-EVENT-002 — for critical classes **fail closed AND** enter degraded mode + alert + integrity-protected loss counter (**not** "fail closed *or* degrade"); see [`EVENT-MODEL.md`](EVENT-MODEL.md) §4a and ADR-0024 §D-5 |
 
 ## AT-8 — Control Plane compromise / split-brain
 

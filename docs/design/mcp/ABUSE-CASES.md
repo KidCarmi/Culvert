@@ -23,16 +23,17 @@ when its test passes with the expected control, event and policy result.
 - **Test:** wrong-audience negative test.
 - **Owner:** IAM/Sec. **Severity:** High. **Closure:** foreign `aud` always denied.
 
-### MCP-AC-002 — Token replay
-- **Attacker:** captured a valid access token.
+### MCP-AC-002 — Stolen-token abuse / DPoP-proof replay
+- **Attacker:** captured a valid access token (and, on a DPoP profile, a captured proof).
 - **Preconditions:** token not yet expired/revoked.
-- **Path:** replay the same token on a second call (MCP-T-002).
+- **Path:** reuse the stolen token from a different client/context, and — on a sender-constrained profile —
+  replay a captured **DPoP proof** (MCP-T-002).
 - **Affected assets:** A-2.
-- **Expected control:** MCP-AUTH-006 replay protection (**net-new; NOT VERIFIED as present** — VRC §6).
-- **Expected event:** decision/DENY, `MCP.AUTH.REPLAY_SUSPECTED`.
-- **Expected policy result:** DENY or step-up.
-- **Test:** replay negative matrix.
-- **Owner:** IAM/Sec. **Severity:** High. **Closure:** replayed token rejected/flagged.
+- **Expected control:** MCP-AUTH-006 as **reframed by [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) items 7–9** — a layered posture (TLS, short TTL, audience/resource restriction, issuer/sig/exp/tenant/scope validation, introspection/revocation, client/session correlation + rate limits + anomaly signals, and **sender-constrained tokens (mTLS/DPoP) on high-risk or externally reachable profiles**). **Net-new; NOT VERIFIED as present** — VRC §6. **Note:** reuse of a still-valid access token is **NOT by itself evidence of replay**, so this case **MUST NOT** be closed by one-time-use rejection of an access-token `jti`; where DPoP is in use, replay detection applies to the **per-request proof** (proof `jti`, method, URI, `iat`, `ath`, nonce), never the access token.
+- **Expected event:** decision/DENY on a **replayed DPoP proof** (`MCP.AUTH.REPLAY_SUSPECTED`); for bare stolen-token reuse, an anomaly/rate-limit security event — not an automatic DENY purely because the token was seen twice.
+- **Expected policy result:** DENY for a replayed proof or a failed sender-constraint check; step-up / rate-limit / flag for anomalous stolen-token reuse.
+- **Test:** DPoP-proof replay + sender-constraint + anomaly/rate-limit matrix (**not** an access-token one-time-use test).
+- **Owner:** IAM/Sec. **Severity:** High. **Closure:** replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles; stolen-token abuse rate-limited/flagged.
 
 ### MCP-AC-003 — Token in query string
 - **Attacker:** any caller.

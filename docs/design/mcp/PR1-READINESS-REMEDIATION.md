@@ -750,3 +750,45 @@ reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not begun.
 performed, including re-scopes of **facts** (like the CodeQL correction) and **layer moves between two existing
 requirements** (`MCP-OPS-002` → `MCP-PROTO-006/008`) — not only splits that created a *new* ID. Before
 declaring a sweep complete, list the re-scopes it covered; anything not on that list is unswept by definition.
+
+---
+
+## Round 11b — the enumerated re-scope audit (self-initiated, no finding filed)
+
+Round 11's lesson was that an audit is only as good as its **enumeration** of what was re-scoped. So this pass
+first wrote the list, then checked each entry's consumers. **The enumeration is the deliverable** — future
+editors should extend this table rather than re-derive it.
+
+| # | Re-scope performed by this package | Swept in |
+|---|---|---|
+| 1 | `MCP-INSP-008` → **+`MCP-INSP-009`** (primitive PR-1 / listener PR-5) | 7, 10, 10b, 11b |
+| 2 | `MCP-PROTO-012` → **+`MCP-ID-008`** (lifecycle PR-1 / identity PR-3) | 7, 8, 10b |
+| 3 | `MCP-CONNECT-004` → **`MCP-ID-007`** for V1 Model A tenant binding (PR-3) | 7, 10, 10b |
+| 4 | Threat register `MCP-T-001..056` → **`..074`** | 9 |
+| 5 | `MCP-OPS-002` → **`MCP-PROTO-006/008`** for parse-time bounds (PR-1) | 11 |
+| 6 | CodeQL **fact** correction (already wired; blocking-status-only gap) | 11 |
+| 7 | `MCP-INSP-001` → **`MCP-PROTO-006`** for *structural* bounds (INSP-001 becomes semantic-only) | **11b** |
+| 8 | PR-11 → **PR-C / Future DMZ gate** (connector + DMZ slice moves) | **11b** — verified consistent |
+| 9 | `MCP-AUTH-006` **reframed** (layered posture + DPoP-proof replay; **not** access-token `jti`) | **11b** |
+| 10 | `MCP-EVENT-002` critical classes → **fail closed AND** degraded+alert (not "or") | **11b** |
+
+Axes 7, 9 and 10 each still had a stale consumer; axis 8 checked clean.
+
+- **Axis 9 was the most serious.** `MCP-AC-002` still read *"replay the same token on a second call … Closure:
+  replayed token rejected/flagged"* — i.e. it demanded exactly the **one-time-use access-token `jti`** behavior
+  that ADR-0024 §D-2 items 7–9 **forbid**. An implementer closing that abuse case would have built the
+  rejected design. It is rewritten as **stolen-token abuse / DPoP-proof replay**: replay detection binds to the
+  **per-request DPoP proof**, bare token reuse yields anomaly/rate-limit handling rather than an automatic DENY,
+  and the test is explicitly **not** an access-token one-time-use test.
+- **Axis 10:** `ATTACK-TREES.md` AT-7 "Undefined loss policy" mitigation read `MCP-EVENT-002 (fail
+  closed/degraded)` — the slash reads as **or**, the exact weakening corrected in `BLUEPRINT.md` earlier. Now
+  "**fail closed AND** degraded mode + alert + integrity-protected loss counter", citing EVENT-MODEL §4a / §D-5.
+- **Axis 7:** the ASVS **V5** row still assigned "input schema/size/depth/field-count bounds" to `MCP-INSP-001`
+  at PR-7 only; it now splits structural (`MCP-PROTO-006/008`, PR-1) from semantic (`MCP-INSP-001`, PR-7). The
+  two `mcp_gateway_inspect_max_{schema_depth,field_count}` config rows are **kept** on `MCP-INSP-001` — they are
+  genuinely inspection-stage settings — but each now says explicitly that it is **not** the kernel's structural
+  parse-time bound, which is enforced earlier by `MCP-PROTO-006`.
+
+**Unchanged:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined; documentation only; PR-1 not begun.
