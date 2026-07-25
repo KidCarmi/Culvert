@@ -1208,3 +1208,84 @@ are one script over a table column, and both should have run in round 16.
 **Unchanged by round 17:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.
+
+---
+
+## Round 18 — three latent protocol-correctness defects in the requirements themselves (`a5059664`)
+
+Three P1 findings from Codex. **This round is categorically different from rounds 5–17.** Those were
+*propagation* failures (a re-scope not reaching every consumer) and *verification* failures (an invariant no
+test enforced). These three are **substantive protocol and security defects in the requirement statements
+themselves** — present since the package was first written, and survived seventeen review rounds because
+every prior round was checking whether the documents agreed with each other, not whether what they agreed on
+was correct against JSON-RPC and HTTP semantics.
+
+### R18-1 (P1) — `MCP-PROTO-003` required correlating notifications, which have no `id`
+
+**Finding.** The requirement said reject/ignore any response **or notification** whose ID cannot be correlated
+to an outstanding request. A JSON-RPC notification is a request object **without** an `id` member — that is
+its definition. So the requirement directed PR-1 to **reject every valid notification**: cancellation,
+progress, list-changed. The package contradicted itself two rows away, where `PROTOCOL-COMPATIBILITY.md`
+already described a notification as "one-way with no correlatable response".
+
+**Fix.** Correlation is now explicitly **response-only**. Notifications are validated independently: a
+notification bearing a top-level `id` is a classification error and is rejected (`MCP-PROTO-002`); its method
+token is validated (`MCP-PROTO-002`/`014`); size/rate bounds still apply (`MCP-PROTO-006`/`008`). Added the
+case the original wording obscured — a cancellation names a request `id` in its **params**, and that
+param-level reference must resolve only within the **same session**, so it cannot cancel another tenant's
+request. Propagated to `PROTOCOL-COMPATIBILITY.md`'s `id`-correlation row and `MCP-AC-022`.
+
+### R18-2 (P1) — `MCP-PROTO-013` mandated a reply to rejected notifications (reply amplification)
+
+**Finding.** "Every exceeded limit / rejected message **MUST** yield a defined, bounded JSON-RPC error" was
+unconditional. Applied to a notification it (a) breaks one-way conformance and (b) converts a cheap
+notification flood into **reply amplification** — the attacker sends small notifications, the server answers
+every one. A requirement whose literal implementation creates a DoS amplifier.
+
+**Fix.** Handling is now by message class: a rejected **request** gets the bounded error; a rejected
+**notification** gets **no wire response**, only a recorded rejection (event + metric) and cleanup. Only a
+message that cannot be parsed or classified at all may emit one `id: null` error, and **that path is itself
+rate-bounded** so it cannot become the amplifier by another route. The cleanup guarantee stays
+**unconditional** across all classes. Propagated to the `Errors` row of `PROTOCOL-COMPATIBILITY.md`.
+
+### R18-3 (P1) — `MCP-INSP-009` enforced the host allowlist at accept time, where the headers do not exist
+
+**Finding.** The requirement said enforce the allowlist "at accept time" and invoke the primitive "on every
+connection". `Host`/`:authority` and `Origin` are **per-request headers that do not exist at socket accept**,
+and with HTTP keep-alive — especially multiplexed **HTTP/2** — one accepted connection carries many requests
+each with its own values. A listener could satisfy the requirement literally by validating the first request
+and let **every subsequent request on that connection bypass the rebinding control**. This is a real bypass in
+the control that MCP-T-031/055/052 depend on.
+
+**Fix.** The two obligations are separated: interface **binding** is the only accept-time obligation;
+Origin/Host validation **MUST** run after header parsing on **every request and every HTTP/2 stream**, never
+once per connection. The E2E proof must **exercise connection reuse and H2 multiplexing** — an allowed first
+request followed by a disallowed `Host`/`Origin` on the *same connection* must be rejected. Per amendments 7
+and 8 this is in the **blocking** Origin/Host gate ("a listener that validates only at accept time or once per
+connection MUST fail"), the `MCP-T-031` traceability row, `ON-PREM-CONNECTIVITY.md` §7 and ADR-0024 §D-9 —
+all three of which repeated the accept-time framing.
+
+### Sweep (amendment 8 applied before shipping)
+
+Each finding was turned into a predicate and run over the package before fixing:
+
+| Predicate | Consumers found | Reported by Codex |
+|---|---|---|
+| Enforcement described as connection/accept-level for data that is per-request | 3 (`SECURITY-REQUIREMENTS` MCP-INSP-009, `ON-PREM-CONNECTIVITY` §7, `ADR-0024` §D-9) | 1 |
+| Mandates a wire response without excluding notifications | 2 (`SECURITY-REQUIREMENTS` MCP-PROTO-013, `PROTOCOL-COMPATIBILITY` Errors row) | 1 |
+| Treats a notification as correlatable by `id` | 3 (`SECURITY-REQUIREMENTS` MCP-PROTO-003, `PROTOCOL-COMPATIBILITY` `id` row, `ABUSE-CASES` MCP-AC-022) | 1 |
+
+**Ninth amendment — internal agreement is not correctness.** Every sweep discipline accumulated in rounds
+5–17 tests whether the documents are *consistent with each other*. All three of these defects were perfectly
+consistent across the package: the wrong rule was stated once and echoed faithfully. Consistency checking
+cannot find them, and neither can a test-coverage check, because a test written from the defective requirement
+would assert the defective behaviour. The only thing that finds them is reading a requirement **against the
+external protocol it claims to implement** — JSON-RPC 2.0 message classes here, HTTP/1.1 keep-alive and HTTP/2
+multiplexing there. For every requirement citing an `[EXT]` external fact, the check is: *would a conformant
+implementation of the named spec satisfy this sentence, and does the sentence's literal reading create a
+behaviour the spec forbids?* Two of these three had the answer written down elsewhere in this same package.
+
+**Unchanged by round 18:** no requirement or threat ID added, removed or renumbered (three requirement
+*statements* corrected). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats /
+91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both`
+capability rows; documentation only; PR-1 not begun.

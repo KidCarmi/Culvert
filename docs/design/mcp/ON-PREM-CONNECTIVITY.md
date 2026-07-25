@@ -144,8 +144,10 @@ Culvert`. This is the only model that exposes a routable, internet-reachable MCP
 > response; do **not** invent a blanket rule that every non-browser client must always send an `Origin`
 > header unless the selected protocol version explicitly requires it. Inbound Origin/Host anti-rebinding is
 > **split across two layers**: the **validation primitive** (`MCP-INSP-008`) is a **PR-1** requirement (pure,
-> listener-independent, no socket), while the **listener-side enforcement** — binding configured interfaces,
-> allowlist at accept time, **E2E** rebinding proof — is **`MCP-INSP-009`** (**PR-5** for the Model A local
+> listener-independent, no socket), while the **listener-side enforcement** — binding configured interfaces (the only
+> accept-time obligation), evaluating the allowlist **per request / per H2 stream after header parsing** (never once
+> per connection — `Host`/`Origin` do not exist at accept time and keep-alive/H2 carry many requests per
+> connection), **E2E** rebinding proof **including connection reuse** — is **`MCP-INSP-009`** (**PR-5** for the Model A local
 > listener; the **Future DMZ gate** for a Model C public listener). **PR-1 binds no listener, so the
 > live-listener control for this model is NOT satisfied by PR-1 work.** See
 > [`ADR-0024 §D-9`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) item 6.

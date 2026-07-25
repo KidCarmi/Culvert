@@ -176,7 +176,9 @@ and is disabled by default**.
    - the **validation primitive** (`MCP-INSP-008`) is a **PR-1 Protocol Kernel requirement** — a pure,
      listener-independent decision function, unit-tested without a socket; and
    - the actual **listener-side enforcement/protection** (`MCP-INSP-009`) is **PR-5**: binding only
-     configured interfaces, enforcing the host allowlist at accept time, and **end-to-end** rebinding proof
+     configured interfaces (the only accept-time obligation), enforcing the host allowlist **per request / per HTTP/2
+     stream after header parsing** — never once per connection, since `Host`/`:authority`/`Origin` do not exist at
+     accept time and keep-alive/H2 multiplexing carry many requests per connection — and **end-to-end** rebinding proof
      against a running listener.
 
    **PR-1 binds no listener, so this item is NOT satisfied by PR-1 alone** — the inbound rebinding threats

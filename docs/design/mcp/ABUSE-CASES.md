@@ -235,7 +235,7 @@ when its test passes with the expected control, event and policy result.
 - **Test:** parser-differential + duplicate-key fixtures. **Owner:** Sec/Eng. **Severity:** High. **Closure:** validated message == forwarded message, always.
 
 ### MCP-AC-022 — Response mis-correlation / request-ID confusion
-- **Attacker:** client replaying/forging response or notification IDs.
+- **Attacker:** client replaying/forging **response** `id`s, or forging a notification that carries a top-level `id` (a classification error) or that names another session's request `id` in its cancellation **params**.
 - **Preconditions:** an active session with outstanding requests.
 - **Path:** send a response whose `id` matches no outstanding request, or a duplicate/null/oversized id (MCP-T-060,071).
 - **Affected assets:** A-9, A-3.
