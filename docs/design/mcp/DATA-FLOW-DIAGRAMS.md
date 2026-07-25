@@ -93,8 +93,11 @@ flowchart LR
     ID --> II[Input inspection]
     II --> POL[Policy engine: pure, default-deny]
     POL --> DEC{Decision}
-    DEC -- ALLOW-class --> CB[Credential broker]
+    DEC -- ALLOW-class --> CBP["Credential broker: PLAN only<br/>choose identity + scope, NO mutation"]
     DEC -- DENY/QUARANTINE/APPROVAL --> EV[(Decision events)]
+    CBP --> WAL{{"DURABLE decision-event COMMIT<br/>critical classes — MCP-EVENT-002<br/>commit FAILED ⇒ fail closed, nothing runs<br/>see DFD-9"}}
+    WAL -- "commit CONFIRMED" --> CB["Credential broker: MATERIALIZE<br/>mint / rotate / revoke"]
+    WAL -- "commit FAILED" --> FCG["Fail closed + degraded + alert<br/>no credential minted, no upstream call"]
     CB --> CALL[Call upstream with scoped cred]
     CALL --> OI[Output inspection]
     OI --> EV
@@ -112,10 +115,12 @@ Crosses TB-2. Threats: MCP-T-022..025, MCP-T-005.
 
 ```mermaid
 flowchart LR
-  DEC[Policy ALLOW-class] --> SEL[Select credential profile by env/server/tool/resource]
+  DEC[Policy ALLOW-class] --> SEL[Select credential profile by env/server/tool/resource<br/>PLAN — no broker mutation]
   SEL --> SCOPE{Scope <= action?}
   SCOPE -- no --> DENY[DENY + security event]
-  SCOPE -- yes --> FETCH[Fetch short-lived cred bounded+encrypted cache]
+  SCOPE -- yes --> WALC{{"DURABLE decision-event COMMIT<br/>credential class — MCP-EVENT-002<br/>MUST precede any broker mutation"}}
+  WALC -- "commit FAILED" --> FCC["Fail closed + degraded + alert<br/>broker state UNCHANGED: nothing minted/rotated/revoked"]
+  WALC -- "commit CONFIRMED" --> FETCH[Fetch short-lived cred bounded+encrypted cache<br/>MATERIALIZE]
   FETCH --> USE[Attach to upstream call only]
   USE -. never returned to agent .-> A[Agent]:::x
   classDef x stroke-dasharray: 5 5,stroke:#c00;
@@ -165,7 +170,7 @@ flowchart LR
   RDX --> Q[[Bounded queue + backpressure]]
   Q -->|"admitted (NOT yet a commit)"| SPOOL[Mandatory local encrypted durable spool per DP]
   SPOOL -->|"commit CONFIRMED"| GATE{Critical action class?}
-  SPOOL -->|"commit FAILED: ENOSPC / fsync error / encryption-key failure"| FC
+  SPOOL -->|"commit FAILED: ENOSPC / fsync error / encryption-key failure"| LOSS
   GATE -->|"write / destructive"| XUP["Upstream call<br/>MCP-EVENT-002 write/destructive class"]
   GATE -->|"configuration publication"| XPUB["Snapshot SIGN → push → apply<br/>enters DFD-10 at SIGN, never earlier"]
   GATE -->|"credential issue / rotate / revoke"| XCRED["Broker MATERIALIZATION<br/>mint / rotate / revoke"]
@@ -181,12 +186,16 @@ flowchart LR
   SPOOLO -->|"commit CONFIRMED"| INT
   QO -->|"saturated"| ODEG
   SPOOLO -->|"commit FAILED"| ODEG["Degraded + alert + loss counter ONLY<br/>the operation ALREADY happened, so fail-closed is vacuous<br/>NEVER a re-execution path"]
-  Q -->|"saturated + critical write/destructive/config/credential"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
-  Q -->|saturated + auth-failure / authz-denial event| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
+  Q -->|"saturated"| LOSS{{"DURABILITY LOST — dispatch by event class<br/>IDENTICAL for queue saturation and spool commit failure"}}
+  LOSS -->|"critical: write / destructive / config-publication /<br/>credential / state-affecting Management"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
+  LOSS -->|"auth-failure / authz-denial (already denied)"| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
+  LOSS -->|"read-only / low-risk"| ODEG
   CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
   SPOOL --> INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
+**Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); read-only/low-risk to degraded only. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
+
 **The gate dispatches by class, because each class has a different irreversible action** (`MCP-EVENT-002`): write/destructive → the upstream call; configuration publication → snapshot **sign/push/apply**, entering DFD-10 at `SIGN` and never earlier; credential → **broker materialization** (mint/rotate/revoke); state-affecting Management → the state change. A single edge to "upstream call" would leave publication and credential mutation ungated, since neither makes one.
 
 **Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`XUP`/`XPUB`/`XCRED`/`XMGMT` → `OUT → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE`** or to any execution node. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE credential use and the upstream call**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.

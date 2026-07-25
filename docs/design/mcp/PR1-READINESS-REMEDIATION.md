@@ -1791,3 +1791,75 @@ eighteen amendments have not yet produced a round in which my own checks found w
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18 and the outcome-lane check clean (each
 proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.
+
+---
+
+## Round 26 — the durable commit had never reached the PRIMARY flows (`aeaf36b4` → next)
+
+Four Codex findings. All four are rounds 24–25 left incomplete, and the first is the most consequential
+omission in the whole durability thread.
+
+### R26-1 (P1) — DFD-5 and DFD-6, the flows an implementer actually follows, never reached the commit
+
+Rounds 22–25 built the commit-before-side-effect guarantee in DFD-9, DFD-10, DFD-15, `MCP-EVENT-002`,
+`EVENT-MODEL` §4a, `ADR-0024` §D-5 and the gates. **DFD-5 — the primary Gateway request flow — still ran
+`DEC -- ALLOW-class --> CB[Credential broker] --> CALL[Call upstream]`, and DFD-6 ran
+`SCOPE -- yes --> FETCH[Fetch short-lived cred]`.** Both are complete write/high-risk execution paths with no
+durable commit anywhere on them.
+
+So for four rounds the guarantee existed on the diagram that *describes event publication* and was absent from
+the two diagrams that *describe how a call is served*. An implementer following DFD-5 would mint a credential
+and call upstream before any event was persisted, and would never see a contradiction, because DFD-9 is a
+different page.
+
+**Fix.** DFD-5 now runs `DEC → CBP (PLAN, no mutation) → WAL{durable commit} → CB (MATERIALIZE) → CALL`, with a
+fail-closed branch asserting no credential minted and no upstream call. DFD-6 gates before `FETCH` with the
+same posture and states that broker state is unchanged on failure.
+
+### R26-2 (P1) — round 24's commit-failure edge bypassed the denial lockout
+
+Round 24 added `SPOOL -->|commit FAILED| FC` — **unconditionally**. For an already-denied
+authentication-failure / authorization-denial event, fail-closed is vacuous; the required protection is the
+**system-wide durability lockout**. So the edge I added to fix one gap opened another, and it contradicted the
+`EVENT-MODEL` text I wrote **in the same commit**, which says commit failure takes the same class dispatch as
+saturation.
+
+### R26-3 (P2) — the saturation path had no route for the class round 25 added
+
+Round 25 added `state-affecting Management op` as its own gate branch and left the saturation edge listing only
+write/destructive/config/credential. A saturated Management state change had **no route at all**.
+
+**Fix for both.** Saturation and commit failure now converge on one `LOSS` dispatch that routes by event class:
+the five critical classes → fail-closed + degraded; already-denied auth/authz-denial → critical degraded state
++ **durability lockout**; read-only/low-risk → degraded only. One dispatch, so the two entry paths cannot drift
+apart again, and coverage is verified by enumerating the classes against the diagram.
+
+### R26-4 (P1) — the PR-10 re-run reached the gate tables and not the slice contract
+
+Round 25's fix landed in `CI-GATES.md` and the traceability matrix, while `IMPLEMENTATION-SLICES.md` still
+limited PR-10's **Security requirements, Tests, Acceptance and Release gate** to
+mixed-version/corrupt-snapshot/rollback. An implementer following the per-slice contract could mark PR-10 green
+without ever running the assertion — restoring exactly the stub-only gap round 25 closed. `MCP-EVENT-002`, the
+re-run, the acceptance criterion and the release gate are now all in the PR-10 slice.
+
+**Nineteenth amendment — and the first predicate that found something before the reviewer did.**
+Predicate 19: **every DFD containing a node that performs an irreversible action** (`Call upstream`,
+`MATERIALIZE`, `Fetch short-lived`, `SIGN[`, `mint / rotate / revoke`) **must also contain a durable-commit
+node.** Applied to all fifteen DFDs it immediately reported DFD-8 — which on inspection is a **false
+positive**: DFD-8 begins at `Upstream response`, entirely post-execution, and my first pattern matched the word
+"upstream" rather than an act. I narrowed the pattern to action-performing node text instead of adding an
+exemption, then re-verified: `NONE` residual, DFD-8 correctly excluded, fires on both an upstream-call seed and
+a credential-materialize seed, and does **not** fire on `Upstream response`.
+
+That sequence is worth recording precisely because it is the first time in twenty-six rounds that one of my own
+checks did work the reviewer had not already done — and it only worked after being corrected once. It does not
+change the standing conclusion below.
+
+**Standing note.** Rounds 22–26 are one chain: each round's fix produced the next round's findings. Twelve of
+the last fifteen rounds found defects in the immediately preceding round's new text. The durability guarantee
+in particular took **five rounds** to reach the primary request flow, and during all five it read as complete.
+
+**Unchanged by round 26:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean
+(each proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.
