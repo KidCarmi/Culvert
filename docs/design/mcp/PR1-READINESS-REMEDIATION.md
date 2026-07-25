@@ -2956,3 +2956,55 @@ edits are `predicates/predicate-22.py` and this log. ADR-0024 `Status: Proposed`
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
 cases; predicates 19, 21, 22, 23, 24, 25 all exit `0` (10 seeds + 4 negative controls on predicate-22); no
 non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 45 — the round-44 fix was correct about the punctuation it was shown and wrong about the punctuation it was not (`f770d368` → next)
+
+Two findings, both **P1**, both in the branch I had just repaired. Round 44 bound the generic escape to the
+**object of `BEFORE`** and computed the scope from the sentence — and both of those decisions carried a
+hole that the reviewer's construction walked straight through.
+
+**R45-1 (P1) — the object split recognised `;` and `—` but not `,`.** The round-44 fix took the object of
+`BEFORE` as the text up to the next semicolon or em-dash, so *"For all classes, the event MUST be durably
+committed BEFORE the upstream call, **with metrics for each class's own side effect**."* still carried the
+delegation phrase inside `obj` and skipped the check. The escape I had just narrowed was reachable again
+through **the most ordinary of the three punctuation forms** — the one an author is most likely to write.
+The split is now `[;,—]`.
+
+**R45-2 (P1) — a class token anywhere in the sentence was read as the assertion's scope.** Scope context was
+the whole sentence, so *"For all classes, the event MUST be durably committed BEFORE the upstream call;
+**write** metrics are emitted separately."* was scoped to the write class — by a token that qualified the
+metrics clause, not the ordering assertion — and the sentence passed as a complete class-scoped rule.
+Context is now the sentence prefix **plus the object of `BEFORE`**, excluding trailing asides.
+
+Both are the same shape as R44-1, one layer down: **an early exit narrowed to the construct it was shown,
+not to the construct it claims to recognise.** I fixed "the marker must be in the object" without asking
+what delimits an object, and "the scope must come from the sentence" without asking which part of the
+sentence the assertion actually governs.
+
+**Action detection deliberately still runs on the full sentence span, not the object.** A legitimate
+enumeration crosses commas — *"signed, pushed or applied"* — so tightening the object was correct for the
+escape and the scope, and would have been a coverage regression for the action set. That distinction was
+checked, not assumed.
+
+**Both round-45 seeds were verified to MISS under the round-44 predicate and FIRE under the round-45 one**
+by grafting them into the committed pre-fix file. A seed that passes both before and after the fix proves
+nothing (amendment 37, one level up: a seed must discriminate the change it certifies).
+
+**Forty-first amendment — narrowing a check to the counter-example is not narrowing it to the class.** Each
+of rounds 39, 40, 41, 44 and 45 fixed a boundary or an exemption using exactly the delimiter, lookaround or
+span the reporter demonstrated. Four of the five were wrong about a sibling form within one round. When a
+fix names a syntactic construct — a sentence, a clause, an object, a scope — enumerate that construct's
+delimiters from the grammar, not from the failing example.
+
+**Standing note.** Rounds 22–45: twenty-four consecutive rounds. Rounds 37–45 have produced **nineteen**
+predicate defects and **four** design defects. **Seven of the twenty-three I introduced while fixing an
+earlier round's finding**, including both of round 45. I have found none of them before review. I do not
+claim this predicate is now correct, and I do not claim my checks are catching what the reviewers catch —
+the evidence in this log says the opposite, in every round including this one.
+
+**Unchanged by round 45:** no requirement, threat or abuse-case ID added, removed or renumbered; no
+normative statement, diagram edge, provenance claim or repository-context row changed — the only document
+edits are `predicates/predicate-22.py`, `predicates/README.md` and this log. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical (`cbfb728a`); 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0` (12 seeds + 4 negative controls on
+predicate-22); no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.

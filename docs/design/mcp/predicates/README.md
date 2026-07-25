@@ -38,7 +38,7 @@ authority changes. That failure has happened four times in this remediation
 |---|---|---|
 | `predicate-19.py` | every DFD containing an irreversible-action node also contains a durable-commit node | `MCP-EVENT-002`'s own action wording ("signed, pushed or applied", "before any broker-side materialization", …) |
 | `predicate-21.py` | each DFD's header declaration agrees with the coverage-summary row that restates it, on both the trust-boundary set and the threat set | the DFD headers and the coverage table themselves |
-| `predicate-22.py` | no live normative document states the commit-ordering precondition in a form naming FEWER than all four class-specific irreversible actions (the class-generic delegation, and a sentence scoped to one class, both pass) | `MCP-EVENT-002`'s class table + `EVENT-MODEL.md` §4a for the per-class scopes |
+| `predicate-22.py` | no live normative document states the commit-ordering precondition in a form naming FEWER than all four class-specific irreversible actions. The class-generic delegation and a sentence scoped to specific classes both pass — but only when the marker sits in the **object of `BEFORE`** (delimited by `;`, `,` or `—`), not in a trailing aside | `MCP-EVENT-002`'s class table + `EVENT-MODEL.md` §4a for the per-class scopes |
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
@@ -100,6 +100,21 @@ branch here has been wrong at least once — a bare marker matched anywhere (43)
 object of `BEFORE` (44), a multi-class sentence exempted by one class (44), a scope context read from a raw
 lookback (42). An exemption decides what *not* to look at; bind it to the exact construct it claims to
 recognise.
+
+**Narrowing a check to the counter-example is not narrowing it to the class** (round 45). Round 44 bound
+`predicate-22`'s generic escape to the object of `BEFORE` and delimited that object with `;` and `—` — the
+two forms it had been shown — leaving the escape reachable through a **comma** aside. The same round read
+the scope from the whole sentence, so a class token in a trailing aside (`… BEFORE the upstream call; write
+metrics are emitted separately.`) became the assertion's scope. Rounds 39, 40, 41, 44 and 45 all fixed a
+boundary or an exemption using exactly the delimiter the reporter demonstrated; four were wrong about a
+sibling form within one round. Enumerate a construct's delimiters from the grammar, not from the failing
+example. Note the asymmetry that fix required: the escape and the scope use the **tight object**, while
+action detection stays on the full sentence span, because a legitimate enumeration crosses commas
+(`signed, pushed or applied`).
+
+**A seed must discriminate the change it certifies** (round 45). The two round-45 seeds were run against the
+committed **pre-fix** predicate as well as the fixed one, and required to MISS there. A seed that fires
+before and after proves the harness runs, not that the fix works.
 
 **A table of test cases must assert its own distinctness** (round 44). `predicate-22`'s seeds were a dict
 keyed by target filename; two round-44 seeds reused files earlier seeds had used and were silently

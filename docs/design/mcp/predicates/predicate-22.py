@@ -149,14 +149,23 @@ def run(texts, scopes=None):
             # the assertion's own sentence: back to the previous terminator, no further
             prev = list(SENTENCE_END.finditer(flat[:m.start()]))
             sent_start = prev[-1].end() if prev else 0
-            ctx = (flat[sent_start:m.start()] + span).lower()
+            # THE OBJECT OF `BEFORE` — the noun phrase the ordering actually
+            # governs, cut at the first clause separator INCLUDING A COMMA.  A
+            # comma-delimited aside is as ordinary as a semicolon one, and
+            # splitting only on `;`/`—` left the round-44 escape reachable
+            # through it (round 45, P1).
+            obj = re.split(r'[;,—]', span[m.end() - m.start():])[0]
+            # SCOPE MUST QUALIFY THE ASSERTION, so the context is the sentence
+            # PREFIX (the "For a write, …" construction) plus the OBJECT — never
+            # the trailing remainder, where a later aside naming a class made an
+            # explicitly all-class rule look scoped to it (round 45, P1).
+            ctx = (flat[sent_start:m.start()] + ' ' + obj).lower()
             line = t[:m.start()].count('\n') + 1
             # THE GENERIC ESCAPE MUST BE THE OBJECT OF `BEFORE`.  Matching the
             # phrase anywhere in the sentence let "... committed BEFORE the
             # upstream call; metrics describe each class's own side effect"
             # skip the whole check — the delegation has to be what the ordering
             # actually points at, not a later aside (round 44, P1).
-            obj = re.split(r';|—', span[m.end() - m.start():])[0]
             if GENERIC.search(obj):
                 continue                          # delegates the enumeration
             got = named_acts(span)
@@ -231,6 +240,19 @@ if __name__ == '__main__':
         ('round 44 — scoped to TWO classes, only one class action named', 'PROTOCOL-COMPATIBILITY.md',
          'For write and configuration publication, the decision event MUST be durably '
          'committed BEFORE the upstream call.'),
+        # ROUND 45: the round-44 generic-escape fix split the object on `;` and `—`
+        # only, so the SAME escape stayed reachable through a COMMA aside — the most
+        # ordinary punctuation of the three. Reviewer's exact construction.
+        ('round 45 — generic phrase in a COMMA-delimited aside', 'AUTH-AND-CREDENTIAL-MODEL.md',
+         "For all classes, the event MUST be durably committed BEFORE the upstream call, "
+         "with metrics for each class's own side effect."),
+        # ROUND 45: scope context was the WHOLE sentence, so a class token appearing
+        # only in a trailing aside — qualifying something other than the ordering
+        # assertion — was read as the assertion's scope. Reviewer's exact construction.
+        ('round 45 — class token only in a LATER aside, not qualifying the assertion',
+         'TOOL-DISCOVERY-AND-DRIFT.md',
+         'For all classes, the event MUST be durably committed BEFORE the upstream call; '
+         'write metrics are emitted separately.'),
     ]
     ok = ok0
     assert len({lbl for lbl, _, _ in seeds}) == len(seeds), 'duplicate seed label'
