@@ -101,12 +101,14 @@ flowchart LR
     POL --> DEC{Decision}
     DEC -- ALLOW-class --> CBP["Credential broker: PLAN only<br/>choose identity + scope, NO mutation"]
     DEC -- DENY/QUARANTINE/APPROVAL --> EV[(Decision events)]
-    CBP --> WAL{{"DURABLE decision-event COMMIT<br/>critical classes — MCP-EVENT-002<br/>commit FAILED ⇒ fail closed, nothing runs<br/>see DFD-9"}}
+    CBP --> WAL{{"DURABLE decision-event COMMIT — MCP-EVENT-002<br/>commit FAILED ⇒ CLASS-AWARE, see the arms below:<br/>critical classes fail closed and NOTHING runs;<br/>read-only/low-risk follows the configured loss policy<br/>see DFD-9"}}
     WAL -- "commit CONFIRMED" --> CB["Credential broker: MATERIALIZE<br/>mint / rotate / revoke"]
     WAL -- "commit FAILED — critical class<br/>(write / destructive / config-publication /<br/>credential / state-affecting Management)" --> FCG["Fail closed + degraded + alert<br/>no credential minted, no upstream call"]
     WAL -- "commit FAILED — read-only / low-risk:<br/>NOT unconditionally fail-closed<br/>see DFD-9 LP — the configured loss policy decides" --> LPG{"configured loss policy?<br/>mcp_{gateway,mgmt}_event_loss_policy"}
-    LPG -- "degrade-and-alert" --> CB
+    LPG -- "degrade-and-alert AND no broker mutation needed<br/>(credential already valid from the PLAN phase)" --> LOWX["Proceed WITHOUT broker materialization<br/>degraded + alert + loss counter<br/>NOTHING minted, rotated or revoked"]
+    LPG -- "degrade-and-alert BUT materialization required:<br/>minting/rotating IS the credential critical class<br/>— the low-risk policy CANNOT authorise it" --> FCG
     LPG -- "fail-closed" --> FCG
+    LOWX --> CALL
     CB --> CALL[Call upstream with scoped cred]
     CALL --> OI[Output inspection]
     OI --> EV
@@ -123,6 +125,16 @@ but a **read-only / low-risk** call follows the configured loss policy (`LPG`, m
 `degrade-and-alert` behave as `fail-closed` for every low-risk call, since DFD-5 carries **all** ALLOW-class
 traffic. DFD-6/DFD-10/DFD-11 have no such arm **by construction** — credential materialization and snapshot
 publication are always critical classes.
+
+**The degraded continuation is NON-MUTATING, and that boundary is load-bearing.** A low-risk call may proceed
+after a failed commit **only** with a credential that is already valid from the non-mutating `PLAN` phase
+(`LOWX`) — it **MUST NOT** reach `CB`, because `CB` performs **materialization** (mint / rotate / revoke),
+which is itself the `MCP-EVENT-002` **credential critical class** and therefore requires a *confirmed* commit
+(DFD-6 fails it closed unconditionally). If a low-risk call needs a fresh or rotated credential, the
+materialization — **not** the low-risk call — is what the policy is being asked to authorise, and the low-risk
+loss policy **cannot** authorise it: that arm fails closed. Routing `degrade-and-alert` straight into `CB`
+would let broker state mutate *after* the commit failed, which is the exact failure `MCP-EVENT-002` exists to
+prevent, reintroduced by the fix that restored the configured behaviour.
 
 ## DFD-6 — Credential selection (Capability B)
 

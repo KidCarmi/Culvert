@@ -2202,3 +2202,49 @@ eleventh consecutive round's worth of evidence for the same conclusion — and i
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases; predicates 7, 13, 18, 19, 21, 22 and the outcome-lane check clean; `SPOOL` has zero
 unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.
+
+## Round 32 — round 31's own fix opened a post-commit-failure credential mutation (`07dcbfeb` → next)
+
+Three P2 findings. **Two are defects in round 31's DFD-5 fix, and the first is a security regression I
+introduced while restoring correct behaviour** — the same shape as rounds 23 and 27.
+
+**R32-1 — `LPG -- degrade-and-alert --> CB` routed a failed low-risk commit into broker MATERIALIZE.** `CB`
+mints/rotates/revokes, which is itself the `MCP-EVENT-002` **credential critical class** and requires a
+*confirmed* commit (DFD-6 fails it closed unconditionally). So round 31's fix — which existed to stop
+`degrade-and-alert` behaving as `fail-closed` — created a path where **broker state mutates after the commit
+failed**, the precise failure the requirement exists to prevent. The degraded continuation is now explicitly
+**non-mutating**: `LOWX` proceeds only on a credential already valid from the `PLAN` phase, and a low-risk call
+that *needs* materialization **fails closed**, because minting is what the policy would be authorising and the
+low-risk loss policy cannot authorise it. Verified mechanically: **`CB`'s only in-edge is `WAL`.**
+
+**R32-2 — the `WAL` node label still read "commit FAILED ⇒ fail closed, nothing runs"** while the arms below it
+allowed low-risk continuation. **Fourth instance of one specific failure mode: my labels and prose are ahead of
+(or behind) the graph in the same commit** — round 24 (label said "commit CONFIRMED", graph branched on
+saturation), round 27 (caption claimed mandatory, bypass two lines below), round 31 (prose said "always
+degrades", edge degraded in one of two cases), round 32 (label says unconditional, graph is class-aware). Now
+class-aware.
+
+**R32-3 — the Management absence assertion added in round 31 is gated where its mechanism does not exist.**
+`ADR-0024` §D-13 defers **every** Management mutation past V1, so PR-8 can only test a fake path, and — unlike
+configuration publication, which has the mandatory PR-10 re-run — **no later Management slice existed to
+inherit the real-path assertion.** That is amendment 18's class exactly: an obligation placed where the
+machinery isn't. Now dual-owned at all four consumer links (requirement row, blocking gate, slice contract,
+traceability row): **PR-8 stub only; the real-path assertion belongs to the future Management-mutation gate,
+which MUST NOT be marked green without it.**
+
+**Predicate 18's vocabulary was blind to this, and that is amendment 20 for the third time.** Its token list
+(`signed CP`, `publication path`, `CP→DP`, `snapshot swap`) was drawn from the PR-10 finding that produced it,
+so a row naming a **Management** mechanism could never match. The vocabulary now derives from the deferral
+authorities (including `ADR-0024` §D-13), seeded with a row that names the deferred mechanism and carries no
+note — fires; residual **NONE**.
+
+**Standing note.** Rounds 22–32: twelve consecutive rounds in which each round's fix produced the next round's
+findings. Round 31 closed with the claim that its grep sweep was the round's one mechanical win; R32-1 shows
+the same commit opened a credential-mutation path after a failed commit. **A round can be simultaneously the
+best-verified so far and the one that introduces the worst defect** — those are not in tension, and the ledger
+should stop implying they are.
+
+**Unchanged by round 32:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates;
+predicates 13, 18 (re-derived), 19, 21, 22 and the outcome-lane check clean; `CB` reachable only via `WAL`;
+no non-ASCII strays; documentation only; PR-1 not begun.
