@@ -118,8 +118,8 @@ this layer, independent of those specifics:
   `CLAUDE.md` "Relay pattern" — read-deadline-armed idle bounding — cited here as **prior-art precedent
   only**, not as a claim that the MCP kernel reuses that code).
 
-`MCP-INSP-008` (inbound Origin/Host) and the protocol-kernel bounds `MCP-PROTO-005/006/008` are **PR-1**
-requirements; `MCP-OPS-002` (deployed-listener stream/connection/rate bounds under load) is a **PR-5**
+The `MCP-INSP-008` inbound Origin/Host **primitive** and the protocol-kernel bounds `MCP-PROTO-005/006/008`
+are **PR-1** requirements (the listener-side Origin/Host enforcement, `MCP-INSP-009`, is **PR-5**); `MCP-OPS-002` (deployed-listener stream/connection/rate bounds under load) is a **PR-5**
 requirement that depends on the Observe Runtime (see [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md),
 finding H-4). This section states the design intent those requirements bind the protocol kernel to, not an
 implementation.
@@ -240,7 +240,8 @@ silent attempt to proceed with an unverified assumption about what the peer mean
   security properties (e.g. dropping Origin/Host validation, or dropping bearer-token audience checks) to
   "make the connection work."
 - Any degraded/disable-safely mode (§7, §8) reduces **functionality**, never reduces **security
-  invariants** — `MCP-AUTH-001/002/003`, `MCP-INSP-008`, and default-deny (§8) apply identically regardless
+  invariants** — `MCP-AUTH-001/002/003`, the `MCP-INSP-008` Origin/Host primitive together with its
+  `MCP-INSP-009` listener-side enforcement once a listener exists, and default-deny (§8) apply identically regardless
   of which supported version or capability subset a given session negotiated.
 - `[EXT]` note: whether the base MCP specification itself defines a standard version-downgrade or
   capability-negotiation failure mode is an external fact to verify before PR-1; the policy above is

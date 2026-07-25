@@ -161,7 +161,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-007 | Workload impersonation | High | MCP-ID-003,005 | IAM/Sec |
 | MCP-T-008 | Cross-user session confusion | High | **MCP-ID-008** (one resolved identity per session, no mid-flight rebind — the enforcing control), MCP-AUTH-007, MCP-ID-006 (assurance/step-up, contributory only) | IAM/Sec |
 | MCP-T-009 | Cross-tenant confusion | Critical | MCP-ID-007, MCP-PRIVACY-002 | IAM/Sec |
-| MCP-T-010 | Tenant-binding failure | Critical | MCP-ID-007, MCP-CONNECT-004 | IAM/Sec |
+| MCP-T-010 | Tenant-binding failure | Critical | **MCP-ID-007** (every session incl. LAN/VPN-local — the **V1/Model-A** control, PR-3) + MCP-CONNECT-004 (connector/DMZ sessions only — PR-C / Future DMZ gate) | IAM/Sec |
 
 ### Tool discovery & drift
 

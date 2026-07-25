@@ -16,8 +16,10 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **MCP-AUTH** (D-2 —
 > resource-server + reframed MCP-AUTH-006 sender-constraint/DPoP-proof replay), **MCP-EVENT** (D-5 —
 > durable spool + per-action fail-closed matrix), **MCP-CONNECT** (D-8 — Model A only V1; connector
-> post-V1), **MCP-CONNECT-003 / MCP-INSP-008** (D-9 — DMZ default-off; host-allowlist + Origin-per-protocol
-> on every listener), **MCP-MGMT** (D-13 — read-only + draft/validate/simulate; mutation excluded). The
+> post-V1), **MCP-CONNECT-003 / MCP-INSP-008 + MCP-INSP-009** (D-9 — DMZ default-off; host-allowlist +
+> Origin-per-protocol on every listener: the `MCP-INSP-008` **primitive** at PR-1, the **listener-side
+> enforcement** `MCP-INSP-009` at PR-5 / the Future DMZ gate), **MCP-MGMT** (D-13 — read-only +
+> draft/validate/simulate; mutation excluded). The
 > requirement **IDs and statements are unchanged** except MCP-AUTH-006, whose framing is corrected below.
 
 ---

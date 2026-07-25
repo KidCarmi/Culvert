@@ -15,7 +15,10 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 > the **outbound connector (Model B) is NOT assigned to PR-11** and is **not** in V1 — PR-11 stays
 > Shadow/Canary. The connector is a **post-V1 slice with its own design gate** (unless a human-approved
 > roadmap change renumbers slices). The DMZ endpoint (Model C, D-9) is **default-off and deferred**.
-> Inbound Origin/Host validation (MCP-INSP-008) remains in **PR-1**.
+> Inbound Origin/Host defence is **split**: the validation **primitive** (`MCP-INSP-008`) remains in
+> **PR-1**, while the **listener-side enforcement** (`MCP-INSP-009` — bind configured interfaces, allowlist
+> at accept, **E2E** rebinding proof) is **PR-5** for Model A / the Future DMZ gate for Model C. PR-1 binds
+> no listener.
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
 rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted ADR under `docs/adr/`**

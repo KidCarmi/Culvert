@@ -153,7 +153,11 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     validation follows the MCP protocol baseline (validate Origin on incoming Streamable HTTP; reject
     present-but-invalid with the protocol-required response; do **not** invent a blanket "always send
     Origin" rule unless the protocol version requires it). Local deployment binds only to explicitly
-    configured interfaces. Inbound Origin/Host (MCP-INSP-008) remains a **PR-1** requirement.
+    configured interfaces. Inbound Origin/Host defence is **split across two layers**: the validation
+    **primitive** (`MCP-INSP-008`) is a **PR-1** requirement, and the **listener-side enforcement**
+    (`MCP-INSP-009`) lands with the listener — **PR-5** for Model A, the **Future DMZ gate** for Model C.
+    **PR-1 binds no listener, so this decision's listener controls are NOT satisfied by PR-1 alone**
+    (ADR-0024 §D-9 item 6).
   - **Approver role:** Security Architecture + Executive (facilitator approval recorded; ratification pending).
   - **Evidence:** ON-PREM-CONNECTIVITY §4/§7; MCP-CONNECT-003, **MCP-INSP-009** (listener-side host
     allowlist + E2E rebinding; `MCP-INSP-008` supplies the PR-1 primitive); MCP-T-052/031.

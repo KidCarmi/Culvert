@@ -669,3 +669,31 @@ dismissed*. The standing instruction is therefore strengthened: when a requireme
 mention must be re-read **in its surrounding context** — a sentence that is literally true of the PR-1
 primitive can still license a wrong closure claim when it sits in a listener, DMZ or config-contract section.
 Prefer naming **both** layers everywhere over judging a mention harmless.
+
+---
+
+## Round 10b — proactive contextual sweep (self-initiated, no finding filed)
+
+Immediately after round 10, the amended rule ("re-read every mention of a split requirement **in context**;
+prefer naming both layers over judging a mention harmless") was applied **as an audit** rather than waiting
+for the next review round. Eight further bare/context-risky mentions were found and fixed. None was reported
+by a reviewer — this is the rule working prospectively.
+
+| Location | Why it was risky | Fix |
+|---|---|---|
+| `IMPLEMENTATION-SLICES.md` D-8 header note | "Inbound Origin/Host validation (`MCP-INSP-008`) remains in PR-1" — sits directly above the slice table an implementer reads first | Names both layers + "PR-1 binds no listener" |
+| `OPEN-DECISIONS.md` D-9 **closure block** | Same bare phrasing inside the *decision of record* for the DMZ | Two-layer split + "this decision's listener controls are NOT satisfied by PR-1 alone" (ADR-0024 §D-9 item 6) |
+| `PR0-REVIEW-CHECKLIST.md` | A reviewer ticking "Origin/Host anti-rebinding is a stated new requirement (`MCP-INSP-008`)" would sign off the listener control on primitive-only text | Requires **both** IDs stated; "tick only if both — PR-1 alone does not close MCP-T-031/055" |
+| `PROTOCOL-COMPATIBILITY.md` §4 PR-1/PR-5 split note | `MCP-INSP-008` listed bare as a PR-1 requirement | Marks it the *primitive*; notes `MCP-INSP-009` listener enforcement is PR-5 |
+| `PROTOCOL-COMPATIBILITY.md` §8 cross-version invariants | `MCP-INSP-008` listed as an invariant that "applies identically" — an enforcement claim | Names the primitive **and** its `MCP-INSP-009` enforcement once a listener exists |
+| `SECURITY-REQUIREMENTS.md` decision-provenance header | Mapped "host-allowlist + Origin-per-protocol **on every listener**" (D-9) to `MCP-INSP-008` alone | Adds `MCP-INSP-009` with its PR-5 / Future-DMZ gate |
+| `THREAT-MODEL.md` §11 `MCP-T-010` | Controls read `MCP-ID-007, MCP-CONNECT-004` with no V1/post-V1 distinction | `MCP-ID-007` marked the **V1/Model-A** control (PR-3); `MCP-CONNECT-004` marked connector/DMZ-only (PR-C / Future DMZ gate) |
+
+Mentions deliberately **left** as-is are those where `MCP-INSP-008` is the subject of a requirement statement
+about the primitive itself (its own row in `SECURITY-REQUIREMENTS.md`, the `MCP-PROTO-012` reconnect re-check,
+the PR-1 primitive test rows) — in those, the primitive *is* the correct referent and no listener claim is
+implied.
+
+**Unchanged:** no requirement or threat added, removed or redefined; ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined; documentation only; PR-1 not begun.

@@ -39,7 +39,7 @@ the specific document and ID.
 - [ ] [`ABUSE-CASES.md`](ABUSE-CASES.md) cover token passthrough, unknown-tool auto-allow, credential-to-agent, critical-event loss (hard NO-GO lines 2,3,4,6).
 - [ ] [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) IDs are unique; every requirement maps to a threat/verification/evidence/gate.
 - [ ] Replay protection is stated as **net-new / NOT VERIFIED**, not implied as present, **and framed per [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) as sender-constraint / DPoP-proof replay — NOT access-token `jti` one-time-use**.
-- [ ] Inbound Origin/Host anti-rebinding is a stated new requirement (MCP-INSP-008).
+- [ ] Inbound Origin/Host anti-rebinding is a stated new requirement, **split across two layers**: the pure validation primitive `MCP-INSP-008` (**PR-1**, no listener) **and** the listener-side enforcement + E2E rebinding proof `MCP-INSP-009` (**PR-5** Model A / Future DMZ gate Model C). Tick this only if **both** are stated — PR-1 alone does not close MCP-T-031/055.
 - [ ] **PR-1 protocol-kernel attack surface is modeled (findings H-1..H-4):** parser/framing/version/protocol-state threats **MCP-T-057..074** exist with owners; the former undefined "protocol bounds" acceptance item is now the **MCP-PROTO-001..014** requirement family; **fuzz** and **compatibility** have defined **blocking PR-1** gate homes ([`CI-GATES.md`](CI-GATES.md)) with compatibility **D-1-gated**; and `MCP-OPS-002` is PR-5 (runtime), not PR-1.
 
 ## IAM / PAM
