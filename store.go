@@ -695,6 +695,8 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		c.uiUsers[username] = &uiAdminUser{passHash: hash, role: role}
 	} else if existing != nil {
 		existing.role = role
+	} else {
+		return fmt.Errorf("password is required to create a new user")
 	}
 	return nil
 }
