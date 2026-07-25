@@ -792,3 +792,75 @@ Axes 7, 9 and 10 each still had a stale consumer; axis 8 checked clean.
 **Unchanged:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined; documentation only; PR-1 not begun.
+
+---
+
+## Round 12 — config-surface consumers of two enumerated axes, plus a new axis 11 (`a94c083c`)
+
+Three findings (1×P1, 2×P2). Two land on axes **already in the round-11b enumeration table** — but on
+consumers that table's sweep did not reach: the **config-surface matrix** (axis 10) and the **SSDLC ASVS V2
+evidence column** (axis 9). So the enumeration was right and still incomplete in *coverage*: enumerating the
+re-scopes is necessary but not sufficient — each axis must also enumerate **which document families** it
+touches. The third finding is a genuinely **new axis 11**.
+
+### R12-1 (P1) — critical-class fail-closed is an invariant, not a selectable mode
+
+**Finding.** `MCP-EVENT-002` requires, for the critical classes, **fail closed AND** degraded-mode-with-alert.
+But `mcp_gateway_event_loss_policy` still exposed `fail-closed | degrade-and-alert` as **mutually exclusive**
+enum values. An operator selecting `degrade-and-alert` could therefore let a saturating **high-risk** operation
+**proceed without a durable event** — a configuration path that directly violates the requirement. This is the
+most serious kind of defect in this package: a config surface that can switch off an invariant.
+
+**Fix.** The setting is scoped to govern **only the read-only / low-risk ALLOW-or-MONITOR class**.
+`degrade-and-alert` **MUST NOT** be selectable for, or applied to, the critical classes (write,
+destructive/production, configuration-publication, credential issue/rotate/revoke/high-risk-selection,
+state-affecting Management operations, auth-failure/authz-denial): for those, fail-closed **AND**
+degraded-mode-with-alert are **unconditional invariants** with **no configuration path** to bypass. Constraint
+class **Override**; the PR-8 test list now **requires a negative test** proving `degrade-and-alert` cannot be
+applied to a critical class (config rejected and/or runtime still fails closed).
+
+### R12-2 (P2, **new axis 11**) — the `MCP-PROTO` family had no config-surface rows
+
+**Finding.** `MCP-PROTO-006` (and 003/004/005/008) make every PR-1 envelope/depth/count/string limit a
+**required configurable bound**, and the matrix's own contract (GUI-parity: every config option needs an API +
+GUI + row) means a field without a row **cannot be implemented**. The matrix defined **no** `MCP-PROTO` fields —
+its only payload-size setting, `mcp_gateway_inspect_max_payload_bytes`, mapped solely to semantic
+`MCP-INSP-001` at PR-7. A PR-1 implementer could not satisfy the requirement and the config contract at once.
+
+**Fix.** Added **seven** kernel-bound rows under a new **"Protocol kernel bounds (PR-1)"** category, capability
+**Both** (the kernel is shared by Management and Gateway): `mcp_protocol_max_envelope_bytes`,
+`_max_json_depth`, `_max_field_count`/`_max_array_elements`, `_max_string_bytes`/`_max_method_name_bytes`,
+`_max_partial_frame_bytes`, `_max_inflight_ids`/`_max_parser_memory_bytes`/`_max_parse_work_budget`, and
+`mcp_protocol_batch_policy`. Each carries YAML/env/flag/API (`GET/PUT /api/mcp/protocol/limits`)/GUI panel,
+**safe-default + hard-cap** validation with the concrete values left to **D-14** (not invented), snapshot
+sync, **Override** backward-compat (a hard cap configuration cannot exceed), and **PR-1** tests
+(`mcp_protocol_limits_test.go`, `_framing_test.go`, `_budget_test.go`, `_batch_test.go`). Silent batch
+split/partial processing is **structurally excluded** from the batch enum.
+`mcp_gateway_inspect_max_payload_bytes` now states it is the **inspection-stage** cap, **not** the wire-envelope
+cap, and **MUST be ≤** `mcp_protocol_max_envelope_bytes`.
+
+### R12-3 (P2) — DPoP-proof replay named in the SSDLC + fixture evidence
+
+**Finding.** The ASVS **V2** evidence column still demanded generic "**replayed-token** rejections", so an
+implementer following the SSDLC mapping could build the **forbidden one-time-use access-token** behavior — the
+same defect round 11b fixed in `MCP-AC-002`, in a different document family.
+
+**Fix.** The V2 evidence now names **replayed per-request DPoP proof rejected + sender-constraint enforced on
+high-risk profiles + stolen-token-abuse anomaly/rate-limit signals**, and states explicitly that reuse of a
+still-valid access token is **not** itself replay (ADR-0024 §D-2 items 7–9). It also folds in the audience
+verification over **both** token forms and the `aud`-less-denied-everywhere rule. The
+`PROTOCOL-COMPATIBILITY.md` OAuth-negative fixture row carried the same generic phrasing and is corrected
+identically.
+
+**Third amendment to the convergence note.** A re-scope sweep must enumerate not only the **axes** but, per
+axis, the **document families** to check: (1) the requirement registry, (2) the threat register, (3) the
+traceability matrix, (4) attack trees, (5) abuse cases, (6) DFDs, (7) CI-gate rows, (8) the **config-surface
+matrix**, (9) the **SSDLC/ASVS framework mappings**, (10) the protocol/connectivity contracts, (11) the
+review checklists, and (12) ADR-0024. Rounds 11b and 12 each missed a *family*, not an axis. Additionally:
+**whenever a requirement makes something configurable, the config-surface matrix needs a row in the same
+change** — the GUI-parity contract makes a missing row an implementation blocker, not a documentation nit.
+
+**Unchanged by round 12:** no requirement or threat added, removed or redefined (the new config rows bind to
+existing `MCP-PROTO-003/004/005/006/008`). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md`
+byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation
+only; PR-1 not begun.
