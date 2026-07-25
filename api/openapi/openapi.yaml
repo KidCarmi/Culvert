@@ -966,10 +966,10 @@ components:
       required: [enabled, effective_enabled, credential_set, status]
       properties:
         enabled: { type: boolean, description: "The persisted operator intent (may be true even when not effectively enabled, e.g. after an explicit credential clear)." }
-        effective_enabled: { type: boolean, description: "True only when enabled, the origin is a valid canonical https endpoint, and a bearer credential is configured." }
+        effective_enabled: { type: boolean, description: "True only when enabled, the origin is a valid canonical https endpoint, and a well-formed bearer credential is configured." }
         origin: { type: string, format: uri, description: "Canonical https origin (present when configured)." }
-        credential_set: { type: boolean, description: "Whether a bearer credential is stored. The value itself is never returned." }
-        status: { type: string, enum: [disabled, origin_invalid, credential_missing, ready], description: "disabled: enabled=false. origin_invalid: no/invalid origin. credential_missing: origin valid but no credential. ready: fully configured (does NOT mean anything is sending — no sender exists yet)." }
+        credential_set: { type: boolean, description: "Whether a bearer credential is stored. The value itself is never returned. May be true while status is credential_invalid." }
+        status: { type: string, enum: [disabled, origin_invalid, credential_missing, credential_invalid, ready], description: "disabled: enabled=false. origin_invalid: no/invalid origin. credential_missing: origin valid but no credential. credential_invalid: a credential is stored but is malformed (blank, over-length, or containing control characters) and is therefore unusable. ready: fully configured (does NOT mean anything is sending — no sender exists yet)." }
     SetTelemetryConfig:
       type: object
       description: >-

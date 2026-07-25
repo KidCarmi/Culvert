@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -619,6 +620,243 @@ func TestTelemetryRejectsMalformedCredential(t *testing.T) {
 			"credential": strings.Repeat("a", maxTelemetryCredentialLen)}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("a max-length credential should be accepted, code=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// malformedPersistedCredentials is the set of credential values that
+// validateTelemetryCredential rejects at PUT and that must be rejected just
+// as hard when they reach the config by any other route (hand edit, restore,
+// migration, corruption).
+var malformedPersistedCredentials = []struct{ name, cred string }{
+	{"whitespace only", "   \t  "},
+	{"CRLF header injection", "tok\r\nInjected: value"},
+	{"bare LF", "tok\nInjected"},
+	{"NUL byte", "tok\x00more"},
+	{"DEL byte", "tok\x7fmore"},
+	{"over the length cap", strings.Repeat("a", maxTelemetryCredentialLen+1)},
+}
+
+// writeTelemetryConfigToDisk persists a config DIRECTLY, bypassing the API
+// and its validation — the whole point of these tests is that the on-disk
+// config is untrusted input.
+func writeTelemetryConfigToDisk(t *testing.T, c telemetryConfig) {
+	t.Helper()
+	telemetryConfigMu.Lock()
+	err := saveTelemetryConfigLocked(c)
+	telemetryConfigMu.Unlock()
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+}
+
+// TestTelemetryPersistedMalformedCredentialFailsClosed proves the PUT-time
+// credential contract also binds a credential that arrived on disk. Before
+// the shared telemetryCredentialUsable predicate, only PUT applied
+// validateTelemetryCredential, so a hand-edited 0600 config carrying
+// "tok\r\nInjected: value" read as status=ready / effective_enabled=true —
+// handing the future Slice 3 sender a header-injection primitive through the
+// one gate it is documented to trust.
+func TestTelemetryPersistedMalformedCredentialFailsClosed(t *testing.T) {
+	for _, tc := range malformedPersistedCredentials {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempTelemetryDir(t)
+			writeTelemetryConfigToDisk(t, telemetryConfig{
+				Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: tc.cred,
+			})
+
+			if telemetryEnabled() {
+				t.Error("telemetryEnabled() must be false for a malformed persisted credential")
+			}
+			view := telemetryStatus()
+			if view.EffectiveEnabled {
+				t.Error("effective_enabled must be false for a malformed persisted credential")
+			}
+			if view.Status == "ready" {
+				t.Errorf("status = %q — a malformed persisted credential must never read ready", view.Status)
+			}
+			if view.Status != "credential_invalid" {
+				t.Errorf("status = %q, want credential_invalid", view.Status)
+			}
+
+			// The value never reaches the API surface.
+			rec := httptest.NewRecorder()
+			apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodGet, "/api/support/telemetry/config", nil))
+			if strings.Contains(rec.Body.String(), strings.TrimSpace(tc.cred)) && strings.TrimSpace(tc.cred) != "" {
+				t.Errorf("GET leaked the malformed credential: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestTelemetryStartupWithMalformedPersistedCredential proves the
+// synchronous startup validation reports the ineffective posture (and never
+// the credential value) rather than booting into a "ready" state.
+func TestTelemetryStartupWithMalformedPersistedCredential(t *testing.T) {
+	withTempTelemetryDir(t)
+	const marker = "startup-malformed-cred" // #nosec G101 -- fake test fixture value
+	writeTelemetryConfigToDisk(t, telemetryConfig{
+		Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: marker + "\r\nInjected: 1",
+	})
+
+	var buf bytes.Buffer
+	prev := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = prev })
+
+	loadTelemetryConfigAtStartup()
+
+	out := buf.String()
+	if strings.Contains(out, marker) {
+		t.Errorf("the startup log leaked the credential: %s", out)
+	}
+	if !strings.Contains(out, "credential_invalid") {
+		t.Errorf("startup log should report the ineffective posture, got: %s", out)
+	}
+	if telemetryEnabled() {
+		t.Error("startup must leave a malformed-credential config ineffective")
+	}
+}
+
+// TestTelemetryPutDoesNotPreserveMalformedCredential proves a later PUT that
+// OMITS the credential does not launder a malformed persisted value forward:
+// enabling is refused outright, and a disable drops the bad value instead of
+// carrying it into the newly written config.
+func TestTelemetryPutDoesNotPreserveMalformedCredential(t *testing.T) {
+	const bad = "tok\r\nInjected: value"
+
+	t.Run("enable is refused", func(t *testing.T) {
+		withTempTelemetryDir(t)
+		writeTelemetryConfigToDisk(t, telemetryConfig{
+			Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: bad,
+		})
+		rec := httptest.NewRecorder()
+		apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+			map[string]any{"enabled": true, "origin": "https://tac.culvertlabs.com"}))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("code=%d, want 400 — a malformed stored credential must not satisfy the bearer requirement", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), bad) {
+			t.Errorf("the rejection echoed the credential: %s", rec.Body.String())
+		}
+		if telemetryEnabled() {
+			t.Error("telemetry must remain ineffective after the refused enable")
+		}
+	})
+
+	t.Run("disable drops it", func(t *testing.T) {
+		withTempTelemetryDir(t)
+		writeTelemetryConfigToDisk(t, telemetryConfig{
+			Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: bad,
+		})
+		rec := httptest.NewRecorder()
+		apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+			map[string]any{"enabled": false}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+		}
+		telemetryConfigMu.Lock()
+		got := loadTelemetryConfigLocked()
+		telemetryConfigMu.Unlock()
+		if got.Credential != "" {
+			t.Errorf("a malformed credential must not be preserved by a PUT that omits one, got %q", got.Credential)
+		}
+	})
+
+	t.Run("a well-formed credential is still preserved", func(t *testing.T) {
+		withTempTelemetryDir(t)
+		writeTelemetryConfigToDisk(t, telemetryConfig{
+			Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: "good-token",
+		})
+		rec := httptest.NewRecorder()
+		apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+			map[string]any{"enabled": true, "origin": "https://tac2.culvertlabs.com"}))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+		}
+		telemetryConfigMu.Lock()
+		got := loadTelemetryConfigLocked()
+		telemetryConfigMu.Unlock()
+		if got.Credential != "good-token" {
+			t.Errorf("preserve semantics broke for a valid credential, got %q", got.Credential)
+		}
+	})
+}
+
+// TestTelemetryCredentialPredicateSharedByGateAndStatus pins the anti-drift
+// property the reviewer asked for: the enabled gate and the status
+// computation consult ONE predicate, so they can never disagree about
+// whether a stored credential is usable.
+func TestTelemetryCredentialPredicateSharedByGateAndStatus(t *testing.T) {
+	creds := []string{"", "   ", "good", "tok\r\nx", "tok\x00x", strings.Repeat("a", maxTelemetryCredentialLen+1)}
+	for _, cred := range creds {
+		c := telemetryConfig{Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: cred}
+		gate := telemetryEnabledFromConfig(c)
+		ready := telemetryStatusFromConfig(c) == "ready"
+		if gate != ready {
+			t.Errorf("gate/status disagree for credential %q: enabled=%v ready=%v", cred, gate, ready)
+		}
+		if want := telemetryCredentialUsable(cred); gate != want {
+			t.Errorf("gate = %v for credential %q, want the shared predicate's %v", gate, cred, want)
+		}
+	}
+}
+
+// ── P2: config-file size bound ───────────────────────────────────────────────
+
+// TestTelemetryConfigRejectsOversizedFile proves an oversized regular 0600
+// config is refused from Lstat METADATA — before os.ReadFile allocates it —
+// so a file grown by a bad restore or a local writer cannot turn synchronous
+// startup validation into boot-time memory pressure.
+func TestTelemetryConfigRejectsOversizedFile(t *testing.T) {
+	withTempTelemetryDir(t)
+	if err := os.MkdirAll(filepath.Dir(telemetryConfigPath()), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Valid JSON, correct mode, correct type — oversized is the ONLY defect,
+	// so this fails for the size and nothing else.
+	padding := strings.Repeat("a", maxTelemetryConfigFileBytes)
+	body := `{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"tok","_pad":"` + padding + `"}`
+	if err := os.WriteFile(telemetryConfigPath(), []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	fi, err := os.Stat(telemetryConfigPath())
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if fi.Size() <= maxTelemetryConfigFileBytes {
+		t.Fatalf("setup: file is %d bytes, expected over the %d-byte cap", fi.Size(), maxTelemetryConfigFileBytes)
+	}
+
+	if err := telemetryConfigFileSafe(telemetryConfigPath()); !errors.Is(err, errTelemetryConfigUnsafe) {
+		t.Fatalf("telemetryConfigFileSafe err = %v, want errTelemetryConfigUnsafe", err)
+	}
+	if got := telemetryConfigGet(); got.Enabled || got.Credential != "" {
+		t.Fatalf("an oversized config must fail closed, got %+v", got)
+	}
+	if telemetryEnabled() {
+		t.Error("an oversized config must never produce an enabled posture")
+	}
+	if got := telemetryStatus().Status; got != "disabled" {
+		t.Errorf("status = %q, want disabled", got)
+	}
+
+	// A file at exactly the cap is still accepted — the bound is not an
+	// accidental off-by-one that rejects legitimate configs.
+	small := `{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"tok"}`
+	pad := maxTelemetryConfigFileBytes - len(small)
+	atCap := `{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"tok","_pad":"` +
+		strings.Repeat("a", pad-len(`,"_pad":""`)) + `"}`
+	if len(atCap) > maxTelemetryConfigFileBytes {
+		t.Fatalf("setup: at-cap fixture is %d bytes, over the cap", len(atCap))
+	}
+	if err := os.WriteFile(telemetryConfigPath(), []byte(atCap), 0o600); err != nil {
+		t.Fatalf("write at-cap: %v", err)
+	}
+	if err := telemetryConfigFileSafe(telemetryConfigPath()); err != nil {
+		t.Errorf("a file at exactly the cap must be accepted, got %v", err)
+	}
+	if !telemetryEnabled() {
+		t.Error("a valid at-cap config should still read as enabled")
 	}
 }
 

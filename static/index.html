@@ -13616,11 +13616,14 @@ function renderTelemetryStatus(d) {
   const el = document.getElementById('support-telemetry-status');
   if (!el) return;
   d = d || {};
-  const statusColors = { ready: 'var(--green)', disabled: 'var(--muted)', origin_invalid: 'var(--red)', credential_missing: 'var(--red)' };
+  const statusColors = { ready: 'var(--green)', disabled: 'var(--muted)', origin_invalid: 'var(--red)', credential_missing: 'var(--red)', credential_invalid: 'var(--red)' };
   const color = statusColors[d.status] || 'var(--muted)';
   const label = String(d.status || 'disabled').toUpperCase();
   const originLine = d.origin ? ' · origin ' + escHtml(String(d.origin)) : '';
-  const credLine = d.credential_set ? ' · credential set' : ' · no credential';
+  // A malformed stored credential IS set but unusable — say so rather than
+  // reporting the reassuring "credential set".
+  const credLine = d.status === 'credential_invalid' ? ' · stored credential is malformed (unusable)'
+    : d.credential_set ? ' · credential set' : ' · no credential';
   el.innerHTML = '<p class="hint">Telemetry <strong style="color:' + color + '">' + escHtml(label) + '</strong>' + originLine + credLine + '</p>';
   // Reflect current values into the admin form.
   const originInp = document.getElementById('telemetry-origin');

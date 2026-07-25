@@ -29,7 +29,10 @@ import (
 //
 // Bearer-mandatory (§4): telemetryEnabled() is the ONLY gate a future sender
 // may consult, and it requires Enabled, a validated+canonical Origin, AND a
-// non-empty Credential — an origin-only posture can never read as enabled.
+// Credential that passes the full validateTelemetryCredential contract — an
+// origin-only posture, or one carrying a malformed credential, can never read
+// as enabled. Both the origin and the credential are re-validated at READ
+// time: the on-disk config is untrusted input, not a trusted cache.
 
 // telemetryConfig is the node-local, default-OFF telemetry configuration.
 // Credential is the per-appliance bearer credential the (future) Slice 3
@@ -53,6 +56,17 @@ func telemetryConfigPath() string { return filepath.Join(dataDir, "support", "te
 // PERMISSIONS make it unsafe to trust (symlink, non-regular file, or
 // group/other-readable). It never carries the file's contents.
 var errTelemetryConfigUnsafe = errors.New("telemetry config file is not a secure regular 0600 file")
+
+// maxTelemetryConfigFileBytes caps the config file BEFORE it is read. The
+// real file is a three-field JSON object of a few hundred bytes (the
+// credential itself is capped at maxTelemetryCredentialLen), so 64 KiB is
+// generous. The cap exists because loadTelemetryConfigAtStartup reads this
+// file synchronously during boot: an oversized regular 0600 file — grown by
+// a buggy writer, a bad restore, or a local process with write access —
+// would otherwise be slurped into memory in full before any JSON validation
+// runs, turning a config problem into boot-time memory pressure. Enforced
+// from Lstat metadata so the bytes are never read at all.
+const maxTelemetryConfigFileBytes = 64 << 10
 
 // telemetryConfigFileSafe enforces the storage contract on the config file
 // BEFORE its bytes are read: the bearer credential inside is the sole
@@ -86,6 +100,11 @@ func telemetryConfigFileSafe(path string) error {
 	// FIFO) — a FIFO in particular would block or feed attacker-chosen bytes.
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%w: not a regular file", errTelemetryConfigUnsafe)
+	}
+	// Bound the read from METADATA, before os.ReadFile allocates anything.
+	// Fails closed on the size alone — the contents are never read or logged.
+	if sz := fi.Size(); sz > maxTelemetryConfigFileBytes {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte cap", errTelemetryConfigUnsafe, sz, maxTelemetryConfigFileBytes)
 	}
 	// Group/other bits set ⇒ another local account can read the bearer
 	// credential. Try to self-heal to 0600; fail closed if we cannot.
@@ -142,14 +161,31 @@ func telemetryConfigGet() telemetryConfig {
 	return loadTelemetryConfigLocked()
 }
 
+// telemetryCredentialUsable is the SINGLE validity predicate for a stored
+// bearer credential, shared by the enabled gate and the status computation so
+// the two can never drift apart.
+//
+// It applies the full validateTelemetryCredential contract (non-blank,
+// within the length cap, no control characters) to whatever is currently
+// held — including a credential that arrived on disk rather than through
+// PUT. The PUT validator alone is not sufficient: the config file can be
+// hand-edited, restored from a foreign backup, migrated, or corrupted, and
+// a persisted `token\r\nInjected: value` would otherwise read as "usable"
+// and hand the future Slice 3 sender a header-injection primitive through
+// the very gate it is told to trust.
+func telemetryCredentialUsable(cred string) bool {
+	return validateTelemetryCredential(cred) == nil
+}
+
 // telemetryEnabledFromConfig is the pure gate logic (§4): true only when
 // Enabled, the Origin re-validates as a canonical https telemetry endpoint
 // (re-checked at read time — not merely trusted from disk — so a hand-edited
-// or downgraded config with a now-invalid origin fails closed), AND a
-// non-empty bearer Credential is configured. An origin without a credential
-// (or vice versa) never produces an enabled posture.
+// or downgraded config with a now-invalid origin fails closed), AND a bearer
+// Credential is present AND well-formed. An origin without a credential (or
+// vice versa) never produces an enabled posture, and neither does a
+// malformed one.
 func telemetryEnabledFromConfig(c telemetryConfig) bool {
-	if !c.Enabled || c.Credential == "" {
+	if !c.Enabled || !telemetryCredentialUsable(c.Credential) {
 		return false
 	}
 	_, err := validateTelemetryEndpoint(c.Origin)
@@ -196,11 +232,18 @@ func loadTelemetryConfigAtStartup() {
 }
 
 // telemetryStatusFromConfig computes the precise status vocabulary (§14):
-// disabled | origin_invalid | credential_missing | ready. Priority order:
-// an explicit Enabled=false always reads "disabled" regardless of any other
-// field (an admin who turned telemetry off should never see a scarier
-// status); otherwise a missing/invalid origin takes precedence over a
-// missing credential, since the origin is the more fundamental prerequisite.
+// disabled | origin_invalid | credential_missing | credential_invalid |
+// ready. Priority order: an explicit Enabled=false always reads "disabled"
+// regardless of any other field (an admin who turned telemetry off should
+// never see a scarier status); otherwise a missing/invalid origin takes
+// precedence over a credential problem, since the origin is the more
+// fundamental prerequisite.
+//
+// credential_missing and credential_invalid are deliberately distinct: both
+// are equally ineffective, but an admin looking at a config that DOES carry
+// a credential needs to be told it is malformed rather than being sent
+// hunting for one that is not there. Reporting the shape of the problem
+// leaks nothing — the value itself never reaches the read model.
 func telemetryStatusFromConfig(c telemetryConfig) string {
 	if !c.Enabled {
 		return "disabled"
@@ -210,6 +253,9 @@ func telemetryStatusFromConfig(c telemetryConfig) string {
 	}
 	if c.Credential == "" {
 		return "credential_missing"
+	}
+	if !telemetryCredentialUsable(c.Credential) {
+		return "credential_invalid"
 	}
 	return "ready"
 }
@@ -455,24 +501,37 @@ func handleTelemetryConfigPut(w http.ResponseWriter, r *http.Request) {
 
 	telemetryConfigMu.Lock()
 	existing := loadTelemetryConfigLocked()
-	next := telemetryConfig{Enabled: body.Enabled, Origin: origin, Credential: existing.Credential}
+	next := telemetryConfig{Enabled: body.Enabled, Origin: origin}
 	credOutcome := "preserved"
 	switch {
 	case body.ClearCredential:
-		next.Credential = ""
 		credOutcome = "cleared"
 	case body.Credential != "":
 		next.Credential = body.Credential
 		credOutcome = "replaced"
+	case existing.Credential == "" || telemetryCredentialUsable(existing.Credential):
+		// Nothing to carry forward, or a well-formed one to carry forward.
+		next.Credential = existing.Credential
+	default:
+		// A MALFORMED persisted credential is never carried forward by a PUT
+		// that omits one — preserving it would launder a hand-edited or
+		// corrupted value through an ordinary admin save. It is dropped, and
+		// the outcome is recorded so the audit trail shows why. The value
+		// itself is not echoed anywhere.
+		credOutcome = "dropped_invalid"
 	}
-	// Bearer-mandatory (§4): enabling with no credential is refused at PUT —
-	// UNLESS this request is the explicit clear action, which is documented
-	// to force the EFFECTIVE posture unavailable rather than being blocked
-	// (the persisted Enabled intent survives; telemetryEnabled() already
-	// reads false the instant the credential is gone).
+	// Bearer-mandatory (§4): enabling with no usable credential is refused at
+	// PUT — UNLESS this request is the explicit clear action, which is
+	// documented to force the EFFECTIVE posture unavailable rather than being
+	// blocked (the persisted Enabled intent survives; telemetryEnabled()
+	// already reads false the instant the credential is gone).
 	if next.Enabled && next.Credential == "" && !body.ClearCredential {
 		telemetryConfigMu.Unlock()
-		http.Error(w, "cannot enable telemetry without a bearer credential", http.StatusBadRequest)
+		msg := "cannot enable telemetry without a bearer credential"
+		if credOutcome == "dropped_invalid" {
+			msg = "the stored bearer credential is malformed; supply a new credential to enable telemetry"
+		}
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	before := telemetryStatusFor(existing)

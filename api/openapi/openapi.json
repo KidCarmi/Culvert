@@ -3184,11 +3184,11 @@
         "description": "Node-local telemetry consent/config posture (M7 Slice 2). Still zero egress — no sender exists in this build. The bearer credential is never exposed; only credential_set is reported.",
         "properties": {
           "credential_set": {
-            "description": "Whether a bearer credential is stored. The value itself is never returned.",
+            "description": "Whether a bearer credential is stored. The value itself is never returned. May be true while status is credential_invalid.",
             "type": "boolean"
           },
           "effective_enabled": {
-            "description": "True only when enabled, the origin is a valid canonical https endpoint, and a bearer credential is configured.",
+            "description": "True only when enabled, the origin is a valid canonical https endpoint, and a well-formed bearer credential is configured.",
             "type": "boolean"
           },
           "enabled": {
@@ -3201,11 +3201,12 @@
             "type": "string"
           },
           "status": {
-            "description": "disabled: enabled=false. origin_invalid: no/invalid origin. credential_missing: origin valid but no credential. ready: fully configured (does NOT mean anything is sending — no sender exists yet).",
+            "description": "disabled: enabled=false. origin_invalid: no/invalid origin. credential_missing: origin valid but no credential. credential_invalid: a credential is stored but is malformed (blank, over-length, or containing control characters) and is therefore unusable. ready: fully configured (does NOT mean anything is sending — no sender exists yet).",
             "enum": [
               "disabled",
               "origin_invalid",
               "credential_missing",
+              "credential_invalid",
               "ready"
             ],
             "type": "string"
