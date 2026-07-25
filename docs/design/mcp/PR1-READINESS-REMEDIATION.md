@@ -921,3 +921,66 @@ against every contract the surface itself is subject to** — for the config mat
 capability-separation contract, the GUI-parity/API/OpenAPI columns, snapshot semantics, the Override/backward-
 compat column, and per-class invariants that must not become selectable. Rounds 12→13 show the failure mode:
 the fix for a missing row introduced a row that broke a different documented invariant.
+
+---
+
+## Round 14 — the denial-lockout in the event FLOW, and a new axis 12 (`6b552ccf`)
+
+Two findings (1×P1, 1×P2).
+
+### R14-1 (P1) — the event flow diagram never modelled the denial-event lockout
+
+**Finding.** §4a's table and (after round 13) the config row both carry the denial-event **durability
+lockout** — but the §6 **flow diagram** routed the whole critical branch to `DEG` (degraded mode) only, and
+the prose under it **incorrectly listed authentication/deny inside the fail-closed branch**, which §4a
+explicitly says is *not* how an already-denied request is handled. A PR-8 implementation following the flow
+could **enter degraded mode and then continue privileged work after losing denial evidence** — the same hole
+round 13 closed in the config row, still open one document over. This is the **third** consumer of this one
+axis (requirement → config row → flow diagram), which is why it keeps recurring: the axis has more consumers
+than any sweep list had entries.
+
+**Fix.** The flow now branches the critical class in two:
+- a new decision node **"Is the event an auth-failure / authz-DENIAL? (request already denied)"**;
+- **no** ⇒ `FAIL` (fail closed the triggering operation) **AND** `DEG` — both, as before;
+- **yes** ⇒ new **`CDEG`** (critical degraded state + alert + loss counter) → new **`LOCK`**
+  (**"DURABILITY LOCKOUT: block NEW allowed write/high-risk ops until durability is restored"**).
+
+The prose is rewritten as two explicitly numbered, explicitly non-interchangeable outcomes, stating that for a
+denial "fail closed" is **vacuous** and that **entering degraded mode alone is not sufficient** — without the
+lockout, privileged work could continue after denial evidence was lost.
+
+### R14-2 (P2, **new axis 12**) — Management tenancy/RBAC derived from a session the listener does not have
+
+**Finding.** Round 1–2 made `mcp_mgmt_auth_mode` **`oauth-token`-only** and removed the session-cookie
+fallback — but two consumers still derived Management authority from a browser session:
+`mcp_mgmt_tenant_scope_mode` used enum **`session-bound`** with "tenant is derived from the authenticated
+admin session", and the `mcp_mgmt_credential_profiles` rationale said the capability "acts as the
+authenticated admin's own **RBAC session**". A Management MCP request has **no such session**, so PR-3 had
+**no defined authoritative tenant source** for its tenant-escape checks. This is a **new axis** — the
+`mcp_mgmt_auth_mode` re-scope — that no previous enumeration listed.
+
+**Fix.** The enum is renamed **`session-bound` → `token-bound`**: tenant and RBAC context derive from the
+**validated OAuth principal / access-token metadata** (issuer + subject/workload identity + tenant claim +
+granted scopes, resolved by the PR-3 identity layer), **never client-asserted**; the row states that the
+`oauth-token`-only listener has **no browser session** so the admin-UI RBAC cookie is **not** an authoritative
+source for it, and that a token with **no resolvable tenant MUST be denied rather than defaulted**. Constraint
+class raised to **Override** (V1 cannot be configured to accept a client-asserted tenant), verification
+extended to four cases (token-derived tenant; client-asserted tenant ignored; no-tenant token denied;
+cross-tenant escape negative), and the requirement link now includes **MCP-ID-007** + **MCP-AUTH-008**. The
+credential-profile rationale now says the capability acts **on behalf of the OAuth principal in its own bearer
+token**, with its RBAC decision from the token's granted scopes and resolved role.
+
+**Unchanged by round 14:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined; documentation only; PR-1 not begun.
+
+**Axis 12 added to the enumeration table:** `mcp_mgmt_auth_mode` → **`oauth-token`-only** (no session-cookie
+fallback) — consumers: the tenancy enum, the credential-profile rationale, and any statement deriving
+Management authority, tenancy or RBAC from a browser/admin session. **Swept in round 14.**
+
+**Fifth amendment to the convergence note.** Two axes (`MCP-EVENT-002` denial lockout; `MCP-INSP-008`→`009`)
+each produced findings across **three or more** consumer documents in **different rounds**. Consumer count is
+therefore not bounded by intuition: for any axis touching a **behavioural invariant** (what the system must do,
+not just which ID owns it), enumerate consumers by **grepping the invariant's vocabulary** — here "fail
+closed", "degraded", "loss policy", "session" — not only the requirement ID. An invariant restated in prose or
+drawn in a diagram will not match an ID grep.

@@ -244,11 +244,14 @@ flowchart TD
     Q["Bounded queue\n(backpressure signal)"]
     SAT{"Saturated?"}
     CRIT{"Critical class?\n(auth / deny / config / high-risk)"}
+    KIND{"Is the event an\nauth-failure / authz-DENIAL?\n(request already denied)"}
     SPOOL["Mandatory local encrypted\ndurable spool (per DP)"]
     EXPORT["Additive export\n(SIEM / bus / object store)\n— never a substitute"]
     INT["Integrity + replay ID\n(event_id, correlation_id,\nsnapshot_hash, dp_id, timestamp)"]
     FAIL["Fail closed\nthe triggering operation"]
     DEG["Enter degraded mode\n+ alert + loss counter\n(MCP-EVENT-002)"]
+    CDEG["CRITICAL degraded state\n+ alert + loss counter"]
+    LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
 
     D --> Q
     Q --> SAT
@@ -256,15 +259,32 @@ flowchart TD
     SPOOL --> INT
     SPOOL -. "additive, async" .-> EXPORT
     SAT -- "yes" --> CRIT
-    CRIT -- "yes (write/destructive/config/credential)" --> FAIL
-    CRIT -- "yes (AND, not either)" --> DEG
+    CRIT -- "yes" --> KIND
+    KIND -- "no\n(write / destructive / config-publication /\ncredential / state-affecting Mgmt)" --> FAIL
+    KIND -- "no (AND, not either)" --> DEG
+    KIND -- "yes\n(already denied — fail-closed is vacuous)" --> CDEG
+    CDEG --> LOCK
     CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> DEG
 ```
 
-The fail-closed branch is scoped to **critical classes only** (authentication, deny, configuration,
-high-risk decisions — [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
-[MCP-T-044](THREAT-MODEL.md)); saturation on a low-risk `ALLOW`/`MONITOR` event still triggers degraded
-mode and an alert, but does not by itself block the underlying operation.
+**Two distinct critical-class outcomes — do not conflate them** (§4a,
+[MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
+[ADR-0024 §D-5](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md),
+[MCP-T-044](THREAT-MODEL.md)):
+
+1. **Write / destructive / configuration-publication / credential / state-affecting-Management** — the
+   triggering operation **fails closed AND** the system enters degraded mode with alert + integrity-protected
+   loss counter. Both, never either.
+2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
+   "fail closed" is **vacuous** and this case is **NOT** relabeled as fail-closed. Instead the system enters
+   the **critical degraded state**, alerts, increments the loss counter, and applies a **durability
+   lockout**: **new *allowed* write/high-risk operations are blocked until critical-event durability is
+   restored** (unless an explicitly approved emergency policy states otherwise). Entering degraded mode
+   **alone is not sufficient** — without the lockout, privileged work could continue after denial evidence
+   was lost.
+
+Saturation on a low-risk `ALLOW`/`MONITOR` event still triggers degraded mode and an alert, but does not by
+itself block the underlying operation.
 
 ---
 
