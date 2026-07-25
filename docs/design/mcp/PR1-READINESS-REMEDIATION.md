@@ -1730,3 +1730,64 @@ rather than on the disciplines recorded here.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13 and the new outcome-lane check all clean
 (each proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.
+
+---
+
+## Round 25 — the per-class gate reached the prose and not the graph; and one assertion is unprovable in its own slice (`cc928c9f` → next)
+
+Two Codex findings. Both are round 23/24 work left incomplete rather than wrong.
+
+### R25-1 (P2) — DFD-9 still funnelled all four classes into "upstream call"
+
+Round 23 established that each critical class is gated at **its own** irreversible action, and propagated that
+to `MCP-EVENT-002`, the gates, `EVENT-MODEL` §4a and `ADR-0024` §D-5. DFD-9's gate kept **one** critical edge:
+
+```
+GATE -->|"write / destructive / config-publication / credential"| EXEC["Credential use + upstream call"]
+```
+
+So the normative flow diagram still said every class ends in an upstream call — the exact narrowing round 23
+was correcting, surviving in the artifact an implementer reads first.
+
+**Fix.** The gate now dispatches by class: write/destructive → `XUP` (upstream call); configuration
+publication → `XPUB` (snapshot **sign/push/apply**, entering DFD-10 at `SIGN` and never earlier); credential →
+`XCRED` (broker **materialization**); state-affecting Management → `XMGMT`. All four converge on the outcome
+lane. The round-24 outcome-lane predicate was re-run against the rewritten block and extended to the four new
+execution nodes.
+
+**This is the fifth occurrence of a fix reaching prose and not the graph** (rounds 15, 19, 22, 24, 25). Round 22
+made it a predicate and round 24 recorded that the predicate is too narrow to catch this class; round 25 is the
+demonstration. The honest statement is that **no predicate I have written checks whether a diagram's structure
+matches a requirement's enumeration** — only that one specific bad edge is absent.
+
+### R25-2 (P1) — the publication assertion is unprovable in the slice it was assigned to
+
+Round 23's per-class table gave PR-8 the obligation to prove that a failed durable commit leaves **no
+configuration revision, nothing signed or pushed, every DP on the prior epoch**. But
+`IMPLEMENTATION-SLICES.md` places the signed CP→DP publication path in **PR-10**, which *depends on* PR-8. At
+PR-8 there is no publication path to assert against — only a stub — and PR-10's gate covered only
+mixed-version / stale-epoch / corrupt-snapshot / rollback behaviour. **The real publication path could
+therefore ship without that assertion ever executing.**
+
+**Fix.** The assertion is now dual-owned and the timing is stated: PR-8 keeps what it can exercise, and the
+PR-10 gate **must re-run the PR-8 event-durability suite against the real signed publication wiring**, with
+PR-10 blocked until it has. Recorded in the blocking-gate row, the gate-status table, and the traceability
+row's Gate column (`PR-8 + mandatory PR-10 re-run`).
+
+**Eighteenth amendment — an assertion must be assigned to a slice in which the asserted mechanism exists.** A
+gate obligation placed before the machinery it constrains is not a weak test, it is **no test**: it passes
+against a stub and never runs against the real path. For every assertion, check the slice that introduces the
+mechanism; if it is later than the gate, either move the assertion or make the later slice's gate re-run it
+explicitly. Predicate 18 encodes the mechanical half: a `CI-GATES.md` row whose own slice precedes a mechanism
+it names (`signed CP`, `publication path`, `CP→DP`, `snapshot swap`) must carry a re-run / slice-timing note.
+Seeded, confirmed to fire, currently `NONE`.
+
+**Standing note.** Rounds 22–25 are one continuous chain: each round's fix produced the next round's findings.
+Ten of the last thirteen rounds found defects in the immediately preceding round's new text. Two of those
+defects were worse than what they replaced (an execution loop, a remote state-deletion primitive). The
+eighteen amendments have not yet produced a round in which my own checks found what the reviewer found.
+
+**Unchanged by round 25:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18 and the outcome-lane check clean (each
+proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.
