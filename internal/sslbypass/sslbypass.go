@@ -183,13 +183,16 @@ func (m *Matcher) Matches(host string) bool {
 	// NormalizeHost is not idempotent for a host carrying an empty trailing
 	// DNS label ("example.com.." — TrimSuffix strips one dot, IDNA keeps the
 	// other), and such hosts pass the request path's NormalizeHostStrict gate.
-	// The pre-optimization code re-normalized h inside per-pattern MatchFQDN,
-	// so "example.com.." matched the bypass pattern "example.com"; preserve
-	// those exact two-pass semantics with a second pass paid ONLY on the
-	// pathological trailing-dot shape — the common path stays single-pass
-	// (Codex review, PR #918).
-	if strings.HasSuffix(h, ".") {
-		h = hostutil.NormalizeHost(h)
+	// The pre-optimization code re-normalized the host inside per-pattern
+	// MatchFQDN — for GLOB patterns only — so "example.com.." matched the
+	// bypass pattern "example.com" while regexes matched against the
+	// single-pass form. Preserve those exact semantics: globs compare against
+	// hg (a second pass paid ONLY on the pathological trailing-dot shape),
+	// regexes keep h. The common path stays single-pass with hg == h
+	// (Codex + Copilot reviews, PR #918).
+	hg := h
+	if strings.HasSuffix(hg, ".") {
+		hg = hostutil.NormalizeHost(hg)
 	}
 	for _, p := range m.compiled {
 		if p.isRE {
@@ -197,7 +200,7 @@ func (m *Matcher) Matches(host string) bool {
 				return true
 			}
 		} else {
-			if hostutil.MatchFQDNNorm(p.norm, h) {
+			if hostutil.MatchFQDNNorm(p.norm, hg) {
 				return true
 			}
 		}

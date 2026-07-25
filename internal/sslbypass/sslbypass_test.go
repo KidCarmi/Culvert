@@ -189,6 +189,27 @@ func TestMatcher_TrailingDotHostMatches(t *testing.T) {
 			t.Errorf("Matches(%q) = %v, want %v (old two-pass semantics)", c.host, got, c.want)
 		}
 	}
+
+	// Regex patterns kept the SINGLE-pass host pre-change (only globs
+	// re-normalized inside MatchFQDN), so a regex anchored on the residual
+	// trailing dot must still see it (Copilot review).
+	re := &Matcher{}
+	if err := re.Add(`~^example\.com\.$`); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !re.Matches("example.com..") {
+		t.Error(`regex ^example\.com\.$ must match the single-pass form "example.com."`)
+	}
+	if re.Matches("example.com.") {
+		t.Error(`regex ^example\.com\.$ must not match "example.com." (normalizes to "example.com")`)
+	}
+	re2 := &Matcher{}
+	if err := re2.Add(`~^example\.com$`); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if re2.Matches("example.com..") {
+		t.Error(`regex ^example\.com$ must not match "example.com.." (regexes see the single-pass "example.com.")`)
+	}
 }
 
 // TestMatcher_EmptyFastPath pins the empty-list fast path: a matcher with no
@@ -199,11 +220,15 @@ func TestMatcher_EmptyFastPath(t *testing.T) {
 		t.Error("empty matcher must not match")
 	}
 	// And after removing the last pattern the fast path re-engages.
-	_ = m.Add("*.example.com")
+	if err := m.Add("*.example.com"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
 	if !m.Matches("a.example.com") {
 		t.Error("pattern should match before removal")
 	}
-	m.Remove("*.example.com")
+	if !m.Remove("*.example.com") {
+		t.Fatal("Remove should report true for an existing pattern")
+	}
 	if m.Matches("a.example.com") {
 		t.Error("must not match after the last pattern is removed")
 	}
