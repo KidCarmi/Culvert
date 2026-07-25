@@ -1096,3 +1096,51 @@ vocabulary per the fifth amendment.
 **Unchanged by round 15:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.
+
+---
+
+## Round 16 — the split was declared but never tested (`5dee6e8c`)
+
+Two findings from Codex (1×P1, 1×P2). **Both land on rows added or extended in round 15** — the
+"defect in my own newly-added text" class (rounds 12→13 precedent), now confirmed twice.
+
+### R16-1 (P1) — the per-capability split had no isolation test
+
+**Finding.** Round 13 split the kernel bounds into `mcp_mgmt_protocol_*` / `mcp_gateway_protocol_*`
+pairs precisely so that *raising a bound on one listener cannot widen the other's trust boundary*. All 22
+paired rows pointed at the same **generic** test (`mcp_protocol_limits_test.go` et al.), and the PR-1 gate
+required no cross-capability assertion. **An implementation backed by a single shared limits object would
+pass every named test** — the split would exist on paper only, and a Management change could silently widen
+the Gateway boundary. The rows declared an invariant that nothing verified.
+
+**Fix.** All 22 paired rows now additionally name `mcp_protocol_limits_isolation_test.go` (**PR-1**): set one
+capability's value, assert the paired capability's is unchanged at runtime, and vice versa — a shared limits
+object **MUST fail**. The requirement is pushed into the two places that actually gate it: the **blocking
+PR-1 protocol-kernel gate** in `CI-GATES.md` (plus its taxonomy row) and the `MCP-T-063` row of
+`TEST-TRACEABILITY-MATRIX.md`, whose evidence column now reads "a Management change never widens the Gateway
+bound (and vice versa)".
+
+### R16-2 (P2) — the new Management loss-policy row had no critical-class negative test
+
+**Finding.** The Gateway row carries an explicit two-part **MUST include** contract (a negative test proving
+`degrade-and-alert` cannot be applied to a critical class, *and* the denial-event lockout test). The
+Management row added in round 15 named only its loss-policy test plus "the shared denial-event lockout test",
+so PR-8 could go green without ever proving the Management critical branch — and a later state-affecting
+Management operation could proceed after losing its event.
+
+**Fix.** The Management row now carries the parallel two-part contract, scoped to the Management critical
+classes (configuration publication / state-affecting Management operation), and its lockout case explicitly
+asserts against a **Gateway** operation, since the lockout is system-wide rather than per-capability.
+
+**Seventh amendment to the convergence note — a declared invariant is not a verified one.** Rounds 13 and 15
+both added rows whose *validation* prose stated the separation contract correctly while their *Tests* column
+named a capability-agnostic test. Prose asserting "X MUST NOT affect Y" is inert unless some named test
+changes X and observes Y. **For any row whose validation text claims isolation, independence or "MUST NOT
+widen", the Tests cell must name a test that manipulates one side and asserts the other — and that test must
+appear in the blocking gate, not only in the row.** The mechanical form of this check: for every
+capability-paired row, does its Tests cell name anything capability-specific or isolation-specific? For all 22
+protocol rows the answer was no, and a single grep over the Tests column surfaced the entire class at once.
+
+**Unchanged by round 16:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.
