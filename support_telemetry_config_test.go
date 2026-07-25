@@ -804,9 +804,9 @@ func TestTelemetryCredentialPredicateSharedByGateAndStatus(t *testing.T) {
 // ── P2: config-file size bound ───────────────────────────────────────────────
 
 // TestTelemetryConfigRejectsOversizedFile proves an oversized regular 0600
-// config is refused from Lstat METADATA — before os.ReadFile allocates it —
-// so a file grown by a bad restore or a local writer cannot turn synchronous
-// startup validation into boot-time memory pressure.
+// config is refused from the descriptor's own metadata — before the bytes are
+// read — so a file grown by a bad restore or a local writer cannot turn
+// synchronous startup validation into boot-time memory pressure.
 func TestTelemetryConfigRejectsOversizedFile(t *testing.T) {
 	withTempTelemetryDir(t)
 	if err := os.MkdirAll(filepath.Dir(telemetryConfigPath()), 0o700); err != nil {
@@ -827,8 +827,8 @@ func TestTelemetryConfigRejectsOversizedFile(t *testing.T) {
 		t.Fatalf("setup: file is %d bytes, expected over the %d-byte cap", fi.Size(), maxTelemetryConfigFileBytes)
 	}
 
-	if err := telemetryConfigFileSafe(telemetryConfigPath()); !errors.Is(err, errTelemetryConfigUnsafe) {
-		t.Fatalf("telemetryConfigFileSafe err = %v, want errTelemetryConfigUnsafe", err)
+	if _, err := readTelemetryConfigBytes(telemetryConfigPath()); !errors.Is(err, errTelemetryConfigUnsafe) {
+		t.Fatalf("readTelemetryConfigBytes err = %v, want errTelemetryConfigUnsafe", err)
 	}
 	if got := telemetryConfigGet(); got.Enabled || got.Credential != "" {
 		t.Fatalf("an oversized config must fail closed, got %+v", got)
@@ -852,12 +852,197 @@ func TestTelemetryConfigRejectsOversizedFile(t *testing.T) {
 	if err := os.WriteFile(telemetryConfigPath(), []byte(atCap), 0o600); err != nil {
 		t.Fatalf("write at-cap: %v", err)
 	}
-	if err := telemetryConfigFileSafe(telemetryConfigPath()); err != nil {
+	if _, err := readTelemetryConfigBytes(telemetryConfigPath()); err != nil {
 		t.Errorf("a file at exactly the cap must be accepted, got %v", err)
 	}
 	if !telemetryEnabled() {
 		t.Error("a valid at-cap config should still read as enabled")
 	}
+}
+
+// ── P1: descriptor-bound loader (filesystem TOCTOU) ─────────────────────────
+
+// TestTelemetryBoundedReadRejectsGrowthPastCap proves the read is bounded
+// INDEPENDENTLY of the f.Stat() size check. It calls the bounded reader
+// directly on an already-open oversized descriptor — exactly the state the
+// loader would be in if the file grew between the fstat and the read — so it
+// exercises the growth backstop that the metadata check cannot cover.
+func TestTelemetryBoundedReadRejectsGrowthPastCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grown.json")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", maxTelemetryConfigFileBytes+1)), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f, err := os.Open(path) // #nosec G304 -- test fixture under t.TempDir()
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := readBoundedTelemetryConfig(f); !errors.Is(err, errTelemetryConfigUnsafe) {
+		t.Fatalf("err = %v, want errTelemetryConfigUnsafe for a descriptor over the cap", err)
+	}
+
+	// Exactly at the cap still reads fully — the +1 in the LimitReader is what
+	// distinguishes "at the cap" from "one byte too long".
+	atCap := filepath.Join(dir, "atcap.json")
+	if err := os.WriteFile(atCap, []byte(strings.Repeat("b", maxTelemetryConfigFileBytes)), 0o600); err != nil {
+		t.Fatalf("write at-cap: %v", err)
+	}
+	g, err := os.Open(atCap) // #nosec G304 -- test fixture under t.TempDir()
+	if err != nil {
+		t.Fatalf("open at-cap: %v", err)
+	}
+	defer func() { _ = g.Close() }()
+	b, err := readBoundedTelemetryConfig(g)
+	if err != nil {
+		t.Fatalf("a descriptor at exactly the cap must be accepted, got %v", err)
+	}
+	if len(b) != maxTelemetryConfigFileBytes {
+		t.Errorf("read %d bytes, want the full %d", len(b), maxTelemetryConfigFileBytes)
+	}
+}
+
+// TestTelemetryConfigSwapCannotRedirectLoad hammers the load path while a
+// concurrent writer repeatedly swaps the config pathname between a legitimate
+// file and a symlink pointing at an attacker-controlled file.
+//
+// With the loader descriptor-bound, every outcome is one of exactly two safe
+// states: the legitimate config, or a fail-closed empty config (the open hit
+// the symlink and oNoFollow refused it). The attacker's credential must NEVER
+// be observed. Under the previous Lstat→ReadFile shape the same swap could
+// land between the check and the read and the attacker file would be loaded
+// and trusted.
+func TestTelemetryConfigSwapCannotRedirectLoad(t *testing.T) {
+	withTempTelemetryDir(t)
+	const attackerCred = "attacker-controlled-credential" // #nosec G101 -- fake test fixture value
+	path := telemetryConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	good := filepath.Join(dataDir, "good.json")
+	evil := filepath.Join(dataDir, "evil.json")
+	if err := os.WriteFile(good, []byte(`{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"legitimate"}`), 0o600); err != nil {
+		t.Fatalf("write good: %v", err)
+	}
+	if err := os.WriteFile(evil, []byte(`{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"`+attackerCred+`"}`), 0o600); err != nil {
+		t.Fatalf("write evil: %v", err)
+	}
+	// Seed the real path with a copy of the legitimate config.
+	legit, err := os.ReadFile(good) // #nosec G304 -- test fixture under t.TempDir()
+	if err != nil {
+		t.Fatalf("read good: %v", err)
+	}
+	if err := os.WriteFile(path, legit, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		link := path + ".swap"
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				_ = os.Remove(link)
+				if err := os.Symlink(evil, link); err != nil {
+					return // symlinks unsupported here; the loop is best-effort
+				}
+				_ = os.Rename(link, path)
+			} else {
+				_ = os.WriteFile(link, legit, 0o600)
+				_ = os.Rename(link, path)
+			}
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		got := telemetryConfigGet()
+		if got.Credential == attackerCred {
+			close(stop)
+			<-done
+			t.Fatalf("iteration %d loaded the attacker's credential — the load is not descriptor-bound", i)
+		}
+		if got.Credential != "" && got.Credential != "legitimate" {
+			close(stop)
+			<-done
+			t.Fatalf("iteration %d loaded an unexpected credential %q", i, got.Credential)
+		}
+	}
+	close(stop)
+	<-done
+}
+
+// TestTelemetryLoaderIsDescriptorBound is the anti-regression wall for the
+// TOCTOU contract: it statically pins that the loader opens the pathname
+// exactly ONCE with oNoFollow and makes every subsequent decision on that
+// descriptor. Re-introducing a path-based os.ReadFile / os.Chmod / os.Lstat
+// in this path would silently restore the swap window, and no behavioral test
+// can reliably catch a race, so the shape itself is the invariant.
+func TestTelemetryLoaderIsDescriptorBound(t *testing.T) {
+	src, err := os.ReadFile("support_telemetry_config.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := funcBodyForTest(t, string(src), "readTelemetryConfigBytes")
+
+	if n := strings.Count(body, "os.OpenFile("); n != 1 {
+		t.Errorf("readTelemetryConfigBytes has %d os.OpenFile calls, want exactly 1 (open once, then bind to the descriptor)", n)
+	}
+	if !strings.Contains(body, "os.O_RDONLY|oNoFollow|oNonBlock") {
+		t.Error("the open must carry oNoFollow (refuse a symlink at open time) and oNonBlock (never block on a FIFO)")
+	}
+	// Every trust decision must be on the descriptor, never the pathname.
+	for _, banned := range []string{"os.ReadFile(", "os.Chmod(", "os.Lstat(", "os.Stat("} {
+		if strings.Contains(body, banned) {
+			t.Errorf("readTelemetryConfigBytes uses path-based %s — every check must be made on the open descriptor", banned)
+		}
+	}
+	for _, required := range []string{"f.Stat()", "f.Chmod(", "readBoundedTelemetryConfig(f)"} {
+		if !strings.Contains(body, required) {
+			t.Errorf("readTelemetryConfigBytes must use %s (descriptor-bound)", required)
+		}
+	}
+
+	// The read itself stays bounded even though the size was already checked.
+	readBody := funcBodyForTest(t, string(src), "readBoundedTelemetryConfig")
+	if !strings.Contains(readBody, "io.LimitReader(f, maxTelemetryConfigFileBytes+1)") {
+		t.Error("the read must go through io.LimitReader(f, cap+1) — the stat'd size can be stale")
+	}
+	if !strings.Contains(readBody, "len(b) > maxTelemetryConfigFileBytes") {
+		t.Error("the bounded read must reject a body that reached the cap+1 sentinel")
+	}
+
+	// The pathname is resolved once, by the caller, and handed in.
+	loadBody := funcBodyForTest(t, string(src), "loadTelemetryConfigLocked")
+	if strings.Count(loadBody, "telemetryConfigPath()") != 1 {
+		t.Error("loadTelemetryConfigLocked must resolve the config path exactly once")
+	}
+	if strings.Contains(loadBody, "os.ReadFile(") {
+		t.Error("loadTelemetryConfigLocked must not re-read the pathname after validation")
+	}
+}
+
+// funcBodyForTest returns the source text of a top-level func, from its
+// signature to the closing brace at column 0.
+func funcBodyForTest(t *testing.T, src, name string) string {
+	t.Helper()
+	start := strings.Index(src, "\nfunc "+name+"(")
+	if start < 0 {
+		t.Fatalf("func %s not found", name)
+	}
+	rest := src[start+1:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatalf("could not find the end of func %s", name)
+	}
+	return rest[:end]
 }
 
 // ── persistence ───────────────────────────────────────────────────────────────

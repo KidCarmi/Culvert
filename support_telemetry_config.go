@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -57,81 +58,125 @@ func telemetryConfigPath() string { return filepath.Join(dataDir, "support", "te
 // group/other-readable). It never carries the file's contents.
 var errTelemetryConfigUnsafe = errors.New("telemetry config file is not a secure regular 0600 file")
 
-// maxTelemetryConfigFileBytes caps the config file BEFORE it is read. The
-// real file is a three-field JSON object of a few hundred bytes (the
-// credential itself is capped at maxTelemetryCredentialLen), so 64 KiB is
-// generous. The cap exists because loadTelemetryConfigAtStartup reads this
-// file synchronously during boot: an oversized regular 0600 file — grown by
-// a buggy writer, a bad restore, or a local process with write access —
-// would otherwise be slurped into memory in full before any JSON validation
-// runs, turning a config problem into boot-time memory pressure. Enforced
-// from Lstat metadata so the bytes are never read at all.
+// maxTelemetryConfigFileBytes caps the config file. The real file is a
+// three-field JSON object of a few hundred bytes (the credential itself is
+// capped at maxTelemetryCredentialLen), so 64 KiB is generous. The cap exists
+// because loadTelemetryConfigAtStartup reads this file synchronously during
+// boot: an oversized file — grown by a buggy writer, a bad restore, or a
+// local process with write access — would otherwise be slurped into memory in
+// full before any JSON validation runs, turning a config problem into
+// boot-time memory pressure. Enforced twice (see readTelemetryConfigBytes):
+// from the descriptor's own metadata, and again as a hard bound on the read
+// itself.
 const maxTelemetryConfigFileBytes = 64 << 10
 
-// telemetryConfigFileSafe enforces the storage contract on the config file
-// BEFORE its bytes are read: the bearer credential inside is the sole
-// authenticated appliance-attribution mechanism for telemetry v1 (§4), so a
-// file that any local user could read — or that is a symlink redirecting the
-// read somewhere else entirely — must never produce a ready/effectively
-// enabled posture.
+// readTelemetryConfigBytes opens the config ONCE and makes every trust
+// decision against THAT DESCRIPTOR — never against the pathname again. The
+// bearer credential inside is the sole authenticated appliance-attribution
+// mechanism for telemetry v1 (§4), so a file that any local user could read,
+// or a symlink redirecting the read somewhere the operator never approved,
+// must never produce a ready/effectively-enabled posture.
 //
-// Uses Lstat (not Stat) so a SYMLINK is seen as a symlink rather than
-// silently followed to its target. Group/other permission bits are
-// best-effort CORRECTED to 0600 (an operator-friendly self-heal, matching
-// how the rest of the appliance treats its own state files); if the
-// correction fails the config is REJECTED rather than trusted. Returns nil
-// when the file is absent (a missing config is simply "disabled", not
-// unsafe).
-func telemetryConfigFileSafe(path string) error {
-	fi, err := os.Lstat(path)
+// DESCRIPTOR-BOUND BY CONSTRUCTION (the TOCTOU contract). An earlier version
+// did Lstat(path) → checks → Chmod(path) → ReadFile(path); those calls each
+// re-resolve the pathname, so they do not necessarily agree on an inode. A
+// local process able to write the support directory could swap the path
+// between the check and the read and defeat both guarantees this function
+// makes. Here:
+//
+//   - os.OpenFile carries oNoFollow, so the open ITSELF refuses a symlink —
+//     there is no window in which a symlink can be substituted, because
+//     nothing re-opens the name afterwards.
+//   - oNonBlock keeps the open from hanging if the path is a FIFO (opening a
+//     FIFO for read blocks until a writer appears); f.Stat() then rejects it
+//     as non-regular.
+//   - f.Stat() (fstat), f.Chmod() (fchmod) and the read all operate on the
+//     already-open descriptor, so they cannot be redirected to a different
+//     inode.
+//
+// Group/other permission bits are best-effort CORRECTED to 0600 (an
+// operator-friendly self-heal, matching how the rest of the appliance treats
+// its own state files); if the correction fails the config is REJECTED rather
+// than trusted. Returns (nil, nil) when the file is absent — a missing config
+// is simply "disabled", not unsafe. No error it returns ever carries the file
+// contents or the credential.
+func readTelemetryConfigBytes(path string) ([]byte, error) {
+	// #nosec G304 -- fixed filename under dataDir; oNoFollow refuses a symlink
+	// at open time and every subsequent check is made on this descriptor.
+	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow|oNonBlock, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // absent ⇒ disabled, not unsafe
+			return nil, nil // absent ⇒ disabled, not unsafe
 		}
-		return errTelemetryConfigUnsafe
+		// ELOOP (oNoFollow refused a symlink), EACCES, ENOTDIR, … all fail
+		// closed. The OS error is deliberately not wrapped in: it is not
+		// needed to describe the posture.
+		return nil, fmt.Errorf("%w: cannot be opened as a plain non-symlink file", errTelemetryConfigUnsafe)
 	}
-	// Reject a symlink outright: following it would read (and trust) bytes
-	// from a path the operator never approved, and "fixing" the mode would
-	// chmod the target.
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: symlink", errTelemetryConfigUnsafe)
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("%w: cannot stat the open file", errTelemetryConfigUnsafe)
 	}
 	// Reject anything that is not a plain file (directory, device, socket,
-	// FIFO) — a FIFO in particular would block or feed attacker-chosen bytes.
+	// FIFO). On Unix oNoFollow already excluded symlinks at open time.
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%w: not a regular file", errTelemetryConfigUnsafe)
+		return nil, fmt.Errorf("%w: not a regular file", errTelemetryConfigUnsafe)
 	}
-	// Bound the read from METADATA, before os.ReadFile allocates anything.
-	// Fails closed on the size alone — the contents are never read or logged.
+	// Cheap metadata rejection so an oversized file is refused without
+	// allocating for it. This is an optimisation, NOT the bound — the read
+	// below is bounded independently, because this size can be stale.
 	if sz := fi.Size(); sz > maxTelemetryConfigFileBytes {
-		return fmt.Errorf("%w: %d bytes exceeds the %d-byte cap", errTelemetryConfigUnsafe, sz, maxTelemetryConfigFileBytes)
+		return nil, fmt.Errorf("%w: %d bytes exceeds the %d-byte cap", errTelemetryConfigUnsafe, sz, maxTelemetryConfigFileBytes)
 	}
 	// Group/other bits set ⇒ another local account can read the bearer
-	// credential. Try to self-heal to 0600; fail closed if we cannot.
+	// credential. Self-heal to 0600 through the DESCRIPTOR (fchmod), so the
+	// mode change lands on the file we validated and not on whatever the
+	// pathname resolves to now. Fail closed if we cannot.
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
-			return fmt.Errorf("%w: mode %04o and chmod failed", errTelemetryConfigUnsafe, perm)
+		if chmodErr := f.Chmod(0o600); chmodErr != nil {
+			return nil, fmt.Errorf("%w: mode %04o and fchmod failed", errTelemetryConfigUnsafe, perm)
 		}
 		logger.Printf("telemetry: corrected insecure permissions on telemetry config (was %04o, now 0600)", perm)
 	}
-	return nil
+	return readBoundedTelemetryConfig(f)
+}
+
+// readBoundedTelemetryConfig reads an already-validated descriptor under a
+// hard byte bound.
+//
+// The f.Stat() size check in the caller is NOT sufficient on its own: a
+// regular file can grow between the fstat and the read, so trusting the
+// stat'd size would reintroduce the unbounded-allocation problem through a
+// narrower window. Reading through an io.LimitReader of cap+1 and rejecting
+// anything that reaches cap+1 closes it — the extra byte is what makes
+// "exactly at the cap" distinguishable from "at least one byte too long".
+func readBoundedTelemetryConfig(f *os.File) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(f, maxTelemetryConfigFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read failed", errTelemetryConfigUnsafe)
+	}
+	if len(b) > maxTelemetryConfigFileBytes {
+		return nil, fmt.Errorf("%w: exceeds the %d-byte cap while being read", errTelemetryConfigUnsafe, maxTelemetryConfigFileBytes)
+	}
+	return b, nil
 }
 
 // loadTelemetryConfigLocked reads the config. Absent, empty, corrupt JSON,
-// or an UNSAFE file (symlink, non-regular, group/other-readable and
-// un-correctable) all fail CLOSED to the zero value (disabled, no origin, no
-// credential) — an unreadable or untrustworthy config can never produce an
+// or an UNSAFE file (symlink, non-regular, oversized, group/other-readable
+// and un-correctable) all fail CLOSED to the zero value (disabled, no origin,
+// no credential) — an unreadable or untrustworthy config can never produce an
 // enabled posture. Caller holds telemetryConfigMu.
 func loadTelemetryConfigLocked() telemetryConfig {
-	path := telemetryConfigPath()
-	if err := telemetryConfigFileSafe(path); err != nil {
+	b, err := readTelemetryConfigBytes(telemetryConfigPath())
+	if err != nil {
 		// Log the POSTURE only — never the file contents or the credential.
 		logger.Printf("telemetry: refusing to load config: %v", sanitizeLog(err.Error()))
 		return telemetryConfig{}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return telemetryConfig{}
+	if len(b) == 0 {
+		return telemetryConfig{} // absent or empty ⇒ disabled
 	}
 	var c telemetryConfig
 	if err := json.Unmarshal(b, &c); err != nil {
