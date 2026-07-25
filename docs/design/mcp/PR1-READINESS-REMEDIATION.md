@@ -621,3 +621,51 @@ more slices early. Severity and volume have fallen monotonically (4 P1 → 2 P1 
 which is consistent with convergence. **A future editor making any similar split MUST sweep every consumer —
 threat register, traceability chain, attack trees, abuse cases, DFDs, CI gate rows, the connectivity/protocol
 contracts, and ADR-0024 itself — not only the requirement table.**
+
+---
+
+## Round 10 — the two consumers the round-7 sweep mis-judged (`1c6b37f0`)
+
+Two P2 findings. Both are instances the **round-7 sweep deliberately skipped** as "accurate statements about
+the primitive" or "not a listener mapping" — that judgement was wrong in context, which is itself worth
+recording: the sweep instruction from round 9 is only useful if applied to *contextual* meaning, not just to
+literal wording.
+
+### R10-1 (P2) — V1 tenant-binding config rows retargeted to `MCP-ID-007`
+
+**Finding.** Rounds 6–7 moved `MCP-CONNECT-004` wholly to PR-C / the Future DMZ gate and recorded that **no
+`MCP-CONNECT-*` requirement is V1 evidence** — but the V1 `mcp_gateway_tenant_binding_mode` row in
+`CONFIG-SURFACE-MATRIX.md` was still governed by `MCP-CONNECT-004` while its test stayed at PR-3/PR-11. The
+configuration contract therefore had **no V1 requirement/evidence chain** for a setting that ships in V1.
+
+**Fix.** Both tenancy rows now cite **`MCP-ID-007`** as the V1 control with **PR-3 tenant-escape evidence**,
+and each states that `MCP-CONNECT-004` is *not* the V1 requirement for the row — it governs it only once the
+connector/DMZ models ship. The `tenant_binding_mode` verification column is split: **V1 evidence = PR-3
+(MCP-ID-007)**, with PR-11 adding Model-A rollout coverage. (`mcp_gateway_per_tenant_overrides` had the same
+defect and is fixed in the same pass, though it was not cited.)
+
+### R10-2 (P2) — Model C posture paragraph no longer implies PR-1 enforcement
+
+**Finding.** The Model C (§4) V1-posture blockquote still read "Inbound Origin/Host anti-rebinding
+(`MCP-INSP-008`) remains a **PR-1** requirement". In a *public-listener* context that reads as the
+enforcement control, so a connectivity review could treat the live-listener control as satisfied by PR-1's
+primitive-only work — exactly what ADR-0024 §D-9 item 6 now forbids.
+
+**Fix.** The paragraph describes the **two-layer split** and makes the gate explicit: the `MCP-INSP-008`
+primitive at PR-1 (pure, no socket) vs `MCP-INSP-009` listener-side enforcement at **PR-5** (Model A local
+listener) / the **Future DMZ gate** (Model C public listener), plus the sentence **"PR-1 binds no listener, so
+the live-listener control for this model is NOT satisfied by PR-1 work."**
+
+**Swept in the same pass (not cited, same defect):** the §8 implementation-sequencing note and the §9 risk
+note both attributed inbound Origin/Host defence to `MCP-INSP-008` alone; both now name the primitive **and**
+its `MCP-INSP-009` enforcement layer. The §2 cross-reference likewise now points at both IDs.
+
+**Unchanged by round 10:** no requirement or threat added, removed or redefined. ADR-0024 remains
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not begun.
+
+**Amendment to the round-9 convergence note.** Two rounds of findings came from instances a sweep *saw and
+dismissed*. The standing instruction is therefore strengthened: when a requirement is split or re-scoped, every
+mention must be re-read **in its surrounding context** — a sentence that is literally true of the PR-1
+primitive can still license a wrong closure claim when it sits in a listener, DMZ or config-contract section.
+Prefer naming **both** layers everywhere over judging a mention harmless.

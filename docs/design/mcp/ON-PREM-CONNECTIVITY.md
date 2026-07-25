@@ -78,7 +78,7 @@ authentication), and defers OAuth/WAF/DMZ hardening entirely. **[REC]**
   enforces it end-to-end** is `MCP-INSP-009` (PR-5). **[FACT]** No such inbound Origin/Host anti-rebinding guard exists in the repository today —
   `isSafeRedirectURL` (`proxy_portal.go:152`) is captive-portal-only and does not cover an inbound MCP/SSE
   listener (`internal/ssrf/ssrf.go` guards outbound dials, not inbound Origin/Host). See
-  [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-INSP-008 and
+  [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-INSP-008 / MCP-INSP-009 and
   [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-031/MCP-T-055.
 
 **Data-flow reference:** [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) DFD-12.
@@ -142,8 +142,13 @@ Culvert`. This is the only model that exposes a routable, internet-reachable MCP
 > validation follows the supported MCP protocol baseline**: validate the `Origin` header on incoming
 > Streamable HTTP connections and reject a present-but-invalid Origin with the protocol-required HTTP
 > response; do **not** invent a blanket rule that every non-browser client must always send an `Origin`
-> header unless the selected protocol version explicitly requires it. Inbound Origin/Host anti-rebinding
-> (MCP-INSP-008) remains a **PR-1** requirement. See [`ADR-0024 §D-9`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
+> header unless the selected protocol version explicitly requires it. Inbound Origin/Host anti-rebinding is
+> **split across two layers**: the **validation primitive** (`MCP-INSP-008`) is a **PR-1** requirement (pure,
+> listener-independent, no socket), while the **listener-side enforcement** — binding configured interfaces,
+> allowlist at accept time, **E2E** rebinding proof — is **`MCP-INSP-009`** (**PR-5** for the Model A local
+> listener; the **Future DMZ gate** for a Model C public listener). **PR-1 binds no listener, so the
+> live-listener control for this model is NOT satisfied by PR-1 work.** See
+> [`ADR-0024 §D-9`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) item 6.
 
 **Who this fits:** cloud AI clients that have no supported outbound-connector mechanism and therefore
 require a directly reachable remote MCP URL. **[REC]**
@@ -261,7 +266,9 @@ matrix, DFD-12/13/14 rows) and §11 (risk register).
   the **local-listener** wiring for Model A folds into **PR-5** (Observe runtime), and CP/DP snapshot
   semantics into **PR-10** (CP/DP & HA). The **outbound connector (Model B) is NOT part of PR-11** and is
   **not** V1 — it is a **post-V1 slice** with its own design gate. DMZ (Model C) is deferred and
-  default-off. Inbound Origin/Host validation (MCP-INSP-008) ships in **PR-1**. Any distinct connectivity
+  default-off. The Inbound Origin/Host **validation primitive** (`MCP-INSP-008`) ships in **PR-1**; its
+  **listener-side enforcement** (`MCP-INSP-009`) ships with the listener in **PR-5** (Model A) / the Future
+  DMZ gate (Model C). Any distinct connectivity
   slice remains tracked in [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) (D-8/D-12).
 
 ---
@@ -270,7 +277,8 @@ matrix, DFD-12/13/14 rows) and §11 (risk register).
 
 Consistent with the rest of the PR-0 package: this document describes a design baseline, not a validated
 implementation. No connectivity model above has been exercised end-to-end in this repository — there is no
-existing MCP/JSON-RPC listener in the inspected paths **[FACT]**, and Model C's inbound Origin/Host
-validation (MCP-INSP-008) is explicitly **not yet built**. Risk from untested connectivity paths is Low for
+existing MCP/JSON-RPC listener in the inspected paths **[FACT]**, and Model C's inbound Origin/Host defence
+is explicitly **not yet built** — neither the `MCP-INSP-008` primitive nor its `MCP-INSP-009` listener-side
+enforcement. Risk from untested connectivity paths is Low for
 the read-only Phase 1 investigation, but the current repository test baseline remains unverified in this
 session.
