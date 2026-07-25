@@ -864,3 +864,60 @@ change** — the GUI-parity contract makes a missing row an implementation block
 existing `MCP-PROTO-003/004/005/006/008`). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md`
 byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation
 only; PR-1 not begun.
+
+---
+
+## Round 13 — defects in round 12's own new rows (`34f9b73c`)
+
+Two findings, **both in the config-surface rows round 12 added**. Round 12 fixed a missing surface; round 13
+fixes that surface being wrong. Worth stating plainly: adding a *new* surface re-opens every contract that
+surface must satisfy, so a fix that adds rows needs the same review as a fix that edits them.
+
+### R13-1 (P1) — the denial-event **durability lockout** was flattened into "fail closed"
+
+**Finding.** The corrected `mcp_gateway_event_loss_policy` row grouped **auth-failure / authz-denial** events
+with the classes that must "fail closed" — but for a denial the triggering request is **already denied**, so
+fail-closed is not the remedy. `MCP-EVENT-002` and ADR-0024 §D-5 require a different behavior: enter the
+**critical degraded state** and **block subsequent *allowed* write/high-risk operations until durability is
+restored**. Round 12's proposed test only proved the config value could not be applied — so an implementation
+following the matrix could **omit the lockout and keep executing privileged work after losing denial evidence**.
+This is the same distinction the round-2 remediation introduced in the requirement, lost when the config row
+was written.
+
+**Fix.** The row now states **two distinct, separately non-configurable invariants**: (a) critical write /
+destructive / config-publication / credential / state-affecting-Management ⇒ **fail closed AND** degraded +
+alert + loss counter; (b) auth-failure / authz-denial ⇒ **critical degraded state + alert + loss counter +
+BLOCK NEW *allowed* write/high-risk operations until durability is restored** (a **durability lockout**),
+absent an explicitly approved emergency policy. It adds "**no configuration path that skips the denial-event
+lockout**". The PR-8 test list now requires **two** tests: the config-rejection negative **and** a
+**denial-event durability-lockout test** — drop a denial event under saturation, assert the critical degraded
+state **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns.
+
+### R13-2 (P2) — the kernel-bound rows violated the matrix's own capability-separation contract
+
+**Finding.** Round 12 added the seven kernel rows with capability **`Both`** and a single `mcp.protocol.*`
+namespace/API. But the matrix's separation contract states the two capabilities keep **separate registry rows
+— "a Management MCP field and a Gateway MCP field are never the same row, even when conceptually parallel"** —
+and **all 61 pre-existing rows are single-capability** (`Mgmt` or `Gateway`; zero `Both`). The shared row also
+had a real security consequence: **raising a bound for Gateway would widen the separate Management trust
+boundary.**
+
+**Fix.** The 7 shared rows are replaced by **22 per-capability rows** (11 fields × Mgmt + Gateway) —
+`mcp_mgmt_protocol_*` / `mcp_gateway_protocol_*`, namespaces `mcp.management.protocol.*` /
+`mcp.gateway.protocol.*`, env `CULVERT_MCP_MGMT_PROTO_*` / `CULVERT_MCP_GW_PROTO_*`, separate APIs
+(`/api/mcp/management/protocol/limits`, `/api/mcp/gateway/protocol/limits`) and separate GUI panels. Each row
+states the governing principle explicitly: **the protocol-kernel *code* is shared, but its *configuration is
+instantiated separately per capability*, so raising a bound on one listener MUST NOT widen the other's trust
+boundary.** The Gateway inspection cap constraint is re-pointed at the **Gateway** envelope value specifically.
+Capability tally after the change: **0 `Both`**, matching the contract.
+
+**Unchanged by round 13:** no requirement or threat added, removed or redefined (all 22 rows bind to existing
+`MCP-PROTO-003/004/005/006/008/013/014`). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md`
+byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation
+only; PR-1 not begun.
+
+**Fourth amendment to the convergence note.** **A remediation that ADDS a surface must re-check that surface
+against every contract the surface itself is subject to** — for the config matrix that means the
+capability-separation contract, the GUI-parity/API/OpenAPI columns, snapshot semantics, the Override/backward-
+compat column, and per-class invariants that must not become selectable. Rounds 12→13 show the failure mode:
+the fix for a missing row introduced a row that broke a different documented invariant.
