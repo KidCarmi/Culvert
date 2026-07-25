@@ -1979,6 +1979,22 @@ negotiation, lifecycle checks and bounds**.
 evaluates each listener against **its own** bound set; DFD-1 and DFD-2 now show the kernel explicitly upstream
 of the Management listener, so they read as downstream of DFD-15 rather than as a path around it.
 
+**Amendment 15, refined — enumerate irreversible ACTIONS, not classes.** R28-2 is the third instance of the
+same error (round 23: one assertion for four classes; rounds 26–27: the slice contract still accepting
+"fail-closed plus degraded"; round 28: a newly gated path reusing the forward path's assertions). The pattern in
+my failures is that I treat *"an assertion exists for this requirement"* as sufficient. It is not: the
+requirement is satisfied **per irreversible action**, and **rollback is a distinct irreversible action from
+publication even though both belong to the configuration-publication class**. So the enumeration to walk is the
+set of *actions*, not the set of *classes* — a class with two irreversible actions needs two absence assertions.
+
+**Amendment 15, second refinement — a new exception placed upstream of an existing absolute loses.** R28-3's
+mechanism: I inserted a narrow retain-unless-correlated rule into a row whose **closing** sentence still said
+"release **all** resources associated with the offending message/**session**". On a literal reading the trailing
+absolute wins, so the exception was decorative. Amendment 10a told me a requirement is a *row* and I had applied
+that only to **which cells I edit**; it applies equally to **the text I did not touch**. When adding a
+qualifier, find every "unconditional / always / all / MUST" clause already in that row and write the exception
+**into** it, rather than merely before it.
+
 **Twenty-first amendment — a per-capability requirement needs a per-capability *structure*, not only
 per-capability rows.** Rounds 16–17 established that paired config rows and paired tests are required; this
 round shows the same split must exist in the **flow model**. A capability whose traffic has no drawn path
