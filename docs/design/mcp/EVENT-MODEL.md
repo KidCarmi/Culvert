@@ -193,7 +193,7 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 > **Ordering precondition (load-bearing).** For every class whose behavior below is **fail closed**, the
 > decision event **MUST be durably committed BEFORE THAT CLASS'S OWN irreversible action** — per the table
 > below: the upstream call; the snapshot **sign/push/apply**, including a **rollback swap**; broker
-> **materialization** (mint/rotate/revoke); the Management **state change** — and the
+> **materialization** (mint/rotate/revoke); the Management **state change and the signed snapshot it publishes** — and the
 > operation runs **only** after that commit is confirmed. Stating this as "before credential use and the
 > upstream call" would leave configuration publication and the Management class unconstrained, because
 > **neither performs an upstream call**; the precondition must name each class's own side effect. A fail-closed rule evaluated after execution is
@@ -206,10 +206,19 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 >
 > | Class | Its irreversible action | Commit must precede | Absence assertion in the test |
 > |---|---|---|---|
-> | Write / destructive | the upstream call | the call | no upstream call occurred |
+> | Write / destructive | the upstream call | the call | no upstream call occurred **AND no broker-side materialization occurred** (DFD-5 gates both at `WAL`) |
 > | Configuration publication | signing / pushing / applying the snapshot | `SIGN` (DFD-10) | no revision created, nothing signed or pushed, every DP on the prior epoch |
-> | Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged |
-> | State-affecting Management operation | the state change | the change | no state change |
+> | Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged **AND no upstream call occurred** (DFD-5 gates both at `WAL`) |
+> | State-affecting Management operation | the state change **and the publication it produces** | the change **and** the snapshot being signed / pushed / applied (DFD-3 `WALM`) | no Management state change **AND no revision created, nothing signed or pushed, every DP on the prior epoch** |
+>
+> **The assertion set is per FLOW, not per class NAME.** A class's case **MUST** assert the absence of **every**
+> irreversible action reachable downstream of that flow's commit gate — not only the action the class is named
+> after. A flow can carry more than one class's side effect: an approved Management mutation both changes
+> Management state **and** publishes a signed snapshot (DFD-3), and the Gateway gate at `WAL` precedes **both**
+> credential materialization and the upstream call (DFD-5). Asserting only the eponymous action passes an
+> implementation that leaves that one record untouched while performing the other — which is why both fail-closed
+> nodes name both actions (`no credential minted, no upstream call`; `NOTHING published, NO Management state
+> change`) rather than one each.
 >
 > **A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
 > encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.

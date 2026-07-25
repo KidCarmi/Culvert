@@ -2345,3 +2345,76 @@ imply the second.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases; `CB` in-edges `[WAL]`, `PUB` in-edges `[WALM]`; DFD-3 has no undefined edge targets;
 predicates 13, 19 (re-derived), 21-strict, 22 clean; no non-ASCII strays; documentation only; PR-1 not begun.
+
+## Round 35 — the gate names two owners and blocks on one; the gate's own subject flow has two irreversible actions and the test asserts one (`8da359ad` → next)
+
+Two P2 findings. Both land, for the **third consecutive round**, on the `Future Management-Mutation Gate`
+section — created in round 33, amended in round 34, wrong again in round 35.
+
+**R35-1 — the gate-status row's `Blocking?` cell named PR-8 while its `Target PR` cell named PR-8 AND the
+future gate.** A consumer reading the status column could therefore treat the post-V1 real-path re-run as
+advisory and close the proposed gate on PR-8's stub coverage — which is precisely the outcome the D-13 section
+exists to prevent. The blocking designation now names both, and says the gate MUST NOT be marked green on stub
+coverage.
+
+**The sweep was mechanical, not from memory.** Predicate 23 enumerates owner tokens from every gate-status
+row's Target cell and subtracts the Blocking cell's, with the owner vocabulary derived from the cells
+themselves (`PR-<n>`, `PR-C`, any `Future … Gate`, any `D-nn`). **16 rows examined, three seeded
+known-positives fire, residual NONE** — so the row Codex found was the only one, and I can say that without
+having re-read the table.
+
+**R35-2 — the gate's test asserted `NO Management state change occurred`, and DFD-3's irreversible action is
+`Publish signed snapshot`.** A handler can leave its Management record untouched and still sign or push after
+`WALM` fails; it would pass both required failure modes. Round 34 gated the flow correctly and then wrote an
+assertion covering only half of what the gate now protects.
+
+**The general defect, which is bigger than the finding.** The whole package had been enumerating absence
+assertions **by class NAME** — each class asserting the absence of the action it is named after. But the
+assertion is scoped to a **FLOW**, and a flow can carry two classes' irreversible actions:
+
+- DFD-3's approved Management mutation **changes Management state AND publishes a signed snapshot**.
+- DFD-5's `WAL` gate precedes **both broker materialization AND the upstream call** — and its fail-closed node
+  has said so all along (`no credential minted, no upstream call`), so the diagram was already stricter than
+  the tests derived from it.
+
+So three clauses were short, not one: `write/destructive` needed *no materialization*, `credential` needed
+*no upstream call*, and `state-affecting Management` needed the publication-class absences. All are fixed in
+`SECURITY-REQUIREMENTS` (`MCP-EVENT-002` Verification + Evidence), `EVENT-MODEL` §4a, `ADR-0024` §D-5,
+`CI-GATES` (blocking row), `IMPLEMENTATION-SLICES` (PR-8 + the future gate), and
+`TEST-TRACEABILITY-MATRIX` (MCP-T-044 Test + Evidence), with the rule stated once in the authority: **the
+assertion set is per FLOW, not per class NAME.**
+
+**Predicate 24 found the consumer I had not reached.** It parses the required action-key set for each class
+out of EVENT-MODEL §4a's table and checks every per-class enumeration in four documents against it. After I
+had fixed five documents by hand it still reported three live violations — all in
+`TEST-TRACEABILITY-MATRIX.md`, which I had not opened. Three seeded reversions fire; residual now NONE. This
+is the first round in which a predicate caught a propagation gap **before** the reviewer, rather than after.
+
+**Predicate 24 arm 2 — the authority exists in TWO copies, and I made them diverge inside this round.**
+EVENT-MODEL §4a and ADR-0024 §D-5 each carry the same per-class table. I fixed EVENT-MODEL's first; for the
+next several minutes the ADR silently contradicted it, with no check that would have said so. Arm 2 now
+compares the two copies cell-for-cell (seed-proven: reverting the ADR's Management row reports all three
+differing columns). **Twenty-fifth amendment — a duplicated authority needs a predicate that compares the
+copies, not one that validates each.** Checking each copy against itself passes two copies that disagree.
+
+**Twenty-sixth amendment — an absence assertion is scoped to a FLOW, not to the class's NAME.** Enumerate the
+irreversible actions reachable downstream of that flow's commit gate and assert every one of them; the
+eponymous action is the one you will think of, and the other is the one the implementation will perform.
+
+**On predicate 19, and a correction to round 34's claim.** Round 34 reported predicate 19 as "fires on block
+3, residual NONE" but never saved it, so this round I re-derived it — and the reconstruction reported a
+residual on DFD-2 (`VAL -. never publishes .-> X[(No snapshot change)]`) that round 34's version evidently
+excluded silently. A **negated** edge documents an action's absence, not its occurrence; that exclusion is now
+written down and the predicate is saved to a file rather than to a transcript. **Round 34's numbers were
+right; the artifact that produced them did not exist**, which makes them unverifiable, and I recorded them as
+if they were reproducible.
+
+**Standing note.** Rounds 22–35: fourteen consecutive rounds, each producing the next round's findings. Rounds
+33, 34 and 35 have all landed on the same section, each time on the part the previous round had just written.
+Round 34's ledger said "creating an artifact and getting it right are separate events"; round 35 is that
+sentence applied to round 34's own correction.
+
+**Unchanged by round 35:** no requirement, threat or abuse-case ID added, removed or renumbered; no diagram
+edge added or removed. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats /
+91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21-strict, 22, 23, 24 (both arms)
+clean; no non-ASCII strays; documentation only; PR-1 not begun.

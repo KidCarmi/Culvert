@@ -143,7 +143,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
   **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
   **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
-  **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF THAT CLASS'S OWN side effect — write/destructive: **no upstream call occurred**; configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked**; state-affecting Management: **no state change**. **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
+  **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF EVERY IRREVERSIBLE ACTION DOWNSTREAM OF THAT FLOW'S COMMIT GATE — **not only the action the class is named after**, since one flow can carry two classes' side effects — write/destructive: **no upstream call occurred AND no broker-side materialization occurred** (DFD-5's `WAL` gates both, and its fail-closed node names both); configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked — AND no upstream call occurred**; state-affecting Management: **no state change AND no revision created, nothing signed or pushed, every DP on the prior epoch** (DFD-3 publishes a signed snapshot, so the state-change assertion alone passes a handler that publishes anyway). **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
 - **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
   non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
   fail-closed-plus-alert alone does **not** satisfy this slice.
@@ -225,8 +225,14 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   decision event non-persistable **under BOTH failure modes, each as its own case — queue saturation AND a
   distinct post-admission spool-commit failure** (`ENOSPC` / `fsync` error / encryption-key failure). **Either
   alone is insufficient**: a handler that blocks on saturation but mutates state after an `fsync` failure (or
-  the reverse) would pass a one-mode gate. Assert
-  **NO Management state change occurred** — observing the returned error or degraded mode is NOT sufficient.
+  the reverse) would pass a one-mode gate. Assert **NO Management state change occurred AND — because DFD-3's
+  irreversible action is `Publish signed snapshot` — no new configuration revision exists, nothing was signed or
+  pushed, and every DP remains on the prior epoch.** The Management-state assertion **alone is insufficient**: a
+  handler can leave its Management record untouched and still sign or push after `WALM` fails, passing both
+  failure cases. An approved Management mutation carries the **configuration-publication** class's irreversible
+  action as well as its own, and `MCP-EVENT-002` requires the absence of **every** irreversible action downstream
+  of the flow's commit gate, not only the one the class is named after. Observing the returned error or degraded
+  mode is NOT sufficient for either.
 - **Owner:** Sec Arch. **Reviewer:** ARB + Security Architecture. **Gate:** this gate **MUST NOT be marked
   green without that re-run** (amendment 18 dual ownership, as for the PR-10 publication re-run); **not**
   reachable via PR-11, and **not** a Production Qualification dependency (post-GA, like PR-C and the DMZ gate).

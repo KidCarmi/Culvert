@@ -122,7 +122,7 @@ for the critical write classes, fail-closed **and** degraded-mode-with-alert are
 **Ordering precondition:** for every class below whose behavior is **fail closed**, the decision event **MUST be
 durably committed BEFORE THAT CLASS'S OWN irreversible action** — per the table below: the upstream call; the
 snapshot **sign/push/apply**, including a **rollback swap**; broker **materialization** (mint/rotate/revoke); the
-Management **state change**; the operation runs only after that commit is confirmed. Phrasing this as "before
+Management **state change and the signed snapshot it publishes**; the operation runs only after that commit is confirmed. Phrasing this as "before
 credential use and the upstream call" would leave configuration publication and the Management class
 unconstrained, since neither performs an upstream call — the precondition must name each class's own side effect. Evaluated after execution, "fail closed" is unimplementable — the side effect has already happened.
 The outcome event is emitted separately afterwards and is not the gate (MCP-EVENT-002, MCP-T-044).
@@ -132,10 +132,17 @@ call" leaves configuration publication and credential mutation ungated, because 
 
 | Class | Its irreversible action | Commit must precede | Absence assertion in the test |
 |---|---|---|---|
-| Write / destructive | the upstream call | the call | no upstream call occurred |
+| Write / destructive | the upstream call | the call | no upstream call occurred **AND no broker-side materialization occurred** (DFD-5 gates both at `WAL`) |
 | Configuration publication | signing / pushing / applying the snapshot | `SIGN` (DFD-10) | no revision created, nothing signed or pushed, every DP on the prior epoch |
-| Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged |
-| State-affecting Management operation | the state change | the change | no state change |
+| Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged **AND no upstream call occurred** (DFD-5 gates both at `WAL`) |
+| State-affecting Management operation | the state change **and the publication it produces** | the change **and** the snapshot being signed / pushed / applied (DFD-3 `WALM`) | no Management state change **AND no revision created, nothing signed or pushed, every DP on the prior epoch** |
+
+**The assertion set is per FLOW, not per class NAME.** A class's case **MUST** assert the absence of **every**
+irreversible action reachable downstream of that flow's commit gate, not only the action the class is named
+after: an approved Management mutation both changes Management state **and** publishes a signed snapshot
+(DFD-3), and the Gateway gate precedes **both** credential materialization and the upstream call (DFD-5).
+Asserting only the eponymous action passes an implementation that leaves that one record untouched while
+performing the other.
 
 **A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
 encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.

@@ -148,7 +148,8 @@ Rules governing the interfaces:
   be able to stop the **side effect**: for the **write / destructive / configuration-publication /
   credential / state-affecting-Management** classes the decision event **MUST be durably committed BEFORE
   THAT CLASS'S OWN irreversible action** — the upstream call; the snapshot **sign/push/apply** (including a
-  rollback swap); broker **materialization** (mint/rotate/revoke); the Management **state change** — and if
+  rollback swap); broker **materialization** (mint/rotate/revoke); the Management **state change and the
+  signed snapshot it publishes** — and if
   it cannot be committed the operation **MUST fail closed and never run**. Naming only "credential use and
   the upstream call" leaves the publication and Management classes unconstrained, since neither performs one. A
   fail-closed guarantee evaluated only *after* execution is not a guarantee — the side effect has already
