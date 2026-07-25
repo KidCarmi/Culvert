@@ -165,10 +165,12 @@ flowchart LR
   RDX --> Q[[Bounded queue + backpressure]]
   Q -->|ok| SPOOL[Mandatory local encrypted durable spool per DP]
   Q -->|saturated + critical write/destructive/config/credential| FC[Fail closed AND degraded mode + alert + loss counter]
+  Q -->|saturated + auth-failure / authz-denial event| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
+  CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
   SPOOL --> INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
-Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`).
+Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
 
 ## DFD-10 — Control Plane → Data Plane snapshot publication
 

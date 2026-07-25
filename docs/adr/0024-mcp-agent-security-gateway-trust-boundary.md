@@ -225,7 +225,9 @@ Isolation requirements:
   contaminating them.
 - The corrected D-2 replay posture avoids a false sense of security from access-token `jti` one-time-use
   and instead pins replay defense to sender-constraint (DPoP-proof / mTLS) for high-risk/external profiles.
-- D-5's fail-closed matrix makes critical-event durability a design invariant, not an operational hope.
+- D-5's per-action durability matrix (**fail closed AND** degrade+alert for the critical classes; **critical degraded
+  state + durability lockout** for a non-persistable auth-failure/authz-denial) makes critical-event durability a
+  design invariant, not an operational hope.
 
 **Negative / costs:**
 - Net-new subsystems (protocol kernel, registry/catalog, identity, broker, policy, inspection, event

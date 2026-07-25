@@ -15,7 +15,7 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > **Decision provenance (2026-07-24).** Options for five families are now fixed by
 > [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md): **MCP-AUTH** (D-2 —
 > resource-server + reframed MCP-AUTH-006 sender-constraint/DPoP-proof replay), **MCP-EVENT** (D-5 —
-> durable spool + per-action fail-closed matrix), **MCP-CONNECT** (D-8 — Model A only V1; connector
+> durable spool + per-action durability matrix — **fail closed AND** degrade+alert for the critical classes, **critical degraded state + durability lockout** for a non-persistable denial event), **MCP-CONNECT** (D-8 — Model A only V1; connector
 > post-V1), **MCP-CONNECT-003 / MCP-INSP-008 + MCP-INSP-009** (D-9 — DMZ default-off; host-allowlist +
 > Origin-per-protocol on every listener: the `MCP-INSP-008` **primitive** at PR-1, the **listener-side
 > enforcement** `MCP-INSP-009` at PR-5 / the Future DMZ gate), **MCP-MGMT** (D-13 — read-only +

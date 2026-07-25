@@ -941,7 +941,7 @@ boundary, acceptance criteria, tests and rollback. PR-1 does not begin before PR
 | PR-5 — Observe Runtime | Dedicated listener, bounded pools and test/observe mode. | MCP disabled causes no measurable SWG regression. |
 | PR-6 — Policy Engine | Rules, actions, reason codes and simulator. | Deterministic pure evaluation and traceable tests. |
 | PR-7 — Inspection | Schema, secret/DLP, destination and redaction. | Abuse corpus and latency budgets. |
-| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions. |
+| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions, **and** the denial-event durability lockout observed (a non-persistable auth-failure/authz-denial blocks new allowed write/high-risk operations until durability returns). |
 | PR-9 — API / GUI | Inventory, policies, simulator, approvals and health. | RBAC, OpenAPI and GUI parity. |
 | PR-10 — CP/DP & HA | Immutable snapshots, fencing, acknowledgements and rollback. | Mixed-version, corrupt-snapshot and rollback tests. |
 | PR-11 — Shadow / Canary | Modes, scope controls, dashboards and rollout guardrails. | Production-readiness evidence complete. |

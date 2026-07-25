@@ -837,7 +837,14 @@ sync, **Override** backward-compat (a hard cap configuration cannot exceed), and
 (`mcp_protocol_limits_test.go`, `_framing_test.go`, `_budget_test.go`, `_batch_test.go`). Silent batch
 split/partial processing is **structurally excluded** from the batch enum.
 `mcp_gateway_inspect_max_payload_bytes` now states it is the **inspection-stage** cap, **not** the wire-envelope
-cap, and **MUST be ≤** `mcp_protocol_max_envelope_bytes`.
+cap, and **MUST be ≤** the Gateway envelope bound.
+
+> **Superseded in part by [R13-2](#r13-2-p2--the-kernel-bound-rows-violated-the-matrixs-own-capability-separation-contract).**
+> The generic field names above (`mcp_protocol_max_envelope_bytes`, `mcp_protocol_batch_policy`, …) and their capability
+> **`Both`** were exactly what round 13 found to violate the matrix's capability-separation contract. They no longer exist:
+> each is now a per-capability pair (`mcp_mgmt_protocol_*` / `mcp_gateway_protocol_*`). This entry is kept as the historical
+> record of round 12; **the current contract is R13-2's**, and the inspection-cap inequality binds
+> `mcp_gateway_inspect_max_payload_bytes` **≤** `mcp_gateway_protocol_max_envelope_bytes` (Gateway-to-Gateway).
 
 ### R12-3 (P2) — DPoP-proof replay named in the SSDLC + fixture evidence
 
@@ -1008,3 +1015,84 @@ vocabulary sweep is what surfaced them.
 **Unchanged:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined / 27 contiguous abuse cases; documentation only; PR-1 not begun.
+
+---
+
+## Round 15 — the per-capability split's orphans, and the denial lockout's 6th–9th consumers (`5f82ded7`)
+
+Three findings from Codex (2×P1, 1×P2), plus **nine** further consumers found by the round-14b
+vocabulary sweep re-run against the two axes the findings named. No reviewer reported the nine.
+
+### R15-1 (P1) — the Management listener had no Origin/Host allowlist
+
+**Finding.** `MCP-INSP-009` binds the host-allowlist to the inbound listener and `MCP-INSP-008` makes an
+**empty allowlist fail closed**. The matrix defined `mcp_gateway_origin_host_allowlist` only. Because the
+matrix's own §"separate registry rows" contract forbids a Management field and a Gateway field being the same
+row, the Management listener had **no allowlist it was permitted to use** — so an implementer following the
+matrix would either reject every Management request (empty ⇒ fail closed) or skip the mandatory rebinding
+defense. `CI-GATES.md` states the D-9 gate applies "on every listener", which is the corroborating contract.
+
+**Fix.** Added `mcp_mgmt_origin_host_allowlist` (full 15-column row: YAML/env/flag/API/GUI/OpenAPI,
+fail-closed validation, PR-1 primitive test + PR-5 listener E2E, `Override` backward-compat). The row states
+why it is a separate row from the Gateway's rather than a shared one.
+
+### R15-2 (P1) — the architecture's failure-ownership table flattened the denial lockout (6th consumer)
+
+**Finding.** `RECOMMENDED-ARCHITECTURE.md`'s `MCP-EVENT-002` row truncated the requirement **before** its
+denial clause and assigned `internal/mcp/events` only "fail-closed **and** degraded-mode-with-alert". The
+triggering request of a denial is *already denied*, so fail-closed-plus-alert is not an equivalent posture —
+an implementation reading only this table would keep performing privileged work after denial evidence was
+lost. **This is the component-ownership table**, i.e. the artifact an implementer maps to packages.
+
+**Fix.** Both columns now carry the denial branch, and the Failure Posture names it "a distinct posture, not a
+synonym", assigning the lockout enforcement to `internal/mcp/runtime` consistently with the general principle
+already stated below that table.
+
+### R15-3 (P2, **new axis 13**) — the per-capability config split left orphaned references
+
+**Finding.** Round 13 split the shared `mcp_protocol_*` rows into `mcp_mgmt_*`/`mcp_gateway_*` pairs. Two
+references to the **deleted generic names** survived: the PR-7 inspection cap's inequality pointed at
+`mcp_protocol_max_envelope_bytes` (unimplementable — no such field), and the **Management** envelope row
+carried a duplicated *Gateway* constraint, coupling the two trust boundaries in the one place the split
+existed to separate.
+
+**Fix.** The inequality is re-pointed at `mcp_gateway_protocol_max_envelope_bytes` (Gateway-to-Gateway); the
+duplicated Gateway constraint is removed from the Management row, which already lives correctly on the
+Gateway row.
+
+### Self-initiated sweep of both axes (nine further consumers, none reviewer-reported)
+
+Axis 13 was swept mechanically — extract every `mcp_*` identifier defined as a matrix row, extract every
+`mcp_*` identifier *referenced* anywhere in the package, and diff. Axis 10 (denial lockout) was re-swept by
+vocabulary per the fifth amendment.
+
+| Consumer | Class | Why it mattered |
+|---|---|---|
+| `CONFIG-SURFACE-MATRIX.md` — Management event pipeline | axis 13, capability symmetry | The **entire** event-pipeline surface was Gateway-only. `MCP-EVENT-002`'s denial lockout is system-wide and "configuration publication" is a *Management* action class, so Management had no row for a surface it is required to have. Added five rows (spool/export/loss-policy/redaction/replay-id), each noting that the durable **transport** may be shared per EVENT-MODEL §4 but the **configuration** is per-capability. |
+| `PR1-READINESS-REMEDIATION.md` R12-2 | axis 13 | This ledger's own round-12 entry still described the generic names and capability **`Both`** as current. Kept as historical record with an explicit supersession note pointing at R13-2. |
+| `DATA-FLOW-DIAGRAMS.md` DFD-9 | axis 10 (**9th consumer**) | **A second event-durability diagram.** Round 14 fixed "the event flow diagram" — there were two. DFD-9 modelled only the fail-closed edge. Added the `CDEG` → `LOCK` branch using the same node names as EVENT-MODEL's diagram. |
+| `IMPLEMENTATION-SLICES.md` PR-8 | axis 10 | The slice that *builds* the event pipeline listed no denial-lockout test and an acceptance of "zero loss … (or fail-closed + alert)". A green PR-8 could have shipped without the lockout ever being exercised. |
+| `ATTACK-TREES.md` AT-7 | axis 10 (7th) | "Undefined loss policy" mitigation enumerated only the critical-class posture. |
+| `CI-GATES.md` §preamble | axis 10 (8th) | The PR-8 gate was described as enforcing "the D-5 per-action **fail-closed** matrix" — the flattening, in the gate contract. |
+| `BLUEPRINT.md` PR-8 slice row | axis 10 | Exit criteria were "zero loss for critical classes" only. |
+| `SECURITY-REQUIREMENTS.md` §preamble | axis 10 | The requirements document's own summary of D-5 said "per-action fail-closed matrix". |
+| `ADR-0024` §Consequences | axis 10 | Same flattening in the decision record's consequences. |
+| `EVENT-MODEL.md` §4 "Degraded mode" | axis 10 | The definition row named only the ordinary degraded state; §4a's **critical** state and lockout are now named there too, with "MUST NOT be collapsed". |
+| `ABUSE-CASES.md` MCP-AC-015 | axis 10 | Queue exhaustion is the *cause* of event loss; its expected result now points at MCP-AC-016's lockout. |
+
+**Sixth amendment to the convergence note — two lessons.**
+
+1. **A split or rename produces two defect classes, not one.** The obvious one is *dangling references to the
+   deleted name*. The silent one is *newly-asymmetric coverage*: while a surface was shared, it covered both
+   sides for free; the moment it is split, every side that did not get a row loses the surface entirely, with
+   no broken link to reveal it. R15-1 and the Management event pipeline are both this second class, and
+   neither is findable by grepping for the old name. **After any split, sweep in both directions:** every
+   reference resolves to a defined name (mechanical), *and* every capability still has every surface its
+   requirements bind it to (semantic).
+2. **When an invariant is drawn, find every diagram that models that flow — not the one the reviewer named.**
+   Round 14's finding was "the event flow diagram"; the fix landed on EVENT-MODEL's. DFD-9 modelled the same
+   flow and kept the flattened form for a further round. A reviewer naming one artifact is not an enumeration.
+
+**Unchanged by round 15:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.

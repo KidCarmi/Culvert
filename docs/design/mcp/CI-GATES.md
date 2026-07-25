@@ -5,7 +5,7 @@ Status: PR-0 design artifact (Proposed)
 > **Decision provenance (2026-07-24, [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > The Proposed gates are now decision-backed: the **OAuth/replay negative matrix (PR-3)** enforces the
 > reframed D-2 posture (sender-constraint / DPoP-proof replay, not access-token one-time-use); the
-> **event-durability-under-saturation gate (PR-8)** enforces the D-5 per-action fail-closed matrix; the
+> **event-durability-under-saturation gate (PR-8)** enforces **both branches** of the D-5 per-action durability matrix (**fail closed AND** degrade+alert for the critical write/destructive/config-publication/credential classes, and the **critical degraded state + durability lockout** for a non-persistable authentication-failure/authorization-denial); the
 > **inbound Origin/Host + SSRF/rebinding gate (PR-1/PR-7)** enforces D-9 (host-allowlist + Origin-per-
 > protocol on every listener). Connector CI (D-8) is a **post-V1** slice gate; Management-vs-Gateway
 > separation (D-13) is carried by the Existing `api-contract`/`pr-api-governance` gates plus the PR-9

@@ -169,7 +169,7 @@ when its test passes with the expected control, event and policy result.
 - **Affected assets:** availability, A-6.
 - **Expected control:** **MCP-PROTO-006/008** parse-time structural + per-session bounds (PR-1) for oversized/pathological frames; MCP-OPS-002 listener/runtime bounds under load (PR-5); MCP-EVENT-002 critical-event durability.
 - **Expected event:** `MCP.SYSTEM.EVENT_BACKPRESSURE` / `DEGRADED_MODE`; no critical-event loss.
-- **Expected policy result:** bounded; fail-closed for critical classes.
+- **Expected policy result:** bounded; **fail closed AND** degrade+alert for the critical classes — and if the saturation drops an auth-failure/authz-denial event, the **critical degraded state + durability lockout** of MCP-AC-016 applies instead.
 - **Test:** load/soak/slowloris/queue-saturation. **Owner:** SRE/Sec. **Severity:** High/Critical. **Closure:** bounds hold; no critical loss.
 
 ### MCP-AC-016 — Critical decision-event loss

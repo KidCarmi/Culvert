@@ -139,8 +139,12 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Trust boundary:** TB-4.
 - **Dependencies:** PR-6.
 - **Security requirements:** MCP-EVENT-001..006; MCP-PRIVACY-002.
-- **Tests:** queue-saturation, event-durability, integrity/tamper, replay-id, export-authz, secret-scan.
-- **Acceptance:** zero loss for critical classes under tested conditions (or fail-closed + alert).
+- **Tests:** queue-saturation, event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
+  **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
+  **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
+- **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
+  non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
+  fail-closed-plus-alert alone does **not** satisfy this slice.
 - **Rollback:** degraded mode → fail-closed for write/high-risk.
 - **Owner:** SRE/Sec. **Reviewer:** Sec Arch. **Release gate:** durability-under-saturation green.
 
