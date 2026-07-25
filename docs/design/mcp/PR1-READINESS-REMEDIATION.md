@@ -1402,3 +1402,75 @@ something else, the citation is wrong even when the ID is real.
 **Unchanged by round 20:** no requirement or threat ID added, removed or renumbered. ADR-0024
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 undefined / 27 contiguous abuse cases; documentation only; PR-1 not begun.
+
+---
+
+## Round 21 — self-found: the recorded sweeps were expectations, not predicates (`fe330f21` → next)
+
+No new reviewer findings. This round came from re-running disciplines 7 and 8 during a scheduled check-in, and
+it found **two residuals the ledger had recorded as clean** — plus the reason they were recorded that way.
+
+### R21-1 (P1, self-found) — the event-spool non-aliasing rule was one-directional and untested
+
+**Finding.** `mcp_mgmt_event_spool_path` forbids aliasing "`/data/config_versions`, the debug audit ring, or
+**the Gateway spool**" — a cross-capability isolation claim. Its Gateway counterpart
+`mcp_gateway_event_spool_path` forbade only "`/data/config_versions` or other existing durable stores" and
+**did not forbid aliasing the Management spool**. Neither row's Tests cell named an assertion; both named a
+bare test file.
+
+So the prohibition held in one direction only, and **the unprotected direction is the higher-consequence
+one**: a Gateway spool aliased onto the Management spool lands Gateway-domain events in the store the
+Management critical-class lockout and `mcp_mgmt_event_loss_policy` reason over. An operator doing this would
+violate no stated rule and no test.
+
+**Fix.** The Gateway row's Validation now forbids aliasing the Management spool, stated as **symmetric in both
+directions** with the consequence inline. Both Tests cells now require a cross-capability non-aliasing case:
+point one capability's spool at the other's configured path and assert the configuration is **rejected**, and
+with distinct paths assert an event of one domain never appears in the other's spool. Shared-transport
+deployments must still assert separation by authorization domain and tenant.
+
+This is discipline 7 (an isolation claim must name a test that manipulates one side and asserts the other) and
+discipline 4 (a split produces silently-asymmetric coverage) landing on the same row.
+
+### R21-2 (P2, self-found) — a blocking gate bound four dual-capability requirements without naming either
+
+**Finding.** The **Protocol-kernel fuzz gate** row (blocking for PR-1) binds `MCP-PROTO-001,002,006,007,008,
+009,013,014`; four of those — `006`, `008`, `013`, `014` — have config rows on **both** capabilities. The row
+named no capability. Its sibling row in the same table, the structural + protocol-state suite, *was* amended in
+round 17 to say "incl. cross-capability". **Round 17 applied its own rule to one row of the class and missed
+the adjacent one** — the exact failure round 17 was created to stop.
+
+**Fix.** The fuzz-gate row now states it MUST run against each capability's configured bounds
+(per-capability parameterization), not one shared bounds object, with the reason inline: a fuzz gate
+exercising one capability's bounds leaves the other's unfuzzed while reporting green.
+
+### R21-3 — the known exemption is now written down
+
+The dual-capability sweep has exactly one legitimate exemption: the repo-wide **gitleaks** row, whose
+`MCP-EVENT-003` association is incidental. That exemption lived only in this ledger's prose and in my working
+memory, so every re-run re-flagged it and invited a wrong "fix". It is now recorded **in the gate row itself**
+as `[dual-capability sweep: EXEMPT — … MUST NOT be amended to name both capabilities]`.
+
+**Twelfth amendment — record the predicate, never the expected output.** The ledger and my check-in notes said
+*"sweep 7 returns NONE; sweep 8 returns only the gitleaks row."* That is an **expectation**, not a check. To
+re-run it I had to reconstruct the script from prose, and my reconstruction matched different phrasings than
+the original — it missed `incl. cross-capability`, `per listener` and `and vice versa` (producing false
+positives) while the original had evidently missed `MUST NOT alias` and the bare-test-file case (producing
+false negatives). **A recorded expected result actively suppresses the finding**, because the next run is
+compared against "expect NONE" rather than against the requirement. Every discipline in this ledger must
+therefore be recorded as its **exact predicate — pattern, table scope, and explicit exemption list —** and
+each exemption must be annotated at the exempt row itself, not held in prose. Promoting these predicates from
+recorded regexes to an executed CI check is PR-0/PR-1 work (out of scope for a documentation PR), and until
+that lands the predicates below are the authority:
+
+- **Discipline 7** — over `CONFIG-SURFACE-MATRIX.md` rows: any row matching
+  `isolat|independen|MUST NOT widen|MUST NOT alias` MUST also match
+  `cross-capability|one shared|assert the other|and vice versa|never appears`. Exemptions: none.
+- **Discipline 8** — over `CI-GATES.md` rows: any row binding a requirement that has config rows on **both**
+  capabilities MUST match `both capabilit|cross-capabilit|per listener|per-capability|each capabilit|and vice
+  versa`. Exemptions: the `gitleaks` row only, annotated in place.
+
+**Unchanged by round 21:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
+only; PR-1 not begun.

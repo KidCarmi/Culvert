@@ -47,7 +47,7 @@ carve-out:
 | `-race` full run (single run owning both coverage contracts) | Data races; 55% global + per-file coverage floors | Yes — a new `internal/mcp/*` package must clear the per-file floor like every other package |
 | benchgate | Regression-gates pinned benchmarks | Yes for any benchmark MCP code adds to the pinned set; does **not** by itself create an MCP-off overhead benchmark (see MCP-OPS-001 below) |
 | govulncheck + gosec | Known-vuln / static-security scan of Go deps and code | Yes — mechanical, language-level; has no MCP-protocol-specific rules |
-| gitleaks | Secret-pattern scan, even docs-only PRs | Yes — would catch a literal secret checked into MCP code or docs, but is a pattern scanner, not the MCP-specific "no raw secrets in decision events" runtime property (MCP-CRED-004/MCP-EVENT-003) |
+| gitleaks **[dual-capability sweep: EXEMPT — repo-wide secret scan, capability-agnostic by design; its `MCP-EVENT-003` association is incidental, so it MUST NOT be amended to name both capabilities]** | Secret-pattern scan, even docs-only PRs | Yes — would catch a literal secret checked into MCP code or docs, but is a pattern scanner, not the MCP-specific "no raw secrets in decision events" runtime property (MCP-CRED-004/MCP-EVENT-003) |
 | path-gated maint-agent checks | Maintenance-agent-specific checks | N/A to MCP unless MCP code touches that surface |
 | advisory traffic smoke | Basic smoke test | Generic, not MCP-aware |
 
@@ -187,7 +187,7 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 | DAST / load / stress nightlies | advisory/scheduled | Advisory | No | — | Yes |
 | `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0018 contract | Yes |
 | Production Qualification evidence pack | prod-readiness | Proposed | Human sign-off gate, not automated PR check | All MCP-* IDs (aggregate) | No |
-| Protocol-kernel fuzz gate (PR-time, bounded) | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001,002,006,007,008,009,013,014 | No |
+| Protocol-kernel fuzz gate (PR-time, bounded) — **MUST run against each capability's configured bounds (per-capability parameterization), not one shared bounds object**, since `MCP-PROTO-006`/`008`/`013`/`014` are per-capability config rows; a fuzz gate exercising only one capability's bounds leaves the other's unfuzzed while reporting green | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001,002,006,007,008,009,013,014 | No |
 | Protocol-kernel structural + protocol-state suite (**incl. cross-capability limit isolation**) | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001..008,012,013,014 | No |
 | Protocol-compatibility conformance gate (D-1-gated) | proposed (target PR-1) | Proposed | Yes, for PR-1 (green only after D-1) | MCP-PROTO-010,011 | No |
 | Deeper scheduled protocol-kernel fuzzing | proposed (extends `fuzz-nightly.yml`) | Advisory | No (scheduled/deep signal) | MCP-PROTO-009 | Partial (harness exists) |
