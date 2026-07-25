@@ -1363,3 +1363,42 @@ error. All three converge on an **unconditional** cleanup node. Caption rewritte
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
 only; PR-1 not begun.
+
+---
+
+## Round 20 — a misattributed citation in round 19's text (`100f93cd`)
+
+One P2 from Codex, in text round 19 had just written.
+
+### R20-1 (P2) — the new ordering invariant cited the wrong requirement
+
+**Finding.** Round 19's pipeline-order rationale cited **`MCP-CRED-006`** as the "least-privilege posture"
+requiring a credential to follow validation. `MCP-CRED-006` says nothing of the kind — it governs **broker
+failure** behavior ("fail closed for write/high-risk; fail-open MAY be allowed only with a valid cached
+credential…"). The requirement that actually states the invariant is **`MCP-POLICY-004`**: "Upstream credential
+selection **MUST** occur only after a policy ALLOW-class decision" — and it is the ID carrying the ordering
+test (`MCP-T-046` confused deputy, `TEST-TRACEABILITY-MATRIX.md:55`, "Ordering (unit) · No cred pre-decision").
+Credential-**scope** least privilege is `MCP-CRED-002`.
+
+**Impact.** The architecture is used to derive implementation acceptance. A rationale citing `MCP-CRED-006`
+attaches the ordering claim to an **unrelated broker-failure test**, so an implementer tracing the invariant to
+its evidence lands on a test that cannot fail when the ordering is wrong. The invariant reads as gated and is
+not.
+
+**Fix.** Both round-19 citations now name `MCP-POLICY-004` (ordering, with the `MCP-T-046` test named inline)
+and `MCP-CRED-002` (scope), and the logical-order paragraph states explicitly that `MCP-CRED-006` is *not* the
+control here. `MCP-CRED-006`'s two legitimate uses in the file (the requirement-summary row and the
+`fail-closed default` DFD node) are unchanged.
+
+**Eleventh amendment — a citation is a claim, and reachability does not check it.** Every invariant I have
+added is justified by a cited requirement ID, and **my reachability invariant counts an ID as reachable
+because it is mentioned, never because the citation is apt.** A misattributed citation is therefore invisible
+to all three of my existing check families: consistency sweeps (the documents agree), the reachability count
+(the ID exists), and coverage checks (a test exists — just not of this invariant). Before citing a requirement
+as the authority for an invariant: **read that row and confirm it states the invariant, then confirm
+`TEST-TRACEABILITY-MATRIX.md` binds a test of *that* invariant to *that* ID.** If the matrix names a test of
+something else, the citation is wrong even when the ID is real.
+
+**Unchanged by round 20:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 undefined / 27 contiguous abuse cases; documentation only; PR-1 not begun.
