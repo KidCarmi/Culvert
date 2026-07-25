@@ -215,7 +215,9 @@ flowchart LR
   ORG --> G{{/mcp/gateway}}
   G --> GW[Gateway pipeline DFD-5]
 ```
-No public ingress; inbound Origin/Host validation required (MCP-INSP-008) — this guard is **missing today**.
+No public ingress; inbound Origin/Host validation required — enforced on this **live listener** by
+**MCP-INSP-009** (PR-5), using the **MCP-INSP-008** validation primitive (PR-1). This guard is **missing
+today**, and the PR-1 primitive alone does not make the listener safe.
 
 ## DFD-13 — Outbound-only connector (Model B)
 
@@ -242,14 +244,18 @@ flowchart LR
   MTLS --> G{{/mcp/gateway}}
   OAUTH -. abuse .-> MON[Monitoring + abuse response]
 ```
-Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits mandatory (MCP-INSP-008,
-MCP-OPS-002).
+Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits mandatory — the
+**listener-side** Origin/Host enforcement on this public path is **MCP-INSP-009** (Future DMZ gate;
+`MCP-INSP-008` is the PR-1 validation primitive only), plus MCP-OPS-002.
 
 ## DFD-15 — Protocol-kernel decode path (Capability B, PR-1)
 
 Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
-`MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here.
+`MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here. **PR-1 is
+identity-agnostic:** the `MCP-PROTO-012` state machine holds an **immutable, opaque session context that
+carries no resolved identity** — identity binding and the no-rebind guarantee are **`MCP-ID-008` at PR-3**,
+so the **identity half of MCP-T-069 is NOT closed by this diagram**.
 
 ```mermaid
 flowchart LR
@@ -259,14 +265,14 @@ flowchart LR
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
   STRUCT --> VER[Protocol-version adapter<br/>allowlist + equivalence, no downgrade<br/>MCP-PROTO-010/011]
   VER --> NORM["Normalized internal message"]
-  NORM --> STATE[Protocol-state machine<br/>one identity/session, cancellation/reconnect<br/>MCP-PROTO-012]
+  NORM --> STATE[Protocol-state machine<br/>immutable OPAQUE session context - no resolved identity<br/>lifecycle / cancellation / reconnect<br/>MCP-PROTO-012]
   STATE --> HANDOFF{{"Test harness (PR-1)<br/>/ later runtime boundary (PR-5)"}}
   FRAME -. limit exceeded / truncated .-> ERR[Bounded JSON-RPC error<br/>no state leak + deterministic cleanup<br/>MCP-PROTO-013]
   DEC -. malformed / differential .-> ERR
   CLASS -. unknown method / bad id .-> ERR
   STRUCT -. over-limit .-> ERR
   VER -. unsupported version / downgrade .-> ERR
-  STATE -. race / duplicate / rebind .-> ERR
+  STATE -. race / duplicate / out-of-order lifecycle .-> ERR
   classDef tb fill:#fee,stroke:#c00;
   class FRAME,DEC tb
 ```

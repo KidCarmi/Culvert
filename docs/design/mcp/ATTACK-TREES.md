@@ -25,7 +25,7 @@ Goal: Agent modifies production without authorized intent
 | Leaf | Threats | Mitigations |
 |---|---|---|
 | L1 | MCP-T-001,002,003,004 | MCP-AUTH-001..006 |
-| L2 | MCP-T-054,055,056 | MCP-OPS-004 (documented limit), MCP-INSP-008 |
+| L2 | MCP-T-054,055,056 | MCP-OPS-004 (documented limit); Origin/Host split — **MCP-INSP-008** primitive at PR-1, **MCP-INSP-009** listener-side enforcement + E2E at **PR-5** (MCP-T-055 needs a live listener, so the PR-1 primitive alone does not close it) |
 | L3 | MCP-T-005,022,046 | MCP-CRED-001,002, MCP-POLICY-004 |
 | L4 | MCP-T-013,015,019 | MCP-TOOL-003,004 |
 | L5 | MCP-T-046 | MCP-POLICY-003, MCP-INSP-001 |
@@ -166,8 +166,8 @@ Goal: Hijack the on-prem ↔ cloud trust link
 |---|---|---|
 | Impersonate connector | MCP-T-051 | MCP-CONNECT-001,002 |
 | Tunnel replay | MCP-T-051 | MCP-CONNECT-002 |
-| DMZ abuse | MCP-T-052,031 | MCP-CONNECT-003, MCP-INSP-008 |
-| Break tenant binding | MCP-T-010,053 | MCP-CONNECT-004 |
+| DMZ abuse | MCP-T-052,031 | MCP-CONNECT-003 + **MCP-INSP-009** (listener-side host allowlist + bind-configured-interfaces + E2E rebinding proof, **Future DMZ gate**). `MCP-INSP-008` is the PR-1 **validation primitive only** and does **not** close this leaf — a live listener is required. |
+| Break tenant binding | MCP-T-010,053 | MCP-CONNECT-004 (connector/DMZ sessions — **PR-C / Future DMZ gate**). *V1 Model A tenant binding is `MCP-ID-007` at PR-3, not this leaf.* |
 
 ## AT-10 — Protocol-kernel subversion (PR-1)
 
@@ -186,9 +186,12 @@ Goal: Subvert the MCP protocol kernel before identity/policy ever run
 | Classification / ID confusion | MCP-T-059,060,061,071 | MCP-PROTO-002,003,004 |
 | Parse-time exhaustion / crash | MCP-T-063,064,073,074,062 | MCP-PROTO-005,006,007,008,009,013 |
 | Version confusion / adapter differential | MCP-T-066,067,068 | MCP-PROTO-010,011 |
-| Protocol-state confusion | MCP-T-069,070,072 | MCP-PROTO-012 |
+| Protocol-state confusion (lifecycle/cancellation/reconnect — identity-free) | MCP-T-070,072, protocol-state half of MCP-T-069 | MCP-PROTO-012 (**PR-1**) |
+| **Mid-session identity rebind** (resolved-identity binding) | identity half of **MCP-T-069** | **MCP-ID-008** (**PR-3**) — *not* closable by MCP-PROTO-012, whose session context is deliberately opaque and identity-free |
 
-All leaves are gated at **PR-1**; version-confusion fixtures depend on **D-1** closure
+All leaves are gated at **PR-1 except the mid-session identity-rebind leaf, which is gated at PR-3** via
+`MCP-ID-008` — PR-1's protocol context carries no resolved identity, so that branch **MUST NOT** be reported
+closed at PR-1. Version-confusion fixtures depend on **D-1** closure
 ([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md)). This tree covers the surface DFD-15 diagrams.
 
 ---
@@ -199,4 +202,5 @@ Every leaf above references at least one defined threat ID and at least one requ
 threat→requirement→test chain for all leaves is consolidated in
 [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Bypass leaves (AT-1 L2) are **residual**
 per [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 (R-1) — the V1 mitigation is a documented limitation
-(MCP-OPS-004) plus the inbound Origin/Host control (MCP-INSP-008), not full coverage.
+(MCP-OPS-004) plus the inbound Origin/Host control — the **MCP-INSP-008** primitive (PR-1) and its
+listener-side enforcement **MCP-INSP-009** (PR-5) — not full coverage.

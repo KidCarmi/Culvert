@@ -454,3 +454,76 @@ slice ownership are unchanged — round 6 stops V1 from *claiming* it, rather th
 **Unchanged by round 6:** ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains
 byte-identical; no requirement or threat IDs added/removed (74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined); documentation only; PR-1 not begun.
+
+---
+
+## Round 7 — stale mappings left behind by the requirement splits (`d5a84cd4`)
+
+Five findings (2×P1, 2×P2 from the protocol reviewer; 1 from the repository review bot). Every one is the
+**same class of defect**: earlier rounds *split* a requirement into a PR-1 primitive and a later
+enforcement/identity control, but downstream artifacts still mapped the threat to the **PR-1-only** half —
+so a threat could be reported closed one or more slices too early. The splits themselves are unchanged;
+round 7 propagates them.
+
+### R7-1 (P1) — `MCP-INSP-009` / PR-5 propagated to every live-listener and DMZ mapping
+
+**Finding.** `MCP-INSP-008` is a **pure validation primitive** (PR-1, binds no listener) while
+`MCP-INSP-009` owns listener binding + host allowlist + E2E rebinding proof (PR-5 / Future DMZ gate). Several
+artifacts still mapped listener and DMZ enforcement to `MCP-INSP-008` alone, so the rebinding threats
+(MCP-T-031/052/055) could be reported covered once only the unit-tested function existed.
+
+**Fix — propagated everywhere, not only the cited lines.** `ATTACK-TREES.md` (the DMZ-abuse leaf **and** the
+AT-1 L2 bypass leaf + its residual-risk narrative), `ABUSE-CASES.md` (the local-listener rebinding case and
+the connector/DMZ case — both now state that a PR-1 unit test does **not** close them), `ON-PREM-
+CONNECTIVITY.md` (the D-8/D-9 posture block, the Model C control table, §7 inbound/outbound discussion, the
+MCP-T-031 mapping, and §8 cross-references), `DATA-FLOW-DIAGRAMS.md` (DFD-12 local-listener note and the
+DFD-14 DMZ note), `OPEN-DECISIONS.md` (D-9 evidence, both blocks), and `CI-GATES.md` (the master-table row,
+which omitted `MCP-INSP-009` and PR-5 entirely).
+
+### R7-2 (P1) — `ON-PREM-CONNECTIVITY.md` §2 retargeted to `MCP-ID-007`
+
+**Finding.** Round 6 retargeted V1 Model A tenant binding to `MCP-ID-007` in the checklist and the
+Production Qualification slice, but §2 of the connectivity document still said every LAN/VPN-local session
+engages `MCP-CONNECT-004` — contradicting both the connector/DMZ-only definition of that ID and round 6's
+own "no `MCP-CONNECT-*` requirement is V1 evidence" statement. An implementer following the connectivity
+document would have put Model A back on a post-V1 test chain.
+
+**Fix.** §2 now engages **`MCP-ID-007`** (PR-3, tenant-escape tests) and states explicitly why
+`MCP-CONNECT-004` is *not* the V1 control here, cross-referencing the slice and checklist.
+
+### R7-3 (P2) — attack-tree session leaf split for `MCP-ID-008`
+
+**Finding.** `ATTACK-TREES.md` AT-10 mapped the whole protocol/session-state leaf to `MCP-PROTO-012` and
+declared **all** leaves gated at PR-1 — but round 2 moved resolved-identity binding to `MCP-ID-008` at PR-3,
+so the mid-session-rebind branch was treated as closed two slices early.
+
+**Fix.** The leaf is **split**: protocol-state confusion (lifecycle/cancellation/reconnect, identity-free) →
+`MCP-PROTO-012` at PR-1; **mid-session identity rebind** → **`MCP-ID-008` at PR-3**, annotated as *not*
+closable by `MCP-PROTO-012`. The "all leaves are gated at PR-1" sentence is corrected to carve out the
+identity leaf. `MCP-T-069` is now shown as split across the two halves consistently with the threat model.
+
+### R7-4 (P2) — `MCP-PROTO-014` wired into the blocking PR-1 gates
+
+**Finding.** The three blocking PR-1 gate rows in `CI-GATES.md` never referenced `MCP-PROTO-014`, and none
+named its fixtures — so PR-1 could satisfy every enumerated gate while the UTF-8/protocol-token verification
+stayed unwired, despite the traceability matrix assigning it to the PR-1 gate.
+
+**Fix.** `MCP-PROTO-014` is added to the **structural + protocol-state suite** row with its fixtures named
+explicitly (invalid-UTF-8 rejection; exact byte-for-byte method-token comparison with no normalization
+folding; non-ASCII-method-name rejection pending D-1; a test proving the kernel does **not** globally
+normalize opaque identifiers), and to the **fuzz gate** row (the corpus must include invalid-UTF-8 and
+non-ASCII/normalization-sensitive method tokens). Both master-table rows updated to match.
+
+### R7-5 — DFD-15 no longer implies identity binding at PR-1
+
+**Finding (review bot).** DFD-15 labelled the `MCP-PROTO-012` state machine "one identity/session", which
+contradicts PR-1's identity-agnostic design and the `MCP-ID-008` split.
+
+**Fix.** The node now reads "immutable **opaque** session context — no resolved identity; lifecycle /
+cancellation / reconnect", the error edge drops "rebind", and the DFD-15 preamble states that the identity
+half of MCP-T-069 is **not** closed by this diagram (it is `MCP-ID-008` at PR-3).
+
+**Unchanged by round 7:** no requirement or threat was added, removed or redefined — only their *mappings*
+were corrected. ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical;
+74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not
+begun.

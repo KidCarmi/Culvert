@@ -16,7 +16,10 @@ architecture review has to improvise a connectivity story.
 > unverified until a named, date-stamped integration is validated. A hardened **DMZ endpoint (Model C)** is
 > **not supported in V1 and is disabled by default.** Host validation + configured-host allowlisting are
 > mandatory on **every** HTTP MCP listener; local deployments bind only to explicitly configured
-> interfaces; inbound Origin/Host validation (MCP-INSP-008) ships in **PR-1**.
+> interfaces. The inbound Origin/Host **validation primitive** (`MCP-INSP-008`) ships in **PR-1**, and the
+> **listener-side enforcement** — binding configured interfaces + the host allowlist, proven end-to-end —
+> is **`MCP-INSP-009` at PR-5**; PR-1 binds no listener, so the listener-side rebinding threats
+> (MCP-T-031/055) are **not** closed until PR-5.
 >
 > **Config-surface consequence:** "not supported in V1" is enforced, not merely defaulted — V1 validation
 > **MUST REJECT** `mcp_gateway_connector_mode` values `outbound-connector` and `dmz-endpoint` across API,
@@ -61,8 +64,14 @@ attack surface, relies on network controls the customer already operates (LAN se
 authentication), and defers OAuth/WAF/DMZ hardening entirely. **[REC]**
 
 **Requirements engaged:**
-- **MCP-CONNECT-004** — every session, including a LAN/VPN-local one, **MUST** be tenant-bound; "internal
-  network" is not itself a tenant boundary. See [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md).
+- **MCP-ID-007** — every session, including a LAN/VPN-local one, **MUST** be tenant-bound ("tenant identity
+  MUST be bound and enforced on **every call**; cross-tenant access MUST be denied", **PR-3**, tenant-escape
+  tests); "internal network" is not itself a tenant boundary. **This — not `MCP-CONNECT-004` — is the V1
+  Model A tenant-binding requirement**: `MCP-CONNECT-004` is scoped to **connector/DMZ** sessions and gated
+  at PR-C / the Future DMZ gate, so citing it here would put Model A on a post-V1 test chain (see
+  [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) Production Qualification and
+  [`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md)). See
+  [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md).
 - **MCP-INSP-008 / MCP-INSP-009** — Origin/Host validation prevents DNS-rebinding that would let a malicious
   local web page pivot into the local listener, even when the listener is LAN-only. The **validation
   primitive** is `MCP-INSP-008` (PR-1, no listener); the **listener that binds configured interfaces and
@@ -146,7 +155,7 @@ require a directly reachable remote MCP URL. **[REC]**
 | OAuth | Authenticate the calling client before any MCP traffic is proxied inward. | **MCP-CONNECT-003**. |
 | WAF | Filter malicious HTTP traffic before it reaches the reverse proxy / Culvert. | **MCP-CONNECT-003**. |
 | Reverse proxy | Terminate public TLS, present a controlled surface, isolate the DMZ from internal segments. | **MCP-CONNECT-003**. |
-| Origin/Host validation | Reject requests whose Origin/Host does not match the expected value — the DNS-rebinding defense for an internet-reachable listener. | **MCP-INSP-008**. |
+| Origin/Host validation | Reject requests whose Origin/Host does not match the expected value — the DNS-rebinding defense for an internet-reachable listener. | **MCP-INSP-009** (listener-side enforcement + E2E proof, Future DMZ gate); `MCP-INSP-008` supplies the PR-1 validation primitive only. |
 | Rate limits | Bound abusive or runaway request volume against a now-public endpoint. | **MCP-CONNECT-003**. |
 | Internal mTLS | The DMZ-to-Culvert hop is itself mutually authenticated — the DMZ is not implicitly trusted internal network. | **MCP-CONNECT-003**. |
 | Explicit risk acceptance | A documented, signed-off risk acceptance is required before this model goes into production — it is the only model with public ingress. | **MCP-CONNECT-003**. |
@@ -154,7 +163,8 @@ require a directly reachable remote MCP URL. **[REC]**
 | Abuse response | A defined runbook for responding to detected abuse (e.g. rate-limit trips, WAF blocks, auth-failure spikes) must exist before go-live. **[REC]** |
 
 **Threat model engaged:** **MCP-T-052** (DMZ endpoint abuse) is the threat this model exists to contain,
-mapped to MCP-CONNECT-003 and MCP-INSP-008. See [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-052 (risk
+mapped to MCP-CONNECT-003 and **MCP-INSP-009** (listener-side enforcement; `MCP-INSP-008` is the PR-1
+primitive only). See [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-052 (risk
 register, High severity) and MCP-T-031 (inbound DNS-rebinding against the MCP/SSE listener, currently
 **Missing today** per the SSRF note in §6).
 
@@ -224,13 +234,14 @@ build on directly: it protects **outbound** dials Culvert itself makes (e.g. to 
 connector's origin), and is the correct reference pattern for any new outbound leg introduced by Models B
 or C. It does **not** cover the **inbound** side — validating the Origin/Host header presented by a client
 connecting *to* Culvert's own MCP/SSE listener is a distinct, currently-unimplemented control
-(**MCP-INSP-008**; see §2 and §4). Both directions matter for these connectivity models: an internal
+(**MCP-INSP-008** primitive at PR-1 + **MCP-INSP-009** listener enforcement at PR-5; see §2 and §4). Both directions matter for these connectivity models: an internal
 mirror or connector origin must not resolve to a private/metadata address unexpectedly (outbound, existing
 guard), and the MCP/SSE listener itself must not accept a rebound Origin/Host (inbound, not yet built).
 
 **Threats engaged:** **MCP-T-053** (data-residency, §6), **MCP-T-036** (SSRF), **MCP-T-037** (DNS
 rebinding), and **MCP-T-031** (inbound DNS-rebinding against the MCP/SSE listener — the inbound-specific
-threat that MCP-INSP-008 exists to close). See [`THREAT-MODEL.md`](THREAT-MODEL.md) §9 (DFD-to-threat
+threat that the MCP-INSP-008 primitive + **MCP-INSP-009** listener enforcement exist to close — a live
+listener is required, so PR-1 alone does not close it). See [`THREAT-MODEL.md`](THREAT-MODEL.md) §9 (DFD-to-threat
 matrix, DFD-12/13/14 rows) and §11 (risk register).
 
 ---
@@ -238,7 +249,8 @@ matrix, DFD-12/13/14 rows) and §11 (risk register).
 ## 8. Cross-References
 
 - Connectivity requirements: [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) MCP-CONNECT-001..004,
-  MCP-INSP-008, MCP-PRIVACY-001/003.
+  MCP-INSP-008 (PR-1 primitive) + **MCP-INSP-009** (PR-5 listener enforcement), **MCP-ID-007** (V1 Model A
+  tenant binding, PR-3), MCP-PRIVACY-001/003.
 - Threats: [`THREAT-MODEL.md`](THREAT-MODEL.md) MCP-T-051 (outbound connector compromise), MCP-T-052 (DMZ
   abuse), MCP-T-053 (cloud AI data-residency), MCP-T-036 (SSRF), MCP-T-037 (DNS rebinding), MCP-T-031
   (inbound DNS-rebinding vs the MCP/SSE listener).

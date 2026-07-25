@@ -141,7 +141,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Question:** offer a routable remote MCP endpoint at all, and accept its risk?
 - **Options:** no DMZ; DMZ with explicit risk acceptance.
 - **Recommended [REC]:** defer DMZ (Model C) until A/B proven; require explicit written risk acceptance if offered.
-- **Evidence:** threat MCP-T-052; MCP-CONNECT-003, MCP-INSP-008.
+- **Evidence:** threat MCP-T-052; MCP-CONNECT-003, MCP-INSP-009 (listener-side; MCP-INSP-008 is the PR-1 primitive).
 - **Owner:** Sec Arch/Exec. **Approver:** Arch + Exec. **Due:** PR-11. **Closure:** risk acceptance signed or DMZ deferred.
 - **Blocking:** GO/NO-GO (connectivity).
 - **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-9, pending ARB/Exec ratification).**
@@ -155,7 +155,8 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     Origin" rule unless the protocol version requires it). Local deployment binds only to explicitly
     configured interfaces. Inbound Origin/Host (MCP-INSP-008) remains a **PR-1** requirement.
   - **Approver role:** Security Architecture + Executive (facilitator approval recorded; ratification pending).
-  - **Evidence:** ON-PREM-CONNECTIVITY §4/§7; MCP-CONNECT-003, MCP-INSP-008; MCP-T-052/031.
+  - **Evidence:** ON-PREM-CONNECTIVITY §4/§7; MCP-CONNECT-003, **MCP-INSP-009** (listener-side host
+    allowlist + E2E rebinding; `MCP-INSP-008` supplies the PR-1 primitive); MCP-T-052/031.
   - **Residual risk:** connector-less cloud clients unserved in V1 (accepted); DMZ, if ever offered, carries the only public-ingress surface (explicit signed risk acceptance required).
 
 ### D-10 — Snapshot signing scheme

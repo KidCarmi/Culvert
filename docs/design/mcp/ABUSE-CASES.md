@@ -131,10 +131,15 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** a local/desktop MCP client (Model A).
 - **Path:** browser-driven request with a forged Host/Origin (MCP-T-031,055).
 - **Affected assets:** A-11, A-9.
-- **Expected control:** MCP-INSP-008 inbound Origin/Host validation (**missing today**).
+- **Expected control:** **MCP-INSP-009** (PR-5) — the **live listener** binds only configured interfaces and
+  enforces the host allowlist/Origin check end-to-end; **MCP-INSP-008** (PR-1) supplies the **validation
+  primitive only**. Both **missing today**. Since this abuse case requires a running listener, it is **not
+  closable at PR-1**.
 - **Expected event:** decision/DENY, `MCP.INSPECTION.ORIGIN_REJECTED`.
 - **Expected policy result:** DENY.
-- **Test:** inbound-rebinding test. **Owner:** Sec/Eng. **Severity:** High. **Closure:** bad Origin/Host rejected.
+- **Test:** listener-side inbound-rebinding **E2E** test (MCP-INSP-009, PR-5) — a PR-1 unit test of the
+  primitive alone does **not** close this. **Owner:** Sec/Eng. **Severity:** High. **Closure:** bad
+  Origin/Host rejected **by the live listener**.
 
 ### MCP-AC-013 — Secret exfiltration through a tool
 - **Attacker:** agent embedding a secret to send outward.
@@ -211,7 +216,9 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** Model B/C deployment.
 - **Path:** impersonate connector identity / replay tunnel / abuse DMZ (MCP-T-051,052).
 - **Affected assets:** A-12, A-9.
-- **Expected control:** MCP-CONNECT-001,002,003 + MCP-INSP-008.
+- **Expected control:** MCP-CONNECT-001,002 (**PR-C**), MCP-CONNECT-003 + **MCP-INSP-009** (**Future DMZ
+  gate** — listener-side host allowlist + E2E rebinding enforcement). `MCP-INSP-008` (PR-1) is the validation
+  primitive only and does not close the DMZ path.
 - **Expected event:** connectivity event; DENY on identity/tenant failure.
 - **Expected policy result:** DENY; tenant-bound.
 - **Test:** impersonation + tunnel-replay + rollover + DMZ-abuse. **Owner:** Net/Sec. **Severity:** High. **Closure:** impersonation/replay blocked; tenant binding holds.
