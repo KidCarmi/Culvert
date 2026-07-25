@@ -75,7 +75,13 @@ WINDOW = 600
 #     decimals, not "anything lowercase".
 ABBREV = r'(?<!\be\.g)(?<!\bi\.e)(?<!\bcf)(?<!\bvs)(?<!\betc)(?<!\bapprox)(?<!\bFig)(?<!\bNo)(?<!\bp)(?<!\bpp)'
 SENTENCE_END = re.compile(r'(?<=\S)' + ABBREV + r'(?<!\d)\.\s+')
-LOOKBACK = 200          # scope marker may precede the ordering clause
+# SCOPE RECOGNITION IS SENTENCE-LOCAL.  A raw 200-character lookback let an
+# unrelated PRECEDING sentence supply the scope: "Configuration publication is
+# described here. The decision event MUST be durably committed BEFORE the
+# snapshot is signed, pushed or applied." was read as scoped and reported clean,
+# which recreates the neighbouring-prose false negative the sentence bound was
+# introduced to remove (round 42, P1).  The scope marker must appear in the
+# assertion's OWN sentence.
 
 
 def perclass_actions():
@@ -132,7 +138,10 @@ def run(texts, scopes=None):
         flat = t.replace('\n', ' ')
         for m in ORDERING.finditer(flat):
             span = SENTENCE_END.split(flat[m.start():m.start() + WINDOW])[0]
-            ctx = (flat[max(0, m.start() - LOOKBACK):m.start()] + span).lower()
+            # the assertion's own sentence: back to the previous terminator, no further
+            prev = list(SENTENCE_END.finditer(flat[:m.start()]))
+            sent_start = prev[-1].end() if prev else 0
+            ctx = (flat[sent_start:m.start()] + span).lower()
             line = t[:m.start()].count('\n') + 1
             if GENERIC.search(span):
                 continue                          # delegates the enumeration
@@ -186,6 +195,11 @@ if __name__ == '__main__':
             'the decision event MUST be durably committed before **the upstream call**. '
             'Publication signs and pushes the snapshot, materialization mints the credential, '
             'and the Management state change is recorded.',
+        # ROUND 42 P1: a PRECEDING sentence names a class.  A raw lookback read the
+        # assertion as scoped to it and reported clean.
+        'OPERATIONS-AND-SUPPORT.md':
+            'Configuration publication is described here. The decision event MUST be durably '
+            'committed BEFORE the snapshot is signed, pushed or applied.',
         # ROUND 41 P1: the NEXT sentence starts with a lowercase technical term.
         # A blanket `(?![a-z])` lookahead absorbed it and let it supply the
         # missing actions.

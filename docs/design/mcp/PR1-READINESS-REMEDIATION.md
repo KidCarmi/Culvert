@@ -2782,3 +2782,62 @@ statement, diagram edge, provenance claim or repository-context row changed — 
 `predicates/` and this log. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74
 threats / 91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all
 exit `0`; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 42 — two ordering defects in the ARCHITECTURE, and the scope check re-created the very false negative it was fixed for (`90f702e6` → next)
+
+Three findings, two of them **P1**, and — for the first time since round 36 — **two are in the design, not
+in the tooling**. Both are stage-ordering defects of the same family as the `MCP-EVENT-002` work: a control
+named in the right words at the wrong point in the flow.
+
+**R42-1 (P1) — DFD-1 and DFD-2 ran the protocol kernel BEFORE the Origin/Host check.** A request with a
+disallowed `Host`/`:authority`/`Origin` entered DFD-15 first, and DFD-15 reaches `MCP-PROTO-003` ID
+correlation and the `MCP-PROTO-012` lifecycle/cancellation state machine — so a cross-origin or
+DNS-rebinding request **could consume or alter protocol-session state before the guard rejected it**. That
+contradicts this package's own [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) §Connect, which makes
+the Origin/Host check a **hard precondition on connect**, and the session-establishment row, which says the
+protocol session is created once negotiation **and** the Origin/Host check succeed. Both flows now read
+`AC → HDR (HTTP header parsing only) → HV (MCP-INSP-009 precondition) → K15`, and the reject arm says
+explicitly: **no kernel entry, no ID correlation, no lifecycle transition, no session created or touched.**
+
+**This is the third time a control has been correct in prose and misplaced in the graph** (rounds 22-23 for
+the pipeline order, 34 for DFD-3's publication, now this) — and the first where the diagram contradicted a
+*sibling document's* explicit precondition rather than a requirement row. Predicate 19 could not see it: it
+asks whether an irreversible action is gated by a durable commit, not whether a **guard precedes the
+state-touching stage it guards**. That is a new dimension and I am recording it as **not currently checked**.
+
+**R42-2 (P2) — DFD-15 rejected unknown methods BEFORE version negotiation.** `CLASS` classified *and*
+rejected unknown/unsupported methods, then `VER` negotiated. `MCP-PROTO-002` requires classification **per
+the negotiated version**, which that order cannot implement: on the initial handshake no version is
+established yet, and a method valid in the version about to be negotiated is refused — or a
+version-specific method is checked against the wrong allowlist. The stage is now split around negotiation:
+`CLASS` decides the **envelope** (request / response / notification + ID correlation, both
+version-independent) and `ADMIT` performs **method/capability admission against the negotiated version**.
+`MCP-PROTO-002`'s own statement now carries the ordering, and PR-1's structural suite gains the
+stage-order case (a method valid only in the version about to be negotiated must not be rejected
+pre-negotiation) so the requirement has a test that would fail on the old order.
+
+**R42-3 (P1) — `predicate-22`'s scope check re-created the neighbouring-prose false negative it was fixed
+for.** Scope recognition used a raw 200-character lookback, so *"Configuration publication is described
+here. The decision event MUST be durably committed BEFORE the snapshot is signed, pushed or applied."*
+was read as scoped to the publication class and reported clean — even though the second sentence is an
+unscoped rule missing three actions. **Round 39 bounded the assertion span at the sentence and left the
+scope context unbounded**, which is the same defect surviving in the half of the function I did not look at.
+Scope is now **sentence-local**: back to the previous terminator, no further. Seeded with the reviewer's
+construction; fires.
+
+**Thirty-sixth amendment — when a fix bounds one input, bound every input to that decision.** The span and
+the scope context feed the same verdict. Bounding one and leaving the other on a character window meant the
+predicate could still be absolved by text outside the sentence — through the other door. A discriminator's
+inputs are a set, and the fix is to the set.
+
+**Standing note.** Rounds 22–42: twenty-one consecutive rounds. This round breaks a five-round run of
+tooling-only findings: two of the three are architecture ordering defects that have been live since those
+diagrams were written, through every round of self-review, and the reviewer found both. Rounds 37–42 have
+now produced **eleven** predicate defects and **two** design defects; I found none of the thirteen.
+
+**Unchanged by round 42:** no requirement, threat or abuse-case ID added, removed or renumbered — one
+requirement STATEMENT (`MCP-PROTO-002`) gained the ordering clause, and it is already in the note's ADDED
+set, so the provenance claim is unchanged and `predicate-25` re-verifies clean. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
+cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`;
+PR-1 not begun.

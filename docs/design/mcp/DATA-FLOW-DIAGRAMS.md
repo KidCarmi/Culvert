@@ -15,14 +15,15 @@ Management MCP↔control surface.
 
 ## DFD-1 — Management MCP read-only request (Capability A)
 
-Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — this flow validates `Host`/`:authority`/`Origin` per request at `HV1`, so it is a consumer of `MCP-INSP-009`).
+Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — this flow validates `Host`/`:authority`/`Origin` per request at `HV1`, so it is a consumer of `MCP-INSP-009`). **`HV1` runs BEFORE the protocol kernel**, immediately after HTTP header parsing: [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) §Connect makes the Origin/Host check a **hard precondition on connect**, and the kernel's own stages (`MCP-PROTO-003` ID correlation, `MCP-PROTO-012` lifecycle/cancellation) touch session state — so a disallowed-origin request reaching the kernel first could consume or alter that state before the rebinding guard rejected it.
 
 ```mermaid
 flowchart LR
-  AC[AI Client] -- bearer: mgmt scope --> K15["Protocol kernel — see DFD-15<br/>strict decode + structural bounds<br/>+ version + lifecycle (Management bound set)"]
-  K15 --> HV1["MCP-INSP-009 listener validation<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream, after header parsing"]
-  HV1 -->|allowed| L1{{/mcp/management listener}}
-  HV1 -.disallowed.-> HVX1[Reject — DNS-rebinding / cross-origin defence]
+  AC[AI Client] -- bearer: mgmt scope --> HDR1["HTTP header parsing only<br/>no JSON-RPC body decode yet"]
+  HDR1 --> HV1["MCP-INSP-009 listener validation — PRECONDITION<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream, immediately after header parsing"]
+  HV1 -.disallowed.-> HVX1["Reject — DNS-rebinding / cross-origin defence<br/>NO kernel entry: no ID correlation, no lifecycle transition,<br/>no protocol session created or touched"]
+  HV1 -->|allowed| K15["Protocol kernel — see DFD-15<br/>strict decode + structural bounds<br/>+ version + lifecycle (Management bound set)"]
+  K15 --> L1{{/mcp/management listener}}
   subgraph Culvert Management MCP
     L1 --> AZ[Mgmt authz: RBAC + tenant + read-only default]
     AZ --> RO[Bounded read-only tool]
@@ -37,14 +38,15 @@ TB-7 at the listener/authz edge. No mutation tool exists (MCP-MGMT-001). Output 
 
 ## DFD-2 — Management MCP draft & validation (Capability A)
 
-Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — validated per request at `HV2`, `MCP-INSP-009`).
+Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — validated per request at `HV2`, `MCP-INSP-009`, **before the protocol kernel** for the same reason as DFD-1: the Origin/Host check is a precondition on connect, and the kernel's ID-correlation and lifecycle stages touch session state).
 
 ```mermaid
 flowchart LR
-  AC[AI Client] --> K15["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle"]
-  K15 --> HV2["MCP-INSP-009 listener validation<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream"]
-  HV2 -->|allowed| L1{{/mcp/management}}
-  HV2 -.disallowed.-> HVX2[Reject]
+  AC[AI Client] --> HDR2["HTTP header parsing only<br/>no JSON-RPC body decode yet"]
+  HDR2 --> HV2["MCP-INSP-009 listener validation — PRECONDITION<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream"]
+  HV2 -.disallowed.-> HVX2["Reject — NO kernel entry, no session state touched"]
+  HV2 -->|allowed| K15["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle"]
+  K15 --> L1{{/mcp/management}}
   L1 --> DR[Draft policy tool]
   DR --> VAL[Validate syntax + simulate blast radius]
   VAL --> AUD[Full audit: no activation]
@@ -332,7 +334,7 @@ Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits m
 
 ## DFD-15 — Protocol-kernel decode path (Capability **A and B**, PR-1)
 
-Crosses **TB-1, TB-7** — Gateway traffic crosses TB-1 and **Management traffic crosses TB-7**, since this kernel is on both listeners' paths. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, classification, structural bounds, version negotiation and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. DFD-1 and DFD-2 therefore begin **downstream of this diagram** (both now show the kernel explicitly); they are not an alternative path around it. **PR-1 ships this decode
+Crosses **TB-1, TB-7** — Gateway traffic crosses TB-1 and **Management traffic crosses TB-7**, since this kernel is on both listeners' paths. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, **envelope** classification, structural bounds, version negotiation, **version-dependent method/capability admission** and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. **Stage order is load-bearing twice over.** (1) `MCP-PROTO-002` requires classification **per the negotiated version**, so only the *envelope* half (request / response / notification + ID correlation) may precede `VER`; rejecting an unknown **method** or an unadvertised **capability** must happen **after** negotiation, or a valid version-specific method is refused and a version-specific one is checked against the wrong allowlist. (2) DFD-1 and DFD-2 begin **downstream of this diagram for the message body only** — their `MCP-INSP-009` Origin/Host check runs **upstream of the kernel**, immediately after HTTP header parsing, because [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) §Connect makes it a **hard precondition on connect** and this kernel's `MCP-PROTO-003` correlation table and `MCP-PROTO-012` lifecycle machine **touch session state**. They are not an alternative path around the kernel; the kernel is simply not the first thing an HTTP-transport request meets. **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
 `MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here. **PR-1 is
 identity-agnostic:** the `MCP-PROTO-012` state machine holds an **immutable, opaque session context that
@@ -343,15 +345,17 @@ so the **identity half of MCP-T-069 is NOT closed by this diagram**.
 flowchart LR
   BYTES["Hostile client bytes (untrusted)<br/>EITHER listener: Gateway or Management"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
   FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
-  DEC --> CLASS[Classify req/resp/notif + method<br/>reject unknown/unsupported<br/>MCP-PROTO-002; ID correlation MCP-PROTO-003]
+  DEC --> CLASS["ENVELOPE classification: req / resp / notif<br/>version-INDEPENDENT; ID correlation MCP-PROTO-003<br/>MCP-PROTO-002 (envelope half)"]
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
   STRUCT --> VER[Protocol-version adapter<br/>allowlist + equivalence, no downgrade<br/>MCP-PROTO-010/011]
-  VER --> NORM["Normalized internal message"]
+  VER --> ADMIT["METHOD / CAPABILITY admission — AFTER negotiation<br/>evaluated against the NEGOTIATED version's allowlist<br/>reject unknown methods + unadvertised capabilities/extensions<br/>MCP-PROTO-002 (version-dependent half)"]
+  ADMIT --> NORM["Normalized internal message"]
   NORM --> STATE[Protocol-state machine<br/>immutable OPAQUE session context - no resolved identity<br/>lifecycle / cancellation / reconnect<br/>MCP-PROTO-012]
   STATE --> HANDOFF{{"Test harness (PR-1)<br/>/ later runtime boundary (PR-5)"}}
   FRAME -. limit exceeded / truncated .-> REJ
   DEC -. malformed / differential .-> REJ
-  CLASS -. unknown method / bad id .-> REJ
+  CLASS -. unclassifiable envelope / bad id .-> REJ
+  ADMIT -. unknown method / unadvertised capability .-> REJ
   STRUCT -. over-limit .-> REJ
   VER -. unsupported version / downgrade .-> REJ
   STATE -. race / duplicate / out-of-order lifecycle .-> REJ
@@ -367,7 +371,7 @@ flowchart LR
   classDef tb fill:#fee,stroke:#c00;
   class FRAME,DEC tb
 ```
-Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop); the **offending message's** resources are freed, but an **outstanding-request entry is released only on trustworthy same-session correlation** — never on an ID lifted from the rejected message, since that would be a remote state-deletion primitive — and otherwise expires on its bounded timeout; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
+Untrusted bytes are bounded and strictly decoded before any downstream stage. **Classification is split around version negotiation:** `CLASS` decides the JSON-RPC *envelope* (request / response / notification) and correlates IDs — both version-independent — while `ADMIT` rejects unknown methods and unadvertised capabilities/extensions **against the negotiated version's** allowlist, which is what `MCP-PROTO-002`'s "per the negotiated version" requires and what a single pre-negotiation classify stage could not implement. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop); the **offending message's** resources are freed, but an **outstanding-request entry is released only on trustworthy same-session correlation** — never on an ID lifted from the rejected message, since that would be a remote state-deletion primitive — and otherwise expires on its bounded timeout; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
 
 ---
