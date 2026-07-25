@@ -176,6 +176,7 @@ flowchart LR
   GATE -->|"credential issue / rotate / revoke"| XCRED["Broker MATERIALIZATION<br/>mint / rotate / revoke"]
   GATE -->|"state-affecting Management op"| XMGMT["Management state change<br/>out of V1 — ADR-0024 D-13"]
   GATE -->|"read-only / low-risk: not execution-gated"| INT
+  GATE -->|"auth-failure / authz-denial event, commit CONFIRMED:<br/>request already denied, nothing to gate"| INT
   XUP --> OUT["Outcome event — emitted AFTER the irreversible action<br/>NOT the fail-closed gate"]
   XPUB --> OUT
   XCRED --> OUT
@@ -191,9 +192,11 @@ flowchart LR
   LOSS -->|"auth-failure / authz-denial (already denied)"| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
   LOSS -->|"read-only / low-risk"| ODEG
   CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
-  SPOOL --> INT[Integrity + replay-id + tenant tag]
+  INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
+**`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor the lockout — which would make the single dispatch below decorative. A **successfully committed** denial event is routed to `INT` **through `GATE`**, after classification, not around it.
+
 **Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); read-only/low-risk to degraded only. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
 
 **The gate dispatches by class, because each class has a different irreversible action** (`MCP-EVENT-002`): write/destructive → the upstream call; configuration publication → snapshot **sign/push/apply**, entering DFD-10 at `SIGN` and never earlier; credential → **broker materialization** (mint/rotate/revoke); state-affecting Management → the state change. A single edge to "upstream call" would leave publication and credential mutation ungated, since neither makes one.
@@ -232,9 +235,13 @@ Crosses TB-3. Threats: MCP-T-047, MCP-T-048.
 flowchart LR
   TRIG[Regression detected] --> PAUSE[Pause rollout]
   PAUSE --> CMP[Compare snapshots]
-  CMP --> RB[Atomic swap to previous snapshot]
+  CMP --> WALR{{"DURABLE decision-event COMMIT<br/>rollback IS a configuration change<br/>MCP-EVENT-002 config-publication class"}}
+  WALR -- "commit FAILED" --> FCR["Fail closed AND degraded + alert<br/>NO swap performed — the CURRENT snapshot stays active<br/>rollback is refused, not silently applied"]
+  WALR -- "commit CONFIRMED" --> RB[Atomic swap to previous snapshot]
   RB --> ACK[Acknowledge + export affected decisions]
 ```
+**Rollback is a configuration change, so it is gated like one.** An operator- or health-triggered rollback applies a snapshot, which is the `MCP-EVENT-002` configuration-publication class's irreversible action — so the durable commit **MUST precede the atomic swap**, and on commit failure the rollback is **refused with the current snapshot left active**, never applied-then-reported. Gating only DFD-10's forward publication would leave rollback as an ungated way to change configuration while the spool is failing.
+
 Atomic; no partial state (MCP-HA-002); `configver` (DefaultMax=50) prior art.
 
 ## DFD-12 — Local enterprise client connectivity (Model A)

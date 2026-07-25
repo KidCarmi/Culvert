@@ -140,14 +140,16 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Trust boundary:** TB-4.
 - **Dependencies:** PR-6.
 - **Security requirements:** MCP-EVENT-001..006; MCP-PRIVACY-002.
-- **Tests:** queue-saturation, event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
+- **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
   **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
   **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
+  **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF THAT CLASS'S OWN side effect — write/destructive: **no upstream call occurred**; configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked**; state-affecting Management: **no state change**. Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
 - **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
   non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
   fail-closed-plus-alert alone does **not** satisfy this slice.
 - **Rollback:** degraded mode → fail-closed for write/high-risk.
-- **Owner:** SRE/Sec. **Reviewer:** Sec Arch. **Release gate:** durability-under-saturation green.
+  **Additionally: for every critical class the side effect is proven not to have occurred**, and a spool-commit failure after admission fails closed identically to saturation.
+- **Owner:** SRE/Sec. **Reviewer:** Sec Arch. **Release gate:** durability-under-saturation green **+ the spool-commit-failure case green + every per-class side-effect-absence assertion green** (`MCP-EVENT-002`).
 
 ## PR-9 — API & GUI
 - **Objective:** inventory, policies, simulator, approvals, health; RBAC + OpenAPI + GUI parity.

@@ -1863,3 +1863,65 @@ in particular took **five rounds** to reach the primary request flow, and during
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean
 (each proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.
+
+---
+
+## Round 27 — round 26's "single dispatch" had a bypass, and my own predicate's vocabulary was an unswept enumeration (`49a37bc6` → next)
+
+Three Codex findings, all in round 26's work.
+
+### R27-1 (P1) — `SPOOL` kept an unconditional edge, so the single dispatch was decorative
+
+Round 26 added `SPOOL -->|commit FAILED| LOSS` and left the pre-existing **unconditional** `SPOOL --> INT`
+edge in place. A failed commit could therefore continue to integrity/export and reach neither fail-closed nor
+the durability lockout — while the caption I wrote in the same commit claimed one mandatory dispatch. **Adding
+a branch does not make it mandatory; removing the bypass does.**
+
+**Fix.** `SPOOL` now has **no unlabelled out-edge**: `commit CONFIRMED → GATE`, `commit FAILED → LOSS`. A
+successfully committed **denial** event reaches `INT` **through `GATE`** via an explicit arm, after
+classification rather than around it. Verified mechanically — `SPOOL` out-edges are both labelled, and `INT` is
+reachable only from `GATE` and `SPOOLO`.
+
+### R27-2 (P1) — DFD-11 rollback applied a snapshot with no durability gate
+
+Round 26 gated DFD-10's forward publication and left DFD-11's `Atomic swap to previous snapshot` ungated. A
+rollback **is** a configuration change — the `MCP-EVENT-002` configuration-publication class's irreversible
+action — so an operator- or health-triggered rollback could apply configuration while the spool was failing.
+
+**Fix.** DFD-11 gates before the swap; on commit failure the rollback is **refused with the current snapshot
+left active**, never applied-then-reported.
+
+**Why predicate 19 missed it, which is the part worth recording.** I built its action vocabulary — `Call
+upstream`, `MATERIALIZE`, `Fetch short-lived`, `SIGN[`, `mint / rotate / revoke` — **from the diagrams I had
+just edited.** `Atomic swap` was never in the list, so the check could not see the ungated rollback. That is
+**amendment 15 applied to my own predicate**: I enumerated from the instances in front of me instead of from
+the authority. The vocabulary is now derived from `MCP-EVENT-002`'s own class table (upstream call /
+sign-push-apply **including a rollback swap** / broker materialization / Management state change), and
+re-verified: residual `NONE`, fires on a rollback-swap seed as well as upstream-call and materialize seeds, and
+still does not fire on the post-execution `Upstream response`.
+
+### R27-3 (P1) — the PR-8 slice contract, one slice over from round 26's fix
+
+Round 26 carried the assertions into PR-10's slice and left **PR-8's** Tests and Acceptance naming only generic
+saturation and "fail closed plus degraded". An act-first implementation reporting `ENOSPC` *after* the side
+effect satisfies those completion fields while `MCP-EVENT-002` and `CI-GATES.md` reject it. PR-8's Tests,
+Acceptance and Release gate now carry the distinct spool-commit-failure case and all four per-class
+side-effect-absence assertions, with the explicit statement that observing fail-closed + degraded is **not**
+sufficient.
+
+**Twentieth amendment — a predicate's own vocabulary is an enumeration, and it decays.** Every check I have
+written matches a *list of tokens*, and each list was drawn from the artifacts in front of me when I wrote it.
+So a predicate silently narrows as the package grows: predicate 19 was blind to rollback from the moment it was
+written. Therefore **a predicate's token list must be derived from the authority it enforces** — for
+predicate 19, `MCP-EVENT-002`'s class table — **and re-derived whenever that authority changes.** A green
+predicate whose vocabulary predates the text it checks is not evidence.
+
+**Standing note.** Rounds 22–27: six consecutive rounds where each fix produced the next round's findings.
+Thirteen of the last sixteen rounds found defects in the immediately preceding round's new text. Round 26's
+central claim — "one mandatory loss dispatch" — was false when written, because a bypass edge two lines below
+it survived.
+
+**Unchanged by round 27:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 (v2) and the outcome-lane check
+clean, each proven to fire on seeded positives; no non-ASCII strays; documentation only; PR-1 not begun.
