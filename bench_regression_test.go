@@ -19,8 +19,11 @@ package main
 //   go test -tags benchgate -run 'TestBenchGate_' -v .
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/sslbypass"
 )
 
 // TestBenchGate_PolicyEvalAllocs locks in the O(1)-allocation policy hot path.
@@ -212,6 +215,45 @@ func TestBenchGate_GeoTrackDispatchDisabledAllocs(t *testing.T) {
 		t.Errorf("REGRESSION: disabled geo-track dispatch allocates %d/op, exceeds bound %d — "+
 			"a per-request tracker spawn has returned to handleRequest for non-GeoIP deployments "+
 			"(geoip.Enabled() probe hoisted out of maybeTrackDestinationCountry?)", allocs, maxAllocs)
+	}
+}
+
+// TestBenchGate_SSLBypassMatchesAllocs locks in the O(1)-allocation SSL-bypass
+// scan on the per-CONNECT decision path (resolveSSLDecision → sslBypass.Matches,
+// consulted for every CONNECT whose matched rule says inspect). Before the
+// pattern.norm precompute, every glob pattern re-ran hostutil.NormalizeHost on
+// BOTH the static pattern and the already-normalized host via MatchFQDN — ~4
+// allocs/pattern (82 allocs/op measured at 20 patterns); it is now a
+// MatchFQDNNorm over the compile-time-normalized pattern, so the steady state
+// is the single per-call host normalization, independent of pattern count —
+// the same contract TestBenchGate_PolicyEvalAllocs pins for rule FQDNs. Any
+// reintroduction of per-pattern normalization fails this gate.
+func TestBenchGate_SSLBypassMatchesAllocs(t *testing.T) {
+	const maxAllocs int64 = 4 // steady state 2 (the per-call host normalization)
+	for _, patterns := range []int{5, 20, 50} {
+		pats := make([]string, patterns)
+		for i := range pats {
+			pats[i] = fmt.Sprintf("*.bypass-%d.example.com", i)
+		}
+		m := &sslbypass.Matcher{}
+		if err := m.Set(pats); err != nil {
+			t.Fatal(err)
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if m.Matches("www.no-match.example.net") {
+					b.Fatal("unexpected match")
+				}
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("Matches patterns=%d: %d allocs/op (bound %d), %d ns/op", patterns, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: sslbypass.Matches patterns=%d allocates %d/op, exceeds constant bound %d — "+
+				"per-pattern host/pattern re-normalization has returned to the CONNECT decision path "+
+				"(pattern.norm precompute bypassed / MatchFQDN instead of MatchFQDNNorm?)", patterns, allocs, maxAllocs)
+		}
 	}
 }
 
