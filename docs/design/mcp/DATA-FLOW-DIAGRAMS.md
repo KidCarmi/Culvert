@@ -161,16 +161,21 @@ Crosses TB-4. Threats: MCP-T-028, MCP-T-044, MCP-T-045.
 
 ```mermaid
 flowchart LR
-  DEC[Decision + inspection + execution] --> RDX[Redact: no tokens/secrets/raw]
+  DEC["Decision + request-side inspection<br/>NO execution yet"] --> RDX[Redact: no tokens/secrets/raw]
   RDX --> Q[[Bounded queue + backpressure]]
   Q -->|ok| SPOOL[Mandatory local encrypted durable spool per DP]
-  Q -->|saturated + critical write/destructive/config/credential| FC[Fail closed AND degraded mode + alert + loss counter]
+  SPOOL --> GATE{Critical action class?}
+  GATE -->|"write / destructive / config-publication / credential:<br/>commit CONFIRMED"| EXEC["Credential use + upstream call<br/>runs ONLY after the durable commit"]
+  GATE -->|"read-only / low-risk: not execution-gated"| INT
+  EXEC --> OUT["Outcome event — emitted AFTER execution<br/>NOT the fail-closed gate"]
+  OUT -.re-enters redaction + queue.-> RDX
+  Q -->|"saturated + critical write/destructive/config/credential"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
   Q -->|saturated + auth-failure / authz-denial event| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
   CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
   SPOOL --> INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
-Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
+**Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE credential use and the upstream call**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
 
 ## DFD-10 — Control Plane → Data Plane snapshot publication
 

@@ -119,6 +119,11 @@ backpressure and replay identifiers. An external message bus or SIEM is an **add
 when an exporter is configured). Durability-unavailable semantics are fixed by action class (MCP-EVENT-002);
 for the critical write classes, fail-closed **and** degraded-mode-with-alert are **both** required:
 
+**Ordering precondition:** for every class below whose behavior is **fail closed**, the decision event **MUST be
+durably committed BEFORE credential use and before the upstream call**; the operation runs only after that commit
+is confirmed. Evaluated after execution, "fail closed" is unimplementable — the side effect has already happened.
+The outcome event is emitted separately afterwards and is not the gate (MCP-EVENT-002, MCP-T-044).
+
 | Action class | Behavior when a decision event cannot be durably persisted |
 |---|---|
 | Read-only / low-risk ALLOW or MONITOR | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an integrity-protected loss/degradation counter; keep retrying persistence/export within bounded budgets; **never fail silently**. |

@@ -135,7 +135,7 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
 | Unit | (harness only — **NOT** requirement-specific proof; see §1 and §1a for per-requirement chains) | Harness exists (`go test -race`) | PR-1+ |
 | Integration | all runtime | Harness exists | PR-1+ |
 | Compatibility (protocol conformance) | MCP-PROTO-010,011 | **Missing** — `[EXT]`/`[D-1]` version fixtures; content gated on D-1 closure; must become a **blocking PR-1** gate ([`CI-GATES.md`](CI-GATES.md)) | PR-1 (D-1-gated) |
-| Malformed JSON-RPC / parser-differential / classification / batch | MCP-PROTO-001,002,003,004,005,007,013 | **Missing** — malformed + duplicate-key + framing + batch-policy corpus | PR-1 |
+| Malformed JSON-RPC / parser-differential / classification / batch | MCP-PROTO-001,002,003,004,005,007,013 | **Missing** — malformed + duplicate-key + framing corpus, plus **deterministic** batch-policy cases (max batch size, per-element bounds, bounded amplification, unsupported-batch explicit rejection) and **deterministic** pathological-number cases (overflow, precision, encodings) — deterministic, not fuzz-delegated | PR-1 |
 | Protocol structural limits (size/depth/field/string/number) | MCP-PROTO-006,007,008 | **Missing** — limit + resource-budget assertions | PR-1 |
 | Version negotiation / downgrade / adapter equivalence | MCP-PROTO-010,011 | **Missing** — D-1-gated fixtures | PR-1 (D-1-gated) |
 | Protocol-state / cancellation / duplicate-completion | MCP-PROTO-012 | **Missing** — protocol-state machine tests | PR-1 |

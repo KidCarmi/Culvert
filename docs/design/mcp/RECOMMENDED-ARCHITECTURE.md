@@ -89,7 +89,7 @@ responsibility and prohibition, mirroring the component table in `BLUEPRINT.md` 
 | `internal/mcp/credentials` | Credential broker: select/mint a short-lived, scoped upstream credential only after an ALLOW-class policy decision. | Expose a raw secret to the agent or to the decision-event pipeline (Blueprint §09; **MCP-CRED-004**). Must not run before policy has decided (confused-deputy risk, threat MCP-T-046). |
 | `internal/mcp/inspection` | Input/output inspection: schema conformance, size limits, secret/DLP pattern matching, destination/URL controls, redaction. **Runs in two distinct positions and the order is load-bearing:** the **request-side** pass (semantic schema `MCP-INSP-001`, secret/DLP, destination/SSRF `MCP-INSP-004`, DNS pinning `MCP-INSP-005`, resource extraction) **MUST** run **before** `policy`, because policy evaluates over validated arguments and extracted resource fields and because a credential **MUST NOT** be selected for a call whose arguments or destination would be rejected (`MCP-POLICY-004` — credential selection only after an ALLOW-class decision, the invariant carrying the `MCP-T-046` ordering test; credential **scope** least privilege is `MCP-CRED-002`); the **response-side** pass (output bounding `MCP-INSP-002`, redaction `MCP-INSP-003`, injection labeling `MCP-INSP-007`) runs **after** the upstream call. See [DATA-FLOW-DIAGRAMS.md](DATA-FLOW-DIAGRAMS.md) DFD-7, whose request chain terminates in `RES --> POL`. | Become a single unbounded queue (Blueprint §09) — must be bounded and independently failure-scoped per stage. |
 | `internal/mcp/events` | Durable decision-event pipeline: event construction, sampling policy, bounded queues with backpressure, export/spool. | Reuse a small debug audit ring as production evidence (Blueprint §09) — specifically, must not reuse `internal/audit`'s bounded ring (`MaxRing=500`, `internal/audit/audit.go:49` — **[FACT]**) as the durable decision-event store. |
-| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → **request-side inspection** → policy → credentials → upstream call → **response-side inspection** → event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
+| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → **request-side inspection** → policy → credentials → **durable commit of the decision event for the critical action classes (write / destructive / configuration-publication / credential — `MCP-EVENT-002`)** → upstream call → **response-side inspection** → outcome-event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
 | `internal/mcp/management` | Capability A business logic: read-only explanation/health/analytics tool handlers, draft/validate/simulate handlers; enforces "no raw secrets / no command exec / no unrestricted export" and gates any future mutation behind plan→validate→approve→apply. | Expose raw secret access, arbitrary command execution, or unrestricted trace/log export as an MCP tool (Blueprint §06 non-goals). Must not reuse the Gateway's policy/credential engines as its authorization model — Capability A authorization is a distinct schema (Trust Boundary TB-7, §4 below). |
 | `internal/mcp/adminapi` | Engine-side support for the admin-UI/API surface specific to MCP (server/tool/policy CRUD data access, decision-event query support) that a root-level `apiXxx` shim in the existing admin-UI layer (`ui_routes_meta.go`, `register*Routes` pattern — **[FACT]**) calls into. | Register `mux.HandleFunc` routes directly — per repo convention, route registration and `uiRoutes` metadata stay in root-level `register*Routes` helpers and `ui_routes_meta.go` (**[FACT]**, `CLAUDE.md` Admin UI / Control Plane section), not inside `internal/`. |
 
@@ -111,7 +111,8 @@ workflow (Blueprint §08):
 
 ```
 protocol kernel → identity → registry/catalog → inspection (request side) → policy → credentials
-                → upstream call → inspection (response side) → runtime → events
+                → [critical classes: DURABLE decision-event commit] → upstream call
+                → inspection (response side) → runtime → events (outcome)
 ```
 
 This is presented as the logical call order for the Gateway path (Capability B). **Request-side inspection precedes `policy`, and `credentials` follows the ALLOW decision** — evaluating policy against unvalidated arguments, or obtaining an upstream credential before a malformed argument or disallowed destination has been rejected, would defeat `MCP-INSP-001`/`004`/`005` and `MCP-POLICY-004` (credential selection only after an ALLOW-class decision — the invariant carrying the `MCP-T-046` ordering test), together with `MCP-CRED-002` credential scoping. `MCP-CRED-006` is **not** the control here: it governs broker **failure** behavior, not ordering. Capability A's
@@ -139,9 +140,16 @@ Rules governing the interfaces:
 - **`credentials` is a one-way sink from `policy`'s perspective.** `policy` never receives a credential
   value as an input and never emits one; it only emits a decision that `runtime` uses to decide whether to
   invoke `credentials`.
-- **`events` never blocks the decision path.** `runtime` emits to `events` after the decision/inspection
-  outcome is known; `events`' own backpressure/failure semantics (§5, MCP-EVENT-002) must not be able to
-  stall or alter a policy decision already made.
+- **`events` never blocks or alters the POLICY DECISION — but for the critical action classes it DOES gate
+  EXECUTION.** These are different things and conflating them breaks `MCP-EVENT-002`. `events`'
+  backpressure/failure semantics (§5) must never stall or change a decision `policy` has already made
+  (that is the `MCP-POLICY-002` purity property this invariant exists to protect). They **must**, however,
+  be able to stop the **side effect**: for the **write / destructive / configuration-publication /
+  credential** classes the decision event **MUST be durably committed BEFORE credential use and before the
+  upstream call**, and if it cannot be committed the operation **MUST fail closed and never run**. A
+  fail-closed guarantee evaluated only *after* execution is not a guarantee — the side effect has already
+  happened and nothing remains to deny (`MCP-T-044`). The **outcome** event is emitted separately after the
+  call and is **not** the fail-closed gate.
 
 ---
 
@@ -254,17 +262,21 @@ flowchart TB
         CAT["internal/mcp/catalog"]
         POL["internal/mcp/policy\n(pure, no I/O — MCP-POLICY-002)"]
         CRED["internal/mcp/credentials\n(fail-closed default — MCP-CRED-006)"]
-        INSP["internal/mcp/inspection"]
+        INSPQ["inspection (REQUEST side)\nsemantic schema + destination/SSRF + DNS pin\nMUST precede policy — MCP-INSP-001/004/005"]
+        INSPR["inspection (RESPONSE side)\noutput bounding + redaction + injection labels\nMCP-INSP-002/003/007"]
         RT["internal/mcp/runtime\n(per-call orchestrator)"]
         EVT["internal/mcp/events\n(durable — MCP-EVENT-002)"]
+        WAL{{"CRITICAL classes: decision event\nDURABLY COMMITTED BEFORE execution\ncannot commit ⇒ fail closed, op never runs\nMCP-EVENT-002"}}
 
         IDENT --> REG
         REG --> CAT
-        CAT --> POL
+        CAT --> INSPQ
+        INSPQ --> POL
         POL --> CRED
-        CRED --> INSP
-        INSP --> RT
-        RT --> EVT
+        CRED --> WAL
+        WAL --> RT
+        RT --> INSPR
+        INSPR --> EVT
     end
 
     subgraph TB7["TB-7: Management MCP ↔ Culvert control surface"]

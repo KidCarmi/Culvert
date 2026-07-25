@@ -188,7 +188,15 @@ are **required**, each grounded in a stable requirement ID from
 ## 4a. Durability-unavailable semantics by action class (D-5, closed)
 
 Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md), when a decision event
-**cannot be durably persisted**, behavior is fixed by the class of action, not left to the moment:
+**cannot be durably persisted**, behavior is fixed by the class of action, not left to the moment.
+
+> **Ordering precondition (load-bearing).** For every class whose behavior below is **fail closed**, the
+> decision event **MUST be durably committed BEFORE credential use and before the upstream call**, and the
+> operation runs **only** after that commit is confirmed. A fail-closed rule evaluated after execution is
+> unimplementable — the side effect has already occurred and there is nothing left to deny. The **outcome**
+> event is emitted separately after execution and is **not** the fail-closed gate
+> ([MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events), MCP-T-044).
+
 
 | Action class | Behavior when the decision event cannot be durably persisted |
 |---|---|

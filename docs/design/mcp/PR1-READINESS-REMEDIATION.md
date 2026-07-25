@@ -1490,3 +1490,80 @@ result from either predicate means "no row is silent", not "every claim is verif
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
 only; PR-1 not begun.
+
+---
+
+## Round 22 — the fail-closed guarantee was positioned after the side effect (`a55079b5` → next)
+
+Three Codex findings on `a55079b5`. One is the **third** instance of the same mistake; one is a real
+unimplementable guarantee in the durability design.
+
+### R22-1 (P1) — `MCP-EVENT-002`'s fail-closed rule could not be implemented as written
+
+**Finding.** DFD-9 reached the fail-closed branch only via `Decision + inspection + execution → Redact →
+Queue`, and `RECOMMENDED-ARCHITECTURE.md` placed event emission after the upstream call. So when the queue
+saturates, **the write/destructive/configuration operation has already happened** — there is nothing left to
+deny, and `MCP-EVENT-002`'s "the operation MUST fail closed" is unimplementable at that point.
+
+**Root cause, and it was stated as an invariant.** `RECOMMENDED-ARCHITECTURE.md` §3 asserted "**`events` never
+blocks the decision path** … must not be able to stall or alter a policy decision already made." That
+invariant exists to protect `MCP-POLICY-002` **policy purity**, and it is correct for that purpose — but it
+**over-reached from the decision into the side effect**. Never blocking a *decision* and never gating
+*execution* are different properties, and conflating them is what made the durability guarantee decorative.
+
+**Fix (write-ahead ordering, propagated across the whole dimension).** For the critical **write /
+destructive / configuration-publication / credential** classes the decision event **MUST be durably committed
+BEFORE credential use and before the upstream call**; the operation runs only after the commit is confirmed;
+if it cannot be committed the operation **MUST NOT run**. The **outcome** event is emitted separately after
+execution and is explicitly **not** the fail-closed gate. Applied to:
+
+- `MCP-EVENT-002` — Statement, **Verification and Evidence** (amendment 10a: the row, not the sentence). The
+  saturation test must now assert **the upstream call never occurred**, because a test that only observes the
+  returned error passes against the broken design.
+- `RECOMMENDED-ARCHITECTURE.md` — the "never blocks" invariant is split into decision-purity (unchanged) vs
+  execution-gating (new); both order statements gain the commit step; the component diagram gains the commit
+  gate node.
+- `DATA-FLOW-DIAGRAMS.md` DFD-9 — regraphed so the commit precedes a distinct execution node, with the
+  outcome event re-entering redaction afterwards.
+- `EVENT-MODEL.md` §4a and **`ADR-0024` §D-5** — the ordering precondition is stated above each action-class
+  table, so the decision record no longer licenses the post-execution reading.
+- `CI-GATES.md` — the blocking saturation gate must assert the side effect did not happen.
+
+### R22-2 (P1) — third time: prose fixed, diagram left behind
+
+The `RECOMMENDED-ARCHITECTURE.md` component diagram still showed `CAT → POL → CRED → INSP → RT → EVT` after
+round 19 corrected both prose order statements **in the same file**. Implementers following the diagram would
+evaluate unvalidated arguments and acquire credentials before destination/schema rejection — re-opening the
+exact `MCP-T-046` path round 19 closed.
+
+This is the third occurrence: round 15 (DFD-9), round 19 (DFD-15), round 22 (the component diagram). Rounds 15
+and 19 both recorded "find every diagram" as prose. Prose did not work.
+
+### R22-3 (P2) — the blocking suite claimed batch and numeric coverage it did not assert
+
+The structural + protocol-state suite binds `MCP-PROTO-004` (batch bounds / explicit rejection when
+unsupported) and `MCP-PROTO-007` (numeric overflow, precision, pathological encodings) but named neither
+behaviour — batch appeared only as a cross-capability isolation case. The fuzz gate is crash-oriented and
+cannot establish deterministic semantics, so PR-1 could pass every blocking gate while permitting batch
+amplification (`MCP-T-061`) or a numeric parser differential (`MCP-T-064`). Both gates and the traceability
+row now name the deterministic cases explicitly and forbid delegating them to fuzzing.
+
+**Thirteenth amendment — a fail-closed guarantee is a position, not a sentence.** For any requirement of the
+form *"if X cannot be done, the operation must fail closed"*, two things must be checked and neither is about
+wording: (a) **every flow reaches X before the irreversible action**, and (b) **the named test asserts the
+side effect did not occur**, not merely that an error was returned. A test of form (b) written without (a)
+passes against a design that executes first and reports failure afterwards — which is precisely the state this
+package was in for `MCP-EVENT-002`.
+
+**Fourteenth amendment — diagrams are a checked consumer, with a predicate.** "Also update the diagrams" has
+now failed three times as prose, so it becomes executable. Predicate 13, over every ```mermaid block in the
+package including ADR-0024: **no edge may run from a credentials-class node to an inspection-class node**
+(`CRED* --> INSP*`), because that is the pipeline inversion in graph form. Verified to fire on a seeded
+positive, and currently `NONE`. Its limitation is the same as predicates 7 and 8 — it is structural, catches
+this specific inversion, and does not validate a diagram's semantics in general; every ordering change still
+requires reading each mermaid block whose flow it touches.
+
+**Unchanged by round 22:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
+only; PR-1 not begun.
