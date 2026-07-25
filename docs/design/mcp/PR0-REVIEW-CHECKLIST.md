@@ -53,7 +53,7 @@ the specific document and ID.
 - [ ] [`OPERATIONS-AND-SUPPORT.md`](OPERATIONS-AND-SUPPORT.md) SLOs are labeled design targets; runbooks exist for every incident class.
 - [ ] [`CP-DP-HA-MODEL.md`](CP-DP-HA-MODEL.md) fencing/last-known-good/rollback are sound; DP never depends on CP per call.
 - [ ] [`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md) mode ladder + **rehearsed rollback** (hard NO-GO line 5); hard failures blocked even in Shadow.
-- [ ] Bounds/rate-limits defined for streams/payloads/queues/events (MCP-OPS-002).
+- [ ] Bounds/rate-limits defined at **both** layers: **parse-time** structural + per-session bounds `MCP-PROTO-006/008` (**PR-1**, kernel, no listener) **and** listener/runtime stream/connection/queue/rate bounds `MCP-OPS-002` (**PR-5**). Tick only if both are stated — deferring oversized-payload defence entirely to PR-5 would leave the PR-1 kernel accepting hostile frames.
 - [ ] MCP-off overhead regression is planned (MCP-OPS-001).
 
 ## Privacy

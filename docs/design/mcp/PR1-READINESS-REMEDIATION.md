@@ -697,3 +697,56 @@ implied.
 **Unchanged:** no requirement or threat added, removed or redefined; ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined; documentation only; PR-1 not begun.
+
+---
+
+## Round 11 — two split axes the 10b audit did not cover (`cfc51356`)
+
+Two P2 findings. Both are the **same propagation class**, but on **split axes the round-10b audit did not
+enumerate**. 10b swept `MCP-INSP-008`→`009`, `MCP-PROTO-012`→`MCP-ID-008`, `MCP-CONNECT-004`→`MCP-ID-007`
+and the `MCP-T-001..0NN` ranges — it did **not** sweep the `MCP-OPS-002`→`MCP-PROTO-006/008` split, nor the
+**CodeQL factual correction** (finding M-1), which is a re-scope of a *fact* rather than of a requirement.
+**That scope gap is the lesson of this round**: an audit is only as good as its enumeration of what was
+re-scoped.
+
+### R11-1 (P2) — parse-time payload bounds kept in the PR-1 mapping
+
+**Finding.** Earlier remediation narrowed `MCP-OPS-002` to **listener/runtime** bounds (PR-5) and moved
+**structural parse-time** limits to `MCP-PROTO-006/008` (PR-1). Several consumers still assigned payload
+bounding **entirely** to `MCP-OPS-002` at PR-5/PR-7, so an SSDLC or threat review could defer the **High**
+oversized-payload control to PR-5 while the PR-1 kernel is already accepting hostile frames.
+
+**Fix — every consumer of the OPS-002 axis:** `SSDLC-CONTROL-MAPPING.md` **PW.9** and **API4** rows now lead
+with `MCP-PROTO-006/008` parse-time bounds at **PR-1** (with PR-1 structural-limit + fuzz + resource-budget
+evidence) and scope `MCP-OPS-002` to the running listener; a **new** test row covers the PR-1
+structural/resource-budget tests distinctly from the PR-5 SSE-exhaustion row. `THREAT-MODEL.md` **MCP-T-040**
+now names `MCP-PROTO-006/008` as *the* control that rejects an oversized frame (PR-1), with `MCP-OPS-002`
+(PR-5) and `MCP-INSP-001` (PR-7, semantic) as the other layers. Also fixed: `ABUSE-CASES.md` (the
+oversized/exhaustion case), `PR0-REVIEW-CHECKLIST.md` (the bounds sign-off item now requires **both** layers
+and warns that deferring to PR-5 leaves the kernel exposed), `ROLLOUT-AND-ROLLBACK.md` (hard-failure row) and
+`PROTOCOL-COMPATIBILITY.md` §4, which still listed "payloads" under `MCP-OPS-002`.
+
+### R11-2 (P2) — the CodeQL path-extension claims removed
+
+**Finding.** Finding M-1 established — and this package's checklist/CI-GATES already stated — that
+`codeql.yml`'s `pull_request` path filter **already includes `internal/**`**, so `internal/mcp/**` is analyzed
+with **no path-filter change**; what is missing is only **blocking** status (it is not branch-protection
+required). But `SSDLC-CONTROL-MAPPING.md` (Verification row + gap register) and `TOOL-DISCOVERY-AND-DRIFT.md`
+still said MCP paths were **not wired** and **scheduled a PR-1 CodeQL workflow edit**. That would send an
+implementer to make an unnecessary workflow change, and left the package self-contradictory.
+
+**Re-verified before editing** (not taken on the reviewer's word): `.github/workflows/codeql.yml` —
+`pull_request.paths` includes `internal/**`. **Fix:** the Verification row now states the verified fact, that
+the gap is **blocking status only**, and that the evidence is *not* a CodeQL path-glob diff; the gap-register
+row is retitled from "path-scope extension" to "**blocking status** (branch-protection policy choice — NOT a
+path-scope extension)"; `TOOL-DISCOVERY-AND-DRIFT.md` carries the same correction with an explicit **"do not
+schedule a CodeQL path-glob change as MCP work."**
+
+**Unchanged by round 11:** no requirement or threat added, removed or redefined. ADR-0024 remains
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not begun.
+
+**Second amendment to the convergence note.** The standing sweep instruction must enumerate **every** re-scope
+performed, including re-scopes of **facts** (like the CodeQL correction) and **layer moves between two existing
+requirements** (`MCP-OPS-002` → `MCP-PROTO-006/008`) — not only splits that created a *new* ID. Before
+declaring a sweep complete, list the re-scopes it covered; anything not on that list is unswept by definition.

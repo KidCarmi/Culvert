@@ -106,8 +106,12 @@ this layer, independent of those specifics:
   an inbound MCP/SSE listener (VERIFIED EVIDENCE). Relevant threats: MCP-T-031 (inbound DNS-rebinding vs
   MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse).
 - **Event framing**: `[EXT]` for the wire-level SSE event shape. The kernel's obligation is bound
-  enforcement regardless of the exact framing: `MCP-OPS-002` requires connections, SSE streams, payloads,
-  queues, concurrency and event buffers to be bounded with per-entity rate limits. A slow or hostile
+  enforcement regardless of the exact framing, **split by layer**: per-message/per-session **parse-time**
+  bounds (size, depth, field/array counts, string length, parser memory and work budget) are
+  `MCP-PROTO-006/008` at **PR-1**, while `MCP-OPS-002` requires live connections, SSE streams, queues,
+  concurrency and event buffers to be bounded with per-entity rate limits at the **running listener**
+  (**PR-5**). A hostile oversized or deeply-nested frame is therefore rejected by the kernel at PR-1 — it does
+  **not** wait for the PR-5 listener bounds. A slow or hostile
   client/server on this channel maps to MCP-T-043 (slow-client) and MCP-T-042 (SSE exhaustion); an
   unbounded event buffer maps to MCP-T-044 (queue saturation/event-loss, Critical).
 - **Keep-alive**: `[EXT]` for the exact heartbeat mechanism the spec defines (e.g. comment pings vs.

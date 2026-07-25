@@ -235,7 +235,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
-| MCP-T-040 | Oversized payloads | High | MCP-INSP-001, MCP-OPS-002 | SRE/Sec |
+| MCP-T-040 | Oversized payloads | High | **MCP-PROTO-006/008** (parse-time structural + per-session bounds — the control that rejects an oversized frame, **PR-1**, before any listener exists), MCP-OPS-002 (listener/runtime bounds under load, PR-5), MCP-INSP-001 (semantic input validation, PR-7) | SRE/Sec |
 | MCP-T-042 | SSE exhaustion | High | MCP-OPS-002 | SRE/Sec |
 | MCP-T-043 | Slow-client attacks | Medium | MCP-OPS-002 | SRE/Sec |
 | MCP-T-044 | Queue saturation / event-loss | Critical | MCP-EVENT-001,002,004 | SRE/Sec |

@@ -166,7 +166,7 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** reachable listener.
 - **Path:** open many slow SSE streams / oversized payloads (MCP-T-042,043,040,044).
 - **Affected assets:** availability, A-6.
-- **Expected control:** MCP-OPS-002 bounds; MCP-EVENT-002 critical-event durability.
+- **Expected control:** **MCP-PROTO-006/008** parse-time structural + per-session bounds (PR-1) for oversized/pathological frames; MCP-OPS-002 listener/runtime bounds under load (PR-5); MCP-EVENT-002 critical-event durability.
 - **Expected event:** `MCP.SYSTEM.EVENT_BACKPRESSURE` / `DEGRADED_MODE`; no critical-event loss.
 - **Expected policy result:** bounded; fail-closed for critical classes.
 - **Test:** load/soak/slowloris/queue-saturation. **Owner:** SRE/Sec. **Severity:** High/Critical. **Closure:** bounds hold; no critical loss.
