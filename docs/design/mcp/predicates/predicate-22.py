@@ -151,15 +151,29 @@ def run(texts, scopes=None):
             sent_start = prev[-1].end() if prev else 0
             ctx = (flat[sent_start:m.start()] + span).lower()
             line = t[:m.start()].count('\n') + 1
-            if GENERIC.search(span):
+            # THE GENERIC ESCAPE MUST BE THE OBJECT OF `BEFORE`.  Matching the
+            # phrase anywhere in the sentence let "... committed BEFORE the
+            # upstream call; metrics describe each class's own side effect"
+            # skip the whole check — the delegation has to be what the ordering
+            # actually points at, not a later aside (round 44, P1).
+            obj = re.split(r';|—', span[m.end() - m.start():])[0]
+            if GENERIC.search(obj):
                 continue                          # delegates the enumeration
             got = named_acts(span)
-            # a sentence SCOPED to one class is complete when it names exactly
-            # that class's own actions — only an UNSCOPED statement of the
-            # general precondition has to name all four
-            if any(got == acts and (scope_tokens(cls)
-                                    & set(re.findall(r'[a-z]{%d,}' % TOKEN_FLOOR, ctx)))
-                   for cls, acts in scopes.items()):
+            # A sentence scoped to one class is complete when it names that
+            # class's own actions.  A sentence scoped to SEVERAL classes must
+            # name the UNION: `any(...)` passed "For write and configuration
+            # publication ... BEFORE the upstream call" on the write class alone
+            # while publication's sign/push/apply went unnamed (round 44, P1).
+            ctx_toks = set(re.findall(r'[a-z]{%d,}' % TOKEN_FLOOR, ctx))
+            scoped = {cls: acts for cls, acts in scopes.items()
+                      if scope_tokens(cls) & ctx_toks}
+            if scoped:
+                need = set().union(*scoped.values())
+                if got == need:
+                    continue
+                bad.append(f'{name}:{line}: assertion scoped to {sorted(scoped)} names {sorted(got)} '
+                           f'— missing {sorted(need - got)} -> {span[:90]!r}')
                 continue
             if not got:
                 bad.append(f'{name}:{line}: ordering assertion names NO class action and is not '
@@ -186,52 +200,47 @@ if __name__ == '__main__':
     print('\n=== seeded known-positives (each MUST fire) ===')
     # every seed is a DIFFERENT incomplete phrasing — the point of the round-38
     # fix is that the predicate must catch the meaning, not one sentence
-    seeds = {
-        'EVENT-MODEL.md':
-            'the decision event MUST be durably committed BEFORE credential use and before the upstream call.',
-        '0024-mcp-agent-security-gateway-trust-boundary.md':
-            'the decision event MUST be durably committed before the upstream call.',
-        'RECOMMENDED-ARCHITECTURE.md':
-            'the decision event MUST be durably persisted before credential use and the upstream call.',
-        'CI-GATES.md':
-            'the decision event MUST be durably committed before the snapshot is signed or pushed.',
-        # ROUND 39 P1: an incomplete rule must NOT be absolved by neighbouring prose.
-        # Under the old fixed 600-char window this sentence reported clean, because
-        # the following sentence names the other three actions.
-        # ROUND 40: the terminator sits after a closing '**' — a boundary matcher
-        # requiring a letter before the period would swallow the next sentence.
-        'ABUSE-CASES.md':
-            'the decision event MUST be durably committed before **the upstream call**. '
-            'Publication signs and pushes the snapshot, materialization mints the credential, '
-            'and the Management state change is recorded.',
-        # ROUND 43: a bare `class-specific` anywhere in the sentence must NOT be
-        # an escape hatch — the marker has to qualify the ACTION.
-        'ROLLOUT-AND-ROLLBACK.md':
-            'the event is durably committed BEFORE the upstream call, with class-specific metrics.',
-        # ROUND 42 P1: a PRECEDING sentence names a class.  A raw lookback read the
-        # assertion as scoped to it and reported clean.
-        'OPERATIONS-AND-SUPPORT.md':
-            'Configuration publication is described here. The decision event MUST be durably '
-            'committed BEFORE the snapshot is signed, pushed or applied.',
-        # ROUND 41 P1: the NEXT sentence starts with a lowercase technical term.
-        # A blanket `(?![a-z])` lookahead absorbed it and let it supply the
-        # missing actions.
-        'GO-NO-GO-CHECKLIST.md':
-            'the decision event MUST be durably committed before the upstream call. '
-            'publication signs and pushes the snapshot, materialization mints the credential, '
-            'and the Management state change is recorded.',
-        'THREAT-MODEL.md':
-            'the decision event MUST be durably committed before the upstream call. '
-            'Separately, publication signs and pushes the snapshot, broker materialization '
-            'mints credentials, and the Management state change is recorded.',
-    }
+    # KEYED BY LABEL, not by target file: a dict keyed by filename silently
+    # DROPPED two seeds in round 44 when they reused a file another seed already
+    # used.  A collision in a seed table is a seed that never ran.
+    seeds = [
+        ('round 38 — credential use + upstream call', 'EVENT-MODEL.md',
+         'the decision event MUST be durably committed BEFORE credential use and before the upstream call.'),
+        ('round 38 — upstream call only', '0024-mcp-agent-security-gateway-trust-boundary.md',
+         'the decision event MUST be durably committed before the upstream call.'),
+        ('round 38 — persisted, credential use + call', 'RECOMMENDED-ARCHITECTURE.md',
+         'the decision event MUST be durably persisted before credential use and the upstream call.'),
+        ('round 38 — publication only', 'CI-GATES.md',
+         'the decision event MUST be durably committed before the snapshot is signed or pushed.'),
+        ('round 40 — terminator after markdown, next sentence supplies the rest', 'ABUSE-CASES.md',
+         'the decision event MUST be durably committed before **the upstream call**. '
+         'Publication signs and pushes the snapshot, materialization mints the credential, '
+         'and the Management state change is recorded.'),
+        ('round 41 — next sentence starts lowercase', 'THREAT-MODEL.md',
+         'the decision event MUST be durably committed before the upstream call. '
+         'publication signs and pushes the snapshot, broker materialization mints credentials, '
+         'and the Management state change is recorded.'),
+        ('round 42 — PRECEDING sentence names a class', 'OPERATIONS-AND-SUPPORT.md',
+         'Configuration publication is described here. The decision event MUST be durably '
+         'committed BEFORE the snapshot is signed, pushed or applied.'),
+        ('round 43 — bare class-specific must not exempt', 'ROLLOUT-AND-ROLLBACK.md',
+         'the event is durably committed BEFORE the upstream call, with class-specific metrics.'),
+        ('round 44 — generic phrase is a LATER ASIDE, not the object of BEFORE', 'GO-NO-GO-CHECKLIST.md',
+         "For all classes, the event MUST be durably committed BEFORE the upstream call; "
+         "metrics describe each class's own side effect."),
+        ('round 44 — scoped to TWO classes, only one class action named', 'PROTOCOL-COMPATIBILITY.md',
+         'For write and configuration publication, the decision event MUST be durably '
+         'committed BEFORE the upstream call.'),
+    ]
     ok = ok0
-    for target, sentence in seeds.items():
+    assert len({lbl for lbl, _, _ in seeds}) == len(seeds), 'duplicate seed label'
+    assert len({tgt for _, tgt, _ in seeds}) == len(seeds), 'two seeds share a target file'
+    for label, target, sentence in seeds:
         seeded = dict(texts)
         seeded[target] = seeded[target] + '\n' + sentence + '\n'
         new = [x for x in run(seeded) if x not in base]
         fired = any(x.startswith(target) for x in new)
-        print(f'  {"FIRES" if fired else "MISSED"}: {sentence[:64]}...' +
+        print(f'  {"FIRES" if fired else "MISSED"}: {label}' +
               (f'\n      -> {new[0][:150]}' if new else ''))
         ok &= fired
 

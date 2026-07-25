@@ -95,6 +95,17 @@ must fire.
 never be recognised as scoped and its legitimate sentences were reported as incomplete. `predicate-22` now
 prints its per-class tokens and fails if any class derives none.
 
+**An early exit must satisfy a higher bar than the check it bypasses** (round 44). Every "skip the verdict"
+branch here has been wrong at least once — a bare marker matched anywhere (43), a marker not bound to the
+object of `BEFORE` (44), a multi-class sentence exempted by one class (44), a scope context read from a raw
+lookback (42). An exemption decides what *not* to look at; bind it to the exact construct it claims to
+recognise.
+
+**A table of test cases must assert its own distinctness** (round 44). `predicate-22`'s seeds were a dict
+keyed by target filename; two round-44 seeds reused files earlier seeds had used and were silently
+discarded by the dict literal, appearing to pass while never running. Seeds are now a list with unique
+labels and unique targets, asserted at run time.
+
 **Containment is not coverage** (round 40). `predicate-25` asked whether a row label appeared *anywhere* in
 the citation-correction note; the note contains `PR-1`, so the numbered rows `1`..`19` were all "covered"
 by the digit. Coverage is now the set of backticked tokens the note names, matched whole — and the seed

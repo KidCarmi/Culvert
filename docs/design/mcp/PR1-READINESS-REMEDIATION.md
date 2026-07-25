@@ -2902,3 +2902,57 @@ claim is unchanged and `predicate-25` re-verifies clean. ADR-0024 `Status: Propo
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
 cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`;
 PR-1 not begun.
+
+## Round 44 — both P1s landed on the two branches I had just named as the likely next failures, and my seed table silently dropped two seeds (`f6b198ba` → next)
+
+Two findings, both **P1**, both in `predicate-22`'s early-exit branches — and round 43's summary comment
+had said, in as many words, that those two branches were where I expected the next defect. Naming a risk is
+not mitigating it.
+
+**R44-1 (P1) — the generic escape was not bound to the object of `BEFORE`.** `GENERIC` was matched anywhere
+in the sentence, so *"For all classes, the event MUST be durably committed BEFORE the upstream call; metrics
+describe each class's own side effect."* skipped the entire check: the delegation phrase was a **later
+aside**, not what the ordering pointed at. The escape now applies only when the marker appears in the
+**object of `BEFORE`** — the text from the ordering match to the next `;` or em-dash.
+
+**R44-2 (P1) — a sentence scoped to several classes was exempted by ONE of them.** `any(got == acts …)`
+returned true as soon as a single class matched, so *"For write and configuration publication, … BEFORE the
+upstream call."* passed on the write class while publication's sign/push/apply went unnamed. The exemption
+now computes **every** class in scope and requires the **union** of their actions; a partial match reports
+which classes are in scope and what is missing.
+
+**Both are the same shape: an early exit that decides "skip the verdict" on weaker evidence than the verdict
+itself would need.** Round 43 fixed the third branch of this kind (the bare `class-specific` marker) and I
+wrote in that round's summary that these two were the ones a reviewer should look at hardest. They were.
+**Predicting where a defect will be is worth nothing next to checking there** — I had the hypothesis, the
+file open, and did not test it.
+
+**And the seed table silently dropped two seeds.** `seeds` was a dict **keyed by target filename**, and both
+round-44 seeds reused files that earlier seeds already used, so the dictionary literal discarded the
+earlier entries — the two new seeds appeared to pass while never running as written. I caught this only
+because the printed reasons named the *old* sentences. The table is now a **list keyed by label**, with
+assertions that no two seeds share a label or a target file. **This is amendment 35 — a derived set must
+never be silently empty — reappearing as a silently-truncated one**, in the very run intended to prove the
+fix.
+
+**Thirty-ninth amendment — an early exit must satisfy a HIGHER bar than the check it bypasses.** Every
+"skip the verdict" branch in this remediation has been wrong at least once: the bare marker (round 43), the
+unbound marker (44), the single-class exemption (44), the raw scope lookback (42). An exemption is a
+security decision about what *not* to look at, and it must be bound to the exact construct it claims to
+recognise — never to the presence of a phrase somewhere nearby.
+
+**Fortieth amendment — a table of test cases must assert its own distinctness.** A dict literal keyed by
+anything a case can share is a silent-drop mechanism. Seeds and controls now carry unique labels and unique
+targets, checked at run time.
+
+**Standing note.** Rounds 22–44: twenty-three consecutive rounds. Rounds 37–44 have produced **seventeen**
+predicate defects and **four** design defects. **Five of the twenty-one I introduced while fixing an earlier
+round's finding.** I found none of the twenty-one before review — including the two I had explicitly
+predicted one round earlier.
+
+**Unchanged by round 44:** no requirement, threat or abuse-case ID added, removed or renumbered; no
+normative statement, diagram edge, provenance claim or repository-context row changed — the only document
+edits are `predicates/predicate-22.py` and this log. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
+cases; predicates 19, 21, 22, 23, 24, 25 all exit `0` (10 seeds + 4 negative controls on predicate-22); no
+non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
