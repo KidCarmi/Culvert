@@ -1144,3 +1144,67 @@ protocol rows the answer was no, and a single grep over the Tests column surface
 **Unchanged by round 16:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.
+
+---
+
+## Round 17 — the seventh amendment, applied where round 16 failed to apply it (`699c472e`)
+
+Two findings from Codex (1×P1, 1×P2). **Both are the seventh amendment turned back on round 16 itself**:
+round 16 wrote "a declared invariant is not a verified one — and the test must appear in the blocking gate,
+not only in the row", then fixed only the 22 protocol rows and left the same defect in two other places.
+
+### R17-1 (P1) — the two host allowlists had no isolation coverage
+
+**Finding.** The `mcp_mgmt_origin_host_allowlist` row added in round 15 states that widening one allowlist
+**MUST NOT** widen the other, and named only per-capability tests. If both capabilities were accidentally
+backed by one shared allowlist, each named test still passes while approving a Gateway host also authorizes
+it on the **Management** listener. The blocking Origin/Host gate did not change one capability and observe
+the other either. This is round 16's P1 in a different pair — and I created the pair myself in round 15.
+
+**Fix.** Both allowlist rows now name `mcp_origin_allowlist_isolation_test.go` (PR-1 primitive scope, PR-5
+listener scope): add an approved host to one capability's allowlist, assert the paired capability's listener
+**still rejects it**, and vice versa; one shared allowlist object **MUST fail**. Pushed into the blocking
+Origin/Host gate, its taxonomy row, and the `MCP-T-031` listener-E2E traceability row.
+
+### R17-2 (P2) — the Management event branch lived only in the matrix row
+
+**Finding.** Round 16 added the Management critical-class and lockout cases to the *configuration-matrix
+row* while the blocking PR-8 gate, its taxonomy row and the traceability row stayed capability-agnostic. The
+gate could therefore be declared green on the Gateway cases alone, so a Management configuration-publication
+path that proceeds after losing its event was **not required to fail the merge** — exactly the failure the
+seventh amendment names, committed in the same change that wrote the amendment.
+
+**Fix.** The blocking PR-8 gate now requires **both** capabilities' critical-class cases **and** the
+denial-event lockout originated on **each** leg, with the Management-originated case asserting that a
+subsequent *allowed* **Gateway** write/high-risk operation is blocked (the lockout is system-wide, so a
+Management-only assertion would let a per-capability implementation pass). Mirrored into the taxonomy row and
+the `MCP-T-044` traceability row.
+
+### Self-initiated sweep — four more capability-agnostic gates
+
+Rather than inspect, I enumerated mechanically: every requirement that has config rows on **both**
+capabilities, then every gate row binding one of those requirements, then whether the gate's text is
+capability-aware. Fifteen requirements are dual-capability; six gate rows were agnostic. Codex reported two.
+
+| Gate | Why per-capability coverage is required |
+|---|---|
+| **Protocol-kernel fuzz gate** (PR-1) | Round 16 made the *structural* gate capability-aware but left the **fuzz** gate agnostic. Kernel code is shared, bounds are not — fuzzing under one capability's bound set proves nothing about the other. Now repeated under each. |
+| **SSE-exhaustion / slowloris / queue-saturation** (PR-5/PR-8) | Both listeners carry their own availability bounds, so saturating one is not evidence for the other. Now run against each listener separately. |
+| **Secret-in-events scan** (PR-4/PR-8) | Both capabilities now have event redaction profiles, and **Management events carry configuration payloads** — a Gateway-only scan left the higher-privilege stream unchecked. Now scans both streams. |
+| *(taxonomy rows for the above)* | Same text, mirrored. |
+
+Deliberate non-finding: the `gitleaks` row in the existing-CI table references `MCP-EVENT-003` incidentally;
+it is a repository-wide secret scan, not a per-capability MCP contract, and stays agnostic by design.
+
+**Eighth amendment — apply a new amendment to its own whole class before shipping it.** Rounds 16 and 17 are
+the same defect twice: round 16 derived the correct general rule and then applied it only to the instance the
+reviewer pointed at. An amendment is a *predicate*, and shipping it means running it over every row, gate and
+traceability entry it can match — mechanically, in the same change that introduces it. The two sweeps that
+close this round are now the standing checks: (a) every row whose validation prose claims
+isolation/independence/"MUST NOT widen" names a test that manipulates one side and asserts the other; (b) for
+every requirement with config rows on both capabilities, every gate binding it names both capabilities. Both
+are one script over a table column, and both should have run in round 16.
+
+**Unchanged by round 17:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation only; PR-1 not begun.
