@@ -21,7 +21,7 @@ is 3.0-mature. Everything else in the recommended Go-native toolchain was adopte
 | Concern | Adopted | Pin |
 |---|---|---|
 | Spec dialect | **OpenAPI 3.0.4** (not 3.1.1 — see §2) | `openapi: 3.0.4` |
-| Parse/validate + request/response validation (in `go test`) | **getkin/kin-openapi** | `v0.142.0` (go.mod) |
+| Parse/validate + request/response validation (in `go test`) | **getkin/kin-openapi** | `v0.144.0` (go.mod) |
 | Route/RBAC coverage | Go test binding `uiRoutes` ⇄ spec ⇄ manifest | — |
 | Bundle + offline docs | `cmd/apibundle` (Go) | — |
 | Breaking-change | **oasdiff** | `v1.11.7` (script pin) |
@@ -53,7 +53,7 @@ the most-proven validator. 3.1.1 migration is a recorded follow-up.
 
 ## 3. Go-native critical path
 
-**getkin/kin-openapi** — **[VERIFIED]** latest v0.142.0, MIT, pure Go, supports 3.0/3.1/3.2 document validation; 3.1 landed v0.136.0 (<https://github.com/getkin/kin-openapi/releases>). Runs inside `go test` — the single most important property for an air-gapped shop. Limitation: request/response *middleware* is 3.0-mature (§2).
+**getkin/kin-openapi** — **[VERIFIED]** latest v0.144.0, MIT, pure Go, supports 3.0/3.1/3.2 document validation; 3.1 landed v0.136.0 (<https://github.com/getkin/kin-openapi/releases>). Runs inside `go test` — the single most important property for an air-gapped shop. Limitation: request/response *middleware* is 3.0-mature (§2).
 
 **Route/RBAC coverage (no new dep)** — bind the live `uiRoutes` table (already
 C1-enforced) to the spec via a Go test: every documented op maps to a real route
@@ -123,7 +123,7 @@ enforcing operationId/summary/description/tags/security/responses and the
 ## 10. Recommendation (as adopted)
 
 Author the contract by hand in **OpenAPI 3.0.4**; validate + enforce route/RBAC
-coverage **inside `go test`** with **kin-openapi v0.142.0** cross-checked against
+coverage **inside `go test`** with **kin-openapi v0.144.0** cross-checked against
 `uiRoutes`; bundle deterministically and render offline HTML with a Go tool; gate
 breaking changes with **oasdiff** and prove client-generation with **oapi-codegen**
 in the deep lane; keep Node out of the fast gate. The entire enforced path is
