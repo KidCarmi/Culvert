@@ -2728,3 +2728,57 @@ statement, diagram edge or provenance claim changed. One repository-context ⟳ 
 (`predicate-25` re-verified: still covered). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md`
 byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21,
 22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 41 — the boundary fix over-excluded, and one class had no scope token at all (`c8efbb7e` → next)
+
+Two findings, both on `predicate-22` (one shared with `predicate-24`), one of them a **P1** on the boundary
+I had now edited in three consecutive rounds.
+
+**R41-1 (P1) — `(?![a-z])` treated EVERY lowercase-starting sentence as non-terminal, not just an
+abbreviation.** So `… before the upstream call. publication signs and pushes the snapshot …` was one span:
+the next sentence, starting with a lowercase technical term, was absorbed and supplied the three missing
+actions. The lookahead was written to skip `e.g.` and decimals and silently skipped far more than that —
+**a correction that over-shot in the direction of leniency**, which is the worst direction for a check whose
+output is `NONE`. The exclusion is now the actual abbreviation set (`e.g`, `i.e`, `cf`, `vs`, `etc`,
+`approx`, `Fig`, `No`, `p`, `pp`) plus decimals, and both predicates share it. Seeded with the reviewer's
+construction in both: fires in `predicate-22` and in `predicate-24`.
+
+**Three rounds, three edits, three defects on the same regex.** Round 39 replaced a fixed window with a
+sentence end; round 40 found the lookbehind rejected a terminator after `**`; round 41 finds the lookahead
+absorbed any lowercase continuation. Each edit fixed the reported case and got the general rule wrong in a
+new way, and each time the result printed `NONE`.
+
+**R41-2 — the `Write / destructive` class had NO scope token, so a legitimately scoped write sentence was
+reported as incomplete.** `scope_tokens()` takes words of six characters or more minus a stopword set;
+`write` is five, and I had put `destructive` in the stopword list myself in round 38. The set came back
+**empty**, so `For a write operation, the decision event MUST be durably committed BEFORE the upstream
+call.` could never match its own class and was judged as an unscoped general rule missing three actions.
+`destructive` is out of the stopword list, the floor falls back to four characters when a class would
+otherwise be tokenless, **the predicate now prints its per-class tokens and fails if any class has none**,
+and there are two new negative controls (a scoped *write* sentence and a scoped *publication* sentence) that
+must stay silent.
+
+**What the tokens print now** — `Write=['destructive']`, `Configuration=['configuration','publication']`,
+`Credential=['credential','revoke','rotate']`, `State-affecting=['management']`. That line exists because a
+silently empty set is invisible: the check kept running and kept reporting, it simply could not recognise one
+of the four classes.
+
+**Thirty-fourth amendment — a correction must be tested from BOTH sides.** Every one of the three boundary
+defects was a rule that was right about the reported case and wrong about the complement: too narrow, then
+too narrow again, then too wide. A fix to a discriminator needs a seed for the case it must catch **and** a
+negative control for the case it must not — round 41 is the first of the three edits to ship both.
+
+**Thirty-fifth amendment — a derived set must never be silently empty.** Where a predicate derives tokens,
+keys or vocabulary per category, it must print them and fail when a category derives nothing. An empty set
+does not raise; it just quietly stops matching, and the check goes on producing `NONE` for a class it can no
+longer see.
+
+**Standing note.** Rounds 22–41: twenty consecutive rounds. Rounds 37–41 have now produced **ten** defects
+in the checked-in predicates. Three of those ten are defects I introduced while fixing an earlier round's
+finding in the same file. I have found none of the ten before review.
+
+**Unchanged by round 41:** no requirement, threat or abuse-case ID added, removed or renumbered; no normative
+statement, diagram edge, provenance claim or repository-context row changed — the only document edits are
+`predicates/` and this log. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74
+threats / 91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all
+exit `0`; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.

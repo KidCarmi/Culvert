@@ -64,12 +64,17 @@ GENERIC = re.compile(r"that class'?s?\s+OWN\s+irreversible action|each class'?s?
 # state change (round 39, P1).  WINDOW survives only as a hard backstop for a
 # sentence with no terminator before the end of the document.
 WINDOW = 600
-# A terminator may be preceded by ANY non-space character — a closing `**`,
-# backtick, bracket, quote or digit.  Requiring a letter there meant
-# `…**exists**.` was not recognised as a sentence end (round 40, P1 on
-# predicate-24, same construction).  The following token must not be lowercase,
-# which excludes "e.g. " and decimal points.
-SENTENCE_END = re.compile(r'(?<=\S)\.\s+(?![a-z])')
+# A sentence ends at `.` + whitespace.  Two refinements, each from a review
+# finding:
+#   * the terminator may be preceded by ANY non-space character — a closing
+#     `**`, backtick, bracket, quote or digit (round 40, P1); and
+#   * the NEXT sentence may legitimately start with a lowercase technical term
+#     ("publication signs and pushes …"), so a blanket `(?![a-z])` lookahead
+#     absorbed it and let the following sentence supply the missing actions
+#     (round 41, P1).  The exclusion is now the ACTUAL abbreviation set plus
+#     decimals, not "anything lowercase".
+ABBREV = r'(?<!\be\.g)(?<!\bi\.e)(?<!\bcf)(?<!\bvs)(?<!\betc)(?<!\bapprox)(?<!\bFig)(?<!\bNo)(?<!\bp)(?<!\bpp)'
+SENTENCE_END = re.compile(r'(?<=\S)' + ABBREV + r'(?<!\d)\.\s+')
 LOOKBACK = 200          # scope marker may precede the ordering clause
 
 
@@ -98,14 +103,25 @@ def named_acts(span):
     return {k for k, pat in ACT_PATTERNS.items() if re.search(pat, span, re.I)}
 
 
-GENERIC_WORDS = {'operation', 'issue', 'selection', 'affecting', 'destructive'}
+GENERIC_WORDS = {'operation', 'issue', 'selection', 'affecting'}
 
 
 def scope_tokens(cls):
     """Distinctive words of a class name, used to detect that a sentence is
-    SCOPED to that class ("Management", "publication", "credential")."""
-    return {w.lower() for w in re.findall(r'[A-Za-z]{6,}', cls)
-            if w.lower() not in GENERIC_WORDS}
+    SCOPED to that class ("Management", "publication", "credential",
+    "destructive"/"write").
+
+    Every class MUST yield at least one token.  `Write / destructive` produced
+    an EMPTY set once "destructive" was in the stopword list and "write" fell
+    below the length floor — so a legitimately scoped write sentence was read as
+    an unscoped general rule and reported as missing three classes' actions
+    (round 41).  A class with no token is a hole, so the floor drops to 4 and
+    the result is asserted non-empty by the caller.
+    """
+    toks = {w.lower() for w in re.findall(r'[A-Za-z]{6,}', cls) if w.lower() not in GENERIC_WORDS}
+    if not toks:
+        toks = {w.lower() for w in re.findall(r'[A-Za-z]{4,}', cls) if w.lower() not in GENERIC_WORDS}
+    return toks
 
 
 def run(texts, scopes=None):
@@ -142,6 +158,13 @@ if __name__ == '__main__':
     texts = {p.name: p.read_text() for p in FILES}
     base = set(run(texts))
 
+    scopes = perclass_actions()
+    tokenless = [c for c in scopes if not scope_tokens(c)]
+    print(f'per-class scope tokens: ' + ', '.join(f'{c.split()[0]}={sorted(scope_tokens(c))}' for c in scopes))
+    if tokenless:
+        print(f'  !! classes with NO scope token (they can never be recognised as scoped): {tokenless}')
+    ok0 = not tokenless
+
     print('\n=== seeded known-positives (each MUST fire) ===')
     # every seed is a DIFFERENT incomplete phrasing — the point of the round-38
     # fix is that the predicate must catch the meaning, not one sentence
@@ -163,12 +186,19 @@ if __name__ == '__main__':
             'the decision event MUST be durably committed before **the upstream call**. '
             'Publication signs and pushes the snapshot, materialization mints the credential, '
             'and the Management state change is recorded.',
+        # ROUND 41 P1: the NEXT sentence starts with a lowercase technical term.
+        # A blanket `(?![a-z])` lookahead absorbed it and let it supply the
+        # missing actions.
+        'GO-NO-GO-CHECKLIST.md':
+            'the decision event MUST be durably committed before the upstream call. '
+            'publication signs and pushes the snapshot, materialization mints the credential, '
+            'and the Management state change is recorded.',
         'THREAT-MODEL.md':
             'the decision event MUST be durably committed before the upstream call. '
             'Separately, publication signs and pushes the snapshot, broker materialization '
             'mints credentials, and the Management state change is recorded.',
     }
-    ok = True
+    ok = ok0
     for target, sentence in seeds.items():
         seeded = dict(texts)
         seeded[target] = seeded[target] + '\n' + sentence + '\n'
@@ -178,13 +208,26 @@ if __name__ == '__main__':
               (f'\n      -> {new[0][:150]}' if new else ''))
         ok &= fired
 
-    print('\n=== negative control: the CLASS-GENERIC form MUST NOT fire ===')
-    ctl = dict(texts)
-    ctl['CI-GATES.md'] = ctl['CI-GATES.md'] + \
-        "\nthe decision event MUST be durably committed BEFORE THAT CLASS'S OWN irreversible action.\n"
-    quiet = not [x for x in run(ctl) if x not in base]
-    print(f'  {"OK (silent)" if quiet else "FALSE POSITIVE"}')
-    ok &= quiet
+    print('\n=== negative controls: legitimate forms MUST NOT fire ===')
+    controls = {
+        'class-generic delegation':
+            "the decision event MUST be durably committed BEFORE THAT CLASS'S OWN irreversible action.",
+        # ROUND 41: a sentence scoped to the write/destructive class is complete
+        # when it names that class's own action — it must not be read as an
+        # unscoped general rule.
+        'scoped to write / destructive':
+            'For a write or destructive operation, the decision event MUST be durably committed '
+            'BEFORE the upstream call.',
+        'scoped to configuration publication':
+            'For configuration publication, the decision event MUST be durably committed BEFORE '
+            'the snapshot is signed, pushed or applied.',
+    }
+    for label, sentence in controls.items():
+        ctl = dict(texts)
+        ctl['CI-GATES.md'] = ctl['CI-GATES.md'] + '\n' + sentence + '\n'
+        quiet = not [x for x in run(ctl) if x not in base]
+        print(f'  {"OK (silent)" if quiet else "FALSE POSITIVE"}: {label}')
+        ok &= quiet
 
     print('\n=== residual on LIVE documents (ledger excluded) ===')
     v = run(texts)

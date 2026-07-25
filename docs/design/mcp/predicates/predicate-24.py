@@ -52,7 +52,11 @@ CLAUSE_WINDOW = 400   # a clause may wrap across lines; the scan is text-wide
 # `… ⇒ **no new configuration revision exists**.` run on into the following
 # prose, which could then supply the missing action-keys and produce a false
 # `NONE` (round 40, P1).
-CLAUSE_END = re.compile(r';|(?<=\S)\.\s+(?![a-z])')
+# shared with predicate-22: the terminator may follow markdown, and the NEXT
+# sentence may start lowercase — only real abbreviations and decimals are
+# excluded (rounds 40/41)
+ABBREV = r'(?<!\be\.g)(?<!\bi\.e)(?<!\bcf)(?<!\bvs)(?<!\betc)(?<!\bapprox)(?<!\bFig)(?<!\bNo)(?<!\bp)(?<!\bpp)'
+CLAUSE_END = re.compile(r';|(?<=\S)' + ABBREV + r'(?<!\d)\.\s+')
 
 
 def keys(text):
@@ -195,6 +199,12 @@ if __name__ == '__main__':
             'docs/design/mcp/CI-GATES.md',
             ('configuration publication ⇒ **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**',
              'configuration publication ⇒ **no new configuration revision exists**. Separately the snapshot is signed and pushed and every DP stays on the prior epoch')),
+        # ROUND 41 P1: the clause's sentence is followed by a LOWERCASE-starting
+        # sentence carrying the missing keys.
+        'CI-GATES: publication clause followed by a lowercase-starting sentence with the missing keys': (
+            'docs/design/mcp/CI-GATES.md',
+            ('configuration publication ⇒ **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**',
+             'configuration publication ⇒ **no new configuration revision exists**. signing and pushing are covered elsewhere, and every DP stays on the prior epoch')),
         # LAYOUT INDEPENDENCE: a cosmetic reflow into one line per class must not
         # reduce coverage.  This seed reflows AND weakens the publication clause;
         # under the old line-level `upstream call` prerequisite it went undetected.

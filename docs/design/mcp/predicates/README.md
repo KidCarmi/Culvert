@@ -82,6 +82,19 @@ letter before the period, so `**exists**.` was not a boundary and the clause abs
 Both now share one definition: a terminator may be preceded by **any non-space character**
 (`(?<=\S)\.\s+(?![a-z])`), which still excludes `e.g.` and decimals.
 
+**A correction must be tested from both sides** (round 41). The sentence boundary was edited in three
+consecutive rounds and was wrong three times — a fixed window, then a lookbehind that rejected `**.`, then a
+lookahead that absorbed *any* lowercase continuation (`… the upstream call. publication signs …`). Each edit
+was right about the reported case and wrong about its complement. The exclusion is now the actual
+abbreviation set plus decimals, and `predicate-22` carries negative controls (a class-generic sentence, a
+scoped *write* sentence, a scoped *publication* sentence) that must stay silent alongside the seeds that
+must fire.
+
+**A derived set must never be silently empty** (round 41). `scope_tokens('Write / destructive')` returned
+`{}` — "write" fell below the length floor and "destructive" was in the stopword list — so that class could
+never be recognised as scoped and its legitimate sentences were reported as incomplete. `predicate-22` now
+prints its per-class tokens and fails if any class derives none.
+
 **Containment is not coverage** (round 40). `predicate-25` asked whether a row label appeared *anywhere* in
 the citation-correction note; the note contains `PR-1`, so the numbered rows `1`..`19` were all "covered"
 by the digit. Coverage is now the set of backticked tokens the note names, matched whole — and the seed
