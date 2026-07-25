@@ -276,8 +276,9 @@ flowchart TD
 
     D --> Q
     Q --> SAT
-    SAT -- "no" --> SPOOL
-    SPOOL --> INT
+    SAT -- "no (admitted — NOT yet a commit)" --> SPOOL
+    SPOOL -- "commit CONFIRMED" --> INT
+    SPOOL -- "commit FAILED\n(ENOSPC / fsync / encryption-key)" --> CRIT
     SPOOL -. "additive, async" .-> EXPORT
     SAT -- "yes" --> CRIT
     CRIT -- "yes" --> KIND
@@ -287,6 +288,8 @@ flowchart TD
     CDEG --> LOCK
     CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> DEG
 ```
+
+**Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded / denial-lockout posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.
 
 **Two distinct critical-class outcomes — do not conflate them** (§4a,
 [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),

@@ -1646,3 +1646,87 @@ as "accepted by the queue" until this round, and every fail-closed test would ha
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 8
 and 13 all `NONE` (each proven to fire on a seeded positive); documentation only; PR-1 not begun.
+
+---
+
+## Round 24 — every finding was a defect in round 23's own fixes (`64342985` → next)
+
+Four Codex findings, **all four introduced by round 23**. One of them made the design worse than before the
+fix, and one re-committed the exact error the round it belongs to had just recorded as an amendment.
+
+### R24-1 (P1) — round 23's outcome-event edge created an unbounded re-execution loop
+
+To separate the decision event from the outcome event I added `OUT -.re-enters redaction + queue.-> RDX`. But
+the outcome event **retains the critical action class**, so re-entering the decision lane reaches `GATE`, whose
+only matching edge for a critical class is `EXEC`. An implementation following DFD-9 literally would **repeat
+the upstream side effect indefinitely** — while the caption two lines below asserted the outcome event is not
+the execution gate.
+
+**This is worse than the defect round 23 fixed.** Round 22's flaw was a guarantee that failed to stop one side
+effect; this one manufactures unbounded side effects.
+
+**Fix.** Two lanes that never join: the **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the
+**outcome** lane (`EXEC → RDXO → QO → SPOOLO → INT`) records and terminates at integrity/export. Outcome-lane
+loss is **degraded + alert + loss counter only** — the operation already happened, so fail-closed is vacuous
+for it, the same reasoning already applied to an already-denied request. A regression predicate now asserts **no
+edge runs from `{OUT, RDXO, QO, SPOOLO, ODEG}` into `{RDX, Q, SPOOL, GATE, EXEC}`**, seeded and confirmed to
+fire.
+
+### R24-2 (P2) — round 23's cleanup rule was a remote state-deletion primitive
+
+Round 23 required a rejected response to "release the outstanding-request correlation entry so no correlation
+state leaks." Codex is right that this is unsafe and partly meaningless: an **uncorrelated** response has no
+entry to release, and a **malformed or over-limit** response may carry an ID that was never trustworthy decoded.
+Implemented literally, **a peer could delete a legitimate in-flight request's state by naming its ID in a
+deliberately malformed response.** I introduced a remote state-deletion vector while closing a resource leak.
+
+**Fix.** The cleanup is now explicitly asymmetric: free the **offending message's** own resources always;
+release an **outstanding-request** entry **only after successful, trustworthy, same-session correlation**,
+otherwise retain it for its bounded timeout. The blocking gate asserts a malformed response naming a live `id`
+**leaves that entry intact**.
+
+### R24-3 (P1) — the spool-commit-failure branch was added to one diagram of two
+
+Round 23 gave DFD-9 a commit-failure edge and left `EVENT-MODEL.md`'s canonical event-flow diagram with
+`FAIL`/`DEG` reachable **only** via `SAT -- yes`, and `SPOOL` carrying success edges only. So the file that owns
+the event model still routed `ENOSPC` / `fsync` / key failure straight to integrity+export.
+
+**Fix.** `SPOOL` now branches `commit CONFIRMED → INT` and `commit FAILED → CRIT`, so commit failure reaches the
+identical class-based posture as saturation for **both** critical-action and denial-event handling.
+
+**This is the fourth occurrence of prose-or-one-diagram fixed while a sibling diagram kept the old flow**
+(rounds 15, 19, 22, 24). Predicate 13 does not catch it: that predicate tests one specific edge inversion, and
+this is a *missing* edge in a different file. As recorded with predicate 13's limitation, the structural check
+was never a substitute for reading every diagram whose flow a change touches — and I did not.
+
+### R24-4 (P1) — the per-class assertions went into the threat-name cell
+
+The traceability row's **Test** and **Evidence** cells still required only generic queue saturation and the
+denial lockout; my round-23 additions had been appended to the **threat-name** cell, where nothing consumes
+them. PR-8 could pass the canonical matrix without testing commit failure or proving any class's side effect
+absent.
+
+Round 19 recorded amendment 10a — *a requirement is a row, not a sentence; a correction must reach the
+Verification and Evidence cells* — and round 23 **cited that amendment in its own commit message** while
+appending to the wrong cell of a different matrix. Recording a rule and applying it are evidently independent.
+
+**Fix.** Test and Evidence cells now carry the spool-commit-failure case and the four per-class absence
+assertions; the threat-name cell is restored to a plain identifier.
+
+**Seventeenth amendment — a fix is not done until its own regression check exists.** Every one of these four
+was reachable by a mechanical check I could have written in the same commit: an unreachable-loop check on the
+graph I edited, a "does this cell actually get consumed" check on the matrix row I edited, and a
+sibling-diagram check on the flow I changed. Rounds 22 and 23 added prose and then relied on the next reviewer.
+So: **when a change alters a flow, a cell's semantics, or an enumeration, the same commit must add the
+predicate that would fail if the change were reverted or applied incompletely** — and must run it. The
+outcome-lane predicate above is that check for R24-1; R24-4's is the traceability-cell consumption check.
+
+**Standing note on the pattern.** Ten of the last twelve rounds found defects in the immediately preceding
+round's new text, and rounds 22–24 form a chain in which each fix introduced the next finding. That is not a
+converging series; it is evidence that this package's correctness currently depends on the external reviewer
+rather than on the disciplines recorded here.
+
+**Unchanged by round 24:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13 and the new outcome-lane check all clean
+(each proven to fire on a seeded positive); no non-ASCII strays; documentation only; PR-1 not begun.

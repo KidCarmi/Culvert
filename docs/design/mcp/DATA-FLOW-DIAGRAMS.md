@@ -169,14 +169,19 @@ flowchart LR
   GATE -->|"write / destructive / config-publication / credential:<br/>commit CONFIRMED"| EXEC["Credential use + upstream call<br/>runs ONLY after the durable commit"]
   GATE -->|"read-only / low-risk: not execution-gated"| INT
   EXEC --> OUT["Outcome event — emitted AFTER execution<br/>NOT the fail-closed gate"]
-  OUT -.re-enters redaction + queue.-> RDX
+  OUT --> RDXO["Redact outcome: no tokens/secrets/raw"]
+  RDXO --> QO[[Bounded queue + backpressure]]
+  QO -->|"admitted"| SPOOLO["Durable spool — OUTCOME lane"]
+  SPOOLO -->|"commit CONFIRMED"| INT
+  QO -->|"saturated"| ODEG
+  SPOOLO -->|"commit FAILED"| ODEG["Degraded + alert + loss counter ONLY<br/>the operation ALREADY happened, so fail-closed is vacuous<br/>NEVER a re-execution path"]
   Q -->|"saturated + critical write/destructive/config/credential"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
   Q -->|saturated + auth-failure / authz-denial event| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
   CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
   SPOOL --> INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
-**Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE credential use and the upstream call**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
+**Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`EXEC → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE` or `EXEC`**. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE credential use and the upstream call**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
 
 ## DFD-10 — Control Plane → Data Plane snapshot publication
 
@@ -286,7 +291,7 @@ flowchart LR
   REJ{{"Reject: branch by message class<br/>MCP-PROTO-013"}}
   REJ -->|request| ERR["Bounded JSON-RPC error<br/>no state leak<br/>MCP-PROTO-013"]
   REJ -->|notification| NORESP["NO wire response<br/>record rejection + loss/metric only<br/>one-way: replying would be reply amplification"]
-  REJ -->|"response (uncorrelated / malformed / over-limit)"| DROP["DISCARD + record — NO wire response<br/>a reply to a response is a feedback loop<br/>release the correlation entry: no leaked state"]
+  REJ -->|"response (uncorrelated / malformed / over-limit)"| DROP["DISCARD + record — NO wire response<br/>a reply to a response is a feedback loop<br/>free the OFFENDING MESSAGE's resources only<br/>outstanding-request entry released ONLY on trusted<br/>same-session correlation, else bounded timeout"]
   REJ -->|unclassifiable| NULLERR["At most one id:null error<br/>rate-bounded so it cannot become the amplifier"]
   ERR --> CLEAN["Deterministic cleanup<br/>UNCONDITIONAL - every class"]
   NORESP --> CLEAN
@@ -295,7 +300,7 @@ flowchart LR
   classDef tb fill:#fee,stroke:#c00;
   class FRAME,DEC tb
 ```
-Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop) and its correlation entry is **released so no correlation state leaks**; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
+Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop); the **offending message's** resources are freed, but an **outstanding-request entry is released only on trustworthy same-session correlation** — never on an ID lifted from the rejected message, since that would be a remote state-deletion primitive — and otherwise expires on its bounded timeout; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
 
 ---
