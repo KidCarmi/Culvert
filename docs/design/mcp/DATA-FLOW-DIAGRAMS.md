@@ -20,7 +20,9 @@ Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010.
 ```mermaid
 flowchart LR
   AC[AI Client] -- bearer: mgmt scope --> K15["Protocol kernel — see DFD-15<br/>strict decode + structural bounds<br/>+ version + lifecycle (Management bound set)"]
-  K15 --> L1{{/mcp/management listener}}
+  K15 --> HV1["MCP-INSP-009 listener validation<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream, after header parsing"]
+  HV1 -->|allowed| L1{{/mcp/management listener}}
+  HV1 -.disallowed.-> HVX1[Reject — DNS-rebinding / cross-origin defence]
   subgraph Culvert Management MCP
     L1 --> AZ[Mgmt authz: RBAC + tenant + read-only default]
     AZ --> RO[Bounded read-only tool]
@@ -40,7 +42,9 @@ Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046.
 ```mermaid
 flowchart LR
   AC[AI Client] --> K15["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle"]
-  K15 --> L1{{/mcp/management}}
+  K15 --> HV2["MCP-INSP-009 listener validation<br/>Host/:authority/Origin vs the MANAGEMENT allowlist<br/>per request AND per H2 stream"]
+  HV2 -->|allowed| L1{{/mcp/management}}
+  HV2 -.disallowed.-> HVX2[Reject]
   L1 --> DR[Draft policy tool]
   DR --> VAL[Validate syntax + simulate blast radius]
   VAL --> AUD[Full audit: no activation]
@@ -193,11 +197,16 @@ flowchart LR
   Q -->|"saturated"| LOSS{{"DURABILITY LOST — dispatch by event class<br/>IDENTICAL for queue saturation and spool commit failure"}}
   LOSS -->|"critical: write / destructive / config-publication /<br/>credential / state-affecting Management"| FC["Fail closed AND degraded mode + alert + loss counter<br/>the operation NEVER RUNS — commit precedes execution"]
   LOSS -->|"auth-failure / authz-denial (already denied)"| CDEG["CRITICAL degraded state\n+ alert + loss counter\nrequest already denied"]
-  LOSS -->|"read-only / low-risk"| ODEG
+  LOSS -->|"read-only / low-risk"| LP{"configured loss policy?<br/>mcp_{gateway,mgmt}_event_loss_policy"}
+  LP -->|"degrade-and-alert"| LDEG["Degraded + alert + integrity-protected loss counter<br/>DECISION lane: the operation has NOT happened yet"]
+  LDEG --> XLOW
+  LP -->|"fail-closed"| FC
   CDEG --> LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
   INT[Integrity + replay-id + tenant tag]
   INT -. additive, async .-> EXP[Additive authorized, tenant-separated export — never a substitute]
 ```
+**A low-risk durability loss follows the configured policy, and `degrade-and-alert` means the call still runs.** `mcp_gateway_event_loss_policy` / `mcp_mgmt_event_loss_policy` select it: under `degrade-and-alert` the degradation is recorded (alarm + integrity-protected loss counter) **and the low-risk operation proceeds** to `XLOW`; only `fail-closed` denies it. Terminating this arm at a degradation node would make `degrade-and-alert` behave as `fail-closed`, contradicting the config contract and `EVENT-MODEL` §4a. Note also that the decision-lane degradation node (`LDEG`) is **not** the outcome-lane one (`ODEG`): in the decision lane the operation has **not** happened yet, which is exactly why it can still proceed.
+
 **The gate decides whether execution is *gated*, not whether it happens.** A committed **read-only / low-risk** decision proceeds to execution (`XLOW`) **without** being gated on the commit, and its outcome enters the outcome lane like any other — routing it straight to integrity/export would either drop every successful low-risk call or silently discard its outcome event, since DFD-5 sends **all** ALLOW-class traffic through this path. Only the **already-denied** classes terminate at `INT` without execution, because there is nothing left to run.
 
 **`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor the lockout — which would make the single dispatch below decorative. A **successfully committed** denial event is routed to `INT` **through `GATE`**, after classification, not around it.
@@ -352,4 +361,4 @@ Untrusted bytes are bounded and strictly decoded before any downstream stage. Re
 | 12 | connectivity | TB-1, TB-6 | 036, 037, 030, 031/055 |
 | 13 | connectivity | TB-6 | 051, 052, 010 |
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
-| 15 | B (gateway, PR-1 kernel) | TB-1 | 057–074 (parser/framing/version/state) |
+| 15 | **A and B** (both listeners, PR-1 kernel) | **TB-1, TB-7** | 057–074 (parser/framing/version/state) |

@@ -2009,3 +2009,57 @@ describing.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean;
 `SPOOL` still has zero unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.
+
+---
+
+## Round 29 — round 28's three fixes each left one consequence (`a9ebada3` → next)
+
+Three Codex findings, all consequences of round 28.
+
+### R29-1 (P2) — my `LOSS` dispatch made `degrade-and-alert` behave as `fail-closed`
+
+Round 26's `LOSS` node routed `read-only / low-risk` to the degradation node and stopped. But the config
+surface offers `mcp_{gateway,mgmt}_event_loss_policy`, and `degrade-and-alert` means the degradation is
+**recorded while the low-risk operation proceeds**. Terminating the arm at degradation silently converted the
+documented policy into `fail-closed` — the diagram overrode a configurable contract.
+
+**Fix.** The arm now branches on the configured policy: `degrade-and-alert` → record degradation (`LDEG`) **and
+continue to `XLOW`**; `fail-closed` → `FC`. Also corrected a conflation I had introduced: `LDEG` (decision lane,
+operation **has not** happened) is distinct from `ODEG` (outcome lane, operation **already** happened) — routing
+the decision-lane case to `ODEG` was wrong on its own terms, since `ODEG`'s whole premise is that re-execution
+is impossible.
+
+### R29-2 (P1) — the Management flows reached authorization without listener-side Host/Origin validation
+
+Round 28 added the protocol kernel upstream of the Management listener and went straight on to
+authz/tool-handling. But `MCP-INSP-008` is **deliberately listener-independent** and cannot perform
+per-request `Host`/`:authority`/`Origin` checks after header parsing — that is `MCP-INSP-009`, which I did not
+place on the path. An implementation following DFD-1/DFD-2 could accept a disallowed request on a reused HTTP/2
+connection: exactly the bypass round 18 corrected for the Gateway, reintroduced on the Management side by my own
+new path.
+
+**Fix.** Both Management flows now show `MCP-INSP-009` validation between the kernel and the listener —
+per request **and** per H2 stream, against the **Management** allowlist — with an explicit reject edge.
+
+### R29-3 (P2) — the trust-boundary coverage row still said Gateway-only
+
+Round 28 retitled DFD-15 to Capability **A and B** and left the coverage-summary row reading
+`B (gateway, PR-1 kernel) | TB-1`. A trust-boundary audit run from that table would still report **no
+protocol-kernel protection for the Management boundary** — the summary contradicted the diagram it summarises,
+in the same file, two hundred lines apart. Now `A and B | TB-1, TB-7`.
+
+**Twenty-second amendment — a diagram's summary row is a consumer of the diagram.** The chain recorded in round
+27 (requirement → gate → traceability → slice contract → release gate) has an intra-document link I had not
+counted: **coverage/summary tables inside the same file**. They are what an auditor reads instead of the
+diagram, so they must be updated with it. This is the fifth distinct link where the same stop-early error has
+occurred (rounds 19, 24, 26, 27, 29).
+
+**Standing note.** Rounds 22–29: nine consecutive rounds where each round's fix produced the next round's
+findings. R29-1 and R29-2 are both cases where **a fix silently overrode a control documented elsewhere** — a
+config contract and a listener requirement respectively — rather than merely being incomplete. That is a
+different and worse failure mode than the propagation gaps of rounds 5–15.
+
+**Unchanged by round 29:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean;
+`SPOOL` has zero unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.
