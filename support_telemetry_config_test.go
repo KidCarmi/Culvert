@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -285,7 +287,7 @@ func TestTelemetryCredentialNeverEchoed(t *testing.T) {
 	}
 
 	getRec := httptest.NewRecorder()
-	apiSupportTelemetryConfig(getRec, roleReq(RoleViewer, http.MethodGet, "/api/support/telemetry/config", nil))
+	apiSupportTelemetryConfig(getRec, roleReq(RoleAdmin, http.MethodGet, "/api/support/telemetry/config", nil))
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("GET: code=%d, body=%q", getRec.Code, getRec.Body.String())
 	}
@@ -353,6 +355,270 @@ func TestTelemetryConfigAuditDoesNotLeakCredential(t *testing.T) {
 		if strings.Contains(e.Detail, secretValue) || strings.Contains(e.Before, secretValue) || strings.Contains(e.After, secretValue) {
 			t.Fatalf("audit entry leaked the credential after clear: %+v", e)
 		}
+	}
+}
+
+// ── P1: a persisted-but-unsafe origin is never reflected outward ─────────────
+
+// TestTelemetryPersistedUnsafeOriginNeverEchoed proves the read model NEVER
+// echoes a raw persisted origin. The PUT handler canonicalizes before
+// storing, but the on-disk config is not a trusted input — it can be
+// hand-edited, restored from a foreign backup, or corrupted. Every unsafe
+// shape (userinfo, query, fragment, path, bad port, private IP, plain http)
+// written directly to disk must come back as status=origin_invalid with the
+// origin field OMITTED, and the raw value must be absent from the GET
+// response, the PUT response, and every audit entry.
+func TestTelemetryPersistedUnsafeOriginNeverEchoed(t *testing.T) {
+	unsafeOrigins := []struct{ name, origin, marker string }{
+		{"userinfo", "https://user:s3cr3t-in-origin@tac.culvertlabs.com", "s3cr3t-in-origin"},
+		{"query", "https://tac.culvertlabs.com?tenant=leaky-tenant-id", "leaky-tenant-id"},
+		{"fragment", "https://tac.culvertlabs.com/#leaky-fragment", "leaky-fragment"},
+		{"path", "https://tac.culvertlabs.com/leaky/path/segment", "leaky/path/segment"},
+		{"invalid port", "https://tac.culvertlabs.com:99999", ":99999"},
+		{"private ip", "https://10.1.2.3", "10.1.2.3"},
+		{"plain http", "http://tac.culvertlabs.com", "http://"},
+	}
+	for _, tc := range unsafeOrigins {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempTelemetryDir(t)
+			restoreAudit := audit.SwapRingForTest()
+			t.Cleanup(restoreAudit)
+
+			// Write the unsafe origin DIRECTLY to disk, bypassing the API.
+			telemetryConfigMu.Lock()
+			err := saveTelemetryConfigLocked(telemetryConfig{
+				Enabled: true, Origin: tc.origin, Credential: "tok",
+			})
+			telemetryConfigMu.Unlock()
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			assertUnsafeOriginNotExposed(t, tc.marker)
+		})
+	}
+}
+
+// assertUnsafeOriginNotExposed checks every outward surface — the typed
+// view, GET, a subsequent PUT's response, and the audit trail — for the raw
+// unsafe origin marker.
+func assertUnsafeOriginNotExposed(t *testing.T, marker string) {
+	t.Helper()
+
+	view := telemetryStatus()
+	if view.Origin != "" {
+		t.Errorf("read model exposed origin %q for an invalid persisted origin — it must be omitted", view.Origin)
+	}
+	if view.Status != "origin_invalid" {
+		t.Errorf("status = %q, want origin_invalid", view.Status)
+	}
+	if view.EffectiveEnabled {
+		t.Error("effective_enabled must be false for an invalid origin")
+	}
+	if telemetryEnabled() {
+		t.Error("telemetryEnabled() must be false for an invalid origin")
+	}
+
+	getRec := httptest.NewRecorder()
+	apiSupportTelemetryConfig(getRec, roleReq(RoleAdmin, http.MethodGet, "/api/support/telemetry/config", nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET: code=%d body=%q", getRec.Code, getRec.Body.String())
+	}
+	if strings.Contains(getRec.Body.String(), marker) {
+		t.Errorf("GET response leaked the unsafe persisted origin (%q): %s", marker, getRec.Body.String())
+	}
+
+	// A subsequent PUT must not leak it via the response or the audit
+	// before-snapshot either.
+	putRec := httptest.NewRecorder()
+	apiSupportTelemetryConfig(putRec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+		map[string]any{"enabled": false}))
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT: code=%d body=%q", putRec.Code, putRec.Body.String())
+	}
+	if strings.Contains(putRec.Body.String(), marker) {
+		t.Errorf("PUT response leaked the unsafe persisted origin (%q): %s", marker, putRec.Body.String())
+	}
+	entries := auditGet()
+	for i := range entries {
+		e := &entries[i]
+		if e.Action != "support.telemetry.config" {
+			continue
+		}
+		for field, val := range map[string]string{"detail": e.Detail, "before": e.Before, "after": e.After} {
+			if strings.Contains(val, marker) {
+				t.Errorf("audit %s leaked the unsafe persisted origin (%q): %s", field, marker, val)
+			}
+		}
+	}
+}
+
+// TestTelemetryPersistedNonCanonicalOriginIsCanonicalized proves a persisted
+// origin that is VALID but not canonical (trailing slash, upper-case host)
+// is returned in canonical form, not verbatim — the read model is the single
+// canonicalization point regardless of how the value reached disk.
+func TestTelemetryPersistedNonCanonicalOriginIsCanonicalized(t *testing.T) {
+	withTempTelemetryDir(t)
+	telemetryConfigMu.Lock()
+	err := saveTelemetryConfigLocked(telemetryConfig{
+		Enabled: true, Origin: "https://TAC.CulvertLabs.COM/", Credential: "tok",
+	})
+	telemetryConfigMu.Unlock()
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	view := telemetryStatus()
+	if view.Origin != "https://tac.culvertlabs.com" {
+		t.Errorf("origin = %q, want the canonical https://tac.culvertlabs.com", view.Origin)
+	}
+	if view.Status != "ready" || !view.EffectiveEnabled {
+		t.Errorf("a valid non-canonical origin should still be ready/effective: %+v", view)
+	}
+}
+
+// ── P1: unsafe config-file permissions / type ───────────────────────────────
+
+// TestTelemetryConfigRejectsUnsafeFileMode proves a group/other-readable
+// config is either self-healed to 0600 or rejected — never trusted as-is
+// while another local account can read the bearer credential.
+func TestTelemetryConfigRejectsUnsafeFileMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0o644, 0o666, 0o604, 0o640} {
+		t.Run(mode.String(), func(t *testing.T) {
+			withTempTelemetryDir(t)
+			telemetryConfigMu.Lock()
+			err := saveTelemetryConfigLocked(telemetryConfig{
+				Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: "tok",
+			})
+			telemetryConfigMu.Unlock()
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			if err := os.Chmod(telemetryConfigPath(), mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+
+			// Load self-heals the mode back to 0600 and then trusts the file.
+			_ = telemetryConfigGet()
+			fi, err := os.Stat(telemetryConfigPath())
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := fi.Mode().Perm(); got&0o077 != 0 {
+				t.Errorf("after load, mode = %04o — group/other bits must be cleared or the config refused", got)
+			}
+		})
+	}
+}
+
+// TestTelemetryConfigRejectsSymlink proves a symlinked config is refused
+// outright (never followed), so an attacker who can create a symlink in the
+// support dir cannot redirect the credential read — or have the appliance
+// chmod an arbitrary target.
+func TestTelemetryConfigRejectsSymlink(t *testing.T) {
+	withTempTelemetryDir(t)
+	if err := os.MkdirAll(filepath.Dir(telemetryConfigPath()), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(dataDir, "elsewhere.json")
+	body := `{"enabled":true,"origin":"https://tac.culvertlabs.com","credential":"tok"}`
+	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, telemetryConfigPath()); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	if got := telemetryConfigGet(); got.Enabled || got.Credential != "" {
+		t.Fatalf("a symlinked config must be refused (fail closed), got %+v", got)
+	}
+	if telemetryEnabled() {
+		t.Fatal("a symlinked config must never produce an enabled posture")
+	}
+}
+
+// TestTelemetryConfigRejectsNonRegularFile proves a directory (or any other
+// non-regular file) at the config path fails closed rather than erroring
+// into a trusted state.
+func TestTelemetryConfigRejectsNonRegularFile(t *testing.T) {
+	withTempTelemetryDir(t)
+	if err := os.MkdirAll(telemetryConfigPath(), 0o700); err != nil {
+		t.Fatalf("mkdir at config path: %v", err)
+	}
+	if got := telemetryConfigGet(); got.Enabled || got.Credential != "" {
+		t.Fatalf("a directory at the config path must fail closed, got %+v", got)
+	}
+	if telemetryEnabled() {
+		t.Fatal("a non-regular config must never produce an enabled posture")
+	}
+}
+
+// TestTelemetryConfigUnsafeFileDoesNotLogCredential proves the refusal path
+// reports the POSTURE without ever logging the credential value.
+func TestTelemetryConfigUnsafeFileDoesNotLogCredential(t *testing.T) {
+	withTempTelemetryDir(t)
+	const secretValue = "must-not-reach-the-log-token" // #nosec G101 -- fake test fixture value
+	if err := os.MkdirAll(filepath.Dir(telemetryConfigPath()), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(dataDir, "elsewhere.json")
+	if err := os.WriteFile(target, []byte(`{"credential":"`+secretValue+`"}`), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, telemetryConfigPath()); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := logger
+	logger = log.New(&buf, "", 0)
+	t.Cleanup(func() { logger = prev })
+
+	_ = telemetryConfigGet()
+	if strings.Contains(buf.String(), secretValue) {
+		t.Fatalf("the unsafe-config log line leaked the credential: %s", buf.String())
+	}
+	if buf.Len() == 0 {
+		t.Error("expected a log line reporting the refused config")
+	}
+}
+
+// ── P2: credential input validation ─────────────────────────────────────────
+
+// TestTelemetryRejectsMalformedCredential proves control characters (a
+// header-injection primitive for the future Bearer header) and over-length
+// values are refused, and that the rejection never echoes the value.
+func TestTelemetryRejectsMalformedCredential(t *testing.T) {
+	cases := []struct{ name, cred string }{
+		{"CRLF injection", "tok\r\nX-Injected: 1"},
+		{"bare LF", "tok\nmore"},
+		{"NUL byte", "tok\x00more"},
+		{"DEL byte", "tok\x7fmore"},
+		{"blank", "   "},
+		{"too long", strings.Repeat("a", maxTelemetryCredentialLen+1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempTelemetryDir(t)
+			rec := httptest.NewRecorder()
+			apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+				map[string]any{"enabled": true, "origin": "https://tac.culvertlabs.com", "credential": tc.cred}))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("code=%d, want 400 for a malformed credential", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), tc.cred) {
+				t.Errorf("the rejection echoed the credential value: %s", rec.Body.String())
+			}
+			if got := telemetryConfigGet(); got.Credential != "" {
+				t.Errorf("a rejected credential must not persist, got %q", got.Credential)
+			}
+		})
+	}
+	// A credential exactly at the cap is accepted.
+	withTempTelemetryDir(t)
+	rec := httptest.NewRecorder()
+	apiSupportTelemetryConfig(rec, roleReq(RoleAdmin, http.MethodPut, "/api/support/telemetry/config",
+		map[string]any{"enabled": true, "origin": "https://tac.culvertlabs.com",
+			"credential": strings.Repeat("a", maxTelemetryCredentialLen)}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a max-length credential should be accepted, code=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -486,18 +752,34 @@ func TestTelemetryRoutesRBACAndClassification(t *testing.T) {
 			putMeta = &entry.Methods[i]
 		}
 	}
-	if getMeta == nil || getMeta.MinRole != RoleViewer || getMeta.Mutating {
-		t.Fatalf("GET metadata = %+v, want MinRole=viewer Mutating=false", getMeta)
+	// BOTH methods are admin-only: the posture reveals the TAC origin and
+	// whether a credential is configured — consent configuration, not
+	// general operational status.
+	if getMeta == nil || getMeta.MinRole != RoleAdmin || getMeta.Mutating {
+		t.Fatalf("GET metadata = %+v, want MinRole=admin Mutating=false", getMeta)
 	}
 	if putMeta == nil || putMeta.MinRole != RoleAdmin || !putMeta.Mutating || !putMeta.AuditExpected {
 		t.Fatalf("PUT metadata = %+v, want MinRole=admin Mutating=true AuditExpected=true", putMeta)
 	}
 
-	// GET viewer → 200.
+	// GET admin → 200.
 	gRec := httptest.NewRecorder()
-	apiSupportTelemetryConfig(gRec, roleReq(RoleViewer, http.MethodGet, "/api/support/telemetry/config", nil))
+	apiSupportTelemetryConfig(gRec, roleReq(RoleAdmin, http.MethodGet, "/api/support/telemetry/config", nil))
 	if gRec.Code != http.StatusOK {
-		t.Fatalf("GET viewer code=%d want 200", gRec.Code)
+		t.Fatalf("GET admin code=%d want 200", gRec.Code)
+	}
+
+	// GET viewer → 403 (the whole config surface is admin-gated).
+	gvRec := httptest.NewRecorder()
+	apiSupportTelemetryConfig(gvRec, roleReq(RoleViewer, http.MethodGet, "/api/support/telemetry/config", nil))
+	if gvRec.Code != http.StatusForbidden {
+		t.Fatalf("GET viewer code=%d want 403 — a viewer must not read the telemetry consent posture", gvRec.Code)
+	}
+	// GET operator → 403 as well (admin is strictly above operator).
+	goRec := httptest.NewRecorder()
+	apiSupportTelemetryConfig(goRec, roleReq(RoleOperator, http.MethodGet, "/api/support/telemetry/config", nil))
+	if goRec.Code != http.StatusForbidden {
+		t.Fatalf("GET operator code=%d want 403", goRec.Code)
 	}
 
 	// PUT viewer → 403.
@@ -549,7 +831,7 @@ func TestTelemetryOpenAPIContract(t *testing.T) {
 	}
 
 	getRec := httptest.NewRecorder()
-	apiSupportTelemetryConfig(getRec, roleReq(RoleViewer, http.MethodGet, "/api/support/telemetry/config", nil))
+	apiSupportTelemetryConfig(getRec, roleReq(RoleAdmin, http.MethodGet, "/api/support/telemetry/config", nil))
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("GET status = %d, want 200; body=%s", getRec.Code, getRec.Body.String())
 	}

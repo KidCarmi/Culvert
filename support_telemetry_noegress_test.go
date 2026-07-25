@@ -24,8 +24,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // forbiddenTelemetryEngineImports mirrors support_noegress_test.go's
@@ -103,34 +107,126 @@ func TestSupportTelemetrySlice1HasNoEgress(t *testing.T) {
 	}
 }
 
-// TestSupportTelemetrySlice1NoStartupWiring proves the preview route is not
-// wired into any startup/init path (no sender to start, no config to load).
-// Mirrors the design's Slice-3-only "TestNoAutoTelemetry: static scan: gate
-// not in startup files" precedent, applied here to prove Slice 1 introduces
-// no startup coupling at all.
+// telemetryStartupFiles are the startup seams the wall inspects — including
+// the ACTUAL seam the merged design names for the future sender (§14 Slice
+// 3: "Sender started in loadPersistentAdminState next to the upload
+// worker"), so an accidental sender wiring in the real seam fails here
+// instead of passing silently.
+var telemetryStartupFiles = []string{
+	"main.go", "main_shutdown.go",
+	"persistent_admin_state_startup.go", // the named Slice-3 sender seam (§14)
+	"background_services_startup.go",
+}
+
+// telemetryForbiddenStartupIdents are the startup references that would mean
+// a SENDER/WORKER exists. Slice 2 legitimately performs ONE synchronous
+// config validation at boot (loadTelemetryConfigAtStartup — the §14
+// persistence contract), so the wall can no longer forbid the mere mention
+// of telemetry in a startup file; it forbids the things that would actually
+// constitute egress or background work.
+var telemetryForbiddenStartupIdents = []string{
+	"startTelemetry", "TelemetrySender", "telemetrySender",
+	"startSupportTelemetry", "telemetryWorker", "telemetryPushLoop",
+	"telemetrySpool", "telemetryPending",
+	"supportMetricRegistry", // the registry is a Slice 1 engine — never armed at boot
+}
+
+// TestSupportTelemetrySlice1NoStartupWiring proves no telemetry SENDER or
+// background worker is wired into any startup/init path. Mirrors the
+// design's Slice-3-only "TestNoAutoTelemetry: static scan: gate not in
+// startup files" precedent.
 //
-// Scans the ACTUAL seam the merged design names for the future sender
-// (§14 Slice 3: "Sender started in loadPersistentAdminState next to the
-// upload worker") — persistent_admin_state_startup.go, not just main.go —
-// plus main.go/main_shutdown.go/background_services_startup.go for
-// defense-in-depth, so an accidental reference in the real future-sender
-// seam fails this wall instead of passing it silently.
+// Slice 2 CHANGED the shape of this wall deliberately: the §14 persistence
+// contract requires the telemetry config to be loaded/validated through the
+// established persistent-admin-state startup path, so a blanket
+// "no telemetry identifier may appear in a startup file" rule would forbid
+// the very thing the design asks for. The wall therefore now targets
+// sender/worker/spool identifiers, and
+// TestTelemetryStartupValidationHasNoSideEffects proves the one permitted
+// startup call is inert.
 func TestSupportTelemetrySlice1NoStartupWiring(t *testing.T) {
-	startupFiles := []string{
-		"main.go", "main_shutdown.go",
-		"persistent_admin_state_startup.go", // the named Slice-3 sender seam (§14)
-		"background_services_startup.go",
-	}
-	for _, name := range startupFiles {
+	for _, name := range telemetryStartupFiles {
 		b, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		src := string(b)
-		for _, marker := range []string{"supportTelemetry", "SupportTelemetry", "supportMetricRegistry"} {
+		for _, marker := range telemetryForbiddenStartupIdents {
 			if strings.Contains(src, marker) {
-				t.Errorf("%s references %q — M7 Slice 1 must not be wired into startup (no sender/consent exists yet)", name, marker)
+				t.Errorf("%s references %q — no telemetry sender/worker may be wired into startup (Slice 3 is blocked on §13)", name, marker)
 			}
+		}
+		// The ONLY telemetry call permitted in a startup file is the
+		// synchronous config validation. Any other telemetry* call there is
+		// a new startup coupling that must be reviewed, not assumed benign.
+		for _, m := range regexp.MustCompile(`\b(?:load|start|init|run)[A-Za-z]*[Tt]elemetry[A-Za-z]*\(`).FindAllString(src, -1) {
+			if m != "loadTelemetryConfigAtStartup(" {
+				t.Errorf("%s calls %q in a startup path — only the inert loadTelemetryConfigAtStartup() validation is permitted (no sender until Slice 3)", name, m)
+			}
+		}
+	}
+}
+
+// TestTelemetryStartupValidationHasNoSideEffects proves the one permitted
+// startup call is genuinely inert: it starts no goroutine, creates no file,
+// and — critically — performs no network activity. Goroutine count is
+// sampled before/after (with a settle window) so an accidental `go func()`
+// inside the validation path fails here.
+func TestTelemetryStartupValidationHasNoSideEffects(t *testing.T) {
+	prevDir := dataDir
+	dataDir = t.TempDir()
+	t.Cleanup(func() { dataDir = prevDir })
+
+	// A fully-configured, VALID config — the case most likely to tempt an
+	// implementation into "arming" something at boot.
+	telemetryConfigMu.Lock()
+	err := saveTelemetryConfigLocked(telemetryConfig{
+		Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: "startup-test-token",
+	})
+	telemetryConfigMu.Unlock()
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	before := listDirTree(t, dataDir)
+	goroutinesBefore := runtime.NumGoroutine()
+
+	loadTelemetryConfigAtStartup()
+
+	// Let any (illegitimately) spawned goroutine actually get scheduled
+	// before sampling, so this doesn't pass by racing ahead of it.
+	time.Sleep(50 * time.Millisecond)
+	if after := runtime.NumGoroutine(); after > goroutinesBefore {
+		t.Errorf("startup validation started %d goroutine(s) — it must be strictly synchronous and inert",
+			after-goroutinesBefore)
+	}
+	if after := listDirTree(t, dataDir); !reflect.DeepEqual(after, before) {
+		t.Errorf("startup validation changed filesystem state: before=%v after=%v", before, after)
+	}
+}
+
+// TestTelemetryStartupValidationSourceIsInert is the static counterpart:
+// the startup validation function's own source may not contain any
+// outbound/background marker. Together with the behavioral test above this
+// covers both "it doesn't dial today" and "it can't grow a dialer quietly".
+func TestTelemetryStartupValidationSourceIsInert(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), "support_telemetry_config.go"))
+	if err != nil {
+		t.Fatalf("read support_telemetry_config.go: %v", err)
+	}
+	src := string(b)
+	start := strings.Index(src, "func loadTelemetryConfigAtStartup()")
+	if start < 0 {
+		t.Fatal("loadTelemetryConfigAtStartup not found — the §14 startup validation step must exist")
+	}
+	// Bound the scan to this function (up to the next top-level func).
+	body := src[start:]
+	if next := strings.Index(body[1:], "\nfunc "); next >= 0 {
+		body = body[:next+1]
+	}
+	for _, ident := range telemetrySlice2OutboundIdents {
+		if strings.Contains(body, ident) {
+			t.Errorf("loadTelemetryConfigAtStartup contains outbound/background marker %q — the startup step must be inert", ident)
 		}
 	}
 }

@@ -792,8 +792,8 @@ var uiRoutes = []uiRouteMetadata{
 			Note: "M7 Slice 1: read-only preview of the exact current support-telemetry sample (schema_version + registry_hash + metric names/values) that would be sealed and sent if telemetry were ever enabled; no consent switch, no sender, no egress exist yet; creates no persistent state"}}},
 	{Path: "/api/support/telemetry/config", Handler: "apiSupportTelemetryConfig", Domain: "support", Public: false,
 		Methods: []uiRouteMethod{
-			{Method: "GET", MinRole: RoleViewer,
-				Note: "M7 Slice 2: read the node-local telemetry consent/config posture (enabled/effective_enabled/origin/credential_set/status; credential value never exposed); node-local (off export/import/rollback/CP→DP); no egress"},
+			{Method: "GET", MinRole: RoleAdmin,
+				Note: "M7 Slice 2: read the node-local telemetry consent/config posture (enabled/effective_enabled/canonical origin/credential_set/status; credential value never exposed, origin re-validated + canonicalized before it is returned); ADMIN-only — the whole consent-configuration surface is admin-gated, unlike the separately-governed telemetry preview; node-local (off export/import/rollback/CP→DP); no egress"},
 			{Method: "PUT", MinRole: RoleAdmin, Mutating: true, AuditExpected: true,
 				Note: "M7 Slice 2: set telemetry enabled/origin/credential (bearer-mandatory to enable; https-only canonical origin, private/internal literal IP refused; credential preserve/replace/clear semantics); node-local; no egress (still no sender in this build); audited as support.telemetry.config"}}},
 	{Path: "/api/diagnose/storage", Handler: "apiDiagnoseStorage", Domain: "support", Public: false,

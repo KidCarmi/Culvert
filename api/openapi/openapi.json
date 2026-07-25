@@ -2743,9 +2743,12 @@
             "type": "boolean"
           },
           "credential": {
-            "description": "Bearer credential to store; empty keeps the existing one.",
+            "description": "Bearer credential to store; empty keeps the existing one. Write-only — never returned by any response. Must not contain control characters.",
             "format": "password",
-            "type": "string"
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string",
+            "writeOnly": true
           },
           "enabled": {
             "type": "boolean"
@@ -3990,10 +3993,6 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "example": {
-                "current_password": "old-pass8",
-                "new_password": "new-pass8"
-              },
               "schema": {
                 "$ref": "#/components/schemas/ChangePasswordRequest"
               }
@@ -4146,11 +4145,6 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "example": {
-                "pass": "s3cret",
-                "totp": "123456",
-                "user": "admin"
-              },
               "schema": {
                 "$ref": "#/components/schemas/LoginRequest"
               }
@@ -4386,11 +4380,6 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "example": {
-                "password": "operator-pass8",
-                "role": "operator",
-                "username": "operator1"
-              },
               "schema": {
                 "$ref": "#/components/schemas/CreateUserRequest"
               }
@@ -14913,10 +14902,6 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "example": {
-                "pass": "changeme-8+chars",
-                "user": "admin"
-              },
               "schema": {
                 "$ref": "#/components/schemas/SetupCompleteRequest"
               }
@@ -16549,7 +16534,7 @@
         ],
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.2.0",
-        "x-culvert-permission": "viewer",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
@@ -16561,7 +16546,6 @@
           "content": {
             "application/json": {
               "example": {
-                "credential": "example-bearer-token",
                 "enabled": true,
                 "origin": "https://tac.culvertlabs.com"
               },

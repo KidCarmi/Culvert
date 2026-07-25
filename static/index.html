@@ -4428,9 +4428,9 @@ Firefox (all platforms):
             <div id="support-uploads" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
-          <div>
+          <div data-min-role="admin">
             <div style="font-weight:600;margin-bottom:6px">Telemetry (opt-in)</div>
-            <p class="hint"><strong>Off by default.</strong> When enabled, a small set of the appliance's own support-health scalars (see the preview below - review it first) would be periodically sealed end-to-end and sent to TAC over authenticated HTTPS: never traffic volume, customer scale, or security-posture data. <strong>This build performs no network transmission of any kind</strong> - there is no sender yet, so enabling here only stores this configuration locally. Telemetry consent is entirely separate from the support-bundle upload consent above - enabling one never enables the other.</p>
+            <p class="hint"><strong>Off by default.</strong> When enabled, a small set of the appliance's own support-health scalars (see the preview below - review it first) would be periodically sealed end-to-end and sent to TAC over authenticated HTTPS: never traffic volume, customer scale, or security-posture data. <strong>This build performs no network transmission of any kind</strong> - there is no sender yet, so enabling here only stores this configuration locally. Telemetry consent is entirely separate from the support-bundle upload consent above - enabling one never enables the other. This whole section is admin-only.</p>
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
@@ -13601,6 +13601,9 @@ async function saveUploadConfig() {
 // a local JSON file; no sender exists in this build.
 async function loadTelemetryConfig() {
   const el = document.getElementById('support-telemetry-status');
+  // The whole telemetry consent surface is admin-only (both GET and PUT), so
+  // don't issue a request that a viewer/operator would only get a 403 for.
+  if (uiRole !== 'admin') return;
   try {
     const d = await api('/api/support/telemetry/config');
     renderTelemetryStatus(d);

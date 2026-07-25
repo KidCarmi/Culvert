@@ -49,12 +49,68 @@ var telemetryConfigMu sync.Mutex
 
 func telemetryConfigPath() string { return filepath.Join(dataDir, "support", "telemetry_config.json") }
 
-// loadTelemetryConfigLocked reads the config. Absent, empty, or corrupt JSON
-// all fail CLOSED to the zero value (disabled, no origin, no credential) —
-// an unreadable config can never produce an enabled posture. Caller holds
-// telemetryConfigMu.
+// errTelemetryConfigUnsafe is the sentinel for a config file whose TYPE or
+// PERMISSIONS make it unsafe to trust (symlink, non-regular file, or
+// group/other-readable). It never carries the file's contents.
+var errTelemetryConfigUnsafe = errors.New("telemetry config file is not a secure regular 0600 file")
+
+// telemetryConfigFileSafe enforces the storage contract on the config file
+// BEFORE its bytes are read: the bearer credential inside is the sole
+// authenticated appliance-attribution mechanism for telemetry v1 (§4), so a
+// file that any local user could read — or that is a symlink redirecting the
+// read somewhere else entirely — must never produce a ready/effectively
+// enabled posture.
+//
+// Uses Lstat (not Stat) so a SYMLINK is seen as a symlink rather than
+// silently followed to its target. Group/other permission bits are
+// best-effort CORRECTED to 0600 (an operator-friendly self-heal, matching
+// how the rest of the appliance treats its own state files); if the
+// correction fails the config is REJECTED rather than trusted. Returns nil
+// when the file is absent (a missing config is simply "disabled", not
+// unsafe).
+func telemetryConfigFileSafe(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // absent ⇒ disabled, not unsafe
+		}
+		return errTelemetryConfigUnsafe
+	}
+	// Reject a symlink outright: following it would read (and trust) bytes
+	// from a path the operator never approved, and "fixing" the mode would
+	// chmod the target.
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: symlink", errTelemetryConfigUnsafe)
+	}
+	// Reject anything that is not a plain file (directory, device, socket,
+	// FIFO) — a FIFO in particular would block or feed attacker-chosen bytes.
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%w: not a regular file", errTelemetryConfigUnsafe)
+	}
+	// Group/other bits set ⇒ another local account can read the bearer
+	// credential. Try to self-heal to 0600; fail closed if we cannot.
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
+			return fmt.Errorf("%w: mode %04o and chmod failed", errTelemetryConfigUnsafe, perm)
+		}
+		logger.Printf("telemetry: corrected insecure permissions on telemetry config (was %04o, now 0600)", perm)
+	}
+	return nil
+}
+
+// loadTelemetryConfigLocked reads the config. Absent, empty, corrupt JSON,
+// or an UNSAFE file (symlink, non-regular, group/other-readable and
+// un-correctable) all fail CLOSED to the zero value (disabled, no origin, no
+// credential) — an unreadable or untrustworthy config can never produce an
+// enabled posture. Caller holds telemetryConfigMu.
 func loadTelemetryConfigLocked() telemetryConfig {
-	b, err := os.ReadFile(telemetryConfigPath())
+	path := telemetryConfigPath()
+	if err := telemetryConfigFileSafe(path); err != nil {
+		// Log the POSTURE only — never the file contents or the credential.
+		logger.Printf("telemetry: refusing to load config: %v", sanitizeLog(err.Error()))
+		return telemetryConfig{}
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return telemetryConfig{}
 	}
@@ -106,6 +162,39 @@ func telemetryEnabledFromConfig(c telemetryConfig) bool {
 // unchanged.
 func telemetryEnabled() bool { return telemetryEnabledFromConfig(telemetryConfigGet()) }
 
+// loadTelemetryConfigAtStartup is the SYNCHRONOUS startup validation step
+// (§14 Slice 2 persistence contract): it loads and validates the node-local
+// telemetry config once during loadPersistentAdminState so an operator
+// learns at boot — not on the next admin page load — that a config is
+// malformed, has unsafe permissions/type, or carries an invalid origin.
+//
+// STRICTLY ZERO EGRESS AND ZERO BACKGROUND WORK. This function reads one
+// local file and logs the resulting posture. It starts NO goroutine, NO
+// timer/ticker, NO sender or spool, performs NO DNS resolution, and makes NO
+// network call of any kind — validateTelemetryEndpoint is documented
+// config-time-only (no network I/O), and there is no sender in this build
+// for it to arm. It is deliberately infallible from the caller's point of
+// view: every failure mode already degrades to the fail-closed disabled
+// posture inside loadTelemetryConfigLocked, so boot is never blocked by a
+// bad telemetry config.
+//
+// The credential VALUE is never logged — only whether one is set.
+func loadTelemetryConfigAtStartup() {
+	c := telemetryConfigGet()
+	status := telemetryStatusFromConfig(c)
+	switch {
+	case !c.Enabled && c.Origin == "" && c.Credential == "":
+		logger.Printf("Telemetry: off (no consent configured; no sender exists in this build)")
+	case status == "ready":
+		// Report the CANONICAL origin only (telemetryStatusFor sanitizes),
+		// so a hand-edited origin carrying userinfo can never reach the log.
+		logger.Printf("Telemetry: consent configured and valid (origin=%s, credential set) — NOTE: no sender exists in this build, nothing is transmitted",
+			sanitizeLog(telemetryStatusFor(c).Origin))
+	default:
+		logger.Printf("Telemetry: not effective (status=%s) — telemetry stays off", sanitizeLog(status))
+	}
+}
+
 // telemetryStatusFromConfig computes the precise status vocabulary (§14):
 // disabled | origin_invalid | credential_missing | ready. Priority order:
 // an explicit Enabled=false always reads "disabled" regardless of any other
@@ -115,9 +204,6 @@ func telemetryEnabled() bool { return telemetryEnabledFromConfig(telemetryConfig
 func telemetryStatusFromConfig(c telemetryConfig) string {
 	if !c.Enabled {
 		return "disabled"
-	}
-	if c.Origin == "" {
-		return "origin_invalid"
 	}
 	if _, err := validateTelemetryEndpoint(c.Origin); err != nil {
 		return "origin_invalid"
@@ -131,7 +217,8 @@ func telemetryStatusFromConfig(c telemetryConfig) string {
 // telemetryStatusView is the redacted read model — the ONLY shape the
 // telemetry config surface (API, audit before/after, GUI) ever exposes.
 // The credential is represented ONLY as CredentialSet; its value is never
-// serialized anywhere by this type.
+// serialized anywhere by this type, and Origin is only ever the CANONICAL
+// re-validated form (see telemetryStatusFor).
 type telemetryStatusView struct {
 	Enabled          bool   `json:"enabled"`
 	EffectiveEnabled bool   `json:"effective_enabled"`
@@ -143,14 +230,31 @@ type telemetryStatusView struct {
 // telemetryStatusFor builds the redacted read model for a given config value
 // (used directly by the API handler and by the audit before/after diff, so
 // neither path ever needs to re-derive it from a fresh disk read).
+//
+// SANITIZATION IS LOAD-BEARING (§9: "the read model returns only the
+// canonical safe origin; it never exposes userinfo or secret material").
+// The PUT handler canonicalizes before persisting, but the ON-DISK config is
+// NOT a trusted input: it can be hand-edited, restored from an older//foreign
+// backup, or corrupted. So Origin is re-validated HERE and only the
+// canonical form is ever copied into the view — never c.Origin verbatim.
+// An origin that fails validation (userinfo, query, fragment, path, bad
+// port, private IP, non-https) is OMITTED entirely and reported as
+// origin_invalid, so a persisted `https://user:secret@host` can never be
+// echoed back through GET/PUT responses, rendered in the GUI, or serialized
+// into an audit before/after snapshot.
 func telemetryStatusFor(c telemetryConfig) telemetryStatusView {
-	return telemetryStatusView{
+	v := telemetryStatusView{
 		Enabled:          c.Enabled,
 		EffectiveEnabled: telemetryEnabledFromConfig(c),
-		Origin:           c.Origin,
 		CredentialSet:    c.Credential != "",
 		Status:           telemetryStatusFromConfig(c),
 	}
+	// Only a canonical, re-validated origin is ever exposed. On failure the
+	// field stays empty (omitempty) rather than leaking the raw value.
+	if canonical, err := validateTelemetryEndpoint(c.Origin); err == nil {
+		v.Origin = canonical
+	}
+	return v
 }
 
 // telemetryStatus reads the current config and returns its redacted view.
@@ -232,8 +336,35 @@ func validateTelemetryEndpoint(origin string) (string, error) {
 	return "https://" + strings.ToLower(u.Host), nil
 }
 
+// maxTelemetryCredentialLen bounds the stored bearer credential. Real TAC
+// bearer tokens are far shorter; the cap exists so a malformed or hostile
+// PUT cannot write an unbounded blob into the 0600 config file.
+const maxTelemetryCredentialLen = 4096
+
+// validateTelemetryCredential bounds a caller-supplied bearer credential.
+// It must be non-empty after trimming, within the length cap, and free of
+// control characters — a credential is placed verbatim into an
+// `Authorization: Bearer …` header by the future Slice 3 sender, so an
+// embedded CR/LF would be a header-injection primitive, and a NUL or other
+// control byte has no legitimate place in a bearer token (RFC 6750 token68).
+// The credential VALUE never appears in the returned error.
+func validateTelemetryCredential(cred string) error {
+	if strings.TrimSpace(cred) == "" {
+		return errors.New("credential must not be blank")
+	}
+	if len(cred) > maxTelemetryCredentialLen {
+		return fmt.Errorf("credential must be at most %d bytes", maxTelemetryCredentialLen)
+	}
+	for _, r := range cred {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("credential must not contain control characters")
+		}
+	}
+	return nil
+}
+
 // apiSupportTelemetryConfig manages the node-local telemetry consent/config
-// (§4/§14). GET (viewer) reads the redacted posture; PUT (admin) sets
+// (§4/§14). GET (admin) reads the redacted posture; PUT (admin) sets
 // enabled/origin/credential, validated and audited. Node-local — no
 // saveConfigVersion, no admin_settings.json, no CP→DP sync (mirrors the
 // upload config's independence, ADR-0011/P6 consent separation). This
@@ -241,7 +372,12 @@ func validateTelemetryEndpoint(origin string) (string, error) {
 func apiSupportTelemetryConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if !requireRole(w, r, RoleViewer) {
+		// Admin-only for BOTH read and write: the posture reveals the TAC
+		// origin and whether a bearer credential is configured — consent
+		// configuration, not general operational status — so the whole
+		// surface is admin-gated. (The separate Slice 1 telemetry PREVIEW
+		// route keeps its own independently-governed RBAC contract.)
+		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
 		jsonOK(w, telemetryStatus())
@@ -264,6 +400,41 @@ type telemetryConfigPutBody struct {
 	ClearCredential bool   `json:"clear_credential"` // explicitly remove the stored credential
 }
 
+// validateTelemetryConfigPut runs every PUT-body rejection rule and returns
+// the CANONICAL origin to persist (empty when none was supplied). It is a
+// pure function taken before the config lock, which is what makes "failed
+// validation never partially mutates or persists" structurally true rather
+// than merely a code-ordering convention. The returned error text never
+// echoes the credential value.
+func validateTelemetryConfigPut(body telemetryConfigPutBody) (string, error) {
+	// No ambiguous combination: replace and clear in the same request is
+	// rejected outright rather than silently picking one.
+	if body.ClearCredential && body.Credential != "" {
+		return "", errors.New("cannot both set and clear the credential in the same request")
+	}
+	// A supplied credential must be well-formed BEFORE anything is persisted.
+	if body.Credential != "" {
+		if err := validateTelemetryCredential(body.Credential); err != nil {
+			return "", err
+		}
+	}
+	origin := strings.TrimSpace(body.Origin)
+	if origin != "" {
+		canon, err := validateTelemetryEndpoint(origin)
+		if err != nil {
+			return "", err
+		}
+		origin = canon
+	}
+	// Enabling requires a valid origin — an origin-less enable is refused
+	// up front (§4), same shape as uploadConfig's "cannot enable without an
+	// origin" gate. A bare disable is always allowed.
+	if body.Enabled && origin == "" {
+		return "", errors.New("cannot enable telemetry without a valid https origin")
+	}
+	return origin, nil
+}
+
 // handleTelemetryConfigPut validates and applies a telemetry config update
 // (admin). Failed validation never partially mutates or persists the
 // config — every rejection returns before the config lock is taken.
@@ -276,26 +447,9 @@ func handleTelemetryConfigPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	// No ambiguous combination: replace and clear in the same request is
-	// rejected outright rather than silently picking one.
-	if body.ClearCredential && body.Credential != "" {
-		http.Error(w, "cannot both set and clear the credential in the same request", http.StatusBadRequest)
-		return
-	}
-	origin := strings.TrimSpace(body.Origin)
-	if origin != "" {
-		canon, err := validateTelemetryEndpoint(origin)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		origin = canon
-	}
-	// Enabling requires a valid origin — an origin-less enable is refused
-	// up front (§4), same shape as uploadConfig's "cannot enable without an
-	// origin" gate. A bare disable is always allowed.
-	if body.Enabled && origin == "" {
-		http.Error(w, "cannot enable telemetry without a valid https origin", http.StatusBadRequest)
+	origin, err := validateTelemetryConfigPut(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -322,7 +476,7 @@ func handleTelemetryConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := telemetryStatusFor(existing)
-	err := saveTelemetryConfigLocked(next)
+	err = saveTelemetryConfigLocked(next)
 	telemetryConfigMu.Unlock()
 	if err != nil {
 		http.Error(w, "persist telemetry config", http.StatusInternalServerError)

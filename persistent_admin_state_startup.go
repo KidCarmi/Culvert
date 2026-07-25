@@ -58,6 +58,13 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	// closes the rename/crash window before the first periodic counter save.
 	saveHitCounters(cfg.HitCountersPath)
 	LoadAdminSettings(cfg.AdminSettingsPath)
+	// M7 Slice 2: validate the node-local telemetry consent config once, at
+	// boot, so a malformed/unsafe/invalid config is surfaced immediately
+	// rather than on the next admin page load. SYNCHRONOUS AND INERT — it
+	// reads one local file and logs the posture; it starts no worker, arms
+	// no timer, resolves no DNS, and cannot transmit anything (there is no
+	// telemetry sender in this build; that is Slice 3, gated on §13).
+	loadTelemetryConfigAtStartup()
 	// Slice B: start the support-bundle retention janitor only AFTER LoadAdminSettings
 	// has restored the GUI-configured caps, so its immediate boot sweep enforces the
 	// operator's caps rather than the compiled defaults for up to one tick. Parented

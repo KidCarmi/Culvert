@@ -981,7 +981,16 @@ components:
       properties:
         enabled: { type: boolean }
         origin: { type: string, description: "Destination origin (https, no userinfo/path/query/fragment, no private/internal literal IP); required to enable." }
-        credential: { type: string, format: password, description: "Bearer credential to store; empty keeps the existing one." }
+        credential:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 1
+          maxLength: 4096
+          description: >-
+            Bearer credential to store; empty keeps the existing one.
+            Write-only — never returned by any response. Must not contain
+            control characters.
         clear_credential: { type: boolean, description: "Explicitly remove the stored credential (mutually exclusive with credential)." }
     SupportRecipients:
       type: object
@@ -1694,7 +1703,9 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/SetupCompleteRequest' }
-            example: { user: admin, pass: "changeme-8+chars" }
+            # No example: the required field is secret-bearing, and Gate 10
+            # forbids credential-shaped values in examples. The schema
+            # documents the required shape.
       responses:
         '200':
           description: Initial admin configured.
@@ -1730,7 +1741,9 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/LoginRequest' }
-            example: { user: admin, pass: "s3cret", totp: "123456" }
+            # No example: the required field is secret-bearing, and Gate 10
+            # forbids credential-shaped values in examples. The schema
+            # documents the required shape.
       responses:
         '200':
           description: Authenticated (session cookie set), or TOTP second step required.
@@ -1838,7 +1851,9 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/CreateUserRequest' }
-            example: { username: operator1, password: "operator-pass8", role: operator }
+            # No example: the required field is secret-bearing, and Gate 10
+            # forbids credential-shaped values in examples. The schema
+            # documents the required shape.
       responses:
         '200':
           description: User created or updated.
@@ -1897,7 +1912,8 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
-            example: { current_password: "old-pass8", new_password: "new-pass8" }
+            # Both fields are secret-bearing, so this operation carries no
+            # example (Gate 10); the schema documents the required shape.
       responses:
         '200':
           description: Password changed.
@@ -5846,7 +5862,7 @@ paths:
         - sessionCookie: []
         - basicAuth: []
       x-culvert-visibility: admin-supported
-      x-culvert-permission: viewer
+      x-culvert-permission: admin
       x-culvert-tenant-scope: appliance
       x-culvert-stability: stable
       x-culvert-idempotency: safe
@@ -5884,7 +5900,9 @@ paths:
         content:
           application/json:
             schema: { $ref: '#/components/schemas/SetTelemetryConfig' }
-            example: { enabled: true, origin: "https://tac.culvertlabs.com", credential: "example-bearer-token" }
+            # No credential in the example — secret-bearing fields must never
+            # appear in the contract or its generated artifacts (Gate 10).
+            example: { enabled: true, origin: "https://tac.culvertlabs.com" }
       responses:
         '200':
           description: Updated telemetry consent/config posture.

@@ -2520,7 +2520,7 @@ routes:
     handler: "apiSupportTelemetryConfig"
     domain: "support"
     visibility: admin-supported
-    min_role: "viewer"
+    min_role: "admin"
     mutating: false
     audit_expected: false
     danger_level: none
