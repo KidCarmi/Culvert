@@ -1470,6 +1470,22 @@ that lands the predicates below are the authority:
   capabilities MUST match `both capabilit|cross-capabilit|per listener|per-capability|each capabilit|and vice
   versa`. Exemptions: the `gitleaks` row only, annotated in place.
 
+**Known limitation of both predicates, recorded because a control's weakness must be as visible as the control.**
+These are **text** predicates, not semantic ones: a row satisfies them by *containing* the required vocabulary,
+not by actually requiring the coverage. Two consequences follow, and both are live:
+
+1. The `gitleaks` exemption annotation added in R21-3 contains the words "both capabilities", so that row now
+   **passes discipline 8 by matching the pattern** rather than by being skipped as exempt. The outcome is
+   correct and the row is self-documenting, but it passes for the wrong reason.
+2. Therefore **any** row can be made to pass either predicate by mentioning the vocabulary in prose without
+   naming a test that establishes the coverage. Nothing in the current tree does this, but nothing prevents it.
+
+These predicates are consequently a **regression guard, not a proof** — they catch a row that says nothing
+about cross-capability coverage, which is exactly how R21-1 and R21-2 were found, and they cannot judge whether
+a named test really manipulates one side and asserts the other. Closing that gap requires the executed CI check
+(PR-0/PR-1), which must assert on the **named test identifiers** rather than on prose. Until then, a `NONE`
+result from either predicate means "no row is silent", not "every claim is verified".
+
 **Unchanged by round 21:** no requirement or threat ID added, removed or renumbered. ADR-0024
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
