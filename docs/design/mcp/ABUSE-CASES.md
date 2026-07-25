@@ -177,10 +177,10 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** high event volume.
 - **Path:** saturate the pipeline during a high-risk deny (MCP-T-044,045).
 - **Affected assets:** A-6.
-- **Expected control:** MCP-EVENT-001,002 (mandatory local encrypted spool + backpressure; for critical write/destructive/config/credential classes: **fail closed AND** degraded mode + alert + loss counter).
-- **Expected event:** the deny event survives; if durability is lost, the triggering critical operation fails closed **and** the system enters degraded mode + alerts.
-- **Expected policy result:** no silent loss of auth/deny/config/high-risk events; degraded mode is not an alternative to fail-closed for critical classes.
-- **Test:** event-durability-under-saturation. **Owner:** SRE/Sec. **Severity:** Critical. **Closure:** zero critical loss demonstrated.
+- **Expected control:** MCP-EVENT-001,002 (mandatory local encrypted spool + backpressure), with the **two distinct critical-class outcomes** of EVENT-MODEL §4a / ADR-0024 §D-5: **(a)** for write/destructive/config-publication/credential/state-affecting-Management ⇒ **fail closed AND** degraded mode + alert + integrity-protected loss counter; **(b)** for the **auth-failure / authz-DENIAL** event this attacker targets ⇒ the request is **already denied**, so fail-closed is vacuous — instead **critical degraded state + alert + loss counter + a DURABILITY LOCKOUT blocking NEW *allowed* write/high-risk operations until durability is restored**.
+- **Expected event:** the deny event survives. If its durability is lost, the system enters the **critical degraded state** and alerts — and **subsequent allowed write/high-risk operations are blocked** until durability returns; for a critical *write* event instead, the triggering operation fails closed **and** degraded mode is entered.
+- **Expected policy result:** no silent loss of auth/deny/config/high-risk events; degraded mode is **not** an alternative to fail-closed for critical write classes, and **degraded mode alone is not sufficient for a lost denial event** — the lockout is required, otherwise the attacker erases the deny evidence and privileged work continues.
+- **Test:** event-durability-under-saturation, **including a denial-event lockout case**: drop the deny event under saturation, then assert a subsequent *allowed* write/high-risk operation is **blocked** until durability is restored. **Owner:** SRE/Sec. **Severity:** Critical. **Closure:** zero critical loss demonstrated **and** the lockout proven (this abuse case is **not** closed by degraded-mode alerting alone).
 
 ### MCP-AC-017 — Stale / corrupt snapshot applied
 - **Attacker:** fenced-out CP or corrupted transport.

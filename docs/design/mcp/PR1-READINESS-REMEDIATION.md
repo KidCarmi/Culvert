@@ -984,3 +984,27 @@ therefore not bounded by intuition: for any axis touching a **behavioural invari
 not just which ID owns it), enumerate consumers by **grepping the invariant's vocabulary** — here "fail
 closed", "degraded", "loss policy", "session" — not only the requirement ID. An invariant restated in prose or
 drawn in a diagram will not match an ID grep.
+
+---
+
+## Round 14b — vocabulary-based sweep of the denial-lockout axis (self-initiated, no finding filed)
+
+Round 14's fifth amendment says: for a **behavioural** invariant, enumerate consumers by grepping the
+**invariant's vocabulary**, not the requirement ID. Applied immediately as an audit
+(`fail[ -]?clos|degraded mode|loss polic|silent(ly)? (drop|los)`), it found **two more** consumers of the
+denial-lockout axis that four previous ID-based sweeps had all missed. Neither was reported by a reviewer.
+
+| Consumer | Why it mattered | Fix |
+|---|---|---|
+| **`ABUSE-CASES.md` MCP-AC-016 — "Critical decision-event loss"** | The abuse case's own attacker goal is *"induces pipeline saturation to **erase a deny event**"* — yet its expected control/event/result described only fail-closed + degraded mode, and its **closure condition was "zero critical loss demonstrated"**, which the lockout does not appear in at all. The single abuse case most specific to this attack could have been signed off **without ever testing the lockout**. | Expected control now states both §4a outcomes with (b) as the branch *this attacker targets*; expected event adds that subsequent allowed write/high-risk ops are blocked; expected result states **degraded mode alone is not sufficient for a lost denial event — otherwise the attacker erases the deny evidence and privileged work continues**; the test adds an explicit **denial-event lockout case**; and closure now requires the lockout proven, noting the case is **not** closed by degraded-mode alerting alone. |
+| **`BLUEPRINT.md` §16 loss-policy note** | The top-level blueprint statement collapsed both kinds into one "critical classes MUST fail closed AND degrade" sentence, so the highest-level document a reader starts from omitted the denial branch entirely. | Rewritten as two numbered, explicitly non-collapsible outcomes, with the denial branch carrying the **durability lockout** and "degraded mode **alone is not sufficient**". |
+
+**Why this validates the amendment:** this axis has now produced findings in **five** consumers across rounds
+2, 13, 14 and 14b — the requirement (§4a table), the config row, the flow diagram, the prose beneath it, the
+abuse case, and the blueprint note. An ID grep matched only the first two, because the rest restate the
+invariant **in prose, in a diagram, and as an attacker-goal narrative** without citing `MCP-EVENT-002`. The
+vocabulary sweep is what surfaced them.
+
+**Unchanged:** no requirement or threat added, removed or redefined. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates /
+0 undefined / 27 contiguous abuse cases; documentation only; PR-1 not begun.

@@ -679,12 +679,20 @@ ring. Production security evidence requires bounded queues, backpressure, a **ma
 durable spool on every relevant Data Plane** (external export is **additive, never a substitute**), replay
 identifiers and an explicit loss policy (D-5 / `ADR-0024 §D-5`, `MCP-EVENT-001`).
 
-> Loss of authentication, deny, configuration or high-risk decision events is unacceptable. If the
-> pipeline cannot preserve them, the critical **write / destructive / configuration-publication / credential**
-> classes **MUST fail closed AND** the system **MUST** enter the defined degraded mode with alerting and an
-> integrity-protected loss counter — degraded mode is **not** an alternative to fail-closed for critical
-> classes. Read-only / low-risk operations may proceed **only** under an explicitly approved degraded-mode
-> policy (`MCP-EVENT-002`, EVENT-MODEL §4a).
+> Loss of authentication, deny, configuration or high-risk decision events is unacceptable, and the required
+> response **differs by event kind** — do not collapse the two:
+>
+> 1. **Critical write / destructive / configuration-publication / credential / state-affecting-Management** —
+>    the operation **MUST fail closed AND** the system **MUST** enter the defined degraded mode with alerting
+>    and an integrity-protected loss counter. Degraded mode is **not** an alternative to fail-closed.
+> 2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
+>    fail-closed is vacuous and this case is **NOT** relabeled as fail-closed. The system **MUST** enter the
+>    **critical degraded state**, alert, increment the loss counter, and apply a **durability lockout**:
+>    **new *allowed* write/high-risk operations are blocked until critical-event durability is restored**
+>    (absent an explicitly approved emergency policy). Degraded mode **alone is not sufficient**.
+>
+> Read-only / low-risk operations may proceed **only** under an explicitly approved degraded-mode policy
+> (`MCP-EVENT-002`, EVENT-MODEL §4a, `ADR-0024 §D-5`).
 
 ---
 
