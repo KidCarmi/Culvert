@@ -573,3 +573,51 @@ reverse mapping now agree in both directions.
 attribution only. ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical;
 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not
 begun.
+
+---
+
+## Round 9 — the last two split consumers (`dc769863`)
+
+Two P2 findings, again the same propagation class — and both in **consumer** documents rather than the
+definitions.
+
+### R9-1 (P2) — ADR-0024 §D-9 item 6 no longer lets PR-1 satisfy inbound protection
+
+**Finding.** The ADR is the *binding* document, and its §D-9 item 6 still read "Inbound Origin/Host
+**protection** (`MCP-INSP-008`) remains a **PR-1** Protocol Kernel requirement" — while Part 1 item 7 and
+`SECURITY-REQUIREMENTS.md` define that ID as a **pure, listener-independent primitive** and assign actual
+enforcement to `MCP-INSP-009` at PR-5. An implementer following the ADR could report the D-9 control
+satisfied after PR-1, with no listener enforcing anything.
+
+**Fix.** Item 6 now states the defence is **split across two layers** — the `MCP-INSP-008` validation
+primitive at PR-1 (unit-tested without a socket) and the `MCP-INSP-009` listener-side
+enforcement/protection at PR-5 (bind configured interfaces, allowlist at accept, **E2E** rebinding proof) —
+and adds explicitly that **PR-1 binds no listener, so the item is NOT satisfied by PR-1 alone**: MCP-T-031/055
+(and MCP-T-052 for any future DMZ) close only when `MCP-INSP-009` ships. It also directs that the words
+"protection" and "enforcement" be reserved for `MCP-INSP-009`, so the wording cannot regress.
+
+### R9-2 (P2) — SSDLC threat range extended through `MCP-T-074`
+
+**Finding.** `SSDLC-CONTROL-MAPPING.md` (BSIMM **Intelligence** row) still described the canonical threat
+register as `MCP-T-001..056`, so an SSDLC/PR-0 evidence review following that mapping would exclude **all 18**
+new PR-1 protocol-kernel threats — the very threats the PR-1 entry gate rests on.
+
+**Fix.** The range is now `MCP-T-001..074`, with an inline note that it **includes `MCP-T-057..074`**, that
+those are part of the PR-1 entry gate, and that they must not be excluded from SSDLC/PR-0 evidence review.
+A repository-wide sweep for other stale `..056` ranges and stale threat/abuse-case counts found none; the only
+remaining `MCP-T-001..056` mention is this ledger's own historical note about the *prior* allocation, which is
+accurate as written.
+
+**Unchanged by round 9:** no requirement or threat added, removed or redefined. ADR-0024 remains
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not begun.
+
+### Convergence note (rounds 5–9)
+
+Every finding in rounds 5–9 shares one root cause: a requirement was **split or re-scoped** at its definition
+site (`MCP-INSP-008`→`009`, `MCP-PROTO-012`→`MCP-ID-008`, `MCP-CONNECT-004`→`MCP-ID-007`,
+`MCP-T-001..056`→`..074`) without updating every downstream consumer, letting a threat read as closed one or
+more slices early. Severity and volume have fallen monotonically (4 P1 → 2 P1 → 2 P1 + 2 P2 → 2 P2 → 2 P2),
+which is consistent with convergence. **A future editor making any similar split MUST sweep every consumer —
+threat register, traceability chain, attack trees, abuse cases, DFDs, CI gate rows, the connectivity/protocol
+contracts, and ADR-0024 itself — not only the requirement table.**

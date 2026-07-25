@@ -171,8 +171,17 @@ and is disabled by default**.
    Origin header** unless the selected protocol version explicitly requires it.
 5. Local deployment **must bind only to explicitly configured interfaces**; it must not default to
    unrestricted public ingress.
-6. Inbound Origin/Host protection (MCP-INSP-008) remains a **PR-1 Protocol Kernel requirement** even though
-   public DMZ exposure is deferred.
+6. Inbound Origin/Host defence remains required even though public DMZ exposure is deferred, and it is
+   **split across two layers** (Part 1 item 7):
+   - the **validation primitive** (`MCP-INSP-008`) is a **PR-1 Protocol Kernel requirement** — a pure,
+     listener-independent decision function, unit-tested without a socket; and
+   - the actual **listener-side enforcement/protection** (`MCP-INSP-009`) is **PR-5**: binding only
+     configured interfaces, enforcing the host allowlist at accept time, and **end-to-end** rebinding proof
+     against a running listener.
+
+   **PR-1 binds no listener, so this item is NOT satisfied by PR-1 alone** — the inbound rebinding threats
+   (MCP-T-031/055, and MCP-T-052 for any future DMZ) close only when `MCP-INSP-009` ships. Reserve the words
+   "protection" and "enforcement" for `MCP-INSP-009`.
 
 #### D-13 — Management MCP scope: read-only + draft/validate/simulate; mutation excluded from V1
 
