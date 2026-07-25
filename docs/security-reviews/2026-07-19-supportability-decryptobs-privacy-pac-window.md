@@ -13,7 +13,7 @@
 > The window is dominated by: the **TAC supportability appliance M1–M4**
 > (`internal/support`, support bundles, sealed export, recipient registry,
 > the `diagnose` verb family — #788, #792–#845), the **ADR-0011 decryption
-> observability program P1–P3** (dec.\* projection, failure feed, health API,
+> observability program P1–P3** (`dec.*` projection, failure feed, health API,
 > trend, panel — #758–#846), **PR3 Option B traffic-log destination privacy**
 > (keyed-HMAC pseudonymization — #860/#868/#870), **PR2 autoexclude
 > security-generation fencing** (#862), **PAC enterprise steering**
