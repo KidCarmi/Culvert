@@ -41,7 +41,7 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-22.py` | no live normative document states the commit-ordering precondition in a form naming FEWER than all four class-specific irreversible actions (the class-generic delegation, and a sentence scoped to one class, both pass) | `MCP-EVENT-002`'s class table + `EVENT-MODEL.md` §4a for the per-class scopes |
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
-| `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff against the merge base — added/rewritten requirement IDs, touched decision blocks, and changed repository-context rows | `git merge-base HEAD origin/main` (the diff is the authority) |
+| `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the
@@ -62,11 +62,28 @@ after they were checked in:
 - **A line-level prerequisite that a cosmetic reflow can defeat.** `predicate-24` only examined lines
   containing the literal `upstream call`, so reflowing the enumeration to one line per class would have
   skipped the configuration-publication and Management clauses — neither mentions an upstream call — and
-  still printed `NONE`. Both predicates now scan the whole text with a character window, and
-  `predicate-24` carries a seed that **reflows the layout and weakens a clause in the same edit**.
+  still printed `NONE`. Both predicates now scan the whole text — `predicate-22` bounded at the sentence
+  end, `predicate-24` at the clause end — and `predicate-24` carries a seed that **reflows the layout and
+  weakens a clause in the same edit**.
 
 A predicate must not be able to lose coverage to a Markdown reformat, and its seeds have to include the
 reformat.
+
+**A window is not a boundary** (round 39). When a check needs "the sentence", "the note" or "the clause", it
+must find that thing's syntactic end. A character count fails in both directions and prints `NONE` either
+way: too small truncates the evidence, too large imports evidence belonging to something else —
+`predicate-22` accepted `durably committed before the upstream call.` because unrelated *following* prose
+mentioned the other three actions inside a 600-character window. `predicate-22` now stops at the sentence
+end; `predicate-25` extracts each provenance note's `>` blockquote instead of a character slice.
+
+**A set comparison runs in both directions, over the union.** `predicate-25` originally reported only
+changes the note omitted, never decisions the note claimed but never touched, and iterated the intersection
+of table rows — so an added, deleted or renamed row was invisible to a note asserting every other row was
+byte-unchanged.
+
+**A base must outlive the merge it describes.** `predicate-25` pins the recorded pre-remediation commit
+(`CULVERT_PROVENANCE_BASE` overrides). `git merge-base HEAD origin/main` would resolve to the current tree
+once this branch merges, emptying the diff and failing every claim the predicate exists to confirm.
 
 ## Compressed notation must be expanded before sets are compared
 

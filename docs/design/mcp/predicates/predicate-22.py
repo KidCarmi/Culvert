@@ -55,11 +55,16 @@ ORDERING = re.compile(r'durabl\w*\s+(?:committed|persisted|commit)\b[^.]{0,40}?\
 # the class-generic delegation, which is complete by construction
 GENERIC = re.compile(r"that class'?s?\s+OWN\s+irreversible action|each class'?s?\s+own\s+"
                      r"(?:side effect|irreversible action)|class-specific", re.I)
-# how far past the match the enumeration may run (the live texts use an em-dash
-# list, and these documents hard-wrap, so the scan runs over the WHOLE text with a
-# character window — a per-line scan would cut every wrapped enumeration in half
-# and report it as incomplete)
+# The scan runs over the WHOLE text (a per-line scan would cut every wrapped
+# enumeration in half and report it as incomplete), but the span an ordering
+# assertion is judged on is the ORDERING SENTENCE ITSELF — terminated at the
+# sentence end, never a fixed window.  A fixed window let an incomplete rule
+# ("durably committed before the upstream call.") be absolved by unrelated
+# following prose that happened to mention publication, materialization and a
+# state change (round 39, P1).  WINDOW survives only as a hard backstop for a
+# sentence with no terminator before the end of the document.
 WINDOW = 600
+SENTENCE_END = re.compile(r'(?<=[a-z\)\*`\d])\.\s+(?![a-z])')
 LOOKBACK = 200          # scope marker may precede the ordering clause
 
 
@@ -105,8 +110,8 @@ def run(texts, scopes=None):
     for name, t in texts.items():
         flat = t.replace('\n', ' ')
         for m in ORDERING.finditer(flat):
-            span = flat[m.start():m.start() + WINDOW]
-            ctx = flat[max(0, m.start() - LOOKBACK):m.start() + WINDOW].lower()
+            span = SENTENCE_END.split(flat[m.start():m.start() + WINDOW])[0]
+            ctx = (flat[max(0, m.start() - LOOKBACK):m.start()] + span).lower()
             line = t[:m.start()].count('\n') + 1
             if GENERIC.search(span):
                 continue                          # delegates the enumeration
@@ -144,6 +149,13 @@ if __name__ == '__main__':
             'the decision event MUST be durably persisted before credential use and the upstream call.',
         'CI-GATES.md':
             'the decision event MUST be durably committed before the snapshot is signed or pushed.',
+        # ROUND 39 P1: an incomplete rule must NOT be absolved by neighbouring prose.
+        # Under the old fixed 600-char window this sentence reported clean, because
+        # the following sentence names the other three actions.
+        'THREAT-MODEL.md':
+            'the decision event MUST be durably committed before the upstream call. '
+            'Separately, publication signs and pushes the snapshot, broker materialization '
+            'mints credentials, and the Management state change is recorded.',
     }
     ok = True
     for target, sentence in seeds.items():

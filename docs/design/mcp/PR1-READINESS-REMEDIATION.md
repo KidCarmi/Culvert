@@ -2602,3 +2602,64 @@ registry's *statements* are untouched; only the provenance note changed. No diag
 ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
 0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII
 strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 39 — a fixed window let neighbouring prose absolve an incomplete rule, and the new provenance predicate checked one direction and one side (`7d81b55f` → next)
+
+Four findings, **all four inside the predicates**, and the first **P1** of the remediation. Checking the
+predicates in has now produced findings in three consecutive rounds; every one of them is a defect in what a
+check could prove, not in what the documents say.
+
+**R39-1 (P1) — `predicate-22` judged an ordering sentence on a 600-character WINDOW, not on the sentence.**
+So `durably committed before the upstream call.` was accepted whenever the *following, unrelated* prose
+happened to mention publication, materialization and a state change inside the window: `named_acts(span)`
+saw all four and reported clean while the rule itself left three classes ungated. The span is now terminated
+at the **sentence end**; `WINDOW` survives only as a backstop for a sentence with no terminator. The new seed
+is exactly the reviewer's construction — an incomplete rule followed by a sentence naming the other three
+actions — and it **fires**; under the old window it reported nothing. Round 38 fixed this predicate to detect
+a meaning; round 39 found the detector's *scope* was wrong, which is the same lesson at a smaller radius.
+
+**R39-2 — `predicate-25`'s decision arm compared one direction only** (`actual - claimed`), so a note naming
+an **unchanged** decision — claiming credit for touching D-3 — passed. Both directions now compared, and
+block **removal** counts as a change (`set(n) ^ set(o)`, not `set(n) - set(o)`). Seeded: naming D-3 fires.
+
+**R39-3 — `predicate-25`'s repository-context arm iterated `set(o) & set(n)`**, the intersection, so an
+**added** row, a **deleted** row, or a **renamed** label was invisible to a note asserting every other row is
+byte-unchanged. Now the union, with one-sided rows required to be named. Two seeds — add an unmarked row,
+delete a non-⟳ row — both fire. **The added-row seed immediately exposed a real bug in my own fix**
+(`n.get(k, o[k])` evaluates the default eagerly → `KeyError`), which is the argument for writing the seed
+before believing the fix.
+
+**R39-4 — the provenance base tracked `origin/main`, so it would break at the moment it mattered.** Once
+this branch merges, `git merge-base HEAD origin/main` resolves to the current tree: the diff empties, the
+live provenance claims "fail", and two seeds report `MISSED`. A predicate advertised as re-runnable has to
+stay re-runnable **after the merge it describes**. The base is now the **recorded immutable commit**
+`1203e04b`, with `CULVERT_PROVENANCE_BASE` for a transplanted history, and a start-up check asserts the base
+is an ancestor of `HEAD` and is not `HEAD`.
+
+**The sweep — the same unbounded-window defect was in `predicate-25` three more times.** R39-1 is a fixed
+character window standing in for a syntactic boundary; `predicate-25` read each provenance note as
+`[:2500]` / `[:900]` / `[:1600]` characters. Those windows sit directly above the `MCP-PROTO` requirement
+table, so a growing document would have dragged unrelated IDs into the *claimed* set — silently making the
+claim look bigger and the check look green. All three now extract the **blockquote** the note lives in, using
+the document's own `>` delimiters. `predicate-24` was checked and is already clause-bounded (it splits on
+`;` and sentence end); `predicate-19/21/23` parse structure, not prose.
+
+**Thirty-first amendment — a window is not a boundary.** When a check needs "the sentence", "the note" or
+"the clause", it must find the syntactic end of that thing. A character count is a guess that fails in both
+directions: too small truncates the evidence (round 38's per-line scan), too large imports evidence that
+belongs to something else (this round). Both failures print `NONE`.
+
+**What three consecutive rounds of predicate findings say.** Rounds 37, 38 and 39 have produced **six**
+defects in the checked-in predicates — parity certified on endpoints, a meaning matched as one phrase, a
+coverage filter a reformat could defeat, a one-direction set comparison, an intersection where a union was
+required, and a base that dissolves on merge. Every one produced `NONE` while proving less than claimed. I
+audited all of them myself before each was reviewed, and found none of the six. That is the strongest
+evidence in this ledger for the position it already records: **these predicates are worth having and are not
+worth trusting unreviewed**, and the recorded recommendation to promote them into executed CI gates during
+PR-0/PR-1 should be read as promoting *reviewed* checks, not these.
+
+**Unchanged by round 39:** no requirement, threat or abuse-case ID added, removed or renumbered; no normative
+statement, diagram edge or provenance claim changed — the only document edits are `predicates/` and this log.
+ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
+0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII
+strays; changes confined to `docs/`; PR-1 not begun.
