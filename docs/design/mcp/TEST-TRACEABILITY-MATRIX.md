@@ -38,7 +38,7 @@ Gate = slice/CI gate that must be green.
 | MCP-T-001 token theft | MCP-AUTH-001,004 | Token validation + short TTL | Auth negative matrix (unit/integration) | Rejections logged | IAM/Sec | PR-3 |
 | MCP-T-002 token replay | MCP-AUTH-006 | Sender-constraint (mTLS/DPoP-proof) + short-TTL/aud/resource + correlation/rate-limit/anomaly — **not** access-token one-time-use ([`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)) | DPoP-proof replay + anomaly/rate-limit matrix (integration) | Replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles | IAM/Sec | PR-3 |
 | MCP-T-003 wrong audience | MCP-AUTH-002 | Audience validation | Wrong-audience (negative) | Foreign `aud` denied | IAM/Sec | PR-3 |
-| MCP-T-004 wrong resource | MCP-AUTH-003 | RFC 8707 resource binding | Wrong-resource (negative) | Mismatch denied | IAM/Sec | PR-3 |
+| MCP-T-004 wrong resource | MCP-AUTH-003 | RFC 8707 `resource` requested; resulting `aud`/introspection audience validated | Wrong-resource (negative) over JWT **and** opaque tokens; `aud`-less token denied for write/high-risk; outbound `resource` parameter asserted | Mismatch denied | IAM/Sec | PR-3 |
 | MCP-T-005 token passthrough | MCP-AUTH-005, MCP-CRED-001 | No passthrough + broker | Upstream-capture (integration) | No client token upstream | IAM/Sec | PR-4 |
 | MCP-T-006 agent impersonation | MCP-ID-002 | Agent attribution | Attribution (unit) | Agent fields present | IAM/Sec | PR-3 |
 | MCP-T-007 workload impersonation | MCP-ID-003 | Workload attestation | Workload-auth (integration) | Spoof rejected | IAM/Sec | PR-3 |

@@ -234,7 +234,7 @@ Qualification gate** (§7) — it is not itself a rollout mode.
 | Privacy | Data inventory, retention policy, redaction proof, and access controls. |
 | Support | Known limitations, troubleshooting guide, upgrade/downgrade procedure, and customer-communication plan. |
 | Release | Signed artifacts, SBOM, provenance, change approval, and source SHA (per [SUPPLY-CHAIN-SECURITY.md](SUPPLY-CHAIN-SECURITY.md)). |
-| Connectivity | Validated local/connector/DMZ deployment model with documented data flows and failure semantics (per [ON-PREM-CONNECTIVITY.md](ON-PREM-CONNECTIVITY.md)). |
+| Connectivity | **V1 scope: Model A (`local-client`) only** — validated local-client deployment model with documented data flows and failure semantics (per [ON-PREM-CONNECTIVITY.md](ON-PREM-CONNECTIVITY.md)), plus evidence that the shipped config surface **rejects** `outbound-connector`/`dmz-endpoint`. Model B (connector) evidence belongs to **PR-C** and Model C (DMZ) evidence to the **Future DMZ Architecture & Production-Readiness Gate**; both are post-GA and **MUST NOT** gate V1 sign-off. |
 
 ---
 

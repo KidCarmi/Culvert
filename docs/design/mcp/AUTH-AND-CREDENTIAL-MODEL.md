@@ -12,7 +12,8 @@ after a policy decision. It is the authoritative source for requirement IDs in t
 
 > **Decision status — D-2 CLOSED (2026-07-24, [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
 > Culvert is the **OAuth protected resource server** (Option A): client tokens terminate at Culvert;
-> audience + RFC 8707 resource identify the canonical Culvert MCP resource (`/mcp/management` or
+> clients request the canonical Culvert MCP resource via RFC 8707 `resource` and Culvert validates the
+> resulting audience restriction, so audience identifies the canonical Culvert MCP resource (`/mcp/management` or
 > `/mcp/gateway/{server-id}`, or an approved Culvert-controlled logical resource); the upstream server/tool/
 > resource are **policy + credential-broker inputs, never the token audience**; separate Mgmt/Gateway OAuth
 > clients + disjoint scopes. Option C = an issuer topology under A; Option B = edge token-exchange only.
@@ -108,16 +109,22 @@ Each MCP request (Management or Gateway) carries a bearer token evaluated agains
 |---|---|---|
 | **Issuer** | Trusted issuer for the calling principal (Human/Workload/Agent/Client), verified via JWKS. | **[FACT]** JWKS + `iss` + `exp` validation exists for the browser OIDC ID-token flow (`auth_oidc_flow.go:499-566`) — reusable *pattern*, not an MCP implementation. |
 | **Audience** | **MUST** identify the Culvert MCP resource, not any other service. | **[FACT]** Today's SWG flow binds audience to the OIDC **`client_id`** (`auth_oidc_flow.go:523`), and `auth_oidc.go:247` only optionally checks a `RequiredAudience`. Neither is "audience = the MCP server." **MCP-AUTH-002** requires a genuine Culvert-identifying audience and rejection of foreign `aud`. |
-| **Resource** | **MUST** carry an RFC 8707 resource indicator binding the token to the **canonical Culvert-controlled MCP resource URI** (which **MAY** encode the target server ID, e.g. the Culvert resource for `/mcp/gateway/{server-id}`) — **never** the upstream business MCP server (ADR-0024 §D-2). | **[FACT]** RFC 8707 resource indicators are **absent today** (grep 0 in VERIFIED EVIDENCE). This is net-new — **MCP-AUTH-003**. |
+| **Resource** | Audience restriction **MUST** be obtained *through the authorization flow*: the client sends `resource=<canonical Culvert-controlled MCP resource URI>` on the authorization/token request (RFC 8707 §2 — which **MAY** encode the target server ID, e.g. the Culvert resource for `/mcp/gateway/{server-id}`), and Culvert verifies the **resulting** restriction (`aud` for JWTs, introspection `aud`/resource metadata for opaque tokens) — **never** the upstream business MCP server (ADR-0024 §D-2). RFC 8707 `resource` is a *request* parameter, so Culvert **MUST NOT** demand a bespoke resource claim inside the token. | **[FACT]** RFC 8707 resource indicators are **absent today** (grep 0 in VERIFIED EVIDENCE) on both the request side and the validation side. This is net-new — **MCP-AUTH-003**. |
 | **Scopes** | Fine-grained, per-capability, per-tool-class scopes (never a blanket "MCP access" scope). | **[INFER]** net-new; must be disjoint between Management and Gateway (**MCP-AUTH-008**). |
 | **Credential profile** | Not carried in the token itself — selected server-side, after the policy decision, from the credential broker (§7). | **[INFER]** net-new; see §7 and **MCP-POLICY-004** / **MCP-CRED-001**. |
 
 **Token state to be enforced (not yet present):**
-- Audience and resource **MUST** independently identify **Culvert** — the canonical Culvert-controlled MCP
+- The token's **effective audience MUST** identify **Culvert** — the canonical Culvert-controlled MCP
   resource URI (which may encode the server ID), **not** the upstream business MCP server; the SWG's
   `client_id`-as-audience shortcut (`auth_oidc_flow.go:523`) is explicitly **not** an acceptable substitute
   for MCP (**MCP-AUTH-002**, **MCP-AUTH-003**; closes **MCP-T-003** wrong audience and **MCP-T-004** wrong
   resource).
+- The binding is established **at the authorization server** (client sends `resource`, AS returns an
+  audience-restricted token) and **verified at Culvert** from standard token metadata — `aud` for JWT
+  access tokens, the introspection response for opaque ones. Culvert's protected-resource metadata **MUST**
+  publish the same canonical resource URI its clients are told to request. An **unrestricted (`aud`-less)
+  token MUST NOT** authorize write/high-risk operations, and Culvert **MUST NOT** require a non-standard
+  resource claim to be present inside the token (**MCP-AUTH-003**).
 - Tokens **MUST** be short-TTL, with expiry enforced (**MCP-AUTH-004**). **[FACT]** `exp` enforcement
   already exists in the OIDC flow (`auth_oidc_flow.go:653-659`) and is a reusable pattern.
 - Tokens **MUST NOT** appear in query strings; validate the bearer token on every relevant request
@@ -180,7 +187,7 @@ target PR live in [SECURITY-REQUIREMENTS.md](SECURITY-REQUIREMENTS.md); threat c
 | 1 | The gateway **MUST NOT** allow token passthrough — the client's bearer token is never forwarded unchanged to an upstream system. Existing no-passthrough posture (`proxy.go scrubForwardedHeaders:46-73`, `proxy_tunnel.go removeHopHeaders:1288-1304` stripping `Proxy-Authorization`) is **precedent only** — it proves the codebase has the discipline, not that MCP token isolation is implemented. | **MCP-AUTH-005** |
 | 2 | The gateway **MUST NOT** accept a bearer token carried in a query string. | **MCP-AUTH-001** |
 | 3 | The gateway **MUST** validate token audience against the Culvert MCP resource and reject foreign audiences. | **MCP-AUTH-002** |
-| 4 | The gateway **MUST** validate an RFC 8707 resource indicator binding the token to the **canonical Culvert-controlled MCP resource URI** (which may encode the server ID) — never the upstream business server. | **MCP-AUTH-003** |
+| 4 | Culvert's clients **MUST** request the **canonical Culvert-controlled MCP resource URI** via RFC 8707 `resource` (which may encode the server ID), and the gateway **MUST** verify the resulting audience restriction from standard metadata (`aud` for JWTs, introspection for opaque tokens) — never accepting the upstream business server as the audience, and never requiring a bespoke in-token resource claim. | **MCP-AUTH-003** |
 | 5 | The gateway **MUST** implement bearer-token replay protection (net-new; see §5). | **MCP-AUTH-006** |
 | 6 | Tokens **MUST** be short-TTL with enforced expiry. | **MCP-AUTH-004** |
 | 7 | Management MCP and Gateway MCP **MUST** use SEPARATE OAuth clients and scopes — never shared. | **MCP-AUTH-008** |
@@ -255,7 +262,7 @@ sequenceDiagram
 
     Agent->>GW: Tool call + Bearer token (aud: Culvert)
     GW->>Auth: Validate token
-    Auth->>Auth: Check issuer, audience == Culvert,<br/>RFC 8707 resource indicator,<br/>expiry, replay/sender-constraint
+    Auth->>Auth: Check issuer, audience == Culvert<br/>(JWT aud / introspection aud — the<br/>RFC 8707-requested resource),<br/>expiry, replay/sender-constraint
     Auth-->>GW: Principal chain (Human/Workload → Agent → Client)
     GW->>Pol: Evaluate policy tuple<br/>(principal + agent + client + tenant +<br/>server + tool + args + resource)
     Pol-->>GW: Decision (ALLOW-class) + obligations

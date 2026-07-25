@@ -84,8 +84,12 @@ Each row: what it is, evidence, what the evidence proves, and the reuse classifi
   against an MCP server, and has no credential-broker step selecting a distinct scoped upstream
   credential after policy.
 - **Classification:** **Architectural precedent + new MCP implementation required.**
-- **[REC]** MCP MUST terminate the client bearer token, validate audience/resource = the MCP server,
+- **[REC]** MCP MUST terminate the client bearer token, validate that its audience is the **canonical
+  Culvert-controlled MCP resource URI** (which may encode the target server ID) and **never** the upstream
+  business MCP server — verified from standard token metadata (`aud` / introspection), per
+  [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-2 and **MCP-AUTH-003** —
   make a policy decision, then select a distinct, scoped, short-lived upstream credential via the broker.
+  The upstream server is a **policy + broker-scope input, not the token's recipient**.
 
 ## 6. Replay protection — corrected, per-mechanism
 
@@ -93,7 +97,7 @@ Each row: what it is, evidence, what the evidence proves, and the reuse classifi
 |---|---|---|---|---|
 | OIDC nonce validation | `auth_oidc_flow.go · validateIDToken · 499-566` ⟳; nonce minted `CaptiveLoginURL:381-392`, checked via `ExchangeCode→validateIDToken(...,entry.nonce):472` | Nonce verified on browser PKCE ID-token flow; `expectedNonce=""` on introspection path is deliberate (comment :359 — access tokens carry no nonce) | Anything about access-token replay | [FACT] R (ID-token flow) |
 | Authorization-code replay | `auth_oidc_flow.go · pkceStore.pop · 248-259` (single-use delete); PKCE S256 `:386-388`; `pkceEntryTTL=10m :221` | `state`/code single-use + TTL-bounded; PKCE binds code to verifier | Bearer access-token reuse after exchange | [FACT] R (code flow) |
-| ID-token validation | `auth_oidc_flow.go · validateIDToken · 499-566` | Sig/exp/issuer/audience(=client_id) enforced | Audience = an MCP server/resource; no RFC 8707 | [FACT] R (sig/exp/iss) / AI (audience semantics) |
+| ID-token validation | `auth_oidc_flow.go · validateIDToken · 499-566` | Sig/exp/issuer/audience(=client_id) enforced | Audience = the canonical Culvert MCP resource URI (ADR-0024 §D-2); no RFC 8707 `resource` on the request side | [FACT] R (sig/exp/iss) / AI (audience semantics) |
 | **Bearer access-token replay** | `auth_oidc.go · introspect/ResolveIdentity · 166-265`; `auth_oidc_flow.go` introspection `617-695` | RFC 7662 introspection: `active` + `exp` + optional `aud`/`scope` | **No** one-time-use, jti tracking, or replay list — an unexpired, un-revoked token replays as active | **[FACT] Missing (no replay defense)** |
 | jti / token cache | `auth_oidc.go · oidcCacheEntry/oidcIdentityCacheGet/Set · 114-151,173,282-319` (`key=cacheKey("",token)`, TTL=min(≈2m,exp)); session jti `internal/session.NewJti` | Token cache is a **performance** cache; session `Jti` is a per-login cookie discriminator + revocation | Cache is **not** anti-replay (it accelerates repeat acceptance); session jti is not a bearer jti | [FACT] AI (cache ≠ replay guard) |
 | Token TTL | ID: `WithExpirationRequired():524`; access: `parseDeclaredExpiry`+`exp<=now` reject `auth_oidc_flow.go:653-659` | Expiry enforced on both; cache TTL clamps to token exp | TTL is not replay prevention | [FACT] R (TTL enforced) |

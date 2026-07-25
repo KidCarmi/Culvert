@@ -17,6 +17,14 @@ architecture review has to improvise a connectivity story.
 > **not supported in V1 and is disabled by default.** Host validation + configured-host allowlisting are
 > mandatory on **every** HTTP MCP listener; local deployments bind only to explicitly configured
 > interfaces; inbound Origin/Host validation (MCP-INSP-008) ships in **PR-1**.
+>
+> **Config-surface consequence:** "not supported in V1" is enforced, not merely defaulted — V1 validation
+> **MUST REJECT** `mcp_gateway_connector_mode` values `outbound-connector` and `dmz-endpoint` across API,
+> YAML/env/flag parsing, config import and snapshot apply, so an operator cannot select or persist a mode
+> that has no implementation and no security gate ([`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md)
+> `mcp_gateway_connector_mode`). Correspondingly, Model B/C evidence **MUST NOT** gate V1 GA — see
+> [`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md) (On-prem connectivity) and
+> [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md) (Production Qualification).
 
 **Naming note (`SOURCE REVIEW REQUIRED`):** the source DOCX blueprint index named this document
 `ONPREM-CONNECTIVITY-MODEL.md`; PR-0 uses the task-specified filename `ON-PREM-CONNECTIVITY.md`. This is

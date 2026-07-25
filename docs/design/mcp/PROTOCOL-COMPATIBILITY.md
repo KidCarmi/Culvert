@@ -157,11 +157,14 @@ what the protocol kernel must enforce on every inbound call, independent of tran
   `client_id` only (`auth_oidc_flow.go:523`, VERIFIED EVIDENCE) — that is **insufficient** for MCP and is
   explicitly not reused as the MCP audience model (`BLUEPRINT.md` §06 non-goal: "Do not reuse the existing
   SWG OIDC proxy flow as a generic MCP authentication model").
-- **Resource-indicator binding.** `MCP-AUTH-003`: the gateway must validate the resource indicator
-  (`[EXT]` RFC 8707 is an external IETF specification, not a Culvert repository fact) binding the token to
-  the specific target MCP server; an unbound token is denied for write/high-risk operations. VERIFIED
-  EVIDENCE: RFC 8707 has zero matches in the current repository — this is a **net-new** control, not an
-  extension of anything that exists today.
+- **Resource-indicator binding.** `MCP-AUTH-003`: Culvert's clients request the **canonical
+  Culvert-controlled MCP resource URI** via the RFC 8707 `resource` parameter (`[EXT]` RFC 8707 is an
+  external IETF specification, not a Culvert repository fact) — **never** the upstream business MCP server
+  (ADR-0024 §D-2) — and the gateway validates the **resulting** audience restriction from standard token
+  metadata (`aud` for JWTs, introspection for opaque tokens) rather than a bespoke in-token claim. An
+  unbound (`aud`-less) token is denied for write/high-risk operations. VERIFIED EVIDENCE: RFC 8707 has zero
+  matches in the current repository — this is a **net-new** control, not an extension of anything that
+  exists today.
 - **No passthrough at the protocol layer.** The protocol kernel never forwards the client's bearer token
   unchanged to an upstream MCP server; credential selection is a separate, later step gated on a policy
   ALLOW-class decision (`MCP-POLICY-004`, `MCP-CRED-001`) and is out of the protocol kernel's

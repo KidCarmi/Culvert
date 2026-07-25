@@ -71,11 +71,20 @@ These five decisions were the blocking GO/NO-GO items required before PR-1. They
 #### D-2 — Authentication & authorization: Culvert as an OAuth protected resource server (Option A)
 
 1. The client access token **terminates at Culvert and is never forwarded upstream** (MCP-AUTH-005).
-2. The OAuth audience and RFC 8707 resource indicator **MUST** identify the canonical Culvert MCP
-   protected resource that receives the token:
+2. The token's **effective OAuth audience MUST** identify the canonical Culvert MCP protected resource
+   that receives the token:
    - Management MCP: the canonical resource URI for `/mcp/management`.
    - Gateway MCP: the canonical Culvert resource URI for `/mcp/gateway/{server-id}`, or an equivalent
      Culvert-controlled logical resource identifier approved by architecture review.
+
+   That binding is established **through the authorization flow, not by a bespoke token claim**: Culvert's
+   registered clients send `resource=<canonical Culvert resource URI>` on authorization/token requests
+   (RFC 8707 §2) and Culvert publishes the same URI in its protected-resource metadata; Culvert then
+   verifies the **resulting** restriction from standard metadata — `aud` for JWT access tokens (RFC 9068),
+   or the introspection response's `aud`/resource metadata for opaque tokens (RFC 7662). Because RFC 8707
+   `resource` is a *request* parameter, Culvert **MUST NOT** require a non-standard resource-indicator
+   claim inside the token (that would break spec-compliant JWT and opaque tokens alike); an
+   **unrestricted, `aud`-less token MUST NOT** authorize write/high-risk operations.
 3. The client token **MUST NOT** use the upstream business MCP server as its recipient/audience. The
    approved upstream MCP server, tool and enterprise resource are **policy inputs and credential-broker
    scope attributes**. Culvert selects a separate upstream credential **only after** an ALLOW-class

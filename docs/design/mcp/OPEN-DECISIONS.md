@@ -49,7 +49,9 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Blocking:** GO/NO-GO (identity) + Slice (PR-3).
 - **CLOSED — 2026-07-24 (approved by the PR-0 facilitator; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-2, pending ARB/Sec-Arch formal ratification).**
   - **Decision:** **Option A** — Culvert is the OAuth protected resource server. Client token terminates at
-    Culvert (no passthrough); audience + RFC 8707 resource identify the canonical Culvert MCP resource
+    Culvert (no passthrough); clients request the canonical resource via RFC 8707 `resource` and Culvert
+    validates the resulting audience restriction (`aud` / introspection, never a bespoke in-token claim),
+    so the audience identifies the canonical Culvert MCP resource
     (`/mcp/management`, `/mcp/gateway/{server-id}` or an approved Culvert-controlled logical resource);
     upstream server/tool/resource are policy + broker-scope inputs; separate Mgmt/Gateway OAuth clients +
     disjoint scopes. Option C = issuer topology under A; Option B = edge token-exchange only, separate

@@ -330,3 +330,83 @@ published history preserved). Reconciliation outcomes:
   contract.md` mention is a point-in-time observation that was accurate when authored (pre-rename) and is
   not an operational cross-reference, so it is intentionally not edited.
 - **ADR-0024 remains `Status: Proposed`; unique across all `origin/main` refs and open PRs.**
+
+---
+
+## Round 5 — automated-review remediation on the main-synced head (`8d8cfc26`)
+
+Four findings raised by the automated reviewer against the synced head (3×P1, 1×P2). All are
+documentation-consistency defects in this package; each is fixed at the canonical source **and** in every
+divergent copy, so an implementer cannot follow a stale statement.
+
+### R5-1 (P1) — RFC 8707 validated through the authorization flow, not by an in-token claim
+
+**Finding.** RFC 8707 `resource` is an **authorization/token-request parameter**. A protected resource
+receives the resulting *audience-restricted access token*, not a token that necessarily carries a resource
+indicator. Requiring every MCP token to "carry an RFC 8707 resource indicator" would fail spec-compliant
+JWTs that carry only `aud`, fail opaque tokens validated by RFC 7662 introspection, or force a private claim.
+
+**Fix.** The control is restated as a two-sided contract: **(a)** Culvert's registered clients send
+`resource=<canonical Culvert-controlled MCP resource URI>` on authorization/token requests (RFC 8707 §2) and
+Culvert publishes that same URI in its protected-resource metadata; **(b)** Culvert verifies the **resulting**
+audience restriction from **standard** metadata — `aud` for JWT access tokens (RFC 9068), or the introspection
+response's `aud`/resource metadata for opaque tokens (RFC 7662) — rejecting any token whose audience names the
+upstream business MCP server or another non-Culvert service. Culvert **MUST NOT** require a non-standard
+in-token resource claim; an unrestricted (`aud`-less) token **MUST NOT** authorize write/high-risk operations.
+The intent of ADR-0024 §D-2 (Culvert is the token recipient; upstream is a policy/broker input) is unchanged —
+only the enforcement mechanism is made standards-accurate.
+
+Updated: `SECURITY-REQUIREMENTS.md` (MCP-AUTH-003, incl. verification over **both** token forms plus an
+`aud`-less-token negative and an outbound-`resource` assertion), `ADR-0024` §D-2 item 2,
+`AUTH-AND-CREDENTIAL-MODEL.md` (D-2 status quote, §4 Resource row, §4 token-state bullets, §6 Hard
+Requirements rule 4, §7 sequence diagram), `PROTOCOL-COMPATIBILITY.md` (which also still carried a residual
+"specific target MCP server" phrasing — now cleared),
+`OPEN-DECISIONS.md` D-2 closure, `TEST-TRACEABILITY-MATRIX.md` MCP-T-004 row, `SSDLC-CONTROL-MAPPING.md` V2.
+
+### R5-2 (P1) — stale upstream-resource recommendation in the repository-context doc
+
+**Finding.** `VERIFIED-REPOSITORY-CONTEXT.md` §5 still normatively recommended validating
+`audience/resource = the MCP server` — exactly the upstream-resource behavior ADR-0024 §D-2 forbids and the
+new negative test rejects.
+
+**Fix.** The `[REC]` now names the **canonical Culvert-controlled MCP resource URI** (which may encode the
+target server ID), states the upstream server is a policy + broker-scope input and never the token's
+recipient, and cites ADR-0024 §D-2 / MCP-AUTH-003. The §6 ID-token "Gap" cell is corrected the same way.
+
+### R5-3 (P1) — circular V1 connectivity release gate removed
+
+**Finding.** V1 Production Qualification required the complete test taxonomy and every domain gate green,
+and the Go/No-Go **On-prem connectivity** domain required local **+ connector + DMZ** deployments validated.
+Since PR-C (connector) and the Future DMZ gate cannot start until **after** V1 GA, V1 GA transitively
+depended on post-GA work — an unsatisfiable gate.
+
+**Fix.** V1 qualification is scoped to **Model A (`local-client`)**:
+- `GO-NO-GO-CHECKLIST.md` — **On-prem connectivity** is Model-A-only, names connector/DMZ as explicitly out
+  of V1 scope with their owning gates, and makes "V1 GA blocked on connector/DMZ evidence" an explicit
+  **NO-GO** (the circularity itself is now a listed failure condition). The **Connectivity** domain row is
+  scoped the same way.
+- `IMPLEMENTATION-SLICES.md` — Production Qualification is bounded to V1/Model-A scope, is **explicitly not
+  dependent** on PR-C or the Future DMZ gate, covers only the Model-A/tenant-binding aspect of
+  MCP-CONNECT-004, and requires the taxonomy green **for PR-0..PR-11 rows** — PR-C / Future-DMZ rows are
+  **deferred, not waived**: they stay tracked as **Missing** and block *their own* gate.
+- `ROLLOUT-AND-ROLLBACK.md` §6 — the Connectivity evidence row (which Production Qualification aggregates
+  from) is scoped to Model A, so the circularity is closed at the source too.
+
+### R5-4 (P2) — deferred connectivity modes rejected in V1, not merely defaulted
+
+**Finding.** The `mcp_gateway_connector_mode` validation enum still **accepted** `outbound-connector` and
+`dmz-endpoint` while the same row said Model A is the only V1 mode and scheduled validation tests post-V1 —
+so an operator could select and snapshot a mode with no implementation and no security gate.
+
+**Fix.** `CONFIG-SURFACE-MATRIX.md` — the V1 accepted value is **`local-client` only**; the other two are
+**reserved names V1 validation MUST REJECT** ("not supported in this release") across API, YAML/env/flag
+parsing, config import **and snapshot apply** (a V1 DP must reject such a snapshot, never silently
+downgrade). V1 **negative tests are assigned to PR-9** (config surface); the positive Model-B/Model-C
+acceptance tests remain with PR-C / the Future DMZ gate. Constraint class raised to **Override** (no
+operator path out of `local-client`). `ON-PREM-CONNECTIVITY.md` records the same enforcement consequence, so
+"not supported in V1" is enforced rather than merely defaulted.
+
+**Unchanged by round 5:** ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains
+byte-identical; no requirement or threat IDs were added or removed (still 74 threats / 91 requirements /
+91 of 91 reachable / 0 duplicates / 0 undefined); no code, CI, dependency, runtime, config-implementation or
+binary change; PR-1 is not begun.

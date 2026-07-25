@@ -204,15 +204,25 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Owner:** Sec Arch/Exec. **Reviewer:** Arch + Exec. **Gate:** signed risk acceptance + production-readiness approval; **not** reachable via PR-11.
 
 ## Production Qualification (separate gate — not a PR slice)
-- **Objective:** full evidence pack + Joint Go/No-Go sign-off.
+- **Objective:** full evidence pack + Joint Go/No-Go sign-off **for V1 (Model A) scope**.
 - **Scope:** evidence aggregation across Security/Reliability/Compatibility/Operations/Privacy/Support/
-  Release/Connectivity ([`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md) §6).
-- **Non-goals:** new features.
-- **Dependencies:** PR-0..PR-11.
-- **Security requirements:** MCP-PRIVACY-003; MCP-SUPPLY-003,004; MCP-OPS-003.
-- **Tests:** the complete taxonomy in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) green;
-  signed SBOM/provenance verified.
-- **Acceptance:** [`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md) fully cleared.
+  Release/Connectivity ([`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md) §6), **bounded to the V1
+  feature set: connectivity Model A (`local-client`) only**.
+- **Non-goals:** new features; **any evidence owned by PR-C (Model B connector) or the Future DMZ
+  Architecture & Production-Readiness Gate (Model C)**.
+- **Dependencies:** PR-0..PR-11. **Explicitly NOT dependent on PR-C or the Future DMZ gate** — those
+  slices begin only after V1 GA, so requiring their evidence here would make GA depend on post-GA work.
+- **Security requirements:** MCP-PRIVACY-003; MCP-SUPPLY-003,004; MCP-OPS-003. Of the connectivity family,
+  V1 qualification covers **only** the Model-A/tenant-binding aspect of **MCP-CONNECT-004**;
+  **MCP-CONNECT-001/002** (+ the connector aspect of 004) are PR-C evidence and **MCP-CONNECT-003** (+ the
+  DMZ aspect of 004, plus **MCP-INSP-009**'s DMZ-facing E2E) is Future-DMZ-gate evidence.
+- **Tests:** the complete taxonomy in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) green
+  **for rows whose Slice column is PR-0..PR-11**; rows owned by PR-C / the Future DMZ gate are **deferred,
+  not waived** — they are tracked as **Missing** and block *their own* gate, never V1 GA. Signed
+  SBOM/provenance verified.
+- **Acceptance:** [`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md) fully cleared **at V1 scope** — its
+  Connectivity and On-prem-connectivity domains are satisfied by Model A alone, and V1 GA **MUST NOT** be
+  gated on connector/DMZ validation (that circularity is called out explicitly in those rows).
 - **Rollback:** hold production enablement.
 - **Owner:** Eng + Product + SRE. **Reviewer:** Joint Go/No-Go Board. **Release gate:** all blocking conditions cleared.
 
