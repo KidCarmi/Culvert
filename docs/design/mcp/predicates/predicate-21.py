@@ -13,10 +13,26 @@ DFD = pathlib.Path('docs/design/mcp/DATA-FLOW-DIAGRAMS.md')
 TM = pathlib.Path('docs/design/mcp/THREAT-MODEL.md')
 
 
+# both range syntaxes used by these documents: `MCP-T-011..017` in the DFD
+# headers, `011–017` (en-dash) in the coverage rows.  A hyphen form is accepted
+# too, since nothing stops a future edit from using it.
+RANGE = re.compile(r'(\d{3})\s*(?:\.\.|[–—-])\s*(?:MCP-T-)?(\d{3})')
+
+
 def nums(s):
-    """3-digit threat numbers mentioned in a threat list (ranges give endpoints)."""
+    """3-digit threat numbers named by a threat list, with ranges EXPANDED.
+
+    Keeping only a range's endpoints would let `057, 074` compare equal to
+    `057..074` — i.e. certify parity for a row that dropped 058-073.  A
+    compressed notation must be expanded before the sets are compared, never
+    matched literally.
+    """
     s = s.split('(')[0]
-    return set(re.findall(r'\d{3}', s))
+    out = set()
+    for lo, hi in RANGE.findall(s):
+        if int(lo) <= int(hi):
+            out |= {f'{n:03d}' for n in range(int(lo), int(hi) + 1)}
+    return out | set(re.findall(r'\d{3}', RANGE.sub(' ', s)))
 
 
 def tbs(s):
@@ -93,6 +109,14 @@ if __name__ == '__main__':
                               '| 1 | A (mgmt) | TB-7 | 034, 035, 010 |', 1), tm_text),
         'drop TB-5 from DFD-2 coverage row':
             (dfd_text.replace('| 2 | A (mgmt) | TB-7, TB-5 |', '| 2 | A (mgmt) | TB-7 |', 1), tm_text),
+        # a range collapsed to its endpoints drops 058-073 and MUST NOT compare equal
+        'collapse DFD-15 coverage range 057-074 to its endpoints':
+            (dfd_text.replace('| 057–074 (parser/framing/version/state) |',
+                              '| 057, 074 (parser/framing/version/state) |', 1), tm_text),
+        # ...and the same collapse on the header side
+        'collapse DFD-4 header range 011..017 to its endpoints':
+            (dfd_text.replace('Threats: MCP-T-011..017, MCP-T-020.',
+                              'Threats: MCP-T-011, MCP-T-017, MCP-T-020.', 1), tm_text),
     }
     ok = True
     for name, (d, t) in seeds.items():

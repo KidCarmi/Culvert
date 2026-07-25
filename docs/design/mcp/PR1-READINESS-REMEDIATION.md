@@ -2480,3 +2480,52 @@ edge added or removed; no normative statement changed. ADR-0024 `Status: Propose
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
 cases; predicates 19, 21, 22, 23, 24 all exit `0` **from the checked-in copies**; no non-ASCII strays;
 changes confined to `docs/`; PR-1 not begun.
+
+## Round 37 — checking the predicates in made them reviewable, and the first review found one certifying parity it had not verified (`2d5a1b98` → next)
+
+One P2 finding, **on `predicates/predicate-21.py` itself** — round 36's own deliverable, reviewed within
+minutes of becoming visible. That is the point of checking them in, and it took one round to prove it.
+
+**R37-1 — `nums()` kept only a range's endpoints.** These documents write threat ranges two ways —
+`MCP-T-011..017` in the DFD headers, `011–017` (en-dash) in the coverage rows — and the parser matched
+`\d{3}` against the raw text. So `057..074` and `057, 074` compared **equal**: a coverage row that dropped
+threats 058–073 would have been certified as header/coverage parity. The predicate was not merely weak on
+that input; **it reported `NONE` while the property it claims to check was unverified for every ranged row**
+— which is five of the fifteen DFDs, including DFD-15's entire eighteen-threat protocol-kernel range.
+
+`nums()` now expands both syntaxes (and a hyphen form, since nothing stops a future edit using it) before
+comparing. Seed-proven **in both directions**: collapsing DFD-15's range on the *coverage* side fires, and
+collapsing DFD-4's `011..017` on the *header* side fires. The strict residual stays `NONE`, so no live
+violation was hiding behind the endpoints — the defect was in what the check could prove, not in the
+documents.
+
+**The sweep is an audit of every predicate that compares parsed sets.** `predicate-23.py` reads owner tokens
+from two table cells and subtracts them; `PR-1..PR-11` is a form these documents use elsewhere, so it now
+expands `PR-a..PR-b` (seed-proven) even though no gate-status cell uses it today — the point is that a future
+edit must not be able to narrow the comparison silently. `predicate-19`, `-22` and `-24` compare node
+presence, phrasing and action-keys rather than identifier sets, so no expansion applies; that was **checked
+and recorded in `predicates/README.md`**, not assumed. `TB-n` is never written as a range, and the README
+says what to do if that changes.
+
+**Twenty-eighth amendment — a set comparison must expand every compressed notation in its inputs before
+comparing.** Matching a range literally does not fail loudly; it silently shrinks the property to its
+endpoints and still prints `NONE`. Any predicate that parses identifiers out of prose has to normalise
+before it compares, and its seeds must include a *collapse* of each compressed form on **each** side of the
+comparison.
+
+**What this round says about the previous thirty-six.** A predicate reporting `NONE` has been my strongest
+evidence in every round-closing line, and this is the first external check of whether one of them means what
+I said it meant. It did not. The other four have now been audited for the same class, but they have been
+audited **by me**, which is exactly the assurance this finding just devalued. The register in
+`predicates/README.md` already marks predicates 7, 8, 13, 18 and the outcome-lane check as unavailable; the
+honest reading of round 37 is that the five that *are* available were, until now, unreviewed.
+
+**Standing note.** Rounds 22–37: sixteen consecutive rounds. Rounds 33 → 37 are one chain — a gate, its
+failure modes, its assertion set, the evidence for the assertion set, and now the correctness of the evidence
+itself. Each round's artifact became the next round's finding.
+
+**Unchanged by round 37:** no requirement, threat or abuse-case ID added, removed or renumbered; no diagram
+edge added or removed; no normative statement changed — the only document edits are `predicates/` and this
+log. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
+0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24 all exit `0` from the checked-in
+copies; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.

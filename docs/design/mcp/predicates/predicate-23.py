@@ -15,9 +15,22 @@ import pathlib
 CI = pathlib.Path('docs/design/mcp/CI-GATES.md')
 
 
+PR_RANGE = re.compile(r'PR-(\d+)\s*(?:\.\.|[–—])\s*(?:PR-)?(\d+)')
+
+
 def owners(cell):
-    """Owner tokens named in a cell, derived from the text's own vocabulary."""
+    """Owner tokens named in a cell, derived from the text's own vocabulary.
+
+    A compressed range (`PR-1..PR-11`, used elsewhere in these documents) is
+    EXPANDED before comparison — keeping only its endpoints would let a cell
+    naming two owners compare equal to one naming eleven.  No gate-status cell
+    uses the form today; the expansion is here so that a future edit that does
+    cannot silently narrow the comparison.
+    """
     out = set(re.findall(r'PR-(?:\d+|C)\b', cell))
+    for lo, hi in PR_RANGE.findall(cell):
+        if int(lo) <= int(hi):
+            out |= {f'PR-{n}' for n in range(int(lo), int(hi) + 1)}
     for m in re.finditer(r'Future ([A-Za-z][A-Za-z \-]*?) Gate', cell):
         out.add('Future ' + m.group(1).strip() + ' Gate')
     # a bare D-nn reference identifies the same future gate by its decision id
@@ -65,6 +78,10 @@ if __name__ == '__main__':
         'drop PR-8 from the secret-scan row Blocking cell':
             text.replace('| Secret-in-events scan (**both capabilities\' streams**) | proposed (target PR-4/PR-8) | Proposed | Yes, for PR-4/PR-8 |',
                          '| Secret-in-events scan (**both capabilities\' streams**) | proposed (target PR-4/PR-8) | Proposed | Yes, for PR-4 |', 1),
+        # a compressed range must not compare equal to its endpoints
+        'target names PR-1..PR-4 while Blocking names only the endpoints':
+            text.replace('| MCP-off overhead regression benchmark | proposed (target PR-5) | Proposed | Yes, for PR-5 |',
+                         '| MCP-off overhead regression benchmark | proposed (target PR-1..PR-4) | Proposed | Yes, for PR-1/PR-4 |', 1),
     }
     ok = True
     for label, seeded in seeds.items():

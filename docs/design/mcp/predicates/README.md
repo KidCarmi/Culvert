@@ -47,6 +47,28 @@ authority changes. That failure has happened four times in this remediation
 five it reports (DFD-6/7/12/13/14) are pre-existing and left failing-visible for
 PR-0 adjudication rather than normalised by me.
 
+## Compressed notation must be expanded before sets are compared
+
+A predicate that parses identifiers out of prose and compares them as **sets**
+has to expand every compressed form first. These documents write threat ranges
+two ways — `MCP-T-011..017` in the DFD headers and `011–017` (en-dash) in the
+coverage rows — and a parser that keeps only the endpoints will report parity
+between `057..074` and `057, 074`, certifying a row that dropped 058–073.
+
+- `predicate-21.py` expands **both** syntaxes (`nums()`), seed-proven in both
+  directions: collapsing a range on the coverage side **and** on the header side
+  each fire.
+- `predicate-23.py` expands `PR-a..PR-b`. No gate-status cell uses that form
+  today; the expansion is there so a future edit that does cannot silently
+  narrow the comparison. Seed-proven.
+- `predicate-19.py`, `predicate-22.py` and `predicate-24.py` compare node
+  presence, phrasing and action-keys — not identifier sets — so no expansion
+  applies. That was checked, not assumed.
+
+Trust-boundary tokens (`TB-n`) are never written as ranges in these documents,
+so `tbs()` does not expand them; if that ever changes the same treatment is
+needed.
+
 ## Reproducibility register — read this before citing a ledger result
 
 The ledger cites predicate results from round 12 onward. **Only the predicates
