@@ -271,10 +271,10 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** an established session.
 - **Path:** inject a lifecycle/auth message to swap the bound principal or reorder establishment (MCP-T-069).
 - **Affected assets:** A-2, A-10.
-- **Expected control:** MCP-PROTO-012 one-identity-per-session; no mid-flight rebind; validated lifecycle.
-- **Expected event:** decision/DENY, `MCP.PROTOCOL.STATE_VIOLATION`.
+- **Expected control:** split by layer — **MCP-ID-008 (PR-3)** owns *resolved-identity binding: one identity per session, no mid-flight rebind* (PR-1 cannot provide it: `MCP-PROTO-012`'s session context is deliberately opaque and identity-free); **MCP-PROTO-012 (PR-1)** owns only *lifecycle ordering / no out-of-order establishment* on that opaque context.
+- **Expected event:** decision/DENY — `MCP.IDENTITY.REBIND_DENIED` (identity rebind, PR-3) or `MCP.PROTOCOL.STATE_VIOLATION` (out-of-order lifecycle, PR-1).
 - **Expected policy result:** DENY; session not rebound.
-- **Test:** protocol-state + reconnect tests. **Owner:** Sec/Eng. **Severity:** High. **Closure:** one identity for the session lifetime.
+- **Test:** identity-binding + no-rebind + cross-session tests (MCP-ID-008, PR-3) for the rebind path; protocol-lifecycle + reconnect tests (MCP-PROTO-012, PR-1) for ordering. **Owner:** IAM/Eng (identity) + Sec/Eng (lifecycle). **Severity:** High. **Closure:** one resolved identity for the session lifetime (PR-3); valid lifecycle ordering (PR-1).
 
 ### MCP-AC-027 — Hostile input crash / panic
 - **Attacker:** fuzzing the kernel to trigger a panic or uncontrolled allocation.
