@@ -3008,3 +3008,67 @@ edits are `predicates/predicate-22.py`, `predicates/README.md` and this log. ADR
 `PR1-READINESS-REVIEW.md` byte-identical (`cbfb728a`); 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0` (12 seeds + 4 negative controls on
 predicate-22); no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 46 — the aside I did not enumerate, and a sibling defect that must NOT be fixed the same way (`b9bb2d26` → next)
+
+Two P1 findings on the head my round-45 note had just recorded as **unreviewed**. Both are the round-45
+class again — an aside form I had not enumerated — which makes amendment 41 a rule I wrote and then
+immediately failed to apply while writing it.
+
+**R46-1 (P1) — a PARENTHESIS opens an aside, and was not in the split set.** Round 45 widened the object
+delimiters to `[;,—]` on the reasoning that I should enumerate what ends an object rather than copy the
+reporter's punctuation. I enumerated three of them. *"For all classes, the event MUST be durably committed
+BEFORE the upstream call **(metrics cover each class's own side effect)**."* put the delegation back inside
+`obj` and skipped the check. The set is now `[;,—(]`.
+
+**R46-2 (P1) — the same opener, other consumer.** A class token inside that parenthetical became the
+assertion's scope, narrowing an explicitly all-class rule to the one action it named.
+
+**R46-3 — found by sweeping, not reported: a COORDINATED aside carries NO punctuation at all.** *"For every
+class, … BEFORE the upstream call **and** write metrics are emitted separately."* is unreachable by any
+split, and splitting on `" and "` would be wrong — a legitimate object is compound (*"the upstream call and
+any retry of that call"*). So the guard keys on the **quantifier** instead: when the assertion itself says
+*all / each / every class*, no single-class token may narrow it, whatever punctuation carries that token.
+**Punctuation alone could not have closed this dimension**, which is why the fix is not another delimiter.
+
+**Forty-second amendment — enumerate a construct's delimiters exhaustively, and where enumeration cannot
+reach, guard the semantics instead.** Amendment 41 said delimiters must come from the grammar. Round 46
+shows the follow-through I skipped: *list them all*, then ask which instances of the construct carry **no
+delimiter** — and close those with a different mechanism rather than a longer character class.
+
+### The sibling defect I am NOT fixing, and why
+
+Sweeping the dimension across the other predicates found `predicate-24`'s clause splitter absorbing a
+parenthetical as owned evidence: a probe that moved the epoch/push evidence out of the owning clause into
+a parenthetical attributing it elsewhere left the residual at `NONE`. **The same fix is wrong there.**
+Adding `(` to `CLAUSE_END` produces **three false positives on live documents**
+(`SECURITY-REQUIREMENTS.md`, `CI-GATES.md`, `TEST-TRACEABILITY-MATRIX.md` — each a credential clause whose
+`call` key legitimately sits inside its own parenthetical). For `predicate-22` a parenthetical is where an
+escape hides; for `predicate-24` it is where the assertion lives. Distinguishing *"the clause's own
+parenthetical"* from *"a parenthetical that attributes the assertion elsewhere"* is the **attribution**
+dimension already recorded as **not mechanisable** and carried as a human-review obligation.
+
+This is recorded as a **demonstrated, open gap in `predicate-24`** — not closed, not silently absorbed into
+what the predicates are said to cover, and deliberately not papered over with a fix that would trade a
+false negative for three false positives.
+
+### On the review that produced this round
+
+The findings arrived with a claim to have committed `8eed741` and opened a follow-up PR. **Neither exists in
+this repository** — `git cat-file -t 8eed741` reports an invalid object and no such PR is open. The two
+technical findings were verified independently against the code before any change was made, and the fixes
+here are mine, seeded and proven on this branch. A finding is worth acting on because it reproduces, not
+because of what the reporter says it did.
+
+**Unchanged by round 46:** no requirement, threat or abuse-case ID added, removed or renumbered; no
+normative statement, diagram edge, provenance claim or repository-context row changed — the only document
+edits are `predicates/predicate-22.py`, `predicates/README.md` and this log. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical (`cbfb728a`); 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0` (15 seeds + 6 negative controls on
+predicate-22); no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+**Standing note.** Rounds 22–46: twenty-five consecutive rounds. Rounds 37–46 have produced **twenty-one**
+predicate defects and **four** design defects; **eight of the twenty-five I introduced while fixing an
+earlier round's finding**, including both reported this round — one of them while writing the amendment
+that names the exact mistake. Of round 46's three predicate defects, **one was self-found** (the coordinated
+aside), which is the first self-found defect since round 37 and is not a trend.

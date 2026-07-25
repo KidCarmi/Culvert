@@ -112,6 +112,24 @@ example. Note the asymmetry that fix required: the escape and the scope use the 
 action detection stays on the full sentence span, because a legitimate enumeration crosses commas
 (`signed, pushed or applied`).
 
+**Enumerate a construct's delimiters exhaustively — and where enumeration cannot reach, guard the
+semantics instead** (round 46). Round 45 replaced "copy the reporter's punctuation" with "derive the
+delimiters from the grammar", and then enumerated three of them: `[;,—]` omitted the **parenthesis**, so the
+same escape reopened one round later. Worse, one instance of the construct carries **no delimiter at all** —
+a coordinated aside (`… BEFORE the upstream call **and** write metrics are emitted separately`) — and
+splitting on `" and "` would break a legitimate compound object (`the upstream call and any retry of that
+call`). That case is closed by a different mechanism: an **explicit universal quantifier** (*all / each /
+every class*) forbids any single-class token from narrowing the assertion, whatever punctuation carries it.
+When a delimiter list cannot reach a form, a longer character class is the wrong instrument.
+
+**The same tightening can be correct in one predicate and a regression in another** (round 46). Sweeping
+this dimension found `predicate-24`'s clause splitter absorbing a parenthetical as owned evidence — but
+adding `(` to its `CLAUSE_END` raises **three false positives on live documents**, because there the
+parenthetical *is* the clause's own assertion rather than a place an escape hides. That gap is recorded as
+**open and demonstrated**, not closed: telling "the clause's own parenthetical" from "a parenthetical that
+attributes the assertion elsewhere" falls in the **attribution** dimension listed below as not mechanisable.
+Check each consumer of a shared span separately before propagating a fix across them.
+
 **A seed must discriminate the change it certifies** (round 45). The two round-45 seeds were run against the
 committed **pre-fix** predicate as well as the fixed one, and required to MISS there. A seed that fires
 before and after proves the harness runs, not that the fix works.

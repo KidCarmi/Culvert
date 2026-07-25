@@ -114,6 +114,11 @@ def named_acts(span):
     return {k for k, pat in ACT_PATTERNS.items() if re.search(pat, span, re.I)}
 
 
+# An EXPLICIT universal quantifier over the classes.  A sentence that says
+# "for all classes" is making a claim about every class, so a class token
+# appearing later in it cannot be read as narrowing its scope (round 46).
+UNIVERSAL = re.compile(r'\b(?:all|each|every)\s+(?:critical\s+|action\s+)?class(?:es)?\b', re.I)
+
 GENERIC_WORDS = {'operation', 'issue', 'selection', 'affecting', 'high', 'risk'}
 # ONE floor, used when deriving a class's tokens AND when tokenising the context.
 # Two different floors was the bug: `destructive` satisfied the 6-char
@@ -154,7 +159,13 @@ def run(texts, scopes=None):
             # comma-delimited aside is as ordinary as a semicolon one, and
             # splitting only on `;`/`—` left the round-44 escape reachable
             # through it (round 45, P1).
-            obj = re.split(r'[;,—]', span[m.end() - m.start():])[0]
+            # ROUND 46: a PARENTHESIS opens an aside exactly as a comma does, and
+            # was not in the split set — so "... BEFORE the upstream call
+            # (metrics cover each class's own side effect)" put the delegation
+            # back inside `obj` and skipped the check again.  The set is now
+            # derived from what OPENS AN ASIDE, not from the forms a reviewer
+            # has demonstrated (amendment 41).
+            obj = re.split(r'[;,—(]', span[m.end() - m.start():])[0]
             # SCOPE MUST QUALIFY THE ASSERTION, so the context is the sentence
             # PREFIX (the "For a write, …" construction) plus the OBJECT — never
             # the trailing remainder, where a later aside naming a class made an
@@ -177,6 +188,18 @@ def run(texts, scopes=None):
             ctx_toks = set(re.findall(r'[a-z]{%d,}' % TOKEN_FLOOR, ctx))
             scoped = {cls: acts for cls, acts in scopes.items()
                       if scope_tokens(cls) & ctx_toks}
+            # AN EXPLICIT UNIVERSAL CANNOT BE NARROWED.  Punctuation-based
+            # bounding of `obj` is necessary but not sufficient: a COORDINATED
+            # aside carries no punctuation at all — "... BEFORE the upstream
+            # call AND write metrics are emitted separately" put `write` in the
+            # object and scoped an explicitly all-class rule down to the one
+            # action it named.  Splitting on " and " was rejected: a legitimate
+            # object is compound ("the upstream call and the publication").  So
+            # the guard keys on the QUANTIFIER instead — when the assertion
+            # itself says all/each/every class, no single-class token may
+            # narrow it, whatever punctuation carries that token (round 46).
+            if scoped and UNIVERSAL.search(ctx):
+                scoped = {}
             if scoped:
                 need = set().union(*scoped.values())
                 if got == need:
@@ -253,6 +276,24 @@ if __name__ == '__main__':
          'TOOL-DISCOVERY-AND-DRIFT.md',
          'For all classes, the event MUST be durably committed BEFORE the upstream call; '
          'write metrics are emitted separately.'),
+        # ROUND 46: the round-45 split covered `;` `,` `—` but not a PARENTHESIS,
+        # which opens an aside just as ordinarily.  Reviewer's construction.
+        ('round 46 — generic phrase in a PARENTHETICAL aside', 'MCP-POLICY-MODEL.md',
+         "For all classes, the event MUST be durably committed BEFORE the upstream call "
+         "(metrics cover each class's own side effect)."),
+        # ROUND 46: same opener, other consumer — a class token inside the
+        # parenthetical became the assertion's scope.  Reviewer's construction.
+        ('round 46 — class token in a PARENTHETICAL aside inside the object',
+         'ATTACK-TREES.md',
+         'For all classes, the event MUST be durably committed BEFORE the upstream call '
+         '(write metrics are emitted separately).'),
+        # ROUND 46 (found by sweeping the dimension, NOT reported): a COORDINATED
+        # aside carries NO punctuation, so no split can reach it — the reason the
+        # fix could not be punctuation alone.  Guarded by the universal quantifier.
+        ('round 46 — coordinated aside with NO punctuation narrows an all-class rule',
+         'CP-DP-HA-MODEL.md',
+         'For every class, the event MUST be durably committed BEFORE the upstream call '
+         'and write metrics are emitted separately.'),
     ]
     ok = ok0
     assert len({lbl for lbl, _, _ in seeds}) == len(seeds), 'duplicate seed label'
@@ -283,6 +324,17 @@ if __name__ == '__main__':
         'scoped to configuration publication':
             'For configuration publication, the decision event MUST be durably committed BEFORE '
             'the snapshot is signed, pushed or applied.',
+        # ROUND 46: the universal guard must not fire on a universal rule that
+        # DOES name every action — the guard forbids NARROWING, not the quantifier.
+        'universal AND complete — names all four actions':
+            'For all classes, the decision event MUST be durably committed BEFORE the upstream '
+            'call, before the snapshot is signed, pushed or applied, before broker '
+            'materialization, and before the Management state change.',
+        # ROUND 46: a legitimate object IS compound — this is why the coordinated
+        # aside could not be fixed by splitting on " and ".
+        'scoped, with a COMPOUND object joined by "and"':
+            'For a write, the decision event MUST be durably committed BEFORE the upstream call '
+            'and before any retry of that call.',
     }
     for label, sentence in controls.items():
         ctl = dict(texts)
