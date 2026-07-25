@@ -42,7 +42,7 @@ Gate = slice/CI gate that must be green.
 | MCP-T-005 token passthrough | MCP-AUTH-005, MCP-CRED-001 | No passthrough + broker | Upstream-capture (integration) | No client token upstream | IAM/Sec | PR-4 |
 | MCP-T-006 agent impersonation | MCP-ID-002 | Agent attribution | Attribution (unit) | Agent fields present | IAM/Sec | PR-3 |
 | MCP-T-007 workload impersonation | MCP-ID-003 | Workload attestation | Workload-auth (integration) | Spoof rejected | IAM/Sec | PR-3 |
-| MCP-T-008 cross-user session | MCP-AUTH-007, MCP-ID-006 | Session binding | Cross-session (integration) | No identity bleed | IAM/Sec | PR-3 |
+| MCP-T-008 cross-user session | **MCP-ID-008**, MCP-AUTH-007, MCP-ID-006 | One resolved identity bound per session; **no mid-flight rebind** (MCP-ID-008) — `MCP-ID-006` assurance/step-up is contributory, not the enforcing control | Cross-session (integration) **+ identity-rebind negative test** (mid-session identity change denied) | No identity bleed; rebind attempt denied | IAM/Sec | PR-3 |
 | MCP-T-009, MCP-T-010 cross-tenant / tenant-binding failure | MCP-ID-007, MCP-PRIVACY-002 | Tenant binding + isolation | Tenant-escape (integration) | Cross-tenant denied | IAM/Sec | PR-3 |
 | MCP-T-011 tool poisoning | MCP-TOOL-001,004 | Fingerprint + quarantine | Malicious-server fixture | Poisoned tool quarantined | Sec/Eng | PR-2 |
 | MCP-T-012 tool shadowing | MCP-TOOL-002 | Disambiguate by fingerprint | Shadowing (unit) | Collision flagged | Sec/Eng | PR-2 |

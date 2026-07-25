@@ -527,3 +527,49 @@ half of MCP-T-069 is **not** closed by this diagram (it is `MCP-ID-008` at PR-3)
 were corrected. ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical;
 74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not
 begun.
+
+---
+
+## Round 8 — the identity split's remaining consumers (`c9ef5ec4`)
+
+Two P2 findings, both the **same propagation class as round 7**: the `MCP-PROTO-012` → `MCP-ID-008` split
+was applied at the requirement, attack-tree and DFD layers, but two consumers still described the *old*
+model.
+
+### R8-1 (P2) — PR-1 session semantics no longer depend on PR-3 identity work
+
+**Finding.** `PROTOCOL-COMPATIBILITY.md` §5 — the contract an implementer builds PR-1 from — still said a
+session "is created **only after identity resolution** attaches a principal", called identity binding a
+**protocol-layer** behavior, and required the **kernel** to re-verify the bearer token on reconnect. Those
+semantics contradict the identity-agnostic kernel and would have made PR-1 depend on PR-3 authentication.
+
+**Fix.** §5 is re-cut **by layer**:
+- **Session establishment (PR-1, identity-agnostic)** — the protocol session is created once version
+  negotiation + the Origin/Host check succeed, producing an **immutable opaque context carrying no resolved
+  identity** (`MCP-PROTO-012`); the kernel never resolves/attaches/inspects a principal, so **PR-1 has no
+  dependency on PR-3**.
+- **Identity attachment (PR-3)** — a new row; principal attachment and the ambiguous-identity write/high-risk
+  denial (`MCP-ID-005`) are a layer **above** the kernel.
+- **Session identity binding (PR-3)** — one resolved identity per session, no mid-flight rebind, owned by
+  **`MCP-ID-008`**, annotated that the kernel *cannot* express this because its context is opaque.
+- **Reconnect** — split: at PR-1 the kernel re-runs the `MCP-INSP-008` Origin/Host check and never replays
+  trust, **with no token or identity check** (it holds neither); from PR-3 the identity/auth layer re-verifies
+  token expiry and re-establishes the `MCP-ID-008` binding.
+
+### R8-2 (P2) — `MCP-T-008` cross-user session confusion now names its enforcing control
+
+**Finding.** `MCP-ID-008` declares control over **both** MCP-T-069 and **MCP-T-008**, but the canonical
+MCP-T-008 rows (`THREAT-MODEL.md` §11 risk register and the `TEST-TRACEABILITY-MATRIX.md` §1 chain) still
+listed only `MCP-AUTH-007` + `MCP-ID-006` — and `MCP-ID-006` is *optional* assurance/step-up behavior, which
+does not enforce the one-identity/no-rebind invariant. The cross-user threat could therefore be reported
+traced without requiring the identity-binding tests.
+
+**Fix.** Both rows now lead with **`MCP-ID-008`** as the **enforcing** control and label `MCP-ID-006`
+**contributory only**; the traceability row adds an explicit **identity-rebind negative test** (mid-session
+identity change denied) with matching evidence. The forward mapping (`MCP-ID-008` → MCP-T-069,008) and the
+reverse mapping now agree in both directions.
+
+**Unchanged by round 8:** no requirement or threat added, removed or redefined — mappings and layer
+attribution only. ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains byte-identical;
+74 threats / 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined; documentation only; PR-1 not
+begun.
