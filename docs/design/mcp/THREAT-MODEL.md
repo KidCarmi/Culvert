@@ -118,8 +118,8 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 
 | DFD | Flow | Dominant STRIDE threats |
 |---|---|---|
-| DFD-1 | Mgmt read-only request | MCP-T-034, MCP-T-035, MCP-T-010 |
-| DFD-2 | Mgmt draft/validate | MCP-T-034, MCP-T-046 |
+| DFD-1 | Mgmt read-only request | MCP-T-034, MCP-T-035, MCP-T-010, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin, validated per request by MCP-INSP-009) |
+| DFD-2 | Mgmt draft/validate | MCP-T-034, MCP-T-046, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin, validated per request by MCP-INSP-009) |
 | DFD-3 | Future mgmt mutation approval | MCP-T-034, MCP-T-032, MCP-T-033 |
 | DFD-4 | Gateway tool discovery | MCP-T-011..017, MCP-T-020 |
 | DFD-5 | Gateway tool call | MCP-T-003..008, MCP-T-019, MCP-T-046 |

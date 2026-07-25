@@ -15,7 +15,7 @@ Management MCP↔control surface.
 
 ## DFD-1 — Management MCP read-only request (Capability A)
 
-Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010.
+Crosses TB-7. Threats: MCP-T-034, MCP-T-035, MCP-T-010, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — this flow validates `Host`/`:authority`/`Origin` per request at `HV1`, so it is a consumer of `MCP-INSP-009`).
 
 ```mermaid
 flowchart LR
@@ -37,7 +37,7 @@ TB-7 at the listener/authz edge. No mutation tool exists (MCP-MGMT-001). Output 
 
 ## DFD-2 — Management MCP draft & validation (Capability A)
 
-Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046.
+Crosses TB-7, TB-5. Threats: MCP-T-034, MCP-T-046, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin — validated per request at `HV2`, `MCP-INSP-009`).
 
 ```mermaid
 flowchart LR
@@ -211,11 +211,11 @@ flowchart LR
 
 **`SPOOL` has NO unconditional onward edge.** Every path out of the spool is labelled: `commit CONFIRMED` reaches `GATE`, `commit FAILED` reaches `LOSS`. An unconditional `SPOOL --> INT` would let a failed commit continue to integrity/export and reach neither fail-closed nor the lockout — which would make the single dispatch below decorative. A **successfully committed** denial event is routed to `INT` **through `GATE`**, after classification, not around it.
 
-**Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); read-only/low-risk to degraded only. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
+**Durability loss has ONE dispatch, and it covers every class.** Queue saturation and spool **commit failure** converge on `LOSS`, which routes by event class: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) to fail-closed + degraded; an already-denied **auth-failure / authz-denial** event to the **critical degraded state + durability lockout** (fail-closed is vacuous there — the request was already denied); and read-only/low-risk to the **configured loss policy** (`LP`) — `degrade-and-alert` records the degradation and the operation **still proceeds** to `XLOW`, `fail-closed` denies it. That arm is a **policy branch, not a posture**: terminating it at a degradation node would make `degrade-and-alert` and `fail-closed` behave identically and delete a configurable contract. Sending commit failure straight to fail-closed would bypass the lockout for denial events, and omitting the Management class would leave a saturated Management state change with no route at all.
 
 **The gate dispatches by class, because each class has a different irreversible action** (`MCP-EVENT-002`): write/destructive → the upstream call; configuration publication → snapshot **sign/push/apply**, entering DFD-10 at `SIGN` and never earlier; credential → **broker materialization** (mint/rotate/revoke); state-affecting Management → the state change. A single edge to "upstream call" would leave publication and credential mutation ungated, since neither makes one.
 
-**Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`XUP`/`XPUB`/`XCRED`/`XMGMT` → `OUT → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE`** or to any execution node. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE credential use and the upstream call**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The two loss branches are **distinct postures**: critical write/destructive/config-publication/credential ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed) — EVENT-MODEL §4a, ADR-0024 §D-5.
+**Two lanes, and they must never join.** The **decision** lane (`DEC → RDX → Q → SPOOL → GATE`) gates execution; the **outcome** lane (`XUP`/`XPUB`/`XCRED`/`XMGMT` → `OUT → RDXO → QO → SPOOLO → INT`) records what happened and **never returns to `GATE`** or to any execution node. Feeding outcome events back into the decision lane would re-enter the gate still carrying the critical action class, whose only matching edge is `EXEC` — i.e. it would re-execute the side effect, indefinitely. Outcome-lane loss is therefore **degraded + alert + loss counter only**: the operation has already happened, so fail-closed is vacuous for it, exactly as for an already-denied request. **Ordering is load-bearing:** for the critical classes the decision event is **durably committed BEFORE that class's OWN irreversible action**, so a saturated queue can still fail the operation closed. A durability check reached only *after* execution cannot fail closed at all — the side effect has already happened (`MCP-T-044`). The **outcome** event is emitted after execution and is explicitly **not** the fail-closed gate. Critical events never silently lost (MCP-EVENT-002); **not** the audit ring (`MaxRing=500`). The **three** loss branches are **distinct**: the five critical classes (write, destructive, configuration publication, credential, **state-affecting Management**) ⇒ **fail closed AND** degrade+alert; a non-persistable **authentication-failure / authorization-denial** ⇒ **critical degraded state + durability lockout** (the request is already denied, so there is no operation to fail closed); **read-only / low-risk ⇒ the configured loss policy**, which is a selection between two behaviours and not a posture of its own — EVENT-MODEL §4a, ADR-0024 §D-5.
 
 ## DFD-10 — Control Plane → Data Plane snapshot publication
 
@@ -303,7 +303,7 @@ Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits m
 
 ## DFD-15 — Protocol-kernel decode path (Capability **A and B**, PR-1)
 
-Crosses TB-1. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, classification, structural bounds, version negotiation and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. DFD-1 and DFD-2 therefore begin **downstream of this diagram** (both now show the kernel explicitly); they are not an alternative path around it. **PR-1 ships this decode
+Crosses **TB-1, TB-7** — Gateway traffic crosses TB-1 and **Management traffic crosses TB-7**, since this kernel is on both listeners' paths. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, classification, structural bounds, version negotiation and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. DFD-1 and DFD-2 therefore begin **downstream of this diagram** (both now show the kernel explicitly); they are not an alternative path around it. **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
 `MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here. **PR-1 is
 identity-agnostic:** the `MCP-PROTO-012` state machine holds an **immutable, opaque session context that
@@ -347,8 +347,8 @@ Untrusted bytes are bounded and strictly decoded before any downstream stage. Re
 
 | DFD | Capability | Trust boundaries | Dominant threats |
 |---|---|---|---|
-| 1 | A (mgmt) | TB-7 | 034, 035, 010 |
-| 2 | A (mgmt) | TB-7, TB-5 | 034, 046 |
+| 1 | A (mgmt) | TB-7 | 034, 035, 010, **031, 055** |
+| 2 | A (mgmt) | TB-7, TB-5 | 034, 046, **031, 055** |
 | 3 | A (mgmt, future) | TB-7, TB-5, TB-3 | 034, 032, 033 |
 | 4 | B (gateway) | TB-1, TB-2 | 011–017, 020 |
 | 5 | B (gateway) | TB-1, TB-2 | 003–008, 019, 046 |

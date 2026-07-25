@@ -286,7 +286,9 @@ flowchart TD
     KIND -- "no (AND, not either)" --> DEG
     KIND -- "yes\n(already denied — fail-closed is vacuous)" --> CDEG
     CDEG --> LOCK
-    CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> DEG
+    CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> LP{"configured loss policy?\nmcp_{gateway,mgmt}_event_loss_policy"}
+    LP -- "degrade-and-alert\n(operation still proceeds)" --> DEG
+    LP -- "fail-closed\n(deny the triggering low-risk call)" --> FAIL
 ```
 
 **Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded / denial-lockout posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.
@@ -307,8 +309,15 @@ flowchart TD
    **alone is not sufficient** — without the lockout, privileged work could continue after denial evidence
    was lost.
 
-Saturation on a low-risk `ALLOW`/`MONITOR` event still triggers degraded mode and an alert, but does not by
-itself block the underlying operation.
+**The low-risk class follows the configured loss policy, and both values must have a route.** Saturation (or a
+commit failure) on a low-risk `ALLOW`/`MONITOR` event always triggers degraded mode and an alert; whether it
+**also blocks the underlying operation** is the operator's choice — `degrade-and-alert` lets the call proceed,
+`fail-closed` denies it rather than lose its event (`mcp_gateway_event_loss_policy` /
+`mcp_mgmt_event_loss_policy`, both enumerated in
+[CONFIG-SURFACE-MATRIX.md](CONFIG-SURFACE-MATRIX.md)). Routing this class unconditionally to degraded-only
+would make `fail-closed` unreachable in the diagram that **owns** the event model, and would contradict the
+config surface's own enum. Unlike the two critical branches above, this arm is a **policy selection, not a
+posture**.
 
 ---
 

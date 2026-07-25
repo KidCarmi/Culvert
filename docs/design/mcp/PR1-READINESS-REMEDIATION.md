@@ -2063,3 +2063,85 @@ different and worse failure mode than the propagation gaps of rounds 5–15.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 13, 18, 19 and the outcome-lane check clean;
 `SPOOL` has zero unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.
+
+## Round 30 — every one of round 29's three fixes reached the graph and not the sentence that restates it (`64885629` → next)
+
+Three P2 findings, all on round 29's own changes, all the **same** shape: the fix landed in the structure and
+not in a nearby artifact that restates the same fact. Amendment 22 named exactly this class one round earlier.
+
+**R30-1 — DFD-9's dispatch prose still said "read-only/low-risk to degraded only."** Round 29 replaced that
+arm with a policy branch (`LP`: `degrade-and-alert` proceeds to `XLOW`, `fail-closed` denies) and left the
+paragraph four lines below summarising the pre-branch behaviour. An implementer reading the prose would omit
+the configured `fail-closed` path the branch existed to restore. The paragraph now describes both outcomes and
+states that this arm is a **policy selection, not a posture**.
+
+**Two residuals in that same paragraph, which the reviewer did not flag and the sweep found:**
+
+- it still read *"durably committed BEFORE credential use and the upstream call"* — the exact round-22
+  phrasing that **amendment 15 was recorded to eliminate**, because it does not constrain configuration
+  publication or credential materialization. Now "BEFORE that class's OWN irreversible action".
+- it still called the loss handling *"two loss branches"* enumerating four critical classes — stale since
+  round 26 added `state-affecting Management` and round 29 added the policy arm. Now **three** branches, five
+  critical classes.
+
+**R30-2 — `MCP-INSP-009` on the Management path had no threat traceability.** Round 29 put the rebinding guard
+on DFD-1/DFD-2 but left both flows' threat declarations, both coverage rows, and both `THREAT-MODEL.md` STRIDE
+rows without `MCP-T-031`/`MCP-T-055`. A threat-to-flow audit would report **no Management flow covering the
+exact risk the new node mitigates**. All six sites now carry them. DFD-3 is deliberately **not** included: it
+has no listener node (it begins at `Plan`) and so does not consume `MCP-INSP-009` — an exclusion by
+construction, recorded so it does not read as an oversight.
+
+**R30-3 — DFD-15's own boundary declaration still said `Crosses TB-1`.** Round 29 fixed the coverage row to
+`TB-1, TB-7` and left the diagram's own header Gateway-only. The header and the summary of the same diagram
+disagreed *about the fix made in the previous round*.
+
+**The sibling-diagram instance the sweep found, unflagged: `EVENT-MODEL`'s canonical event-flow diagram had
+the same missing policy branch** — `CRIT -- "no (low-risk ALLOW/MONITOR)" --> DEG`, with no route to `FAIL` at
+all. So in the file that **owns** the event model, `fail-closed` was an unreachable value of a documented enum.
+Fixed with the same `LP` branch plus prose. This is the **sixth** time a flow change reached one diagram and
+not its siblings (15, 19, 22, 24, 26, 30).
+
+**Twenty-third amendment — a structural fix is not complete until every sentence that describes that
+structure is re-read.** Amendment 22 established that summary *tables* are consumers. R30-1 shows that
+**prose paragraphs immediately adjacent to the diagram** are the same hazard and are harder to see, because
+proximity reads as currency. The operative unit is not the file and not the diagram — it is **every
+restatement of the changed fact**, and the ones nearest the change are the ones least likely to be checked.
+
+**Predicate 21 (new) — DFD header ⇔ coverage-row parity.** For every DFD the trust-boundary set and threat set
+declared in its own `Crosses … Threats: …` header must equal the coverage-summary row that restates it.
+Vocabulary is **derived from the two tables themselves**, not a hand-written token list, so it cannot decay
+(amendment 20). Seeded with three known-positives (drop `TB-7` from DFD-15's header; drop `031/055` from
+DFD-1's coverage row; drop `TB-5` from DFD-2's coverage row) — **each seed is required to produce a NEW
+violation naming the seeded DFD.** That requirement mattered twice:
+
+1. My first harness reported `FIRES` for the DFD-15 seed while actually naming **DFD-6** — it was passing on a
+   pre-existing residual, not on the seeded change. A predicate that "fires" for the wrong reason is worth
+   less than no predicate, because it certifies the wrong thing.
+2. With the harness corrected the DFD-15 seed then genuinely **MISSED**: my boundary extraction scanned the
+   whole header line, so the explanatory prose "*Management traffic crosses TB-7*" kept satisfying the check
+   after the declaration itself was gutted. The parse now stops at the declaration clause. **A later prose
+   mention of a boundary is not a declaration of it** — and my own round-30 wording was what hid the gap.
+
+Strict-arm residual: **NONE**.
+
+**Pre-existing divergence surfaced, NOT silently fixed.** Predicate 21's advisory arm compares each DFD header
+against `THREAT-MODEL.md`'s §9 STRIDE row and reports five mismatches in flows this round did not touch —
+DFD-6 (`005`), DFD-7 (`040`), DFD-12 (`031`, `055`), DFD-13 (`010` vs `053`), DFD-14 (`031`, `052` vs `051`).
+That arm is **advisory and not gated**, because whether §9's STRIDE emphasis must equal a DFD's dominant-threat
+declaration is a design question, not a drift bug — and editing five untouched rows to make my own new check
+go green would be precisely the kind of unreviewed change that looks like rigour. **Flagged for human
+adjudication at PR-0 sign-off; deliberately left failing-visible rather than resolved by me.**
+
+**Standing note.** Rounds 22–30: ten consecutive rounds in which each round's fix produced the next round's
+findings. Every one of round 30's three findings is an instance of the class recorded as amendment 22 in round
+29 — I wrote the rule and then reproduced the error three times in the same commit. The sweep did find two
+unflagged residuals and one sibling-diagram defect this round, which is the second time my own checking has
+added anything; it also produced a predicate that certified the wrong thing until corrected twice. That is the
+accurate summary, and it is not a convergence claim.
+
+**Unchanged by round 30:** no requirement or threat ID added, removed or renumbered (`MCP-T-031`/`055` were
+already defined; only their flow traceability changed). ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
+cases / 0 `Both` capability rows; predicates 7, 13, 18, 19, 21 and the outcome-lane check clean; `SPOOL` has
+zero unconditional out-edges; `LOSS` has exactly three arms and `LP` exactly two; no non-ASCII strays;
+documentation only; PR-1 not begun.
