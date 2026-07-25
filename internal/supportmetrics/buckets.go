@@ -106,7 +106,7 @@ func CAExpiryBucket(daysUntilExpiry int) float64 {
 }
 
 // UptimeBucketLadder is the canonical, hash-participating definition for
-// support_uptime_bucket (§7: "<1d/<7/<30/>=30"), expressed in days.
+// support_health_uptime_bucket (§7: "<1d/<7/<30/>=30"), expressed in days.
 // Non-descending: longer uptime is a later (more stable) bucket.
 var UptimeBucketLadder = &BucketLadder{
 	Labels:     []string{"lt1d", "lt7d", "lt30d", "ge30d"},

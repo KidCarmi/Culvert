@@ -4416,7 +4416,7 @@ Firefox (all platforms):
             <div id="support-upload-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="upload-origin" class="input sm" type="text" placeholder="https://tac.example.com" style="width:240px" title="TAC upload base URL (https, non-private)">
-              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="upload-credential" class="input sm" type="password" placeholder="bearer credential (optional)" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="upload-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="upload-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveUploadConfig" data-min-role="admin" title="Save the upload posture (node-local; no bundle is sent by this action)">Save</button>
@@ -4430,11 +4430,11 @@ Firefox (all platforms):
 
           <div data-min-role="admin">
             <div style="font-weight:600;margin-bottom:6px">Telemetry (opt-in)</div>
-            <p class="hint"><strong>Off by default.</strong> When enabled, a small set of the appliance's own support-health scalars (see the preview below - review it first) would be periodically sealed end-to-end and sent to TAC over authenticated HTTPS: never traffic volume, customer scale, or security-posture data. <strong>This build performs no network transmission of any kind</strong> - there is no sender yet, so enabling here only stores this configuration locally. Telemetry consent is entirely separate from the support-bundle upload consent above - enabling one never enables the other. This whole section is admin-only.</p>
+            <p class="hint"><strong>Off by default.</strong> When enabled, a small set of this node's own support-health scalars (see the preview below - review it first) would be periodically sealed end-to-end and sent to TAC over authenticated HTTPS: never traffic volume, customer scale, or security-posture data. <strong>This build performs no network transmission of any kind</strong> - there is no sender yet, so enabling here only stores this configuration locally. Telemetry consent is entirely separate from the support-bundle upload consent above - enabling one never enables the other. This whole section is admin-only.</p>
             <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
               <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
-              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-node bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
               <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
               <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
@@ -13829,7 +13829,7 @@ function renderSupportBundles(list) {
         ops += ready
           ? ' <a class="btn ghost sm" href="' + escHtml(href) + '" download>Download</a>' +
             ' <button class="btn ghost sm" data-click="supportExportEncrypted" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download encrypted with a passphrase (AES-256-GCM) for TAC transport">Encrypt</button>' +
-            ' <button class="btn ghost sm" data-click="supportExportSealed" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download sealed to a recipient public key (E2E - appliance holds no decrypt key)">Seal</button>'
+            ' <button class="btn ghost sm" data-click="supportExportSealed" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Download sealed to a recipient public key (E2E - the node holds no decrypt key)">Seal</button>'
           : ' <span class="hint" title="Bundle pending admin approval">download after approval</span>';
         if (ready && uiRole === 'admin') {
           ops += ' <button class="btn ghost sm" data-click="supportUploadBundle" data-arg="' + escHtml(String(b.bundle_id)) + '" title="Seal to TAC and upload (consent-gated; requires upload enabled, a TAC trust key, and a case id)">Upload to TAC</button>';
@@ -14509,7 +14509,7 @@ async function supportExportSealed(id) {
   const names = _supportRecipients.map(r => r.name);
   const hint = names.length
     ? 'Enter a registered recipient NAME (' + names.join(', ') + '), or paste a raw base64 X25519 public key.'
-    : "Recipient's X25519 public key (base64) to seal the bundle to. Only the holder of the matching private key can open it - the appliance keeps no decrypt key.";
+    : "Recipient's X25519 public key (base64) to seal the bundle to. Only the holder of the matching private key can open it - the node keeps no decrypt key.";
   const val = window.prompt(hint);
   if (val === null) return; // cancelled
   const v = val.trim();

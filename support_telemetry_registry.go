@@ -93,14 +93,14 @@ var supportMetricRegistry = supportmetrics.Registry{
 		Read:              readSupportHealthCAExpiryBucket,
 	},
 	{
-		ID:                "support_uptime_bucket",
+		ID:                "support_health_uptime_bucket",
 		Type:              supportmetrics.Gauge,
 		PrivacyClass:      supportmetrics.Aggregate,
 		InSupportBundle:   true,
 		TelemetryEligible: true,
 		TelemetryReason:   "coarse stability signal; exact uptime rejected (fingerprint/correlation)",
 		Buckets:           supportmetrics.UptimeBucketLadder,
-		Read:              readSupportUptimeBucket,
+		Read:              readSupportHealthUptimeBucket,
 	},
 }
 
@@ -176,7 +176,7 @@ func readSupportHealthCAExpiryBucket() float64 {
 	return supportmetrics.CAExpiryBucket(caExpiryDaysRemaining())
 }
 
-func readSupportUptimeBucket() float64 {
+func readSupportHealthUptimeBucket() float64 {
 	return supportmetrics.UptimeBucket(time.Since(startTime))
 }
 

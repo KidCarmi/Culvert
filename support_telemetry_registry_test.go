@@ -34,7 +34,7 @@ func TestSupportTelemetryExactEligibleSet(t *testing.T) {
 		"support_health_session_ready":         true,
 		"support_health_config_snapshot_valid": true,
 		"support_health_ca_expiry_bucket":      true,
-		"support_uptime_bucket":                true,
+		"support_health_uptime_bucket":         true,
 	}
 	got := map[string]bool{}
 	for _, d := range supportMetricRegistry.Eligible() {
@@ -123,7 +123,7 @@ func TestSupportHealthReadCallbacks_ReturnBinaryOrBucketValues(t *testing.T) {
 			t.Errorf("binary read closure #%d returned %v, want 0 or 1", i, v)
 		}
 	}
-	bucketed := []func() float64{readSupportHealthCAExpiryBucket, readSupportUptimeBucket}
+	bucketed := []func() float64{readSupportHealthCAExpiryBucket, readSupportHealthUptimeBucket}
 	for i, fn := range bucketed {
 		v := fn()
 		if v < 0 || v > 3 {
