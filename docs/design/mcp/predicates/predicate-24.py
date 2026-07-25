@@ -47,6 +47,12 @@ CLASSES = {
 # that crosses no other separator
 SEP = r'[^;⇒:→|]{0,50}?\s*(?:⇒|:|→)'
 CLAUSE_WINDOW = 400   # a clause may wrap across lines; the scan is text-wide
+# A clause ends at the next ';' or at a SENTENCE end.  The terminator may be
+# preceded by a closing '**', backtick or bracket — requiring a letter there let
+# `… ⇒ **no new configuration revision exists**.` run on into the following
+# prose, which could then supply the missing action-keys and produce a false
+# `NONE` (round 40, P1).
+CLAUSE_END = re.compile(r';|(?<=\S)\.\s+(?![a-z])')
 
 
 def keys(text):
@@ -132,7 +138,7 @@ def clauses(text):
     flat = text.replace('\n', ' ')
     for name, pat in CLASSES.items():
         for m in re.finditer(r'(?:' + pat + r')' + SEP, flat):
-            clause = re.split(r';|(?<=[a-z])\.\s', flat[m.end():m.end() + CLAUSE_WINDOW])[0]
+            clause = CLAUSE_END.split(flat[m.end():m.end() + CLAUSE_WINDOW])[0]
             bare = re.sub(r'[*_`]', '', clause).strip()
             if bare.lower().startswith('before'):
                 continue          # ordering precondition, not an absence assertion
@@ -182,6 +188,13 @@ if __name__ == '__main__':
             'docs/design/mcp/CI-GATES.md',
             ('credential issue/rotation/revocation ⇒ **broker-side credential state unchanged** (nothing minted, rotated or revoked) **AND no upstream call occurred**',
              'credential issue/rotation/revocation ⇒ **broker-side credential state unchanged** (nothing minted, rotated or revoked)')),
+        # ROUND 40 P1: the clause ends at '**.' and the NEXT sentence supplies the
+        # missing action-keys.  A boundary matcher that requires a letter before the
+        # period runs straight past it and reports the clause complete.
+        'CI-GATES: end the publication clause at "**." with the missing keys in the NEXT sentence': (
+            'docs/design/mcp/CI-GATES.md',
+            ('configuration publication ⇒ **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**',
+             'configuration publication ⇒ **no new configuration revision exists**. Separately the snapshot is signed and pushed and every DP stays on the prior epoch')),
         # LAYOUT INDEPENDENCE: a cosmetic reflow into one line per class must not
         # reduce coverage.  This seed reflows AND weakens the publication clause;
         # under the old line-level `upstream call` prerequisite it went undetected.

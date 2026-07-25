@@ -2663,3 +2663,68 @@ statement, diagram edge or provenance claim changed — the only document edits 
 ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
 0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII
 strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 40 — the boundary fix had the same hole one predicate over, a substring stood in for coverage, and a repository claim named the wrong symbol (`229d7a16` → next)
+
+Four findings: a second **P1** on the very boundary class round 39 had just closed, a coverage check that
+containment made vacuous for nineteen rows, and the first Copilot finding of the remediation — a factual
+attribution error in a repository-context row that has been wrong since the package was written.
+
+**R40-1 (P1) — `predicate-24`'s clause boundary did not recognise a terminator after Markdown.** The
+splitter required a lowercase letter before the period (`(?<=[a-z])\.\s`), so
+`… ⇒ **no new configuration revision exists**.` — period preceded by `*` — was not a boundary. The clause
+ran on into the following prose, which could then supply `signed`/`pushed`/`epoch` and make an incomplete
+publication assertion report complete. **This is round 39's P1 in the adjacent predicate**: I fixed the
+boundary in `predicate-22` and did not ask whether the other boundary matcher had the same hole. It did.
+
+Both predicates now share one definition — **a terminator may be preceded by any non-space character**
+(`(?<=\S)\.\s+(?![a-z])`), which covers a closing `**`, backtick, bracket, quote or digit, while the
+lowercase lookahead still excludes `e.g.` and decimal points. Each carries a seed whose clause ends at
+`**.` with the missing keys in the *next* sentence; both fire, and `predicate-22`'s sixth seed is the same
+construction on the ordering sentence.
+
+**R40-2 — `predicate-25` treated substring containment as coverage.** A row is "covered" if the
+citation-correction note names it — and the note contains `PR-1`, so `'1' in note.lower()` was true for the
+numbered command-inventory rows `1`..`19`. **Nineteen rows could change with no ⟳ and no mention and produce
+no violation.** Coverage is now the set of **backticked tokens** the note explicitly names, matched whole.
+Seeded by mutating row `1` with no row-specific note: fires.
+
+**R40-3 (Copilot) — `VERIFIED-REPOSITORY-CONTEXT`'s SSRF row attributed "fail-closed on DNS error" to
+`Control`.** Verified against `internal/ssrf/ssrf.go`: `Control` runs **after** DNS resolution, receives the
+resolved `IP:port`, and fails closed on a *parse anomaly* — it never sees a hostname, so it cannot observe a
+DNS error at all. The DNS-failure fail-closed belongs to the pre-flight `PrivateHost`, which rejects a
+`LookupHost` error and deliberately does not cache it. The row now states **two properties in two symbols**
+rather than collapsing them into one. The evidence citations were right; the *proves* cell attributed one
+symbol's property to another — the same attribution class as rounds 20 and 33, and this one had been live
+since the package was written, through every round of self-review.
+
+**The sweep, and what it cost me to do it properly.** R40-1's dimension is *every place a boundary is
+computed*; that is `predicate-22` (fixed round 39, lookbehind still too narrow — widened) and `predicate-24`
+(the finding). R40-2's dimension is *every place membership is decided by containment rather than by an
+explicit set*: the requirement and decision arms already compare parsed ID sets, and `predicate-23` matches
+whole owner tokens — checked, not assumed. R40-3's dimension is *every "Proves" cell whose evidence names
+more than one symbol*; that check is by reading, and I am recording it as **not** enumerable — there is no
+mechanical form of "this sentence attributes this property to that symbol", so it stays a human-review
+obligation and I am not claiming otherwise.
+
+**Thirty-second amendment — fixing a class in one site is not fixing the class.** Round 39 closed a
+boundary defect in `predicate-22` and I did not grep for the other boundary matcher, which was three files
+away and had the identical hole. When a fix corrects a *shape*, the sweep is over every implementation of
+that shape, including the ones inside the tooling.
+
+**Thirty-third amendment — containment is not coverage.** `x in text` answers a question about characters,
+not about naming. Where a check asks "is this thing explicitly accounted for", it must compare against a
+parsed set of names, and its seeds must include the shortest and most collision-prone label in the corpus.
+
+**What forty rounds of this say, stated without softening.** Rounds 37–40 have produced **eight** defects in
+the checked-in predicates. Every one printed `NONE` while proving less than advertised; I audited all eight
+before review and found none of them. Two of the four findings this round are defects I introduced *while
+fixing the previous round's findings*. The recorded position stands and is now better evidenced: these
+checks are worth keeping and are not worth trusting unreviewed, and the recommendation to promote them into
+CI during PR-0/PR-1 means promoting **reviewed** checks.
+
+**Unchanged by round 40:** no requirement, threat or abuse-case ID added, removed or renumbered; no normative
+statement, diagram edge or provenance claim changed. One repository-context ⟳ row's *Proves* cell corrected
+(`predicate-25` re-verified: still covered). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md`
+byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21,
+22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.

@@ -76,6 +76,17 @@ way: too small truncates the evidence, too large imports evidence belonging to s
 mentioned the other three actions inside a 600-character window. `predicate-22` now stops at the sentence
 end; `predicate-25` extracts each provenance note's `>` blockquote instead of a character slice.
 
+**Fixing a boundary in one predicate is not fixing the class** (round 40). Round 39 corrected
+`predicate-22`'s span; `predicate-24`'s clause splitter had the identical hole — it required a lowercase
+letter before the period, so `**exists**.` was not a boundary and the clause absorbed the next sentence.
+Both now share one definition: a terminator may be preceded by **any non-space character**
+(`(?<=\S)\.\s+(?![a-z])`), which still excludes `e.g.` and decimals.
+
+**Containment is not coverage** (round 40). `predicate-25` asked whether a row label appeared *anywhere* in
+the citation-correction note; the note contains `PR-1`, so the numbered rows `1`..`19` were all "covered"
+by the digit. Coverage is now the set of backticked tokens the note names, matched whole — and the seed
+mutates the shortest label in the corpus.
+
 **A set comparison runs in both directions, over the union.** `predicate-25` originally reported only
 changes the note omitted, never decisions the note claimed but never touched, and iterated the intersection
 of table rows — so an added, deleted or renamed row was invisible to a note asserting every other row was

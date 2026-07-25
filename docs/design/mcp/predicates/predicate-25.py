@@ -162,8 +162,21 @@ def vrc_rows(text):
     return out
 
 
+def note_labels(note):
+    """Row labels the note EXPLICITLY names, taken from its backticked spans.
+
+    Substring containment is not coverage: the numbered command-inventory rows
+    are labelled `1`..`19`, and the note contains "PR-1", so `'1' in note` was
+    true for every one of them — nineteen rows were invisible to this check
+    (round 40).  A label counts as named only if it appears as a whole
+    backticked token.
+    """
+    return {m.strip().lower() for m in re.findall(r'`([^`]+)`', note)}
+
+
 def claim_vrc(new, old):
     note = note_block(new, 'Citation-correction note')
+    named = note_labels(note)
     o, n = vrc_rows(old), vrc_rows(new)
     v = []
     # the UNION, not the intersection: an added row, a deleted row and a renamed
@@ -176,8 +189,8 @@ def claim_vrc(new, old):
         kind = 'changed' if (k in o and k in n) else ('ADDED' if k in n else 'REMOVED')
         if kind == 'changed' and '⟳' in row:
             continue                       # covered by the ⟳ marker
-        label = re.sub(r'[*`]', '', row.strip('|').split('|')[0]).strip()
-        if label.lower() not in note.lower():
+        label = re.sub(r'[*`⟳]', '', row.strip('|').split('|')[0]).strip()
+        if label.lower() not in named:
             v.append(f'VERIFIED-REPOSITORY-CONTEXT: row {label!r} was {kind}, carries no ⟳ cover, '
                      f'and is not named in the citation-correction note')
     return v
@@ -219,6 +232,11 @@ if __name__ == '__main__':
         'drop the ID-token row from the citation-correction note': (
             'docs/design/mcp/VERIFIED-REPOSITORY-CONTEXT.md',
             [('`ID-token validation` (the', '`(redacted)` (the')]),
+        # ROUND 40: a NUMBERED row must not be covered by an incidental digit
+        # ("PR-1") appearing in the note.
+        'change numbered row 1 with no row-specific note': (
+            'docs/design/mcp/VERIFIED-REPOSITORY-CONTEXT.md',
+            [('| 1 |', '| 1 | (mutated for the seed)')]),
         # ---- round 39: the note must be exact in BOTH directions -------------
         'name a decision the change never touched (D-3)': (
             'docs/design/mcp/OPEN-DECISIONS.md',

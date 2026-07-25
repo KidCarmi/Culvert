@@ -64,7 +64,12 @@ GENERIC = re.compile(r"that class'?s?\s+OWN\s+irreversible action|each class'?s?
 # state change (round 39, P1).  WINDOW survives only as a hard backstop for a
 # sentence with no terminator before the end of the document.
 WINDOW = 600
-SENTENCE_END = re.compile(r'(?<=[a-z\)\*`\d])\.\s+(?![a-z])')
+# A terminator may be preceded by ANY non-space character — a closing `**`,
+# backtick, bracket, quote or digit.  Requiring a letter there meant
+# `…**exists**.` was not recognised as a sentence end (round 40, P1 on
+# predicate-24, same construction).  The following token must not be lowercase,
+# which excludes "e.g. " and decimal points.
+SENTENCE_END = re.compile(r'(?<=\S)\.\s+(?![a-z])')
 LOOKBACK = 200          # scope marker may precede the ordering clause
 
 
@@ -152,6 +157,12 @@ if __name__ == '__main__':
         # ROUND 39 P1: an incomplete rule must NOT be absolved by neighbouring prose.
         # Under the old fixed 600-char window this sentence reported clean, because
         # the following sentence names the other three actions.
+        # ROUND 40: the terminator sits after a closing '**' — a boundary matcher
+        # requiring a letter before the period would swallow the next sentence.
+        'ABUSE-CASES.md':
+            'the decision event MUST be durably committed before **the upstream call**. '
+            'Publication signs and pushes the snapshot, materialization mints the credential, '
+            'and the Management state change is recorded.',
         'THREAT-MODEL.md':
             'the decision event MUST be durably committed before the upstream call. '
             'Separately, publication signs and pushes the snapshot, broker materialization '
