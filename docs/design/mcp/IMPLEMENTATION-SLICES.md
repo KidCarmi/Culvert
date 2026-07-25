@@ -17,7 +17,8 @@ dependencies, security requirements, tests, acceptance criteria, rollback, owner
 > roadmap change renumbers slices). The DMZ endpoint (Model C, D-9) is **default-off and deferred**.
 > Inbound Origin/Host defence is **split**: the validation **primitive** (`MCP-INSP-008`) remains in
 > **PR-1**, while the **listener-side enforcement** (`MCP-INSP-009` — bind configured interfaces, allowlist
-> at accept, **E2E** rebinding proof) is **PR-5** for Model A / the Future DMZ gate for Model C. PR-1 binds
+> evaluated **per request / per H2 stream after header parsing** — never once per connection, since
+> `Host`/`Origin` do not exist at socket accept — **E2E** rebinding proof **over a reused connection**) is **PR-5** for Model A / the Future DMZ gate for Model C. PR-1 binds
 > no listener.
 
 Delivery rule (BLUEPRINT §23): every slice needs a defined trust boundary, acceptance criteria, tests and
@@ -102,7 +103,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** enforcement, upstream execution in production.
 - **Trust boundary:** TB-1, TB-4.
 - **Dependencies:** PR-1..PR-4.
-- **Security requirements:** MCP-OPS-001,002; **MCP-INSP-009** (inbound listener: bind configured interfaces + host-allowlist at accept + invoke the PR-1 `MCP-INSP-008` primitive + **E2E** rebinding enforcement — the listener the PR-1 Protocol Kernel deliberately did not bind).
+- **Security requirements:** MCP-OPS-001,002; **MCP-INSP-009** (inbound listener: bind configured interfaces **at accept** + evaluate the host-allowlist and invoke the PR-1 `MCP-INSP-008` primitive **after header parsing on every request and every HTTP/2 stream — never once per connection**, since `Host`/`:authority`/`Origin` do not exist at socket accept + **E2E** rebinding enforcement **including connection reuse** — the listener the PR-1 Protocol Kernel deliberately did not bind).
 - **Tests:** MCP-off overhead regression, load/soak/slowloris/queue bounds, streaming/reconnect, **E2E inbound-rebinding against the live listener (MCP-INSP-009)**.
 - **Acceptance:** MCP disabled → no measurable SWG regression; bounds hold under load; **listener binds only configured interfaces and rejects rebinding end-to-end**.
 - **Rollback:** listener disabled; runtime dormant.

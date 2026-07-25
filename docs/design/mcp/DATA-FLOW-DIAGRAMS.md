@@ -269,17 +269,23 @@ flowchart LR
   VER --> NORM["Normalized internal message"]
   NORM --> STATE[Protocol-state machine<br/>immutable OPAQUE session context - no resolved identity<br/>lifecycle / cancellation / reconnect<br/>MCP-PROTO-012]
   STATE --> HANDOFF{{"Test harness (PR-1)<br/>/ later runtime boundary (PR-5)"}}
-  FRAME -. limit exceeded / truncated .-> ERR[Bounded JSON-RPC error<br/>no state leak + deterministic cleanup<br/>MCP-PROTO-013]
-  DEC -. malformed / differential .-> ERR
-  CLASS -. unknown method / bad id .-> ERR
-  STRUCT -. over-limit .-> ERR
-  VER -. unsupported version / downgrade .-> ERR
-  STATE -. race / duplicate / out-of-order lifecycle .-> ERR
+  FRAME -. limit exceeded / truncated .-> REJ
+  DEC -. malformed / differential .-> REJ
+  CLASS -. unknown method / bad id .-> REJ
+  STRUCT -. over-limit .-> REJ
+  VER -. unsupported version / downgrade .-> REJ
+  STATE -. race / duplicate / out-of-order lifecycle .-> REJ
+  REJ{{"Reject: branch by message class<br/>MCP-PROTO-013"}}
+  REJ -->|request| ERR["Bounded JSON-RPC error<br/>no state leak<br/>MCP-PROTO-013"]
+  REJ -->|notification| NORESP["NO wire response<br/>record rejection + loss/metric only<br/>one-way: replying would be reply amplification"]
+  REJ -->|unclassifiable| NULLERR["At most one id:null error<br/>rate-bounded so it cannot become the amplifier"]
+  ERR --> CLEAN["Deterministic cleanup<br/>UNCONDITIONAL - every class"]
+  NORESP --> CLEAN
+  NULLERR --> CLEAN
   classDef tb fill:#fee,stroke:#c00;
   class FRAME,DEC tb
 ```
-Untrusted bytes are bounded and strictly decoded before any downstream stage; every reject path yields a
-bounded, non-leaky error with deterministic cleanup (MCP-PROTO-013). No hostile input may panic the kernel
+Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
 
 ---

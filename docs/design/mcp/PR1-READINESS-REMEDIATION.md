@@ -1289,3 +1289,77 @@ behaviour the spec forbids?* Two of these three had the answer written down else
 *statements* corrected). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats /
 91 requirements / 91 of 91 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both`
 capability rows; documentation only; PR-1 not begun.
+
+---
+
+## Round 19 — round 18's own corrections, unpropagated (`e119a535`)
+
+Three P1 findings from Codex. **Two are round 18's fixes not carried to every consumer** — the propagation
+class, applied to my own corrections one round after amendment 8 said to run each fix as a predicate over its
+whole class. The third is an older unswept consumer of the `MCP-INSP-001` re-scope.
+
+### R19-1 (P1) — the architecture ran `policy → credentials → inspection`
+
+**Finding.** `MCP-INSP-001` (re-scoped to *semantic* validation "before policy/upstream use") and DFD-7 —
+whose request chain literally terminates in `RES --> POL` — both require request-side inspection to feed
+policy. `RECOMMENDED-ARCHITECTURE.md` still sequenced `identity → registry/catalog → policy → credentials →
+inspection` in **both** its runtime-orchestration row and its dependency chain. An implementation following
+the architecture would **evaluate policy against unvalidated arguments and obtain an upstream credential
+before a malformed argument or disallowed destination was rejected** — defeating `MCP-INSP-001`/`004`/`005`
+and the `MCP-CRED-006` least-privilege posture. The architecture's own `credentials` row already said
+"only after an ALLOW-class policy decision", so the document contradicted itself.
+
+**Root cause.** The architecture modelled `inspection` as **one** stage. It is two, in two positions, and the
+order is load-bearing.
+
+**Fix.** Both order statements now read `identity → registry/catalog → inspection (request side) → policy →
+credentials → upstream call → inspection (response side) → events`. The `internal/mcp/inspection` component
+row states which checks belong to each pass (request: `MCP-INSP-001`/`004`/`005` + resource extraction;
+response: `002`/`003`/`007`) and *why* the order cannot be reversed, with the DFD-7 cross-reference.
+
+### R19-2 (P1) — `MCP-INSP-009`'s acceptance cells still said "at accept"
+
+**Finding.** Round 18 corrected the normative **Statement** cell to require per-request/per-stream validation,
+and left the **Verification** cell reading `host-allowlist-at-accept` and the **Evidence** cell reading
+"allowlist enforced at accept" — plus the same stale framing in `IMPLEMENTATION-SLICES.md` (twice) and the
+traceability matrix. PR-5 is implemented and reviewed against those acceptance cells, so an implementation
+could validate once per connection, satisfy every acceptance description, and leave later keep-alive requests
+and HTTP/2 streams unprotected. The correction was cosmetic where it mattered least and absent where it
+mattered most.
+
+**Fix.** Verification, Evidence, both `IMPLEMENTATION-SLICES.md` references and the `MCP-T-031` control cell
+now all require post-header-parse evaluation per request / per H2 stream and an E2E proof over a **reused**
+connection.
+
+**Why the round-18 sweep missed it.** The predicate was `at accept time|per connection|every connection`. The
+surviving instances read `host-allowlist-at-accept` (hyphenated, no "time") and `allowlist at accept`. **The
+pattern matched one spelling of the concept, so it reported clean while the class was open.**
+
+### R19-3 (P1) — DFD-15 still routed every rejection to a single error node
+
+**Finding.** Round 18 fixed `MCP-PROTO-013` to branch rejection by message class, and DFD-15 still routed
+limit/method/state rejections to one `ERR` node with the caption "every reject path yields a bounded,
+non-leaky error". Implementing DFD-15 literally **recreates the notification-flood reply amplifier round 18
+closed** — the same defect class as round 15's DFD-9, in the same file.
+
+**Fix.** The reject path branches through a `REJ` node: request ⇒ bounded JSON-RPC error; notification ⇒ **no
+wire response**, recorded rejection + metric only; unclassifiable ⇒ at most one **rate-bounded** `id: null`
+error. All three converge on an **unconditional** cleanup node. Caption rewritten to match.
+
+**Tenth amendment — two rules, both about how a fix is applied.**
+
+1. **A requirement is a ROW, not a sentence.** Correcting the normative statement while leaving the
+   Verification and Evidence cells asserting the old rule is worse than leaving the row alone, because
+   implementers and reviewers work from the acceptance cells. Any statement correction **MUST** be applied to
+   every cell of that row, and to the same requirement's rows in `IMPLEMENTATION-SLICES.md`,
+   `TEST-TRACEABILITY-MATRIX.md` and `CI-GATES.md`. Round 18 changed one cell of four.
+2. **Derive the sweep pattern from the concept, then validate it against a known positive in every
+   spelling.** Round 18's regex was written from the phrasing in front of me and silently missed the
+   hyphenated and "time"-less variants. **A predicate that reports clean has proven nothing until it has been
+   shown to match an instance already known to be defective.** Before trusting a clean sweep, seed it with the
+   instance the reviewer named and confirm it fires.
+
+**Unchanged by round 19:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
+only; PR-1 not begun.
