@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -185,7 +186,11 @@ func TestNoAutoUpload(t *testing.T) {
 
 // TestConsentSeparation — the upload switch is independent (ADR-0011/P6):
 // enabling upload writes ONLY its own node-local file and touches no other
-// consent/posture surface.
+// consent/posture surface. Extended for M7 Slice 2 (§14/§15): enabling
+// telemetry afterward writes ONLY its own node-local file too, leaves
+// upload_config.json byte-identical, and touches no admin_settings.json —
+// all FOUR independent switches (support-bundle upload, OTLP, Prometheus/
+// alerts, telemetry) stay consent-separated.
 func TestConsentSeparation(t *testing.T) {
 	withTempUploadDir(t)
 	uploadConfigMu.Lock()
@@ -207,5 +212,38 @@ func TestConsentSeparation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "admin_settings.json")); err == nil {
 		t.Error("enabling upload wrote admin_settings.json — upload is node-local and independent")
+	}
+
+	// M7 Slice 2: enabling telemetry must touch ONLY telemetry_config.json —
+	// upload_config.json must stay byte-identical, and no admin_settings.json.
+	uploadConfigBefore, err := os.ReadFile(uploadConfigPath())
+	if err != nil {
+		t.Fatalf("read upload config baseline: %v", err)
+	}
+	telemetryConfigMu.Lock()
+	_ = saveTelemetryConfigLocked(telemetryConfig{Enabled: true, Origin: "https://tac.culvertlabs.com", Credential: "tok"})
+	telemetryConfigMu.Unlock()
+	if !telemetryEnabled() {
+		t.Fatal("telemetry should be enabled")
+	}
+	entries, err = os.ReadDir(supportDir)
+	if err != nil {
+		t.Fatalf("read support dir after telemetry enable: %v", err)
+	}
+	allowed := map[string]bool{"upload_config.json": true, "telemetry_config.json": true}
+	for _, e := range entries {
+		if !allowed[e.Name()] {
+			t.Errorf("enabling telemetry also wrote %q — telemetry consent must be independent (no consent conflation)", e.Name())
+		}
+	}
+	uploadConfigAfter, err := os.ReadFile(uploadConfigPath())
+	if err != nil {
+		t.Fatalf("read upload config after telemetry enable: %v", err)
+	}
+	if !bytes.Equal(uploadConfigBefore, uploadConfigAfter) {
+		t.Error("enabling telemetry modified upload_config.json — consent switches must be fully independent")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "admin_settings.json")); err == nil {
+		t.Error("enabling telemetry wrote admin_settings.json — telemetry is node-local and independent")
 	}
 }

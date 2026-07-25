@@ -92,8 +92,11 @@ import (
 //   - 187 — M7 Slice 1 added /api/support/telemetry/preview (GET admin: read-only
 //     preview of the current support-telemetry sample; no consent, sender, or
 //     egress exists yet).
+//   - 188 — M7 Slice 2 added /api/support/telemetry/config (GET viewer / PUT
+//     admin: node-local telemetry consent + bearer-auth config; still zero
+//     egress — no sender exists yet).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 187
+	const want = 188
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}

@@ -4427,9 +4427,22 @@ Firefox (all platforms):
             <div id="support-uploads" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
+          <div>
+            <div style="font-weight:600;margin-bottom:6px">Telemetry (opt-in)</div>
+            <p class="hint"><strong>Off by default.</strong> When enabled, a small set of the appliance's own support-health scalars (see the preview below - review it first) would be periodically sealed end-to-end and sent to TAC over authenticated HTTPS: never traffic volume, customer scale, or security-posture data. <strong>This build performs no network transmission of any kind</strong> - there is no sender yet, so enabling here only stores this configuration locally. Telemetry consent is entirely separate from the support-bundle upload consent above - enabling one never enables the other.</p>
+            <div id="support-telemetry-status" role="status" aria-live="polite" style="margin-bottom:6px"><p class="hint">Loading…</p></div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-min-role="admin">
+              <input id="telemetry-origin" class="input sm" type="text" placeholder="https://tac.culvertlabs.com" style="width:240px" title="TAC telemetry origin (https, non-private; no path/query/fragment)">
+              <input id="telemetry-credential" class="input sm" type="password" placeholder="bearer credential" style="width:200px" autocomplete="off" title="Per-appliance bearer credential; stored 0600, never displayed. Leave blank to keep the existing one.">
+              <label style="display:flex;gap:4px;align-items:center;font-size:.8rem"><input id="telemetry-enabled" type="checkbox"> Enable</label>
+              <label style="display:flex;gap:4px;align-items:center;font-size:.8rem" title="Remove the stored credential"><input id="telemetry-clear-cred" type="checkbox"> Clear credential</label>
+              <button class="btn ghost sm" data-click="saveTelemetryConfig" data-min-role="admin" title="Save the telemetry posture (node-local; no data is sent - no sender exists in this build)">Save</button>
+            </div>
+          </div>
+
           <div data-min-role="admin">
             <div style="font-weight:600;margin-bottom:6px">Telemetry preview</div>
-            <p class="hint">M7 Slice 1: a read-only preview of the exact governed support-health sample that would be sealed and sent if telemetry were ever enabled. <strong>There is no telemetry consent switch, sender, or egress in this build</strong> - this only shows what future values would look like.</p>
+            <p class="hint">A read-only preview of the exact governed support-health sample that would be sealed and sent if telemetry were enabled and a sender existed. <strong>No sender or egress exists in this build</strong> - this only shows what future values would look like.</p>
             <div id="support-telemetry-preview" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -4875,6 +4888,7 @@ document.addEventListener('click', e => {
     case 'rotateRecipient':        rotateRecipient(arg); break;
     case 'deleteRecipient':        deleteRecipient(arg); break;
     case 'saveUploadConfig':       saveUploadConfig(); break;
+    case 'saveTelemetryConfig':    saveTelemetryConfig(); break;
     case 'supportApplyCaseFilter': supportApplyCaseFilter(); break;
     case 'supportClearCaseFilter': supportClearCaseFilter(); break;
     case 'supportApproveBundle':   supportApproveBundle(arg); break;
@@ -13495,6 +13509,7 @@ async function loadSupport() {
   loadUploadConfig();
   loadTacTrust();
   loadUploads();
+  loadTelemetryConfig();
   loadSupportTelemetryPreview();
 }
 
@@ -13576,6 +13591,60 @@ async function saveUploadConfig() {
     if (credInp) credInp.value = '';
     if (clearInp) clearInp.checked = false;
     renderUploadStatus(await r.json());
+  } catch (err) {
+    toast('Save failed: ' + err.message, 'error');
+  }
+}
+
+// M7 Slice 2: telemetry consent/config. Still zero egress - PUT only writes
+// a local JSON file; no sender exists in this build.
+async function loadTelemetryConfig() {
+  const el = document.getElementById('support-telemetry-status');
+  try {
+    const d = await api('/api/support/telemetry/config');
+    renderTelemetryStatus(d);
+  } catch (err) {
+    if (el) el.innerHTML = '<p class="hint">Could not load telemetry posture: ' + escHtml(err.message) + '</p>';
+  }
+}
+
+function renderTelemetryStatus(d) {
+  const el = document.getElementById('support-telemetry-status');
+  if (!el) return;
+  d = d || {};
+  const statusColors = { ready: 'var(--green)', disabled: 'var(--muted)', origin_invalid: 'var(--red)', credential_missing: 'var(--red)' };
+  const color = statusColors[d.status] || 'var(--muted)';
+  const label = String(d.status || 'disabled').toUpperCase();
+  const originLine = d.origin ? ' · origin ' + escHtml(String(d.origin)) : '';
+  const credLine = d.credential_set ? ' · credential set' : ' · no credential';
+  el.innerHTML = '<p class="hint">Telemetry <strong style="color:' + color + '">' + escHtml(label) + '</strong>' + originLine + credLine + '</p>';
+  // Reflect current values into the admin form.
+  const originInp = document.getElementById('telemetry-origin');
+  const enabledInp = document.getElementById('telemetry-enabled');
+  if (originInp && document.activeElement !== originInp) originInp.value = d.origin || '';
+  if (enabledInp) enabledInp.checked = !!d.enabled;
+}
+
+async function saveTelemetryConfig() {
+  if (uiRole !== 'admin') { toast('Admin role required', 'error'); return; }
+  const originInp = document.getElementById('telemetry-origin');
+  const enabledInp = document.getElementById('telemetry-enabled');
+  const credInp = document.getElementById('telemetry-credential');
+  const clearInp = document.getElementById('telemetry-clear-cred');
+  const origin = (originInp && originInp.value || '').trim();
+  const enabled = !!(enabledInp && enabledInp.checked);
+  const body = { enabled: enabled, origin: origin };
+  // Empty credential = keep the existing one; an explicit checkbox clears it.
+  if (clearInp && clearInp.checked) body.clear_credential = true;
+  else if (credInp && credInp.value) body.credential = credInp.value;
+  try {
+    const r = await apiFetch('/api/support/telemetry/config',
+      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { toast('Save failed: ' + (await r.text()), 'error'); return; }
+    toast('Telemetry posture saved (no data was sent - no sender exists in this build)', 'success');
+    if (credInp) credInp.value = '';
+    if (clearInp) clearInp.checked = false;
+    renderTelemetryStatus(await r.json());
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');
   }

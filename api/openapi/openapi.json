@@ -2734,6 +2734,29 @@
         },
         "type": "object"
       },
+      "SetTelemetryConfig": {
+        "additionalProperties": false,
+        "description": "Set the telemetry consent/config posture. Enabling requires a valid https origin AND a bearer credential (existing, preserved, or newly supplied) — an origin-only request is rejected (400). A bare disable ({} or {\"enabled\":false}) is always accepted.",
+        "properties": {
+          "clear_credential": {
+            "description": "Explicitly remove the stored credential (mutually exclusive with credential).",
+            "type": "boolean"
+          },
+          "credential": {
+            "description": "Bearer credential to store; empty keeps the existing one.",
+            "format": "password",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "origin": {
+            "description": "Destination origin (https, no userinfo/path/query/fragment, no private/internal literal IP); required to enable.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "SetUIAllowIPsBody": {
         "additionalProperties": false,
         "properties": {
@@ -3153,6 +3176,46 @@
         ],
         "type": "object"
       },
+      "TelemetryConfigStatus": {
+        "additionalProperties": false,
+        "description": "Node-local telemetry consent/config posture (M7 Slice 2). Still zero egress — no sender exists in this build. The bearer credential is never exposed; only credential_set is reported.",
+        "properties": {
+          "credential_set": {
+            "description": "Whether a bearer credential is stored. The value itself is never returned.",
+            "type": "boolean"
+          },
+          "effective_enabled": {
+            "description": "True only when enabled, the origin is a valid canonical https endpoint, and a bearer credential is configured.",
+            "type": "boolean"
+          },
+          "enabled": {
+            "description": "The persisted operator intent (may be true even when not effectively enabled, e.g. after an explicit credential clear).",
+            "type": "boolean"
+          },
+          "origin": {
+            "description": "Canonical https origin (present when configured).",
+            "format": "uri",
+            "type": "string"
+          },
+          "status": {
+            "description": "disabled: enabled=false. origin_invalid: no/invalid origin. credential_missing: origin valid but no credential. ready: fully configured (does NOT mean anything is sending — no sender exists yet).",
+            "enum": [
+              "disabled",
+              "origin_invalid",
+              "credential_missing",
+              "ready"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "effective_enabled",
+          "credential_set",
+          "status"
+        ],
+        "type": "object"
+      },
       "Timeseries": {
         "additionalProperties": false,
         "properties": {
@@ -3548,8 +3611,8 @@
       "url": "https://github.com/KidCarmi/Culvert"
     },
     "title": "Culvert Admin API",
-    "version": "1.1.0",
-    "x-culvert-api-contract-version": "1.1.0"
+    "version": "1.2.0",
+    "x-culvert-api-contract-version": "1.2.0"
   },
   "openapi": "3.0.4",
   "paths": {
@@ -16448,6 +16511,102 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.1.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/telemetry/config": {
+      "get": {
+        "description": "M7 Slice 2. Returns the node-local telemetry consent/config posture. Still zero egress — no sender exists in this build. The bearer credential is never exposed; only whether one is set.",
+        "operationId": "getSupportTelemetryConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryConfigStatus"
+                }
+              }
+            },
+            "description": "Current telemetry consent/config posture."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Telemetry consent/config posture",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "M7 Slice 2. Sets the telemetry enabled flag, origin, and/or bearer credential. Enabling requires a valid canonical https origin AND a bearer credential (existing, preserved, or newly supplied); an origin-only request is rejected (400). Writes a local JSON file only — this handler cannot cause egress (no sender exists).",
+        "operationId": "setSupportTelemetryConfig",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "credential": "example-bearer-token",
+                "enabled": true,
+                "origin": "https://tac.culvertlabs.com"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/SetTelemetryConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryConfigStatus"
+                }
+              }
+            },
+            "description": "Updated telemetry consent/config posture."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set telemetry consent/config posture",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-audit-event": "support.telemetry.config",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "1.2.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"
