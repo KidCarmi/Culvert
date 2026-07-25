@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,21 @@ type fakeCatalogServer struct {
 	slow        map[string]bool   // paths served after a delay (slow origin)
 	delay       time.Duration
 	manifestGET atomic.Int32 // count of /manifests/ requests
+
+	mu             sync.Mutex
+	userAgentsSeen []string // every User-Agent header observed, in request order
+}
+
+func (f *fakeCatalogServer) recordUserAgent(ua string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userAgentsSeen = append(f.userAgentsSeen, ua)
+}
+
+func (f *fakeCatalogServer) allUserAgents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.userAgentsSeen...)
 }
 
 func (f *fakeCatalogServer) handler() http.HandlerFunc {
@@ -31,6 +47,7 @@ func (f *fakeCatalogServer) handler() http.HandlerFunc {
 		if strings.HasPrefix(p, "/manifests/") {
 			f.manifestGET.Add(1)
 		}
+		f.recordUserAgent(r.Header.Get("User-Agent"))
 		if f.slow[p] {
 			time.Sleep(f.delay)
 		}
@@ -117,6 +134,42 @@ func TestHTTPProvider_HappyPath(t *testing.T) {
 	}
 	if len(c.byReleaseID) != 2 {
 		t.Fatalf("staged catalog has %d releases; want 2", len(c.byReleaseID))
+	}
+}
+
+// TestHTTPProvider_SendsIdentifyingUserAgent guards against a regression class
+// that took down real catalog fetches (both the R2 publisher's staged-bytes
+// verify and every appliance's production auto-seed/refresh): a bare
+// Go-http-client User-Agent is indistinguishable from generic bot traffic to
+// a CDN/WAF fronting the catalog origin (Cloudflare bot-management on
+// catalog.culvertlabs.com) and gets blocked with a 403 despite the request
+// being legitimate. Every request the provider issues — index, sidecars, and
+// manifests — must self-identify with catalogUserAgent, matching the
+// project-wide convention (internal/threatfeed, internal/feedsync,
+// internal/alerts) of never sending an unidentified outbound fetch.
+func TestHTTPProvider_SendsIdentifyingUserAgent(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeCatalogServer{files: signedCatalogFiles(t, priv, validSource())}
+	p, _ := newHTTPProvider(t, f, holderTrust(t, pub))
+
+	dir, err := p.Stage(context.Background())
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	uas := f.allUserAgents()
+	if len(uas) == 0 {
+		t.Fatal("no requests observed at the fake origin")
+	}
+	for i, ua := range uas {
+		if ua != catalogUserAgent {
+			t.Fatalf("request %d: User-Agent = %q, want %q (a default/empty UA is what trips CDN/WAF bot-management)",
+				i, ua, catalogUserAgent)
+		}
 	}
 }
 
