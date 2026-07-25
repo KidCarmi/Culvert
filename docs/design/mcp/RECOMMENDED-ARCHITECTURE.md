@@ -146,8 +146,11 @@ Rules governing the interfaces:
   backpressure/failure semantics (§5) must never stall or change a decision `policy` has already made
   (that is the `MCP-POLICY-002` purity property this invariant exists to protect). They **must**, however,
   be able to stop the **side effect**: for the **write / destructive / configuration-publication /
-  credential** classes the decision event **MUST be durably committed BEFORE credential use and before the
-  upstream call**, and if it cannot be committed the operation **MUST fail closed and never run**. A
+  credential / state-affecting-Management** classes the decision event **MUST be durably committed BEFORE
+  THAT CLASS'S OWN irreversible action** — the upstream call; the snapshot **sign/push/apply** (including a
+  rollback swap); broker **materialization** (mint/rotate/revoke); the Management **state change** — and if
+  it cannot be committed the operation **MUST fail closed and never run**. Naming only "credential use and
+  the upstream call" leaves the publication and Management classes unconstrained, since neither performs one. A
   fail-closed guarantee evaluated only *after* execution is not a guarantee — the side effect has already
   happened and nothing remains to deny (`MCP-T-044`). The **outcome** event is emitted separately after the
   call and is **not** the fail-closed gate.

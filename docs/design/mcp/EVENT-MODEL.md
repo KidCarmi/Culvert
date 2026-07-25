@@ -191,8 +191,12 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 **cannot be durably persisted**, behavior is fixed by the class of action, not left to the moment.
 
 > **Ordering precondition (load-bearing).** For every class whose behavior below is **fail closed**, the
-> decision event **MUST be durably committed BEFORE credential use and before the upstream call**, and the
-> operation runs **only** after that commit is confirmed. A fail-closed rule evaluated after execution is
+> decision event **MUST be durably committed BEFORE THAT CLASS'S OWN irreversible action** — per the table
+> below: the upstream call; the snapshot **sign/push/apply**, including a **rollback swap**; broker
+> **materialization** (mint/rotate/revoke); the Management **state change** — and the
+> operation runs **only** after that commit is confirmed. Stating this as "before credential use and the
+> upstream call" would leave configuration publication and the Management class unconstrained, because
+> **neither performs an upstream call**; the precondition must name each class's own side effect. A fail-closed rule evaluated after execution is
 > unimplementable — the side effect has already occurred and there is nothing left to deny. The **outcome**
 > event is emitted separately after execution and is **not** the fail-closed gate
 > ([MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events), MCP-T-044).
@@ -289,6 +293,7 @@ flowchart TD
     CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> LP{"configured loss policy?\nmcp_{gateway,mgmt}_event_loss_policy"}
     LP -- "degrade-and-alert\n(operation still proceeds)" --> DEG
     LP -- "fail-closed\n(deny the triggering low-risk call)" --> FAIL
+    LP -- "fail-closed: AND, not either\ndegradation is recorded for BOTH policies" --> DEG
 ```
 
 **Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded / denial-lockout posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.

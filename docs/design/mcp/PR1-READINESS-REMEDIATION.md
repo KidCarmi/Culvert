@@ -2145,3 +2145,60 @@ already defined; only their flow traceability changed). ADR-0024 `Status: Propos
 cases / 0 `Both` capability rows; predicates 7, 13, 18, 19, 21 and the outcome-lane check clean; `SPOOL` has
 zero unconditional out-edges; `LOSS` has exactly three arms and `LP` exactly two; no non-ASCII strays;
 documentation only; PR-1 not begun.
+
+## Round 31 — round 30 claimed a swept dimension and had swept one file of three (`4bbf1e16` → next)
+
+Five P2 findings. **Two are the identical sentence round 30 fixed in one file while its own reply asserted the
+dimension had been swept**, and the check that would have found them is a one-second grep.
+
+**R31-1 / R31-2 — the amendment-15 phrasing survived in `EVENT-MODEL` §4a and `ADR-0024` §D-5.** Round 30 found
+the narrow wording ("durably committed BEFORE credential use and the upstream call") in DFD-9's caption, fixed
+it there, reported it as a sweep residual — and never grepped the package for the same sentence. It was in
+**three** live documents. Configuration publication and the Management class perform no upstream call, so in
+both of those files the load-bearing precondition constrained nothing for two of the five critical classes,
+directly contradicting the per-class table printed immediately below it in each.
+
+**The third instance — `RECOMMENDED-ARCHITECTURE.md:149` — the reviewer did NOT flag.** Found only because this
+round finally ran the grep. All three now name each class's own irreversible action, and each states explicitly
+why the narrow phrasing is insufficient so it cannot be "simplified" back.
+
+**R31-3 — `MCP-EVENT-002`'s own Verification and Evidence cells omitted the Management class.** The requirement
+declares five critical classes and its per-class absence assertions enumerated three, so PR-8 could satisfy the
+**canonical requirement row** without proving a Management state change absent. Both cells now carry it. This is
+amendment 15's test-side corollary at its source: the row that *defines* the enumeration was itself short.
+
+**R31-4 — DFD-5 unconditionally failed low-risk calls closed.** `WAL -- commit FAILED --> FCG` applied to every
+class, and DFD-5 carries **all** ALLOW-class traffic — so the primary Gateway flow made `degrade-and-alert`
+behave as `fail-closed` for every read-only call, the exact defect round 29 fixed in DFD-9 and round 30 fixed in
+`EVENT-MODEL`. **Third file, same defect, third consecutive round.** Now class-aware via `LPG`; the caption
+records that DFD-6/10/11 need no such arm **by construction** (credential materialization and snapshot
+publication are always critical), so the absence there is not a fourth instance waiting.
+
+**R31-5 — round 30's own new edge dropped half its outcome.** `LP -- fail-closed --> FAIL` reached only `FAIL`,
+which denies the operation; the prose below says low-risk loss **always** degrades and alerts, with the policy
+deciding only whether it *also* blocks. So the edge I added one round earlier lost the degraded/alert/counter
+half. Fixed with an explicit AND pair, matching how `KIND` already expresses AND.
+
+**Twenty-fourth amendment — a phrase is a dimension, and the sweep for it is `grep`, not memory.** Rounds
+22–30 treated "sweep the dimension" as re-reading the artifacts I could bring to mind. For a defect that is a
+**specific form of words**, the dimension is enumerable mechanically and exhaustively in one command. Round 30
+found the narrow phrasing, wrote three paragraphs about why it mattered, and fixed one third of it — because it
+searched its memory of the package instead of the package. **When the defect has a textual signature, grep the
+whole tree before claiming the dimension is closed.**
+
+**Predicate 22 (new) — no live normative document may state the ordering precondition in the narrow form.**
+Vocabulary derived from `MCP-EVENT-002`'s class table (amendment 20); the ledger is **excluded by design**
+because it records historical wording verbatim (2 occurrences retained). Seeded by injecting the narrow sentence
+into each of the three files that carried it — each seed required to produce a NEW violation naming that file.
+All three fire; residual on live documents **NONE**.
+
+**Standing note.** Rounds 22–31: eleven consecutive rounds where each round's fix produced the next round's
+findings. Round 30 recorded amendment 23 about restatements being consumers, and R31-1/2/4 are three more
+restatements it did not reach. The one thing this round did better is mechanical: the grep found a site the
+reviewer missed. That is the argument for **executed checks over recorded discipline**, which is now the
+eleventh consecutive round's worth of evidence for the same conclusion — and it is not a convergence claim.
+
+**Unchanged by round 31:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases; predicates 7, 13, 18, 19, 21, 22 and the outcome-lane check clean; `SPOOL` has zero
+unconditional out-edges; no non-ASCII strays; documentation only; PR-1 not begun.

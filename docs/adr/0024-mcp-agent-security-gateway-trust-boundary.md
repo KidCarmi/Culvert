@@ -120,8 +120,11 @@ when an exporter is configured). Durability-unavailable semantics are fixed by a
 for the critical write classes, fail-closed **and** degraded-mode-with-alert are **both** required:
 
 **Ordering precondition:** for every class below whose behavior is **fail closed**, the decision event **MUST be
-durably committed BEFORE credential use and before the upstream call**; the operation runs only after that commit
-is confirmed. Evaluated after execution, "fail closed" is unimplementable — the side effect has already happened.
+durably committed BEFORE THAT CLASS'S OWN irreversible action** — per the table below: the upstream call; the
+snapshot **sign/push/apply**, including a **rollback swap**; broker **materialization** (mint/rotate/revoke); the
+Management **state change**; the operation runs only after that commit is confirmed. Phrasing this as "before
+credential use and the upstream call" would leave configuration publication and the Management class
+unconstrained, since neither performs an upstream call — the precondition must name each class's own side effect. Evaluated after execution, "fail closed" is unimplementable — the side effect has already happened.
 The outcome event is emitted separately afterwards and is not the gate (MCP-EVENT-002, MCP-T-044).
 
 **The irreversible action is class-specific, and each class is gated at its own** — gating only "the upstream

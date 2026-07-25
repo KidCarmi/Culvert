@@ -103,7 +103,10 @@ flowchart LR
     DEC -- DENY/QUARANTINE/APPROVAL --> EV[(Decision events)]
     CBP --> WAL{{"DURABLE decision-event COMMIT<br/>critical classes — MCP-EVENT-002<br/>commit FAILED ⇒ fail closed, nothing runs<br/>see DFD-9"}}
     WAL -- "commit CONFIRMED" --> CB["Credential broker: MATERIALIZE<br/>mint / rotate / revoke"]
-    WAL -- "commit FAILED" --> FCG["Fail closed + degraded + alert<br/>no credential minted, no upstream call"]
+    WAL -- "commit FAILED — critical class<br/>(write / destructive / config-publication /<br/>credential / state-affecting Management)" --> FCG["Fail closed + degraded + alert<br/>no credential minted, no upstream call"]
+    WAL -- "commit FAILED — read-only / low-risk:<br/>NOT unconditionally fail-closed<br/>see DFD-9 LP — the configured loss policy decides" --> LPG{"configured loss policy?<br/>mcp_{gateway,mgmt}_event_loss_policy"}
+    LPG -- "degrade-and-alert" --> CB
+    LPG -- "fail-closed" --> FCG
     CB --> CALL[Call upstream with scoped cred]
     CALL --> OI[Output inspection]
     OI --> EV
@@ -113,7 +116,13 @@ flowchart LR
   classDef tb fill:#fee,stroke:#c00;
   class G,CALL tb
 ```
-No token passthrough (MCP-AUTH-005); credential selected **after** ALLOW (MCP-POLICY-004).
+No token passthrough (MCP-AUTH-005); credential selected **after** ALLOW (MCP-POLICY-004). **The commit gate is
+class-aware, not unconditional:** a failed commit fails the operation closed for the five **critical** classes,
+but a **read-only / low-risk** call follows the configured loss policy (`LPG`, mirroring DFD-9's `LP`) — under
+`degrade-and-alert` it still proceeds. An unconditional `commit FAILED ⇒ fail closed` on this flow would make
+`degrade-and-alert` behave as `fail-closed` for every low-risk call, since DFD-5 carries **all** ALLOW-class
+traffic. DFD-6/DFD-10/DFD-11 have no such arm **by construction** — credential materialization and snapshot
+publication are always critical classes.
 
 ## DFD-6 — Credential selection (Capability B)
 
