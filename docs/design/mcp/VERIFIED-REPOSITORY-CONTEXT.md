@@ -44,7 +44,11 @@ Each row: what it is, evidence, what the evidence proves, and the reuse classifi
 > evidence that were **re-verified against `origin/main` `2eef667`** during the PR-1 remediation and updated
 > to the current-tree symbols/lines (`newHistogram :360`; `ssrf.go PrivateIP :72-79`, `PrivateHost :86-113`,
 > `Control :126-139`; `ui_routes_meta.go uiRoutes` var `:87`; `auth_oidc_flow.go validateIDToken :499-566`;
-> `internal/secret` `Provider :64`; `internal/redaction` `DataClass :12`). Non-⟳ rows are unchanged. See
+> `internal/secret` `Provider :64`; `internal/redaction` `DataClass :12`). **Two further rows carry text
+> corrections rather than line-range fixes and are therefore NOT marked ⟳:** `ID-token validation` (the
+> *Class for MCP* cell restates the audience semantics per ADR-0024 §D-2) and `OpenAPI contract + CI gate`
+> (ADR-0018 cited by path instead of by name). **Every other non-⟳ row is byte-unchanged** — enumerated
+> from the diff against the merge base, not from recollection (`predicates/predicate-25.py`). See
 > `PR1-READINESS-REMEDIATION.md`.
 
 | Primitive | Evidence `path · symbol · lines` | Proves | Class for MCP |

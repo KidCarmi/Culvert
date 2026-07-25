@@ -38,14 +38,35 @@ authority changes. That failure has happened four times in this remediation
 |---|---|---|
 | `predicate-19.py` | every DFD containing an irreversible-action node also contains a durable-commit node | `MCP-EVENT-002`'s own action wording ("signed, pushed or applied", "before any broker-side materialization", …) |
 | `predicate-21.py` | each DFD's header declaration agrees with the coverage-summary row that restates it, on both the trust-boundary set and the threat set | the DFD headers and the coverage table themselves |
-| `predicate-22.py` | no live normative document states the commit-ordering precondition in terms naming only the Gateway's side effect | `MCP-EVENT-002`'s class table |
+| `predicate-22.py` | no live normative document states the commit-ordering precondition in a form naming FEWER than all four class-specific irreversible actions (the class-generic delegation, and a sentence scoped to one class, both pass) | `MCP-EVENT-002`'s class table + `EVENT-MODEL.md` §4a for the per-class scopes |
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
+| `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff against the merge base — added/rewritten requirement IDs, touched decision blocks, and changed repository-context rows | `git merge-base HEAD origin/main` (the diff is the authority) |
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the
 five it reports (DFD-6/7/12/13/14) are pre-existing and left failing-visible for
 PR-0 adjudication rather than normalised by me.
+
+## Detect the meaning, not one sentence — and stay layout-independent
+
+Two failure modes cost `predicate-22` and `predicate-24` their stated properties, both found by review
+after they were checked in:
+
+- **Matching one phrase instead of the prohibited meaning.** `predicate-22` originally matched the literal
+  string `committed BEFORE credential use`. `durably committed before the upstream call` — the same
+  incomplete rule, differently worded — passed silently, and the derived class vocabulary was asserted but
+  never used in the decision. It now compares the actions a sentence NAMES against the four the authority
+  requires, accepts the class-generic delegation, and accepts a sentence SCOPED to one class when it names
+  exactly that class's own actions.
+- **A line-level prerequisite that a cosmetic reflow can defeat.** `predicate-24` only examined lines
+  containing the literal `upstream call`, so reflowing the enumeration to one line per class would have
+  skipped the configuration-publication and Management clauses — neither mentions an upstream call — and
+  still printed `NONE`. Both predicates now scan the whole text with a character window, and
+  `predicate-24` carries a seed that **reflows the layout and weakens a clause in the same edit**.
+
+A predicate must not be able to lose coverage to a Markdown reformat, and its seeds have to include the
+reformat.
 
 ## Compressed notation must be expanded before sets are compared
 
@@ -77,7 +98,7 @@ in a working session and never saved:
 
 | Cited in the ledger | Reproducible here? |
 |---|---|
-| Predicates 19, 21, 22, 23, 24 | **Yes** — files above |
+| Predicates 19, 21, 22, 23, 24, 25 | **Yes** — files above |
 | Predicates 7, 8, 13, 18, and the "outcome-lane check" | **No** — not saved; their recorded results cannot be re-run |
 
 This register exists because round 35 corrected round 34 for recording a

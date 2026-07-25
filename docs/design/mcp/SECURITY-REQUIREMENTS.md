@@ -19,8 +19,23 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > post-V1), **MCP-CONNECT-003 / MCP-INSP-008 + MCP-INSP-009** (D-9 — DMZ default-off; host-allowlist +
 > Origin-per-protocol on every listener: the `MCP-INSP-008` **primitive** at PR-1, the **listener-side
 > enforcement** `MCP-INSP-009` at PR-5 / the Future DMZ gate), **MCP-MGMT** (D-13 — read-only +
-> draft/validate/simulate; mutation excluded). The
-> requirement **IDs and statements are unchanged** except MCP-AUTH-006, whose framing is corrected below.
+> draft/validate/simulate; mutation excluded).
+>
+> **What this remediation changed in THIS registry — enumerated from the diff against the merge base, not
+> from recollection** (`predicates/predicate-25.py` re-derives and enforces these three sets):
+>
+> - **16 requirement IDs ADDED:** `MCP-PROTO-001..014`, `MCP-ID-008`, `MCP-INSP-009` — the protocol-kernel
+>   family, the protocol-lifecycle split from identity binding, and listener-side host-allowlist enforcement
+>   (split off from the MCP-INSP-008 primitive, whose own statement is rewritten — see the next bullet).
+> - **7 requirement STATEMENTS rewritten:** `MCP-AUTH-003` (RFC 8707 validated through the authorization
+>   flow), `MCP-AUTH-006` (replay framing per ADR-0024 §D-2), `MCP-EVENT-001`, `MCP-EVENT-002`
+>   (commit-before-side-effect, per class, per flow), `MCP-INSP-001`, `MCP-INSP-008` (primitive-only scope)
+>   and `MCP-OPS-002` (runtime bounds separated from parse-time bounds).
+> - **0 requirement IDs removed or renumbered.**
+>
+> An earlier version of this note said the IDs and statements were "unchanged except MCP-AUTH-006". That was
+> false in both directions — it hid sixteen additions and six further statement rewrites — and it was wrong
+> in the one document where a reviewer most needs the change list to be exact.
 
 ---
 

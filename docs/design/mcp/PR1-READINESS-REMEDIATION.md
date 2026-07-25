@@ -2529,3 +2529,76 @@ edge added or removed; no normative statement changed — the only document edit
 log. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
 0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24 all exit `0` from the checked-in
 copies; no non-ASCII strays; changes confined to `docs/`; PR-1 not begun.
+
+## Round 38 — two predicates did not check what they claimed, and the requirement registry's provenance note was false (`9331813e` → next)
+
+Three P2 findings. Two are in the predicates checked in one round earlier; one is in the canonical
+requirement registry and had been live since the package was written.
+
+**R38-1 — `predicate-22` matched one SENTENCE, not the prohibited MEANING.** It searched for the literal
+string `committed BEFORE credential use`. So `durably committed before the upstream call`, and
+`durably persisted before credential use and the upstream call` — the same incomplete ordering rule,
+differently worded — produced **no violation**, and `CLASS_ACTS`, the vocabulary derived from the
+authority, was **asserted at start-up and never used in the decision**. The predicate's `NONE` did not
+establish the property the README claimed for it. It now compares the actions a sentence NAMES against the
+four `MCP-EVENT-002` requires: the class-generic delegation passes, an enumeration of all four passes, a
+sentence scoped to one class passes when it names exactly that class's own actions (parsed from EVENT-MODEL
+§4a), and anything else is a violation. Four seeds — each a *different* incomplete phrasing — fire; a
+negative control on the class-generic form stays silent; residual `NONE`.
+
+**R38-2 — `predicate-24` could be defeated by a Markdown reflow.** It skipped any line not containing the
+literal `upstream call`. The configuration-publication and Management clauses mention no upstream call, so
+reformatting the enumeration into one bullet or line per class — a purely cosmetic edit — would have
+dropped them from coverage entirely while the predicate still printed `NONE`. The prerequisite is gone, the
+scan is text-wide, and there is now a seed that **reflows the layout and weakens a clause in the same
+edit**. Removing the filter produced no false positives: residual stayed `NONE`.
+
+**Both are the same defect as round 37's, one level up.** Round 37 was a predicate certifying parity it had
+not verified; these are predicates certifying properties they never tested. The common shape: **a check
+whose `NONE` is cheaper to produce than the property it stands for.**
+
+**R38-3 — the requirement registry said its IDs and statements were "unchanged except MCP-AUTH-006".** That
+is false in both directions: this remediation **adds sixteen IDs** (`MCP-PROTO-001..014`, `MCP-ID-008`,
+`MCP-INSP-009`) and **rewrites seven statements** (`MCP-AUTH-003`, `MCP-AUTH-006`, `MCP-EVENT-001`,
+`MCP-EVENT-002`, `MCP-INSP-001`, `MCP-INSP-008`, `MCP-OPS-002`). A provenance note is the one thing a
+reviewer reads **instead of** the diff, so a false one is worse than none — and this was in the canonical
+registry, the document where the change list most needs to be exact. The note now carries the enumerated
+sets, states that none were removed, and says plainly what the old sentence hid.
+
+**The sweep found two more provenance claims, and one of them was also false.** Grepping the package for
+"unchanged" claims rather than fixing the reported line:
+
+- `OPEN-DECISIONS.md` — "All other decisions are unchanged." The touched blocks are exactly the seven the
+  note names, **but it omitted that D-14 is entirely new**. Now stated.
+- `VERIFIED-REPOSITORY-CONTEXT.md` — "Non-⟳ rows are unchanged." **False for two rows**: `ID-token
+  validation` (its *Class for MCP* cell was rewritten for ADR-0024 §D-2) and `OpenAPI contract + CI gate`
+  (ADR-0018 re-cited by path). Both are text corrections rather than line-range fixes, so they carry no ⟳;
+  the note now names them.
+- `PR0-REVIEW-CHECKLIST.md` — its "no code/CI/config/runtime change" line predates round 36's
+  `predicates/`. Qualified to **no product code**, with the predicates named as non-workflow document checks.
+
+**Predicate 25 makes this class enumerable instead of remembered.** It parses each provenance note's own
+claimed sets and compares them against `git merge-base HEAD origin/main`: added/rewritten requirement IDs,
+touched decision blocks, and every repository-context row that changed without a ⟳ or a mention. Four seeds
+fire (drop an added ID; drop a rewritten ID; drop D-14; drop a named row); residual `NONE`. **The diff is
+the authority, which is the only thing that can check a claim about a diff.**
+
+**Twenty-ninth amendment — a predicate must detect the prohibited MEANING, and must not lose coverage to a
+reformat.** Matching one phrasing, or gating on a token that a cosmetic edit can move, produces a `NONE`
+that costs nothing to obtain. Every predicate's seeds must include **a differently-worded instance** of the
+defect and **a layout change**, not just the exact construction that prompted it.
+
+**Thirtieth amendment — a provenance claim is checkable only against the diff.** "Unchanged except X" is an
+assertion about a commit range; recollection cannot verify it and neither can reading the document. If a
+document claims what a change did, a predicate must derive that from `git`.
+
+**Standing note.** Rounds 22–38: seventeen consecutive rounds. Rounds 33 → 38 are one chain — a gate, its
+failure modes, its assertion set, the evidence for that set, the correctness of the evidence, and now the
+evidence's own coverage. Round 37 said the four unreviewed predicates had been "audited by me, which is
+exactly the assurance this finding just devalued." Two of those four were wrong, and review found both.
+
+**Unchanged by round 38:** no requirement, threat or abuse-case ID added, removed or renumbered — the
+registry's *statements* are untouched; only the provenance note changed. No diagram edge added or removed.
+ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements /
+0 duplicates / 27 contiguous abuse cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII
+strays; changes confined to `docs/`; PR-1 not begun.

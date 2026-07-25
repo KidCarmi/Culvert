@@ -46,6 +46,7 @@ CLASSES = {
 # clause ("credential issue/rotation/revocation ⇒ …"), so allow bounded text
 # that crosses no other separator
 SEP = r'[^;⇒:→|]{0,50}?\s*(?:⇒|:|→)'
+CLAUSE_WINDOW = 400   # a clause may wrap across lines; the scan is text-wide
 
 
 def keys(text):
@@ -113,22 +114,31 @@ def table_drift():
 
 def clauses(text):
     """Per-class ABSENCE clauses: the text introduced by `<class> ⇒ | : | →`, up to
-    the next `;`.  An ORDERING clause ("… ⇒ before the upstream call") is a
-    different statement and is excluded — it says when the commit happens, not
-    what the test asserts did not happen."""
+    the next `;` or the end of the sentence.
+
+    Scanning is over the WHOLE text with a character window, and carries NO
+    line-level prerequisite.  An earlier version required the literal string
+    `upstream call` to appear on the same LINE before it would look at a line at
+    all — so a purely cosmetic reflow into one bullet or line per class would
+    have skipped the configuration-publication and Management clauses entirely
+    (neither names an upstream call) and still printed `NONE`.  A Markdown
+    reformat must never change what this predicate covers.
+
+    An ORDERING clause ("… ⇒ before the upstream call") is a different statement
+    and is excluded — it says when the commit happens, not what the test asserts
+    did not happen.
+    """
     out = []
-    for line in text.splitlines():
-        if 'upstream call' not in line:
-            continue
-        for name, pat in CLASSES.items():
-            for m in re.finditer(r'(?:' + pat + r')' + SEP, line):
-                clause = line[m.end():].split(';')[0]
-                bare = re.sub(r'[*_`]', '', clause).strip()
-                if bare.lower().startswith('before'):
-                    continue          # ordering precondition, not an absence assertion
-                if not re.search(r'\bno\b|\bNO\b|nothing|NOTHING|unchanged|ABSENCE', clause):
-                    continue          # not an absence enumeration at all
-                out.append((name, clause))
+    flat = text.replace('\n', ' ')
+    for name, pat in CLASSES.items():
+        for m in re.finditer(r'(?:' + pat + r')' + SEP, flat):
+            clause = re.split(r';|(?<=[a-z])\.\s', flat[m.end():m.end() + CLAUSE_WINDOW])[0]
+            bare = re.sub(r'[*_`]', '', clause).strip()
+            if bare.lower().startswith('before'):
+                continue          # ordering precondition, not an absence assertion
+            if not re.search(r'\bno\b|\bNO\b|nothing|NOTHING|unchanged|ABSENCE', clause):
+                continue          # not an absence enumeration at all
+            out.append((name, clause))
     return out
 
 
@@ -172,6 +182,13 @@ if __name__ == '__main__':
             'docs/design/mcp/CI-GATES.md',
             ('credential issue/rotation/revocation ⇒ **broker-side credential state unchanged** (nothing minted, rotated or revoked) **AND no upstream call occurred**',
              'credential issue/rotation/revocation ⇒ **broker-side credential state unchanged** (nothing minted, rotated or revoked)')),
+        # LAYOUT INDEPENDENCE: a cosmetic reflow into one line per class must not
+        # reduce coverage.  This seed reflows AND weakens the publication clause;
+        # under the old line-level `upstream call` prerequisite it went undetected.
+        'CI-GATES: reflow to one line per class AND drop the publication epoch/push assertions': (
+            'docs/design/mcp/CI-GATES.md',
+            ('configuration publication ⇒ **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**',
+             'configuration publication ⇒ **no new configuration revision exists**\n  (reflowed onto its own line, away from any mention of an upstream call)')),
     }
     ok = True
     tmp = tempfile.mkdtemp()

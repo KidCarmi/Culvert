@@ -11,7 +11,10 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 > the numbered ADR [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
 > (per-decision closure blocks below). **D-0** is promoted to ADR-0024 (`Status: Proposed`) — the PR-1 gate
 > closes only on ARB + Security Architecture ratification. **D-1** is **elevated to a hard PR-1 entry gate**
-> and remains OPEN. All other decisions are unchanged.
+> and remains OPEN. **D-14 is NEW** (protocol-kernel concrete limit values and batch support, added by the
+> same remediation). Enumerated from the diff against the merge base rather than from recollection: the
+> decision blocks this remediation touched are exactly **D-0, D-1, D-2, D-5, D-8, D-9, D-13** plus the new
+> **D-14**; every other decision block is byte-unchanged (`predicates/predicate-25.py`).
 
 ---
 

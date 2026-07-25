@@ -81,7 +81,7 @@ the specific document and ID.
 - [ ] No document presents a roadmap feature as implemented.
 - [ ] Every repository claim carries file · symbol · line evidence or is marked `NOT VERIFIED` / `[EXT]`.
 - [ ] Management MCP and Security Gateway are never merged.
-- [ ] Only files under `docs/design/mcp/` **plus the promoted `docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`** changed; the source DOCX and diagram assets are unchanged; no code/CI/config/runtime change; no listener.
+- [ ] Only files under `docs/design/mcp/` **plus the promoted `docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`** changed; the source DOCX and diagram assets are unchanged; **no product code, CI workflow, config or runtime change** — the standalone document-structure checks under `docs/design/mcp/predicates/` are Python but are not wired to any workflow and check *these documents*, not the product; no listener.
 - [ ] Implementation sequence is PR-0 … PR-11 + separate Production Qualification (no PR-12 unless justified in [`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) D-12).
 
 ## Sign-off
