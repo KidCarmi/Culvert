@@ -219,7 +219,7 @@ affected.
 | **Hot-path glue** | `autoexclude_resolve.go` (package main) | Gates learn+read on the rule's fail-open opt-in; classifies TLS failures into learnable reasons; derives client-evidence token; fires audit/alert/metric on promotion. |
 | **Decision point** | `proxy.go` → `resolveSSLAction` | Per-CONNECT consult: if the rule is fail-open and the host is excluded, downgrade Inspect → Bypass. |
 | **Failure sites** | `proxy_tunnel.go`, `proxy_tunnel_h2.go` | Where an inspect handshake fails; call `maybeFailOpenOrigin` / `maybeFailOpenClient`. |
-| **Decryption Profile** | `internal/decryptprofile` | Holds the `OnInspectError` field; `FailOpenScope(name)` is the no-copy hot-path accessor returning `(profileID, isFailOpen)`. |
+| **Decryption Profile** | `internal/decryptprofile` | Holds the `OnInspectError` field; `FailOpenScope(name)` is the no-copy hot-path accessor returning `(profileID, securityGen, ok)` (ok iff the profile exists and is fail-open). |
 | **Admin API** | `apiDecryptionExclusions` (`ui_policy.go`) | `GET` list+stats+footprint (viewer), `DELETE` evict/clear (operator). |
 | **Cache Tuning API** | `ui_policy.go` (`GET`/`PUT /api/decryption-exclusions/tunables`) | `GET` defaults+bounds (viewer), `PUT` full-set update of the five engine parameters (admin). |
 | **UI** | Decryption Exclusions panel (`static/index.html`) | Read/evict surface, the **Cache Tuning** section (admin-only), and the fail-open toggle on the profile editor. |
