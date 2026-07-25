@@ -7,7 +7,7 @@ and labeled `[VERIFIED file:line]`, `[INFERENCE]`, or `[RECOMMENDATION]`. This
 register documents **current behavior**; it does **not** prescribe a global
 breaking migration. See "Standard error contract" at the end for the
 migration-safe target. Produced by an independent Application-Security reviewer
-as part of ADR-0007.
+as part of ADR-0018.
 
 ## 0. Executive summary
 

@@ -99,7 +99,7 @@ tagged release, with no MCP-specific SBOM/provenance content (e.g., no MCP-tool-
 | `install-lifecycle-e2e.yml` + `maint-agent-*-e2e.yml` | Nightly + installer-surface PRs | Advisory/path-gated — not a general MCP gate |
 | `qa-gate.yml` / `security-release-gate.yml` | Full functional QA / 10-check security scan on main pushes, tags (security), weekly cron (security) | Pass-through shell on PRs (does not block PR merge); real content runs post-merge |
 | `code-review.yml` | Reviewdog inline lint, PR-size, conventional commits | Advisory PR DX — never blocks |
-| `api-contract.yml` + `pr-api-governance.yml` | Breaking-change + client-gen check on `api/openapi/openapi.yaml` changes | **Existing, Blocking for API changes** — any MCP Management API surface (Capability A) that extends `api/openapi/openapi.yaml` is already gated by these two checks per ADR-0007 |
+| `api-contract.yml` + `pr-api-governance.yml` | Breaking-change + client-gen check on `api/openapi/openapi.yaml` changes | **Existing, Blocking for API changes** — any MCP Management API surface (Capability A) that extends `api/openapi/openapi.yaml` is already gated by these two checks per ADR-0018 |
 
 ## Production-readiness gates — Proposed
 
@@ -185,7 +185,7 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 | `fuzz-nightly.yml` | advisory/scheduled | Advisory | No | — | Yes |
 | Dependency Obituary | advisory/scheduled | Advisory | No | — | Yes |
 | DAST / load / stress nightlies | advisory/scheduled | Advisory | No | — | Yes |
-| `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0007 contract | Yes |
+| `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0018 contract | Yes |
 | Production Qualification evidence pack | prod-readiness | Proposed | Human sign-off gate, not automated PR check | All MCP-* IDs (aggregate) | No |
 | Protocol-kernel fuzz gate (PR-time, bounded) | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001,002,006,007,008,009,013 | No |
 | Protocol-kernel structural + protocol-state suite | proposed (target PR-1) | Proposed | Yes, for PR-1 | MCP-PROTO-001..008,012,013 | No |

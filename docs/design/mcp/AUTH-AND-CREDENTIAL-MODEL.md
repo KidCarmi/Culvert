@@ -43,9 +43,11 @@ delegation concept. **[REC]** it is reusable, after refactor, only as the concre
 **Human** principal below (see **MCP-ID-001**) — it cannot stand in for Workload, Agent, Client, Tenant,
 MCP Server, Tool or Resource, which are new principal types this program must introduce.
 
-The eight principal types below mirror [BLUEPRINT.md](BLUEPRINT.md) §10's identity table, each defined
-separately because policy evaluates them independently — collapsing any two loses the distinctions a
-decision needs (e.g. "which agent, owned by which human, running in which client, against which tenant").
+The eight principal types below extend [BLUEPRINT.md](BLUEPRINT.md) §10's seven-entity identity table
+with **Tenant** elevated from a field on Human/Resource to its own principal type (marked `[INFER]`
+net-new below), each defined separately because policy evaluates them independently — collapsing any
+two loses the distinctions a decision needs (e.g. "which agent, owned by which human, running in which
+client, against which tenant").
 
 | Identity | Minimum Fields | Policy Use | Notes |
 |---|---|---|---|

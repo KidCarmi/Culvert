@@ -1,6 +1,6 @@
 # API Documentation — OpenAPI Tooling Research
 
-External research supporting ADR-0007. Scope: tooling to author, validate, lint,
+External research supporting ADR-0018. Scope: tooling to author, validate, lint,
 diff, and render the Culvert admin REST API (~180 `net/http` ServeMux routes).
 Constraints: single static Go 1.25 binary, air-gapped, **no CDN/no runtime
 internet**, reproducible builds, `go test -race ./...` as the required gate,
@@ -14,7 +14,7 @@ the linked release page before pinning.
 ## 0. Culvert adoption decision (what we actually shipped)
 
 The abstract research recommendation is 3.1.1. **Culvert adopted 3.0.4** for one
-decisive, context-specific reason documented below and in ADR-0007: our enforced
+decisive, context-specific reason documented below and in ADR-0018: our enforced
 conformance gates use kin-openapi's in-process request/response validation, which
 is 3.0-mature. Everything else in the recommended Go-native toolchain was adopted:
 

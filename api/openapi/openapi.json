@@ -3011,6 +3011,55 @@
         "description": "Supportability status (debug level, bundle state, retention).",
         "type": "object"
       },
+      "SupportTelemetryPreview": {
+        "additionalProperties": false,
+        "description": "The exact support-telemetry sample that would be sealed and sent right now, IF telemetry were enabled — it is not; no consent switch, sender, or egress exists in this build. This is a lossless rendering of the complete inner sample: schema_version and registry_hash identify the governed metric schema (any eligible-metric or bucket-definition change bumps registry_hash); sample_epoch and sequence are the non-identifying delivery-identity fields the wire contract carries (sample_epoch is a random per-process token, never a stable appliance fingerprint; Slice 1 has no delivery sequence counter yet, so sequence is always 0); metrics are the current values of exactly the telemetry-eligible entries in the scoped support-metric registry. Does not imply future previews will be byte-for-byte identical — only the schema/eligible-set identity is stable.",
+        "properties": {
+          "generated_at": {
+            "description": "RFC3339 UTC timestamp this sample was built.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Telemetry-eligible metric id -> current scalar value.",
+            "type": "object"
+          },
+          "registry_hash": {
+            "description": "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition).",
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "sample_epoch": {
+            "description": "Non-identifying, caller-supplied per-process-lifetime random token (128-bit hex). Never a stable appliance fingerprint.",
+            "pattern": "^[0-9a-f]{32}$",
+            "type": "string"
+          },
+          "schema_version": {
+            "description": "Governed telemetry wire-schema version.",
+            "enum": [
+              3
+            ],
+            "type": "integer"
+          },
+          "sequence": {
+            "description": "Per-epoch delivery sequence number. Always 0 in Slice 1 (no delivery counter exists yet).",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "registry_hash",
+          "generated_at",
+          "sample_epoch",
+          "sequence",
+          "metrics"
+        ],
+        "type": "object"
+      },
       "SyslogConfig": {
         "additionalProperties": false,
         "properties": {
@@ -16399,6 +16448,45 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.1.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/support/telemetry/preview": {
+      "get": {
+        "description": "M7 Slice 1. Renders the exact current support-telemetry sample — governed metric names/values plus schema_version and registry_hash — that would be sealed and sent if telemetry were ever enabled. There is no telemetry consent switch, no sender, and no egress anywhere in this build; this route creates no persistent state, enables nothing, and sends nothing.",
+        "operationId": "getSupportTelemetryPreview",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportTelemetryPreview"
+                }
+              }
+            },
+            "description": "Current governed telemetry sample preview."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Support-telemetry sample preview (read-only; no sender exists)",
+        "tags": [
+          "support"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.1.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

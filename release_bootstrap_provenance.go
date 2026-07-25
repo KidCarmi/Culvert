@@ -1,4 +1,4 @@
-// Bootstrap provenance (G1) — make the appliance able to prove which signed-catalog
+// Bootstrap provenance — make the appliance able to prove which signed-catalog
 // decision provisioned it.
 //
 // `culvert bootstrap-resolve --out` writes the full decision (immutable digest,

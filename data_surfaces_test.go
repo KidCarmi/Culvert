@@ -42,6 +42,7 @@ var collectedStructs = []any{
 	timelineSection{},
 	timelineEvent{},
 	localHealthSection{},
+	supportMetricsSection{},
 }
 
 func TestDataSurfaces_EveryCollectedFieldClassified(t *testing.T) {

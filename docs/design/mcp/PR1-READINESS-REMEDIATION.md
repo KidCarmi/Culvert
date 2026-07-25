@@ -152,10 +152,12 @@ noting the repo's two `0007` ADRs). Redaction row → `class.go · DataClass · 
 
 ### L-3 — ADR numbering language — **RESOLVED (verified) + collision-driven renumber**
 ADR-0024 carries a **Numbering** note: `0024` is the **next free number across the repository-wide ADR/RFC
-allocation** — `docs/adr/` reaches `0017` (with legacy duplicates `0008`–`0011` and `ADR-0007-openapi-
-contract.md`), `docs/support/rfc/` holds `0012` and `0018`–`0022`, so `0022` was the highest allocated on
-`main`; **`0023` is taken by open PR #854's unrelated Durable Configuration Publication ADR**, so this MCP
-ADR is **`0024`** (verified `origin/main` `2eef667` + PR #854). No doc calls it "next sequential in
+allocation**. *(Post-sync update: `main` has since renamed the OpenAPI-contract ADR from the former
+`ADR-0007-openapi-contract.md` to `docs/adr/0018-openapi-contract.md`, so `docs/adr/` now runs `0001–0018`
+and the `0007` slot is solely the secret-containment ADR.)* `docs/support/rfc/` holds `0012` and
+`0018`–`0022` (highest RFC `0022`); **`0023` is taken by open PR #854's unrelated Durable Configuration
+Publication ADR**, so this MCP ADR is **`0024`** (verified unique against `origin/main` `7791c706` + PR #854).
+No doc calls it "next sequential in
 `docs/adr/`". (The superseded `ADR-PROPOSAL` is already a pure pointer with no "next in sequence" language.)
 
 ### Renumber & review-artifact treatment (collision follow-up)
@@ -298,3 +300,33 @@ See the "Validation" section results recorded in the delivering message / commit
 threat-ID, requirement-ID, duplicate-ID, and undefined-reference checks pass; no file outside
 `docs/adr/0024-*` and `docs/design/mcp/**` changed; no `.go/.mod/.sum/.yml/.yaml`/config/binary file changed;
 the source DOCX and diagram assets are byte-unchanged.
+
+---
+
+## Main-sync reconciliation (round 4 — merge with current `origin/main`)
+
+Merged current `origin/main` (`7791c706`) into the review branch with `--no-ff` (no rebase, no force-push;
+published history preserved). Reconciliation outcomes:
+
+- **OpenAPI ADR renumber (main governance):** `main` renamed the OpenAPI-contract ADR from the former
+  `ADR-0007-openapi-contract.md` to `docs/adr/0018-openapi-contract.md` (the `0007` slot is now solely the
+  secret-containment ADR). Every MCP reference where **ADR-0007 meant the OpenAPI contract** was updated to
+  **ADR-0018 / `docs/adr/0018-openapi-contract.md`** (CI-GATES, SSDLC, VERIFIED-REPOSITORY-CONTEXT, and
+  ADR-0024 `Related` + `Numbering`). References where **ADR-0007 means the secret-containment ADR**
+  (`docs/adr/0007-secret-containment-boundary.md`) were **left unchanged** (CONFIG-SURFACE-MATRIX,
+  AUTH-AND-CREDENTIAL-MODEL, VERIFIED-REPOSITORY-CONTEXT secret row).
+- **Conflicts resolved (2):** `VERIFIED-REPOSITORY-CONTEXT.md` (kept the PR-1 ⟳ citation fixes AND main's
+  ADR-0018 rename) and `ADR-PROPOSAL-mcp-trust-boundary.md` (kept the superseded-by-ADR-0024 pointer — the
+  proposal is promoted on this branch). `CI-GATES.md`, `SSDLC-CONTROL-MAPPING.md` and
+  `AUTH-AND-CREDENTIAL-MODEL.md` auto-merged, keeping both main's ADR-0018 fix and the MCP remediation.
+- **Traceability closed to 91/91:** explicit §1a rows added for the 12 previously token-unreachable
+  requirements — genuine-threat rows for `MCP-ID-001/004/005`, `MCP-CRED-003`, `MCP-CPDP-001`,
+  `MCP-POLICY-005/007`, `MCP-TOOL-005`, `MCP-OPS-003`; a **clearly labeled cross-cutting posture block**
+  (no invented threat) for `MCP-SUPPLY-001/002/004`. Independently recomputed: **91 defined / 91 reachable /
+  0 missing / 0 duplicates** (generic "Unit"/"Integration" harness rows excluded from proof).
+- **ID provenance disambiguated:** first PR-1 remediation allocated `MCP-T-057..074` + `MCP-PROTO-001..013`;
+  the follow-up allocated `MCP-PROTO-014` + `MCP-INSP-009` + `MCP-ID-008`. `MCP-PROTO-014` is counted once.
+- **Preserved review:** `PR1-READINESS-REVIEW.md` is kept **byte-identical**; its one `ADR-0007-openapi-
+  contract.md` mention is a point-in-time observation that was accurate when authored (pre-rename) and is
+  not an operational cross-reference, so it is intentionally not edited.
+- **ADR-0024 remains `Status: Proposed`; unique across all `origin/main` refs and open PRs.**

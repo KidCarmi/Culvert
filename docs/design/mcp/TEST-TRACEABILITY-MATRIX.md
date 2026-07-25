@@ -17,12 +17,13 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 >   per [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)) and made the
 >   connectivity/events/dual-surface rows decision-backed — it **did not renumber or remove** any
 >   previously existing ID.
-> - **PR-1 remediation** ADDED threats **MCP-T-057..074** (18) and the requirement family
->   **MCP-PROTO-001..014** (14 — `MCP-PROTO-014` came in the follow-up).
-> - **Follow-up remediation** ADDED **MCP-INSP-009** (PR-5 listener) and **MCP-ID-008** (PR-3 identity), and
->   `MCP-PROTO-014` (UTF-8/protocol-token handling).
-> - **Independently recomputed totals:** **74 threats**; **91 requirements** (MCP-PROTO **14**, MCP-INSP
->   **9**, MCP-ID **8**; the other families unchanged). No ID was removed; no duplicates/orphans.
+> - **First PR-1 readiness remediation** allocated threats **MCP-T-057..074** (18) and the requirement
+>   family **MCP-PROTO-001..013** (13).
+> - **Follow-up remediation** allocated **MCP-PROTO-014** (UTF-8/protocol-token handling), **MCP-INSP-009**
+>   (PR-5 listener), and **MCP-ID-008** (PR-3 identity) — three new requirement IDs. *(`MCP-PROTO-014` is
+>   counted here once, in the follow-up; it is not part of the first-remediation `001..013` block.)*
+> - **Final totals (independently recomputed):** **74 threats**; **91 requirements** (MCP-PROTO **14**,
+>   MCP-INSP **9**, MCP-ID **8**; the other families unchanged). No ID was removed; no duplicates; no orphans.
 
 IDs: threats `MCP-T-*` ([`THREAT-MODEL.md`](THREAT-MODEL.md)); requirements `MCP-*-*`
 ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); abuse cases `MCP-AC-*` ([`ABUSE-CASES.md`](ABUSE-CASES.md)).
@@ -108,6 +109,24 @@ Owner → Gate chain.
 | MCP-T-054 stdio bypass | MCP-OPS-004 (Origin/Host does **not** control stdio) | Documented V1 limitation; endpoint-bridge roadmap (D-7) | Doc review | Limitation documented | Product/Sec | PR-0 (doc) / D-7 roadmap |
 | MCP-T-055 localhost bypass | MCP-OPS-004 + MCP-INSP-008 (primitive, PR-1) + MCP-INSP-009 (listener, PR-5) where HTTP-listener traffic is involved | Documented limit + Origin/Host validation on the local HTTP listener | Doc review + primitive tests (PR-1) + listener E2E rebinding (PR-5) | Limitation documented; bad Origin/Host rejected | Product/Sec | PR-0 (doc) / PR-1 (primitive) / PR-5 (listener) |
 | MCP-T-056 direct-egress bypass | MCP-OPS-004 (in-product limitation); a customer network-egress policy is a **compensating external control, not an MCP requirement ID** (Origin/Host does **not** control arbitrary direct egress) | Documented V1 limitation | Doc review | Limitation documented | Net/Sec | PR-0 (doc) |
+| MCP-T-006,007 principal typing | MCP-ID-001 | Distinct human/workload/agent/client/tenant/server/tool/resource principals | Principal-model unit tests (each type populated end-to-end) | Principal types populated on decision events | IAM/Eng | PR-3 |
+| MCP-T-045 delegation chain | MCP-ID-004 | Record human→agent→client→server→tool→resource chain without secrets | Event-schema tests (chain present, no secrets) | Delegation chain present; no secrets | IAM/Eng | PR-8 |
+| MCP-T-006,007 ambiguous identity | MCP-ID-005 | Missing/ambiguous identity → DENY for write/high-risk | Ambiguous-identity tests | DENY + reason code on ambiguity | Sec/Eng | PR-6 |
+| MCP-T-022 credential lifetime | MCP-CRED-003 | Short-lived, rotatable-without-downtime, immediately revocable credentials | Rotation/revoke tests | Revoke takes effect; rotation without outage | IAM/PAM | PR-4 |
+| MCP-T-047,050 snapshot fields | MCP-CPDP-001 | Snapshot carries epoch + config/policy/catalog/credential revisions + minimum_dp_version + content_hash+signature | Snapshot-schema tests | All fields present + verified | Eng/SRE | PR-10 |
+| MCP-T-018 nine-action model | MCP-POLICY-005 | Nine decision actions + obligations supported | Action-matrix tests (each action + obligation exercised) | Each action/obligation exercised | Sec/Eng | PR-6 |
+| MCP-T-032,033,039 approval UX | MCP-POLICY-007 | Approval dialog shows exact action/resource/impact/credential | Approval-UX completeness tests | Dialog completeness proven | Product Sec/Eng | PR-9 |
+| MCP-T-014 semantic drift | MCP-TOOL-005 | Semantic/description drift triggers risk re-score + review | Semantic-drift tests | Re-score recorded | Sec/Eng | PR-2 |
+| MCP-T-044,051 operability | MCP-OPS-003 | Dashboards, alerts and runbooks for every incident class | Ops review (runbooks + alerts present) | Runbooks + alerts exist | SRE | Prod-Qual |
+
+**Cross-cutting / posture requirements (no threat ID — supply-chain/build posture; still with explicit
+test, evidence, owner and gate, per the completeness rule — a fake threat is NOT invented for these):**
+
+| Requirement | Type | Control | Verification / test | Evidence | Owner | Gate |
+|---|---|---|---|---|---|---|
+| MCP-SUPPLY-001 | cross-cutting supply-chain posture | Dependencies pinned + minimal; new runtime deps avoided (single-binary posture) | `go.mod` review + `go-licenses` on the first MCP dependency change | Pinned; license-clean | Sec/Release | PR-1 |
+| MCP-SUPPLY-002 | cross-cutting build posture | CI actions pinned to immutable SHAs with least-privilege tokens | Workflow review (no floating action tags) on the first MCP workflow change | SHA-pinned actions | Release | PR-1 |
+| MCP-SUPPLY-004 | cross-cutting response posture | Vulnerability-remediation SLA + emergency-revoke + customer-notification procedure | Runbook review | Documented SLA + revoke + notification procedure | Sec/Release | Prod-Qual |
 
 ## 2. Full test taxonomy → requirement coverage
 
@@ -153,7 +172,10 @@ Owner → Gate chain.
 
 - Every Critical/High threat in [`THREAT-MODEL.md`](THREAT-MODEL.md) §11 appears in §1 with a requirement,
   test, evidence expectation, owner and gate.
-- Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §2
-  row (test coverage).
+- Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §1a
+  row (or the labeled cross-cutting/posture block in §1a) with an explicit test/evidence/owner/gate — **all
+  91 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
+  generic "Unit | all" and "Integration" harness rows, which are **not** counted as requirement-specific
+  proof).
 - Every abuse case `MCP-AC-*` maps to a §1 row via its threat/requirement IDs.
 - Missing suites are labeled **Missing** here and in [`CI-GATES.md`](CI-GATES.md); none is claimed present.
