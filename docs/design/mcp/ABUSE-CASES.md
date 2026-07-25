@@ -171,9 +171,9 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** high event volume.
 - **Path:** saturate the pipeline during a high-risk deny (MCP-T-044,045).
 - **Affected assets:** A-6.
-- **Expected control:** MCP-EVENT-001,002 (spool/backpressure; fail-closed or degraded).
-- **Expected event:** the deny event survives (or the operation fails closed + alert).
-- **Expected policy result:** no silent loss of auth/deny/config/high-risk events.
+- **Expected control:** MCP-EVENT-001,002 (mandatory local encrypted spool + backpressure; for critical write/destructive/config/credential classes: **fail closed AND** degraded mode + alert + loss counter).
+- **Expected event:** the deny event survives; if durability is lost, the triggering critical operation fails closed **and** the system enters degraded mode + alerts.
+- **Expected policy result:** no silent loss of auth/deny/config/high-risk events; degraded mode is not an alternative to fail-closed for critical classes.
 - **Test:** event-durability-under-saturation. **Owner:** SRE/Sec. **Severity:** Critical. **Closure:** zero critical loss demonstrated.
 
 ### MCP-AC-017 — Stale / corrupt snapshot applied

@@ -238,9 +238,13 @@ protocol-kernel-only; PR-5 stays the first listener runtime.
 4. **`MCP-PROTO-012` split.** PR-1 = protocol lifecycle, cancellation, reconnect, **immutable opaque
    session context (no identity)**; **new `MCP-ID-008`** (PR-3) = resolved-identity binding + no
    mid-session rebind. **PR-1 retains identity as a non-goal** (stated in the PR-1 slice and PROTO-012).
-5. **UTF-8/Unicode control added.** **New `MCP-PROTO-014`** (PR-1): reject invalid UTF-8 and NFC-normalize
-   method/identifier names before compare/dispatch (covers `MCP-T-057`/`MCP-T-065`), with fixtures and a
-   traceability row.
+5. **UTF-8/protocol-token control added (accurate semantics).** **New `MCP-PROTO-014`** (PR-1): reject
+   invalid UTF-8; compare method tokens **exactly** against the version allowlist; reject non-ASCII method
+   names until D-1 permits them; opaque user/server/tool identifiers follow **field-specific**
+   canonicalization and are **not** globally normalized by the kernel. **NFC is not claimed as a
+   homoglyph/confusable defense** — confusable handling for any later Unicode-identifier profile needs an
+   explicit field-level policy + dedicated tests. Covers `MCP-T-057`/`MCP-T-065` without overstating the
+   control.
 6. **Traceability completeness.** Explicit §1a rows added for `MCP-AUTH-008`, `MCP-EVENT-004`,
    `MCP-EVENT-006`, `MCP-CONNECT-004`; the "Unit | all" row is annotated as **not** requirement-specific
    proof; the outdated "no IDs added/removed" impression is corrected (three IDs added — see the callout

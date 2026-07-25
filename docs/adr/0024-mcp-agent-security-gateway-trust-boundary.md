@@ -56,9 +56,10 @@ first such record and is a **hard PR-1 entry gate**.
    config/policy/catalog/credential revisions + `minimum_dp_version` + **content-hash + signature**,
    validated whole and applied atomically, reusing the `halease`/`dpObserveEpoch` fencing and DP
    fail-static behavior. (Signing scheme selection is D-10, deferred to PR-10.)
-7. **New inbound Origin/Host anti-rebinding control** for the MCP/SSE listener (MCP-INSP-008), which does
-   not exist today. This ships in **PR-1** for the local listener, independent of whether any DMZ model is
-   ever offered (see D-9).
+7. **New inbound Origin/Host anti-rebinding control**, which does not exist today, split across two slices:
+   the **pure Origin/Host validation primitive `MCP-INSP-008` ships in PR-1** (no listener), and the
+   **listener that binds configured interfaces and enforces it end-to-end is `MCP-INSP-009` at PR-5**. This
+   is independent of whether any DMZ model is ever offered (see D-9).
 8. **Package placement under `internal/mcp/*`**, consistent with ADR-0002; the exact split/naming is
    evaluated (not adopted) in `RECOMMENDED-ARCHITECTURE.md`. Every new config field follows the
    config-surface anti-drift registry and GUI-parity mandate.

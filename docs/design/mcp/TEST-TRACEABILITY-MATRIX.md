@@ -12,10 +12,17 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 > [`ADR-0024` PR-1 entry gate](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md), the repository
 > build/test baseline **MUST** be run and recorded before any PR-1 code change begins.
 >
-> **Decision provenance (2026-07-24):** the replay row (MCP-T-002 / MCP-AUTH-006) is reframed per
-> [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (sender-constraint /
-> DPoP-proof, not access-token one-time-use). All other rows keep their IDs; the D-5/D-8/D-9/D-13 rows are
-> now decision-backed. No threat or requirement ID was added or removed.
+> **ID provenance (accurate history):**
+> - **Decision closure (D-2/D-5/D-8/D-9/D-13, 2026-07-24)** reframed the replay row (MCP-T-002 / MCP-AUTH-006
+>   per [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)) and made the
+>   connectivity/events/dual-surface rows decision-backed — it **did not renumber or remove** any
+>   previously existing ID.
+> - **PR-1 remediation** ADDED threats **MCP-T-057..074** (18) and the requirement family
+>   **MCP-PROTO-001..014** (14 — `MCP-PROTO-014` came in the follow-up).
+> - **Follow-up remediation** ADDED **MCP-INSP-009** (PR-5 listener) and **MCP-ID-008** (PR-3 identity), and
+>   `MCP-PROTO-014` (UTF-8/protocol-token handling).
+> - **Independently recomputed totals:** **74 threats**; **91 requirements** (MCP-PROTO **14**, MCP-INSP
+>   **9**, MCP-ID **8**; the other families unchanged). No ID was removed; no duplicates/orphans.
 
 IDs: threats `MCP-T-*` ([`THREAT-MODEL.md`](THREAT-MODEL.md)); requirements `MCP-*-*`
 ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); abuse cases `MCP-AC-*` ([`ABUSE-CASES.md`](ABUSE-CASES.md)).
@@ -66,7 +73,7 @@ Gate = slice/CI gate that must be green.
 | MCP-T-069 protocol-state confusion (lifecycle) | MCP-PROTO-012 | Immutable opaque session context; lifecycle validated; cancel/reconnect handled (no identity) | Protocol-lifecycle + cancellation-race + reconnect tests | Opaque context; races handled; reconnect re-validated | Sec/Eng | PR-1 |
 | MCP-T-069 identity rebind | MCP-ID-008 | One resolved identity bound per session; mid-session rebind denied | Identity-binding + no-rebind + cross-session tests | No mid-session identity rebind | IAM/Eng | PR-3 |
 | MCP-T-074 hostile-input crash/panic | MCP-PROTO-009, MCP-PROTO-013 | Crash-resistant parse/adapter; bounded error + cleanup | Fuzz (panic/crash detection) + race | No panic/crash on corpus; bounded error | Sec/Eng | PR-1 |
-| MCP-T-057/065 UTF-8 / Unicode identifier handling | MCP-PROTO-014 | Reject invalid UTF-8; NFC-normalize method/identifier names before compare/dispatch | Invalid-UTF-8 + NFC-normalization + confusable-identifier fixtures | Invalid UTF-8 rejected; identifiers normalized; confusables collapsed | Sec/Eng | PR-1 |
+| MCP-T-057/065 UTF-8 / protocol-token handling | MCP-PROTO-014 | Reject invalid UTF-8; **exact** method-token comparison; reject non-ASCII method names (pending D-1); opaque identifiers not globally normalized by the kernel | Invalid-UTF-8 rejection + exact-comparison + non-ASCII-method-rejection (D-1-gated) + no-global-normalization fixtures | Invalid UTF-8 rejected; method tokens compared exactly; non-ASCII methods rejected; opaque IDs untouched by kernel normalization | Sec/Eng | PR-1 |
 
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
@@ -98,7 +105,9 @@ Owner → Gate chain.
 | MCP-T-052 DMZ abuse | MCP-CONNECT-003, MCP-INSP-009 | OAuth/WAF/Origin/rate + listener-side host allowlist | DMZ-abuse tests | Controls enforced | Net/Sec | **Future DMZ Architecture & Production-Readiness Gate** |
 | MCP-T-010 tenant-binding failure (connector/DMZ session) | MCP-CONNECT-004, MCP-ID-007 | Tenant-bound connector/DMZ session | Tenant-binding tests | Session bound to tenant; cross-tenant denied | Net/Sec | **PR-C** (connector) / Future DMZ gate |
 | MCP-T-053 data residency | MCP-PRIVACY-001,003 | DLP-before-egress | Egress-gate tests | DLP proven | Privacy/Legal | PR-11 |
-| MCP-T-054, MCP-T-055, MCP-T-056 bypass (stdio/localhost/direct-egress) | MCP-OPS-004, MCP-INSP-008 | Documented limit + inbound guard | Doc review + inbound tests | Limitation documented | Product/Sec | PR-0/PR-1 |
+| MCP-T-054 stdio bypass | MCP-OPS-004 (Origin/Host does **not** control stdio) | Documented V1 limitation; endpoint-bridge roadmap (D-7) | Doc review | Limitation documented | Product/Sec | PR-0 (doc) / D-7 roadmap |
+| MCP-T-055 localhost bypass | MCP-OPS-004 + MCP-INSP-008 (primitive, PR-1) + MCP-INSP-009 (listener, PR-5) where HTTP-listener traffic is involved | Documented limit + Origin/Host validation on the local HTTP listener | Doc review + primitive tests (PR-1) + listener E2E rebinding (PR-5) | Limitation documented; bad Origin/Host rejected | Product/Sec | PR-0 (doc) / PR-1 (primitive) / PR-5 (listener) |
+| MCP-T-056 direct-egress bypass | MCP-OPS-004 (in-product limitation); a customer network-egress policy is a **compensating external control, not an MCP requirement ID** (Origin/Host does **not** control arbitrary direct egress) | Documented V1 limitation | Doc review | Limitation documented | Net/Sec | PR-0 (doc) |
 
 ## 2. Full test taxonomy → requirement coverage
 

@@ -304,7 +304,7 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 | MCP-T-062 | Framing ambiguity / truncated / partial message mishandled | Medium | MCP-PROTO-005,013 | Sec/Eng |
 | MCP-T-063 | Oversized message / excessive JSON depth / field-count / string-size (parse-time exhaustion) | High | MCP-PROTO-006,008 | SRE/Sec |
 | MCP-T-064 | Numeric overflow / pathological number encodings | Medium | MCP-PROTO-007 | Sec/Eng |
-| MCP-T-065 | Unicode-normalization confusion in method/identifier names | Medium | MCP-PROTO-014 (NFC-normalize identifiers before compare/dispatch) + MCP-PROTO-001 | Sec/Eng |
+| MCP-T-065 | Unicode-normalization confusion in method/identifier names | Medium | MCP-PROTO-014 (exact method-token comparison + reject non-ASCII method names pending D-1; NFC is **not** a confusable defense; opaque-ID confusable handling deferred to a field-level policy) + MCP-PROTO-001 | Sec/Eng |
 | MCP-T-066 | Version-negotiation confusion / unknown-version accepted best-effort | High | MCP-PROTO-010 | Sec/Eng |
 | MCP-T-067 | Downgrade to an unsupported/weaker protocol semantics | High | MCP-PROTO-010 | Sec/Eng |
 | MCP-T-068 | Version-adapter differential (same input → divergent normalized message across adapters) | High | MCP-PROTO-011 | Sec/Eng |
@@ -352,5 +352,7 @@ without an owner is a NO-GO** ([`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md))
 > owners and are recorded in [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md):
 > D-2 → MCP-T-001..010 (esp. MCP-T-005 Critical passthrough); D-5 → MCP-T-044 Critical / MCP-T-028 /
 > MCP-T-045; D-8 → MCP-T-051 / MCP-T-053 (residual R-5) / MCP-T-010; D-9 → MCP-T-052 / MCP-T-031 (inbound
-> Origin/Host, Missing-today → MCP-INSP-008 in PR-1); D-13 → MCP-T-034 Critical / MCP-T-035. No closure
+> Origin/Host, Missing-today, split across two layers: **`MCP-INSP-008` — the PR-1 pure Origin/Host
+> validation primitive (no listener); `MCP-INSP-009` — the PR-5 listener binding + end-to-end
+> enforcement**); D-13 → MCP-T-034 Critical / MCP-T-035. No closure
 > removes a threat's owner or residual acceptance in §12.

@@ -675,14 +675,16 @@ Last reviewed: 4 days ago
 ### Event Durability
 
 The MCP event pipeline must be separate from, or materially extend beyond, a small in-memory debug
-ring. Production security evidence requires bounded queues, backpressure, disk spool or durable export,
-replay identifiers and an explicit loss policy. *(Refined by closed decision D-5 / `ADR-0024 §D-5` and
-`MCP-EVENT-001`: the local encrypted durable **spool is mandatory on every relevant Data Plane** and
-external export is **additive, never a substitute** — "spool or export" is not satisfied by export alone.)*
+ring. Production security evidence requires bounded queues, backpressure, a **mandatory local encrypted
+durable spool on every relevant Data Plane** (external export is **additive, never a substitute**), replay
+identifiers and an explicit loss policy (D-5 / `ADR-0024 §D-5`, `MCP-EVENT-001`).
 
 > Loss of authentication, deny, configuration or high-risk decision events is unacceptable. If the
-> pipeline cannot preserve them, write/high-risk operations must fail closed or the system must enter a
-> defined degraded mode and alert.
+> pipeline cannot preserve them, the critical **write / destructive / configuration-publication / credential**
+> classes **MUST fail closed AND** the system **MUST** enter the defined degraded mode with alerting and an
+> integrity-protected loss counter — degraded mode is **not** an alternative to fail-closed for critical
+> classes. Read-only / low-risk operations may proceed **only** under an explicitly approved degraded-mode
+> policy (`MCP-EVENT-002`, EVENT-MODEL §4a).
 
 ---
 

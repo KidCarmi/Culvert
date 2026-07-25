@@ -74,9 +74,9 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** reuse of SWG identity/OIDC-flow assumptions; policy.
 - **Trust boundary:** TB-1.
 - **Dependencies:** PR-1.
-- **Security requirements:** MCP-AUTH-001..008; MCP-ID-001..007.
-- **Tests:** negative auth matrix, wrong-audience, wrong-resource, replay, tenant-escape, cross-session.
-- **Acceptance:** no reuse of SWG identity; negative auth matrix passes; replay defense present.
+- **Security requirements:** MCP-AUTH-001..008; **MCP-ID-001..008** (`MCP-ID-008` = resolved-identity binding to a protocol session + no mid-session rebind, the identity half split out of the PR-1 `MCP-PROTO-012`).
+- **Tests:** negative auth matrix, wrong-audience, wrong-resource, replay, tenant-escape, cross-session; **one resolved identity bound to one protocol session; mid-session identity rebind denied; concurrent sessions do not leak/exchange identity (MCP-ID-008)**.
+- **Acceptance:** no reuse of SWG identity; negative auth matrix passes; replay defense present; **exactly one resolved identity per session, rebind denied, no cross-session identity leakage; PR-1 remains identity-agnostic (carries only the immutable opaque session context — `MCP-PROTO-012`)**.
 - **Rollback:** identity module disabled → gateway denies (fail-closed).
 - **Owner:** IAM/Eng. **Reviewer:** Sec Arch. **Release gate:** OAuth-negative + replay suites green.
 
@@ -174,7 +174,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** production enablement without Production Qualification; the outbound connector (Model B, post-V1); any DMZ endpoint (Model C, default-off/deferred).
 - **Trust boundary:** TB-1.
 - **Dependencies:** PR-1..PR-10.
-- **Security requirements:** MCP-PRIVACY-001 (DLP-before-egress); hard-fail-in-shadow set. *(MCP-CONNECT-001..004 move to the post-V1 connector slice.)*
+- **Security requirements:** MCP-PRIVACY-001 (DLP-before-egress); hard-fail-in-shadow set. *(Connector/DMZ requirements are **not** in PR-11: **MCP-CONNECT-001, MCP-CONNECT-002 and the connector aspect of MCP-CONNECT-004** move to **PR-C**; **MCP-CONNECT-003 and the DMZ aspect of MCP-CONNECT-004** move to the **Future DMZ Architecture & Production-Readiness Gate**. PR-11 remains Shadow/Canary for **Model A only**.)*
 - **Tests:** shadow decision parity, egress DLP gate.
 - **Acceptance:** production-readiness evidence complete; hard failures blocked even in Shadow.
 - **Rollback:** emergency disable → Observe/Disabled; snapshot rollback.
