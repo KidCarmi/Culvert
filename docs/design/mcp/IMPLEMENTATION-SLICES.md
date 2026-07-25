@@ -171,7 +171,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Trust boundary:** TB-3.
 - **Dependencies:** PR-6, PR-8.
 - **Security requirements:** MCP-CPDP-001..003; MCP-HA-001,002; **MCP-EVENT-002** (the configuration-publication commit-before-publication assertion, which PR-8 can only stub because the signed publication path does not exist until this slice).
-- **Tests:** mixed-version, stale-epoch, corrupt/partial snapshot, rollback, restart/failover, **plus a re-run of the PR-8 event-durability suite against the REAL signed publication path**: with the decision event non-persistable (queue saturated **or** spool commit failed), assert **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**. **Plus a separate ROLLBACK failure-injection case, because rollback's side effect is a SWAP and not a revision:** those forward-path assertions **all pass vacuously for an act-first rollback**, so the suite MUST invoke a rollback with the decision event non-persistable and assert **no swap occurred and the CURRENT snapshot remains active** (DFD-11, `MCP-EVENT-002`).
+- **Tests:** mixed-version, stale-epoch, corrupt/partial snapshot, rollback, restart/failover, **plus a re-run of the PR-8 event-durability suite against the REAL signed publication path**: with the decision event non-persistable under **BOTH** failure modes as separate cases — queue saturated **AND** a distinct post-admission spool-commit failure (`ENOSPC` / `fsync` / encryption-key); **either alone is insufficient** — assert **no new configuration revision exists, nothing was signed or pushed, and every DP remains on the prior epoch**. **Plus a separate ROLLBACK failure-injection case, because rollback's side effect is a SWAP and not a revision:** those forward-path assertions **all pass vacuously for an act-first rollback**, so the suite MUST invoke a rollback with the decision event non-persistable **under both failure modes (saturation AND spool-commit failure)** and assert **no swap occurred and the CURRENT snapshot remains active** (DFD-11, `MCP-EVENT-002`).
 - **Acceptance:** whole-snapshot validation; atomic swap; rollback within SLO target; stale/corrupt rejected; **a non-persistable publication decision event leaves the configuration state byte-unchanged**.
 - **Rollback:** atomic swap to previous snapshot; last-known-good served.
 - **Owner:** Eng/SRE. **Reviewer:** Arch. **Release gate:** mixed-version + corrupt-snapshot + rollback green **+ the PR-8 durability re-run green against the real publication path** — this slice **MUST NOT** be marked green without it (`MCP-EVENT-002`, amendment 18: an assertion must run in a slice where the mechanism exists).
@@ -222,7 +222,10 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   `state-affecting Management operation` class** — this gate **OWNS the real-path assertion**, because PR-8
   can only stub it: no Management mutation mechanism exists before this gate.
 - **Tests:** the PR-8 event-durability suite **re-run against the REAL Management mutation path**, with the
-  decision event non-persistable via **either** queue saturation **or** spool commit failure, asserting
+  decision event non-persistable **under BOTH failure modes, each as its own case — queue saturation AND a
+  distinct post-admission spool-commit failure** (`ENOSPC` / `fsync` error / encryption-key failure). **Either
+  alone is insufficient**: a handler that blocks on saturation but mutates state after an `fsync` failure (or
+  the reverse) would pass a one-mode gate. Assert
   **NO Management state change occurred** — observing the returned error or degraded mode is NOT sufficient.
 - **Owner:** Sec Arch. **Reviewer:** ARB + Security Architecture. **Gate:** this gate **MUST NOT be marked
   green without that re-run** (amendment 18 dual ownership, as for the PR-10 publication re-run); **not**

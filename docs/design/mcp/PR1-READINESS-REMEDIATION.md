@@ -2295,3 +2295,53 @@ consuming cell**, and my sweeps optimise for the former.
 requirement). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91
 requirements / 0 duplicates; no malformed traceability rows; predicates 21-strict and 22 clean; no non-ASCII
 strays; documentation only; PR-1 not begun.
+
+## Round 34 — the gate I created in round 33 could go green on one failure mode, and its own subject flow was ungated (`eca4d838` → next)
+
+Two P2 findings, **both on the `Future Management-Mutation Gate` section round 33 added one round earlier.**
+
+**R34-1 — the gate's test said "non-persistable via EITHER queue saturation OR spool commit failure".**
+`MCP-EVENT-002` requires **both**, as separate cases: saturation *and* a distinct post-admission commit
+failure. "Either" lets the gate go green having exercised one path — and a real mutation handler that blocks
+on saturation but changes state after an `fsync` failure (or the reverse) passes. **The sweep found the
+identical weakening in PR-10's re-run** (`queue saturated **or** spool commit failed`) **and in the rollback
+failure-injection case** — both written in rounds 26/27, both unflagged for eight rounds. All three now
+require BOTH modes as separate cases and say why either alone is insufficient.
+
+**R34-2 — DFD-3 routed `APPR --> PUB[Publish signed snapshot]` directly.** The gate I created designates DFD-3
+as the future Management-mutation flow, and DFD-3 documented publishing straight after four-eyes approval with
+**no durable commit and no failure branch** — i.e. the flow the gate exists to govern still violated the one
+assertion the gate owns. Now `APPR → WALM{commit} → PUB`, with a commit-FAILED arm that publishes nothing and
+changes no Management state, and a caption saying plainly that **human approval is necessary but not
+sufficient**. `PUB`'s only in-edge is `WALM`.
+
+**Predicate 19 was blind to DFD-3, and this is amendment 20's FOURTH failure.** Its action vocabulary carried
+`SIGN[` but nothing matching `PUB[Publish signed snapshot]`, so the one diagram in the package with an
+ungated publication could never be flagged — it reported `NONE` across all fifteen DFDs while DFD-3 sat there.
+The vocabulary now derives from `MCP-EVENT-002`'s own words — *"before the snapshot is **signed, pushed or
+applied**"* — rather than from node names I had happened to write. Seeded by reverting DFD-3's gate: **fires on
+block 3**; residual `NONE`; DFD-8 (post-execution `Upstream response`) still correctly excluded.
+
+**The pattern across amendment 20's four failures is now unambiguous.** Round 27: `Atomic swap` missing.
+Round 32: Management mechanisms missing from predicate 18. Round 34: publish-type nodes missing from
+predicate 19 — *the same predicate I re-derived in round 27*. Re-deriving a predicate once, from the authority,
+at the moment it fails, does not keep it derived. **Each predicate needs its vocabulary re-derived from the
+authority on every round in which that authority's text changes**, and I have never once done that
+prospectively — only in response to a finding that the check missed.
+
+**A note on scope discipline, since it cuts the other way this time.** Round 30 deliberately *excluded* DFD-3
+from the `MCP-INSP-009` sweep, correctly: it has no listener node. That exclusion was sound for that control
+and I recorded it as by-construction. But I never asked the separate question of whether DFD-3 needed the
+**durability** gate. **A justified exclusion from one dimension is not an exclusion from the others**, and
+writing down "excluded by construction" made the diagram feel handled.
+
+**Standing note.** Rounds 22–34: thirteen consecutive rounds, each producing the next round's findings. Round
+33 created a gate; round 34 found that gate could pass on half its contract and that its own subject flow was
+ungated. The gate was still worth creating — the alternative was the dangling reference it replaced — but
+**creating an artifact and getting it right are separate events**, and the ledger should not let the first
+imply the second.
+
+**Unchanged by round 34:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27
+contiguous abuse cases; `CB` in-edges `[WAL]`, `PUB` in-edges `[WALM]`; DFD-3 has no undefined edge targets;
+predicates 13, 19 (re-derived), 21-strict, 22 clean; no non-ASCII strays; documentation only; PR-1 not begun.

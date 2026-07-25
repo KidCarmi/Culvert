@@ -60,11 +60,19 @@ Crosses TB-7, TB-5, TB-3. Threats: MCP-T-034, MCP-T-032, MCP-T-033.
 ```mermaid
 flowchart LR
   AC[AI Client] --> PLAN[Plan] --> VALID[Validate] --> APPR[Human approve four-eyes]
-  APPR --> PUB[Publish signed snapshot]
+  APPR --> WALM{{"DURABLE decision-event COMMIT<br/>state-affecting Management class — MCP-EVENT-002<br/>MUST precede the state change / publication"}}
+  WALM -- "commit FAILED" --> FCM["Fail closed AND degraded + alert<br/>NOTHING published, NO Management state change<br/>the approved mutation is REFUSED, not applied-then-reported"]
+  WALM -- "commit CONFIRMED" --> PUB[Publish signed snapshot]
   PUB --> DP[(Data Planes)]
   APPR -. denied .-> EV[(Decision events)]
 ```
-**Out of scope until plan→validate→approve→apply exists** (MCP-MGMT-001). Shown for completeness.
+**Out of scope until plan→validate→approve→apply exists** (MCP-MGMT-001). Shown for completeness — but
+**gated, because "future" is not "ungated".** This is the flow the **Future Management-Mutation Gate**
+(`IMPLEMENTATION-SLICES.md`, ADR-0024 §D-13) owns, and its whole subject is the `MCP-EVENT-002`
+commit-before-state-change assertion. Leaving `APPR --> PUB` direct would have documented a real mutation
+path that publishes after approval **without** the assertion its own gate exists to enforce — so human
+four-eyes approval is necessary but **not sufficient**: the decision event must be durably committed before
+anything is published or any Management state changes.
 
 ## DFD-4 — Security Gateway tool discovery (Capability B)
 
