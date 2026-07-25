@@ -82,7 +82,10 @@ Crosses TB-1, TB-2. Threats: MCP-T-011..017, MCP-T-020.
 
 ```mermaid
 flowchart LR
-  A[AI Agent] --> G{{/mcp/gateway/server-id}}
+  A[AI Agent] --> HDR4["HTTP header parsing only"] --> HV4["MCP-INSP-009 listener validation — PRECONDITION<br/>Host/:authority/Origin vs the GATEWAY allowlist"]
+  HV4 -.disallowed.-> HVX4["Reject — no kernel entry, no session state touched"]
+  HV4 -->|allowed| K15G["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle<br/>(Gateway bound set)"]
+  K15G --> G{{/mcp/gateway/server-id}}
   subgraph Gateway
     G --> REG[Server registry: allowlist + TLS identity]
     REG --> DISC[Discover + list tools]
@@ -103,7 +106,10 @@ Crosses TB-1, TB-2. Threats: MCP-T-003..008, MCP-T-019, MCP-T-046.
 
 ```mermaid
 flowchart LR
-  A[AI Agent] -- bearer: aud=Culvert --> G{{/mcp/gateway/server-id}}
+  A[AI Agent] -- bearer: aud=Culvert --> HDR5["HTTP header parsing only"] --> HV5["MCP-INSP-009 listener validation — PRECONDITION<br/>Host/:authority/Origin vs the GATEWAY allowlist"]
+  HV5 -.disallowed.-> HVX5["Reject — no kernel entry, no session state touched"]
+  HV5 -->|allowed| K15B["Protocol kernel — see DFD-15<br/>strict decode + bounds + version + lifecycle<br/>(Gateway bound set)"]
+  K15B --> G{{/mcp/gateway/server-id}}
   subgraph Gateway
     G --> ID[Identity resolver: token+aud+resource+replay]
     ID --> II[Input inspection]
@@ -334,7 +340,7 @@ Explicit risk acceptance required (MCP-CONNECT-003); Origin/Host + rate limits m
 
 ## DFD-15 — Protocol-kernel decode path (Capability **A and B**, PR-1)
 
-Crosses **TB-1, TB-7** — Gateway traffic crosses TB-1 and **Management traffic crosses TB-7**, since this kernel is on both listeners' paths. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, **envelope** classification, structural bounds, version negotiation, **version-dependent method/capability admission** and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. **Stage order is load-bearing twice over.** (1) `MCP-PROTO-002` requires classification **per the negotiated version**, so only the *envelope* half (request / response / notification + ID correlation) may precede `VER`; rejecting an unknown **method** or an unadvertised **capability** must happen **after** negotiation, or a valid version-specific method is refused and a version-specific one is checked against the wrong allowlist. (2) DFD-1 and DFD-2 begin **downstream of this diagram for the message body only** — their `MCP-INSP-009` Origin/Host check runs **upstream of the kernel**, immediately after HTTP header parsing, because [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) §Connect makes it a **hard precondition on connect** and this kernel's `MCP-PROTO-003` correlation table and `MCP-PROTO-012` lifecycle machine **touch session state**. They are not an alternative path around the kernel; the kernel is simply not the first thing an HTTP-transport request meets. **PR-1 ships this decode
+Crosses **TB-1, TB-7** — Gateway traffic crosses TB-1 and **Management traffic crosses TB-7**, since this kernel is on both listeners' paths. Threats: MCP-T-057..074 (parser/framing/version/protocol-state). **This is the SAME kernel for BOTH capabilities** — the config surface instantiates `MCP-PROTO-*` bounds per capability, so hostile **Management** traffic traverses strict decoding, **envelope** classification, structural bounds, version negotiation, **version-dependent method/capability admission** and the lifecycle state machine **before** reaching Management authorization or tool handling, exactly as Gateway traffic does, evaluated against the **Management** bound set. **Stage order is load-bearing twice over.** (1) `MCP-PROTO-002` requires classification **per the negotiated version**, so only the *envelope* half (request / response / notification + ID correlation) may precede `VER`; rejecting an unknown **method** or an unadvertised **capability** must happen **after** negotiation, or a valid version-specific method is refused and a version-specific one is checked against the wrong allowlist. (2) **Every inbound path now shows this kernel explicitly** — DFD-1, DFD-2 (Management) and DFD-4, DFD-5 (Gateway) each enter through `HDR → HV → K15…`, and `RECOMMENDED-ARCHITECTURE.md`'s component graph routes **both** the Management client and the Gateway agent through the protocol kernel. A caption asserting "both capabilities traverse the kernel" while the consuming diagrams drew a direct edge would have let an implementer follow either flow straight past strict decode, bounds, admission and lifecycle for one capability (round 43). DFD-1 and DFD-2 begin **downstream of this diagram for the message body only** — their `MCP-INSP-009` Origin/Host check runs **upstream of the kernel**, immediately after HTTP header parsing, because [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) §Connect makes it a **hard precondition on connect** and this kernel's `MCP-PROTO-003` correlation table and `MCP-PROTO-012` lifecycle machine **touch session state**. They are not an alternative path around the kernel; the kernel is simply not the first thing an HTTP-transport request meets. **PR-1 ships this decode
 path and its test harness — but NO public/production listener** (the listener is PR-5). Requirements:
 `MCP-PROTO-001..014`. No policy, credential, or upstream execution happens here. **PR-1 is
 identity-agnostic:** the `MCP-PROTO-012` state machine holds an **immutable, opaque session context that
@@ -347,7 +353,9 @@ flowchart LR
   FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
   DEC --> CLASS["ENVELOPE classification: req / resp / notif<br/>version-INDEPENDENT; ID correlation MCP-PROTO-003<br/>MCP-PROTO-002 (envelope half)"]
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
-  STRUCT --> VER[Protocol-version adapter<br/>allowlist + equivalence, no downgrade<br/>MCP-PROTO-010/011]
+  STRUCT --> BOOT{"BOOTSTRAP admission — version-INDEPENDENT<br/>on an un-negotiated session the ONLY admissible method<br/>is the initialize handshake that SUPPLIES the version<br/>anything else is rejected BEFORE negotiation state is touched"}
+  BOOT -. "un-negotiated session, method != initialize" .-> REJ
+  BOOT --> VER[Protocol-version adapter<br/>allowlist + equivalence, no downgrade<br/>MCP-PROTO-010/011]
   VER --> ADMIT["METHOD / CAPABILITY admission — AFTER negotiation<br/>evaluated against the NEGOTIATED version's allowlist<br/>reject unknown methods + unadvertised capabilities/extensions<br/>MCP-PROTO-002 (version-dependent half)"]
   ADMIT --> NORM["Normalized internal message"]
   NORM --> STATE[Protocol-state machine<br/>immutable OPAQUE session context - no resolved identity<br/>lifecycle / cancellation / reconnect<br/>MCP-PROTO-012]

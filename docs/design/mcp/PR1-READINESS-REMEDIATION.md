@@ -2841,3 +2841,64 @@ set, so the provenance claim is unchanged and `predicate-25` re-verifies clean. 
 `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
 cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`;
 PR-1 not begun.
+
+## Round 43 — my own round-42 fix created a P1, and a caption I strengthened was contradicted by three diagrams (`a15ffdbf` → next)
+
+Five findings, three of them **P1**. Two are consequences of round 42's own corrections, which makes this
+the **fifth** fix-introduced defect round and the second in a row.
+
+**R43-1 (P1) — the round-42 stage split made `STRUCT → VER → ADMIT` unconditional, and the handshake
+supplies the version.** On a new session the `initialize` request is *what establishes* the protocol
+version, so `VER` cannot negotiate before something has admitted that method — leaving two bad options:
+interpret version/capability fields from an **arbitrary, not-yet-admitted** method (mutating negotiation
+state before rejection), or have no admitted handshake at all. DFD-15 now carries a **version-independent
+`BOOT` admission before `VER`**: on an un-negotiated session the only admissible method is the `initialize`
+handshake; anything else is rejected **before** version fields are read or negotiation state is touched.
+`MCP-PROTO-002` and PR-1's structural suite carry the bootstrap case. **I fixed an ordering defect and
+introduced a new one inside the same stage, one round apart.**
+
+**R43-2 (P1) — the "both capabilities traverse this kernel" caption was contradicted by every consuming
+diagram.** `RECOMMENDED-ARCHITECTURE`'s component graph sent the Management client straight to `MGMT` while
+only the Gateway agent reached `PROTO`; DFD-4 and DFD-5 sent the Gateway endpoint straight to `REG`/`ID`.
+An implementer following any of the three would bypass strict decode, bounds, admission and lifecycle **for
+one capability** — and round 42 *strengthened that caption* without checking the graphs it describes. All
+three now route through the kernel explicitly (`HDR → HV → K15 → …`), and the component graph forks
+`PROTO → MGMT` / `PROTO → IDENT` after validation.
+
+**This is amendment 10a's exact failure mode, in the direction I had not considered.** The amendment says a
+fix must reach the cell a gate *consumes*; here the **caption asserted a property the graphs did not
+implement**, so strengthening the words made the package *less* accurate, not more. A claim about what
+every path does is only as true as the paths.
+
+**R43-3 (P2) — `scope_tokens` still dropped `write`.** Round 41's fallback only ran when the six-character
+pass returned nothing; `destructive` satisfied it, so `write` was never derived, and the context tokeniser
+used a six-character floor too. `For a write, …` was still misreported. **The round-41 negative control
+masked it** by saying "a write or destructive operation" — the control contained the token that made the
+bug invisible. One `TOKEN_FLOOR = 4` is now used for derivation **and** context matching, and the new
+control uses the short synonym alone.
+
+**R43-4 (P2) — the bare `class-specific` alternative was an unconditional escape hatch.** Any ordering
+sentence containing that phrase passed before its actions were checked: *"… committed BEFORE the upstream
+call, with class-specific metrics"* certified clean. The marker must now **qualify the action**
+(`class-specific … action|side effect`), seeded with exactly that sentence.
+
+**Thirty-seventh amendment — a negative control that contains the token under test proves nothing.** The
+round-41 control was written from the class name I was looking at, so it carried `destructive` and could
+not have failed. A control must be the **minimal** legitimate form — the shortest synonym, the barest
+construction — not a comfortable one.
+
+**Thirty-eighth amendment — before strengthening a claim, check the artifacts it quantifies over.** "Every
+path does X" is a claim about the paths. Round 42 made that sentence more emphatic while three diagrams
+contradicted it; the emphasis is what made it worse.
+
+**Standing note.** Rounds 22–43: twenty-two consecutive rounds. Rounds 37–43 have produced **fifteen**
+predicate defects and **four** design defects. **Five of the nineteen are defects I introduced while fixing
+an earlier round's finding**, two of them in this round alone. I have found none of the nineteen before
+review.
+
+**Unchanged by round 43:** no requirement, threat or abuse-case ID added, removed or renumbered — one
+statement (`MCP-PROTO-002`) gained the bootstrap clause and is already in the ADDED set, so the provenance
+claim is unchanged and `predicate-25` re-verifies clean. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
+cases; predicates 19, 21, 22, 23, 24, 25 all exit `0`; no non-ASCII strays; changes confined to `docs/`;
+PR-1 not begun.

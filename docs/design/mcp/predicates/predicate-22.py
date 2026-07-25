@@ -53,8 +53,13 @@ ACT_PATTERNS = {
 # the ordering assertion itself — any durability-before-action sentence
 ORDERING = re.compile(r'durabl\w*\s+(?:committed|persisted|commit)\b[^.]{0,40}?\bBEFORE\b', re.I)
 # the class-generic delegation, which is complete by construction
+# The generic marker must QUALIFY THE ACTION.  A bare `class-specific` matched
+# anywhere in the sentence let "... committed BEFORE the upstream call, with
+# class-specific metrics" escape entirely (round 43): the escape hatch fired
+# before the named actions were ever checked.
 GENERIC = re.compile(r"that class'?s?\s+OWN\s+irreversible action|each class'?s?\s+own\s+"
-                     r"(?:side effect|irreversible action)|class-specific", re.I)
+                     r"(?:side effect|irreversible action)|"
+                     r"class-specific\s+(?:\w+\s+){0,2}?(?:irreversible\s+)?(?:action|side effect)", re.I)
 # The scan runs over the WHOLE text (a per-line scan would cut every wrapped
 # enumeration in half and report it as incomplete), but the span an ordering
 # assertion is judged on is the ORDERING SENTENCE ITSELF — terminated at the
@@ -109,7 +114,12 @@ def named_acts(span):
     return {k for k, pat in ACT_PATTERNS.items() if re.search(pat, span, re.I)}
 
 
-GENERIC_WORDS = {'operation', 'issue', 'selection', 'affecting'}
+GENERIC_WORDS = {'operation', 'issue', 'selection', 'affecting', 'high', 'risk'}
+# ONE floor, used when deriving a class's tokens AND when tokenising the context.
+# Two different floors was the bug: `destructive` satisfied the 6-char
+# derivation so the 4-char fallback never ran, `write` was dropped, and the
+# context tokeniser could not have seen it anyway (round 43).
+TOKEN_FLOOR = 4
 
 
 def scope_tokens(cls):
@@ -124,10 +134,8 @@ def scope_tokens(cls):
     (round 41).  A class with no token is a hole, so the floor drops to 4 and
     the result is asserted non-empty by the caller.
     """
-    toks = {w.lower() for w in re.findall(r'[A-Za-z]{6,}', cls) if w.lower() not in GENERIC_WORDS}
-    if not toks:
-        toks = {w.lower() for w in re.findall(r'[A-Za-z]{4,}', cls) if w.lower() not in GENERIC_WORDS}
-    return toks
+    return {w.lower() for w in re.findall(r'[A-Za-z]{%d,}' % TOKEN_FLOOR, cls)
+            if w.lower() not in GENERIC_WORDS}
 
 
 def run(texts, scopes=None):
@@ -149,7 +157,8 @@ def run(texts, scopes=None):
             # a sentence SCOPED to one class is complete when it names exactly
             # that class's own actions — only an UNSCOPED statement of the
             # general precondition has to name all four
-            if any(got == acts and (scope_tokens(cls) & set(re.findall(r'[a-z]{6,}', ctx)))
+            if any(got == acts and (scope_tokens(cls)
+                                    & set(re.findall(r'[a-z]{%d,}' % TOKEN_FLOOR, ctx)))
                    for cls, acts in scopes.items()):
                 continue
             if not got:
@@ -195,6 +204,10 @@ if __name__ == '__main__':
             'the decision event MUST be durably committed before **the upstream call**. '
             'Publication signs and pushes the snapshot, materialization mints the credential, '
             'and the Management state change is recorded.',
+        # ROUND 43: a bare `class-specific` anywhere in the sentence must NOT be
+        # an escape hatch — the marker has to qualify the ACTION.
+        'ROLLOUT-AND-ROLLBACK.md':
+            'the event is durably committed BEFORE the upstream call, with class-specific metrics.',
         # ROUND 42 P1: a PRECEDING sentence names a class.  A raw lookback read the
         # assertion as scoped to it and reported clean.
         'OPERATIONS-AND-SUPPORT.md':
@@ -232,6 +245,10 @@ if __name__ == '__main__':
         'scoped to write / destructive':
             'For a write or destructive operation, the decision event MUST be durably committed '
             'BEFORE the upstream call.',
+        # ROUND 43: the SHORT synonym of the write class — the round-41 control
+        # said "write or destructive", which masked the missing `write` token.
+        'scoped to write (short synonym only, no "destructive")':
+            'For a write, the decision event MUST be durably committed BEFORE the upstream call.',
         'scoped to configuration publication':
             'For configuration publication, the decision event MUST be durably committed BEFORE '
             'the snapshot is signed, pushed or applied.',

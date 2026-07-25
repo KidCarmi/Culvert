@@ -303,9 +303,10 @@ flowchart TB
         SWGPOL["policy.go PolicyRule\n(4 actions; NOT extended for MCP)"]
     end
 
-    MC -->|"TB-7"| MGMT
+    MC -->|"TB-7"| PROTO
     AG -->|"TB-1"| PROTO
-    PROTO -->|"validated request"| IDENT
+    PROTO -->|"validated request (Management bound set)"| MGMT
+    PROTO -->|"validated request (Gateway bound set)"| IDENT
     RT -->|"TB-2: mTLS/allowlist"| US
     RT <-->|"TB-3: signed snapshot,\nepoch/fencing"| SNAP
     MGMT <-->|"TB-3"| SNAP
