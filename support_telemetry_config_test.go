@@ -79,6 +79,27 @@ func TestTelemetryRejectsPrivateOrigin(t *testing.T) {
 	}
 }
 
+// TestTelemetryRejectsInvalidPort — an explicitly supplied port outside the
+// valid TCP range (1-65535) is refused; url.Parse/Port() would otherwise
+// accept it as a plain numeric string with no range check, persisting an
+// endpoint that could never be dialed.
+func TestTelemetryRejectsInvalidPort(t *testing.T) {
+	bad := []string{
+		"https://tac.culvertlabs.com:99999",
+		"https://tac.culvertlabs.com:0",
+		"https://tac.culvertlabs.com:65536",
+		"https://tac.culvertlabs.com:-1",
+	}
+	for _, o := range bad {
+		if _, err := validateTelemetryEndpoint(o); err == nil {
+			t.Errorf("origin %q should be rejected (invalid port)", o)
+		}
+	}
+	if _, err := validateTelemetryEndpoint("https://tac.culvertlabs.com:8443"); err != nil {
+		t.Errorf("origin with a valid port should be accepted: %v", err)
+	}
+}
+
 // TestTelemetryCanonicalizesOrigin — a trailing "/" is normalized away and the
 // scheme+host is lower-cased; the canonical form is what gets stored/returned.
 func TestTelemetryCanonicalizesOrigin(t *testing.T) {

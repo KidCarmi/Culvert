@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -155,6 +156,45 @@ func telemetryStatusFor(c telemetryConfig) telemetryStatusView {
 // telemetryStatus reads the current config and returns its redacted view.
 func telemetryStatus() telemetryStatusView { return telemetryStatusFor(telemetryConfigGet()) }
 
+// validateTelemetryEndpointShape checks every STRUCTURAL constraint on an
+// already-parsed origin (scheme, userinfo, fragment, query, host, port,
+// path) — split out of validateTelemetryEndpoint purely to stay under the
+// repo's cyclomatic-complexity threshold; it carries no independent
+// behavior of its own.
+func validateTelemetryEndpointShape(u *url.URL) error {
+	if u.Scheme != "https" {
+		return errors.New("origin must be https")
+	}
+	if u.User != nil {
+		return errors.New("origin must not contain userinfo (user:pass@)")
+	}
+	if u.Fragment != "" {
+		return errors.New("origin must not contain a fragment")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return errors.New("origin must not contain a query")
+	}
+	if u.Hostname() == "" {
+		return errors.New("origin must include a host")
+	}
+	// url.Parse/Port() accept any numeric string after the colon without
+	// range-checking it — "https://host:99999" parses "cleanly" but is not
+	// a dialable TCP port. Reject explicitly rather than persisting an
+	// endpoint that can never be reached.
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("origin port must be a valid TCP port (1-65535)")
+		}
+	}
+	// Origin only — no operator-provided path, except an optional canonical
+	// "/" (normalized away by the caller).
+	if p := u.EscapedPath(); p != "" && p != "/" {
+		return errors.New("origin must not contain a path")
+	}
+	return nil
+}
+
 // validateTelemetryEndpoint enforces the hardened endpoint-canonicalization
 // contract (§9): https-only, a real non-empty host, no userinfo, no
 // fragment, no query, no operator-provided path (only an optional trailing
@@ -173,27 +213,10 @@ func validateTelemetryEndpoint(origin string) (string, error) {
 	if err != nil {
 		return "", errors.New("invalid origin URL")
 	}
-	if u.Scheme != "https" {
-		return "", errors.New("origin must be https")
-	}
-	if u.User != nil {
-		return "", errors.New("origin must not contain userinfo (user:pass@)")
-	}
-	if u.Fragment != "" {
-		return "", errors.New("origin must not contain a fragment")
-	}
-	if u.RawQuery != "" || u.ForceQuery {
-		return "", errors.New("origin must not contain a query")
+	if err := validateTelemetryEndpointShape(u); err != nil {
+		return "", err
 	}
 	host := u.Hostname()
-	if host == "" {
-		return "", errors.New("origin must include a host")
-	}
-	// Origin only — no operator-provided path, except an optional canonical
-	// "/" (normalized away below).
-	if p := u.EscapedPath(); p != "" && p != "/" {
-		return "", errors.New("origin must not contain a path")
-	}
 	// Strip an IPv6 zone (e.g. "fe80::1%eth0") before parsing — a scoped
 	// literal otherwise makes net.ParseIP return nil and the private-IP
 	// check would mistake a link-local literal for an ordinary hostname
