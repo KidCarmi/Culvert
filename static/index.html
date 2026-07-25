@@ -3477,10 +3477,10 @@ Firefox (all platforms):
             <table class="table" id="cdr-instances-table">
               <thead><tr>
                 <th>Name</th><th>Endpoint</th><th>Fingerprint</th><th>Enrolled</th>
-                <th>Cert expires</th><th>Version</th>
+                <th>Cert expires</th><th>Health</th><th>Circuit</th><th>Version</th>
                 <th data-min-role="admin">Actions</th>
               </tr></thead>
-              <tbody id="cdr-instances-tbody"><tr><td colspan="7" class="muted">No instances enrolled</td></tr></tbody>
+              <tbody id="cdr-instances-tbody"><tr><td colspan="9" class="muted">No instances enrolled</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -9763,7 +9763,7 @@ function cdrRenderInstances() {
   if (!tbody) return;
   const list = cdrState.instances || [];
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted">No instances enrolled</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">No instances enrolled</td></tr>';
     return;
   }
   const isAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
@@ -9782,6 +9782,8 @@ function cdrRenderInstances() {
       <td><code title="${escHtml(i.serverFingerprint || '')}">${escHtml(fp)}${fp ? '…' : ''}</code></td>
       <td>${escHtml(enrolled)}</td>
       <td>${cdrCertExpiryBadge(i)}</td>
+      <td>${cdrHealthBadge(i)}</td>
+      <td>${cdrBreakerBadge(i)}</td>
       <td>${escHtml(i.version || '-')}</td>
       <td>${actions}</td>
     </tr>`;
@@ -9799,6 +9801,31 @@ function cdrCertExpiryBadge(inst) {
   if (d <= 14) return `<span class="badge drop" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left - renew now</span>`;
   if (d <= 60) return `<span class="badge inspect" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
   return `<span class="badge allow" title="${escHtml(inst.clientCertNotAfter || '')}">${d}d left</span>`;
+}
+
+// cdrHealthBadge shows the pool health-poller's latest view of this
+// instance (culvert_cdr_pool_instance_healthy). No pool entry means the
+// instance isn't currently dialed (dial failed, or a pool rebuild is in
+// flight) - shown as "-" rather than a false "unhealthy".
+function cdrHealthBadge(inst) {
+  if (typeof inst.poolHealthy !== 'boolean') return '<span class="muted">-</span>';
+  return inst.poolHealthy
+    ? '<span class="badge ok">Healthy</span>'
+    : '<span class="badge blocked">Unhealthy</span>';
+}
+
+// cdrBreakerBadge surfaces the per-instance circuit breaker
+// (cdrCircuitBreaker.Stats) that the traffic picker (cdrPool.Pick) uses
+// to silently skip a misbehaving Sluice instance. Previously visible
+// only via /metrics (culvert_cdr_pool_breaker_state) or logs.
+function cdrBreakerBadge(inst) {
+  const state = inst.breakerState;
+  if (!state) return '<span class="muted">-</span>';
+  const cls = state === 'closed' ? 'ok' : (state === 'open' ? 'blocked' : 'auth');
+  const label = state === 'half_open' ? 'half-open' : state;
+  const detail = state === 'closed' ? '' :
+    `<div style="font-size:.72rem;color:var(--muted);margin-top:2px">${inst.breakerConsecFails || 0} consecutive failure${inst.breakerConsecFails === 1 ? '' : 's'}, ${inst.breakerTotalTrips || 0} request${inst.breakerTotalTrips === 1 ? '' : 's'} rejected</div>`;
+  return `<span class="badge ${cls}" title="${inst.breakerOpenedAt ? 'Opened ' + escHtml(inst.breakerOpenedAt) : ''}">${escHtml(label)}</span>${detail}`;
 }
 
 async function cdrRefreshInstances() {

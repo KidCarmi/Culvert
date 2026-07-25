@@ -222,6 +222,57 @@ func TestApiCDRInstances_List(t *testing.T) {
 	}
 }
 
+// TestApiCDRInstances_MergesPoolBreakerState proves an admin can see, from
+// the GUI's data source, that the traffic picker (cdrPool.Pick) is
+// currently skipping a specific enrolled instance because its circuit
+// breaker tripped open — previously visible only via /metrics or logs.
+func TestApiCDRInstances_MergesPoolBreakerState(t *testing.T) {
+	resetCDRState(t)
+	_, _ = cdrInstances.Add(CDREnrolledInstance{Name: "no-pool-entry", Endpoint: "sluice:8443"})
+	_, _ = cdrInstances.Add(CDREnrolledInstance{Name: "tripped", Endpoint: "sluice-2:8443"})
+
+	breaker := newCDRCircuitBreaker(cdrBreakerConfig{FailureThreshold: 1})
+	breaker.OnFailure() // one failure trips it open (threshold=1)
+	pc := &cdrPooledClient{Name: "tripped", Breaker: breaker}
+	pc.healthy.Store(0)
+	cdrPool.replace([]*cdrPooledClient{pc})
+
+	w := httptest.NewRecorder()
+	apiCDRInstances(w, newViewerRequest("/api/cdr/instances"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d; body=%s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Instances []map[string]any `json:"instances"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	byName := map[string]map[string]any{}
+	for _, inst := range got.Instances {
+		byName[inst["name"].(string)] = inst
+	}
+
+	noPool := byName["no-pool-entry"]
+	if _, ok := noPool["breakerState"]; ok {
+		t.Fatalf("no-pool-entry should omit breaker fields entirely, got %v", noPool["breakerState"])
+	}
+
+	tripped := byName["tripped"]
+	if tripped["breakerState"] != "open" {
+		t.Fatalf("breakerState = %v, want open", tripped["breakerState"])
+	}
+	if tripped["poolHealthy"] != false {
+		t.Fatalf("poolHealthy = %v, want false", tripped["poolHealthy"])
+	}
+	if tripped["breakerTotalOpens"].(float64) != 1 {
+		t.Fatalf("breakerTotalOpens = %v, want 1", tripped["breakerTotalOpens"])
+	}
+	if _, ok := tripped["breakerOpenedAt"]; !ok {
+		t.Fatalf("breakerOpenedAt missing for an opened breaker")
+	}
+}
+
 func TestApiCDRInstances_DeleteRemovesRegistryEntry(t *testing.T) {
 	resetCDRState(t)
 	_, _ = cdrInstances.Add(CDREnrolledInstance{Name: "live", Endpoint: "sluice:8443"})

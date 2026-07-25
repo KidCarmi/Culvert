@@ -166,6 +166,22 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 				entry["clientCertNotAfter"] = expiry.UTC().Format(time.RFC3339)
 				entry["clientCertDaysRemaining"] = daysUntil(expiry)
 			}
+			// Merge in the live pool member's health + circuit-breaker state
+			// so the admin can see, without Prometheus or logs, when the
+			// picker (cdrPool.Pick) is silently skipping this instance. No
+			// pool entry (dial failed / pool rebuilding) just omits these
+			// fields.
+			if pc := cdrPool.Get(inst.Name); pc != nil {
+				st := pc.Breaker.Stats()
+				entry["poolHealthy"] = pc.Healthy()
+				entry["breakerState"] = st.State
+				entry["breakerConsecFails"] = st.ConsecFails
+				entry["breakerTotalOpens"] = st.TotalOpens
+				entry["breakerTotalTrips"] = st.TotalTrips
+				if st.OpenedAt > 0 {
+					entry["breakerOpenedAt"] = time.Unix(0, st.OpenedAt).UTC().Format(time.RFC3339)
+				}
+			}
 			enriched = append(enriched, entry)
 		}
 		jsonOK(w, map[string]any{
