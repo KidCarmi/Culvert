@@ -2505,6 +2505,16 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/support/telemetry/preview"
+    method: "GET"
+    handler: "apiSupportTelemetryPreview"
+    domain: "support"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/api/support/bundles"
     method: "GET"
     handler: "apiSupportBundles"

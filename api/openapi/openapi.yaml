@@ -930,6 +930,32 @@ components:
         max: { type: integer, description: "Maximum trust keys accepted." }
         alg: { type: string, description: "Expected key algorithm." }
         error: { type: string, description: "Sanitized configuration error (present only on misconfiguration)." }
+    SupportTelemetryPreview:
+      type: object
+      description: >-
+        The exact support-telemetry sample that would be sealed and sent
+        right now, IF telemetry were enabled — it is not; no consent switch,
+        sender, or egress exists in this build. This is a lossless rendering
+        of the complete inner sample: schema_version and registry_hash
+        identify the governed metric schema (any eligible-metric or
+        bucket-definition change bumps registry_hash); sample_epoch and
+        sequence are the non-identifying delivery-identity fields the wire
+        contract carries (sample_epoch is a random per-process token, never a
+        stable appliance fingerprint; Slice 1 has no delivery sequence
+        counter yet, so sequence is always 0); metrics are the current values
+        of exactly the telemetry-eligible entries in the scoped
+        support-metric registry. Does not imply future previews will be
+        byte-for-byte identical — only the schema/eligible-set identity is
+        stable.
+      additionalProperties: false
+      required: [schema_version, registry_hash, generated_at, sample_epoch, sequence, metrics]
+      properties:
+        schema_version: { type: integer, enum: [3], description: "Governed telemetry wire-schema version." }
+        registry_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Lowercase-hex SHA-256 over the governed eligibility schema (metric id/type/privacy-class/eligibility/bucket-definition)." }
+        generated_at: { type: string, format: date-time, description: "RFC3339 UTC timestamp this sample was built." }
+        sample_epoch: { type: string, pattern: "^[0-9a-f]{32}$", description: "Non-identifying, caller-supplied per-process-lifetime random token (128-bit hex). Never a stable appliance fingerprint." }
+        sequence: { type: integer, minimum: 0, description: "Per-epoch delivery sequence number. Always 0 in Slice 1 (no delivery counter exists yet)." }
+        metrics: { type: object, description: "Telemetry-eligible metric id -> current scalar value.", additionalProperties: { type: number } }
     SupportRecipients:
       type: object
       required: [recipients, max]
@@ -5751,6 +5777,34 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TACTrustStatus' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/support/telemetry/preview:
+    get:
+      operationId: getSupportTelemetryPreview
+      tags: [support]
+      summary: Support-telemetry sample preview (read-only; no sender exists)
+      description: >-
+        M7 Slice 1. Renders the exact current support-telemetry sample —
+        governed metric names/values plus schema_version and registry_hash —
+        that would be sealed and sent if telemetry were ever enabled. There
+        is no telemetry consent switch, no sender, and no egress anywhere in
+        this build; this route creates no persistent state, enables nothing,
+        and sends nothing.
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.1.0
+      responses:
+        '200':
+          description: Current governed telemetry sample preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupportTelemetryPreview' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/support/bundles:
     get:

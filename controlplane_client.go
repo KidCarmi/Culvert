@@ -308,6 +308,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	var snap ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		logger.Printf("DataPlane: parse config error: %v", err)
+		markConfigSnapshotApplyRejected()
 		return
 	}
 	// H5: validate per-slice caps BEFORE advancing lastVersion so that a
@@ -317,6 +318,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	// short-circuit below.
 	if err := validateConfigSnapshot(snap); err != nil {
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+		markConfigSnapshotApplyRejected()
 		return
 	}
 	// ADR-0005 S3: the epoch fence must run BEFORE any caller-side mutation
@@ -336,6 +338,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	applyExternalAuthSnapshotSettings(snap)
 	if err := syncSnapshotIdPProfiles(snap); err != nil {
 		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+		markConfigSnapshotApplyRejected()
 		return
 	}
 	snap.IdPProfiles = nil
@@ -344,10 +347,12 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	// apply must not be recorded as the new good state).
 	if err := applyConfigSnapshot(snap); err != nil {
 		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+		markConfigSnapshotApplyRejected()
 		return
 	}
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
+	markConfigSnapshotApplyOK()
 	c.lastVersion.Store(snap.Version)
 	c.lastPolicyVersion.Store(snap.PolicyVersion)
 }
@@ -433,10 +438,12 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	var remainder ConfigSnapshot
 	if err := json.Unmarshal(reply.Remainder, &remainder); err != nil {
 		logger.Printf("DataPlane: parse delta remainder v%d: %v — full resync", reply.TargetVersion, err)
+		markConfigSnapshotApplyRejected()
 		return false
 	}
 	if err := validateConfigSnapshot(remainder); err != nil {
 		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
+		markConfigSnapshotApplyRejected()
 		return false
 	}
 	// applyBlocklistDeltaSnapshot applies the blocklist chain and verifies the
@@ -447,6 +454,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	snapForDisk := remainder
 	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
 		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
+		markConfigSnapshotApplyRejected()
 		return false
 	}
 	// Persist a RECONSTRUCTED full last-good: the remainder omits BlockedHosts, so
@@ -462,6 +470,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	snapForDisk.BlockedHosts = bl.FeedList()
 	persistDPLastGoodConfigSnapshot(snapForDisk)
 	dpMarkCPPollHealthy()
+	markConfigSnapshotApplyOK()
 	c.resetBackoff()
 	c.lastVersion.Store(reply.TargetVersion)
 	c.lastPolicyVersion.Store(remainder.PolicyVersion)

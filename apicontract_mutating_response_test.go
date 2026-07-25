@@ -74,7 +74,12 @@ func TestConformance_MutatingResponses(t *testing.T) {
 	}{
 		{"blockpage-set", http.MethodPut, "/api/blockpage", `{"html":"<h1>Blocked</h1>"}`, RoleAdmin, apiBlockPage, http.StatusOK},
 		{"ui-allow-ips-add", http.MethodPost, "/api/ui-allow-ips", `{"ips":["10.0.0.0/8"]}`, RoleAdmin, apiUIAllowIPs, http.StatusOK},
-		{"policy-create", http.MethodPost, "/api/policy", `{"priority":10,"name":"allow-eng","sourceGroup":"engineering","destFQDN":"*.github.com","sslAction":"Inspect","action":"Allow","enabled":true}`, RoleOperator, apiPolicy, http.StatusOK},
+		// Priority 9910 is a reserved test-only slot (mirrors the 9901/7701/7702
+		// convention elsewhere): the global policyStore accumulates rules across
+		// the whole test binary with no universal per-test cleanup, so a small,
+		// commonly-used priority like 10 collides under some -shuffle orderings
+		// with whichever other test happened to run first and claim it.
+		{"policy-create", http.MethodPost, "/api/policy", `{"priority":9910,"name":"allow-eng","sourceGroup":"engineering","destFQDN":"*.github.com","sslAction":"Inspect","action":"Allow","enabled":true}`, RoleOperator, apiPolicy, http.StatusOK},
 		{"upload-config-disable", http.MethodPut, "/api/support/upload/config", `{"enabled":false}`, RoleAdmin, apiSupportUploadConfig, http.StatusOK},
 	}
 	for _, c := range cases {
