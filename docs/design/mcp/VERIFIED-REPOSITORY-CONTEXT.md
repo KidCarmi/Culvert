@@ -30,7 +30,7 @@ architectural inference from facts · **[REC]** recommendation · **[EXT]** exte
 - `CLAUDE.md` — authoritative project instructions (package layout, conventions, invariants, admin-API
   rules, config-surface anti-drift, GUI-parity mandate). [FACT]
 - `docs/adr/0001-record-architecture-decisions.md` — ADR mandate and six-section format. [FACT]
-- `docs/adr/ADR-0007-openapi-contract.md` — CI-enforced OpenAPI contract bound to the live route table. [FACT]
+- `docs/adr/0018-openapi-contract.md` — CI-enforced OpenAPI contract bound to the live route table. [FACT]
 - `docs/engineering/ENGINEERING-CONSTITUTION.md` — governance charter (referenced by `CLAUDE.md`). [FACT]
 - `docs/api/API-*` (9 documents) — API style, versioning, deprecation, contributing. [FACT]
 - `roadmap/*` — phased design plans (referenced, not exhaustively read this pass). [INFER]
@@ -48,7 +48,7 @@ Each row: what it is, evidence, what the evidence proves, and the reuse classifi
 | Config versioning + rollback | `internal/configver/configver.go · Store · DefaultMax=50 :33, SaveWithNote :108-137`; `configversion.go · capture/apply/diff · 43-577` | Numbered `v{N}.json` history + diff + dry-run rollback + re-publish | Engine reusable as-is; typed DTO after refactor |
 | Config-surface anti-drift registry | `config_surfaces.go · configSurfaces · 104-455`; `config_surfaces_test.go` (parity) | Declares field membership across 5 hand-maintained surfaces; parity-enforced | Reusable as-is (pattern; MCP must add rows) |
 | Admin-API convention | `ui.go · newAdminUIHandler · 64-98`; `ui_routes_meta.go · uiRoutes · 48-87`; `ui_rbac.go · requireRole · 46-53`; `ui_metadata_enforcement.go · 451-508` | `apiXxx`+`register*Routes`+`uiRoutes`+`requireRole`+C1/C1.5/C2/C2c/C4 parity | Reusable as-is |
-| OpenAPI contract + CI gate | `api/openapi/openapi.yaml`; `ADR-0007`; `.github/workflows/pr-api-governance.yml`, `api-contract.yml` | Coverage gate binds spec to the live route table; breaking-change gate merge-blocking | Reusable as-is |
+| OpenAPI contract + CI gate | `api/openapi/openapi.yaml`; `ADR-0018`; `.github/workflows/pr-api-governance.yml`, `api-contract.yml` | Coverage gate binds spec to the live route table; breaking-change gate merge-blocking | Reusable as-is |
 | Metrics | `metrics.go · handleMetrics :431, ruleMetrics :26-78 (maxRuleMetrics=200 :24), newHistogram :348-408` | `culvert_*` namespace, cardinality-capped counters, lock-free histogram | Reusable as-is |
 | GUI/SPA panel convention | `static/index.html` nav-item/`view-div`/`data-view`/`data-min-role` (:553-645, :706+) | Deterministic panel pattern used by ~30 panels | Reusable as-is |
 | Secret containment / provider seam | `internal/secret/provider.go`, `internal/secret/secret.go` (KEK containment, ADR-0007-secret) | Compiler-enforced KEK boundary + provider model | Reusable after refactoring (broker prior art) |
@@ -156,7 +156,7 @@ and a non-protective performance cache). Design documents must not imply otherwi
 | Command | Why not run | Risk created |
 |---|---|---|
 | `go test ./...` / `-race` | Documentation-only phase; no code changed | **Low for the read-only Phase 1 investigation, but the current repository test baseline remains unverified in this session.** Required before any PR-1 code. |
-| Re-count of `uiRoutes` entries | Route count is stated by `ADR-0007`/`CLAUDE.md`; not central to PR-0 | "~180 routes" remains a repo-doc claim, flagged `[EXT/repo-doc]`, not independently verified here. |
+| Re-count of `uiRoutes` entries | Route count is stated by `ADR-0018`/`CLAUDE.md`; not central to PR-0 | "~180 routes" remains a repo-doc claim, flagged `[EXT/repo-doc]`, not independently verified here. |
 | Full line-by-line read of `config_surfaces_test.go`, `internal/halease/etcd.go`, `.github/scripts/coverage-floor.sh`, `.gitleaks.toml` | Behavior inferred from callers/ADRs; informs design not PR-0 correctness | **Low for the read-only Phase 1 investigation, but the current repository test baseline remains unverified in this session.** Items relied upon are marked `NOT VERIFIED` where used. |
 
 ## 12. Limitations of the investigation

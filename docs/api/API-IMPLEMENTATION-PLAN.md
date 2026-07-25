@@ -1,6 +1,6 @@
 # API OpenAPI Program — Implementation Plan & Status
 
-Tracks the sliced rollout from ADR-0007. Status as of 2026-07-19.
+Tracks the sliced rollout from ADR-0018. Status as of 2026-07-19.
 
 ## Slice status
 

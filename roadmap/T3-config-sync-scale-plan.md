@@ -53,7 +53,7 @@ not one-shot.
 
 **D2. Canonical host-set encoding (versioned wire contract).** Pin exactly:
 dedup, comment-strip, wildcard `*.`↔`.` normalization, IDN→punycode, case-fold,
-trailing-dot strip, sort order. The drift hash is defined over this. Any change
+trailing-dot strip, sort order. The synced fingerprint is defined over this. Any change
 is a wire-contract version bump.
 
 **D3. Integrity anchored off the CP (resolves break 4).** MANDATORY signature
@@ -139,7 +139,7 @@ O(N log N) recompute under the blocklist lock).
 
 - A CP delta can never delete a manual/admin block.
 - Feed-derived and CP-authoritative membership are tracked separately.
-- The drift hash covers ONLY the CP-authoritative set; feeds are checked by etag.
+- The synced fingerprint covers ONLY the CP-authoritative set; feeds are checked by etag.
 - Integrity is signed against an offline root; a CP-asserted hash is not an H5 control.
 - Every new sync RPC is epoch-fenced; `dpLastSeenEpoch` is durable.
 - Deltas carry base+target version; apply is sequential/gap-free/atomic-with-version.

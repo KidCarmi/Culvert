@@ -5,10 +5,15 @@ authority that governs day-2 updates — instead of enumerating GHCR tags. This
 document is the operator reference for that flow plus two release-engineering
 runbooks the code cannot enforce on its own:
 
-- **[G3] Release cutover checklist** — what must be true before the first
+- **Release cutover checklist** — what must be true before the first
   catalog-driven install can succeed.
-- **[G4] Pinned-identity rotation** — how to rotate/rename the signing identity
+- **Pinned-identity rotation** — how to rotate/rename the signing identity
   without bricking installs.
+
+(These two checklists are unrelated to the "G1"/"G3"/"G4" rulebase-UX gap IDs in
+`docs/design/M3-POLICY-ARCH-REVIEW.md` — that is a different numbering series for a
+different feature; this doc never uses the bracketed-letter shorthand to avoid
+colliding with it.)
 
 For the trust internals (baked roots, Sigstore identity, freshness/rollback) see
 `enterprise-release-catalog-plan.md` and `sigstore-trusted-root-lifecycle.md`.
@@ -77,7 +82,7 @@ identical to the runtime verifier and cannot drift (`TestReleaseIdentitySSOT`,
 
 ---
 
-## [G3] Release cutover checklist
+## Release cutover checklist
 
 The installer path is version-decoupled by design: the verifier is downloaded as
 `releases/latest`, and the **catalog** — not the verifier — picks the appliance
@@ -119,7 +124,7 @@ CULVERT_RELEASE_CATALOG_URL=https://staging.example/release-catalog \
 
 ---
 
-## [G4] Pinned-identity rotation
+## Pinned-identity rotation
 
 The keyless signing identity (issuer + SAN regex) is **byte-pinned** so trust cannot
 drift. Rotating it — or **renaming the `ci.yml` signing workflow** (the SAN anchors

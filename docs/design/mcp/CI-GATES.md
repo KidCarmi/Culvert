@@ -90,7 +90,7 @@ tagged release, with no MCP-specific SBOM/provenance content (e.g., no MCP-tool-
 | `install-lifecycle-e2e.yml` + `maint-agent-*-e2e.yml` | Nightly + installer-surface PRs | Advisory/path-gated — not a general MCP gate |
 | `qa-gate.yml` / `security-release-gate.yml` | Full functional QA / 10-check security scan on main pushes, tags (security), weekly cron (security) | Pass-through shell on PRs (does not block PR merge); real content runs post-merge |
 | `code-review.yml` | Reviewdog inline lint, PR-size, conventional commits | Advisory PR DX — never blocks |
-| `api-contract.yml` + `pr-api-governance.yml` | Breaking-change + client-gen check on `api/openapi/openapi.yaml` changes | **Existing, Blocking for API changes** — any MCP Management API surface (Capability A) that extends `api/openapi/openapi.yaml` is already gated by these two checks per ADR-0007 |
+| `api-contract.yml` + `pr-api-governance.yml` | Breaking-change + client-gen check on `api/openapi/openapi.yaml` changes | **Existing, Blocking for API changes** — any MCP Management API surface (Capability A) that extends `api/openapi/openapi.yaml` is already gated by these two checks per ADR-0018 |
 
 ## Production-readiness gates — Proposed
 
@@ -162,7 +162,7 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 | `fuzz-nightly.yml` | advisory/scheduled | Advisory | No | — | Yes |
 | Dependency Obituary | advisory/scheduled | Advisory | No | — | Yes |
 | DAST / load / stress nightlies | advisory/scheduled | Advisory | No | — | Yes |
-| `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0007 contract | Yes |
+| `api-contract.yml` / `pr-api-governance.yml` | fast/deep (API diff) | Existing | Yes, for API changes | OpenAPI/ADR-0018 contract | Yes |
 | Production Qualification evidence pack | prod-readiness | Proposed | Human sign-off gate, not automated PR check | All MCP-* IDs (aggregate) | No |
 | Malicious-MCP-server test suite | proposed (target PR-2) | Proposed | Yes, for PR-2 | MCP-TOOL-001..006 | No |
 | OAuth/audience/replay negative matrix | proposed (target PR-3) | Proposed | Yes, for PR-3 | MCP-AUTH-001..008 | No |

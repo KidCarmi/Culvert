@@ -1,4 +1,4 @@
-# ADR-0007: A durable, CI-enforced OpenAPI contract for the Culvert admin API
+# ADR-0018: A durable, CI-enforced OpenAPI contract for the Culvert admin API
 
 - **Status:** Accepted (baseline / Slice 0–2 + conformance core shipped)
 - **Date:** 2026-07-19
