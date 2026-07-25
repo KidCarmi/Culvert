@@ -77,11 +77,11 @@ exact external rules:
 
 | Lifecycle element | Culvert protocol-kernel intent | External fact status |
 |---|---|---|
-| Request | Bounded parse (size/depth/field-count — see `MCP-INSP-001`); the kernel decodes the envelope only — it **MUST NOT** decide business policy on it (that is the Policy Engine's job, per `BLUEPRINT.md` §09 "Must Not: Decide business policy or contain business rules"). | `[EXT]` exact JSON-RPC request shape |
+| Request | Bounded parse (size/depth/field-count — see `MCP-PROTO-006`; strict single-parse decode `MCP-PROTO-001`); the kernel decodes the envelope only — it **MUST NOT** decide business policy on it (that is the Policy Engine's job, per `BLUEPRINT.md` §09 "Must Not: Decide business policy or contain business rules"). | `[EXT]` exact JSON-RPC request shape |
 | Response | Bounded encode (size/type/schema, truncation policy — `MCP-INSP-002`); responses from an upstream/approved server pass through the Inspection Pipeline before being returned to the agent. | `[EXT]` exact response shape |
 | Notification | Treated as a one-way message with no correlatable response; the kernel **MUST** apply the same size/rate bounds as a request (a notification flood is still an availability threat — MCP-T-042/043/044). | `[EXT]` whether/how notifications differ structurally from requests |
-| `id` correlation | The kernel **MUST** track outstanding request `id`s per session within a bounded table (never unbounded — an attacker sending many uncorrelated/duplicate `id`s is a queue-saturation vector, MCP-T-044) and **MUST** reject or ignore a response/notification whose `id` cannot be correlated to an outstanding request from the same session. | `[EXT]` exact `id` uniqueness/reuse rules in the spec |
-| Errors | The kernel **MUST** map internal failures (parse error, oversized payload, policy DENY, upstream failure) to a defined, bounded set of JSON-RPC error responses — **MUST NOT** leak internal state (stack traces, upstream credentials, file paths) in an error message (this is the same posture as `MCP-CRED-004`/`MCP-EVENT-003` applied to the wire layer). | `[EXT]` the standard JSON-RPC error-code table and whether MCP reserves additional codes |
+| `id` correlation | The kernel **MUST** track outstanding request `id`s per session within a bounded table (never unbounded — an attacker sending many uncorrelated/duplicate `id`s is a queue-saturation vector, MCP-T-044) and **MUST** reject or ignore a **response** whose `id` cannot be correlated to an outstanding request from the same session. **Correlation is response-only:** a notification has no top-level `id` (see the Notification row above — "no correlatable response"), so it is never correlated; a notification that *does* carry a top-level `id` is a classification error and is rejected. A notification that names a request `id` in its **params** (cancellation) has that param-level reference resolved only within the same session. | `[EXT]` exact `id` uniqueness/reuse rules in the spec |
+| Errors | The kernel **MUST** map internal failures (parse error, oversized payload, policy DENY, upstream failure) to a defined, bounded set of JSON-RPC error responses **when the offending message is a request** — a rejected **notification** gets **no wire response** at all (one-way semantics; replying would be reply amplification), only a recorded rejection plus resource cleanup, and an unclassifiable message may yield at most one rate-bounded `id: null` error. An error response **MUST NOT** leak internal state (stack traces, upstream credentials, file paths) in an error message (this is the same posture as `MCP-CRED-004`/`MCP-EVENT-003` applied to the wire layer). | `[EXT]` the standard JSON-RPC error-code table and whether MCP reserves additional codes |
 
 Determinism note: bounding and validating the JSON-RPC envelope is a protocol-kernel responsibility and is
 independent of `MCP-POLICY-002`'s no-I/O determinism requirement on the Policy Engine — the kernel may do
@@ -98,15 +98,20 @@ fields), and keep-alive/heartbeat convention are external specification facts.**
 this layer, independent of those specifics:
 
 - **Connect**: the inbound HTTP request that establishes the Streamable HTTP/SSE channel **MUST** pass
-  Origin/Host validation before the channel is established — `MCP-INSP-008` ("The inbound MCP/SSE
-  listener MUST validate Origin/Host to prevent DNS-rebinding against the local server") is a hard
-  precondition on connect, not a post-hoc check. This closes a gap the repository does not have a general
+  Origin/Host validation before the channel is established — the `MCP-INSP-008` Origin/Host validation
+  **primitive** (a pure decision, PR-1) is a hard precondition on connect, not a post-hoc check; the
+  **listener that invokes it at connect and binds only configured interfaces is `MCP-INSP-009` at PR-5**
+  (PR-1 ships no listener). This closes a gap the repository does not have a general
   answer for today: `isSafeRedirectURL` (`proxy_portal.go:152`) is captive-portal-only and does not cover
   an inbound MCP/SSE listener (VERIFIED EVIDENCE). Relevant threats: MCP-T-031 (inbound DNS-rebinding vs
   MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse).
 - **Event framing**: `[EXT]` for the wire-level SSE event shape. The kernel's obligation is bound
-  enforcement regardless of the exact framing: `MCP-OPS-002` requires connections, SSE streams, payloads,
-  queues, concurrency and event buffers to be bounded with per-entity rate limits. A slow or hostile
+  enforcement regardless of the exact framing, **split by layer**: per-message/per-session **parse-time**
+  bounds (size, depth, field/array counts, string length, parser memory and work budget) are
+  `MCP-PROTO-006/008` at **PR-1**, while `MCP-OPS-002` requires live connections, SSE streams, queues,
+  concurrency and event buffers to be bounded with per-entity rate limits at the **running listener**
+  (**PR-5**). A hostile oversized or deeply-nested frame is therefore rejected by the kernel at PR-1 — it does
+  **not** wait for the PR-5 listener bounds. A slow or hostile
   client/server on this channel maps to MCP-T-043 (slow-client) and MCP-T-042 (SSE exhaustion); an
   unbounded event buffer maps to MCP-T-044 (queue saturation/event-loss, Critical).
 - **Keep-alive**: `[EXT]` for the exact heartbeat mechanism the spec defines (e.g. comment pings vs.
@@ -117,9 +122,11 @@ this layer, independent of those specifics:
   `CLAUDE.md` "Relay pattern" — read-deadline-armed idle bounding — cited here as **prior-art precedent
   only**, not as a claim that the MCP kernel reuses that code).
 
-Both `MCP-OPS-002` and `MCP-INSP-008` are PR-1/PR-5-gated requirements (see
-[`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); this section states the design intent those
-requirements bind the protocol kernel to, not an implementation.
+The `MCP-INSP-008` inbound Origin/Host **primitive** and the protocol-kernel bounds `MCP-PROTO-005/006/008`
+are **PR-1** requirements (the listener-side Origin/Host enforcement, `MCP-INSP-009`, is **PR-5**); `MCP-OPS-002` (deployed-listener stream/connection/rate bounds under load) is a **PR-5**
+requirement that depends on the Observe Runtime (see [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md),
+finding H-4). This section states the design intent those requirements bind the protocol kernel to, not an
+implementation.
 
 ---
 
@@ -130,10 +137,11 @@ specification itself rather than by Culvert's own design choice, it is marked `[
 
 | Behavior | Intended semantics | External-fact status |
 |---|---|---|
-| Session establishment | A session is created only after version negotiation (§2) and Origin/Host validation (§4) succeed, and only after identity resolution (`MCP-ID` family — see [`AUTH-AND-CREDENTIAL-MODEL.md`](AUTH-AND-CREDENTIAL-MODEL.md)) attaches a principal to it. A session with ambiguous/missing identity **MUST NOT** be granted write/high-risk capability (`MCP-ID-005`). | Culvert design choice — not spec-mandated |
-| Session identity binding | One session serves exactly one resolved identity for its lifetime; a session **MUST NOT** be re-bound to a different identity mid-flight (this is the protocol-layer analog of `MCP-AUTH-007` cross-user session confusion, MCP-T-008). | Culvert design choice |
+| Session establishment (**PR-1, identity-agnostic**) | The **protocol session** is created once version negotiation (§2) and the Origin/Host check (§4) succeed. What PR-1 creates is an **immutable, opaque protocol-session context carrying NO resolved identity** (`MCP-PROTO-012`) — the kernel does **not** resolve, attach or inspect a principal, so PR-1 has **no dependency on PR-3 authentication/identity work**. | Culvert design choice — not spec-mandated |
+| Identity attachment to a session (**PR-3**) | Once identity resolution exists, a principal is attached to the protocol session (`MCP-ID` family — see [`AUTH-AND-CREDENTIAL-MODEL.md`](AUTH-AND-CREDENTIAL-MODEL.md)), and a session with ambiguous/missing identity **MUST NOT** be granted write/high-risk capability (`MCP-ID-005`). This is a **PR-3 layer above the kernel**, never a PR-1 protocol-kernel behavior. | Culvert design choice |
+| Session identity binding (**PR-3**) | One session serves exactly one resolved identity for its lifetime; a session **MUST NOT** be re-bound to a different identity mid-flight — **`MCP-ID-008`** (closes the identity half of MCP-T-069 and the cross-user confusion threat MCP-T-008, alongside `MCP-AUTH-007`). This is **not** a protocol-layer behavior: `MCP-PROTO-012`'s session context is deliberately opaque, so the kernel cannot express or enforce it. | Culvert design choice |
 | Cancellation | `[EXT]` whether/how the MCP spec defines an explicit cancellation notification for an in-flight tool call. Intended Culvert behavior regardless: a cancellation **MUST** free the corresponding entry in the bounded `id`-correlation table (§3) promptly, and **MUST NOT** be usable to bypass an already-issued QUARANTINE/DENY decision (cancel-and-retry is not a policy-evaluation bypass). | Mixed — cancellation existing in the spec is `[EXT]`; how Culvert accounts for it is design intent |
-| Reconnect | `[EXT]` for any spec-defined resumption/session-id-reuse mechanism (e.g. replaying missed SSE events by last-event-id). Intended Culvert posture: a reconnect **MUST** re-run Origin/Host validation and **MUST** re-verify the bearer token has not expired (no implicit session-lifetime extension via reconnect) — a reconnect is not a trust carry-over, it is a new connect that happens to resume application-level session state. | Mixed |
+| Reconnect | `[EXT]` for any spec-defined resumption/session-id-reuse mechanism (e.g. replaying missed SSE events by last-event-id). Intended Culvert posture, **split by layer**: at **PR-1** the kernel **MUST** re-run the `MCP-INSP-008` Origin/Host check and **MUST NOT** replay or resume trust — it treats a reconnect as a new connect that happens to resume protocol-level state (`MCP-PROTO-012`), with **no token or identity check**, since the kernel holds neither. From **PR-3**, the identity/auth layer additionally **MUST** re-verify the bearer token has not expired and **MUST** re-establish the identity binding (`MCP-ID-008`) — there is no implicit session-lifetime extension via reconnect. | Mixed |
 | Idle/timeout | A session with no activity for a bounded interval **MUST** be closed by the kernel (ties to `MCP-OPS-002` bounding and to the queue-saturation concern in MCP-T-044). | Culvert design choice on the specific bound; the notion that MCP sessions can idle is `[EXT]` |
 
 ---
@@ -154,11 +162,15 @@ what the protocol kernel must enforce on every inbound call, independent of tran
   `client_id` only (`auth_oidc_flow.go:523`, VERIFIED EVIDENCE) — that is **insufficient** for MCP and is
   explicitly not reused as the MCP audience model (`BLUEPRINT.md` §06 non-goal: "Do not reuse the existing
   SWG OIDC proxy flow as a generic MCP authentication model").
-- **Resource-indicator binding.** `MCP-AUTH-003`: the gateway must validate the resource indicator
-  (`[EXT]` RFC 8707 is an external IETF specification, not a Culvert repository fact) binding the token to
-  the specific target MCP server; an unbound token is denied for write/high-risk operations. VERIFIED
-  EVIDENCE: RFC 8707 has zero matches in the current repository — this is a **net-new** control, not an
-  extension of anything that exists today.
+- **Resource-indicator binding.** `MCP-AUTH-003`: Culvert's clients request the **canonical
+  Culvert-controlled MCP resource URI** via the RFC 8707 `resource` parameter (`[EXT]` RFC 8707 is an
+  external IETF specification, not a Culvert repository fact) — **never** the upstream business MCP server
+  (ADR-0024 §D-2) — and the gateway validates the **resulting** audience restriction from standard token
+  metadata (`aud` for JWTs, introspection for opaque tokens) rather than a bespoke in-token claim. An
+  unbound (`aud`-less) token is denied for **every** operation class — read/low-risk included — since it
+  cannot be shown to target Culvert at all. VERIFIED EVIDENCE: RFC 8707 has zero
+  matches in the current repository — this is a **net-new** control, not an extension of anything that
+  exists today.
 - **No passthrough at the protocol layer.** The protocol kernel never forwards the client's bearer token
   unchanged to an upstream MCP server; credential selection is a separate, later step gated on a policy
   ALLOW-class decision (`MCP-POLICY-004`, `MCP-CRED-001`) and is out of the protocol kernel's
@@ -232,7 +244,8 @@ silent attempt to proceed with an unverified assumption about what the peer mean
   security properties (e.g. dropping Origin/Host validation, or dropping bearer-token audience checks) to
   "make the connection work."
 - Any degraded/disable-safely mode (§7, §8) reduces **functionality**, never reduces **security
-  invariants** — `MCP-AUTH-001/002/003`, `MCP-INSP-008`, and default-deny (§8) apply identically regardless
+  invariants** — `MCP-AUTH-001/002/003`, the `MCP-INSP-008` Origin/Host primitive together with its
+  `MCP-INSP-009` listener-side enforcement once a listener exists, and default-deny (§8) apply identically regardless
   of which supported version or capability subset a given session negotiated.
 - `[EXT]` note: whether the base MCP specification itself defines a standard version-downgrade or
   capability-negotiation failure mode is an external fact to verify before PR-1; the policy above is
@@ -245,19 +258,21 @@ silent attempt to proceed with an unverified assumption about what the peer mean
 Per the PR-0 brief's CI evidence, **these fixtures do not exist today** — VERIFIED EVIDENCE lists, among
 the items "MISSING for MCP": malicious-MCP-server tests, OAuth-negative matrix, DNS-rebinding lab, inbound
 Origin/Host tests, SSE-exhaustion, mixed-version/stale-epoch/corrupt-snapshot MCP gates, and MCP-off
-overhead regression. None of these are present in the current CI pipeline
-(`pr-fast-gate.yml`/`pr-deep-gate.yml`/`ci.yml`/`codeql.yml` — MCP paths not wired). This section states
-what PR-1 and later slices must add, and is intentionally a **requirements list**, not a claim that any of
-it exists.
+overhead regression. None of these MCP-specific **fixtures/gates** exist in the current CI pipeline
+(`pr-fast-gate.yml`/`pr-deep-gate.yml`/`ci.yml`). (`codeql.yml` **does** already analyze `internal/mcp/**`
+via its `internal/**` PR path filter, but is non-blocking — see [`CI-GATES.md`](CI-GATES.md), finding M-1;
+that is CodeQL SAST, not the MCP compatibility/fuzz fixtures listed here.) This section states what PR-1 and
+later slices must add, and is intentionally a **requirements list**, not a claim that any of it exists.
 
 | Fixture class | Purpose | Threats exercised | Requirement(s) | Gate |
 |---|---|---|---|---|
-| Protocol-version conformance fixtures | Prove the kernel correctly negotiates every version in the allowlist and correctly rejects every version outside it. | MCP-T-050 (mixed version) | `MCP-SERVER-*` adjacency, adapter policy (§8) | PR-1 |
-| Malformed/non-compliant JSON-RPC fixtures | Prove the kernel bounds and rejects malformed envelopes without a crash, panic, or unbounded resource use. | MCP-T-040 (oversized payloads), MCP-T-044 (queue saturation) | `MCP-INSP-001` | PR-1 |
+| Protocol-version conformance fixtures | Prove the kernel negotiates every allowlisted version, rejects every non-allowlisted version, refuses silent downgrade, and that version adapters are equivalent. | MCP-T-066,067,068 (version negotiation/downgrade/adapter differential); MCP-T-050 (mixed CP/DP version, distinct) | `MCP-PROTO-010,011` | PR-1 (**fixtures + greenness gated on D-1**) |
+| Malformed/non-compliant JSON-RPC fixtures | Prove the kernel bounds and rejects malformed envelopes without a crash, panic, or unbounded resource use, and that parsing is non-differential. | MCP-T-057,058,063,073,074 (malformed/differential/exhaustion/crash) | `MCP-PROTO-001,006,009,013` | PR-1 |
 | Malicious/non-compliant MCP **server** fixtures | Prove the kernel and downstream tool-discovery layer do not trust a hostile server's self-reported tool list, schema, or identity claims. | MCP-T-011..017 (tool poisoning, shadowing, schema drift, description drift, rug pull, server identity change, unknown-tool auto-allow) | `MCP-TOOL-001..006`, `MCP-SERVER-001..003` | PR-2 |
-| Inbound Origin/Host rebinding fixtures | Prove the inbound MCP/SSE listener rejects a bad Origin/Host at connect (§4). | MCP-T-031 (inbound DNS-rebinding vs MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse) | `MCP-INSP-008` | PR-1 |
+| Origin/Host validation primitive fixtures | Prove the pure Origin/Host accept/reject decision + empty-allowlist fail-closed (no socket, no listener). | MCP-T-031, MCP-T-055 | `MCP-INSP-008` | PR-1 |
+| Inbound listener rebinding E2E fixtures | Prove the running listener binds only configured interfaces and rejects a bad Origin/Host at connect (§4). | MCP-T-031 (inbound DNS-rebinding vs MCP/SSE listener), MCP-T-055 (localhost bypass), MCP-T-052 (DMZ abuse) | `MCP-INSP-009` | PR-5 |
 | SSE-exhaustion / slow-client / queue-saturation load fixtures | Prove connection/stream/queue bounds hold under adversarial load. | MCP-T-042 (SSE exhaustion), MCP-T-043 (slow-client), MCP-T-044 (queue saturation/event-loss) | `MCP-OPS-002` | PR-5 |
-| OAuth-negative matrix | Prove missing/invalid/query-string/wrong-audience/wrong-resource/replayed tokens are all rejected. | MCP-T-001..005 | `MCP-AUTH-001..006` | PR-3 |
+| OAuth-negative matrix | Prove missing/invalid/query-string/wrong-audience/wrong-resource tokens are rejected (both JWT-`aud` and opaque-introspection forms; an `aud`-less token denied on **every** operation class). **Replay: prove a replayed per-request DPoP proof is rejected and sender-constraint is enforced — NOT one-time-use rejection of an access-token `jti`** (ADR-0024 §D-2 items 7–9). | MCP-T-001..005 | `MCP-AUTH-001..006` | PR-3 |
 | Mixed-version CP/DP fixtures | Prove a DP below minimum_dp_version does not apply a snapshot, distinct from client-protocol-version mixing. | MCP-T-050, MCP-T-047 | `MCP-CPDP-003` | PR-10 |
 | MCP-off overhead regression | Prove MCP disabled causes no measurable SWG regression. | — (availability/product-integrity concern) | `MCP-OPS-001` | PR-5 |
 

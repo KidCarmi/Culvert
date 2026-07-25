@@ -8,6 +8,11 @@ debug trail. Each capability emits events into its **own** decision namespace; t
 shared schema shape, not a merged event stream (see [`README.md`](README.md) doctrine: separate
 enforcement engines and trust boundaries, shared conventions only).
 
+> **Decision status — D-5 CLOSED (2026-07-24, [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)).**
+> **Option C:** local encrypted durable spool on every relevant Data Plane, bounded queues + backpressure
+> + replay IDs + pluggable asynchronous exporters; a message bus / SIEM is an **adapter**, never a
+> mandatory runtime dependency. The per-action durability-unavailable semantics are fixed in **§4a** below.
+
 **Status:** PR-0 design artifact (Proposed). No event pipeline described here is implemented; this
 document is normative input to PR-8 (Durable decision events) per
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events) and
@@ -156,10 +161,10 @@ are **required**, each grounded in a stable requirement ID from
 | Element | Requirement | Design intent |
 |---|---|---|
 | Bounded queue + backpressure | MCP-EVENT-001 | The decision path enqueues into a bounded, in-memory queue sized for burst absorption, not unbounded growth; backpressure signals (queue depth, enqueue latency) are observable before loss occurs. |
-| Disk spool **or** durable export | MCP-EVENT-001 | On sustained backpressure, events spool to local durable storage (survives process restart) **or** are exported synchronously to a durable sink (e.g. SIEM/object store) before being considered committed — at least one of the two, not neither. |
+| Mandatory local encrypted durable spool (+ additive export) | MCP-EVENT-001 | Every relevant Data Plane **MUST** have a **local, encrypted, bounded, durable spool** (survives process restart); on sustained backpressure events are persisted there before being considered committed. An external durable sink (SIEM / message bus / object store) is an **additive exporter**, **never a substitute** for the local spool — the spool is required even when an exporter is configured, and export being unavailable does not by itself constitute durability. |
 | Replay / correlation IDs | MCP-EVENT-004 | Every event carries a unique `event_id` plus a `correlation_id` linking related events (e.g. a `REQUIRE_APPROVAL` event and its later `approval_granted` follow-up) so an investigator or a replay tool can reconstruct a full decision sequence deterministically. |
 | Explicit loss policy | MCP-EVENT-001, -002 | The system states, in advance, what happens when the bounded queue and the spool/export path are both saturated — see the CRITICAL constraint below. Silence is not an acceptable answer. |
-| Degraded mode | MCP-EVENT-002 | A named, alertable state (distinct from normal operation) that the gateway enters when event durability cannot be guaranteed, so operators are not silently blind. |
+| Degraded mode | MCP-EVENT-002 | A named, alertable state (distinct from normal operation) that the gateway enters when event durability cannot be guaranteed, so operators are not silently blind. §4a additionally defines a **critical** degraded state for a non-persistable denial event, which carries the **durability lockout** (new *allowed* write/high-risk operations blocked until durability returns) — the two states are distinct and **MUST NOT** be collapsed into one. |
 | Integrity fields | MCP-EVENT-005 | `event_id`, `timestamp`, `dp_id`, `snapshot_hash`, `correlation_id` are present on every event and the event stream **SHOULD** be tamper-evident (e.g. hash-chained or append-only-store backed) so post-hoc tampering is detectable, not merely inconvenient. |
 | Retention | MCP-PRIVACY-003 | Retention is a documented, per-deployment policy (`retention_class` in §1), not an implicit function of queue/disk size. |
 | Tenant separation | MCP-EVENT-006, MCP-PRIVACY-002 | Events are partitioned by `tenant` at rest and in any export path; no query or export primitive may return events across tenants. |
@@ -168,13 +173,75 @@ are **required**, each grounded in a stable requirement ID from
 ### CRITICAL constraint
 
 > Loss of authentication, deny, configuration, or high-risk decision events **MUST NOT** occur silently.
-> If the durability path (bounded queue → spool/export) cannot preserve such an event, the corresponding
-> write/high-risk operation **MUST fail closed**, or the system **MUST** enter the defined degraded mode
-> (above) and alert. This is [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
+> If the durability path (bounded queue → **mandatory local encrypted spool** → additive export) cannot
+> preserve such an event, the corresponding **critical write / destructive / config-publication / credential**
+> operation **MUST fail closed AND** the system **MUST** enter the defined degraded mode (above) with alert
+> and an integrity-protected loss counter — both, not either. This is
+> [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
 > tied to [MCP-T-044](THREAT-MODEL.md) (queue saturation / event-loss, **Critical**) in the canonical
 > threat registry. A dropped `MONITOR` event on a low-risk `ALLOW` is a durability nuisance; a dropped
 > `DENY`, auth-failure, config-change, or high-risk event is a security-evidence failure and must be
 > treated as one architecturally, not just operationally.
+
+---
+
+## 4a. Durability-unavailable semantics by action class (D-5, closed)
+
+Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md), when a decision event
+**cannot be durably persisted**, behavior is fixed by the class of action, not left to the moment.
+
+> **Ordering precondition (load-bearing).** For every class whose behavior below is **fail closed**, the
+> decision event **MUST be durably committed BEFORE THAT CLASS'S OWN irreversible action** — per the table
+> below: the upstream call; the snapshot **sign/push/apply**, including a **rollback swap**; broker
+> **materialization** (mint/rotate/revoke); the Management **state change and the signed snapshot it publishes** — and the
+> operation runs **only** after that commit is confirmed. Stating this as "before credential use and the
+> upstream call" would leave configuration publication and the Management class unconstrained, because
+> **neither performs an upstream call**; the precondition must name each class's own side effect. A fail-closed rule evaluated after execution is
+> unimplementable — the side effect has already occurred and there is nothing left to deny. The **outcome**
+> event is emitted separately after execution and is **not** the fail-closed gate
+> ([MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events), MCP-T-044).
+
+> **The irreversible action is class-specific, and each class is gated at its own** — gating only "the upstream
+> call" leaves configuration publication and credential mutation ungated, because neither makes one:
+>
+> | Class | Its irreversible action | Commit must precede | Absence assertion in the test |
+> |---|---|---|---|
+> | Write / destructive | the upstream call | the call | no upstream call occurred **AND no broker-side materialization occurred** (DFD-5 gates both at `WAL`) |
+> | Configuration publication | signing / pushing / applying the snapshot | `SIGN` (DFD-10) | no revision created, nothing signed or pushed, every DP on the prior epoch |
+> | Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged **AND no upstream call occurred** (DFD-5 gates both at `WAL`) |
+> | State-affecting Management operation | the state change **and the publication it produces** | the change **and** the snapshot being signed / pushed / applied (DFD-3 `WALM`) | no Management state change **AND no revision created, nothing signed or pushed, every DP on the prior epoch** |
+>
+> **The assertion set is per FLOW, not per class NAME.** A class's case **MUST** assert the absence of **every**
+> irreversible action reachable downstream of that flow's commit gate — not only the action the class is named
+> after. A flow can carry more than one class's side effect: an approved Management mutation both changes
+> Management state **and** publishes a signed snapshot (DFD-3), and the Gateway gate at `WAL` precedes **both**
+> credential materialization and the upstream call (DFD-5). Asserting only the eponymous action passes an
+> implementation that leaves that one record untouched while performing the other — which is why both fail-closed
+> nodes name both actions (`no credential minted, no upstream call`; `NOTHING published, NO Management state
+> change`) rather than one each.
+>
+> **A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
+> encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.
+
+
+| Action class | Behavior when the decision event cannot be durably persisted |
+|---|---|
+| Read-only / low-risk `ALLOW` or `MONITOR` | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an **integrity-protected loss/degradation counter**; keep retrying persistence/export within bounded budgets; **never fail silently**. |
+| Write action | **Fail closed** (deny the operation) **AND** enter the defined degraded mode + alert + integrity-protected loss counter. |
+| Destructive / production action | **Fail closed AND** enter degraded mode + alert + loss counter. |
+| Configuration publication | **Fail closed AND** enter degraded mode + alert — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** enter degraded mode + alert + loss counter. |
+| State-affecting Management MCP operation | **Fail closed AND** degraded mode + alert (and out of V1 regardless — see [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)). |
+| Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
+
+**Required design coverage (PR-8).** The durable-event design **MUST** specify, in addition to the §4
+elements: event-**ordering scope**, **deduplication**, **replay cursor**, **encryption at rest**,
+**corruption recovery**, **tenant isolation**, **retention**, **disk-pressure behavior**, and
+**restart/failover recovery**. (Management MCP and Gateway MCP **may** share the underlying durable event
+transport only when events are separated by authorization domain, tenant, category, partitioning,
+retention and query policy — [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
+items 4–5; two physically separate event systems are not required when logical + security isolation is
+enforced and tested.)
 
 ---
 
@@ -211,28 +278,60 @@ flowchart TD
     Q["Bounded queue\n(backpressure signal)"]
     SAT{"Saturated?"}
     CRIT{"Critical class?\n(auth / deny / config / high-risk)"}
-    SPOOL["Disk spool"]
-    EXPORT["Durable export\n(SIEM / object store)"]
+    KIND{"Is the event an\nauth-failure / authz-DENIAL?\n(request already denied)"}
+    SPOOL["Mandatory local encrypted\ndurable spool (per DP)"]
+    EXPORT["Additive export\n(SIEM / bus / object store)\n— never a substitute"]
     INT["Integrity + replay ID\n(event_id, correlation_id,\nsnapshot_hash, dp_id, timestamp)"]
     FAIL["Fail closed\nthe triggering operation"]
-    DEG["Enter degraded mode\n+ alert (MCP-EVENT-002)"]
+    DEG["Enter degraded mode\n+ alert + loss counter\n(MCP-EVENT-002)"]
+    CDEG["CRITICAL degraded state\n+ alert + loss counter"]
+    LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
 
     D --> Q
     Q --> SAT
-    SAT -- "no" --> SPOOL
-    SAT -- "no" --> EXPORT
-    SPOOL --> INT
-    EXPORT --> INT
+    SAT -- "no (admitted — NOT yet a commit)" --> SPOOL
+    SPOOL -- "commit CONFIRMED" --> INT
+    SPOOL -- "commit FAILED\n(ENOSPC / fsync / encryption-key)" --> CRIT
+    SPOOL -. "additive, async" .-> EXPORT
     SAT -- "yes" --> CRIT
-    CRIT -- "yes" --> FAIL
-    CRIT -- "yes" --> DEG
-    CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> DEG
+    CRIT -- "yes" --> KIND
+    KIND -- "no\n(write / destructive / config-publication /\ncredential / state-affecting Mgmt)" --> FAIL
+    KIND -- "no (AND, not either)" --> DEG
+    KIND -- "yes\n(already denied — fail-closed is vacuous)" --> CDEG
+    CDEG --> LOCK
+    CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> LP{"configured loss policy?\nmcp_{gateway,mgmt}_event_loss_policy"}
+    LP -- "degrade-and-alert\n(operation still proceeds)" --> DEG
+    LP -- "fail-closed\n(deny the triggering low-risk call)" --> FAIL
+    LP -- "fail-closed: AND, not either\ndegradation is recorded for BOTH policies" --> DEG
 ```
 
-The fail-closed branch is scoped to **critical classes only** (authentication, deny, configuration,
-high-risk decisions — [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
-[MCP-T-044](THREAT-MODEL.md)); saturation on a low-risk `ALLOW`/`MONITOR` event still triggers degraded
-mode and an alert, but does not by itself block the underlying operation.
+**Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded / denial-lockout posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.
+
+**Two distinct critical-class outcomes — do not conflate them** (§4a,
+[MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
+[ADR-0024 §D-5](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md),
+[MCP-T-044](THREAT-MODEL.md)):
+
+1. **Write / destructive / configuration-publication / credential / state-affecting-Management** — the
+   triggering operation **fails closed AND** the system enters degraded mode with alert + integrity-protected
+   loss counter. Both, never either.
+2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
+   "fail closed" is **vacuous** and this case is **NOT** relabeled as fail-closed. Instead the system enters
+   the **critical degraded state**, alerts, increments the loss counter, and applies a **durability
+   lockout**: **new *allowed* write/high-risk operations are blocked until critical-event durability is
+   restored** (unless an explicitly approved emergency policy states otherwise). Entering degraded mode
+   **alone is not sufficient** — without the lockout, privileged work could continue after denial evidence
+   was lost.
+
+**The low-risk class follows the configured loss policy, and both values must have a route.** Saturation (or a
+commit failure) on a low-risk `ALLOW`/`MONITOR` event always triggers degraded mode and an alert; whether it
+**also blocks the underlying operation** is the operator's choice — `degrade-and-alert` lets the call proceed,
+`fail-closed` denies it rather than lose its event (`mcp_gateway_event_loss_policy` /
+`mcp_mgmt_event_loss_policy`, both enumerated in
+[CONFIG-SURFACE-MATRIX.md](CONFIG-SURFACE-MATRIX.md)). Routing this class unconditionally to degraded-only
+would make `fail-closed` unreachable in the diagram that **owns** the event model, and would contradict the
+config surface's own enum. Unlike the two critical branches above, this arm is a **policy selection, not a
+posture**.
 
 ---
 

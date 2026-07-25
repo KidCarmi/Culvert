@@ -675,12 +675,24 @@ Last reviewed: 4 days ago
 ### Event Durability
 
 The MCP event pipeline must be separate from, or materially extend beyond, a small in-memory debug
-ring. Production security evidence requires bounded queues, backpressure, disk spool or durable export,
-replay identifiers and an explicit loss policy.
+ring. Production security evidence requires bounded queues, backpressure, a **mandatory local encrypted
+durable spool on every relevant Data Plane** (external export is **additive, never a substitute**), replay
+identifiers and an explicit loss policy (D-5 / `ADR-0024 §D-5`, `MCP-EVENT-001`).
 
-> Loss of authentication, deny, configuration or high-risk decision events is unacceptable. If the
-> pipeline cannot preserve them, write/high-risk operations must fail closed or the system must enter a
-> defined degraded mode and alert.
+> Loss of authentication, deny, configuration or high-risk decision events is unacceptable, and the required
+> response **differs by event kind** — do not collapse the two:
+>
+> 1. **Critical write / destructive / configuration-publication / credential / state-affecting-Management** —
+>    the operation **MUST fail closed AND** the system **MUST** enter the defined degraded mode with alerting
+>    and an integrity-protected loss counter. Degraded mode is **not** an alternative to fail-closed.
+> 2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
+>    fail-closed is vacuous and this case is **NOT** relabeled as fail-closed. The system **MUST** enter the
+>    **critical degraded state**, alert, increment the loss counter, and apply a **durability lockout**:
+>    **new *allowed* write/high-risk operations are blocked until critical-event durability is restored**
+>    (absent an explicitly approved emergency policy). Degraded mode **alone is not sufficient**.
+>
+> Read-only / low-risk operations may proceed **only** under an explicitly approved degraded-mode policy
+> (`MCP-EVENT-002`, EVENT-MODEL §4a, `ADR-0024 §D-5`).
 
 ---
 
@@ -929,7 +941,7 @@ boundary, acceptance criteria, tests and rollback. PR-1 does not begin before PR
 | PR-5 — Observe Runtime | Dedicated listener, bounded pools and test/observe mode. | MCP disabled causes no measurable SWG regression. |
 | PR-6 — Policy Engine | Rules, actions, reason codes and simulator. | Deterministic pure evaluation and traceable tests. |
 | PR-7 — Inspection | Schema, secret/DLP, destination and redaction. | Abuse corpus and latency budgets. |
-| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions. |
+| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions, **and** the denial-event durability lockout observed (a non-persistable auth-failure/authz-denial blocks new allowed write/high-risk operations until durability returns). |
 | PR-9 — API / GUI | Inventory, policies, simulator, approvals and health. | RBAC, OpenAPI and GUI parity. |
 | PR-10 — CP/DP & HA | Immutable snapshots, fencing, acknowledgements and rollback. | Mixed-version, corrupt-snapshot and rollback tests. |
 | PR-11 — Shadow / Canary | Modes, scope controls, dashboards and rollout guardrails. | Production-readiness evidence complete. |

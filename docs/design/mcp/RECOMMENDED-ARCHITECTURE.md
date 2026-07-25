@@ -9,9 +9,10 @@ threat IDs or requirement IDs — those are owned by [`THREAT-MODEL.md`](THREAT-
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) and are only referenced here.
 
 **Status: PR-0 design artifact (Proposed).** Package names and file boundaries in this document are
-**[REC]** — evaluated, not adopted. Adoption requires the ADR promotion described in
-[`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0) and
-[`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md).
+**[REC]** — evaluated, not adopted. The trust-boundary decisions are now recorded in
+[`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (`Status: Proposed` —
+adoption completes on ARB + Security Architecture ratification); the exact package split/naming stays
+[REC] pending that ratification. See [`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0-promoted-2026-07-24).
 
 ---
 
@@ -44,9 +45,20 @@ here; the operative constraint for this document is:
   failure semantics, rate limits, audit/event categories, threat models, runbooks.
 
 Concretely: Capability A and Capability B **MUST NOT** share a listener, a policy engine instance, a
-credential broker instance, or a decision-event stream with each other or with the SWG runtime, even
-though all three may run inside the same `culvert` process and reuse the same admin-UI shell, RBAC
-middleware chain, and config-snapshot transport.
+credential broker instance, or an **active/logical decision-event stream** with each other or with the SWG
+runtime, even though all three may run inside the same `culvert` process and reuse the same admin-UI shell,
+RBAC middleware chain, and config-snapshot transport.
+
+> **Refinement — D-13 (2026-07-24, [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
+> items 3–6).** "Do not share" is scoped to **active state and logical planes**, not to reviewed
+> implementation code or physical infrastructure. The two capabilities **may** share reviewed
+> implementation libraries and selected Control-Plane infrastructure; **may** share a policy-engine
+> **implementation library** (but never shared active policy state, rule bundles, namespaces or
+> authorization decisions — those stay per-capability); and **may** share the **underlying durable event
+> transport** *only when* events are separated by authorization domain, tenant, category, partitioning,
+> retention and query policy. Two **physically** separate event systems are **not** required when logical +
+> security isolation is enforceable and tested. What must never be shared: a listener, an active policy
+> engine instance / rule set, a credential-broker instance, or a logical (unpartitioned) event stream.
 
 ---
 
@@ -60,27 +72,32 @@ wiring. New engines are expected to land under `internal/`, not re-inlined into 
 `BLUEPRINT.md` §09 proposes eleven `internal/mcp/*` subpackages. Splitting the MCP subsystem into
 `internal/mcp/*` leaf packages is **consistent with the ADR-0002 pattern** — subpackages under a shared
 `internal/mcp/` parent rather than 11 flat `internal/` siblings is a reasonable refinement given the
-subsystem's size, but the **exact split, naming, and file boundaries are [REC]**, pending the ADR
-promotion. The table below evaluates each proposed package's responsibility and prohibition, mirroring the
-component table in `BLUEPRINT.md` §09.
+subsystem's size, but the **exact split, naming, and file boundaries are [REC]**. **[ADR-0024 §Decision
+item 8](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) ratifies the `internal/mcp/*`
+*namespace and trust boundary*, NOT the exact leaf-package names** — so the specific names in the table
+below (`internal/mcp/protocol`, `…/policy`, `…/runtime`, etc.) remain **`[REC]`, subject to implementation
+review, even after ADR-0024 is Accepted** (finding L-4). The table below evaluates each proposed package's
+responsibility and prohibition, mirroring the component table in `BLUEPRINT.md` §09.
 
 | Proposed Package | Responsibility (evaluated) | Must NOT (evaluated) |
 |---|---|---|
-| `internal/mcp/protocol` | MCP listener/protocol kernel: transport termination, JSON-RPC/SSE framing, version adapters, connection lifecycle, size/connection/stream bounds. | Decide business policy or embed business rules (Blueprint §09: "Decide business policy or contain business rules"). Must not be the place tool-risk or credential logic lives. |
+| `internal/mcp/protocol` | MCP listener/protocol kernel: transport termination, JSON-RPC/SSE framing, version adapters, connection lifecycle, and the structural/size/depth/framing/state bounds now specified by **`MCP-PROTO-001..014`** ([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)). | Decide business policy or embed business rules (Blueprint §09: "Decide business policy or contain business rules"). Must not be the place tool-risk or credential logic lives. |
 | `internal/mcp/identity` | Resolve and validate the calling principal: token validation, audience/resource checks, agent/client/workload attribution, tenant binding. | Rely on IP alone or invent/assume identity when validation is inconclusive (Blueprint §09). Must not perform policy evaluation itself. |
 | `internal/mcp/registry` | Server registry: registered upstream MCP server endpoints, ownership, TLS identity, environment, connection status. | Allow traffic to an unregistered server (Blueprint §09). Must not itself execute or proxy calls. |
 | `internal/mcp/catalog` | Tool catalog: tool definitions, canonical fingerprints/hashes, risk classification, approval history, drift detection inputs. | Trust server-supplied annotations/descriptions as the sole security boundary (Blueprint §09) — catalog data informs policy, it does not decide. |
 | `internal/mcp/policy` | Deterministic policy evaluation over identity + server + tool + arguments + resource + risk; returns a decision, reason code, matched rule, and revision context. | Perform network or other I/O during evaluation (Blueprint §09; **MCP-POLICY-002**, [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)) — must be a pure function of its inputs. Contrast the SWG policy engine, which does DNS and other I/O mid-evaluation (`policy.go` `Evaluate:1083-1143`, DNS resolution at `:1387` → `geoip.go` `resolveHost:125-204` — **[FACT]**); that pattern must not be reused for MCP. |
-| `internal/mcp/credentials` | Credential broker: select/mint a short-lived, scoped upstream credential only after an ALLOW-class policy decision. | Expose a raw secret to the agent or to the decision-event pipeline (Blueprint §09; **MCP-CRED-004**). Must not run before policy has decided (confused-deputy risk, threat MCP-T-046). |
-| `internal/mcp/inspection` | Input/output inspection: schema conformance, size limits, secret/DLP pattern matching, destination/URL controls, redaction. | Become a single unbounded queue (Blueprint §09) — must be bounded and independently failure-scoped per stage. |
+| `internal/mcp/credentials` | Credential broker, in **two separable phases** because only the second is irreversible: **(1) PLAN** — choose the identity and scope for a short-lived credential (no broker mutation), permitted once policy returns ALLOW; **(2) MATERIALIZE** — mint / rotate / revoke, which **MUST NOT run until the decision event is durably committed** for the `MCP-EVENT-002` credential class, since a mint or revocation cannot be undone by a later failure. Selection/minting happens only after an ALLOW-class policy decision (`MCP-POLICY-004`). | Expose a raw secret to the agent or to the decision-event pipeline (Blueprint §09; **MCP-CRED-004**). Must not run before policy has decided (confused-deputy risk, threat MCP-T-046). |
+| `internal/mcp/inspection` | Input/output inspection: schema conformance, size limits, secret/DLP pattern matching, destination/URL controls, redaction. **Runs in two distinct positions and the order is load-bearing:** the **request-side** pass (semantic schema `MCP-INSP-001`, secret/DLP, destination/SSRF `MCP-INSP-004`, DNS pinning `MCP-INSP-005`, resource extraction) **MUST** run **before** `policy`, because policy evaluates over validated arguments and extracted resource fields and because a credential **MUST NOT** be selected for a call whose arguments or destination would be rejected (`MCP-POLICY-004` — credential selection only after an ALLOW-class decision, the invariant carrying the `MCP-T-046` ordering test; credential **scope** least privilege is `MCP-CRED-002`); the **response-side** pass (output bounding `MCP-INSP-002`, redaction `MCP-INSP-003`, injection labeling `MCP-INSP-007`) runs **after** the upstream call. See [DATA-FLOW-DIAGRAMS.md](DATA-FLOW-DIAGRAMS.md) DFD-7, whose request chain terminates in `RES --> POL`. | Become a single unbounded queue (Blueprint §09) — must be bounded and independently failure-scoped per stage. |
 | `internal/mcp/events` | Durable decision-event pipeline: event construction, sampling policy, bounded queues with backpressure, export/spool. | Reuse a small debug audit ring as production evidence (Blueprint §09) — specifically, must not reuse `internal/audit`'s bounded ring (`MaxRing=500`, `internal/audit/audit.go:49` — **[FACT]**) as the durable decision-event store. |
-| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → policy → credentials → inspection → upstream call → event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
+| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → **request-side inspection** → policy → credentials → **durable commit of the decision event for the critical action classes, positioned before EACH class's own irreversible action (`MCP-EVENT-002`): the upstream call for write/destructive, snapshot sign/push/apply for configuration publication, broker materialization for credential — credential PLANNING may precede the commit, minting/rotation/revocation may not** → credential materialization → upstream call → **response-side inspection** → outcome-event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
 | `internal/mcp/management` | Capability A business logic: read-only explanation/health/analytics tool handlers, draft/validate/simulate handlers; enforces "no raw secrets / no command exec / no unrestricted export" and gates any future mutation behind plan→validate→approve→apply. | Expose raw secret access, arbitrary command execution, or unrestricted trace/log export as an MCP tool (Blueprint §06 non-goals). Must not reuse the Gateway's policy/credential engines as its authorization model — Capability A authorization is a distinct schema (Trust Boundary TB-7, §4 below). |
 | `internal/mcp/adminapi` | Engine-side support for the admin-UI/API surface specific to MCP (server/tool/policy CRUD data access, decision-event query support) that a root-level `apiXxx` shim in the existing admin-UI layer (`ui_routes_meta.go`, `register*Routes` pattern — **[FACT]**) calls into. | Register `mux.HandleFunc` routes directly — per repo convention, route registration and `uiRoutes` metadata stay in root-level `register*Routes` helpers and `ui_routes_meta.go` (**[FACT]**, `CLAUDE.md` Admin UI / Control Plane section), not inside `internal/`. |
 
 **[REC]**: Whether Capability A (`internal/mcp/management`) and Capability B (`internal/mcp/runtime` +
 friends) end up as fully separate package trees (e.g. `internal/mcpmgmt/*` vs `internal/mcpgw/*`) or as a
-shared `internal/mcp/*` tree with capability-scoped subpackages is an open naming question for the ADR —
+shared `internal/mcp/*` tree with capability-scoped subpackages is an **open naming/decomposition question
+left to implementation review** — ADR-0024 fixes the `internal/mcp/*` namespace and the separation
+doctrine, not the leaf-package tree shape —
 either is consistent with ADR-0002, but the doctrine in §1 requires that whichever layout is chosen, the
 **runtime instances** (listeners, policy engine instances, credential broker instances, event streams) are
 never shared between the two capabilities, regardless of package tree shape.
@@ -93,10 +110,13 @@ never shared between the two capabilities, regardless of package tree shape.
 workflow (Blueprint §08):
 
 ```
-protocol kernel → identity → registry/catalog → policy → credentials → inspection → runtime → events
+protocol kernel → identity → registry/catalog → inspection (request side) → policy → credentials
+                → [critical classes: DURABLE decision-event commit — spool CONFIRMED, before each class's
+                   own irreversible action] → credential materialization → upstream call
+                → inspection (response side) → runtime → events (outcome)
 ```
 
-This is presented as the logical call order for the Gateway path (Capability B); Capability A's
+This is presented as the logical call order for the Gateway path (Capability B). **Request-side inspection precedes `policy`, and `credentials` follows the ALLOW decision** — evaluating policy against unvalidated arguments, or obtaining an upstream credential before a malformed argument or disallowed destination has been rejected, would defeat `MCP-INSP-001`/`004`/`005` and `MCP-POLICY-004` (credential selection only after an ALLOW-class decision — the invariant carrying the `MCP-T-046` ordering test), together with `MCP-CRED-002` credential scoping. `MCP-CRED-006` is **not** the control here: it governs broker **failure** behavior, not ordering. Capability A's
 `management` package sits beside `identity`/`policy` as a distinct authorization path (§1, TB-7) rather
 than inside this chain.
 
@@ -121,9 +141,20 @@ Rules governing the interfaces:
 - **`credentials` is a one-way sink from `policy`'s perspective.** `policy` never receives a credential
   value as an input and never emits one; it only emits a decision that `runtime` uses to decide whether to
   invoke `credentials`.
-- **`events` never blocks the decision path.** `runtime` emits to `events` after the decision/inspection
-  outcome is known; `events`' own backpressure/failure semantics (§5, MCP-EVENT-002) must not be able to
-  stall or alter a policy decision already made.
+- **`events` never blocks or alters the POLICY DECISION — but for the critical action classes it DOES gate
+  EXECUTION.** These are different things and conflating them breaks `MCP-EVENT-002`. `events`'
+  backpressure/failure semantics (§5) must never stall or change a decision `policy` has already made
+  (that is the `MCP-POLICY-002` purity property this invariant exists to protect). They **must**, however,
+  be able to stop the **side effect**: for the **write / destructive / configuration-publication /
+  credential / state-affecting-Management** classes the decision event **MUST be durably committed BEFORE
+  THAT CLASS'S OWN irreversible action** — the upstream call; the snapshot **sign/push/apply** (including a
+  rollback swap); broker **materialization** (mint/rotate/revoke); the Management **state change and the
+  signed snapshot it publishes** — and if
+  it cannot be committed the operation **MUST fail closed and never run**. Naming only "credential use and
+  the upstream call" leaves the publication and Management classes unconstrained, since neither performs one. A
+  fail-closed guarantee evaluated only *after* execution is not a guarantee — the side effect has already
+  happened and nothing remains to deny (`MCP-T-044`). The **outcome** event is emitted separately after the
+  call and is **not** the fail-closed gate.
 
 ---
 
@@ -175,7 +206,7 @@ Failure-mode ownership for the three MUST-fail-closed requirements the brief cal
 |---|---|---|---|
 | **MCP-POLICY-001** | Policy evaluation **MUST** default-deny when no rule matches. | `internal/mcp/policy` | Fail closed always — no-match is a DENY, never an implicit ALLOW. Mirrors the SWG default-deny posture (`policy.go:1142`, `proxy.go:543-556` — **[FACT]**, cited as precedent only, not shared code). |
 | **MCP-CRED-006** | Broker failure **MUST** fail closed for write/high-risk; fail-open **MAY** be allowed only with a valid cached credential and explicit policy for read-only low-risk. | `internal/mcp/credentials` | Conditional fail-closed: default is fail-closed; a narrow, explicitly-configured fail-open path exists only for read-only/low-risk with a still-valid cached credential — never for write/high-risk. |
-| **MCP-EVENT-002** | Loss of authentication/deny/configuration/high-risk events **MUST NOT** occur silently; the system **MUST** fail closed or enter a defined degraded mode and alert. | `internal/mcp/events` | Fail closed or alert-and-degrade for the critical event classes named; ordinary/low-risk event loss under backpressure may be handled by sampling/spooling per [`EVENT-MODEL.md`](EVENT-MODEL.md), but the critical classes are never silently dropped. |
+| **MCP-EVENT-002** | Loss of authentication/deny/configuration/high-risk events **MUST NOT** occur silently; for the critical **write/destructive/config-publication/credential** classes the operation **MUST fail closed AND** the system **MUST** enter the defined degraded mode with alert + loss counter (both, not either). **For an authentication-failure or authorization-denial event** — whose triggering request is **already denied**, so there is no operation to "fail closed" — the system **MUST** instead enter the **critical degraded state**, alert, increment the loss counter, and **block new *allowed* write/high-risk operations until critical-event durability is restored**. | `internal/mcp/events` | Fail-closed **and** degraded-mode-with-alert for the critical classes named. **Denial-event branch — a distinct posture, not a synonym:** when an authentication-failure or authorization-denial event cannot be persisted, the triggering request is already denied, so `events` **MUST** raise the **critical degraded state** and the **durability lockout**, and `internal/mcp/runtime` **MUST** block new *allowed* write/high-risk operations until durability is restored; fail-closed-plus-alert alone is **not** an equivalent posture and an implementation that stops there keeps doing privileged work after denial evidence has been lost. ordinary/low-risk event loss under backpressure may be handled (under an explicit degraded-mode policy) by sampling/spooling per [`EVENT-MODEL.md`](EVENT-MODEL.md), but the critical classes are never silently dropped. |
 
 General principle carried into `internal/mcp/runtime`: when any of `policy`, `credentials`, or `events`
 reports a failure, `runtime` must propagate the most restrictive applicable posture (deny the call) rather
@@ -235,18 +266,24 @@ flowchart TB
         REG["internal/mcp/registry"]
         CAT["internal/mcp/catalog"]
         POL["internal/mcp/policy\n(pure, no I/O — MCP-POLICY-002)"]
-        CRED["internal/mcp/credentials\n(fail-closed default — MCP-CRED-006)"]
-        INSP["internal/mcp/inspection"]
+        CREDPLAN["credentials: PLAN only\nchoose identity + scope, NO mutation\nMCP-CRED-002"]
+        CREDMAT["credentials: MATERIALIZE\nmint / rotate / revoke — the irreversible act\nONLY after the commit — MCP-EVENT-002\n(fail-closed default — MCP-CRED-006)"]
+        INSPQ["inspection (REQUEST side)\nsemantic schema + destination/SSRF + DNS pin\nMUST precede policy — MCP-INSP-001/004/005"]
+        INSPR["inspection (RESPONSE side)\noutput bounding + redaction + injection labels\nMCP-INSP-002/003/007"]
         RT["internal/mcp/runtime\n(per-call orchestrator)"]
         EVT["internal/mcp/events\n(durable — MCP-EVENT-002)"]
+        WAL{{"CRITICAL classes: decision event\nDURABLY COMMITTED (spool CONFIRMED, not just enqueued)\nBEFORE this class's irreversible action\ncannot commit ⇒ fail closed, nothing happens\nMCP-EVENT-002"}}
 
         IDENT --> REG
         REG --> CAT
-        CAT --> POL
-        POL --> CRED
-        CRED --> INSP
-        INSP --> RT
-        RT --> EVT
+        CAT --> INSPQ
+        INSPQ --> POL
+        POL --> CREDPLAN
+        CREDPLAN --> WAL
+        WAL --> CREDMAT
+        CREDMAT --> RT
+        RT --> INSPR
+        INSPR --> EVT
     end
 
     subgraph TB7["TB-7: Management MCP ↔ Culvert control surface"]
@@ -266,9 +303,10 @@ flowchart TB
         SWGPOL["policy.go PolicyRule\n(4 actions; NOT extended for MCP)"]
     end
 
-    MC -->|"TB-7"| MGMT
+    MC -->|"TB-7"| PROTO
     AG -->|"TB-1"| PROTO
-    PROTO -->|"validated request"| IDENT
+    PROTO -->|"validated request (Management bound set)"| MGMT
+    PROTO -->|"validated request (Gateway bound set)"| IDENT
     RT -->|"TB-2: mTLS/allowlist"| US
     RT <-->|"TB-3: signed snapshot,\nepoch/fencing"| SNAP
     MGMT <-->|"TB-3"| SNAP

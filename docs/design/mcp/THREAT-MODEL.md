@@ -71,8 +71,8 @@ connector/DMZ ingress · E-7 credential-provider integration · E-8 event export
 
 ## 6. Data flows
 
-See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (14 numbered DFDs). STRIDE-per-flow in §9 references
-those DFD numbers (DFD-1 … DFD-14).
+See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (15 numbered DFDs; DFD-15 — the PR-1 protocol-kernel
+decode path — added by the remediation). STRIDE-per-flow in §9 references those DFD numbers (DFD-1 … DFD-15).
 
 ## 7. Risk-rating methodology
 
@@ -90,13 +90,13 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 
 | Component | S | T | R | I | D | E |
 |---|---|---|---|---|---|---|
-| Protocol Kernel / Listener | MCP-T-005 | MCP-T-013 | — | MCP-T-041 | MCP-T-042,043,044 | MCP-T-036 |
+| Protocol Kernel / Listener | MCP-T-069 | MCP-T-058,068 | — | MCP-T-060 | MCP-T-042,043,044,063,073,074 | MCP-T-066,067 |
 | Identity Resolver | MCP-T-006,007,008 | MCP-T-003,004 | MCP-T-009 | — | — | MCP-T-030 |
 | Server Registry | MCP-T-020 | MCP-T-016 | — | — | — | MCP-T-016 |
 | Tool Catalog | MCP-T-011,012 | MCP-T-013,014,015 | — | — | — | MCP-T-017 |
 | Policy Engine | — | MCP-T-019 | MCP-T-046 | — | — | MCP-T-018,031 |
-| Credential Broker | MCP-T-024 | — | — | MCP-T-023,025 | MCP-T-024 | MCP-T-022 |
-| Inspection Pipeline | MCP-T-038 | — | — | MCP-T-026,027 | MCP-T-040 | MCP-T-018 |
+| Credential Broker | MCP-T-024 | — | — | MCP-T-005,023,025 | MCP-T-024 | MCP-T-022 |
+| Inspection Pipeline | MCP-T-038 | — | — | MCP-T-026,027,036,041 | MCP-T-040 | MCP-T-018 |
 | Decision Event Pipeline | MCP-T-045 | MCP-T-045 | MCP-T-045 | MCP-T-028 | MCP-T-044 | — |
 | CP→DP snapshot | MCP-T-049 | MCP-T-047,050 | — | — | — | MCP-T-047 |
 | Management MCP | MCP-T-034 | MCP-T-034 | — | MCP-T-035 | — | MCP-T-034 |
@@ -104,12 +104,22 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 
 *(S=Spoofing, T=Tampering, R=Repudiation, I=Info-disclosure, D=DoS, E=Elevation.)*
 
+> **Protocol-Kernel row corrected by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding M-4).**
+> The row previously listed threats owned by other components (`MCP-T-005` credential/identity, `MCP-T-013`
+> tool-catalog, `MCP-T-036` egress, `MCP-T-041` redirect). Those are now attached where their control is
+> enforced (`MCP-T-005` → Credential Broker; `MCP-T-013` already on Tool Catalog; `MCP-T-036`/`MCP-T-041` →
+> Inspection Pipeline). The kernel row now carries only threats native to parsing/framing/version/protocol-
+> state, whose controls are the new `MCP-PROTO-*` requirements: T (differential) = `MCP-T-058/068`,
+> I (mis-correlation) = `MCP-T-060`, D (parse-time exhaustion + listener DoS) = `MCP-T-063/073/074` (+ the
+> listener-half SSE/queue DoS `MCP-T-042/043/044`, gated PR-5), S (session/state confusion) = `MCP-T-069`,
+> E (version downgrade/unknown-version) = `MCP-T-066/067`.
+
 ## 9. STRIDE per flow (DFD cross-reference)
 
 | DFD | Flow | Dominant STRIDE threats |
 |---|---|---|
-| DFD-1 | Mgmt read-only request | MCP-T-034, MCP-T-035, MCP-T-010 |
-| DFD-2 | Mgmt draft/validate | MCP-T-034, MCP-T-046 |
+| DFD-1 | Mgmt read-only request | MCP-T-034, MCP-T-035, MCP-T-010, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin, validated per request by MCP-INSP-009) |
+| DFD-2 | Mgmt draft/validate | MCP-T-034, MCP-T-046, **MCP-T-031, MCP-T-055** (inbound rebinding / cross-origin, validated per request by MCP-INSP-009) |
 | DFD-3 | Future mgmt mutation approval | MCP-T-034, MCP-T-032, MCP-T-033 |
 | DFD-4 | Gateway tool discovery | MCP-T-011..017, MCP-T-020 |
 | DFD-5 | Gateway tool call | MCP-T-003..008, MCP-T-019, MCP-T-046 |
@@ -122,6 +132,7 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-12 | Local enterprise client connectivity | MCP-T-036, MCP-T-037, MCP-T-030 |
 | DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-052, MCP-T-053 |
 | DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-051 |
+| DFD-15 | Protocol-kernel decode path (PR-1) | MCP-T-057..074 (parser/framing/version/state) |
 
 ## 10. Security objectives
 
@@ -148,9 +159,9 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-005 | Token passthrough | Critical | MCP-AUTH-005, MCP-CRED-001 | IAM/Sec |
 | MCP-T-006 | Agent impersonation | High | MCP-ID-002,005 | IAM/Sec |
 | MCP-T-007 | Workload impersonation | High | MCP-ID-003,005 | IAM/Sec |
-| MCP-T-008 | Cross-user session confusion | High | MCP-ID-006, MCP-AUTH-007 | IAM/Sec |
+| MCP-T-008 | Cross-user session confusion | High | **MCP-ID-008** (one resolved identity per session, no mid-flight rebind — the enforcing control), MCP-AUTH-007, MCP-ID-006 (assurance/step-up, contributory only) | IAM/Sec |
 | MCP-T-009 | Cross-tenant confusion | Critical | MCP-ID-007, MCP-PRIVACY-002 | IAM/Sec |
-| MCP-T-010 | Tenant-binding failure | Critical | MCP-ID-007, MCP-CONNECT-004 | IAM/Sec |
+| MCP-T-010 | Tenant-binding failure | Critical | **MCP-ID-007** (every session incl. LAN/VPN-local — the **V1/Model-A** control, PR-3) + MCP-CONNECT-004 (connector/DMZ sessions only — PR-C / Future DMZ gate) | IAM/Sec |
 
 ### Tool discovery & drift
 
@@ -224,7 +235,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
-| MCP-T-040 | Oversized payloads | High | MCP-INSP-001, MCP-OPS-002 | SRE/Sec |
+| MCP-T-040 | Oversized payloads | High | **MCP-PROTO-006/008** (parse-time structural + per-session bounds — the control that rejects an oversized frame, **PR-1**, before any listener exists), MCP-OPS-002 (listener/runtime bounds under load, PR-5), MCP-INSP-001 (semantic input validation, PR-7) | SRE/Sec |
 | MCP-T-042 | SSE exhaustion | High | MCP-OPS-002 | SRE/Sec |
 | MCP-T-043 | Slow-client attacks | Medium | MCP-OPS-002 | SRE/Sec |
 | MCP-T-044 | Queue saturation / event-loss | Critical | MCP-EVENT-001,002,004 | SRE/Sec |
@@ -249,8 +260,8 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
 | MCP-T-054 | Local stdio bypass | High (residual) | MCP-OPS-004 (documented limitation) | Product/Sec |
-| MCP-T-055 | localhost bypass | High (residual) | MCP-OPS-004; MCP-INSP-008 (inbound Origin/Host) | Product/Sec |
-| MCP-T-056 | Direct egress bypass | High (residual) | MCP-OPS-004, network egress policy | Net/Sec |
+| MCP-T-055 | localhost bypass | High (residual) | MCP-OPS-004; MCP-INSP-008 (Origin/Host primitive, PR-1) + MCP-INSP-009 (listener enforcement, PR-5) | Product/Sec |
+| MCP-T-056 | Direct egress bypass | High (residual) | MCP-OPS-004 (documented V1 limitation, R-1) — the only **in-product** control; a customer-owned network egress policy is a **compensating control outside Culvert**, not an MCP requirement ID | Net/Sec |
 
 ### Management MCP
 
@@ -264,20 +275,56 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
 | MCP-T-051 | Outbound connector compromise | High | MCP-CONNECT-001,002 | Net/Sec |
-| MCP-T-052 | DMZ endpoint abuse | High | MCP-CONNECT-003, MCP-INSP-008 | Net/Sec |
+| MCP-T-052 | DMZ endpoint abuse | High | MCP-CONNECT-003, MCP-INSP-009 (listener-side Origin/Host enforcement) | Net/Sec |
 | MCP-T-053 | Cloud AI data-residency risk | High | MCP-PRIVACY-001,003 | Privacy/Legal |
 
 ### Inbound listener (new requirement surfaced in Phase 1)
 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
-| MCP-T-031 | Inbound DNS-rebinding against the MCP/SSE listener | High | MCP-INSP-008 (**Missing today** — `isSafeRedirectURL` is captive-portal-only, `proxy_portal.go:152`) | Sec/Eng |
+| MCP-T-031 | Inbound DNS-rebinding against the MCP/SSE listener | High | MCP-INSP-008 (Origin/Host validation **primitive** + harness, PR-1 — **no listener**) + MCP-INSP-009 (listener binding + host-allowlist + **E2E** rebinding enforcement, PR-5). **Missing today** — `isSafeRedirectURL` is captive-portal-only, `proxy_portal.go:152`. | Sec/Eng |
+
+### Protocol kernel — parsing, framing, version, protocol state (PR-1)
+
+Added by the PR-1 remediation (`PR1-READINESS-REMEDIATION.md`, finding H-1) to model the attack surface
+PR-1 actually ships: the MCP parser, JSON-RPC framing, version adapters and protocol-state machine. PR-1
+adds **no public listener**, but these threats are intrinsic to the kernel that will later front the PR-5
+listener and are gated at **PR-1**. Distinct rows are kept where controls/tests differ (no collapse into a
+single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
+([`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)); tests + gate in
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md).
+
+| ID | Threat | Sev | Primary controls (req IDs) | Owner |
+|---|---|---|---|---|
+| MCP-T-057 | Malformed JSON-RPC envelope / invalid UTF-8 not safely rejected | Medium | MCP-PROTO-001,013,014 | Sec/Eng |
+| MCP-T-058 | Parser differential (duplicate/ambiguous keys, conflicting fields) → downstream sees a different message than was validated | High | MCP-PROTO-001 | Sec/Eng |
+| MCP-T-059 | JSON-RPC message-type misclassification / unknown-or-unsupported method or extension dispatched | Medium | MCP-PROTO-002 | Sec/Eng |
+| MCP-T-060 | Request-ID confusion / response mis-correlation (integer/string/null edge cases, duplicate/absent id) | High | MCP-PROTO-003 | Sec/Eng |
+| MCP-T-061 | Batch-message ambiguity / amplification, or reject-bypass when batch is unsupported | Medium | MCP-PROTO-004 | Sec/Eng |
+| MCP-T-062 | Framing ambiguity / truncated / partial message mishandled | Medium | MCP-PROTO-005,013 | Sec/Eng |
+| MCP-T-063 | Oversized message / excessive JSON depth / field-count / string-size (parse-time exhaustion) | High | MCP-PROTO-006,008 | SRE/Sec |
+| MCP-T-064 | Numeric overflow / pathological number encodings | Medium | MCP-PROTO-007 | Sec/Eng |
+| MCP-T-065 | Unicode-normalization confusion in method/identifier names | Medium | MCP-PROTO-014 (exact method-token comparison + reject non-ASCII method names pending D-1; NFC is **not** a confusable defense; opaque-ID confusable handling deferred to a field-level policy) + MCP-PROTO-001 | Sec/Eng |
+| MCP-T-066 | Version-negotiation confusion / unknown-version accepted best-effort | High | MCP-PROTO-010 | Sec/Eng |
+| MCP-T-067 | Downgrade to an unsupported/weaker protocol semantics | High | MCP-PROTO-010 | Sec/Eng |
+| MCP-T-068 | Version-adapter differential (same input → divergent normalized message across adapters) | High | MCP-PROTO-011 | Sec/Eng |
+| MCP-T-069 | Protocol-state / session confusion (mid-session identity rebind, out-of-order lifecycle) | High | MCP-PROTO-012 (protocol lifecycle + immutable opaque session context, PR-1) + MCP-ID-008 (resolved-identity binding / no rebind, PR-3) | Sec/Eng |
+| MCP-T-070 | Cancellation race (cancel-and-retry as a decision bypass; unclean cancel) | Medium | MCP-PROTO-012 | Sec/Eng |
+| MCP-T-071 | Duplicate completion / in-session response replay | Medium | MCP-PROTO-003,012 | Sec/Eng |
+| MCP-T-072 | Reconnect / replay of protocol messages (resumption abuse) | Medium | MCP-PROTO-012 | Sec/Eng |
+| MCP-T-073 | Slow-input / partial-frame buffering resource exhaustion (parse-time) | Medium | MCP-PROTO-005,008 | SRE/Sec |
+| MCP-T-074 | Panic / crash / uncontrolled allocation from hostile input | High | MCP-PROTO-009,013 | Sec/Eng |
+
+The eight **High** protocol-kernel threats (`MCP-T-058,060,063,066,067,068,069,074`) carry a full
+Threat → Requirement → Control → Test → Evidence → Owner → Gate row in
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1; the Medium ones are covered by the
+protocol-kernel fuzz + structural-limit test classes there.
 
 ## 12. Residual risk ownership
 
 | ID | Residual risk | Owner | Acceptance condition |
 |---|---|---|---|
-| R-1 | stdio/localhost/direct-egress bypass (MCP-T-054..056) | Product/Sec | Documented V1 limitation; endpoint bridge is roadmap ([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) D-8). |
+| R-1 | stdio/localhost/direct-egress bypass (MCP-T-054..056) | Product/Sec | Documented V1 limitation; endpoint bridge is roadmap ([`OPEN-DECISIONS.md`](OPEN-DECISIONS.md) **D-7** — the local-MCP/stdio-localhost roadmap decision; D-8 is the distinct connector model). |
 | R-2 | Pattern inspection cannot catch every secret/injection (MCP-T-026,027,038) | Sec/Privacy | Defense-in-depth + approvals; accepted with monitoring. |
 | R-3 | Approved server later compromised (MCP-T-021) | Sec/Eng | Drift + destination + output controls; accepted. |
 | R-4 | Human approval social engineering (MCP-T-032,033) | Product Sec | Explicit, auditable approval UX; accepted. |
@@ -292,5 +339,20 @@ A threat is closed for PR-1 entry when: (1) it appears in this register with a s
 without an owner is a NO-GO** ([`GO-NO-GO-CHECKLIST.md`](GO-NO-GO-CHECKLIST.md)).
 
 > **Note on MCP-T-002 (token replay):** per [`VERIFIED-REPOSITORY-CONTEXT.md`](VERIFIED-REPOSITORY-CONTEXT.md)
-> §6, the reusable SWG bearer path provides **no** access-token replay defense. MCP replay protection is
-> **net-new and NOT VERIFIED as present**; `MCP-AUTH-006` is therefore a build requirement, not a reuse.
+> §6, the reusable SWG bearer path provides **no** access-token replay defense. MCP anti-replay is
+> **net-new and NOT VERIFIED as present**; `MCP-AUTH-006` is a build requirement, not a reuse.
+> **Reframed by [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (items 7–9):**
+> the control is **not** access-token `jti` one-time-use (a still-valid token replaying is not itself
+> evidence of replay). It is a layered posture — short TTL, audience/resource, issuer/sig/exp/tenant/scope
+> validation, introspection/revocation, correlation + rate limits + anomaly, and **sender-constrained
+> (mTLS/DPoP) tokens for high-risk/external profiles**, with DPoP replay detection applied to the
+> per-request DPoP proof.
+
+> **Decision closure (2026-07-24).** The threats governing the five closed decisions have accountable
+> owners and are recorded in [`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md):
+> D-2 → MCP-T-001..010 (esp. MCP-T-005 Critical passthrough); D-5 → MCP-T-044 Critical / MCP-T-028 /
+> MCP-T-045; D-8 → MCP-T-051 / MCP-T-053 (residual R-5) / MCP-T-010; D-9 → MCP-T-052 / MCP-T-031 (inbound
+> Origin/Host, Missing-today, split across two layers: **`MCP-INSP-008` — the PR-1 pure Origin/Host
+> validation primitive (no listener); `MCP-INSP-009` — the PR-5 listener binding + end-to-end
+> enforcement**); D-13 → MCP-T-034 Critical / MCP-T-035. No closure
+> removes a threat's owner or residual acceptance in §12.

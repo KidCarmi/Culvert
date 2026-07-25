@@ -23,16 +23,17 @@ when its test passes with the expected control, event and policy result.
 - **Test:** wrong-audience negative test.
 - **Owner:** IAM/Sec. **Severity:** High. **Closure:** foreign `aud` always denied.
 
-### MCP-AC-002 — Token replay
-- **Attacker:** captured a valid access token.
+### MCP-AC-002 — Stolen-token abuse / DPoP-proof replay
+- **Attacker:** captured a valid access token (and, on a DPoP profile, a captured proof).
 - **Preconditions:** token not yet expired/revoked.
-- **Path:** replay the same token on a second call (MCP-T-002).
+- **Path:** reuse the stolen token from a different client/context, and — on a sender-constrained profile —
+  replay a captured **DPoP proof** (MCP-T-002).
 - **Affected assets:** A-2.
-- **Expected control:** MCP-AUTH-006 replay protection (**net-new; NOT VERIFIED as present** — VRC §6).
-- **Expected event:** decision/DENY, `MCP.AUTH.REPLAY_SUSPECTED`.
-- **Expected policy result:** DENY or step-up.
-- **Test:** replay negative matrix.
-- **Owner:** IAM/Sec. **Severity:** High. **Closure:** replayed token rejected/flagged.
+- **Expected control:** MCP-AUTH-006 as **reframed by [`ADR-0024 §D-2`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) items 7–9** — a layered posture (TLS, short TTL, audience/resource restriction, issuer/sig/exp/tenant/scope validation, introspection/revocation, client/session correlation + rate limits + anomaly signals, and **sender-constrained tokens (mTLS/DPoP) on high-risk or externally reachable profiles**). **Net-new; NOT VERIFIED as present** — VRC §6. **Note:** reuse of a still-valid access token is **NOT by itself evidence of replay**, so this case **MUST NOT** be closed by one-time-use rejection of an access-token `jti`; where DPoP is in use, replay detection applies to the **per-request proof** (proof `jti`, method, URI, `iat`, `ath`, nonce), never the access token.
+- **Expected event:** decision/DENY on a **replayed DPoP proof** (`MCP.AUTH.REPLAY_SUSPECTED`); for bare stolen-token reuse, an anomaly/rate-limit security event — not an automatic DENY purely because the token was seen twice.
+- **Expected policy result:** DENY for a replayed proof or a failed sender-constraint check; step-up / rate-limit / flag for anomalous stolen-token reuse.
+- **Test:** DPoP-proof replay + sender-constraint + anomaly/rate-limit matrix (**not** an access-token one-time-use test).
+- **Owner:** IAM/Sec. **Severity:** High. **Closure:** replayed DPoP proof rejected; sender-constraint enforced on high-risk profiles; stolen-token abuse rate-limited/flagged.
 
 ### MCP-AC-003 — Token in query string
 - **Attacker:** any caller.
@@ -131,10 +132,15 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** a local/desktop MCP client (Model A).
 - **Path:** browser-driven request with a forged Host/Origin (MCP-T-031,055).
 - **Affected assets:** A-11, A-9.
-- **Expected control:** MCP-INSP-008 inbound Origin/Host validation (**missing today**).
+- **Expected control:** **MCP-INSP-009** (PR-5) — the **live listener** binds only configured interfaces and
+  enforces the host allowlist/Origin check end-to-end; **MCP-INSP-008** (PR-1) supplies the **validation
+  primitive only**. Both **missing today**. Since this abuse case requires a running listener, it is **not
+  closable at PR-1**.
 - **Expected event:** decision/DENY, `MCP.INSPECTION.ORIGIN_REJECTED`.
 - **Expected policy result:** DENY.
-- **Test:** inbound-rebinding test. **Owner:** Sec/Eng. **Severity:** High. **Closure:** bad Origin/Host rejected.
+- **Test:** listener-side inbound-rebinding **E2E** test (MCP-INSP-009, PR-5) — a PR-1 unit test of the
+  primitive alone does **not** close this. **Owner:** Sec/Eng. **Severity:** High. **Closure:** bad
+  Origin/Host rejected **by the live listener**.
 
 ### MCP-AC-013 — Secret exfiltration through a tool
 - **Attacker:** agent embedding a secret to send outward.
@@ -161,9 +167,9 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** reachable listener.
 - **Path:** open many slow SSE streams / oversized payloads (MCP-T-042,043,040,044).
 - **Affected assets:** availability, A-6.
-- **Expected control:** MCP-OPS-002 bounds; MCP-EVENT-002 critical-event durability.
+- **Expected control:** **MCP-PROTO-006/008** parse-time structural + per-session bounds (PR-1) for oversized/pathological frames; MCP-OPS-002 listener/runtime bounds under load (PR-5); MCP-EVENT-002 critical-event durability.
 - **Expected event:** `MCP.SYSTEM.EVENT_BACKPRESSURE` / `DEGRADED_MODE`; no critical-event loss.
-- **Expected policy result:** bounded; fail-closed for critical classes.
+- **Expected policy result:** bounded; **fail closed AND** degrade+alert for the critical classes — and if the saturation drops an auth-failure/authz-denial event, the **critical degraded state + durability lockout** of MCP-AC-016 applies instead.
 - **Test:** load/soak/slowloris/queue-saturation. **Owner:** SRE/Sec. **Severity:** High/Critical. **Closure:** bounds hold; no critical loss.
 
 ### MCP-AC-016 — Critical decision-event loss
@@ -171,10 +177,10 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** high event volume.
 - **Path:** saturate the pipeline during a high-risk deny (MCP-T-044,045).
 - **Affected assets:** A-6.
-- **Expected control:** MCP-EVENT-001,002 (spool/backpressure; fail-closed or degraded).
-- **Expected event:** the deny event survives (or the operation fails closed + alert).
-- **Expected policy result:** no silent loss of auth/deny/config/high-risk events.
-- **Test:** event-durability-under-saturation. **Owner:** SRE/Sec. **Severity:** Critical. **Closure:** zero critical loss demonstrated.
+- **Expected control:** MCP-EVENT-001,002 (mandatory local encrypted spool + backpressure), with the **two distinct critical-class outcomes** of EVENT-MODEL §4a / ADR-0024 §D-5: **(a)** for write/destructive/config-publication/credential/state-affecting-Management ⇒ **fail closed AND** degraded mode + alert + integrity-protected loss counter; **(b)** for the **auth-failure / authz-DENIAL** event this attacker targets ⇒ the request is **already denied**, so fail-closed is vacuous — instead **critical degraded state + alert + loss counter + a DURABILITY LOCKOUT blocking NEW *allowed* write/high-risk operations until durability is restored**.
+- **Expected event:** the deny event survives. If its durability is lost, the system enters the **critical degraded state** and alerts — and **subsequent allowed write/high-risk operations are blocked** until durability returns; for a critical *write* event instead, the triggering operation fails closed **and** degraded mode is entered.
+- **Expected policy result:** no silent loss of auth/deny/config/high-risk events; degraded mode is **not** an alternative to fail-closed for critical write classes, and **degraded mode alone is not sufficient for a lost denial event** — the lockout is required, otherwise the attacker erases the deny evidence and privileged work continues.
+- **Test:** event-durability-under-saturation, **including a denial-event lockout case**: drop the deny event under saturation, then assert a subsequent *allowed* write/high-risk operation is **blocked** until durability is restored. **Owner:** SRE/Sec. **Severity:** Critical. **Closure:** zero critical loss demonstrated **and** the lockout proven (this abuse case is **not** closed by degraded-mode alerting alone).
 
 ### MCP-AC-017 — Stale / corrupt snapshot applied
 - **Attacker:** fenced-out CP or corrupted transport.
@@ -211,16 +217,90 @@ when its test passes with the expected control, event and policy result.
 - **Preconditions:** Model B/C deployment.
 - **Path:** impersonate connector identity / replay tunnel / abuse DMZ (MCP-T-051,052).
 - **Affected assets:** A-12, A-9.
-- **Expected control:** MCP-CONNECT-001,002,003 + MCP-INSP-008.
+- **Expected control:** MCP-CONNECT-001,002 (**PR-C**), MCP-CONNECT-003 + **MCP-INSP-009** (**Future DMZ
+  gate** — listener-side host allowlist + E2E rebinding enforcement). `MCP-INSP-008` (PR-1) is the validation
+  primitive only and does not close the DMZ path.
 - **Expected event:** connectivity event; DENY on identity/tenant failure.
 - **Expected policy result:** DENY; tenant-bound.
 - **Test:** impersonation + tunnel-replay + rollover + DMZ-abuse. **Owner:** Net/Sec. **Severity:** High. **Closure:** impersonation/replay blocked; tenant binding holds.
+
+### MCP-AC-021 — Parser differential via duplicate JSON keys
+- **Attacker:** client sending a crafted JSON-RPC envelope with duplicate/ambiguous keys.
+- **Preconditions:** reachable protocol kernel (PR-1 harness or later listener).
+- **Path:** send `{"method":"safe", ... ,"method":"dangerous"}` so the validator and a downstream reader disagree (MCP-T-058).
+- **Affected assets:** A-3, A-9.
+- **Expected control:** MCP-PROTO-001 strict single-parse decode; duplicate-key reject/canonicalize.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.MALFORMED`.
+- **Expected policy result:** DENY (message rejected before downstream stages).
+- **Test:** parser-differential + duplicate-key fixtures. **Owner:** Sec/Eng. **Severity:** High. **Closure:** validated message == forwarded message, always.
+
+### MCP-AC-022 — Response mis-correlation / request-ID confusion
+- **Attacker:** client replaying/forging **response** `id`s, or forging a notification that carries a top-level `id` (a classification error) or that names another session's request `id` in its cancellation **params**.
+- **Preconditions:** an active session with outstanding requests.
+- **Path:** send a response whose `id` matches no outstanding request, or a duplicate/null/oversized id (MCP-T-060,071).
+- **Affected assets:** A-9, A-3.
+- **Expected control:** MCP-PROTO-003 bounded per-session ID table + type/edge validation.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.ID_MISCORRELATION`.
+- **Expected policy result:** rejected/ignored; no cross-correlation.
+- **Test:** ID-correlation + int/string/null edge tests. **Owner:** Sec/Eng. **Severity:** High. **Closure:** uncorrelated responses rejected; table bounded.
+
+### MCP-AC-023 — Depth/size bomb (parse-time exhaustion)
+- **Attacker:** client sending a deeply nested / huge-field / long-string envelope.
+- **Preconditions:** reachable protocol kernel.
+- **Path:** send a payload exceeding depth/field/string/size bounds to exhaust CPU/memory at parse time (MCP-T-063,073).
+- **Affected assets:** availability.
+- **Expected control:** MCP-PROTO-006 structural limits + MCP-PROTO-008 per-session resource budget.
+- **Expected event:** `MCP.PROTOCOL.LIMIT_EXCEEDED`.
+- **Expected policy result:** rejected with bounded cleanup; session budget enforced.
+- **Test:** limit + fuzz + resource-budget assertions. **Owner:** SRE/Sec. **Severity:** High. **Closure:** over-limit rejected; budget holds.
+
+### MCP-AC-024 — Protocol-version downgrade
+- **Attacker:** client negotiating an unknown or weaker protocol version.
+- **Preconditions:** version negotiation at session establishment.
+- **Path:** offer a version outside the allowlist expecting best-effort/downgrade acceptance (MCP-T-066,067).
+- **Affected assets:** A-3, security invariants.
+- **Expected control:** MCP-PROTO-010 version allowlist; reject unknown; no silent downgrade.
+- **Expected event:** decision/DENY, `MCP.PROTOCOL.VERSION_REJECTED`.
+- **Expected policy result:** explicit negotiation failure (not a narrowed-security connection).
+- **Test:** version-conformance/downgrade fixtures (**D-1-gated**). **Owner:** Sec/Eng. **Severity:** High. **Closure:** unknown/downgrade rejected; only allowlisted versions accepted.
+
+### MCP-AC-025 — Version-adapter differential
+- **Attacker:** sends equivalent inputs across two supported versions to obtain divergent normalized messages.
+- **Preconditions:** ≥2 versions in the allowlist with adapters.
+- **Path:** exploit an adapter that normalizes the same intent differently so downstream policy differs by version (MCP-T-068).
+- **Affected assets:** A-3.
+- **Expected control:** MCP-PROTO-011 adapter equivalence to one internal representation.
+- **Expected event:** n/a (equivalence proven in test); divergence → `MCP.PROTOCOL.ADAPTER_DIVERGENCE`.
+- **Expected policy result:** identical normalized message regardless of version.
+- **Test:** adapter-equivalence fixtures (**D-1-gated**). **Owner:** Sec/Eng. **Severity:** High. **Closure:** no cross-adapter differential.
+
+### MCP-AC-026 — Mid-session identity rebind / protocol-state confusion
+- **Attacker:** attempts to re-bind a session to a different identity mid-flight or drive out-of-order lifecycle.
+- **Preconditions:** an established session.
+- **Path:** inject a lifecycle/auth message to swap the bound principal or reorder establishment (MCP-T-069).
+- **Affected assets:** A-2, A-10.
+- **Expected control:** split by layer — **MCP-ID-008 (PR-3)** owns *resolved-identity binding: one identity per session, no mid-flight rebind* (PR-1 cannot provide it: `MCP-PROTO-012`'s session context is deliberately opaque and identity-free); **MCP-PROTO-012 (PR-1)** owns only *lifecycle ordering / no out-of-order establishment* on that opaque context.
+- **Expected event:** decision/DENY — `MCP.IDENTITY.REBIND_DENIED` (identity rebind, PR-3) or `MCP.PROTOCOL.STATE_VIOLATION` (out-of-order lifecycle, PR-1).
+- **Expected policy result:** DENY; session not rebound.
+- **Test:** identity-binding + no-rebind + cross-session tests (MCP-ID-008, PR-3) for the rebind path; protocol-lifecycle + reconnect tests (MCP-PROTO-012, PR-1) for ordering. **Owner:** IAM/Eng (identity) + Sec/Eng (lifecycle). **Severity:** High. **Closure:** one resolved identity for the session lifetime (PR-3); valid lifecycle ordering (PR-1).
+
+### MCP-AC-027 — Hostile input crash / panic
+- **Attacker:** fuzzing the kernel to trigger a panic or uncontrolled allocation.
+- **Preconditions:** reachable protocol kernel.
+- **Path:** feed adversarial bytes to parser/framing/adapter/cancellation paths (MCP-T-074).
+- **Affected assets:** availability.
+- **Expected control:** MCP-PROTO-009 crash-resistance; MCP-PROTO-013 bounded error + cleanup.
+- **Expected event:** `MCP.PROTOCOL.MALFORMED` (bounded error), never a crash.
+- **Expected policy result:** bounded error; process stays up.
+- **Test:** fuzz (panic/crash detection) + race. **Owner:** Sec/Eng. **Severity:** High. **Closure:** no panic/crash on the corpus.
 
 ---
 
 ## Coverage
 
-20 abuse cases spanning all Critical/High threat classes. Each maps to ≥1 requirement and a named test;
-the consolidated chain is in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Residual-only
-cases (stdio/localhost/direct-egress bypass) are covered as documented limitations (MCP-OPS-004) rather
-than abuse cases, per [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 R-1.
+27 abuse cases spanning all Critical/High threat classes, including the seven PR-1 protocol-kernel cases
+(MCP-AC-021..027, added by the remediation — `PR1-READINESS-REMEDIATION.md`, finding H-1). Each maps to
+≥1 requirement and a named test; the consolidated chain is in
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Residual-only cases
+(stdio/localhost/direct-egress bypass) are covered as documented limitations (MCP-OPS-004) rather than
+abuse cases, per [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 R-1.

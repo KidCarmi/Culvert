@@ -186,9 +186,12 @@ that pin them. As of this PR-0 package:
 - **No canonicalization tests exist in the current repository CI baseline.** There is no MCP tool
   fingerprinting code yet (no MCP listener exists in inspected paths — VERIFIED EVIDENCE), so there is
   necessarily no test proving the whitespace-/order-insensitivity behavior described in §1.
-- **No malicious or non-compliant MCP server fixtures exist today.** `codeql.yml` is PR path-scoped and
-  MCP paths are **NOT** wired into it; `pr-fast-gate.yml`/`pr-deep-gate.yml` do not run any MCP-specific
-  suite. A malicious-MCP-server test corpus is explicitly listed as **MISSING FOR MCP** in the current CI
+- **No malicious or non-compliant MCP server fixtures exist today.** `pr-fast-gate.yml`/`pr-deep-gate.yml`
+  do not run any MCP-specific suite. **On CodeQL, note the correction (finding M-1):** `codeql.yml` is PR
+  path-scoped, but its filter **already includes `internal/**`**, which matches `internal/mcp/**` — so MCP Go
+  code **will be analyzed on PRs with no path-filter change**. What CodeQL does *not* do is **block**: it is
+  not a branch-protection-required check, so making it gate MCP PRs is a **repo-settings choice, not a
+  workflow edit**. Do **not** schedule a CodeQL path-glob change as MCP work. A malicious-MCP-server test corpus is explicitly listed as **MISSING FOR MCP** in the current CI
   evidence, alongside the OAuth-negative matrix, DNS-rebinding lab, inbound Origin/Host tests,
   SSE-exhaustion tests, and mixed-version/stale-epoch/corrupt-snapshot MCP gates.
 - **No drift-classification fixtures (per-row §2 test cases: no-change, safe-narrowing, privilege
