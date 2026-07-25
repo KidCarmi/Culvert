@@ -1802,8 +1802,9 @@ tr.dragging  { opacity: .4; }
         <div class="panel-body">
           <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;line-height:1.6">
             Every PAC path that returns <code>DIRECT</code> - a <strong>full security-path bypass</strong>:
-            matching traffic skips SSL inspection, DLP, CDR, URL filtering, threat inspection,
-            authentication, policy, and all proxy logging - it never reaches Culvert. (This is
+            matching traffic skips SSL inspection, content scanning (ClamAV/YARA/DPI), CDR,
+            Blocklist/URL Category enforcement, Threat Feed, authentication, policy, and all proxy
+            logging - it never reaches Culvert. (This is
             <em>not</em> the same as an SSL-inspection bypass.) <strong>Derived from configuration:</strong>
             it shows what the config makes reachable, not that a bypass was used - Culvert cannot
             observe DIRECT traffic.
@@ -4399,10 +4400,10 @@ Firefox (all platforms):
           </div>
 
           <div>
-            <div style="font-weight:600;margin-bottom:6px">Sealing recipients</div>
-            <p class="hint">Register a TAC/recipient <strong>public</strong> X25519 key once (verify its fingerprint out-of-band), then seal bundles to it by name - no pasting raw keys. Keys are validated on registration; nothing here is secret.</p>
+            <div style="font-weight:600;margin-bottom:6px">Sealing recipients (manual export only)</div>
+            <p class="hint">Register a <strong>public</strong> X25519 key once (verify its fingerprint out-of-band), then seal a manually-downloaded bundle to it by name - no pasting raw keys. Keys are validated on registration; nothing here is secret. This registry is separate from the "TAC trust keys" below - it feeds only the manual <em>Seal</em> download, not the automated <em>Upload to TAC</em> button, which reads its recipient key from TAC trust keys instead.</p>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px" data-min-role="admin">
-              <input id="recipient-name" class="input sm" type="text" placeholder="name (e.g. tac-prod)" maxlength="64" style="width:150px">
+              <input id="recipient-name" class="input sm" type="text" placeholder="name (e.g. auditor-2026)" maxlength="64" style="width:150px">
               <input id="recipient-key" class="input sm" type="text" placeholder="base64 X25519 public key" style="width:240px">
               <button class="btn ghost sm" data-click="addRecipient" data-min-role="admin" title="Register a named sealing recipient">Register</button>
             </div>
@@ -12728,7 +12729,7 @@ async function savePACProfile() {
         const ok = await confirmDanger({
           title: 'New DIRECT bypass - confirm',
           msg: 'This profile introduces new DIRECT path(s): ' + paths,
-          impact: 'DIRECT is a FULL security-path bypass - matching traffic skips SSL inspection, DLP, CDR, URL filtering, threat inspection, authentication, policy, and all proxy logging (it never reaches Culvert).',
+          impact: 'DIRECT is a FULL security-path bypass - matching traffic skips SSL inspection, content scanning (ClamAV/YARA/DPI), CDR, Blocklist/URL Category enforcement, Threat Feed, authentication, policy, and all proxy logging (it never reaches Culvert).',
           confirmWord: profileId,
           okLabel: 'Publish bypass',
         });

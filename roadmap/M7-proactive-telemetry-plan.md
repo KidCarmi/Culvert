@@ -21,7 +21,7 @@
 > justification (§7); (6) a corrected preview guarantee via `registry_hash` +
 > `schema_version` (§8); (7) hardened endpoint canonicalization — fixed path, origin
 > only (§9); (8) explicit TAC key-rotation behavior, fail-closed (§10); (9) a durable
-> proactive **incident state machine** replacing the naïve `ok→fail` compare (§11);
+> proactive **degradation state machine** replacing the naïve `ok→fail` compare (§11);
 > (10) a TAC-side retention/privacy contract with the AI-consumption boundary (§12);
 > (11) a mandatory cross-repo gateway checkpoint — **Slice 3 is blocked** until
 > `tac-platform` ships the gateway + golden vectors (§13). New slice structure (§14),
@@ -49,9 +49,9 @@ independent switch), decomposed into slices with **egress isolated to Slice 3**:
    **support-health scalar** metrics (label-free; no traffic/scale/posture/identity),
    E2E-sealed to TAC's key, over authenticated HTTPS. The admin previews the exact
    sample before enabling.
-2. **Proactive local support-bundle staging** — a durable incident state machine that,
-   on a sustained health degradation, **pre-stages an incident-scoped bundle locally**
-   (never auto-sent).
+2. **Proactive local support-bundle staging** — a durable degradation-tracking state
+   machine that, on a sustained health degradation, **pre-stages a bundle scoped to
+   the degraded check, locally** (never auto-sent).
 3. **Alert → support-scope linkage** — a fired alert *suggests* the matching incident
    scope (suggestion only).
 
@@ -80,7 +80,7 @@ M7 builds it; **CROSS-REPO** = must be built in `tac-platform`; **DEFERRED** = l
 | **No central metric registry** — metrics are hardcoded `Fprintf` + per-subsystem `WritePrometheus`; OTLP re-lists as `culvert.*` | EXISTING constraint | `metrics.go` `handleMetrics`; `otlp.go` `culvertMetricsSnapshot` |
 | Scoped support-metric registry (`supportMetricRegistry`) | **NEW** (§6) | — |
 | Telemetry consent switch + config + preview + sender + spool | **NEW** (§4/§5/§14) | — |
-| Proactive incident state machine + durable ledger | **NEW** (§11) | — |
+| Proactive degradation state machine + durable ledger | **NEW** (§11) | — |
 | Telemetry ingestion gateway (`/v1/telemetry/samples`), TAC decryption, idempotency, retention | **CROSS-REPO** — confirmed absent in `tac-platform` (`internal/`: approval/audit/domain/executor/fsm/opsvc/plan/policy/provider/releasemanifest/store/validator; no telemetry/ingest/upload route) | `KidCarmi/tac-platform` (§13) |
 | mTLS transport auth; canonical repo-wide metrics architecture | **DEFERRED** (§4, §6) | — |
 
@@ -333,7 +333,7 @@ not customer traffic/posture, and do not fingerprint a tenant.
 | `support_health_session_ready` (0/1) | session subsystem key present | Aggregate | exact bit | **Yes** | own health; no secret material |
 | `support_health_config_snapshot_valid` (0/1) | last config snapshot validated | Aggregate | exact bit | **Yes** | own health; not config content |
 | `support_health_ca_expiry_bucket` (0..3) | CA cert nearing expiry | Aggregate | bucketed (`>90d/≤90/≤30/≤7`) | **Yes** | proactive renewal signal; bucketed to avoid a precise cert-timeline fingerprint |
-| `support_uptime_bucket` (0..3) | restart cadence | Aggregate | bucketed (`<1d/<7/<30/≥30`) | **Yes** | coarse stability signal; **exact uptime rejected** (fingerprint/correlation) |
+| `support_health_uptime_bucket` (0..3) | restart cadence | Aggregate | bucketed (`<1d/<7/<30/≥30`) | **Yes** | coarse stability signal; **exact uptime rejected** (fingerprint/correlation); named `support_health_*` to match the rest of this scoped registry (§6) |
 | `culvert_requests_total` | traffic volume | LocalOnly | — | **No** | reveals customer scale |
 | `culvert_requests_blocked`/`allowed`/`auth_fail` | policy/auth outcomes | LocalOnly | — | **No** | security posture + attack signal (auth failures) |
 | `culvert_bytes_sent_total`/`recv_total` | throughput | LocalOnly | — | **No** | customer scale |
@@ -420,11 +420,17 @@ Telemetry reuses the M6 TAC recipient trust store (`support_tac_trust.go`).
 
 ---
 
-## 11. Proactive incident state machine (durable)
+## 11. Proactive degradation state machine (durable)
 
 A naïve `ok→fail` compare over `computeReadiness()` is insufficient (readiness mixes
 gating/report-only/optional/DP-specific/startup-flapping checks). M7 defines an explicit
-**proactive check registry** + a durable **incident** model.
+**proactive check registry** + a durable **degradation** model. (This is a distinct
+concept from the existing **incident scope** catalog below — "degradation" is the new
+stateful open/closed health record this section defines; "incident scope" stays the
+pre-existing, stateless `support_scopes.go` catalog key. Per `docs/design/
+PRODUCT-TERMINOLOGY.md`, "Incident" itself is not a product concept and must not become
+a GUI-facing entity name — Slice 4's GUI (§14) must surface this as "degradation",
+never "incident".)
 
 ```go
 type proactiveCheckDescriptor struct {
@@ -432,7 +438,7 @@ type proactiveCheckDescriptor struct {
     Scope               string        // support incident scope, e.g. "tls" (must be a real scope)
     Severity            string        // "critical" | "warn"
     ConsecutiveFailures int           // crossings required before staging (default 3)
-    Cooldown            time.Duration // min gap between stagings for the same incident
+    Cooldown            time.Duration // min gap between stagings for the same degradation
     StageOnBootFailure  bool          // false — never stage during startup grace
     Evaluate            func() CheckResult
 }
@@ -447,13 +453,14 @@ report-only/optional/DP-dependency rows are excluded):
 | `policy_loaded` (policy engine down) | `policy` | critical | yes |
 | `config_snapshot_validator` (bad snapshot) | `cluster` | critical | yes |
 | `clamav`/`yara` (scan engine down) | `scan` | warn | yes |
-| `session_secret` | — | critical | **no** (config error, not an evolving incident) |
+| `session_secret` | — | critical | **no** (config error, not an evolving degradation) |
 | `geoip` | — | warn | **no** (optional/data-file; low value) |
 | `state_file_*`, DP-dependency rows | — | — | **no** (report-only) |
 
-**Durable local incident state** (`<dataDir>/support/proactive_incidents.json`, `0600`,
-bounded): per check `{ last_status, consecutive_failures, incident_fingerprint,
-incident_start, last_staged_at, last_staged_bundle_id, recovered_at, cooldown_until }`.
+**Durable local degradation state** (`<dataDir>/support/proactive_degradations.json`,
+`0600`, bounded): per check `{ last_status, consecutive_failures,
+degradation_fingerprint, degradation_start, last_staged_at, last_staged_bundle_id,
+recovered_at, cooldown_until }`.
 
 **Transitions** (`unknown → healthy | degraded`; `healthy → degraded`;
 `degraded → degraded`; `degraded → healthy`):
@@ -462,11 +469,11 @@ incident_start, last_staged_at, last_staged_bundle_id, recovered_at, cooldown_un
   `unknown → degraded` at boot never immediately stages.
 - **Threshold:** stage only after `ConsecutiveFailures` (default **3**) consecutive
   failing evaluations — a single flap never stages.
-- **One incident, one stage:** staging sets `cooldown_until`; `degraded → degraded`
+- **One degradation, one stage:** staging sets `cooldown_until`; `degraded → degraded`
   does **not** re-stage until cooldown elapses (persistent degradation ⇒ no storm).
-- **Recovery closes the incident:** `degraded → healthy` records `recovered_at` and
-  resets counters; a **new** failure after recovery opens a **new** incident (new
-  fingerprint) and stages again after threshold.
+- **Recovery closes the degradation:** `degraded → healthy` records `recovered_at` and
+  resets counters; a **new** failure after recovery opens a **new** degradation record
+  (new fingerprint) and stages again after threshold.
 - **Cooldown survives restart** (persisted ledger) — a restart mid-cooldown does not
   re-stage.
 - **Local-only, per-node:** each node evaluates its **own** readiness and stages its
@@ -578,13 +585,13 @@ Tests: `TestNoAutoTelemetry`, `TestTelemetryRejectsURLUserinfo`,
 `TestTelemetryDisableStopsEgress`, `TestTelemetryNoTrustKeyFailsClosed`,
 `TestTelemetryKeyRotationDoesNotResealPendingSample`, `TestTelemetryGatewayGoldenVector`.
 
-### Slice 4 — Durable proactive support incidents (LOCAL ONLY)
-Proactive check registry (§11) + incident state machine + durable cooldown ledger +
+### Slice 4 — Durable proactive support degradation tracking (LOCAL ONLY)
+Proactive check registry (§11) + degradation state machine + durable cooldown ledger +
 startup grace + consecutive-failure threshold + recovery handling + scope mapping +
 local bundle staging + alert→scope suggestion + GUI + runbook
 (`docs/operator/proactive-support.md`). **No upload, no telemetry send.**
 Tests: `TestProactiveStartupGrace`, `TestProactiveConsecutiveFailureThreshold`,
-`TestProactiveCooldownSurvivesRestart`, `TestProactiveRecoveryClosesIncident`,
+`TestProactiveCooldownSurvivesRestart`, `TestProactiveRecoveryClosesDegradation`,
 `TestProactivePersistentFailureDoesNotStorm`, `TestProactiveStaysLocal`,
 `TestAlertScopeMapValid`.
 
@@ -622,7 +629,7 @@ TestNoAutoTelemetry                           # static scan: gate not in startup
 TestProactiveStartupGrace
 TestProactiveConsecutiveFailureThreshold
 TestProactiveCooldownSurvivesRestart
-TestProactiveRecoveryClosesIncident
+TestProactiveRecoveryClosesDegradation
 TestProactivePersistentFailureDoesNotStorm
 TestProactiveStaysLocal
 TestAlertScopeMapValid
@@ -657,7 +664,7 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
    pending immediately; §8 preview + `registry_hash` shows the governed schema and
    current values before enabling.
 7. **Support engineer (flapping node)** — *"a flapping check storms bundles / fills
-   disk."* → Folded: §11 startup grace + 3-consecutive-failure threshold + per-incident
+   disk."* → Folded: §11 startup grace + 3-consecutive-failure threshold + per-degradation
    cooldown surviving restart + single-flight + §8 bundle budgets/retention.
 8. **Crypto/trust-rotation reviewer** — *"rotation re-seals a pending sample
    unpredictably / no-key silently sends plaintext."* → Folded: §10 pending bound to its
@@ -678,7 +685,7 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
 2. Every new route: `uiRoutes` metadata + UI affordance + `route-classification.yaml`
    row (GUI parity + OpenAPI coverage gate).
 3. Every new persisted state (`telemetry_config.json`, `telemetry_pending.json`,
-   `proactive_incidents.json`, staged bundles) lives under `<dataDir>/support` and is
+   `proactive_degradations.json`, staged bundles) lives under `<dataDir>/support` and is
    bounded. The telemetry payload carries **no** identifier; staged bundles keep their
    normal manifest node identity (redaction-governed; never sent without upload consent).
 4. Additive-only wire/schema within a major; telemetry + proactive independent, both
@@ -701,7 +708,7 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
 - **After restart?** §5.3 one-slot pending sample persists + retries if still enabled;
   new `sample_epoch` on a fresh build.
 - **Counter reset?** §5.2 restart = new epoch; TAC reads it as a reset, not a rollback.
-- **Stored locally?** §5.3 one pending sample; §11 incident ledger; both bounded, `0600`.
+- **Stored locally?** §5.3 one pending sample; §11 degradation ledger; both bounded, `0600`.
 - **Consent disabled?** §5.4 pending sample **deleted immediately**, egress stops same
   tick.
 - **Which metrics + why?** §7 eligibility table (default-deny, own-health bits only, with
@@ -712,7 +719,7 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
   2.5); **Slice 3 is blocked** until it passes.
 - **What stages a proactive bundle?** §11 an eligible check failing
   `ConsecutiveFailures` times after startup grace, outside cooldown.
-- **Storms across restart/HA?** §11 durable per-incident cooldown survives restart;
+- **Storms across restart/HA?** §11 durable per-degradation cooldown survives restart;
   per-node local only; no cross-node coordination.
 - **Proven no auto-upload?** §11 staging is local-only + `TestProactiveStaysLocal`;
   §5/§14 telemetry send is separate, gated, `TestNoAutoTelemetry`.

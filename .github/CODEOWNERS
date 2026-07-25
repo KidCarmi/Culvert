@@ -45,7 +45,7 @@ ui.go                       @KidCarmi
 # or the route source-of-truth require API-governance review.
 api/                        @KidCarmi
 docs/api/                   @KidCarmi
-docs/adr/ADR-0007-openapi-contract.md @KidCarmi
+docs/adr/0018-openapi-contract.md @KidCarmi
 internal/apicontract/       @KidCarmi
 cmd/apibundle/              @KidCarmi
 ui_routes_meta.go           @KidCarmi

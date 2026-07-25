@@ -60,7 +60,7 @@ completion of the tightening sweep.
 ## 1. What shipped
 
 **[IMPLEMENTED]** A durable, CI-enforced OpenAPI contract for the Culvert admin
-API, per ADR-0007 (Option D). The enforced critical path is Go-native, offline,
+API, per ADR-0018 (Option D). The enforced critical path is Go-native, offline,
 deterministic, and runs inside the required `go test -race ./...`.
 
 - **Contract:** `api/openapi/openapi.yaml` (OpenAPI 3.0.4), 171 paths / 275
@@ -81,7 +81,7 @@ deterministic, and runs inside the required `go test -race ./...`.
 - **Tooling/CI:** `Makefile` `api-*` targets; pinned offline scripts (oasdiff,
   oapi-codegen; graceful-skip); advisory `.github/workflows/api-contract.yml`
   (core gates also enforced in the required fast gate); CODEOWNERS + PR-template.
-- **Docs:** ADR-0007, research, consistency/risk register, style guide, versioning
+- **Docs:** ADR-0018, research, consistency/risk register, style guide, versioning
   & deprecation policies, inventory, contributing, implementation plan.
 
 ## 2. Route inventory totals

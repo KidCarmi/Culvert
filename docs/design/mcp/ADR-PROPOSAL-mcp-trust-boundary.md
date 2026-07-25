@@ -10,7 +10,7 @@
 - **Status:** Proposed (PR-0 proposal; to be promoted to a numbered ADR before PR-1)
 - **Date:** 2026-07-24
 - **Deciders:** Staff/Principal Engineer (proposer); Architecture Review Board + Security Architecture (to ratify)
-- **Related:** ADR-0001 (record architecture decisions), ADR-0002 (flat `package main` → `internal/`), ADR-0007 (OpenAPI contract); the C1/C1.5/C2 admin-route metadata program; [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md), [`THREAT-MODEL.md`](THREAT-MODEL.md)
+- **Related:** ADR-0001 (record architecture decisions), ADR-0002 (flat `package main` → `internal/`), ADR-0018 (OpenAPI contract); the C1/C1.5/C2 admin-route metadata program; [`RECOMMENDED-ARCHITECTURE.md`](RECOMMENDED-ARCHITECTURE.md), [`THREAT-MODEL.md`](THREAT-MODEL.md)
 
 ## Context
 
