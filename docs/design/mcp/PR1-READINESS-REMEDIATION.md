@@ -1567,3 +1567,82 @@ requires reading each mermaid block whose flow it touches.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
 reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; documentation
 only; PR-1 not begun.
+
+---
+
+## Round 23 — round 22's fix was written in Gateway vocabulary and gated one class of four (`2cdf7d1d` → next)
+
+Five Codex findings. Four are the **same** defect: round 22 established "the decision event must be committed
+before the side effect" and then expressed it as *"before credential use and before the upstream call"* — which
+is the **write/destructive** class's irreversible action, and **not** the irreversible action of the other three
+classes `MCP-EVENT-002` itself enumerates. The fifth is an enumeration I built by hand instead of from the spec.
+
+### R23-1 (P1) — configuration publication was never on the gated path
+
+DFD-10 runs `Admin publish → sign → push → validate → atomic swap` with **no durable commit anywhere**.
+Configuration publication makes **no upstream call**, so round 22's wording did not reach it at all: with the
+spool unavailable, a configuration could be signed, pushed and applied, and only then fail. The class the
+package treats as most sensitive was the one the fix missed.
+
+**Fix.** DFD-10 gains the commit gate **before `SIGN`**, with a fail-closed branch asserting no revision is
+created, nothing is signed or pushed, and every DP stays on the prior epoch.
+
+### R23-2 (P1) — credential materialization happened before the gate
+
+The component diagram ran `POL → CRED → WAL`, and the `credentials` component "selects/mints". So for the
+credential class — issue / rotation / revocation / high-risk selection — the **broker-side mutation occurred
+before the commit**. A mint or a revocation cannot be undone by a later failure, so that class could not fail
+closed either.
+
+**Fix.** `credentials` is split into two phases because only the second is irreversible: **PLAN** (choose
+identity + scope, no mutation) may precede the commit; **MATERIALIZE** (mint / rotate / revoke) **MUST NOT**.
+Diagram now `POL → CREDPLAN → WAL → CREDMAT → RT`, with the component row and both order statements updated.
+
+### R23-3 (P2) — the gate accepted an enqueue as a commit
+
+DFD-9 had **no failure edge from `SPOOL`**: only queue saturation reached fail-closed. But the guarantee is
+conditioned on a *confirmed durable commit*, and a full disk, an `fsync` error or an encryption-key failure all
+succeed at admission and fail at commit. My own label said "commit CONFIRMED" while the graph only branched on
+saturation.
+
+**Fix.** `SPOOL` now has an explicit commit-failure edge to fail-closed; `MCP-EVENT-002` states that queue
+admission is **not** a commit; the gate requires a distinct spool-commit-failure test case.
+
+### R23-4 (P2) — JSON-RPC has four dispositions and I had enumerated three
+
+DFD-15's reject branch covered **request / notification / unclassifiable** and omitted **response**. An
+uncorrelated, malformed or over-limit inbound response would fall through — permitting a response-to-response
+feedback loop and leaving the outstanding-request correlation entry allocated (leaked correlation state).
+Rounds 18–22 built this enumeration by hand, three times, and never went back to the spec's own list.
+
+**Fix.** `MCP-PROTO-013`, DFD-15 and the blocking suite gain the response class: **discard + record, no wire
+response, correlation entry released**.
+
+### R23-5 (P1) — the absence assertion only fitted one class
+
+The saturation gate proved "the upstream call never occurred" — which, as Codex notes, **cannot fail** for
+classes that make no upstream call. Configuration publication and credential mutation could publish or mutate,
+report failure afterwards, and satisfy the named assertion.
+
+**Fix.** Per-class absence assertions in `MCP-EVENT-002` Verification/Evidence and the blocking gate: no
+upstream call / no revision-or-push and every DP on the prior epoch / broker credential state unchanged / no
+Management state change — plus the spool-commit-failure case.
+
+**Fifteenth amendment — enumerate from the authority, never from the instance in front of me.** Both root
+causes this round are the same error at different scales. `MCP-EVENT-002` **lists its four critical classes in
+its own statement**, and I fixed the one the reviewer's example used, letting its vocabulary ("the upstream
+call") silently narrow the guarantee. JSON-RPC **defines its message dispositions**, and I enumerated them from
+whichever cases were under discussion, three rounds running. So: when a requirement or a cited spec contains an
+**explicit enumeration**, that enumeration is the checklist — apply the fix to every member, and state the
+per-member specifics rather than a phrase that happens to fit one. Corollary for tests: an absence assertion
+must name **that member's own** side effect; a shared phrasing is a coverage gap wearing the costume of a
+guarantee.
+
+**Sixteenth amendment — define "succeeded" at the layer that can fail.** A guarantee conditioned on an
+operation completing must say what completion means where the storage actually lives. "Durably persisted" read
+as "accepted by the queue" until this round, and every fail-closed test would have exercised only saturation.
+
+**Unchanged by round 23:** no requirement or threat ID added, removed or renumbered. ADR-0024
+`Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined / 27 contiguous abuse cases / 0 `Both` capability rows; predicates 7, 8
+and 13 all `NONE` (each proven to fire on a seeded positive); documentation only; PR-1 not begun.

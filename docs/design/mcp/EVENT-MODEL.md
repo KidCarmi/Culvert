@@ -197,6 +197,19 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 > event is emitted separately after execution and is **not** the fail-closed gate
 > ([MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events), MCP-T-044).
 
+> **The irreversible action is class-specific, and each class is gated at its own** — gating only "the upstream
+> call" leaves configuration publication and credential mutation ungated, because neither makes one:
+>
+> | Class | Its irreversible action | Commit must precede | Absence assertion in the test |
+> |---|---|---|---|
+> | Write / destructive | the upstream call | the call | no upstream call occurred |
+> | Configuration publication | signing / pushing / applying the snapshot | `SIGN` (DFD-10) | no revision created, nothing signed or pushed, every DP on the prior epoch |
+> | Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged |
+> | State-affecting Management operation | the state change | the change | no state change |
+>
+> **A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
+> encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.
+
 
 | Action class | Behavior when the decision event cannot be durably persisted |
 |---|---|

@@ -86,10 +86,10 @@ responsibility and prohibition, mirroring the component table in `BLUEPRINT.md` 
 | `internal/mcp/registry` | Server registry: registered upstream MCP server endpoints, ownership, TLS identity, environment, connection status. | Allow traffic to an unregistered server (Blueprint §09). Must not itself execute or proxy calls. |
 | `internal/mcp/catalog` | Tool catalog: tool definitions, canonical fingerprints/hashes, risk classification, approval history, drift detection inputs. | Trust server-supplied annotations/descriptions as the sole security boundary (Blueprint §09) — catalog data informs policy, it does not decide. |
 | `internal/mcp/policy` | Deterministic policy evaluation over identity + server + tool + arguments + resource + risk; returns a decision, reason code, matched rule, and revision context. | Perform network or other I/O during evaluation (Blueprint §09; **MCP-POLICY-002**, [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md)) — must be a pure function of its inputs. Contrast the SWG policy engine, which does DNS and other I/O mid-evaluation (`policy.go` `Evaluate:1083-1143`, DNS resolution at `:1387` → `geoip.go` `resolveHost:125-204` — **[FACT]**); that pattern must not be reused for MCP. |
-| `internal/mcp/credentials` | Credential broker: select/mint a short-lived, scoped upstream credential only after an ALLOW-class policy decision. | Expose a raw secret to the agent or to the decision-event pipeline (Blueprint §09; **MCP-CRED-004**). Must not run before policy has decided (confused-deputy risk, threat MCP-T-046). |
+| `internal/mcp/credentials` | Credential broker, in **two separable phases** because only the second is irreversible: **(1) PLAN** — choose the identity and scope for a short-lived credential (no broker mutation), permitted once policy returns ALLOW; **(2) MATERIALIZE** — mint / rotate / revoke, which **MUST NOT run until the decision event is durably committed** for the `MCP-EVENT-002` credential class, since a mint or revocation cannot be undone by a later failure. Selection/minting happens only after an ALLOW-class policy decision (`MCP-POLICY-004`). | Expose a raw secret to the agent or to the decision-event pipeline (Blueprint §09; **MCP-CRED-004**). Must not run before policy has decided (confused-deputy risk, threat MCP-T-046). |
 | `internal/mcp/inspection` | Input/output inspection: schema conformance, size limits, secret/DLP pattern matching, destination/URL controls, redaction. **Runs in two distinct positions and the order is load-bearing:** the **request-side** pass (semantic schema `MCP-INSP-001`, secret/DLP, destination/SSRF `MCP-INSP-004`, DNS pinning `MCP-INSP-005`, resource extraction) **MUST** run **before** `policy`, because policy evaluates over validated arguments and extracted resource fields and because a credential **MUST NOT** be selected for a call whose arguments or destination would be rejected (`MCP-POLICY-004` — credential selection only after an ALLOW-class decision, the invariant carrying the `MCP-T-046` ordering test; credential **scope** least privilege is `MCP-CRED-002`); the **response-side** pass (output bounding `MCP-INSP-002`, redaction `MCP-INSP-003`, injection labeling `MCP-INSP-007`) runs **after** the upstream call. See [DATA-FLOW-DIAGRAMS.md](DATA-FLOW-DIAGRAMS.md) DFD-7, whose request chain terminates in `RES --> POL`. | Become a single unbounded queue (Blueprint §09) — must be bounded and independently failure-scoped per stage. |
 | `internal/mcp/events` | Durable decision-event pipeline: event construction, sampling policy, bounded queues with backpressure, export/spool. | Reuse a small debug audit ring as production evidence (Blueprint §09) — specifically, must not reuse `internal/audit`'s bounded ring (`MaxRing=500`, `internal/audit/audit.go:49` — **[FACT]**) as the durable decision-event store. |
-| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → **request-side inspection** → policy → credentials → **durable commit of the decision event for the critical action classes (write / destructive / configuration-publication / credential — `MCP-EVENT-002`)** → upstream call → **response-side inspection** → outcome-event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
+| `internal/mcp/runtime` | Per-request orchestration: sequences identity → registry/catalog lookup → **request-side inspection** → policy → credentials → **durable commit of the decision event for the critical action classes, positioned before EACH class's own irreversible action (`MCP-EVENT-002`): the upstream call for write/destructive, snapshot sign/push/apply for configuration publication, broker materialization for credential — credential PLANNING may precede the commit, minting/rotation/revocation may not** → credential materialization → upstream call → **response-side inspection** → outcome-event emission for a single MCP call; owns the runtime pool and resource limits for the Gateway. | Duplicate policy logic, duplicate credential logic, or bypass the pipeline ordering owned by the components above. |
 | `internal/mcp/management` | Capability A business logic: read-only explanation/health/analytics tool handlers, draft/validate/simulate handlers; enforces "no raw secrets / no command exec / no unrestricted export" and gates any future mutation behind plan→validate→approve→apply. | Expose raw secret access, arbitrary command execution, or unrestricted trace/log export as an MCP tool (Blueprint §06 non-goals). Must not reuse the Gateway's policy/credential engines as its authorization model — Capability A authorization is a distinct schema (Trust Boundary TB-7, §4 below). |
 | `internal/mcp/adminapi` | Engine-side support for the admin-UI/API surface specific to MCP (server/tool/policy CRUD data access, decision-event query support) that a root-level `apiXxx` shim in the existing admin-UI layer (`ui_routes_meta.go`, `register*Routes` pattern — **[FACT]**) calls into. | Register `mux.HandleFunc` routes directly — per repo convention, route registration and `uiRoutes` metadata stay in root-level `register*Routes` helpers and `ui_routes_meta.go` (**[FACT]**, `CLAUDE.md` Admin UI / Control Plane section), not inside `internal/`. |
 
@@ -111,7 +111,8 @@ workflow (Blueprint §08):
 
 ```
 protocol kernel → identity → registry/catalog → inspection (request side) → policy → credentials
-                → [critical classes: DURABLE decision-event commit] → upstream call
+                → [critical classes: DURABLE decision-event commit — spool CONFIRMED, before each class's
+                   own irreversible action] → credential materialization → upstream call
                 → inspection (response side) → runtime → events (outcome)
 ```
 
@@ -261,20 +262,22 @@ flowchart TB
         REG["internal/mcp/registry"]
         CAT["internal/mcp/catalog"]
         POL["internal/mcp/policy\n(pure, no I/O — MCP-POLICY-002)"]
-        CRED["internal/mcp/credentials\n(fail-closed default — MCP-CRED-006)"]
+        CREDPLAN["credentials: PLAN only\nchoose identity + scope, NO mutation\nMCP-CRED-002"]
+        CREDMAT["credentials: MATERIALIZE\nmint / rotate / revoke — the irreversible act\nONLY after the commit — MCP-EVENT-002\n(fail-closed default — MCP-CRED-006)"]
         INSPQ["inspection (REQUEST side)\nsemantic schema + destination/SSRF + DNS pin\nMUST precede policy — MCP-INSP-001/004/005"]
         INSPR["inspection (RESPONSE side)\noutput bounding + redaction + injection labels\nMCP-INSP-002/003/007"]
         RT["internal/mcp/runtime\n(per-call orchestrator)"]
         EVT["internal/mcp/events\n(durable — MCP-EVENT-002)"]
-        WAL{{"CRITICAL classes: decision event\nDURABLY COMMITTED BEFORE execution\ncannot commit ⇒ fail closed, op never runs\nMCP-EVENT-002"}}
+        WAL{{"CRITICAL classes: decision event\nDURABLY COMMITTED (spool CONFIRMED, not just enqueued)\nBEFORE this class's irreversible action\ncannot commit ⇒ fail closed, nothing happens\nMCP-EVENT-002"}}
 
         IDENT --> REG
         REG --> CAT
         CAT --> INSPQ
         INSPQ --> POL
-        POL --> CRED
-        CRED --> WAL
-        WAL --> RT
+        POL --> CREDPLAN
+        CREDPLAN --> WAL
+        WAL --> CREDMAT
+        CREDMAT --> RT
         RT --> INSPR
         INSPR --> EVT
     end

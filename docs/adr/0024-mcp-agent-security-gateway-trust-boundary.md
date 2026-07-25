@@ -124,6 +124,19 @@ durably committed BEFORE credential use and before the upstream call**; the oper
 is confirmed. Evaluated after execution, "fail closed" is unimplementable — the side effect has already happened.
 The outcome event is emitted separately afterwards and is not the gate (MCP-EVENT-002, MCP-T-044).
 
+**The irreversible action is class-specific, and each class is gated at its own** — gating only "the upstream
+call" leaves configuration publication and credential mutation ungated, because neither makes one:
+
+| Class | Its irreversible action | Commit must precede | Absence assertion in the test |
+|---|---|---|---|
+| Write / destructive | the upstream call | the call | no upstream call occurred |
+| Configuration publication | signing / pushing / applying the snapshot | `SIGN` (DFD-10) | no revision created, nothing signed or pushed, every DP on the prior epoch |
+| Credential issue / rotate / revoke / high-risk selection | broker-side **materialization** (mint / rotate / revoke) | materialization — **planning may precede it** | broker credential state unchanged |
+| State-affecting Management operation | the state change | the change | no state change |
+
+**A confirmed commit, not an enqueue.** Queue admission is not durability: a full disk, an `fsync` error or an
+encryption-key failure is a commit FAILURE and must fail closed exactly as saturation does.
+
 | Action class | Behavior when a decision event cannot be durably persisted |
 |---|---|
 | Read-only / low-risk ALLOW or MONITOR | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an integrity-protected loss/degradation counter; keep retrying persistence/export within bounded budgets; **never fail silently**. |

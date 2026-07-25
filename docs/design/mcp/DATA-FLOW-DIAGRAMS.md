@@ -163,8 +163,9 @@ Crosses TB-4. Threats: MCP-T-028, MCP-T-044, MCP-T-045.
 flowchart LR
   DEC["Decision + request-side inspection<br/>NO execution yet"] --> RDX[Redact: no tokens/secrets/raw]
   RDX --> Q[[Bounded queue + backpressure]]
-  Q -->|ok| SPOOL[Mandatory local encrypted durable spool per DP]
-  SPOOL --> GATE{Critical action class?}
+  Q -->|"admitted (NOT yet a commit)"| SPOOL[Mandatory local encrypted durable spool per DP]
+  SPOOL -->|"commit CONFIRMED"| GATE{Critical action class?}
+  SPOOL -->|"commit FAILED: ENOSPC / fsync error / encryption-key failure"| FC
   GATE -->|"write / destructive / config-publication / credential:<br/>commit CONFIRMED"| EXEC["Credential use + upstream call<br/>runs ONLY after the durable commit"]
   GATE -->|"read-only / low-risk: not execution-gated"| INT
   EXEC --> OUT["Outcome event — emitted AFTER execution<br/>NOT the fail-closed gate"]
@@ -184,7 +185,9 @@ Crosses TB-3, TB-5. Threats: MCP-T-047..050.
 ```mermaid
 flowchart LR
   ADM[Admin publish] --> CP[Control Plane]
-  CP --> SIGN[Stamp epoch+revisions+min_dp_version+content_hash+signature]
+  CP --> WALC{{"Durable decision-event COMMIT<br/>config-publication class — MCP-EVENT-002<br/>BEFORE sign/push/apply"}}
+  WALC -->|"commit FAILED"| FCC["Fail closed AND degraded + alert<br/>NO revision created, NOTHING signed or pushed<br/>every DP stays on the prior epoch"]
+  WALC -->|"commit CONFIRMED"| SIGN[Stamp epoch+revisions+min_dp_version+content_hash+signature]
   SIGN --> PUSH[(mTLS push)]
   PUSH --> DP[Data Plane]
   subgraph DP apply
@@ -197,7 +200,7 @@ flowchart LR
   end
   V -. invalid/partial .-> REJECT[Reject whole; keep last good]
 ```
-Reuses `halease`/`dpObserveEpoch` fencing; adds content_hash+signature (missing today) — MCP-CPDP-001/002.
+Reuses `halease`/`dpObserveEpoch` fencing; adds content_hash+signature (missing today) — MCP-CPDP-001/002. **The configuration-publication class is gated here, not on the Gateway call path:** its irreversible action is signing/pushing/applying the snapshot, so the `MCP-EVENT-002` durable commit precedes `SIGN`. Gating only "the upstream call" would have left this flow ungated entirely, since publication makes no upstream call.
 
 ## DFD-11 — Rollback
 
@@ -283,14 +286,16 @@ flowchart LR
   REJ{{"Reject: branch by message class<br/>MCP-PROTO-013"}}
   REJ -->|request| ERR["Bounded JSON-RPC error<br/>no state leak<br/>MCP-PROTO-013"]
   REJ -->|notification| NORESP["NO wire response<br/>record rejection + loss/metric only<br/>one-way: replying would be reply amplification"]
+  REJ -->|"response (uncorrelated / malformed / over-limit)"| DROP["DISCARD + record — NO wire response<br/>a reply to a response is a feedback loop<br/>release the correlation entry: no leaked state"]
   REJ -->|unclassifiable| NULLERR["At most one id:null error<br/>rate-bounded so it cannot become the amplifier"]
   ERR --> CLEAN["Deterministic cleanup<br/>UNCONDITIONAL - every class"]
   NORESP --> CLEAN
+  DROP --> CLEAN
   NULLERR --> CLEAN
   classDef tb fill:#fee,stroke:#c00;
   class FRAME,DEC tb
 ```
-Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
+Untrusted bytes are bounded and strictly decoded before any downstream stage. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop) and its correlation entry is **released so no correlation state leaks**; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
 
 ---
