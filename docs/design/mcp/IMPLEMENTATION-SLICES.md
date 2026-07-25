@@ -143,7 +143,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
   **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
   **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
-  **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF THAT CLASS'S OWN side effect — write/destructive: **no upstream call occurred**; configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked**; state-affecting Management: **no state change**. **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the **future Management-mutation gate, which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
+  **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF THAT CLASS'S OWN side effect — write/destructive: **no upstream call occurred**; configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked**; state-affecting Management: **no state change**. **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
 - **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
   non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
   fail-closed-plus-alert alone does **not** satisfy this slice.
@@ -212,6 +212,21 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   allowlist + bind-configured-interfaces + E2E rebinding enforcement).
 - **Tests:** DMZ-abuse, OAuth/WAF/rate-limit, listener-side rebinding E2E.
 - **Owner:** Sec Arch/Exec. **Reviewer:** Arch + Exec. **Gate:** signed risk acceptance + production-readiness approval; **not** reachable via PR-11.
+
+## Future Management-Mutation Gate (post-V1, not a PR slice) *(D-13 — Management mutation deferred)*
+- **Objective:** the first Management MCP operation that **changes state** — deferred out of V1 entirely by
+  ADR-0024 §D-13 (V1 Management is read-only/draft-validate: `MCP-MGMT-001`), and admitted only under a
+  separate architecture decision with plan→validate→approve→apply and four-eyes approval (DFD-3).
+- **Non-goals:** any V1 mutation capability; treating a PR-8 stub as coverage of this path.
+- **Security requirements:** `MCP-MGMT-001` (no mutation tool in V1) and **`MCP-EVENT-002` for the
+  `state-affecting Management operation` class** — this gate **OWNS the real-path assertion**, because PR-8
+  can only stub it: no Management mutation mechanism exists before this gate.
+- **Tests:** the PR-8 event-durability suite **re-run against the REAL Management mutation path**, with the
+  decision event non-persistable via **either** queue saturation **or** spool commit failure, asserting
+  **NO Management state change occurred** — observing the returned error or degraded mode is NOT sufficient.
+- **Owner:** Sec Arch. **Reviewer:** ARB + Security Architecture. **Gate:** this gate **MUST NOT be marked
+  green without that re-run** (amendment 18 dual ownership, as for the PR-10 publication re-run); **not**
+  reachable via PR-11, and **not** a Production Qualification dependency (post-GA, like PR-C and the DMZ gate).
 
 ## Production Qualification (separate gate — not a PR slice)
 - **Objective:** full evidence pack + Joint Go/No-Go sign-off **for V1 (Model A) scope**.

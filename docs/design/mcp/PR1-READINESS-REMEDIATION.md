@@ -2248,3 +2248,50 @@ should stop implying they are.
 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates;
 predicates 13, 18 (re-derived), 19, 21, 22 and the outcome-lane check clean; `CB` reachable only via `WAL`;
 no non-ASCII strays; documentation only; PR-1 not begun.
+
+## Round 33 — round 32 named a gate that did not exist, and put the note in the wrong column (`71af0423`/`316ad14a` → next)
+
+One P2 finding, and it lands on **amendment 10a at the same matrix that produced amendment 10a's own
+restatement in round 24.** Round 32 fixed the Management slice-timing gap by writing "PR-8 stub only; the
+real-path assertion is owned by the future Management-mutation gate" into the **Test** cell of
+`TEST-TRACEABILITY-MATRIX`'s `MCP-T-044` row — and left the formal **Gate** column reading
+`PR-8 + mandatory PR-10 re-run (publication path)`. A consumer reading the Gate column, which is the cell that
+actually says when the row is closed, could mark `MCP-T-044` done having run the assertion only as a stub.
+
+**Round 24's finding on this exact matrix was that I edited the threat-NAME cell instead of Test/Evidence.
+Round 33's is that I edited the Test cell instead of Gate.** Amendment 10a's own corollary — *confirm the cell
+you edited is one a gate CONSUMES* — has now failed twice in the same table, in the same way, nine rounds
+apart, with the rule written down in between.
+
+**The larger defect the sweep found, which the reviewer did not state:** "owned by the future
+Management-mutation gate" **named a gate that existed nowhere in the package.** `ADR-0024` §D-13 defers
+Management mutation, but no gate section owned the deferred assertion — unlike PR-C and the Future DMZ gate,
+which are real named post-V1 gates with their own requirement/test/owner fields. So round 32's dual ownership
+had **one owner and one dangling reference**, which is the attribution class (a citation naming something that
+does not state — here, does not exist).
+
+Fixed by making the owner real, then pointing all four references at it:
+
+- **New `## Future Management-Mutation Gate (post-V1, not a PR slice)`** in `IMPLEMENTATION-SLICES.md`,
+  modelled on the Future DMZ gate: objective, non-goals, `MCP-MGMT-001` + `MCP-EVENT-002` for the
+  `state-affecting Management` class, the **real-path re-run** as its test, owner/reviewer, and "MUST NOT be
+  marked green without that re-run" — plus, like PR-C and the DMZ gate, explicitly **not** a Production
+  Qualification dependency, so V1 GA cannot come to depend on post-GA work.
+- **Traceability Gate column** and the **CI-GATES gate-status row** now both name it.
+- The prose references in `SECURITY-REQUIREMENTS`, `CI-GATES` and `IMPLEMENTATION-SLICES` were rewritten from
+  the lowercase "future Management-mutation gate" to the **defined** gate name, so each reference resolves.
+
+**Also this round: 6 behind `main`.** Merged in (no rebase, no force-push, per the standing constraint) —
+`316ad14a`, 0 behind, still documentation-only for this branch's own contribution, all invariants re-verified
+**after** the merge rather than before it.
+
+**Standing note.** Rounds 22–33: thirteen consecutive rounds, each producing the next round's findings. The
+one structural observation worth adding is that round 32's error was **not** a propagation miss — I did carry
+the fix to four documents. It was that the thing I carried pointed at nothing, and that the one cell which
+formally gates the row was not among the four. **Breadth of propagation is not the same as reaching the
+consuming cell**, and my sweeps optimise for the former.
+
+**Unchanged by round 33:** no requirement or threat ID added, removed or renumbered (a new *gate* is not a new
+requirement). ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91
+requirements / 0 duplicates; no malformed traceability rows; predicates 21-strict and 22 clean; no non-ASCII
+strays; documentation only; PR-1 not begun.
