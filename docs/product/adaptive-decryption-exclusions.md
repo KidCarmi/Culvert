@@ -227,13 +227,14 @@ affected.
 
 ### The scoped key (policy isolation)
 
-Every entry — active and pending — is keyed by **`(scopeID, host)`**, where
+Every active entry is keyed by **`(scopeID, host)`**, and pending observations
+use that same base plus the current security generation and failure reason.
 `scopeID` is the **stable identity of the decryption profile** that matched the
 failing session (not the profile name; a rename preserves the ID).
 
 ```
 active map key  =  scopeID \x00 host
-pending map key =  scopeID \x00 host \x00 reason
+pending map key =  scopeID \x00 host \x00 gen \x00 reason
 ```
 
 Host-only keying would *not* be policy isolation; the scope is. A host learned under
