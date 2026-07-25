@@ -1750,8 +1750,14 @@ MAINT_AGENT_WIRED=0
 # searchable, or the agent could never chdir in. A system path like /srv/culvert
 # passes (/, /srv are 0755); a 0700 home or /root is rejected at an ancestor.
 agent_ancestors_traversable() {
-  local p mode
-  p="$(dirname "$1")"
+  local target="$1" p mode
+  # $1 (INSTALL_DIR) can be a relative CULVERT_DIR override with no leading
+  # "/". dirname() on a relative, single-segment path (e.g. "culvert-stack")
+  # returns ".", and dirname(".") is ALSO "." forever — the walk below would
+  # never reach "/" and spin forever. Anchor to an absolute path first so the
+  # loop terminates exactly like it does for an already-absolute $1.
+  [[ "$target" == /* ]] || target="${PWD}/${target}"
+  p="$(dirname "$target")"
   while :; do
     [[ -d "$p" ]] || return 1
     mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1

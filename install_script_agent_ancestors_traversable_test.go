@@ -20,11 +20,13 @@ package main
 // Docker required.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // searchableTempRoot creates a fresh directory directly under /tmp and makes it
@@ -152,5 +154,47 @@ func TestInstallScript_AgentAncestorsTraversable_Blocked0750Home(t *testing.T) {
 	if got := runAgentAncestorsTraversable(t, stack); got != "BLOCKED" {
 		t.Fatalf("agent_ancestors_traversable(%s) = %q, want BLOCKED when the %s ancestor is 0750 "+
 			"(no world-search bit, agent user not in group)", stack, got, home)
+	}
+}
+
+// TestInstallScript_AgentAncestorsTraversable_RelativePathDoesNotHang is the
+// field bug: CULVERT_DIR (INSTALL_DIR's source) is a documented operator
+// override with no requirement that it be absolute, and install.sh never
+// normalizes it before passing it to agent_ancestors_traversable. The walk
+// does `p="$(dirname "$1")"` and loops until p == "/" — but for a relative,
+// single-segment path (e.g. CULVERT_DIR=culvert-stack), dirname("culvert-stack")
+// is ".", and dirname(".") is ALSO "." forever, so the loop never reaches "/"
+// and spins forever. This turns a fail-closed safety guard (skip the
+// maintenance agent when an ancestor is unsearchable) into a hang that wastes
+// an otherwise-completed install with no output, requiring the operator to
+// notice and kill the process. The helper must resolve a relative path before
+// walking so it terminates like the absolute-path case.
+func TestInstallScript_AgentAncestorsTraversable_RelativePathDoesNotHang(t *testing.T) {
+	root := searchableTempRoot(t)
+	stack := filepath.Join(root, "stack")
+	if err := os.MkdirAll(stack, 0o750); err != nil {
+		t.Fatalf("mkdir stack: %v", err)
+	}
+	chmod0755Chain(t, root, stack)
+
+	fn := extractShellFunction(t, "scripts/install.sh", "agent_ancestors_traversable")
+	script := fn + "\nif agent_ancestors_traversable \"$1\"; then echo TRAVERSABLE; else echo BLOCKED; fi\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// cmd.Dir=root + a bare relative leaf name reproduces a relative CULVERT_DIR:
+	// the string passed to agent_ancestors_traversable never starts with "/".
+	cmd := exec.CommandContext(ctx, "bash", "-c", script, "agent-traversable-test", "stack") //nolint:gosec // fixed script, path is a test tempdir
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("agent_ancestors_traversable(\"stack\") hung (infinite loop) on a relative path — "+
+			"dirname(\".\") == \".\" forever, so the ancestor walk never reaches \"/\"; got so far: %s", out)
+	}
+	if err != nil {
+		t.Fatalf("shell script failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "TRAVERSABLE" {
+		t.Fatalf("agent_ancestors_traversable(\"stack\") = %q, want TRAVERSABLE for a relative path under a world-searchable root", got)
 	}
 }
