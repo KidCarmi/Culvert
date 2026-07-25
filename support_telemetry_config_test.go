@@ -986,7 +986,7 @@ func TestTelemetryConfigSwapCannotRedirectLoad(t *testing.T) {
 // in this path would silently restore the swap window, and no behavioral test
 // can reliably catch a race, so the shape itself is the invariant.
 func TestTelemetryLoaderIsDescriptorBound(t *testing.T) {
-	src, err := os.ReadFile("support_telemetry_config.go")
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "support_telemetry_config.go"))
 	if err != nil {
 		t.Fatalf("read source: %v", err)
 	}
