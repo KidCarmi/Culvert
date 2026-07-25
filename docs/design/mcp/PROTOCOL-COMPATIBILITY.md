@@ -162,7 +162,8 @@ what the protocol kernel must enforce on every inbound call, independent of tran
   external IETF specification, not a Culvert repository fact) — **never** the upstream business MCP server
   (ADR-0024 §D-2) — and the gateway validates the **resulting** audience restriction from standard token
   metadata (`aud` for JWTs, introspection for opaque tokens) rather than a bespoke in-token claim. An
-  unbound (`aud`-less) token is denied for write/high-risk operations. VERIFIED EVIDENCE: RFC 8707 has zero
+  unbound (`aud`-less) token is denied for **every** operation class — read/low-risk included — since it
+  cannot be shown to target Culvert at all. VERIFIED EVIDENCE: RFC 8707 has zero
   matches in the current repository — this is a **net-new** control, not an extension of anything that
   exists today.
 - **No passthrough at the protocol layer.** The protocol kernel never forwards the client's bearer token

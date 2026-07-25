@@ -83,8 +83,10 @@ These five decisions were the blocking GO/NO-GO items required before PR-1. They
    verifies the **resulting** restriction from standard metadata — `aud` for JWT access tokens (RFC 9068),
    or the introspection response's `aud`/resource metadata for opaque tokens (RFC 7662). Because RFC 8707
    `resource` is a *request* parameter, Culvert **MUST NOT** require a non-standard resource-indicator
-   claim inside the token (that would break spec-compliant JWT and opaque tokens alike); an
-   **unrestricted, `aud`-less token MUST NOT** authorize write/high-risk operations.
+   claim inside the token (that would break spec-compliant JWT and opaque tokens alike). An **absent
+   audience is rejected for EVERY operation class** — not merely write/high-risk — because a token with no
+   verifiable audience cannot be shown to target Culvert at all (fail closed; the unconditional form of
+   MCP-AUTH-002).
 3. The client token **MUST NOT** use the upstream business MCP server as its recipient/audience. The
    approved upstream MCP server, tool and enterprise resource are **policy inputs and credential-broker
    scope attributes**. Culvert selects a separate upstream credential **only after** an ALLOW-class

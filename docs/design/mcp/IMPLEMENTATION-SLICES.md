@@ -212,10 +212,13 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
   Architecture & Production-Readiness Gate (Model C)**.
 - **Dependencies:** PR-0..PR-11. **Explicitly NOT dependent on PR-C or the Future DMZ gate** — those
   slices begin only after V1 GA, so requiring their evidence here would make GA depend on post-GA work.
-- **Security requirements:** MCP-PRIVACY-003; MCP-SUPPLY-003,004; MCP-OPS-003. Of the connectivity family,
-  V1 qualification covers **only** the Model-A/tenant-binding aspect of **MCP-CONNECT-004**;
-  **MCP-CONNECT-001/002** (+ the connector aspect of 004) are PR-C evidence and **MCP-CONNECT-003** (+ the
-  DMZ aspect of 004, plus **MCP-INSP-009**'s DMZ-facing E2E) is Future-DMZ-gate evidence.
+- **Security requirements:** MCP-PRIVACY-003; MCP-SUPPLY-003,004; MCP-OPS-003. **Model A tenant binding is
+  covered by `MCP-ID-007`** ("tenant identity MUST be bound and enforced on every call; cross-tenant access
+  MUST be denied", **PR-3**, tenant-escape tests) — that is the V1 control with a V1 test/evidence chain.
+  **No `MCP-CONNECT-*` requirement is V1 evidence:** `MCP-CONNECT-004` is defined for **connector/DMZ**
+  sessions and gated at PR-C / the Future DMZ gate, so V1 qualification does **not** claim any aspect of it;
+  **MCP-CONNECT-001/002** (+ 004 for the connector) are PR-C evidence, and **MCP-CONNECT-003** (+ 004 for the
+  DMZ, plus **MCP-INSP-009**'s DMZ-facing E2E) is Future-DMZ-gate evidence.
 - **Tests:** the complete taxonomy in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) green
   **for rows whose Slice column is PR-0..PR-11**; rows owned by PR-C / the Future DMZ gate are **deferred,
   not waived** — they are tracked as **Missing** and block *their own* gate, never V1 GA. Signed

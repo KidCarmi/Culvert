@@ -122,9 +122,11 @@ Each MCP request (Management or Gateway) carries a bearer token evaluated agains
 - The binding is established **at the authorization server** (client sends `resource`, AS returns an
   audience-restricted token) and **verified at Culvert** from standard token metadata — `aud` for JWT
   access tokens, the introspection response for opaque ones. Culvert's protected-resource metadata **MUST**
-  publish the same canonical resource URI its clients are told to request. An **unrestricted (`aud`-less)
-  token MUST NOT** authorize write/high-risk operations, and Culvert **MUST NOT** require a non-standard
-  resource claim to be present inside the token (**MCP-AUTH-003**).
+  publish the same canonical resource URI its clients are told to request. An **absent audience is rejected
+  for EVERY operation class, not just write/high-risk** — a token with no verifiable audience cannot be shown
+  to target Culvert at all, so read/low-risk requests fail closed too (this is the unconditional form of
+  **MCP-AUTH-002**). Culvert **MUST NOT** require a non-standard resource claim to be present inside the
+  token (**MCP-AUTH-003**).
 - Tokens **MUST** be short-TTL, with expiry enforced (**MCP-AUTH-004**). **[FACT]** `exp` enforcement
   already exists in the OIDC flow (`auth_oidc_flow.go:653-659`) and is a reusable pattern.
 - Tokens **MUST NOT** appear in query strings; validate the bearer token on every relevant request

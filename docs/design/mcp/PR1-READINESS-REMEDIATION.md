@@ -410,3 +410,47 @@ operator path out of `local-client`). `ON-PREM-CONNECTIVITY.md` records the same
 byte-identical; no requirement or threat IDs were added or removed (still 74 threats / 91 requirements /
 91 of 91 reachable / 0 duplicates / 0 undefined); no code, CI, dependency, runtime, config-implementation or
 binary change; PR-1 is not begun.
+
+---
+
+## Round 6 — follow-on findings introduced by round 5 (`2cabc33a`)
+
+Two P1 findings raised against the round-5 head. Both are defects **in the round-5 edits themselves**, so
+they are recorded separately rather than folded into round 5.
+
+### R6-1 (P1) — an absent audience must be rejected for every operation, not just write/high-risk
+
+**Finding.** Round 5's MCP-AUTH-003 said an unrestricted (`aud`-less) token "MUST NOT authorize write/
+high-risk operations". That carve-out (inherited from the pre-round-5 "unbound tokens denied for write/
+high-risk" phrasing) is weaker than the same requirement's own "verify on every request" clause and weaker
+than **MCP-AUTH-002**'s unconditional audience requirement: PR-3 could satisfy the matrix while **accepting**
+a read/low-risk request bearing a JWT with no `aud`, or an opaque token whose introspection response omits
+`aud` — a token that cannot be shown to target Culvert at all.
+
+**Fix.** An **absent audience is now a rejection for every operation class** (fail closed), stated as
+MCP-AUTH-003 clause (c) and propagated to `ADR-0024` §D-2 item 2, `AUTH-AND-CREDENTIAL-MODEL.md` §4
+token-state bullets, `PROTOCOL-COMPATIBILITY.md` (which still carried the carve-out) and the
+`TEST-TRACEABILITY-MATRIX.md` MCP-T-004 row. Verification now explicitly requires the `aud`-less negative on
+a **read/low-risk** request as well as a write/high-risk one, over **both** token forms (JWT without `aud`;
+introspection response omitting `aud`). Note the distinction retained: a **mismatched** audience and an
+**absent** audience are both rejections — the requirement no longer treats "absent" as a lesser case.
+
+### R6-2 (P1) — V1 Model A tenant binding cited a requirement with no V1 test chain
+
+**Finding.** Round 5 scoped V1 qualification to "the Model-A/tenant-binding aspect of **MCP-CONNECT-004**",
+but that requirement is defined for **connector/DMZ sessions** and gated at **PR-C / the Future DMZ gate**,
+and neither traceability row for it carries a Model A case. Combined with round 5's own rule that the
+taxonomy must be green only for **PR-0..PR-11** rows, V1 Production Qualification asserted a tenant-binding
+condition for which it had **no V1 test or evidence chain** — a gate that could not be cleared as written.
+
+**Fix.** V1 Model A tenant binding is retargeted to **`MCP-ID-007`** — "tenant identity **MUST** be bound and
+enforced on **every call**; cross-tenant access **MUST** be denied", owned by **PR-3** with tenant-escape
+tests — which is inside the PR-0..PR-11 range and therefore has a real V1 evidence chain.
+`IMPLEMENTATION-SLICES.md` (Production Qualification) and `GO-NO-GO-CHECKLIST.md` (On-prem connectivity) now
+state explicitly that **no `MCP-CONNECT-*` requirement is V1 evidence** and that `MCP-CONNECT-004` is not the
+V1 control, so the connector/DMZ family stays wholly behind its own gates. `MCP-CONNECT-004`'s definition and
+slice ownership are unchanged — round 6 stops V1 from *claiming* it, rather than broadening it.
+
+**Unchanged by round 6:** ADR-0024 remains `Status: Proposed`; `PR1-READINESS-REVIEW.md` remains
+byte-identical; no requirement or threat IDs added/removed (74 threats / 91 requirements / 91 of 91
+reachable / 0 duplicates / 0 undefined); documentation only; PR-1 not begun.
