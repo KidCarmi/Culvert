@@ -21,7 +21,21 @@ rebase.
 
 **Scope discipline.** Documentation only. No Go source, CI workflow, dependency, runtime config, binary
 asset, or the preserved source DOCX was changed. Changes are confined to
-`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md` and `docs/design/mcp/**`. Preserved invariants:
+`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md` and `docs/design/mcp/**` — including
+`docs/design/mcp/predicates/`, which holds the **document-structure checks this log cites** (see below).
+Those are standalone scripts run by hand from the repository root; they are **not** wired to any workflow,
+and they check *these documents*, not the product.
+
+**Predicate artifacts, and which of the results below can be re-run.** From round 12 onward this log cites
+executable structural checks by number. The ones that survive as artifacts live in
+[`predicates/`](predicates/) with a per-file table and a **reproducibility register** in
+[`predicates/README.md`](predicates/README.md). **Predicates 19, 21, 22, 23 and 24 are checked in and
+re-runnable; predicates 7, 8, 13, 18 and the "outcome-lane check" are NOT** — they were written and run in a
+working session and never saved, so the results recorded for them below are claims rather than reproducible
+evidence, and the register says so rather than leaving a later reader to discover it by searching. They are
+deliberately **not** reconstructed from memory to fill the gap (round 35's re-derivation of predicate 19
+produced a residual the original had evidently excluded silently — a reconstruction is a different check
+wearing the same number). Preserved invariants:
 ADR-0024 stays `Status: Proposed`; D-1 stays a hard pre-PR-1 gate; PR-1 stays protocol-kernel-only with **no
 public/production listener**; PR-5 stays the first observe/listener runtime; PR-11 stays Shadow/Canary; no
 token passthrough; Management vs Gateway stay separate; no SWG `PolicyRule`/OIDC reuse; no test or gate is
@@ -2418,3 +2432,51 @@ sentence applied to round 34's own correction.
 edge added or removed. ADR-0024 `Status: Proposed`; `PR1-READINESS-REVIEW.md` byte-identical; 74 threats /
 91 requirements / 0 duplicates / 27 contiguous abuse cases; predicates 19, 21-strict, 22, 23, 24 (both arms)
 clean; no non-ASCII strays; documentation only; PR-1 not begun.
+
+## Round 36 — the round-35 correction was itself unverifiable: I claimed a saved artifact and saved it outside the repository (`2f251b80` → next)
+
+One P2 finding, and it lands on **the paragraph in which round 35 corrected round 34 for recording an
+unreproducible verification result.**
+
+**R36-1 — "the predicate is a file, not a transcript" was true and useless.** The file was in a working
+scratchpad, not in the tree, so a reviewer searching tracked files finds only prose. Round 34 recorded a
+result with no artifact; round 35 named that as the defect, produced an artifact, and left it somewhere no
+reader of this repository can reach. **A verification artifact that is not in the repository is, to every
+consumer of the repository, exactly the transcript I said I had stopped writing.** The correction reproduced
+the defect one level down, which makes this the fourth *fix-introduced defect* in the log and the third
+consecutive round landing on the previous round's own words.
+
+**Fixed:** [`predicates/`](predicates/) now holds `predicate-19.py`, `predicate-21.py`, `predicate-22.py`,
+`predicate-23.py` and `predicate-24.py`, plus a README giving the run command, the two-part contract every
+predicate satisfies (**seeded known-positives must fire** *and* residual must be empty), and the authority
+each one derives its vocabulary from. All five exit `0` when run from the repository root. They are
+standalone scripts, not wired to CI — PR-0 modifies no workflow file, and promoting them into executed gates
+stays recorded work for PR-0/PR-1.
+
+**The sweep is the part that costs me something.** The dimension is not "check in predicate 19"; it is
+**every result this log claims**. Predicates **7, 8, 13, 18 and the outcome-lane check** were never saved,
+and they are cited in eleven round-closing verification lines. They are now listed in a **reproducibility
+register** in the README and in this log's header as **NOT re-runnable** — the recorded results stand as
+claims, explicitly labelled, rather than being quietly backed by an artifact that does not exist.
+
+**I did not reconstruct them, and that is deliberate.** Round 35 re-derived predicate 19 and the
+reconstruction reported a residual the original had evidently excluded in silence; a reconstruction is a
+*different* check wearing the same number, and filling the register with reconstructions would have made the
+table look complete while making it less true. The honest table has five rows filled and five rows marked
+unavailable.
+
+**Twenty-seventh amendment — an artifact is only evidence where the reader can run it.** "Saved" is not a
+property of my session; it is a property of the tree the reviewer clones. Any claim of the form *"predicate
+N: seeds fire, residual NONE"* must be accompanied by a tracked path, or be labelled as unreproducible in
+the same breath.
+
+**Standing note.** Rounds 22–36: fifteen consecutive rounds. Rounds 33, 34, 35 and 36 form a chain in which
+each round's finding is on the artifact the previous round created to fix the round before it — a gate, then
+its failure modes, then its assertion set, then the evidence for the assertion set. The ledger's habit of
+recording a lesson in the same round it violates it is now itself the most reliable pattern in the log.
+
+**Unchanged by round 36:** no requirement, threat or abuse-case ID added, removed or renumbered; no diagram
+edge added or removed; no normative statement changed. ADR-0024 `Status: Proposed`;
+`PR1-READINESS-REVIEW.md` byte-identical; 74 threats / 91 requirements / 0 duplicates / 27 contiguous abuse
+cases; predicates 19, 21, 22, 23, 24 all exit `0` **from the checked-in copies**; no non-ASCII strays;
+changes confined to `docs/`; PR-1 not begun.
