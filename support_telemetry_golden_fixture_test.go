@@ -167,6 +167,26 @@ const telemetryGoldenFixtureWriterFunc = "writeTelemetryGoldenFixtureTo"
 // execution can never rewrite a repository file.
 const telemetryGoldenFixtureRegenerateEnv = "CULVERT_TELEMETRY_FIXTURE_REGENERATE"
 
+// telemetryGoldenFixtureOptedIn reports whether the developer EXPLICITLY opted
+// into regeneration.
+//
+// Only affirmative values count. A conventional DISABLED value — `0`, `false`,
+// `no`, `off` — must NOT arm the writer: a mere presence check would treat
+// `CULVERT_TELEMETRY_FIXTURE_REGENERATE=false` in a developer's shell as
+// consent, and an ordinary `go test ./...` would then silently overwrite the
+// checked-in fixture (dirtying the checkout and masking real fixture drift) —
+// exactly the silent rewrite the opt-in exists to prevent. Anything
+// unrecognized is treated as NOT opted in, so the failure direction is always
+// "refuse to write".
+func telemetryGoldenFixtureOptedIn() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(telemetryGoldenFixtureRegenerateEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // telemetryGoldenFixtureCIEnvs are the environment markers that mean "this is
 // an automated run". Regeneration hard-refuses when any is set, even WITH the
 // opt-in, so a stray env var in a workflow can never mutate the fixture in CI.
@@ -1032,7 +1052,7 @@ func writeTelemetryGoldenFixture(b []byte) error {
 // automated — so even a direct call from a stray test cannot rewrite a
 // repository file during an ordinary run.
 func writeTelemetryGoldenFixtureTo(path string, b []byte) error {
-	if os.Getenv(telemetryGoldenFixtureRegenerateEnv) == "" {
+	if !telemetryGoldenFixtureOptedIn() {
 		return fmt.Errorf("refusing to write %s: regeneration is explicit opt-in only (set %s=1)",
 			path, telemetryGoldenFixtureRegenerateEnv)
 	}
@@ -1063,7 +1083,7 @@ func writeTelemetryGoldenFixtureTo(path string, b []byte) error {
 // runs — including `./...`, `-count=2`, `-shuffle=on`, and `-race` — can never
 // rewrite a repository file.
 func TestTelemetryGoldenFixtureRegenerate(t *testing.T) {
-	if os.Getenv(telemetryGoldenFixtureRegenerateEnv) == "" {
+	if !telemetryGoldenFixtureOptedIn() {
 		t.Skipf("golden-fixture regeneration is opt-in: %s=1 go test -run %s .",
 			telemetryGoldenFixtureRegenerateEnv, t.Name())
 	}
@@ -1128,12 +1148,27 @@ func TestTelemetryGoldenFixtureWriteRefusesWithoutOptIn(t *testing.T) {
 	// test, not destroy the repository artifact every other test reads.
 	target := filepath.Join(t.TempDir(), "inner_sample.json")
 
-	t.Setenv(telemetryGoldenFixtureRegenerateEnv, "")
 	for _, env := range telemetryGoldenFixtureCIEnvs {
 		t.Setenv(env, "")
 	}
-	if err := writeTelemetryGoldenFixtureTo(target, []byte("corrupted")); err == nil {
-		t.Error("the writer must refuse without the explicit opt-in")
+	// Unset, DISABLED, and unrecognized values must all refuse. A bare
+	// presence check would read "0"/"false" as consent and rewrite the
+	// repository fixture during an ordinary `go test ./...`.
+	for _, v := range []string{"", "0", "false", "no", "off", "FALSE", " 0 ", "maybe", "2"} {
+		t.Setenv(telemetryGoldenFixtureRegenerateEnv, v)
+		if telemetryGoldenFixtureOptedIn() {
+			t.Errorf("%s=%q must NOT count as an opt-in", telemetryGoldenFixtureRegenerateEnv, v)
+		}
+		if err := writeTelemetryGoldenFixtureTo(target, []byte("corrupted")); err == nil {
+			t.Errorf("the writer must refuse when %s=%q", telemetryGoldenFixtureRegenerateEnv, v)
+		}
+	}
+	// The documented affirmative spellings DO opt in.
+	for _, v := range []string{"1", "true", "yes", "on", "TRUE", " 1 "} {
+		t.Setenv(telemetryGoldenFixtureRegenerateEnv, v)
+		if !telemetryGoldenFixtureOptedIn() {
+			t.Errorf("%s=%q must count as an opt-in", telemetryGoldenFixtureRegenerateEnv, v)
+		}
 	}
 
 	t.Setenv(telemetryGoldenFixtureRegenerateEnv, "1")
@@ -1159,7 +1194,7 @@ func TestTelemetryGoldenFixtureWriteRefusesWithoutOptIn(t *testing.T) {
 // that no OTHER function can write either is
 // TestTelemetryGoldenFixtureOnlyTheOptInHelperWrites (static, order-independent).
 func TestTelemetryGoldenFixtureNormalRunDoesNotModifyIt(t *testing.T) {
-	if os.Getenv(telemetryGoldenFixtureRegenerateEnv) != "" {
+	if telemetryGoldenFixtureOptedIn() {
 		t.Skipf("%s is set — this run is an explicit regeneration", telemetryGoldenFixtureRegenerateEnv)
 	}
 	path := telemetryGoldenFixtureAbsPath()

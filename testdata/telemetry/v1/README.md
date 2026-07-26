@@ -120,7 +120,13 @@ CULVERT_TELEMETRY_FIXTURE_REGENERATE=1 go test -run TestTelemetryGoldenFixtureRe
 go test -run TestTelemetryGoldenFixture .   # that command runs the WRITER ONLY — verify separately
 ```
 
-The regeneration path refuses to run when `CI`, `GITHUB_ACTIONS`,
+Only an affirmative opt-in value arms the writer — `1`, `true`, `yes`, or `on`
+(case-insensitive). A conventional disabled value such as `0` or `false` is
+**not** consent and leaves the fixture untouched, so an exported
+`CULVERT_TELEMETRY_FIXTURE_REGENERATE=false` cannot silently rewrite the file
+during an ordinary `go test ./...`.
+
+The regeneration path additionally refuses to run when `CI`, `GITHUB_ACTIONS`,
 `CONTINUOUS_INTEGRATION`, or `BUILD_NUMBER` is set, refuses to write
 non-deterministic bytes, and prints the follow-up checklist (update the recorded
 constants, this table, and the coordinated `tac-platform` copy).
