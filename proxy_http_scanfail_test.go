@@ -22,8 +22,8 @@ import (
 // BodyScanEnabled on so scanHTTPResponseBody actually buffers the body.
 type cleanClam struct{}
 
-func (cleanClam) Ping() error                       { return nil }
-func (cleanClam) Scan([]byte) (string, bool, error) { return "", false, nil }
+func (cleanClam) Ping() error                                      { return nil }
+func (cleanClam) Scan([]byte) (name string, found bool, err error) { return "", false, nil }
 
 // erroringBody yields a prefix then fails the read (origin RST mid-body).
 type erroringBody struct {
@@ -54,7 +54,7 @@ func withBodyScanScanner(t *testing.T) {
 func TestScanHTTPResponseBody_ReadErrorFailsClosed(t *testing.T) {
 	withBodyScanScanner(t)
 
-	r := httptest.NewRequest(http.MethodGet, "http://files.example.com/download.bin", nil)
+	r := httptest.NewRequest(http.MethodGet, "http://files.example.com/download.bin", http.NoBody)
 	r.RemoteAddr = "198.51.100.7:4321"
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
@@ -82,7 +82,7 @@ func TestScanHTTPResponseBody_CleanBodyReassembled(t *testing.T) {
 	withBodyScanScanner(t)
 
 	content := []byte("perfectly ordinary clean response body")
-	r := httptest.NewRequest(http.MethodGet, "http://files.example.com/ok.txt", nil)
+	r := httptest.NewRequest(http.MethodGet, "http://files.example.com/ok.txt", http.NoBody)
 	r.RemoteAddr = "198.51.100.7:4321"
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
