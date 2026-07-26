@@ -1551,6 +1551,15 @@ setup_at_rest_encryption() {
       local pass2=""; read -rsp "Confirm passphrase: " pass2; echo ""
       [[ -n "$pass" ]] || error "Empty passphrase."
       [[ "$pass" == "$pass2" ]] || error "Passphrases did not match."
+      # This passphrase is PBKDF2-SHA256'd (600k iterations, internal/ca/ca.go)
+      # straight into the AES-256-GCM key that protects the SSL-inspection Root
+      # CA private key and saved request logs — a short passphrase is brute-
+      # forceable regardless of the iteration count. gen_passphrase's
+      # auto-generated default is 40 characters; require an operator-chosen one
+      # to be long enough to meaningfully resist an offline attack.
+      if [[ "${#pass}" -lt 12 ]]; then
+        error "Passphrase too short (${#pass} characters) — must be at least 12. This encrypts the SSL-inspection CA key and saved logs at rest, so it must resist offline brute-force."
+      fi
       # The passphrase is stored in .env, which docker compose interpolates
       # ($VAR), treats # as a comment, etc. Restrict to characters that survive
       # that round-trip intact so the value reaching the container is exact.
