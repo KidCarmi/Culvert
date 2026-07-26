@@ -308,6 +308,8 @@ var uiRoutes = []uiRouteMetadata{
 		}},
 	{Path: "/api/urlcat/lookup", Handler: "apiURLCatLookup", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware"}}},
+	{Path: "/api/urlcat/feed-status", Handler: "apiURLCatFeedStatus", Domain: "policy", Public: false,
+		Methods: []uiRouteMethod{{Method: "GET", MinRole: RoleViewer, Note: "no direct requireRole; protected by uiAuthMiddleware; read-only feed freshness/failure counts"}}},
 	{Path: "/api/blockpage", Handler: "apiBlockPage", Domain: "policy", Public: false,
 		Methods: []uiRouteMethod{
 			{Method: "GET", MinRole: RoleViewer},

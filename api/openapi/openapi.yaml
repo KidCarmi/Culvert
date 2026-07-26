@@ -1425,6 +1425,23 @@ components:
         matchedBy: { type: string }
         blocked: { type: boolean }
         blockSource: { type: string }
+    URLCatFeedStatusEntry:
+      type: object
+      required: [configured]
+      additionalProperties: false
+      properties:
+        configured: { type: boolean }
+        entries: { type: integer }
+        lastSync: { type: string, description: "RFC3339 UTC timestamp of the last successful sync, or empty if never synced." }
+        intervalSeconds: { type: integer }
+        syncFailures: { type: integer }
+    URLCatFeedStatus:
+      type: object
+      required: [ut1, saas]
+      additionalProperties: false
+      properties:
+        ut1: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
+        saas: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
     SetClusterLabels:
       type: object
       required: [node_id]
@@ -8826,6 +8843,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/URLCategoryLookup' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat/feed-status:
+    get:
+      operationId: getURLCatFeedStatus
+      tags: [policy]
+      summary: URL category feed status
+      description: Freshness and failure counts for the UT1 community feed and the SaaS category feed (previously visible only via /metrics).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: URL category feed status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/URLCatFeedStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/alerts/webhooks/history:
     get:
