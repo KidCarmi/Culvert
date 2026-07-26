@@ -401,11 +401,15 @@ type AuthDecision struct {
 }
 
 // resolveAuthOutcome resolves the end-user authentication outcome for a request.
-// It is the Phase 1 spine, but in Slice 1 it is a pure contract that returns
-// Default for every request — the Stage-1 auth-rule evaluator is added in later
-// slices. It is intentionally NOT called from proxy.go in this slice.
+// It is the RUNTIME entry (proxy.go arm 3, via resolveNoCredAuthOutcome) and runs
+// on every request that presents no credentials — the dominant traffic class —
+// so it evaluates against the store's published evaluation snapshot: the same
+// zero-copy, priority-sorted view Evaluate uses. Decision semantics are
+// identical to resolveAuthOutcomeFrom over policyStore.List() (pinned by
+// TestResolveAuthOutcome_SnapshotEquivalentToPure); the pure resolver remains
+// the simulator/diagnostics surface.
 func resolveAuthOutcome(ctx RequestContext) AuthDecision {
-	return resolveAuthOutcomeFrom(policyStore.List(), ctx)
+	return resolveAuthOutcomeSnapshot(policyStore.evaluationSnapshot(), ctx)
 }
 
 // resolveAuthOutcomeFrom is the FULL pure resolver, taking an explicit ruleset so
@@ -462,6 +466,70 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 	return AuthDecision{Outcome: OutcomeDefault}
 }
 
+// resolveAuthOutcomeSnapshot is the runtime resolver core. rules is a published
+// evaluation snapshot (PolicyStore.evaluationSnapshot): already priority-sorted
+// by sortLocked and immutable by the publication contract, so — unlike
+// resolveAuthOutcomeFrom, which must defensively copy and re-sort a
+// caller-owned []PolicyRule — it scans with no per-request rulebase clone,
+// sort, or List()-style per-rule publication copies (previously O(rules) heap
+// clones plus an RFC3339 format per hit rule on EVERY un-credentialed
+// request). Per-request derived values (normalized host, parsed client IP) are
+// computed lazily at most once via authMatchScratch and shared across the rule
+// loop. The matched rule is detached with copyPolicyRuleForMatch (the
+// PolicyMatch contract: a decision result must never expose a published
+// definition a caller could mutate), so a match costs one rule copy — not one
+// per rule.
+func resolveAuthOutcomeSnapshot(rules []*PolicyRule, ctx RequestContext) AuthDecision {
+	scratch := authMatchScratch{ctx: ctx}
+	for _, rule := range rules {
+		outcome, ok := authRuleMatchesScratch(rule, &scratch)
+		if !ok {
+			continue
+		}
+		// Kill switch disables Exempt only: suppress a matching Exempt rule and
+		// fall through to lower-priority rules / Default. CR and SSORequired are
+		// unaffected — they already require authentication (same contract as
+		// resolveAuthOutcomeFrom).
+		if outcome == OutcomeExempt && authExemptKillSwitchEngaged() {
+			continue
+		}
+		snap := new(PolicyRule)
+		copyPolicyRuleForMatch(snap, rule)
+		return AuthDecision{Outcome: outcome, Rule: snap}
+	}
+	return AuthDecision{Outcome: OutcomeDefault}
+}
+
+// authMatchScratch carries the per-request derived values authRuleMatchesScratch
+// consumes on demand, computed lazily at most once and shared across the whole
+// rule scan (mirroring Evaluate's once-per-request normHost/clientAddr hoist).
+// Laziness matters: on a rulebase with no auth rules — the common deployment —
+// no rule survives the type check, so neither value is ever computed and the
+// scan allocates nothing.
+type authMatchScratch struct {
+	ctx     RequestContext
+	norm    string // normalizeHost(ctx.Host), computed on the first dest check
+	normSet bool
+	addr    net.IP // net.ParseIP(ctx.ClientIP); nil = unparseable (fails closed)
+	addrSet bool
+}
+
+func (s *authMatchScratch) normHost() string {
+	if !s.normSet {
+		s.norm = normalizeHost(s.ctx.Host)
+		s.normSet = true
+	}
+	return s.norm
+}
+
+func (s *authMatchScratch) clientAddr() net.IP {
+	if !s.addrSet {
+		s.addr = net.ParseIP(s.ctx.ClientIP)
+		s.addrSet = true
+	}
+	return s.addr
+}
+
 // authRuleMatches reports whether a single rule is an enabled, currently
 // effective Stage-1 auth rule that matches the request, and if so returns its
 // outcome (Exempt or CredentialRequired). It returns ("", false) when the rule
@@ -472,6 +540,15 @@ func resolveAuthOutcomeFrom(rules []PolicyRule, ctx RequestContext) AuthDecision
 // interpreted here (no exempt/challenge semantics); the resolver applies the
 // kill switch and the caller decides what each outcome means.
 func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
+	scratch := authMatchScratch{ctx: ctx}
+	return authRuleMatchesScratch(rule, &scratch)
+}
+
+// authRuleMatchesScratch is authRuleMatches' core. The scratch carries the
+// request context plus its lazily-computed derived values so the runtime
+// resolver shares one host normalization and one client-IP parse across the
+// whole rule loop instead of re-deriving them per rule.
+func authRuleMatchesScratch(rule *PolicyRule, s *authMatchScratch) (AuthOutcome, bool) {
 	if ruleTypeOf(rule) != ruleTypeAuth { // Stage-1 only; access rules are ignored
 		return "", false
 	}
@@ -491,7 +568,7 @@ func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
 	}
 	// Source scope: typed CIDR SubjectMatch. nil / unknown predicate / bad IP all
 	// fail closed.
-	if !matchSubject(rule.SubjectMatch, ctx.ClientIP) {
+	if !matchSubjectAddr(rule.SubjectMatch, s.ctx.ClientIP, s.clientAddr()) {
 		return "", false
 	}
 	// Destination: an explicit selector, or an acknowledged broad exemption.
@@ -500,7 +577,7 @@ func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
 	if !authRuleHasDestination(*rule) && !spec.BroadExemption {
 		return "", false
 	}
-	if !matchDest(rule, ctx.Host) {
+	if !matchDestNorm(rule, s.ctx.Host, s.normHost()) {
 		return "", false
 	}
 	// Schedule: a malformed timezone must fail closed (require auth), NOT silently
@@ -518,7 +595,7 @@ func authRuleMatches(rule *PolicyRule, ctx RequestContext) (AuthOutcome, bool) {
 	if !authRuleNotExpired(spec) {
 		return "", false
 	}
-	if !matchAuthProtocolMethod(spec, ctx) {
+	if !matchAuthProtocolMethod(spec, s.ctx) {
 		return "", false
 	}
 	return spec.Outcome, true
@@ -601,17 +678,26 @@ func incAuthSSORequired() {
 // the identity-dependent predicates that belong on access rules — fails closed,
 // as does a nil/empty selector or an unparseable client IP.
 func matchSubject(sm *SubjectMatch, clientIP string) bool {
+	return matchSubjectAddr(sm, clientIP, net.ParseIP(clientIP))
+}
+
+// matchSubjectAddr is matchSubject's core. clientAddr MUST be
+// net.ParseIP(clientIP) (nil = unparseable, fails closed); the runtime resolver
+// parses it once per request and reuses it across every auth rule's CIDR
+// predicates (previously net.ParseIP ran per rule and again per value on the
+// no-credentials path).
+func matchSubjectAddr(sm *SubjectMatch, clientIP string, clientAddr net.IP) bool {
 	if sm == nil || sm.SchemaVersion < 1 || len(sm.All) == 0 {
 		return false
 	}
-	if net.ParseIP(clientIP) == nil {
+	if clientAddr == nil {
 		return false
 	}
 	for i := range sm.All {
 		p := sm.All[i]
 		switch p.Type {
 		case subjectPredicateCIDR:
-			if !cidrPredicateMatches(p.Values, clientIP) {
+			if !cidrPredicateMatchesAddr(p.Values, clientIP, clientAddr) {
 				return false
 			}
 		default:
@@ -621,11 +707,12 @@ func matchSubject(sm *SubjectMatch, clientIP string) bool {
 	return true
 }
 
-// cidrPredicateMatches reports whether clientIP is contained by ANY of values
-// (each a CIDR or bare IP). An empty value list fails closed.
-func cidrPredicateMatches(values []string, clientIP string) bool {
+// cidrPredicateMatchesAddr reports whether the client is contained by ANY of
+// values (each a CIDR or bare IP). An empty value list fails closed. clientAddr
+// MUST be net.ParseIP(clientIP).
+func cidrPredicateMatchesAddr(values []string, clientIP string, clientAddr net.IP) bool {
 	for _, v := range values {
-		if matchIPOrCIDR(v, clientIP) {
+		if matchIPOrCIDRAddr(v, clientIP, clientAddr) {
 			return true
 		}
 	}

@@ -113,6 +113,60 @@ func TestBenchGate_PolicyEvalCIDRAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_AuthResolveAllocs locks in the snapshot-based Stage-1 auth
+// resolver (resolveAuthOutcomeSnapshot). Before it, resolveAuthOutcome ran
+// resolveAuthOutcomeFrom over policyStore.List() on EVERY un-credentialed
+// request — a full per-request rulebase deep clone plus a second copy and a
+// re-sort (~1 MB/op and ~478 µs/op measured at 1000 rules). The gate pins two
+// contracts: (a) a rulebase with no auth rules resolves with ZERO allocations
+// at any size, and (b) with a fixed auth-rule tranche the allocation count is a
+// constant independent of access-rule count (the per-auth-rule CIDR parse is
+// inherent and bounded by the tranche size, never by the rulebase).
+func TestBenchGate_AuthResolveAllocs(t *testing.T) {
+	ctx := benchNoCredCtx()
+	// (a) access-only rulebases: the scan exits every rule at the type check and
+	// the lazy scratch never computes — 0 allocs measured; headroom of 2.
+	const maxAllocsAccessOnly = 2
+	for _, rules := range []int{10, 100, 1000, 10000} {
+		ps := buildAuthResolveStore(rules)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = resolveAuthOutcomeSnapshot(ps.evaluationSnapshot(), ctx)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("resolveAuthOutcomeSnapshot access-only rules=%d: %d allocs/op (bound %d), %d ns/op",
+			rules, allocs, maxAllocsAccessOnly, res.NsPerOp())
+		if allocs > maxAllocsAccessOnly {
+			t.Errorf("REGRESSION: auth resolve over %d access-only rules allocates %d/op, exceeds bound %d — "+
+				"per-request rulebase cloning (List()) or per-rule derivation has returned to the no-credentials path",
+				rules, allocs, maxAllocsAccessOnly)
+		}
+	}
+	// (b) fixed 8-auth-rule tranche across growing access rulebases: measured 33
+	// allocs/op (8 rules × ParseCIDR + one client-IP parse), CONSTANT in access
+	// count. Bound adds headroom while still failing an O(access-rules) return.
+	const maxAllocsWithAuth = 48
+	for _, rules := range []int{10, 1000, 10000} {
+		ps := buildAuthResolveStore(rules, benchAuthRules(8)...)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = resolveAuthOutcomeSnapshot(ps.evaluationSnapshot(), ctx)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("resolveAuthOutcomeSnapshot access=%d auth=8: %d allocs/op (bound %d), %d ns/op",
+			rules, allocs, maxAllocsWithAuth, res.NsPerOp())
+		if allocs > maxAllocsWithAuth {
+			t.Errorf("REGRESSION: auth resolve over %d access + 8 auth rules allocates %d/op, exceeds constant bound %d — "+
+				"allocation is scaling with rulebase size again (List() clone, per-rule host normalization, or per-rule IP parse)",
+				rules, allocs, maxAllocsWithAuth)
+		}
+	}
+}
+
 // TestBenchGate_ResolveHostCached locks in the host→IP TTL cache on the GeoIP
 // resolution seam. Before the cache, resolveHost ran a BLOCKING net.LookupHost
 // on every call — reached per country-scoped rule per request from the policy
