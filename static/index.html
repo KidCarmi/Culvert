@@ -6194,8 +6194,11 @@ async function loadURLCatFeedStatus() {
   try {
     const d = await api('/api/urlcat/feed-status');
     const rows = [];
-    if (d.ut1 && d.ut1.configured) rows.push(_fmtURLCatFeedRow('UT1 Community Feed', d.ut1));
-    if (d.saas && d.saas.configured) rows.push(_fmtURLCatFeedRow('SaaS Category Feed', d.saas));
+    if (d.ut1 && d.ut1.configured) rows.push(_fmtURLCatFeedRow('UT1 Community Feed', d.ut1, `${d.ut1.entries || 0} entries`));
+    // SaaS Stats() reports hosts newly added on the LAST sync, not the feed's total
+    // size - 0 is normal and healthy once the feed is fully merged, so it gets its
+    // own label instead of being shown as "0 entries" (which reads as broken/empty).
+    if (d.saas && d.saas.configured) rows.push(_fmtURLCatFeedRow('SaaS Category Feed', d.saas, `${d.saas.hostsAddedLastSync || 0} new host(s) added on last sync`));
     if (!rows.length) { el.style.display = 'none'; return; }
     el.style.display = 'flex';
     el.style.flexDirection = 'column';
@@ -6206,7 +6209,7 @@ async function loadURLCatFeedStatus() {
   }
 }
 
-function _fmtURLCatFeedRow(label, feed) {
+function _fmtURLCatFeedRow(label, feed, countText) {
   const failures = feed.syncFailures || 0;
   const neverSynced = !feed.lastSync;
   const warn = failures > 0 || neverSynced;
@@ -6216,7 +6219,7 @@ function _fmtURLCatFeedRow(label, feed) {
   const icon = warn
     ? '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
     : '';
-  return `<span style="color:${color}">${icon}${escHtml(label)}: ${feed.entries || 0} entries, last sync ${escHtml(when)}${failText}</span>`;
+  return `<span style="color:${color}">${icon}${escHtml(label)}: ${escHtml(countText)}, last sync ${escHtml(when)}${failText}</span>`;
 }
 
 // ── Blocklist-as-category card ────────────────────────────────────────────

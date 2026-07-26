@@ -1147,6 +1147,14 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 // for the /metrics Prometheus writer (urlcat_metrics.go); this surfaces the
 // same read-only state to the admin GUI so a stalled or failing feed is
 // visible without scraping /metrics or reading logs. Read-only, no config-version.
+//
+// NOTE: the two feeds' counts mean different things and are NOT
+// interchangeable. UT1's Stats() reports the full corpus size parsed on the
+// last sync (feedsync.Syncer.totalDomains). SaaS's Stats() reports only the
+// merge callback's "added" return (mergeSaaSCategories, saas_feed.go) — the
+// number of NEW hosts folded in that sync, which is legitimately 0 on a
+// healthy, routine, unchanged sync. Rendering that as "entries" would read
+// as an empty/broken feed, so it gets its own field name.
 func apiURLCatFeedStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1165,8 +1173,8 @@ func apiURLCatFeedStatus(w http.ResponseWriter, r *http.Request) {
 	saasEnabled := globalSaaSFeed.Enabled()
 	saas := map[string]any{"configured": saasEnabled}
 	if saasEnabled {
-		_, lastSync, count, interval := globalSaaSFeed.Stats()
-		saas["entries"] = count
+		_, lastSync, added, interval := globalSaaSFeed.Stats()
+		saas["hostsAddedLastSync"] = added
 		saas["lastSync"] = rfc3339OrEmpty(lastSync)
 		saas["intervalSeconds"] = int64(interval.Seconds())
 		saas["syncFailures"] = saasfeed.SyncFailures()

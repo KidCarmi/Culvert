@@ -1431,7 +1431,8 @@ components:
       additionalProperties: false
       properties:
         configured: { type: boolean }
-        entries: { type: integer }
+        entries: { type: integer, description: "UT1 only: total domains parsed on the last successful sync (the feed's full corpus size)." }
+        hostsAddedLastSync: { type: integer, description: "SaaS only: hosts newly merged on the last sync. 0 is normal/healthy once the feed is fully merged - it is NOT the feed's total size." }
         lastSync: { type: string, description: "RFC3339 UTC timestamp of the last successful sync, or empty if never synced." }
         intervalSeconds: { type: integer }
         syncFailures: { type: integer }

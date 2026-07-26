@@ -92,6 +92,9 @@ func TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue(t *testing.T) {
 	saas := saasfeed.New(saasfeed.Deps{Lifecycle: context.Background})
 	saas.Configure("http://localhost:9999/feed.json", time.Hour) // unreachable local port, fails fast — mirrors internal/saasfeed's own Configure test
 	t.Cleanup(saas.Stop)
+	// SeedStats after Configure to pin a deterministic "hosts added" value,
+	// overwriting whatever the async unreachable-URL sync attempt wrote.
+	saas.SeedStats(time.Unix(1_700_000_500, 0), 7)
 	globalSaaSFeed = saas
 
 	w := httptest.NewRecorder()
@@ -109,6 +112,17 @@ func TestAPIURLCatFeedStatus_SaaSEnabledReportsConfiguredTrue(t *testing.T) {
 	}
 	if _, present := got.SaaS["syncFailures"]; !present {
 		t.Errorf("saas response should include syncFailures when configured")
+	}
+	// Regression: the SaaS syncer's Stats() count is hosts newly ADDED on the
+	// last sync (mergeSaaSCategories' return value), not the feed's total
+	// size — 0 is normal on a routine unchanged sync. It must be surfaced
+	// under its own field name, never as "entries" (which would misread as
+	// an empty/broken feed on a healthy sync that added nothing new).
+	if added, _ := got.SaaS["hostsAddedLastSync"].(float64); added != 7 {
+		t.Errorf("saas.hostsAddedLastSync = %v, want 7", got.SaaS["hostsAddedLastSync"])
+	}
+	if _, present := got.SaaS["entries"]; present {
+		t.Errorf(`saas response must not use the "entries" key — it would misrepresent the added-this-sync delta as the feed's total size`)
 	}
 }
 
