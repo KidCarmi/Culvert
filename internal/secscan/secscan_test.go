@@ -111,6 +111,10 @@ func TestSecScanDI_ClamBlockThenCacheHit(t *testing.T) {
 }
 
 func TestSecScanDI_ClamErrorFallsThroughToYARA(t *testing.T) {
+	// Install a recorder for this test's async scan_clam_error and drain it
+	// before returning — a straggler alert goroutine left in flight would land
+	// in the next shuffled test's recorder (see clam_error_test.go).
+	rec := withAlertRecorder(t)
 	clam := &fakeClam{scanErr: errors.New("daemon down")}
 	yr := &fakeYARA{loaded: true, enabled: true, matches: []string{"rule_a", "rule_b"}}
 	ss := newEnabledTestScanner(Deps{
@@ -123,6 +127,7 @@ func TestSecScanDI_ClamErrorFallsThroughToYARA(t *testing.T) {
 	if res == nil || res.Source != "yara" || res.Reason != "rule_a, rule_b" {
 		t.Fatalf("expected yara block after clam error, got %+v", res)
 	}
+	rec.waitForEvents(t, 1)
 }
 
 func TestSecScanDI_YARADisabledToggleSkipsMatch(t *testing.T) {

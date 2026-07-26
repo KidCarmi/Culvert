@@ -87,7 +87,7 @@ func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 }
 
 func TestClamError_RecoveredDaemonRescansAndBlocks(t *testing.T) {
-	withAlertRecorder(t)
+	rec := withAlertRecorder(t)
 	clam := &fakeClam{scanErr: errors.New("daemon down")}
 	ss := newEnabledTestScanner(Deps{
 		Clam: clam,
@@ -101,6 +101,13 @@ func TestClamError_RecoveredDaemonRescansAndBlocks(t *testing.T) {
 	if res := ss.ScanBody(data); res != nil {
 		t.Fatalf("first scan (daemon down) should fail open, got %+v", res)
 	}
+	// Absorb this test's own async scan_clam_error before proceeding: the alert
+	// fires on its own goroutine, and a straggler left in flight past the end of
+	// the test lands in the NEXT test's freshly-installed recorder — under
+	// -shuffle it made TestClamError_CountedAlertedAndCleanNotCached count two
+	// events (determinism-gate failure). Every alert-triggering test must drain
+	// its own alerts before returning.
+	rec.waitForEvents(t, 1)
 
 	// Daemon recovers and now detects the content.
 	clam.scanErr = nil
