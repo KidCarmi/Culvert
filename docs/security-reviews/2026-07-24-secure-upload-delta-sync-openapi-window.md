@@ -2,8 +2,7 @@
 
 > **Reviewer role:** Security Regression Engineer (AppSec / Secure Code Review / Product Security)
 > **Review date:** 2026-07-24
-> **Baseline:** `6349722` — end of the previous review's window
-> (`docs/security-reviews/2026-07-19-supportability-decryptobs-privacy-pac-window.md`, PR #878)
+> **Baseline:** `6349722` — end of the previous review's window (see PR #878; the prior report file is not yet on `main`)
 > **Head:** `2eef667` (`main`)
 > **Scope reviewed:** every code-bearing change in the window — 29 first-parent
 > merges (PRs #869–#910), 192 files, ~53k insertions (~11k of it Go across 92
