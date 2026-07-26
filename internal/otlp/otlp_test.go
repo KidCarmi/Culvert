@@ -163,6 +163,65 @@ func TestMetricsExporter_PushNilEndpointIsNoOp(t *testing.T) {
 	if err := o.push(t.Context()); err != nil {
 		t.Fatalf("push with no endpoint should be a no-op, got %v", err)
 	}
+	if h := o.Health(); h.FailureCount != 0 || h.LastError != "" || h.LastSuccessAt != "" {
+		t.Fatalf("disabled exporter must not record push health, got %+v", h)
+	}
+}
+
+func TestMetricsExporter_Health(t *testing.T) {
+	o := &MetricsExporter{endpoint: "ftp://bad", client: http.DefaultClient}
+	if h := o.Health(); h.FailureCount != 0 || h.LastError != "" {
+		t.Fatalf("fresh exporter should report zero health, got %+v", h)
+	}
+
+	if err := o.push(t.Context()); err == nil {
+		t.Fatal("push must reject a non-http(s) endpoint")
+	}
+	h := o.Health()
+	if h.FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", h.FailureCount)
+	}
+	if h.LastError == "" {
+		t.Fatal("LastError should be populated after a failed push")
+	}
+	if h.LastErrorAt == "" {
+		t.Fatal("LastErrorAt should be populated after a failed push")
+	}
+	if h.LastSuccessAt != "" {
+		t.Fatalf("LastSuccessAt should stay empty, got %q", h.LastSuccessAt)
+	}
+
+	// A second failure should increment the counter, not reset it.
+	if err := o.push(t.Context()); err == nil {
+		t.Fatal("expected a second failure")
+	}
+	if h := o.Health(); h.FailureCount != 2 {
+		t.Fatalf("FailureCount after 2nd failure = %d, want 2", h.FailureCount)
+	}
+
+	// Now succeed: LastSuccessAt should populate; the failure count and the
+	// last error message are historical and must not be wiped by a recovery.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	o.mu.Lock()
+	o.endpoint = ts.URL
+	o.client = ts.Client()
+	o.mu.Unlock()
+	if err := o.push(t.Context()); err != nil {
+		t.Fatalf("push should succeed, got %v", err)
+	}
+	h = o.Health()
+	if h.LastSuccessAt == "" {
+		t.Fatal("LastSuccessAt should be populated after a successful push")
+	}
+	if h.FailureCount != 2 {
+		t.Fatalf("a success must not reset FailureCount, got %d", h.FailureCount)
+	}
+	if h.LastError == "" {
+		t.Fatal("a success must not clear the historical LastError")
+	}
 }
 
 func TestEnvelope_Shape(t *testing.T) {
