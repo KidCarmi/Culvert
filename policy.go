@@ -1341,6 +1341,21 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 	return cidrOrIP == clientIP
 }
 
+// matchIPOrCIDRAddr is matchIPOrCIDR with the client IP pre-parsed. clientAddr
+// MUST be net.ParseIP(clientIP) (nil = unparseable, fails closed on the CIDR
+// branch); the Stage-1 auth resolver parses once per request instead of per
+// predicate value.
+func matchIPOrCIDRAddr(cidrOrIP, clientIP string, clientAddr net.IP) bool {
+	if strings.Contains(cidrOrIP, "/") {
+		_, ipNet, err := net.ParseCIDR(cidrOrIP)
+		if err != nil {
+			return false
+		}
+		return clientAddr != nil && ipNet.Contains(clientAddr)
+	}
+	return cidrOrIP == clientIP
+}
+
 // ─── Destination matching ─────────────────────────────────────────────────────
 
 func matchDest(rule *PolicyRule, host string) bool {
