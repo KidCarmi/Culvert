@@ -121,6 +121,36 @@ Re-verification at HEAD confirmed two coupled defects:
   connection-refused parent → 502 + breaker `open` (impossible pre-fix), third
   request → DIRECT to a live origin (200) + `DirectFallback` active/counted.
 
+### Post-review amendments (same PR)
+
+- **Breaker success deferred until the body is consumed** (Codex P1 on the
+  first push): recording success right after `client.Do` credited a parent
+  that returned headers and then dropped/truncated the body — such a parent
+  reset its own failure count every request and could never be ejected. Now:
+  transport error → charged at `Do`; header-level block-page outcomes →
+  success; the CHAOS-17 scan read-error 502 → charged (the read error is
+  returned from `scanHTTPResponseBody`); the final stream wraps the body in a
+  read-error tracker so a parent-side read failure is charged while a
+  client-side write failure (client disconnected mid-download) is not.
+  Pinned by `TestHandleHTTP_TruncatedParentBodyChargesBreaker` (a fake parent
+  answering 200 + short body trips the breaker; pre-fix it never moved).
+- **Fallback flag cleared when the pool is replaced/wiped** (Codex P2):
+  an admin removing the last parent while in fallback left
+  `direct_fallback.active`/the gauge reporting a failed-chain bypass forever
+  (the transport keeps the old ProxyFunc after a wipe, and the empty-pool
+  branch returned before the accounting). `setProxiesLocked` now resets the
+  transition state (a repopulated still-down pool re-alerts on the next
+  request — new transition) and the empty-pool `Next()` branch self-clears.
+  Pinned by `TestFallbackState_ClearedWhenPoolReplacedOrWiped`.
+- **Determinism-gate fix (pre-existing, base branch):** the CI shuffle gate
+  caught `TestClamError_CountedAlertedAndCleanNotCached` (from the earlier
+  2026-07-26 run, already merged) observing a straggler `scan_clam_error`
+  alert goroutine from a sibling test under `-count=2`. Re-worked to the
+  CLAUDE.md assert-on-content pattern: each invocation's fake engine error
+  carries a unique marker and assertions filter on it. The new
+  `upstream_pool_down` tests use the same discipline (per-test drain sink)
+  from the start.
+
 ---
 
 ## Failure Scenarios examined (this run)
@@ -168,6 +198,14 @@ Re-verification at HEAD confirmed two coupled defects:
   `ProxyFunc` guards the nil-request shape (pinned in
   `TestAttribution_NilSafety`).
 - Full `go test ./...` green at the companion commit; `go vet` clean.
+- Flake observed on the first CI round (pre-existing, unrelated to this
+  diff, recorded for a future run): `TestSupportBundle_NoOutboundNetworkAtRuntime`
+  swaps the process-global `net.DefaultResolver` (`support_noegress_test.go:154`),
+  which races against leaked gRPC DNS-resolver goroutines from earlier
+  cluster tests still re-resolving in the background. The real fix is
+  closing those leaked ClientConns in the cluster tests (or pointing the
+  no-egress tripwire at an injected resolver seam instead of the global) —
+  candidate for the CHAOS-13/14 half-open/keepalive pass.
 
 ## Open-findings register — status after this run
 

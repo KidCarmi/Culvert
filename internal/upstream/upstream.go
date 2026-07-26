@@ -204,6 +204,12 @@ func (p *Pool) SetProxies(entries []Entry) {
 }
 
 func (p *Pool) setProxiesLocked(entries []Entry) {
+	// Replacing the pool resets the direct-fallback transition state (Codex
+	// P2): a wiped pool makes direct egress the intentional operating mode
+	// again (the flag would otherwise report an active failed-chain bypass
+	// forever), and a repopulated pool re-derives — and re-alerts — on the
+	// next request if the new parents are also down.
+	p.fallbackActive.Store(false)
 	p.proxies = nil
 	p.entries = nil
 	for _, e := range entries {
@@ -265,7 +271,15 @@ func (p *Pool) Next() *Proxy {
 
 	n := len(proxies)
 	if n == 0 {
-		return nil // pool not configured — direct egress is the normal mode
+		// Pool not configured — direct egress is the normal mode, never a
+		// fallback. Also clear any stale fallback flag: the shared transport
+		// can still hold this pool's ProxyFunc after an admin wiped the last
+		// parent (applyUpstreamProxy early-returns for a disabled pool).
+		// Load-before-Store keeps this hot path read-only in the common case.
+		if p.fallbackActive.Load() {
+			p.fallbackActive.Store(false)
+		}
+		return nil
 	}
 	start := int(p.idx.Add(1)) % n
 	for i := 0; i < n; i++ {

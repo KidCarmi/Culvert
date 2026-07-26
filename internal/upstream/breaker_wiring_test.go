@@ -40,6 +40,27 @@ func newAttribPool(t *testing.T, threshold int, timeout time.Duration, urls ...s
 	return p
 }
 
+// drainPoolAlerts installs a counting sink and returns a wait func the test
+// MUST call before returning: entering direct fallback fires the
+// upstream_pool_down alert on its own goroutine, and an undrained straggler
+// from one test can land in a later test's sink (the -count/-shuffle
+// determinism class — same failure mode the secscan clam tests hit).
+func drainPoolAlerts(t *testing.T, expected int) func() {
+	t.Helper()
+	ch := make(chan struct{}, 16)
+	alerts.SetSink(func(string, alerts.Payload) { ch <- struct{}{} })
+	t.Cleanup(func() { alerts.SetSink(func(string, alerts.Payload) {}) })
+	return func() {
+		for i := 0; i < expected; i++ {
+			select {
+			case <-ch:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out draining pool alert %d/%d", i+1, expected)
+			}
+		}
+	}
+}
+
 func attribRequest(t *testing.T) (*http.Request, *Attribution) {
 	t.Helper()
 	ctx, att := WithAttribution(context.Background())
@@ -53,6 +74,8 @@ func attribRequest(t *testing.T) (*http.Request, *Attribution) {
 func TestAttribution_FailuresTripBreakerAndSuccessCloses(t *testing.T) {
 	pool := newAttribPool(t, 2, time.Minute, "http://parent.test:3128")
 	fn := pool.ProxyFunc()
+	drain := drainPoolAlerts(t, 1) // the Next()-nil check below is one fallback transition
+	defer drain()
 
 	// Two attributed failures → breaker opens → pool falls back to direct.
 	for i := 0; i < 2; i++ {
@@ -197,6 +220,38 @@ func TestNext_DirectFallbackCountsAndAlertsOncePerTransition(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no alert on re-entering fallback (second transition)")
+	}
+}
+
+func TestFallbackState_ClearedWhenPoolReplacedOrWiped(t *testing.T) {
+	// Codex P2: an admin wiping (or replacing) the pool while it is in
+	// direct-fallback must clear the flag — otherwise /api/upstream and the
+	// fallback gauge report an active failed-chain bypass forever, even
+	// though direct egress became the intentional no-pool mode.
+	pool := newAttribPool(t, 1, time.Minute, "http://parent.test:3128")
+	drain := drainPoolAlerts(t, 1) // entering fallback below fires once
+	defer drain()
+	pool.proxies[0].CB.RecordFailure()
+	if up := pool.Next(); up != nil {
+		t.Fatal("expected direct fallback with the only parent tripped")
+	}
+	if active, _ := pool.DirectFallback(); !active {
+		t.Fatal("fallback should be active before the wipe")
+	}
+
+	pool.SetProxies(nil)
+	if active, _ := pool.DirectFallback(); active {
+		t.Fatal("SetProxies(nil) must clear the direct-fallback flag")
+	}
+
+	// The empty-pool Next() branch also self-clears: the shared transport
+	// can keep calling this pool's ProxyFunc after the wipe.
+	pool.fallbackActive.Store(true)
+	if up := pool.Next(); up != nil {
+		t.Fatal("Next() on empty pool must return nil")
+	}
+	if active, _ := pool.DirectFallback(); active {
+		t.Fatal("empty-pool Next() must clear a stale fallback flag")
 	}
 }
 
