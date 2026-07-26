@@ -20,10 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/KidCarmi/Culvert/internal/alerts"
 )
 
 func newAttribPool(t *testing.T, threshold int, timeout time.Duration, urls ...string) *Pool {
@@ -40,25 +39,20 @@ func newAttribPool(t *testing.T, threshold int, timeout time.Duration, urls ...s
 	return p
 }
 
-// drainPoolAlerts installs a counting sink and returns a wait func the test
-// MUST call before returning: entering direct fallback fires the
-// upstream_pool_down alert on its own goroutine, and an undrained straggler
-// from one test can land in a later test's sink (the -count/-shuffle
-// determinism class — same failure mode the secscan clam tests hit).
-func drainPoolAlerts(t *testing.T, expected int) func() {
+// captureFallbackAlerts swaps the fireFallbackAlert seam for a SYNCHRONOUS
+// recorder and returns the captured-count getter. The production value
+// spawns a goroutine per transition, and ANY pool-exhausting test in this
+// package does so — a straggler landing in a later test's global alerts
+// sink is exactly the -count/-shuffle determinism failure the CI gate
+// caught (twice). Capturing at the seam is synchronous and test-local, so
+// assertions are exact and nothing leaks across tests.
+func captureFallbackAlerts(t *testing.T) func() int {
 	t.Helper()
-	ch := make(chan struct{}, 16)
-	alerts.SetSink(func(string, alerts.Payload) { ch <- struct{}{} })
-	t.Cleanup(func() { alerts.SetSink(func(string, alerts.Payload) {}) })
-	return func() {
-		for i := 0; i < expected; i++ {
-			select {
-			case <-ch:
-			case <-time.After(2 * time.Second):
-				t.Fatalf("timed out draining pool alert %d/%d", i+1, expected)
-			}
-		}
-	}
+	var n atomic.Int64
+	prev := fireFallbackAlert
+	fireFallbackAlert = func(string) { n.Add(1) }
+	t.Cleanup(func() { fireFallbackAlert = prev })
+	return func() int { return int(n.Load()) }
 }
 
 func attribRequest(t *testing.T) (*http.Request, *Attribution) {
@@ -74,8 +68,7 @@ func attribRequest(t *testing.T) (*http.Request, *Attribution) {
 func TestAttribution_FailuresTripBreakerAndSuccessCloses(t *testing.T) {
 	pool := newAttribPool(t, 2, time.Minute, "http://parent.test:3128")
 	fn := pool.ProxyFunc()
-	drain := drainPoolAlerts(t, 1) // the Next()-nil check below is one fallback transition
-	defer drain()
+	captureFallbackAlerts(t) // keep the Next()-nil transition below off the global sink
 
 	// Two attributed failures → breaker opens → pool falls back to direct.
 	for i := 0; i < 2; i++ {
@@ -161,9 +154,7 @@ func TestAttribution_NilSafety(t *testing.T) {
 }
 
 func TestNext_DirectFallbackCountsAndAlertsOncePerTransition(t *testing.T) {
-	fired := make(chan string, 8)
-	alerts.SetSink(func(event string, _ alerts.Payload) { fired <- event })
-	defer alerts.SetSink(func(string, alerts.Payload) {})
+	alertCount := captureFallbackAlerts(t)
 
 	pool := newAttribPool(t, 1, time.Minute, "http://parent.test:3128")
 
@@ -186,18 +177,8 @@ func TestNext_DirectFallbackCountsAndAlertsOncePerTransition(t *testing.T) {
 	if active, total := pool.DirectFallback(); !active || total != 3 {
 		t.Fatalf("DirectFallback() = (%v, %d), want (true, 3)", active, total)
 	}
-	select {
-	case ev := <-fired:
-		if ev != "upstream_pool_down" {
-			t.Fatalf("alert event = %q, want upstream_pool_down", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no upstream_pool_down alert fired on fallback transition")
-	}
-	select {
-	case ev := <-fired:
-		t.Fatalf("second alert %q fired while still in fallback — want once per transition", ev)
-	case <-time.After(50 * time.Millisecond):
+	if got := alertCount(); got != 1 {
+		t.Fatalf("alerts after 3 fallbacks in one window = %d, want exactly 1 (once per transition)", got)
 	}
 
 	// Recovery: a usable parent clears the state; re-entering fallback
@@ -213,13 +194,8 @@ func TestNext_DirectFallbackCountsAndAlertsOncePerTransition(t *testing.T) {
 	if up := pool.Next(); up != nil {
 		t.Fatal("Next() after re-trip should fall back to direct")
 	}
-	select {
-	case ev := <-fired:
-		if ev != "upstream_pool_down" {
-			t.Fatalf("alert event = %q, want upstream_pool_down", ev)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no alert on re-entering fallback (second transition)")
+	if got := alertCount(); got != 2 {
+		t.Fatalf("alerts after recovery + re-trip = %d, want 2 (one per transition)", got)
 	}
 }
 
@@ -229,8 +205,7 @@ func TestFallbackState_ClearedWhenPoolReplacedOrWiped(t *testing.T) {
 	// fallback gauge report an active failed-chain bypass forever, even
 	// though direct egress became the intentional no-pool mode.
 	pool := newAttribPool(t, 1, time.Minute, "http://parent.test:3128")
-	drain := drainPoolAlerts(t, 1) // entering fallback below fires once
-	defer drain()
+	captureFallbackAlerts(t) // keep the transition below off the global sink
 	pool.proxies[0].CB.RecordFailure()
 	if up := pool.Next(); up != nil {
 		t.Fatal("expected direct fallback with the only parent tripped")

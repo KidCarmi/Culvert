@@ -147,9 +147,12 @@ Re-verification at HEAD confirmed two coupled defects:
   2026-07-26 run, already merged) observing a straggler `scan_clam_error`
   alert goroutine from a sibling test under `-count=2`. Re-worked to the
   CLAUDE.md assert-on-content pattern: each invocation's fake engine error
-  carries a unique marker and assertions filter on it. The new
-  `upstream_pool_down` tests use the same discipline (per-test drain sink)
-  from the start.
+  carries a unique marker and assertions filter on it. The second CI round
+  caught the same class in the new `upstream_pool_down` tests (legacy
+  pool-exhausting tests also spawn the async alert goroutine now), fixed
+  structurally: `fireFallbackAlert` is a package-level seam the tests swap
+  for a synchronous test-local recorder, so transition assertions are exact
+  and nothing ever listens on the process-global alerts sink.
 
 ---
 

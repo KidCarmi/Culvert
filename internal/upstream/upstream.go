@@ -296,6 +296,22 @@ func (p *Pool) Next() *Proxy {
 	return nil
 }
 
+// fireFallbackAlert delivers the upstream_pool_down alert on a fallback
+// transition. Package-level seam so tests can capture transitions
+// SYNCHRONOUSLY instead of listening on the process-global alerts sink —
+// any pool-exhausting test spawns the async production goroutine, and a
+// straggler landing in a later test's sink is exactly the -count/-shuffle
+// determinism failure the CI gate caught. The production value fires async
+// because the transition edge sits on the request path and alerts Dispatch
+// can hit a synchronous retry-queue disk write when the webhook semaphore
+// is full (same rationale as secscan's clamScanError).
+var fireFallbackAlert = func(detail string) {
+	go alerts.Fire("upstream_pool_down", alerts.Payload{
+		Detail: detail,
+		Source: "upstream",
+	})
+}
+
 // noteDirectFallback records that a request needed a parent proxy but none
 // was available (all unhealthy or circuit-open). The counter increments per
 // request; the log line + webhook alert fire once per transition INTO the
@@ -304,10 +320,7 @@ func (p *Pool) noteDirectFallback() {
 	p.fallbackTotal.Add(1)
 	if !p.fallbackActive.Swap(true) {
 		obs.Printf("Upstream: ALL parent proxies down — failing open to DIRECT egress (parent-proxy chain bypassed)")
-		go alerts.Fire("upstream_pool_down", alerts.Payload{
-			Detail: "all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)",
-			Source: "upstream",
-		})
+		fireFallbackAlert("all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)")
 	}
 }
 
