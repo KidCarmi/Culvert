@@ -149,8 +149,10 @@ diff-triggered), **nightly/e2e** (`install-lifecycle-e2e.yml`, `proxy-nightly-e2
 - **Failure injected:** a fake ClamAV client returning an error mid-stream; a body reader returning an
   error mid-read.
 - **Expected result (post-P1-5):** with `on_error=block`, both paths block; counter increments.
-- **Current expected result:** ClamAV error → clean/forward; plain-HTTP read error → forward+truncate;
-  no counter — **RED** (CHAOS-10/17). Assert the current asymmetry to document it.
+- **Current expected result (updated 2026-07-26):** plain-HTTP read error now fails **closed** (502)
+  and ClamAV errors are counted (`culvert_clam_scan_errors_total`) + alerted (`scan_clam_error`) with
+  no clean-verdict caching — shipped with `clam_error_test.go` + `proxy_http_scanfail_test.go`.
+  Remaining RED sliver: the `scan.on_error=block` posture for the ClamAV-error path itself.
 - **Level:** unit. **Harness:** `internal/secscan` fake clam + `proxy_http`/`proxy_tunnel` `httptest`.
   **Runtime:** <1s. **Lane:** Fast. **Flakiness:** none.
 

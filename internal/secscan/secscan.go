@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/clamav"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
 	"github.com/KidCarmi/Culvert/internal/obs"
@@ -72,6 +73,7 @@ var (
 	statScanTimeout       int64 // body scans that hit ScanBodyTimeout (fail-closed)
 	statScanSkipped       int64 // responses forwarded unscanned (size > maxBytes)
 	statRemoteScanFail    int64 // remote scan sidecar failures (fail-open)
+	statClamScanError     int64 // ClamAV scan errors mid-request (fail-open, alerted)
 )
 
 // CounterSnapshot is a point-in-time copy of the scan counters.
@@ -82,6 +84,7 @@ type CounterSnapshot struct {
 	ScanTimeout       int64
 	ScanSkipped       int64
 	RemoteScanFail    int64
+	ClamScanError     int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -93,6 +96,7 @@ func Counters() CounterSnapshot {
 		ScanTimeout:       atomic.LoadInt64(&statScanTimeout),
 		ScanSkipped:       atomic.LoadInt64(&statScanSkipped),
 		RemoteScanFail:    atomic.LoadInt64(&statRemoteScanFail),
+		ClamScanError:     atomic.LoadInt64(&statClamScanError),
 	}
 }
 
@@ -495,18 +499,40 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 	}
 }
 
+// clamScanError records a ClamAV mid-request scan failure: counter + webhook
+// alert (deduped by the alerts store), mirroring the remote sidecar's
+// remoteScanFail model (CHAOS-10). Fired on its own goroutine like
+// remoteScanFail: Dispatch's semaphore-full path enqueues the retry with a
+// synchronous disk write, and this runs inside ScanBody's fail-closed
+// timeout — a saturated webhook queue must not turn the fail-open error
+// path into a scan-timeout block.
+func clamScanError(err error) {
+	atomic.AddInt64(&statClamScanError, 1)
+	go alerts.Fire("scan_clam_error", alerts.Payload{
+		Source: "clamav",
+		Detail: err.Error(),
+	})
+}
+
 // scanBodyInner runs ClamAV + YARA sequentially. Called from ScanBody under a timeout.
 func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 	ss.mu.RLock()
 	clam := ss.clam
 	ss.mu.RUnlock()
 
-	// ClamAV scan.
+	// ClamAV scan. An engine error (daemon crash mid-stream) falls through to
+	// YARA — fail-open for THIS request, but counted + alerted, and the verdict
+	// is never cached: a "clean" computed while ClamAV was dark would otherwise
+	// keep admitting the same content by hash long after the daemon recovers.
+	clamDark := false
 	if clam != nil {
 		name, found, err := clam.Scan(data)
-		if err != nil {
+		switch {
+		case err != nil:
+			clamDark = true
+			clamScanError(err)
 			obs.Printf("ERROR SecurityScan: ClamAV error: %s", strings.ReplaceAll(err.Error(), "\n", " "))
-		} else if found {
+		case found:
 			atomic.AddInt64(&statClamBlocked, 1)
 			ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
 			return &Result{Blocked: true, Reason: name, Source: "clamav", Hash: hash}
@@ -523,8 +549,11 @@ func (ss *Scanner) scanBodyInner(data []byte, hash string) *Result {
 		}
 	}
 
-	// Content is clean — cache the negative result.
-	ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
+	// Content is clean — cache the negative result, unless ClamAV errored:
+	// a partial scan is not a clean verdict (the next occurrence rescans).
+	if !clamDark {
+		ss.cache.Set(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
+	}
 	return nil
 }
 
