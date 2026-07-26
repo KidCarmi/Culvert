@@ -512,6 +512,13 @@ else
 fi
 
 cd "$INSTALL_DIR"
+# Canonicalize to the absolute path `cd` just resolved. INSTALL_DIR can still
+# hold a relative CULVERT_DIR override (e.g. "culvert-stack") at this point,
+# and every later use of $INSTALL_DIR — including agent_ancestors_traversable,
+# which walks dirname($INSTALL_DIR) upward — assumes an absolute path. Passing
+# a relative one there would resolve to "$PWD/$INSTALL_DIR", double-counting
+# the leaf we already cd'd into instead of naming it once.
+INSTALL_DIR="$PWD"
 
 ###############################################################################
 # 6. Seed the pinned proxy image tag (P1.4)
