@@ -242,6 +242,20 @@ The following couplings are explicitly out of bounds for the MCP subsystem, rega
 - **MCP policy engine MUST NOT do network I/O.** Contrast the SWG policy engine, which performs DNS
   resolution mid-evaluation (`policy.go:1387` — **[FACT]**, cited above in §3 and §2). `internal/mcp/policy`
   must be a pure function per **MCP-POLICY-002**.
+- **MUST NOT introduce an MCP config structure the anti-drift parity inventory does not enumerate** —
+  including, and especially, a **nested** one. `config_surfaces_test.go`'s `csrStructTypes()` is hard-coded
+  to `configBackup`, `AdminSettings`, `ConfigSnapshot` and reflects **one level deep** (**[FACT]**), so a
+  nested `ConfigSnapshot.MCP *MCPSnapshot` would collapse every synced MCP field into a single walled
+  field: forward/reverse parity would not see the inner fields, `SnapshotCapParity` would `continue` past
+  the struct kind leaving nested slices uncapped, wire-wipe parity would read only the outer JSON tag, and
+  `redactUnenrolledSnapshot` — which zeroes only rows flagged `Sensitive` — would ship the server registry
+  (`RC-1`) and credential-provider references (`RC-2`) to an **unenrolled** peer. Two shapes are permitted,
+  and only two: **(a)** one top-level struct field + one registry row per logical MCP setting (the flat
+  mandate), or **(b)** a nested shape *only* once the parity machinery demonstrably recurses — nested
+  field paths, nested cap parity, nested wire-wipe. **A nested struct behind a one-level-deep checker is
+  the prohibited combination.** Binding constraint: **MCP-CFG-001**, ADR-0024 §Decision Part 1 item 8;
+  strategy: [`D-15`](OPEN-DECISIONS.md#d-15--mcp-config-surface-registry-integration-strategy)
+  (recommended Option A — extend the existing registry).
 
 ---
 

@@ -64,6 +64,34 @@ first such record and is a **hard PR-1 entry gate**.
    evaluated (not adopted) in `RECOMMENDED-ARCHITECTURE.md`. Every new config field follows the
    config-surface anti-drift registry and GUI-parity mandate.
 
+   **Binding structural constraint (added by the board-blocker remediation for
+   [#927](https://github.com/KidCarmi/Culvert/issues/927); strategy decision `D-15`; owning requirement
+   `MCP-CFG-001`).** The sentence above asserts coverage the tooling does not currently provide:
+   `config_surfaces_test.go` hard-codes a three-type inventory (`configBackup`, `AdminSettings`,
+   `ConfigSnapshot`) and reflects **one level deep**, so an unenumerated or nested MCP config struct is
+   invisible to forward and reverse parity, while `redactUnenrolledSnapshot` zeroes only rows flagged
+   `Sensitive`. This ADR therefore binds the implementation to **both** of the following:
+
+   - **(a) Enumeration is mandatory and total.** *Every* MCP configuration structure — including every
+     nested struct, at any depth — **MUST** be enumerated in the anti-drift inventory and **MUST** have
+     complete registry semantics (`Sensitive`, Export/Import, Rollback, AdminDurable, `AppliesOnDP`,
+     `WireWipeCapable`, validation, snapshot capture/apply). **An implementation that introduces a
+     nested MCP config struct which the parity inventory does not enumerate violates this ADR**, and is
+     not made conformant by the struct's fields individually appearing in the config matrix.
+   - **(b) The parity machinery must actually reach what (a) enumerates.** Nested/dotted field paths,
+     nested slice/map cap parity, and nested wire-wipe ⇔ `omitempty` parity **MUST** be covered before
+     the first MCP config field ships. Satisfying (b) by the **flat mandate** — one top-level struct
+     field and one registry row per logical MCP setting, no nested MCP config struct — is an acceptable
+     and explicitly permitted way to discharge it; satisfying it by **extending the parity machinery to
+     recurse** (the `D-15` Option A recommendation) is the preferred route. What is **not** permitted is
+     a nested struct with a one-level-deep checker: that combination is the defect this constraint
+     exists to forbid.
+
+   Conformance is evidenced by the anti-omission gates in
+   [`CI-GATES.md`](../design/mcp/CI-GATES.md), which **MUST** fail for *both* omission cases — a new
+   field in an already-enumerated type, **and** an entirely new or nested MCP config type. A gate that
+   catches only the first case does not discharge this constraint.
+
 ### Part 2 — Closed PR-1 entry decisions (D-2, D-5, D-8, D-9, D-13)
 
 These five decisions were the blocking GO/NO-GO items required before PR-1. They are approved as follows.

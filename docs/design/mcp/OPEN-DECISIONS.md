@@ -15,6 +15,14 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 > same remediation). Enumerated from the diff against the merge base rather than from recollection: the
 > decision blocks this remediation touched are exactly **D-0, D-1, D-2, D-5, D-8, D-9, D-13** plus the new
 > **D-14**; every other decision block is byte-unchanged (`predicates/predicate-25.py`).
+>
+> **Later addition, separately attributed — NOT part of the remediation described above.** **D-15** (MCP
+> config-surface registry integration strategy) was added by the board-blocker remediation for
+> [#927](https://github.com/KidCarmi/Culvert/issues/927), a subsequent PR. It is named here because
+> `predicate-25` measures the **cumulative** diff against the immutable recorded base `1203e04b`, so a
+> decision block touched by any later PR must be named in this note or the provenance check fails.
+> Attribution is stated explicitly rather than folded into the sentence above, because silently widening
+> an earlier remediation's claim is the false-provenance defect that predicate exists to catch.
 
 ---
 
@@ -235,6 +243,55 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
   blocked — only their numeric values are.**
 - **Blocking:** Slice (PR-1) for the values; the `MCP-PROTO-*` requirements themselves are already defined.
 
+### D-15 — MCP config-surface registry integration strategy
+- **Added by:** the board-blocker remediation for [#927](https://github.com/KidCarmi/Culvert/issues/927)
+  (Enterprise Security Architecture Board, blocker B-3). Resolves the deferral previously left dangling
+  in [`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md) §"The anti-drift pattern this surface must
+  follow", which pointed at this document without allocating a decision here.
+- **Question:** how do MCP configuration surfaces obtain the *enforced* anti-drift parity guarantees
+  (forward, reverse, redaction, capture/apply, cap, wire-wipe, GUI) that `config_surfaces.go` +
+  `config_surfaces_test.go` provide for the existing three types?
+- **Why it is not merely a style choice `[FACT]`:** `csrStructTypes()` hard-codes exactly three types
+  (`configBackup`, `AdminSettings`, `ConfigSnapshot`) and the reflection walk is one level deep. A new
+  or nested MCP config struct is therefore **invisible** to parity — registering fails loudly, *not*
+  registering passes silently. `redactUnenrolledSnapshot` zeroes only rows flagged `Sensitive`, so an
+  invisible nested MCP struct discloses the server registry and credential-provider references to an
+  **unenrolled** peer (the DEBT-006 `SessionHMAC`/`IdPProfiles` class).
+- **Options:**
+  - **Option A — extend the existing registry.** Add MCP surfaces to `configSurfaces` and extend the
+    parity machinery to handle nested/dotted field paths, nested cap parity, and nested wire-wipe.
+  - **Option B — parallel MCP registry.** A separate registry + parity suite providing equivalent or
+    stronger forward, reverse, redaction, capture/apply, cap, wire-wipe and GUI guarantees.
+- **Recommended `[REC]`: Option A — extend the existing registry.** Repository evidence:
+  1. `config_surfaces_test.go` already implements every guarantee needed (forward/reverse parity,
+     `SnapshotCapParity`, `SnapshotApplyParity`, redaction parity, wire-wipe ⇔ `omitempty`,
+     `SnapshotCaptureOwner`). Option B re-implements all of it, and a second implementation is a second
+     thing that can drift — the exact failure class the registry exists to prevent.
+  2. The single leak path is `redactUnenrolledSnapshot`, which reads **one** registry. Two registries
+     means two redaction call sites and a standing question of which one a new field belongs to.
+  3. `CLAUDE.md` records the registry as "the anti-drift wall for Finding 10.3 / DEBT-004/006/009" —
+     one wall, not a family of walls.
+  4. Option B's only real advantage — freedom to model MCP-specific surfaces — is obtainable under
+     Option A by extending the taxonomy (a new `fieldKind`), which is additive.
+  - **Cost of Option A, stated honestly:** it requires touching shared parity machinery that currently
+    guards the whole product, so the extension itself must land with its own regression evidence. That
+    is the trade this decision accepts.
+- **Binding structural constraint (either option):** every MCP configuration structure — including any
+  nested struct — **MUST** be enumerated in the anti-drift inventory. A hard-coded inventory that
+  silently ignores an unenumerated nested type does **not** satisfy this decision; see `MCP-CFG-001`.
+- **Evidence:** `[FACT]` `config_surfaces.go`, `config_surfaces_test.go` (`csrStructTypes`, one-level
+  reflection, `SnapshotCapParity` skipping `Ptr`/`Struct`); `[FACT]` `CLAUDE.md` config-surface
+  registry contract; `[REC]` the recommendation above.
+- **Owner:** Eng — platform/config. **Approver:** Architecture (registry contract) **and** Product
+  Security (redaction/disclosure class). **Due:** PR-1.
+- **Blocking:** **HARD PR-1 entry gate**, alongside D-1 — the wall must exist *before* the first MCP
+  config field, because retrofitting after PR-4/PR-8 add credential and event rows is materially harder.
+- **Closure conditions:** (1) option selected and recorded by the named approvers; (2) the constraint
+  recorded in ADR-0024 §Decision Part 1 item 8; (3) `MCP-CFG-001` present with verification + evidence;
+  (4) the anti-omission gates in [`CI-GATES.md`](CI-GATES.md) specified as blocking, including **both**
+  omission cases (new field in a known type **and** an entirely new/nested type).
+- **Status: OPEN — recommendation recorded, NOT human-approved.**
+
 ---
 
 ## Blocking summary
@@ -249,5 +306,6 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 | D-13 Mgmt MCP scope | GO/NO-GO + PR-9 | PR-9 | **CLOSED (read-only+draft/validate/simulate; mutation excluded; ADR-0024 §D-13)** |
 | **D-1 protocol baseline** | **HARD PR-1 entry gate** (elevated; was Slice) | **PR-1** | **OPEN — [EXT] external verification + human approval required BEFORE PR-1** |
 | **D-14 protocol-kernel limit values + batch** | Slice (PR-1) — values only | PR-1 | **OPEN — `MCP-PROTO-*` requirements defined; numeric defaults/hard-caps + batch policy are the open implementation decision** |
+| **D-15 config-surface registry integration** | **HARD PR-1 entry gate** | **PR-1** | **OPEN — Option A (extend the existing registry) recommended with repository evidence; NOT human-approved. Owner Eng/platform-config; approvers Architecture + Product Security. Owning requirement `MCP-CFG-001`** |
 | D-3, D-4, D-6, D-10, D-12 | Slice | per slice | Open (slice-scoped) |
 | D-7, D-11 | Non-blocking / GA | post-V1 / GA | Open (post-V1 / GA) |

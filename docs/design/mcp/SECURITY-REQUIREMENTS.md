@@ -24,9 +24,19 @@ Verification · Evidence · Gate**. Status is `Proposed` for all rows unless not
 > **What this remediation changed in THIS registry — enumerated from the diff against the merge base, not
 > from recollection** (`predicates/predicate-25.py` re-derives and enforces these three sets):
 >
-> - **16 requirement IDs ADDED:** `MCP-PROTO-001..014`, `MCP-ID-008`, `MCP-INSP-009` — the protocol-kernel
->   family, the protocol-lifecycle split from identity binding, and listener-side host-allowlist enforcement
->   (split off from the MCP-INSP-008 primitive, whose own statement is rewritten — see the next bullet).
+> - **17 requirement IDs ADDED cumulatively against the recorded base, by TWO separate remediations —
+>   attribution is stated per ID and is NOT merged:** `MCP-PROTO-001..014`, `MCP-ID-008`, `MCP-INSP-009`
+>   (**16 IDs — added by the PR-1 readiness remediation, this note's original subject**: the
+>   protocol-kernel family, the protocol-lifecycle split from identity binding, and listener-side
+>   host-allowlist enforcement, split off from the MCP-INSP-008 primitive whose own statement is
+>   rewritten — see the next bullet); and `MCP-CFG-001` (**1 ID — added LATER by the board-blocker
+>   remediation for [#927](https://github.com/KidCarmi/Culvert/issues/927), a separate subsequent PR,
+>   NOT part of the PR-1 readiness remediation**: config-surface anti-drift governance, strategy `D-15`).
+>   `MCP-CFG-001` is enumerated in this list because `predicates/predicate-25.py` measures the
+>   **cumulative** diff against the immutable recorded base `1203e04b`, so every later addition must
+>   appear here or the provenance check fails. Listing it *without* this attribution would falsely credit
+>   it to the earlier remediation — the exact false-provenance defect (round 38) that predicate exists to
+>   prevent.
 > - **7 requirement STATEMENTS rewritten:** `MCP-AUTH-003` (RFC 8707 validated through the authorization
 >   flow), `MCP-AUTH-006` (replay framing per ADR-0024 §D-2), `MCP-EVENT-001`, `MCP-EVENT-002`
 >   (commit-before-side-effect, per class, per flow), `MCP-INSP-001`, `MCP-INSP-008` (primitive-only scope)
@@ -172,6 +182,20 @@ this package does **not** fix production default numbers without evidence.
 | MCP-HA-001 | Stale Control-Plane publications **MUST** be fenced by epoch; the DP **MUST** keep the last valid snapshot and never depend on a CP round-trip per call. | Prior art: `halease`, `dpObserveEpoch`, fail-static. | MCP-T-047,048,049 | Eng / SRE | Stale-epoch tests | Stale rejected; last-good served | PR-10 |
 | MCP-HA-002 | The DP **MUST** retain the previous snapshot and support atomic rollback within the rollback SLO target. | Recover without partial state. | MCP-T-048 | Eng / SRE | Rollback tests | Atomic rollback proven | PR-10 |
 
+## MCP-CFG — Configuration surface governance
+
+Single-requirement family. It exists because the property below had **no requirement owner**: it lived
+only as a prose bullet in ADR-0024 §Decision Part 1 item 8, and prose does not redact a field. The
+family is deliberately narrow — one requirement, one property, one owner — not a new taxonomy. Strategy
+is [`D-15`](OPEN-DECISIONS.md#d-15--mcp-config-surface-registry-integration-strategy); the per-row
+mapping is [`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md) §Registry semantics.
+
+| ID | Statement | Rationale | Threats | Owner | Verification | Evidence | Gate |
+|---|---|---|---|---|---|---|---|
+| MCP-CFG-001 | Every MCP configuration surface **MUST** be inside the anti-drift registry wall before the first MCP config field ships. Concretely: (1) **every** MCP config structure — including every nested struct at any depth — **MUST** be enumerated in the parity inventory, and an unenumerated type **MUST** fail the build, not pass silently; (2) every MCP row **MUST** carry complete registry semantics (`Sensitive`, Export/Import, Rollback, AdminDurable, `AppliesOnDP`, `WireWipeCapable`, validation, snapshot capture/apply) via its declared registry class; (3) every row classed `Sensitive` **MUST** be provably zeroed on the `!callerIsEnrolledNode` path; (4) snapshot integrity metadata (`RC-5`) **MUST** be `AppliesOnDP: true` so apply-parity cannot skip it; (5) inline secret material (`RC-X`) **MUST** be rejected at validation, never stored-and-redacted. | The parity inventory is hard-coded to three types and reflects one level deep, so a nested MCP config struct is invisible to forward/reverse parity while `redactUnenrolledSnapshot` keys on `Sensitive` — an unenrolled peer would receive the server registry and credential-provider references (the DEBT-006 disclosure class). The incentive gradient is inverted: registering fails loudly, not registering passes silently. | MCP-T-023,047 | Eng / Sec Arch | Anti-omission parity tests — **both** omission cases (new field in a known type **and** an entirely new/nested type); redaction parity; capture/apply parity incl. `RC-5`; nested cap parity; wire-wipe ⇔ `omitempty`; GUI parity; `count(RC-X) == 0` | Unenumerated type fails the build; every `Sensitive` MCP value absent for unenrolled peers; every `RC-5` field read on the DP; nested caps enforced; every API-backed row has a GUI surface | **PR-1** |
+
+---
+
 ## MCP-CONNECT — On-prem connectivity
 
 | ID | Statement | Rationale | Threats | Owner | Verification | Evidence | Gate |
@@ -220,8 +244,11 @@ this package does **not** fix production default numbers without evidence.
 
 ## Summary
 
-**Total requirements: 91** across 16 namespaces (MCP-PROTO 14, MCP-AUTH 8, ID 8, SERVER 3, TOOL 6,
-POLICY 7, CRED 6, INSP 9, EVENT 6, CPDP 3, HA 2, CONNECT 4, MGMT 4, PRIVACY 3, SUPPLY 4, OPS 4). The
+**Total requirements: 92** across 17 namespaces (MCP-PROTO 14, MCP-AUTH 8, ID 8, SERVER 3, TOOL 6,
+POLICY 7, CRED 6, INSP 9, EVENT 6, CPDP 3, HA 2, **CFG 1**, CONNECT 4, MGMT 4, PRIVACY 3, SUPPLY 4,
+OPS 4). `MCP-CFG-001` was added by the board-blocker remediation for
+[#927](https://github.com/KidCarmi/Culvert/issues/927) — the config-surface anti-drift property
+previously had no requirement owner and lived only as an ADR prose bullet. The
 MCP-PROTO family was added by the PR-1 remediation (finding H-2); the follow-up remediation added
 `MCP-PROTO-014` (UTF-8/Unicode identifier handling), `MCP-INSP-009` (PR-5 listener binding, split from the
 PR-1 `MCP-INSP-008` primitive), and `MCP-ID-008` (PR-3 identity binding, split from `MCP-PROTO-012`). All

@@ -188,7 +188,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
 | MCP-T-022 | Over-privileged credentials | High | MCP-CRED-002,003 | IAM/PAM |
-| MCP-T-023 | Credential leakage | Critical | MCP-CRED-004, MCP-EVENT-003 | IAM/PAM |
+| MCP-T-023 | Credential leakage | Critical | MCP-CRED-004, MCP-EVENT-003, MCP-CFG-001 | IAM/PAM |
 | MCP-T-024 | Credential-cache compromise | High | MCP-CRED-005,006 | IAM/PAM |
 | MCP-T-025 | Scope mismatch not rejected | High | MCP-CRED-002 | IAM/PAM |
 
@@ -250,7 +250,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 
 | ID | Threat | Sev | Controls | Owner |
 |---|---|---|---|---|
-| MCP-T-047 | Stale snapshot applied | High | MCP-CPDP-002, MCP-HA-001 | Eng/SRE |
+| MCP-T-047 | Stale snapshot applied | High | MCP-CPDP-002, MCP-HA-001, MCP-CFG-001 | Eng/SRE |
 | MCP-T-048 | Split-brain | High | MCP-HA-001,002 | Eng/SRE |
 | MCP-T-049 | Stale Control-Plane publication | High | MCP-HA-001 | Eng/SRE |
 | MCP-T-050 | Mixed-version CP/DP behavior | High | MCP-CPDP-003 | Eng/SRE |
