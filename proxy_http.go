@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/upstream"
 )
 
 // maxRequestBody is the largest body we'll forward for non-tunnel requests.
@@ -88,7 +90,20 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		Timeout: 30 * time.Second,
 	}
 	r.RequestURI = ""
+
+	// CHAOS-11: attribute this request's outcome to the parent proxy the
+	// transport selects, so real request failures trip the pool's circuit
+	// breaker (previously only the periodic health probe ever ejected a
+	// broken upstream). No-op (nil attribution) when the pool is disabled.
+	var upstreamAtt *upstream.Attribution
+	if upstreamPool.Enabled() {
+		ctx, att := upstream.WithAttribution(r.Context())
+		r = r.WithContext(ctx)
+		upstreamAtt = att
+	}
+
 	resp, err := client.Do(r)
+	upstreamAtt.Record(err) // nil-safe
 	if err != nil {
 		logger.Printf("upstream request error: %v", err)
 		if isDNSError(err) {
