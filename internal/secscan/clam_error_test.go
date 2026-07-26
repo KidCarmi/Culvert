@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
@@ -43,6 +44,21 @@ func withAlertRecorder(t *testing.T) *alertRecorder {
 	return rec
 }
 
+// waitForEvents polls until the recorder has at least n events or the
+// deadline passes (the clam alert fires on its own goroutine, mirroring
+// remoteScanFail — Dispatch must never run inside ScanBody's timeout).
+func (rec *alertRecorder) waitForEvents(t *testing.T, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events := rec.get()
+		if len(events) >= n || time.Now().After(deadline) {
+			return events
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 	rec := withAlertRecorder(t)
 	clam := &fakeClam{scanErr: errors.New("daemon down")}
@@ -61,7 +77,7 @@ func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 	if got := atomic.LoadInt64(&statClamScanError) - before; got != 1 {
 		t.Fatalf("ClamScanError counter delta = %d, want 1", got)
 	}
-	events := rec.get()
+	events := rec.waitForEvents(t, 1)
 	if len(events) != 1 || events[0] != "scan_clam_error" {
 		t.Fatalf("want one scan_clam_error alert, got %v", events)
 	}

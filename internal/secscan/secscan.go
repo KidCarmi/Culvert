@@ -501,10 +501,14 @@ func (ss *Scanner) ScanBody(data []byte) *Result {
 
 // clamScanError records a ClamAV mid-request scan failure: counter + webhook
 // alert (deduped by the alerts store), mirroring the remote sidecar's
-// remoteScanFail model (CHAOS-10). Dispatch never blocks the producer.
+// remoteScanFail model (CHAOS-10). Fired on its own goroutine like
+// remoteScanFail: Dispatch's semaphore-full path enqueues the retry with a
+// synchronous disk write, and this runs inside ScanBody's fail-closed
+// timeout — a saturated webhook queue must not turn the fail-open error
+// path into a scan-timeout block.
 func clamScanError(err error) {
 	atomic.AddInt64(&statClamScanError, 1)
-	alerts.Fire("scan_clam_error", alerts.Payload{
+	go alerts.Fire("scan_clam_error", alerts.Payload{
 		Source: "clamav",
 		Detail: err.Error(),
 	})

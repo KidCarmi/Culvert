@@ -16504,9 +16504,11 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="decryption_autoexclude_surge"> Decryption exclusion surge</label>
         <!-- Chaos-hardening events (same exact-name filter class as above):
              state_file_corrupt = CHAOS-05/07 quarantine, cluster_node_reenrolled
-             = expired-node re-enrollment (CHAOS-12 recovery path). -->
+             = expired-node re-enrollment (CHAOS-12 recovery path),
+             scan_clam_error = ClamAV mid-request error fail-open window (CHAOS-10). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>
