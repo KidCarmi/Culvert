@@ -1331,6 +1331,10 @@ tr.dragging  { opacity: .4; }
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Sidecar fails</div>
               <div id="sec-remote-fail" style="font-weight:600;font-size:.85rem">0</div>
             </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">ClamAV scan errors</div>
+              <div id="sec-clam-error" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
           </div>
           <div id="sec-yara-warnings" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:14px;font-size:.78rem;color:var(--yellow)"></div>
 
@@ -7919,6 +7923,7 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-skipped', s.stat_scan_skipped, 1, null);
     setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
     setMetric('sec-remote-fail', s.stat_remote_scan_fail, 1, 10);
+    setMetric('sec-clam-error', s.stat_clam_scan_error, 1, 10);
   } catch(e) { console.error(e); }
 }
 

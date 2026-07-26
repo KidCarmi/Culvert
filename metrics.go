@@ -523,6 +523,10 @@ culvert_clamav_blocked_total %d
 # TYPE culvert_yara_blocked_total counter
 culvert_yara_blocked_total %d
 
+# HELP culvert_clam_scan_errors_total Total ClamAV scan errors mid-request (content forwarded unscanned, fail-open)
+# TYPE culvert_clam_scan_errors_total counter
+culvert_clam_scan_errors_total %d
+
 # HELP culvert_threat_feed_blocked_total Total requests blocked by threat intelligence feeds
 # TYPE culvert_threat_feed_blocked_total counter
 culvert_threat_feed_blocked_total %d
@@ -575,6 +579,7 @@ culvert_auth_sso_required_total %d
 		dpiBlocked,
 		clamBlocked,
 		yaraBlocked,
+		scanCounters.ClamScanError,
 		feedBlocked,
 		feedEntries,
 		globalThreatFeed.AllowlistMaskedTotal(),
