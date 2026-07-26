@@ -3,8 +3,11 @@
 Culvert supports three deployment modes. Choose the one that fits your scale.
 
 > **Image tag:** the Compose examples below use `culvert/proxy:pinned` — a
-> fixed **local-only** tag; Compose never pulls it from a registry directly.
-> Seed it first via the [one-line installer](../README.md#one-line-install-linux)
+> fixed **local-only** tag that must be seeded before the first `up`. If it
+> isn't present, Compose falls back to a registry pull and fails with
+> `pull access denied for culvert/proxy` (see README.md's troubleshooting
+> entry). Seed it first via the
+> [one-line installer](../README.md#one-line-install-linux)
 > (`curl ... install.sh | bash`), which handles this for you, or build it
 > yourself: `docker build -t culvert/proxy:pinned .`. See the `proxy:` service
 > comment in `docker-compose.yml` for the full rationale (P1.4).
