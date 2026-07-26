@@ -542,8 +542,29 @@ must verify:
 - a wrong-tenant credential cannot submit as another appliance (`403`),
 - an unsupported `schema_version`/`envelope_version` is rejected cleanly (`422`).
 
+**Fixture ownership (clarification, no design change).** The golden fixtures above are
+**copied**, so each one has exactly one producing repository:
+
+- **Culvert owns the inner plaintext fixture** (§3.3). Culvert is the producer of that
+  shape, so its fixture is generated and byte-verified by Culvert's real production
+  serialization path (`supportmetrics.Registry.BuildSample` → `json.Marshal` →
+  `Sample.MarshalJSON`) against the live `supportMetricRegistry` schema — never
+  hand-written, and never invented on the TAC side. Shipped as **Slice 2.5-A1**:
+  `testdata/telemetry/v1/inner_sample.json` + `support_telemetry_golden_fixture_test.go`
+  (see `testdata/telemetry/v1/README.md` for the recorded copy-contract metadata).
+- **`tac-platform` consumes a copied version** of those exact bytes and verifies the
+  recorded SHA-256. Both repositories stay hermetic — no submodule, no network fetch, no
+  cross-repository test dependency.
+- **Sealed outer-envelope fixtures (§3.2) remain deferred to TAC `2.5-C`.** Slice 2.5-A1
+  carries no envelope, encryption, key, credential, sender, or spool.
+- **Test naming:** `TestTelemetryGatewayGoldenVector` (named in §14/§15) remains the
+  **Slice 3** envelope/interop vector against the live gateway. A1's inner-plaintext
+  half of that contract is the `TestTelemetryGoldenFixture*` family — those tests
+  satisfy the producer side only; `TestTelemetryGatewayGoldenVector` is still owed.
+
 **The M7 plan states: Slice 3 is blocked until the TAC telemetry gateway contract and
-the golden interoperability test pass.** This is Slice 2.5 (§14).
+the golden interoperability test pass.** This is Slice 2.5 (§14). The inner-plaintext
+fixture landing does **not** unblock Slice 3.
 
 ---
 
