@@ -13,6 +13,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/feedsync"
 	"github.com/KidCarmi/Culvert/internal/pac"
+	"github.com/KidCarmi/Culvert/internal/saasfeed"
 )
 
 // blocklistCleanupUnattributed handles DELETE /api/blocklist?scope=unattributed:
@@ -1140,6 +1141,57 @@ func apiURLCatLookup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/urlcat/feed-status — freshness and failure counts for the two
+// background feeds that back URL Categories (UT1 community blacklist + SaaS
+// curated JSON). Both feeds already track this state via Stats()/SyncFailures()
+// for the /metrics Prometheus writer (urlcat_metrics.go); this surfaces the
+// same read-only state to the admin GUI so a stalled or failing feed is
+// visible without scraping /metrics or reading logs. Read-only, no config-version.
+//
+// NOTE: the two feeds' counts mean different things and are NOT
+// interchangeable. UT1's Stats() reports the full corpus size parsed on the
+// last sync (feedsync.Syncer.totalDomains). SaaS's Stats() reports only the
+// merge callback's "added" return (mergeSaaSCategories, saas_feed.go) — the
+// number of NEW hosts folded in that sync, which is legitimately 0 on a
+// healthy, routine, unchanged sync. Rendering that as "entries" would read
+// as an empty/broken feed, so it gets its own field name.
+func apiURLCatFeedStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ut1 := map[string]any{"configured": globalUT1FeedSyncer != nil}
+	if globalUT1FeedSyncer != nil {
+		entries, lastSync, interval := globalUT1FeedSyncer.Stats()
+		ut1["entries"] = entries
+		ut1["lastSync"] = rfc3339OrEmpty(lastSync)
+		ut1["intervalSeconds"] = int64(interval.Seconds())
+		ut1["syncFailures"] = feedsync.SyncFailures()
+	}
+
+	saasEnabled := globalSaaSFeed.Enabled()
+	saas := map[string]any{"configured": saasEnabled}
+	if saasEnabled {
+		_, lastSync, added, interval := globalSaaSFeed.Stats()
+		saas["hostsAddedLastSync"] = added
+		saas["lastSync"] = rfc3339OrEmpty(lastSync)
+		saas["intervalSeconds"] = int64(interval.Seconds())
+		saas["syncFailures"] = saasfeed.SyncFailures()
+	}
+
+	jsonOK(w, map[string]any{"ut1": ut1, "saas": saas})
+}
+
+// rfc3339OrEmpty renders t as RFC3339 UTC, or "" for the zero value (never
+// synced) — mirrors the blocklist-feed and threat-feed status handlers.
+func rfc3339OrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // configBackup is the portable JSON snapshot of all non-secret configuration.
 type configBackup struct {
 	Version             int           `json:"version"`
@@ -2189,6 +2241,7 @@ func registerPolicyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/urlcat", apiURLCat)                                              // GET/POST/PUT/DELETE categories
 	mux.HandleFunc("/api/urlcat/host", apiURLCatHost)                                     // POST/DELETE individual hosts
 	mux.HandleFunc("/api/urlcat/lookup", apiURLCatLookup)                                 // GET — resolve a domain to its category
+	mux.HandleFunc("/api/urlcat/feed-status", apiURLCatFeedStatus)                        // GET — UT1 + SaaS feed freshness/failure counts (viewer, read-only)
 
 	// Block page template (shown to users blocked by a policy rule).
 	mux.HandleFunc("/api/blockpage", apiBlockPage) // GET template / PUT update

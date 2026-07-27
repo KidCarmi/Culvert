@@ -95,8 +95,10 @@ import (
 //   - 188 — M7 Slice 2 added /api/support/telemetry/config (GET viewer / PUT
 //     admin: node-local telemetry consent + bearer-auth config; still zero
 //     egress — no sender exists yet).
+//   - 189 — Added /api/urlcat/feed-status (GET viewer: UT1 + SaaS category
+//     feed freshness/failure counts, previously Prometheus-only).
 func TestC1_RouteMetadata_Locked141(t *testing.T) {
-	const want = 188
+	const want = 189
 	if got := len(uiRoutes); got != want {
 		t.Fatalf("uiRoutes has %d entries; want %d (route added or removed?)", got, want)
 	}
