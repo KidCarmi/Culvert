@@ -1830,12 +1830,21 @@ func apiBlockPage(w http.ResponseWriter, r *http.Request) {
 // Upstream Proxy Chaining API
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// upstreamDirectFallbackStatus is the CHAOS-11 fail-open visibility block
+// shared by the upstream GET surfaces: whether the pool is currently
+// bypassed to direct egress and how many requests have fallen back.
+func upstreamDirectFallbackStatus() map[string]any {
+	active, total := upstreamPool.DirectFallback()
+	return map[string]any{"active": active, "total": total}
+}
+
 func apiUpstream(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		jsonOK(w, map[string]any{
-			"enabled": upstreamPool.Enabled(),
-			"proxies": upstreamPool.List(),
+			"enabled":         upstreamPool.Enabled(),
+			"proxies":         upstreamPool.List(),
+			"direct_fallback": upstreamDirectFallbackStatus(),
 		})
 	case http.MethodPost:
 		if !requireRole(w, r, RoleAdmin) {
@@ -1867,8 +1876,9 @@ func apiUpstreamSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"enabled": upstreamPool.Enabled(),
-		"proxies": upstreamPool.List(),
+		"enabled":         upstreamPool.Enabled(),
+		"proxies":         upstreamPool.List(),
+		"direct_fallback": upstreamDirectFallbackStatus(),
 	})
 }
 

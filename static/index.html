@@ -3757,6 +3757,7 @@ Firefox (all platforms):
         <div id="upstream-empty" style="padding:32px;text-align:center;color:var(--muted);font-size:.85rem">
           No upstream proxies configured. Traffic goes directly to the internet.
         </div>
+        <div id="upstream-fallback-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border:1px solid var(--red);border-radius:6px;background:rgba(239,68,68,.12);font-size:.84rem"></div>
         <div class="tbl-wrap">
           <table id="upstream-table" style="display:none">
             <thead><tr><th>URL</th><th>Health</th><th>Circuit</th><th>Actions</th></tr></thead>
@@ -15227,10 +15228,12 @@ async function toggleOCSP(enabled) {
 // Upstream Proxies Panel
 // ═══════════════════════════════════════════════════════════════════════════
 let upstreamData = [];
+let upstreamFallback = null; // CHAOS-11: {active, total} direct-fallback status
 async function loadUpstream() {
   const r = await api('/api/upstream');
   if (!r) return;
   upstreamData = r.proxies || [];
+  upstreamFallback = r.direct_fallback || null;
   renderUpstream();
 }
 
@@ -15238,6 +15241,18 @@ function renderUpstream() {
   const empty = document.getElementById('upstream-empty');
   const table = document.getElementById('upstream-table');
   const tbody = document.getElementById('upstream-tbody');
+  // CHAOS-11: surface the fail-open bypass — a configured chain with every
+  // parent down silently egresses DIRECT; make that state impossible to miss.
+  const banner = document.getElementById('upstream-fallback-banner');
+  if (banner) {
+    if (upstreamData.length && upstreamFallback && upstreamFallback.active) {
+      banner.innerHTML = '<strong style="color:var(--red)">DIRECT FALLBACK ACTIVE</strong> — all parent proxies are down (unhealthy or circuit-open). Egress traffic is bypassing the parent-proxy chain. ' +
+        (upstreamFallback.total ? escHtml(String(upstreamFallback.total)) + ' request' + (upstreamFallback.total === 1 ? '' : 's') + ' egressed direct since startup.' : '');
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
   if (!upstreamData.length) {
     empty.style.display = '';
     table.style.display = 'none';
@@ -16542,6 +16557,8 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
+        <!-- CHAOS-11: all parent proxies down — chain bypassed, egress is direct. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="upstream_pool_down"> Upstream pool down (direct fallback)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

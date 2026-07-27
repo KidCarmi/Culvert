@@ -772,6 +772,14 @@ components:
       properties:
         enabled: { type: boolean }
         proxies: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        direct_fallback:
+          type: object
+          description: CHAOS-11 fail-open visibility — whether the pool is currently bypassed to DIRECT egress (all parents unhealthy or circuit-open) and how many requests have fallen back since startup.
+          additionalProperties: false
+          required: [active, total]
+          properties:
+            active: { type: boolean }
+            total: { type: integer, format: int64 }
 
     # ── Slice 3 tranche 6: cluster/support/diagnostics read-model schemas ──────────
     ClusterCAInfo:

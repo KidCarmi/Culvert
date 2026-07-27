@@ -23,6 +23,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
@@ -92,13 +94,21 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	cb.state.Store(int32(circuitClosed))
 }
 
-// RecordFailure increments the failure count and opens the circuit if threshold is reached.
-func (cb *CircuitBreaker) RecordFailure() {
+// RecordFailure increments the failure count and opens the circuit if the
+// threshold is reached. It returns true exactly when this call transitioned
+// the circuit into the open state (closed/half-open → open), so callers can
+// log/alert once per trip instead of once per failure. Failures recorded
+// while already open refresh openedAt (extending the open window) and
+// return false.
+func (cb *CircuitBreaker) RecordFailure() bool {
 	n := cb.failures.Add(1)
 	if n >= cb.threshold {
-		cb.state.Store(int32(circuitOpen))
+		// openedAt is stored before the state flips so a concurrent Allow()
+		// observing the open state never reads a stale trip timestamp.
 		cb.openedAt.Store(time.Now().UnixMilli())
+		return cb.state.Swap(int32(circuitOpen)) != int32(circuitOpen)
 	}
+	return false
 }
 
 // Params returns the breaker's configured threshold and timeout. Exported for
@@ -166,6 +176,13 @@ type Pool struct {
 	cbThreshold int
 	cbTimeout   time.Duration
 	idx         atomic.Int64 // round-robin counter
+
+	// Direct-fallback visibility (CHAOS-11): before this existed the
+	// all-upstreams-down → direct-egress fail-open (PX-2 posture) was
+	// completely silent — no log, no alert, no counter. The posture itself
+	// is unchanged; these only make it observable.
+	fallbackActive atomic.Bool  // pool is currently failing open to direct
+	fallbackTotal  atomic.Int64 // requests that fell back to direct since start
 }
 
 // Configure sets the list of upstream proxies and the circuit-breaker
@@ -187,6 +204,12 @@ func (p *Pool) SetProxies(entries []Entry) {
 }
 
 func (p *Pool) setProxiesLocked(entries []Entry) {
+	// Replacing the pool resets the direct-fallback transition state (Codex
+	// P2): a wiped pool makes direct egress the intentional operating mode
+	// again (the flag would otherwise report an active failed-chain bypass
+	// forever), and a repopulated pool re-derives — and re-alerts — on the
+	// next request if the new parents are also down.
+	p.fallbackActive.Store(false)
 	p.proxies = nil
 	p.entries = nil
 	for _, e := range entries {
@@ -248,16 +271,73 @@ func (p *Pool) Next() *Proxy {
 
 	n := len(proxies)
 	if n == 0 {
+		// Pool not configured — direct egress is the normal mode, never a
+		// fallback. Also clear any stale fallback flag: the shared transport
+		// can still hold this pool's ProxyFunc after an admin wiped the last
+		// parent (applyUpstreamProxy early-returns for a disabled pool).
+		// Load-before-Store keeps this hot path read-only in the common case.
+		if p.fallbackActive.Load() {
+			p.fallbackActive.Store(false)
+		}
 		return nil
 	}
 	start := int(p.idx.Add(1)) % n
 	for i := 0; i < n; i++ {
 		up := proxies[(start+i)%n]
 		if up.Healthy.Load() && up.CB.Allow() {
+			p.noteUpstreamAvailable()
 			return up
 		}
 	}
-	return nil // all upstreams down — fall back to direct
+	// All upstreams down — fall back to direct (PX-2 fail-open posture,
+	// unchanged). CHAOS-11: count every fallback and alert once per
+	// transition so the bypassed parent-proxy chain is never silent.
+	p.noteDirectFallback()
+	return nil
+}
+
+// fireFallbackAlert delivers the upstream_pool_down alert on a fallback
+// transition. Package-level seam so tests can capture transitions
+// SYNCHRONOUSLY instead of listening on the process-global alerts sink —
+// any pool-exhausting test spawns the async production goroutine, and a
+// straggler landing in a later test's sink is exactly the -count/-shuffle
+// determinism failure the CI gate caught. The production value fires async
+// because the transition edge sits on the request path and alerts Dispatch
+// can hit a synchronous retry-queue disk write when the webhook semaphore
+// is full (same rationale as secscan's clamScanError).
+var fireFallbackAlert = func(detail string) {
+	go alerts.Fire("upstream_pool_down", alerts.Payload{
+		Detail: detail,
+		Source: "upstream",
+	})
+}
+
+// noteDirectFallback records that a request needed a parent proxy but none
+// was available (all unhealthy or circuit-open). The counter increments per
+// request; the log line + webhook alert fire once per transition INTO the
+// fallback state (noteUpstreamAvailable logs the recovery transition).
+func (p *Pool) noteDirectFallback() {
+	p.fallbackTotal.Add(1)
+	if !p.fallbackActive.Swap(true) {
+		obs.Printf("Upstream: ALL parent proxies down — failing open to DIRECT egress (parent-proxy chain bypassed)")
+		fireFallbackAlert("all parent proxies unhealthy or circuit-open; egress is DIRECT (parent-proxy chain bypassed)")
+	}
+}
+
+// noteUpstreamAvailable clears the direct-fallback state when a usable proxy
+// reappears. The Load-before-Swap keeps the common path (fallback inactive)
+// read-only — no cache-line write per request.
+func (p *Pool) noteUpstreamAvailable() {
+	if p.fallbackActive.Load() && p.fallbackActive.Swap(false) {
+		obs.Printf("Upstream: parent proxy available again — direct-egress fallback ended")
+	}
+}
+
+// DirectFallback reports whether the pool is currently failing open to
+// direct egress (all parents down) and how many requests have done so since
+// startup. Exported for the admin API and /metrics.
+func (p *Pool) DirectFallback() (active bool, total int64) {
+	return p.fallbackActive.Load(), p.fallbackTotal.Load()
 }
 
 // List returns the current upstream proxy statuses for the UI/API.
@@ -288,12 +368,81 @@ func (p *Pool) List() []Status {
 // ProxyFunc returns an http.Transport-compatible proxy selector.
 // When upstreams are configured, it returns the next healthy proxy URL.
 // Falls back to nil (direct connection) when no upstream is available.
+//
+// If the request context carries an Attribution slot (WithAttribution), the
+// selected proxy is recorded there so the caller can feed the request's
+// outcome back into that proxy's circuit breaker (CHAOS-11).
 func (p *Pool) ProxyFunc() func(*http.Request) (*url.URL, error) {
-	return func(_ *http.Request) (*url.URL, error) {
-		if up := p.Next(); up != nil {
+	return func(req *http.Request) (*url.URL, error) {
+		up := p.Next()
+		if req != nil {
+			if a, ok := req.Context().Value(attributionKey{}).(*Attribution); ok {
+				a.proxy.Store(up) // nil when falling back to direct — Record then no-ops
+			}
+		}
+		if up != nil {
 			return up.URL, nil
 		}
 		return nil, nil // direct connection
+	}
+}
+
+// ─── Request-outcome attribution (CHAOS-11) ──────────────────────────────────
+//
+// Before this existed the circuit breaker was dead code on the request path:
+// nothing production ever called RecordFailure/RecordSuccess, so a broken
+// parent proxy kept receiving (and failing) live traffic until the next
+// health-check tick — and the breaker state shown in the admin UI never
+// moved. Attribution threads the transport's per-request proxy selection
+// back to the caller so real request outcomes drive the breaker.
+
+// attributionKey is the context key carrying the per-request attribution slot.
+type attributionKey struct{}
+
+// Attribution records which pool proxy the transport selected for one
+// request. Create with WithAttribution; ProxyFunc fills it during RoundTrip.
+type Attribution struct {
+	proxy atomic.Pointer[Proxy]
+}
+
+// WithAttribution returns a child context carrying a fresh attribution slot,
+// plus the slot itself. Attach it to the request before it enters the
+// transport; after the request completes, call Record with the outcome.
+func WithAttribution(ctx context.Context) (context.Context, *Attribution) {
+	a := &Attribution{}
+	return context.WithValue(ctx, attributionKey{}, a), a
+}
+
+// Record feeds a completed request's outcome into the selected proxy's
+// circuit breaker. Nil-safe on both the receiver (pool disabled — no slot
+// was created) and the slot's proxy (the transport fell back to direct).
+//
+// A context.Canceled error is deliberately NOT charged to the proxy: it
+// means OUR client went away mid-request, which says nothing about the
+// parent's health — charging it would let a flaky client population trip
+// breakers on a healthy chain. Timeouts (context.DeadlineExceeded) DO count:
+// a parent that cannot complete requests within the client budget is failing
+// for our purposes; misattribution of a slow origin is bounded by the
+// consecutive-failure threshold and healed by the half-open probe.
+func (a *Attribution) Record(err error) {
+	if a == nil {
+		return
+	}
+	up := a.proxy.Load()
+	if up == nil {
+		return
+	}
+	switch {
+	case err == nil:
+		up.CB.RecordSuccess()
+	case errors.Is(err, context.Canceled):
+		// client abort — not evidence about the parent proxy
+	default:
+		if up.CB.RecordFailure() {
+			threshold, timeout := up.CB.Params()
+			obs.Printf("Upstream: circuit OPEN for %s after %d consecutive request failures (retry in %s; last error: %v)",
+				up.URL.Redacted(), threshold, timeout, err)
+		}
 	}
 }
 

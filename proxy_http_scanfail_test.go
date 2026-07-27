@@ -67,8 +67,12 @@ func TestScanHTTPResponseBody_ReadErrorFailsClosed(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	if handled := scanHTTPResponseBody(w, r, resp); !handled {
+	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp)
+	if !handled {
 		t.Fatal("body read error must be handled fail-closed (pre-fix: returned false → forwarded unscanned + truncated)")
+	}
+	if upstreamReadErr == nil {
+		t.Fatal("the upstream read error must be surfaced so the caller can charge the breaker attribution (CHAOS-11)")
 	}
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("want 502 Bad Gateway, got %d", w.Code)
@@ -92,8 +96,12 @@ func TestScanHTTPResponseBody_CleanBodyReassembled(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	if handled := scanHTTPResponseBody(w, r, resp); handled {
+	handled, upstreamReadErr := scanHTTPResponseBody(w, r, resp)
+	if handled {
 		t.Fatalf("clean body must not be blocked; recorder: %d %q", w.Code, w.Body.String())
+	}
+	if upstreamReadErr != nil {
+		t.Fatalf("clean pass must not report an upstream read error, got %v", upstreamReadErr)
 	}
 	got, err := io.ReadAll(resp.Body)
 	if err != nil {

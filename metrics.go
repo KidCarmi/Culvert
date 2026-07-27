@@ -622,6 +622,27 @@ culvert_h2_inspect_drain_forced_total %d
 		atomic.LoadInt64(&statH2InspectForced),
 	)
 
+	// CHAOS-11: parent-proxy chain fail-open visibility. fallback_active=1
+	// means the pool is CURRENTLY bypassed (all parents unhealthy or
+	// circuit-open) and egress is direct; the counter tracks how many
+	// requests egressed direct while the chain was configured.
+	upFallbackActive, upFallbackTotal := upstreamPool.DirectFallback()
+	upActiveVal := 0
+	if upFallbackActive {
+		upActiveVal = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_upstream_direct_fallback_active 1 when the parent-proxy pool is currently failing open to direct egress (all parents down)
+# TYPE culvert_upstream_direct_fallback_active gauge
+culvert_upstream_direct_fallback_active %d
+
+# HELP culvert_upstream_direct_fallback_total Requests that egressed DIRECT because no parent proxy was available (fail-open bypass of the chain)
+# TYPE culvert_upstream_direct_fallback_total counter
+culvert_upstream_direct_fallback_total %d
+`,
+		upActiveVal,
+		upFallbackTotal,
+	)
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol
