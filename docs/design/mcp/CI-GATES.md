@@ -212,10 +212,29 @@ dependencies for MCP/JSON-RPC/OAuth libraries) is exactly the kind of change tha
 code; making CodeQL a *blocking* MCP gate is a **branch-protection settings change** (adding it as a
 required check), not a workflow edit. Adding every "Proposed" gate in this document as an actual workflow
 job (the fuzz, compatibility, and other MCP-specific gates below) **is** a CI/workflow change. Per the
-PR-0 scope boundary (see [`README.md`](README.md) and the shared PR-0 authoring brief), **PR-0 — and this
-remediation — is documentation-only and modifies no CI file**; these changes belong to PR-1 and later,
-scoped per the "Target PR" column above. This document records what is required so that each of those PRs
-can carry its own gate as a **hard entry condition**, not a follow-up.
+PR-0 scope boundary (see [`README.md`](README.md) and the shared PR-0 authoring brief), **PR-0 — and the
+readiness remediation — is documentation-only and modifies no CI file**; those changes belong to PR-1 and
+later, scoped per the "Target PR" column above. This document records what is required so that each of
+those PRs can carry its own gate as a **hard entry condition**, not a follow-up.
+
+**[FACT] One exception now exists, and it is deliberately narrow.** A standalone CI-hardening change wired
+the **document-structure predicates** into the required Fast PR Gate as
+`Gate · MCP design predicates` — an explicit allowlist of **six**
+(`predicate-19`, `-21`, `-22`, `-23`, `-24`, `-26`), run by
+[`.github/scripts/mcp-doc-predicates.sh`](../../../.github/scripts/mcp-doc-predicates.sh) when a PR touches
+`docs/design/mcp/**`, ADR-0024, that script, or `pr-fast-gate.yml`. A failure blocks the
+`✅ Fast PR Gate — APPROVED` aggregate; a skip (irrelevant PR) counts as passing. `predicate-25` is
+**excluded on purpose** — it is provenance-specific and diffs against a fixed historical base commit, so as
+a general gate it would fail unrelated valid PRs; it stays manual. The membership is an allowlist rather
+than a `predicate-*.py` glob so a future predicate cannot become blocking without review.
+
+This exception exists because blocker #927 took three PRs and four verification rounds in which **every**
+intermediate head passed the full pipeline while still carrying a real defect — once because the
+config-surface matrix did not parse as a table at all, making every assertion over it vacuous. No CI job
+parsed these documents, so green carried no signal. **It changes nothing else:** every "Proposed" gate in
+the table above remains proposed and belongs to PR-1 or later, the six predicates check **design
+documents** and not the runtime `configSurfaces` registry, and `MCP-CFG-001`(7)'s registry-side binding
+stays **specified but unenforced** until PR-1.
 
 ## Cross-references
 
