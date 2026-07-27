@@ -42,6 +42,36 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
+| `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals, forward **and** reverse summary↔live parity, and prose censuses reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary tables |
+
+### `predicate-26.py` — the anti-vacuity check
+
+**Exact property.** Every `MCP-CFG-001` assertion is quantified over the rows of one table. *A check quantified over a set it failed to build is not a check — it is a green tick.* PR #947 shipped exactly that: a 17-cell header against a 16-cell delimiter row. Per GFM, *"The header row must match the delimiter row in the number of cells. If not, a table will not be recognized"* — so a conformant parser yields **zero** rows, `count(RC-X) == 0` holds trivially, the value-kind invariant has nothing to quantify over, and every downstream assertion passes while asserting nothing. This predicate's **first duty is to refuse to be vacuous**: an unparseable or empty table is an unconditional failure, never a silent pass.
+
+**How to run** (from the repository root):
+
+```
+python3 docs/design/mcp/predicates/predicate-26.py
+```
+
+Exit `0` = every property holds, every seed fired, every negative control stayed silent. Exit `1` = at least one violation, printed. Stdlib only; no network, no third-party imports, no repository mutation.
+
+**Seeded positive controls — each mutation MUST be detected** (the run prints `DETECTED`/`MISSED` per seed, and a `MISSED` fails the predicate, so a decorative check cannot pass):
+
+1. a 17-column header with a 16-column delimiter — *the #947 defect itself*;
+2. a table that parses to **zero** rows — the anti-vacuity case;
+3. `provider-ref → RC-6` — a sensitive value kind in a non-sensitive class;
+4. a live `RC-0` row named in the `RC-2` summary — *the D-2 defect itself*;
+5. a duplicate field ID;
+6. a live `RC-2` row missing from the summary — the reverse-parity direction;
+7. an unknown value-kind token;
+8. a live row classified `RC-X`.
+
+**Negative controls — each MUST stay silent**, proving the predicate is bound to this one table and does not police unrelated prose: an unrelated prose table gaining a row; a fenced code example containing `mcp_`-shaped pipe rows; an ordinary prose edit outside any table.
+
+**Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other four tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. `EXPECTED_ROWS` is a deliberate constant: a legitimate row addition is expected to fail this predicate until the constant is updated under review.
+
+**Like every predicate here, it is not wired into CI.** It passes only when run by hand.
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the
