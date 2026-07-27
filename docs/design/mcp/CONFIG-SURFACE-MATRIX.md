@@ -236,6 +236,8 @@ Because `RC-1` and `RC-2` are `Sensitive: **Yes**`, `Sensitive` now **follows fr
 rather than from a per-row judgement, and unenrolled-peer redaction parity therefore covers every
 sensitive-kind row by construction.
 
+**Where the invariant binds — the registry, not this table.** This matrix is the *design-time projection*; the artifact that actually drives `redactUnenrolledSnapshot` is the `configSurfaces` registry. `MCP-CFG-001`(7) therefore requires the value kind to be carried on the **registry entry**, requires the rule above to be evaluated over **registry entries**, and requires **bidirectional field-ID parity** between MCP registry entries and the rows here. Quantifying only over this table would leave a hole: a field added to an already-enumerated struct **and correctly registered**, but with no row here, satisfies both omission cases while the value-kind rule has nothing to inspect — so it could be registered `Sensitive: false` and reach an unenrolled peer with every gate green. A row in this table is documentation; a registry entry is the control.
+
 **Required negative example — this must FAIL the gate:**
 
 ```
