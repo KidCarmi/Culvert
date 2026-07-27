@@ -264,20 +264,32 @@ to where the secret lives — never a place to keep the secret.
 `provider-ref` 4 · `snapshot-meta` 4 · `tenant-scope` 3 · `none` 2 · `path` 2 · `server-endpoint` 1 ·
 `pinned-identity` 0 — **89 rows, 5 sensitive-kind rows, all in `RC-1`/`RC-2`, 0 violations.**
 
+**Registry-class census** (reproducible from the table): `RC-0` 2 · `RC-1` 2 · `RC-2` 4 · `RC-3` 5 ·
+`RC-4` 3 · `RC-5` 4 · `RC-6` 31 · `RC-7` 38 · `RC-X` 0.
+
+Both censuses are **complete and unique** by construction, and predicate-26 enforces exactly that:
+every token in each vocabulary must publish a count — including the zero-valued ones, `pinned-identity`
+and `RC-X` — and must publish it **exactly once**. A census that may silently omit a claim is not a
+reproducibility check, because the cheapest way to hide a stale count is to delete it; a census that
+may state a claim twice is worse, because the two copies can disagree while a first-match reader sees
+only the correct one. Deleting `RC-X 0`, duplicating `RC-2 4`, or changing `RC-X` to `1` are each a
+seeded failure, not a judgement call.
+
 **`RC-X` is a forbidden class and must remain empty.** It exists so the anti-omission test can assert
 `count(RC-X) == 0` rather than relying on a reviewer noticing. A row that would need `RC-X` is a design
 error: the secret belongs behind a provider reference (`RC-2`), never in configuration. Validation
 **MUST reject** inline secret material rather than storing and redacting it.
 
-### The five explicitly-classified categories
+### The six explicitly-classified categories
 
 | Category | Rows | Class | Why |
 |---|---|---|---|
 | Server endpoint + pinned TLS identity | `mcp_gateway_server_registry`, `mcp_gateway_server_approval_mode` | **RC-1** | Disclosure to an unenrolled peer maps the customer's internal MCP estate and its pinned identities. `Sensitive: true` is what zeroes it in the `!callerIsEnrolledNode` block. |
-| Credential-provider references | `mcp_mgmt_credential_profiles`, `mcp_gateway_credential_profiles`, `mcp_gateway_connector_mtls_profile_ref`, `mcp_mgmt_event_export_target`, `mcp_gateway_event_export_target` | **RC-2** | Vault paths, KMS key IDs and export destinations are reconnaissance for the credential store even without the secret. Export targets are included deliberately — a destination URL is a common carrier of embedded credentials. |
+| Credential-provider references | `mcp_gateway_credential_profiles`, `mcp_gateway_connector_mtls_profile_ref`, `mcp_mgmt_event_export_target`, `mcp_gateway_event_export_target` | **RC-2** | Vault paths, KMS key IDs and export destinations are reconnaissance for the credential store even without the secret. Export targets are included deliberately — a destination URL is a common carrier of embedded credentials. **4 live rows.** The Management credential-profile row is deliberately absent: Management brokers no upstream credentials, so it is a checklist-only RC-0 row with value kind `none` (see the RC-0 definition). Naming it here would assert a sensitive registry setting for a field that must never exist — and predicate-26 fails on exactly that summary/live disagreement. |
 | Policy / catalog references | `mcp_gateway_policy_bundle_ref`, `mcp_gateway_tool_catalog_snapshot`, `mcp_gateway_tool_approval_state`, `mcp_gateway_reason_code_catalog_version`, `mcp_mgmt_tool_allowlist` | **RC-3** | Enforcement inputs, rollback-eligible; not secret. |
 | Per-tenant overrides | `mcp_gateway_per_tenant_overrides`, `mcp_gateway_tenant_binding_mode`, `mcp_mgmt_tenant_scope_mode` | **RC-4** | Must clear on wire (an emptied override map that silently retains the previous value is a cross-tenant policy-staleness bug). |
-| Snapshot integrity metadata | **Derived, operator-read-only:** `mcp_gateway_snapshot_catalog_revision`, `_credential_revision`, `_content_hash`, `_signature` → **RC-5**. **Operator-controlled publication settings:** `mcp_gateway_snapshot_sync_enabled`, `_min_dp_version` → **RC-7** | **RC-5** / **RC-7** | The category splits, and conflating it was a real defect. The four derived fields are computed by the publisher and surfaced read-only, so `AdminDurable: No` / Export `No` is correct. The other two carry an admin `PUT` and a GUI surface: under RC-5 an operator change would be omitted from durable settings and backups, so a restart could silently revert sync to its default or lose the minimum-version fence. They are operator configuration and belong in **RC-7**. |
+| Snapshot integrity metadata | `mcp_gateway_snapshot_catalog_revision`, `mcp_gateway_snapshot_credential_revision`, `mcp_gateway_snapshot_content_hash`, `mcp_gateway_snapshot_signature` | **RC-5** | Derived and operator-read-only: computed by the publisher and surfaced read-only, so `AdminDurable: No` / Export `No` is correct. **Exhaustive for RC-5** — these are all four live RC-5 rows, and predicate-26 enforces that in both directions. |
+| Snapshot publication settings | `mcp_gateway_snapshot_sync_enabled`, `mcp_gateway_snapshot_min_dp_version` | **RC-7** | Operator-controlled, and conflating them with the derived four was a real defect: both carry an admin `PUT` and a GUI surface, so under RC-5 an operator change would be omitted from durable settings and backups — a restart could silently revert sync to its default or lose the minimum-version fence. They are operator configuration and belong in **RC-7**. **This row is a deliberately bounded subset, not exhaustive for RC-7** (38 live rows); predicate-26 pins its membership to exactly these two names rather than to the class, so neither can be dropped and no other RC-7 row is demanded here. |
 
 ### `AppliesOnDP` is mandatory for RC-5 — and why
 
@@ -316,7 +328,7 @@ the unenrolled-peer path.
 ## The matrix
 
 | Field ID | Capability | Category | File config (YAML) | Env var | CLI flag | Admin API | GUI panel | OpenAPI | Validation | Documentation | Tests | Snapshot (CP→DP) | Backward compat | Secret handling | Value kind | Registry class |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|------|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `mcp_mgmt_enabled` | Mgmt | Enable/disable | `mcp.management.enabled` | `CULVERT_MCP_MGMT_ENABLED` | `-mcp-mgmt-enabled` | `GET/PUT /api/mcp/management/settings` (admin write, viewer read) | MCP → Management → General (`data-view="mcp-management"`) | Yes | bool | [BLUEPRINT.md](BLUEPRINT.md) §9 | `mcp_mgmt_startup_test.go` (PR-9) | No — Mgmt runs CP-side only (see `mcp_mgmt_config_sync_enabled`) | Std — off by default; unknown key ⇒ disabled | None | `tunable` | RC-6 |
 | `mcp_mgmt_listen_bind` | Mgmt | Listener bind/port | `mcp.management.listen_bind` | `CULVERT_MCP_MGMT_LISTEN_BIND` | `-mcp-mgmt-listen-bind` | `GET/PUT /api/mcp/management/settings` | MCP → Management → General | Yes | valid IP/hostname; rejects `0.0.0.0` without an explicit ack flag | [BLUEPRINT.md](BLUEPRINT.md) §9, [RECOMMENDED-ARCHITECTURE.md](RECOMMENDED-ARCHITECTURE.md) §4 | `mcp_mgmt_listener_test.go` (PR-5/PR-9 — listener binding is PR-5, MCP-INSP-009) | No | Std | None | `listener` | RC-6 |
 | `mcp_mgmt_listen_port` | Mgmt | Listener bind/port | `mcp.management.listen_port` | `CULVERT_MCP_MGMT_LISTEN_PORT` | `-mcp-mgmt-listen-port` | `GET/PUT /api/mcp/management/settings` | MCP → Management → General | Yes | `1–65535`; MUST NOT equal `mcp_gateway_listen_port` (separate-listener invariant) | [RECOMMENDED-ARCHITECTURE.md](RECOMMENDED-ARCHITECTURE.md) §1 (separate runtimes) | pure config validation that the two ports differ `mcp_listener_port_config_test.go` (**PR-9** — when the settings fields/API become real) + runtime listener separation `mcp_listener_separation_test.go` (**PR-5** — actual bound sockets); admin API/GUI/OpenAPI parity **PR-9**. **PR-1 binds no listener.** | No | Std | None | `listener` | RC-6 |
