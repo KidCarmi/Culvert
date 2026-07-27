@@ -65,7 +65,20 @@ jobs:
             echo "Manual run — all jobs enabled."
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD > changed.txt
+          # --no-renames is load-bearing, not stylistic. With rename detection
+          # on (the default), `--name-only` emits ONLY the destination of a
+          # rename — so moving a file OUT of a classified directory hides the
+          # source path from every `case` below. Concretely: moving
+          # docs/design/mcp/DATA-FLOW-DIAGRAMS.md to an archive dir would list
+          # only the archive path, leave mcp_docs=false, skip the predicate job,
+          # and the aggregate would count that skip as passing — while the
+          # predicates themselves would have failed outright on the missing
+          # input. A gate that does not run is a green tick, which is the exact
+          # failure class this job exists to close. --no-renames reports the
+          # move as delete+add, so BOTH paths are classified. It can only ever
+          # add paths, never remove them, so it stays consistent with this
+          # classifier's fail-toward-running-the-gate posture.
+          git diff --no-renames --name-only HEAD^1 HEAD > changed.txt
           echo "── Changed files ──"; cat changed.txt
 
           # Docs-only = every file matches a documentation pattern.
