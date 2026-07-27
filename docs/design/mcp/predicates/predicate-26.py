@@ -50,9 +50,24 @@ VALUE_KINDS = {'server-endpoint', 'pinned-identity', 'provider-ref',
                'listener', 'path', 'tunable', 'none'}
 SENSITIVE_KINDS = {'server-endpoint', 'pinned-identity', 'provider-ref'}
 
-# Registry-class summary tables whose membership must agree with the live rows.
-# label -> the class every field it names must actually carry.
-SUMMARY_TABLES = {'Credential-provider references': 'RC-2'}
+# Registry-class summary rows whose membership must agree with the live rows.
+#   label -> (classes a named field may carry, classes the summary is EXHAUSTIVE for)
+# Reverse parity only applies to a class the summary is meant to enumerate fully:
+# the snapshot row names all four RC-5 rows but only two of the 38 RC-7 rows, so
+# demanding reverse parity on RC-7 there would be wrong.
+SUMMARY_TABLES = {
+    'Server endpoint + pinned TLS identity': ({'RC-1'}, {'RC-1'}),
+    'Credential-provider references':        ({'RC-2'}, {'RC-2'}),
+    'Policy / catalog references':           ({'RC-3'}, {'RC-3'}),
+    'Per-tenant overrides':                  ({'RC-4'}, {'RC-4'}),
+    'Snapshot integrity metadata':           ({'RC-5', 'RC-7'}, {'RC-5'}),
+}
+
+# The document's published census line must be COMPLETE and correct: every token
+# in the vocabulary present (including zero-valued ones), every count equal to the
+# parsed tally, and the stated totals equal to the parsed totals.  A census that
+# may silently omit a claim is not a reproducibility check.
+CENSUS_ANCHOR = '**Current census**'
 
 
 def split_cells(line):
@@ -170,36 +185,57 @@ def check(text):
             v.append(f'snapshot-meta <-> RC-5 biconditional broken for {fid!r}: '
                      f'kind={kind!r} class={cls} (line {ln})')
 
-    # ── summary <-> live parity, BOTH directions ────────────────────────────
-    for label, want in SUMMARY_TABLES.items():
+    # ── summary <-> live parity, BOTH directions, for EVERY summary row ─────
+    for label, (allowed, exhaustive) in SUMMARY_TABLES.items():
         named = summary_members(text, label)
         if named is None:
             v.append(f'registry-class summary row {label!r} not found')
             continue
-        for fid in named:                                   # forward
+        for fid in sorted(named):                           # forward
             if fid not in live:
                 v.append(f'summary {label!r} names {fid!r}, which is not a live '
                          f'matrix row')
-            elif live[fid][1] != want:
+            elif live[fid][1] not in allowed:
                 v.append(f'SUMMARY/LIVE DISAGREEMENT: summary {label!r} lists '
-                         f'{fid!r} as {want}, but its live row is '
+                         f'{fid!r} among {sorted(allowed)}, but its live row is '
                          f'{live[fid][1]} (line {live[fid][2]})')
-        for fid, (_, cls, ln) in live.items():              # reverse
-            if cls == want and fid not in named:
+        for fid, (_k, cls, ln) in sorted(live.items()):     # reverse
+            if cls in exhaustive and fid not in named:
                 v.append(f'live row {fid!r} is {cls} (line {ln}) but is not '
                          f'named in the {label!r} summary')
 
-    # ── census reproducibility: prose counts must match parsed rows ─────────
-    for label, counter in (('value kind', 0), ('registry class', 1)):
-        tally = {}
-        for _, (k, c, _l) in live.items():
-            key = (k, c)[counter]
-            tally[key] = tally.get(key, 0) + 1
-        for key, n in sorted(tally.items()):
-            claim = census_claim(text, key)
-            if claim is not None and claim != n:
-                v.append(f'census disagreement for {label} {key!r}: document '
-                         f'states {claim}, parsed rows give {n}')
+    # ── census reproducibility: COMPLETE and correct, no silent omissions ────
+    census = census_line(text)
+    if census is None:
+        v.append(f'published census line ({CENSUS_ANCHOR}) not found — the '
+                 f'document must publish a census that can be checked against '
+                 f'the parsed rows')
+    else:
+        tally = {k: 0 for k in VALUE_KINDS}          # every token, including zeros
+        for _fid, (k, _c, _l) in live.items():
+            if k in tally:
+                tally[k] += 1
+        for key in sorted(VALUE_KINDS):
+            claim = census_claim(census, key)
+            if claim is None:
+                v.append(f'census OMITS value kind {key!r}: every vocabulary '
+                         f'token must publish a count (including zero), or a '
+                         f'stale claim can be hidden by deleting it')
+            elif claim != tally[key]:
+                v.append(f'census disagreement for value kind {key!r}: document '
+                         f'states {claim}, parsed rows give {tally[key]}')
+        total = re.search(r'\*\*(\d+) rows,\s*(\d+) sensitive-kind rows', census)
+        if total is None:
+            v.append('census does not publish "<N> rows, <M> sensitive-kind rows" '
+                     'totals — both must be checkable against the parsed rows')
+        else:
+            if int(total.group(1)) != len(rows):
+                v.append(f'census row total disagreement: document states '
+                         f'{total.group(1)}, parsed rows give {len(rows)}')
+            sens = sum(1 for _f, (k, _c, _l) in live.items() if k in SENSITIVE_KINDS)
+            if int(total.group(2)) != sens:
+                v.append(f'census sensitive-kind total disagreement: document '
+                         f'states {total.group(2)}, parsed rows give {sens}')
     return v
 
 
@@ -213,12 +249,27 @@ def summary_members(text, label):
     return None
 
 
-def census_claim(text, key):
-    """The document's own stated count for `key`, if it publishes one.
+def census_line(text):
+    """The published census PARAGRAPH, joined.
 
-    Matches the "Current census" line, e.g. `` `tunable` 56 ``.
+    The census wraps across physical lines; reading only the first one would let
+    a claim hide on a continuation line.
     """
-    m = re.search(r'`' + re.escape(key) + r'`\s+(\d+)', text)
+    L = text.split('\n')
+    for i, l in enumerate(L):
+        if l.startswith(CENSUS_ANCHOR):
+            para = []
+            for j in range(i, len(L)):
+                if not L[j].strip():
+                    break
+                para.append(L[j])
+            return ' '.join(para)
+    return None
+
+
+def census_claim(census, key):
+    """The census line's stated count for `key`, if it publishes one."""
+    m = re.search(r'`' + re.escape(key) + r'`\s+(\d+)', census)
     return int(m.group(1)) if m else None
 
 
@@ -276,7 +327,32 @@ def seed_rcx_row(t):
     return re.sub(r'(\| `mcp_gateway_listen_bind` \|.*)\| RC-6 \|', r'\1| RC-X |', t)
 
 
+def seed_rc1_summary_corrupt(t):
+    """A different registry-class summary (RC-1) disagreeing with the live rows."""
+    return t.replace('| Server endpoint + pinned TLS identity | `mcp_gateway_server_registry`',
+                     '| Server endpoint + pinned TLS identity | `mcp_mgmt_enabled`')
+
+
+def seed_census_claim_deleted(t):
+    """A published census count silently removed."""
+    return t.replace('`tunable` 56 · ', '')
+
+
+def seed_zero_kind_census_wrong(t):
+    """A zero-row value kind's published count falsified."""
+    return t.replace('`pinned-identity` 0', '`pinned-identity` 99')
+
+
+def seed_census_total_wrong(t):
+    """The published row total falsified."""
+    return t.replace('**89 rows, 5 sensitive-kind rows', '**88 rows, 5 sensitive-kind rows')
+
+
 SEEDS = [
+    ('RC-1 summary disagrees with live rows (non-RC-2 summary)', seed_rc1_summary_corrupt),
+    ('a published census count deleted', seed_census_claim_deleted),
+    ('zero-row value kind census falsified (pinned-identity 0 -> 99)', seed_zero_kind_census_wrong),
+    ('published row total falsified', seed_census_total_wrong),
     ('17-col header with 16-col delimiter (the #947 defect)', seed_bad_delimiter),
     ('table parses to ZERO rows (anti-vacuity)', seed_zero_rows),
     ('provider-ref -> RC-6', seed_provider_ref_rc6),
@@ -301,6 +377,15 @@ NEGATIVE_CONTROLS = [
 ]
 
 
+def norm(vs):
+    """Violation set with line numbers erased.
+
+    Seeds and controls shift line numbers; comparing raw strings would report a
+    pure re-numbering as a new finding.
+    """
+    return {re.sub(r'\(line \d+\)', '(line N)', x) for x in vs}
+
+
 def main():
     if not DOC.exists():
         print(f'FAIL: {DOC} not found (run from the repository root)')
@@ -321,7 +406,7 @@ def main():
     missed = []
     for name, fn in SEEDS:
         found = check(fn(text))
-        ok = bool(set(found) - set(live_v))   # seed must introduce a NEW violation
+        ok = bool(norm(found) - norm(live_v))   # seed must introduce a NEW violation
         print(f'  [{"DETECTED" if ok else "MISSED":8}] {name}')
         if not ok:
             missed.append(name)
@@ -330,7 +415,7 @@ def main():
     noisy = []
     for name, fn in NEGATIVE_CONTROLS:
         found = check(fn(text))
-        quiet = not (set(found) - set(live_v))
+        quiet = not (norm(found) - norm(live_v))
         print(f'  [{"QUIET" if quiet else "FIRED":8}] {name}')
         if not quiet:
             noisy.append(name)

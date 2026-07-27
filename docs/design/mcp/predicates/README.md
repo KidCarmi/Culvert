@@ -42,7 +42,7 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
-| `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals, forward **and** reverse summary↔live parity, and prose censuses reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary tables |
+| `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals, forward **and** reverse summary↔live parity for **every** registry-class summary (not just one), and a **complete** published census — every vocabulary token, including zero-valued ones, plus the row and sensitive-kind totals — reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary tables |
 
 ### `predicate-26.py` — the anti-vacuity check
 
@@ -65,11 +65,17 @@ Exit `0` = every property holds, every seed fired, every negative control stayed
 5. a duplicate field ID;
 6. a live `RC-2` row missing from the summary — the reverse-parity direction;
 7. an unknown value-kind token;
-8. a live row classified `RC-X`.
+8. a live row classified `RC-X`;
+9. an **RC-1** summary disagreeing with the live rows — proving parity is enforced for *every* registry-class summary, not only `RC-2`;
+10. a published census count **deleted** — an omitted claim must not hide a stale one;
+11. a **zero-valued** census claim falsified (`pinned-identity 0 → 99`) — kinds with no live rows are still checked;
+12. the published **row total** falsified.
+
+Seeds 9–12 were added after review showed the first draft enforced parity for `RC-2` only and accepted an absent or zero-valued census claim — i.e. the gate documentation described more than the predicate enforced.
 
 **Negative controls — each MUST stay silent**, proving the predicate is bound to this one table and does not police unrelated prose: an unrelated prose table gaining a row; a fenced code example containing `mcp_`-shaped pipe rows; an ordinary prose edit outside any table.
 
-**Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other four tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. `EXPECTED_ROWS` is a deliberate constant: a legitimate row addition is expected to fail this predicate until the constant is updated under review.
+**Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other four tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. Summary membership must use **full field names**: the snapshot summary originally abbreviated them (`_credential_revision`), which silently defeated mechanical parity and is why the expanded form is now required. `EXPECTED_ROWS` is a deliberate constant: a legitimate row addition is expected to fail this predicate until the constant is updated under review.
 
 **Like every predicate here, it is not wired into CI.** It passes only when run by hand.
 
