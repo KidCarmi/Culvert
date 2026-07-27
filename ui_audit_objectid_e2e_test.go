@@ -76,6 +76,13 @@ func TestUIE2E_AuditLog_FilterableByRuleID(t *testing.T) {
 		t.Fatal("created rule never appeared in the store")
 	}
 
+	// If the policy editor still considers the form dirty (e.g. slow async UI
+	// updates on CI), navigation can be fenced by the unsaved-changes confirm
+	// dialog. Reset to the canonical clean state before opening Audit.
+	if _, err := page.Evaluate(`() => { if (typeof cancelPolicyEdit === 'function') cancelPolicyEdit(); }`); err != nil {
+		t.Fatalf("reset policy editor state before audit navigation: %v", err)
+	}
+
 	// Open the audit view (loads /api/audit) and confirm the add row shows the
 	// id tooltip.
 	if err := page.Locator(`.nav-item[data-view="audit"]`).First().Click(); err != nil {
