@@ -26,7 +26,7 @@ ui_metadata_enforcement.go — C2 metadata-driven middleware (MinRole enforcemen
 ui_auth.go / ui_config.go / ui_policy.go / ui_security.go / ui_cluster.go / ui_static.go / cdr_ui.go / pac.go / diagnostics.go — per-domain register*Routes helpers + handlers
 ui_helpers.go — auditEvent / auditEventDiff / decodeJSON / shared validators
 ui_middleware.go / ui_session.go / ui_rbac.go — middleware chain, session cookies, RBAC helpers
-session.go    — Session shim over internal/session (ADR-0002; key holder — race-safe, three runtime writers — token codec, revocation, TTL, jti live in the package; main keeps cookie helpers + sessionIdentity + env/config key wiring)
+session.go    — Session shim over internal/session (ADR-0002; key holder — race-safe, three runtime writers — token codec, revocation, TTL, jti live in the package; main keeps cookie helpers + sessionIdentity + env/config key wiring). **Terminology note**: the HMAC key used to sign/verify admin-UI session cookies is ONE concept surfaced under FOUR names by design, not drift — "Session Secret" (`CULVERT_SESSION_SECRET` env, `session_secret` YAML key, `/api/session-secret`; a load-bearing backward-compatible contract, do not rename), "Session Signing Key" (GUI panel title in `static/index.html`), `SigningKey`/`SetSigningKey` (the `internal/session` accessor), and `SessionHMAC` (the `ConfigSnapshot` CP→DP wire field, named for gosec G117). Do not "fix" any one layer's name in isolation — see the cross-referencing comments at `internal/session/session.go` (`SigningKey`) and `controlplane_snapshot.go` (`applySnapshotSessionSecret`).
 auth.go       — Local bcrypt auth
 auth_ldap.go  — LDAP bind + search auth with group resolution
 auth_oidc.go  — OIDC token introspection (RFC 7662)
