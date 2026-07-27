@@ -106,6 +106,54 @@ func TestResolveAuthStartupConfig_PropagatesAllFields(t *testing.T) {
 	}
 }
 
+// ─── Credential validation ─────────────────────────────────────────────
+//
+// Every other place a local admin credential is set — the web setup
+// wizard (apiSetupComplete), the admin config-auth API handler, and
+// --reset-password (via SetUIUser) — rejects a password that fails
+// validatePasswordComplexity. The CLI -user/-pass flags and the YAML
+// auth.user/auth.pass keys resolve into this exact authStartupConfig
+// and previously reached cfg.SetAuth with no such gate, so an operator
+// could stand up a fully "configured" admin account with e.g.
+// -user admin -pass x, silently bypassing the wizard's 8-char/
+// upper+lower+digit floor on the real authentication boundary.
+// validateAuthStartupCredentials closes that gap; these are its tests.
+
+func TestValidateAuthStartupCredentials(t *testing.T) {
+	tests := []struct {
+		name    string
+		auth    authStartupConfig
+		wantErr bool
+	}{
+		{
+			name: "empty user is the clear/unconfigured case, exempt regardless of password",
+			auth: authStartupConfig{AuthUser: "", AuthPass: ""},
+		},
+		{
+			name:    "non-empty user with too-short password is rejected",
+			auth:    authStartupConfig{AuthUser: "admin", AuthPass: "x"},
+			wantErr: true,
+		},
+		{
+			name:    "non-empty user with lowercase-only password is rejected",
+			auth:    authStartupConfig{AuthUser: "admin", AuthPass: "alllowercase"},
+			wantErr: true,
+		},
+		{
+			name: "non-empty user with a complexity-satisfying password is accepted",
+			auth: authStartupConfig{AuthUser: "admin", AuthPass: "Sup3rSecret!"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAuthStartupCredentials(tt.auth)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAuthStartupCredentials(%+v) error = %v, wantErr %v", tt.auth, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // ─── Loader ──────────────────────────────────────────────────────────
 
 func TestLoadAuth_SetsPorts(t *testing.T) {

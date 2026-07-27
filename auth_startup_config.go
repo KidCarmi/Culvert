@@ -56,3 +56,22 @@ func resolveAuthStartupConfig(proxyPort, uiPort int, authUser, authPass, uiUsers
 		UIUsersFile: uiUsersFile,
 	}
 }
+
+// validateAuthStartupCredentials enforces the same password-complexity
+// floor (validatePasswordComplexity) that every other local-admin-credential
+// entry point already applies — the web setup wizard (apiSetupComplete), the
+// admin config-auth API handler, and --reset-password (via SetUIUser). The
+// CLI -user/-pass flags and YAML auth.user/auth.pass keys resolve into this
+// authStartupConfig and previously reached cfg.SetAuth with no such gate.
+//
+// An empty AuthUser is the "clear/unconfigured" case (loadAuth passes it
+// straight to cfg.SetAuth to disable local auth) and is exempt regardless of
+// AuthPass.
+//
+// Pure; deterministic.
+func validateAuthStartupCredentials(auth authStartupConfig) error {
+	if auth.AuthUser == "" {
+		return nil
+	}
+	return validatePasswordComplexity(auth.AuthPass)
+}
