@@ -106,8 +106,11 @@ func TestClamError_RecoveredDaemonRescansAndBlocks(t *testing.T) {
 	// the test lands in the NEXT test's freshly-installed recorder — under
 	// -shuffle it made TestClamError_CountedAlertedAndCleanNotCached count two
 	// events (determinism-gate failure). Every alert-triggering test must drain
-	// its own alerts before returning.
-	rec.waitForEvents(t, 1)
+	// its own alerts before returning; fail on timeout so a delayed goroutine
+	// surfaces HERE, not as leakage into whichever test shuffles in next.
+	if events := rec.waitForEvents(t, 1); len(events) != 1 || events[0] != "scan_clam_error" {
+		t.Fatalf("drain: want one scan_clam_error alert before proceeding, got %v", events)
+	}
 
 	// Daemon recovers and now detects the content.
 	clam.scanErr = nil

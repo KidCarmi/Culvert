@@ -127,7 +127,11 @@ func TestSecScanDI_ClamErrorFallsThroughToYARA(t *testing.T) {
 	if res == nil || res.Source != "yara" || res.Reason != "rule_a, rule_b" {
 		t.Fatalf("expected yara block after clam error, got %+v", res)
 	}
-	rec.waitForEvents(t, 1)
+	// Fail on timeout so a delayed alert goroutine surfaces here instead of
+	// leaking into the next shuffled test's recorder.
+	if events := rec.waitForEvents(t, 1); len(events) != 1 || events[0] != "scan_clam_error" {
+		t.Fatalf("drain: want one scan_clam_error alert, got %v", events)
+	}
 }
 
 func TestSecScanDI_YARADisabledToggleSkipsMatch(t *testing.T) {
