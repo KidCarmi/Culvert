@@ -95,6 +95,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IN_TAG: ${{ github.event.inputs.tag }}
+          # Matches catalogUserAgent in release_catalog_http.go. An unidentified
+          # curl UA is indistinguishable from bot traffic to a CDN/WAF fronting
+          # the R2 catalog origin and gets 403'd.
+          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
           for attempt in $(seq 1 24); do
@@ -123,7 +127,7 @@ jobs:
             test -s bundle/index.json          || { echo "FATAL: bundle missing index.json"; exit 1; }
             test -s bundle/index.json.sigstore || { echo "FATAL: bundle missing index.json.sigstore"; exit 1; }
             WANT="$(sha256sum bundle/index.json | awk '{print $1}')"
-            R2="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || R2=""
+            R2="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | sha256sum | awk '{print $1}')" || R2=""
             PAGES="$(curl -fsS https://kidcarmi.github.io/Culvert/release-catalog/index.json | sha256sum | awk '{print $1}')" || PAGES=""
             if [ "$R2" = "$WANT" ] && [ "$PAGES" = "$WANT" ]; then
               echo "Both origins match release $TAG ($WANT)"; exit 0
@@ -160,9 +164,13 @@ jobs:
       # fail an unrelated release verify).
       - name: Assert live catalog freshness age ≤ 2× re-sign cadence (weekly canary)
         if: github.event_name == 'schedule'
+        env:
+          # Matches catalogUserAgent in release_catalog_http.go (see the
+          # "Converge" step above for why this is required).
+          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
-          GEN="$(curl -fsS -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | jq -r '.generated_at // empty')"
+          GEN="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' https://catalog.culvertlabs.com/release-catalog/index.json | jq -r '.generated_at // empty')"
           test -n "$GEN" || { echo "FATAL: live index has no generated_at"; exit 1; }
           AGE=$(( $(date -u +%s) - $(date -u -d "$GEN" +%s) ))
           MAX=$(( 14 * 24 * 3600 ))
