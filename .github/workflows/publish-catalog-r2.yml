@@ -386,6 +386,8 @@ jobs:
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
           CF_CACHE_PURGE_TOKEN: ${{ secrets.CF_CACHE_PURGE_TOKEN }}
           R2_PUBLIC_BASE: ${{ vars.R2_PUBLIC_BASE }}
+          # Matches catalogUserAgent in release_catalog_http.go.
+          CATALOG_UA: "Culvert-ReleaseCatalog/1.0 (+https://github.com/KidCarmi/Culvert)"
         run: |
           set -euo pipefail
           WANT="$(cat stage/.index.sha256)"
@@ -394,7 +396,10 @@ jobs:
             -H "Content-Type: application/json" \
             --data "{\"files\":[\"$R2_PUBLIC_BASE/release-catalog/index.json\",\"$R2_PUBLIC_BASE/release-catalog/index.json.sigstore\"]}" >/dev/null
           for i in 1 2 3 4 5; do
-            GOT="$(curl -fsS -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
+            # -A: an unidentified curl UA is indistinguishable from bot traffic to
+            # a CDN/WAF fronting the catalog origin and gets 403'd (same class of
+            # issue fixed for the Go client in release_catalog_http.go).
+            GOT="$(curl -fsS -A "$CATALOG_UA" -H 'Cache-Control: no-cache' "$R2_PUBLIC_BASE/release-catalog/index.json" | sha256sum | awk '{print $1}')" || GOT=""
             if [ "$GOT" = "$WANT" ]; then echo "live index confirmed ($WANT)"; exit 0; fi
             echo "confirm attempt $i: got '$GOT' want '$WANT' — retrying"; sleep $((i*i))
           done
