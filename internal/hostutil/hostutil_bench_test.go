@@ -105,9 +105,20 @@ func BenchmarkNormalizeHostStrict_RequestFanout(b *testing.B) {
 	}
 }
 
+// benchParallelSink keeps the parallel benchmark's results alive against
+// dead-code elimination. It is deliberately NOT the plain benchNorm/benchOK
+// globals the serial benchmarks use: writing a shared package-level sink from
+// every RunParallel worker is a data race under -race AND makes the benchmark
+// measure false sharing on that cache line instead of normalization cost —
+// precisely the contention this benchmark exists to prove is absent.
+var benchParallelSink atomic.Int64
+
 // BenchmarkNormalizeHostStrict_Parallel is the concurrency benchmark: the fast
 // path must stay lock-free and allocation-free under the goroutine-per-request
-// fan-out the proxy runs at, with no shared state to contend on.
+// fan-out the proxy runs at, with no shared state to contend on. Each worker
+// therefore accumulates into a GOROUTINE-LOCAL variable inside the measured
+// loop and folds its total in exactly once on the way out, so the only
+// synchronized write is O(workers), not O(b.N).
 func BenchmarkNormalizeHostStrict_Parallel(b *testing.B) {
 	hosts := []string{
 		"example.com", "sub.cdn.assets.example.com", "api.service.example.org",
@@ -115,11 +126,17 @@ func BenchmarkNormalizeHostStrict_Parallel(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
+		var local int64 // goroutine-local: no shared write in the measured loop
 		i := 0
 		for pb.Next() {
-			benchNorm, benchOK = NormalizeHostStrict(hosts[i%len(hosts)])
+			norm, ok := NormalizeHostStrict(hosts[i%len(hosts)])
+			local += int64(len(norm))
+			if ok {
+				local++
+			}
 			i++
 		}
+		benchParallelSink.Add(local)
 	})
 }
 
