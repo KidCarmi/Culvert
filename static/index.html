@@ -6650,7 +6650,7 @@ async function rollbackConfigVersion(version) {
       const stores = (data.persist_errors || []).join(', ');
       toast(`Rolled back to v${version} in memory, but it was NOT saved to disk (${stores}) — the rollback will be LOST on restart. Check the data directory for a full, read-only, or permission-broken filesystem.`, 'error');
     } else {
-      toast(`Rolled back to v${version} successfully.`, 'ok');
+      toast(`Rolled back to v${version} successfully.`, 'success');
     }
     loadConfigVersions();
     fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
