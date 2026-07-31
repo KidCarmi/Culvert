@@ -52,6 +52,13 @@ COLUMNS = [
 KEY_COLS = ('Capability', 'Leg / peer role', 'Requestor & direction', 'Method')
 CAPABILITIES = {'Gateway', 'Management'}
 
+# The EXACT reviewed V1 admitted-method set. An admitted row whose method is not
+# in this set is a violation even if it has a well-formed owner — otherwise a
+# `resources/subscribe` row with a named decision point would pass while the
+# `resources/*` rejection row launders the extra admission (MCP-PROTO-016).
+ADMITTED_METHODS = {'initialize', 'notifications/initialized', 'ping',
+                    'notifications/cancelled', 'tools/list', 'tools/call'}
+
 # Method families that MUST appear only as rejected rows in V1.
 REJECTED_FAMILIES = ['resources', 'prompts', 'completion', 'sampling', 'elicitation', 'roots', 'tasks']
 # Specific methods that must remain rejected.
@@ -195,6 +202,11 @@ def check_registry(text):
 
         k = owner_kind(owner)
         if status == 'admitted':
+            if method not in ADMITTED_METHODS:
+                v.append(f'ADMITTED row {method!r} (line {ln}) is NOT in the reviewed V1 '
+                         f'admitted-method set {sorted(ADMITTED_METHODS)} — only the reviewed '
+                         f'tools-only surface may be admitted (MCP-PROTO-016); a rejected-family '
+                         f'row does not launder an extra admission')
             if k == 'none':
                 v.append(f'ADMITTED row {method!r} (line {ln}) has NO handling owner — every '
                          f'admitted method must name a decision point XOR be kernel-terminal')
@@ -328,6 +340,17 @@ def s_resources_read_admitted(t):
         '| Gateway | client-facing peer | client → Culvert (req) | resources/read | admitted |', 1))
 
 
+def s_admit_outside_set(t):
+    """A well-formed admitted row for a method OUTSIDE the reviewed set, with a
+    named decision point — must fail even though its owner is valid."""
+    row = ('| Gateway | client-facing peer | client → Culvert (req) | resources/subscribe | admitted | '
+           'read | params → uri | tool-name (Gateway) | not catalogued | none | default-deny | '
+           'event / ordinary | ALLOW / DENY | decision-point: rogue handler | tools capability advertised | PR-6 |')
+    return _mut(t, 'registry', lambda s: s.replace(
+        '| Gateway | client-facing peer | client → Culvert (req) | tools/call | admitted |',
+        row + '\n| Gateway | client-facing peer | client → Culvert (req) | tools/call | admitted |', 1))
+
+
 def s_tasks_cancel_admitted(t):
     return _mut(t, 'registry', lambda s: s.replace(
         '| Gateway | client-facing peer | client → Culvert (req) | tasks/cancel | rejected |',
@@ -396,6 +419,7 @@ SEEDS = [
     ('upstream bytes assigned to another decoder', s_upstream_other_decoder, 'no second'),
     ('server sampling admitted', s_sampling_admitted, "'sampling/createMessage'"),
     ('resources/read admitted with no decision point', s_resources_read_admitted, "'resources/read'"),
+    ('admitted method outside the reviewed set (resources/subscribe + owner)', s_admit_outside_set, 'reviewed V1'),
     ('tasks/cancel admitted', s_tasks_cancel_admitted, "'tasks/cancel'"),
     ('admitted row with no owner', s_admitted_no_owner, 'NO handling owner'),
     ('admitted row with two owners', s_admitted_two_owners, 'TWO owners'),

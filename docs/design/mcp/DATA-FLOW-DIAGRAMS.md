@@ -407,13 +407,12 @@ flowchart LR
   UBYTES["Upstream-server-facing leg (TB-2)<br/>server ↔ Culvert bytes"] --> KERNEL
   KERNEL["SAME protocol kernel (MCP-PROTO-001..016)<br/>peer-role parameterized; parser MUST NOT diverge<br/>correlation keyed by (session, requestor-role/direction, request-id)"] --> ADMIT
   ADMIT{"METHOD ADMISSION<br/>Culvert-reviewed registry (MCP-OPERATION-REGISTRY.md)<br/>NOT the raw negotiated-version method set"}
-  ADMIT --> |"admitted + kernel-terminal<br/>initialize / ping / notifications/* / cancelled"| KT["Kernel handles + answers<br/>no downstream dispatch"]
+  ADMIT --> |"admitted + kernel-terminal<br/>initialize / notifications/initialized / ping / notifications/cancelled"| KT["Kernel handles + answers<br/>no downstream dispatch"]
   ADMIT --> |"admitted + names ONE decision point<br/>tools/list, tools/call"| DP["Named downstream decision point<br/>catalog/discovery (DFD-4) · policy engine (DFD-5)<br/>default-deny on a representable operand"]
   ADMIT --> |"absent from registry / rejected class<br/>resources/*, prompts/*, completion/*, tasks/*"| REJ["REJECT at admission (MCP-PROTO-013/016)<br/>no dispatch path; no wire response where class forbids"]
-  UBYTES --> |"server-originated sampling/elicitation/roots<br/>or reverse notifications/cancelled naming a client-owned id"| RCH{"Reverse-channel handling"}
-  RCH --> |"server-originated REQUEST"| REJ2["REJECTED — not proxied to the agent<br/>Culvert advertises no such client capability<br/>MCP-T-076"]
-  RCH --> |"cancellation for a Culvert-originated UPSTREAM request"| KT
-  RCH -. "names a CLIENT-leg id (opposite direction)" .-> NOOP["NO effect — never releases the other<br/>direction's state (MCP-PROTO-015)"]
+  ADMIT --> |"server-originated REQUEST (sampling / elicitation / roots) — reverse channel"| REJ2["REJECTED at admission — not proxied to the agent<br/>Culvert advertises no such client capability<br/>MCP-T-076"]
+  ADMIT --> |"server→Culvert notifications/cancelled"| RCANCEL{"owns SERVER-originated requests ONLY<br/>(same direction) — none admitted in V1"}
+  RCANCEL -. "names a Culvert-originated id (opposite direction)" .-> NOOP["NO effect — never cancels/releases the other<br/>direction's state (MCP-PROTO-015)"]
   classDef tb fill:#fee,stroke:#c00;
   class KERNEL,ADMIT tb
 ```
