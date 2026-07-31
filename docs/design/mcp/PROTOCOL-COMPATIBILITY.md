@@ -29,6 +29,7 @@ fact, and it can change between when this is written and when PR-1 starts.
 | Remote Streamable HTTP | **In scope for V1.** `[EXT]` — the exact wire name, request/response framing and capability-negotiation fields of "Streamable HTTP" are defined by the MCP specification, not this repository. | Matches `BLUEPRINT.md` §06/§07 ("Honest coverage — V1 covers remote MCP routed through Culvert") and the doctrine that both capabilities are reached over a Culvert-owned listener (`/mcp/management`, `/mcp/gateway/{server-id}`). | Proposed |
 | stdio | **Explicitly deferred**, not V1. `[EXT]` for the transport's wire semantics. | A local/stdio transport has no network hop for Culvert to interpose on — it structurally cannot be inspected by a network-terminating gateway without a local bridge component. | Deferred — see [OPEN-DECISIONS.md](OPEN-DECISIONS.md) |
 | Local/"localhost" HTTP | **Explicitly deferred**, not V1. `[EXT]`. | Same reasoning — a loopback-only server bypasses the remote listener entirely (see MCP-T-055 below). | Deferred |
+| **Legacy `2024-11-05` HTTP+SSE transport pair** (an SSE endpoint whose first event is an `endpoint` event, plus its paired POST endpoint) | **Explicitly EXCLUDED from V1.** A deliberate supported-transport **decision**, not an omission: Culvert hosts **no** legacy SSE endpoint that emits an `endpoint` event, **no** paired legacy POST, **no** compatibility alias, and **no** configuration switch / profile flag / "allow-unknown transport era" option that can enable either. | Hosting the legacy pair is exactly what a security-motivated `4xx` rejection recruits a client into probing for (`MCP-T-078`); excluding it, and returning the spec-sanctioned terminal `405` on the probe GET, closes that vector. Evidence: `MCP-PROTO-017` and [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the official TypeScript SDK isolates the legacy `endpoint`-emitting server into a separate opt-in `@modelcontextprotocol/server-legacy` package Culvert does not depend on. | Excluded (binding invariant) |
 | Any other transport (e.g. future MCP transports not yet standardized) | **Not supported.** `[EXT]` — future transports are, by definition, outside current repository or specification knowledge. | V1 non-goal: "Do not support every MCP transport, extension and protocol version on day one" (`BLUEPRINT.md` §06). | Out of scope |
 
 `MCP-OPS-004` requires these V1 coverage limits (stdio/localhost/direct-egress bypass) to be documented as
@@ -62,6 +63,16 @@ Design intent, independent of the specific version identifiers:
 - The negotiation outcome (the version actually agreed) **MUST** be attached to the session/decision
   context so downstream policy and event logging can record which version handled a given call — this
   supports MCP-T-050 (mixed-version) analysis and `MCP-CPDP-003` (mixed CP/DP version).
+- **Terminal rejection without legacy fallback (RPR-4).** A version outside the allowlist is rejected as a
+  **terminal** outcome that does **not** recruit the client into the legacy `2024-11-05` HTTP+SSE probe. On
+  the `initialize` path a **`200` counter-offer** (an `InitializeResult` naming a supported version) is
+  **preferred** over a `4xx` hard reject — a `4xx` is the spec-defined legacy-probe trigger and an SDK
+  catch-any fallback probes on **any** thrown connect error, so only an HTTP success avoids both; if the
+  client cannot support the offered version it **SHOULD disconnect**. The 2025-era baseline and the
+  **non-final** `2026-07-28` RC era are kept separate. Status/transport facts are bound to
+  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) (`MCP-PROTO-017`, `MCP-T-078`); the
+  sessionless absent-`MCP-Protocol-Version` ruling is **D-1 (OPEN)** and `2025-03-26` is **not** silently
+  admitted.
 
 This is intent, not a spec citation — the concrete version strings, the negotiation message shape, and
 whether negotiation is a distinct step versus part of the initial handshake are all `[EXT]`.
@@ -121,6 +132,15 @@ this layer, independent of those specifics:
   not held open indefinitely (this mirrors the existing raw-tunnel idle-bound posture in the SWG data path,
   `CLAUDE.md` "Relay pattern" — read-deadline-armed idle bounding — cited here as **prior-art precedent
   only**, not as a claim that the MCP kernel reuses that code).
+
+- **No pre-negotiation held stream (RPR-4).** No GET path may allocate an SSE stream **before** a valid
+  negotiated session — or other explicitly authorized stream context — exists. A GET without that context
+  returns the spec-sanctioned terminal **`405`** (never an empty or indefinitely-held `text/event-stream`),
+  and every security-motivated `400`/`404`/`405` is terminal so a client's spec-mandated follow-on probe GET
+  receives `405` and retains **zero** streams — **N rejected clients leave zero retained streams** (an
+  invariant, not a connection-count bound). This is owned by `MCP-PROTO-017`, illustrated by **DFD-17**, and
+  evidenced in [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the listener assertion is
+  PR-5, the terminal-status primitive is PR-1.
 
 The `MCP-INSP-008` inbound Origin/Host **primitive** and the protocol-kernel bounds `MCP-PROTO-005/006/008`
 are **PR-1** requirements (the listener-side Origin/Host enforcement, `MCP-INSP-009`, is **PR-5**); `MCP-OPS-002` (deployed-listener stream/connection/rate bounds under load) is a **PR-5**
@@ -198,6 +218,7 @@ and per `MCP-OPS-004`):
 | MCP extensions/experimental capabilities not reviewed by Culvert | Not supported | An unreviewed capability bit in a handshake **MUST NOT** be honored implicitly; the kernel advertises only the capability set it has actually implemented and bounded. |
 | Server-originated reverse-channel requests (`sampling/createMessage`, `elicitation/create`, `roots/list`) | Not supported / **not proxied in V1** | Culvert advertises **no** client capability for these; a server-originated request on the upstream leg is **rejected at admission** by the same kernel (`MCP-PROTO-013/015/016`), never proxied to the agent. There is no reverse-channel proxying in V1. See [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md) rejected rows and MCP-T-076. |
 | Any JSON-RPC method absent from the Culvert-reviewed admitted-method registry (`resources/*` incl. `resources/read`, `prompts/*`, `completion/*`, `tasks/*` incl. `tasks/cancel`, logging/progress/list-changed, and any spec-version method not on the reviewed list) | Not supported / **rejected** | The admitted set is [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md), **not** "whatever the negotiated version contains" (`MCP-PROTO-016`). A method valid in the negotiated version but absent from the registry is **rejected**, never admitted-and-unpoliced; no configuration may re-admit it (no `allow_unknown_methods`). See MCP-T-077. |
+| Legacy `2024-11-05` HTTP+SSE transport pair (`endpoint`-event SSE + paired POST) | Not supported / **excluded** | Not hosted by any route or configuration; a GET probe receives the terminal `405`, never an `endpoint`-awaiting stream, and no `allow-unknown transport era` switch exists. An explicit supported-transport decision (`MCP-PROTO-017` / `MCP-T-078`, [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) §2). |
 | Every MCP transport/extension/version on day one | Explicit V1 non-goal (`BLUEPRINT.md` §06) | N/A — scoping decision, not a runtime fallback. |
 
 "Downgrade-safely" here means: when the kernel cannot support something a client/server requests, the
@@ -249,6 +270,12 @@ silent attempt to proceed with an unverified assumption about what the peer mean
   invariants** — `MCP-AUTH-001/002/003`, the `MCP-INSP-008` Origin/Host primitive together with its
   `MCP-INSP-009` listener-side enforcement once a listener exists, and default-deny (§8) apply identically regardless
   of which supported version or capability subset a given session negotiated.
+- The kernel/listener **never** falls back to a legacy `2024-11-05` HTTP+SSE transport and **never** opens or
+  holds a pre-negotiation SSE stream: a security-motivated `400`/`404`/`405` rejection is **terminal**, its
+  follow-on probe GET is answered `405` with zero stream allocation, and N rejected clients leave zero
+  retained streams (`MCP-PROTO-017` / `MCP-T-078`). This is the transport-layer counterpart to the
+  version/capability downgrade rules above — reducing functionality, never security. See
+  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md).
 - `[EXT]` note: whether the base MCP specification itself defines a standard version-downgrade or
   capability-negotiation failure mode is an external fact to verify before PR-1; the policy above is
   Culvert's own floor regardless of what the spec allows as a minimum.

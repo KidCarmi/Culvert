@@ -1,11 +1,12 @@
 # MCP Data-Flow Diagrams
 
-Sixteen numbered data-flow diagrams (DFD-1 … DFD-16) for the MCP subsystem. Each marks its **trust
+Seventeen numbered data-flow diagrams (DFD-1 … DFD-17) for the MCP subsystem. Each marks its **trust
 boundaries** (TB-1 … TB-7 from [`THREAT-MODEL.md`](THREAT-MODEL.md)) and the dominant threats. **Status:
 PR-0 design artifact (Proposed).** These are design flows; no runtime exists. Diagrams are Mermaid so they
 render on GitHub and diff cleanly. Management MCP (Capability A) and the Security Gateway (Capability B)
 are kept as **separate** flows. **DFD-15 (the PR-1 protocol-kernel decode path) was added by the PR-1
-remediation** (`PR1-READINESS-REMEDIATION.md`, finding M-3).
+remediation** (`PR1-READINESS-REMEDIATION.md`, finding M-3). **DFD-17 (transport rejection → terminal GET →
+zero stream) was added by the RPR-4 remediation for [#929](https://github.com/KidCarmi/Culvert/issues/929).**
 
 Trust-boundary legend: **TB-1** agent/client↔Culvert · **TB-2** Culvert↔MCP server · **TB-3** CP↔DP ·
 **TB-4** runtime↔events · **TB-5** admin↔publication · **TB-6** cloud AI↔customer network · **TB-7**
@@ -424,6 +425,38 @@ same-direction outstanding set; an opposite-direction `id` match has no effect.
 
 ---
 
+## DFD-17 — Transport rejection → terminal GET → zero stream (Capability **B**, PR-1/PR-5)
+
+Crosses **TB-1**. Threats: MCP-T-078 (security-rejection-path legacy fallback + retained unauthenticated
+stream). Shows that every security-motivated rejection is **terminal** and that the client's spec-mandated
+follow-on GET is answered with **405** and allocates **zero** stream — the legacy `2024-11-05` `endpoint`
+event is **not hosted**. Status/transport facts are bound to
+[`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); the sessionless absent-header ruling is
+D-1 (OPEN).
+
+```mermaid
+flowchart LR
+  REJ["Security rejection (TB-1)<br/>400 unlisted version / invalid MCP-Protocol-Version / missing session<br/>404 terminated session · 405 DELETE unsupported"] --> CO
+  CO{"Initialize path?"}
+  CO -->|"PREFER 200 counter-offer (InitializeResult)"| CONT["Client continues — or SHOULD disconnect if it<br/>cannot support the offered version — NO probe"]
+  CO -->|"terminal 4xx (header / session / malformed)"| PROBE["Spec-conformant OR catch-any SDK client<br/>concludes legacy 2024-11-05 and issues GET (endpoint-event probe)"]
+  PROBE --> GET{"GET without a valid negotiated session/context"}
+  GET -->|"MUST 405 Method Not Allowed"| TERM["Terminal: no text/event-stream<br/>ZERO stream allocated or retained (MCP-PROTO-017)"]
+  TERM --> ZERO["N rejected clients leave ZERO retained streams<br/>client fallback terminates (MCP-T-078 closed)"]
+  GET -.->|"FORBIDDEN: open or hold an endpoint-awaiting SSE"| BLOCK["legacy 2024-11-05 endpoint event<br/>NOT HOSTED — no route or config can emit it"]
+  classDef tb fill:#fee,stroke:#c00;
+  classDef no fill:#eee,stroke:#999,stroke-dasharray:4 3;
+  class REJ,GET tb
+  class BLOCK no
+```
+
+Both the initialize counter-offer and every terminal `4xx` avoid recruiting a stream: the counter-offer is
+an HTTP 200 success so no probe fires, and a terminal rejection's follow-on GET is `405` with no allocation.
+The forbidden dashed edge (opening or holding an `endpoint`-awaiting SSE) is the #929 vector, closed by
+`MCP-PROTO-017`; the legacy endpoint event is not reachable by any route or configuration.
+
+---
+
 ## Trust-boundary coverage summary
 
 | DFD | Capability | Trust boundaries | Dominant threats |
@@ -444,3 +477,4 @@ same-direction outstanding set; an opposite-direction `id` match has no effect.
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
 | 15 | **A and B** (both listeners, PR-1 kernel) | **TB-1, TB-7** | 057–074 (parser/framing/version/state) |
 | 16 | **B** (both legs, PR-1 kernel) | **TB-1, TB-2** | 076, 077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
+| 17 | **B** (transport rejection, PR-1/PR-5) | **TB-1** | 078 (security-rejection-path legacy fallback + retained unauthenticated stream) |

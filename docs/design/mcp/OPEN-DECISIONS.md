@@ -50,6 +50,21 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
   the Protocol Kernel (parser, lifecycle, transport, compatibility all depend on D-1), D-1 **MUST** be
   externally verified and human-approved **before** PR-1 implementation begins — it may **not** be left
   for closure during implementation. **Still OPEN.**
+- **RPR-4 ([#929](https://github.com/KidCarmi/Culvert/issues/929)) transport-fallback input — does NOT
+  close D-1.** The transport-rejection posture D-1's status-code contract depends on is recorded in
+  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) and owned by `MCP-PROTO-017` /
+  `MCP-T-078`: legacy `2024-11-05` HTTP+SSE is **excluded**; a GET without a valid negotiated
+  session/context is terminal **`405`** with **no** stream; and a **`200` `initialize` counter-offer** is
+  preferred over a `4xx` hard reject (a `4xx`, or any thrown connect error under an SDK catch-any wrapper,
+  triggers the legacy probe). **Sessionless / first-request absent-`MCP-Protocol-Version` ruling (the
+  narrowed Gate 3 conflict C-7):** when negotiated session state — or equivalent trusted context —
+  identifies the version, Culvert has "another way" and honoring it is **conformant**; only the
+  **sessionless / first-request** case is a genuine deviation, recorded here as the item D-1 must decide.
+  Culvert **MUST NOT** silently admit `2025-03-26` (admitting it would alter **batch policy**,
+  **version-header expectations** and the **method/capability surface**). `2025-11-25` remains the current
+  stable baseline candidate; `2026-07-28` remains **excluded while non-final** (comparison / evidence only).
+  **D-1 remains OPEN** — this input does not select the version set. Gate 3 amendment (posted on #923): C-6
+  **withdrawn** (false positive), A-7 **removed**, C-7 / A-2 **narrowed** to the sessionless case.
 
 ### D-2 — Authentication deployment model
 - **Question:** MCP as OAuth resource server, gateway-issued token, or enterprise-broker integration; RFC 8707 adoption?
