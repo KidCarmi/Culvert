@@ -135,6 +135,7 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-051 |
 | DFD-15 | Protocol-kernel decode path (PR-1) | MCP-T-057..074 (parser/framing/version/state) |
 | DFD-16 | Two-leg kernel + method admission (PR-1) | MCP-T-076, MCP-T-077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
+| DFD-17 | Transport rejection → terminal GET → zero stream (PR-1/PR-5) | MCP-T-078 (security-rejection-path legacy fallback + retained unauthenticated stream) |
 
 ## 10. Security objectives
 
@@ -319,11 +320,12 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 | MCP-T-073 | Slow-input / partial-frame buffering resource exhaustion (parse-time) | Medium | MCP-PROTO-005,008 | SRE/Sec |
 | MCP-T-074 | Panic / crash / uncontrolled allocation from hostile input | High | MCP-PROTO-009,013 | Sec/Eng |
 | MCP-T-076 | Reverse-channel / requestor-direction state confusion — a well-formed message on one leg/direction (an upstream server's `notifications/cancelled`, or a server-originated `sampling`/`elicitation`/`roots` request) mis-correlates to, cancels or deletes the **other** direction's in-flight state, or is dispatched as a client-originated operation across an unspecified second decoder | High | MCP-PROTO-015 (peer-role kernel + requestor-scoped `(session, direction, id)` state), MCP-PROTO-003, MCP-PROTO-013 | Sec/Eng |
+| MCP-T-078 | Security-rejection-path legacy fallback + retained unauthenticated stream — a security-motivated `400`/`404`/`405` (unlisted `initialize` version, invalid/missing `MCP-Protocol-Version`, missing/terminated session, unsupported DELETE) recruits a spec-conformant **or** catch-any SDK client into the legacy `2024-11-05` HTTP+SSE probe (a GET expecting an `endpoint` event); a stream opened or held awaiting an `endpoint` Culvert never emits becomes an **unauthenticated, pre-initialize, indefinitely-held stream per rejected client** (N rejected ⇒ N held streams, self-amplifying), and 2025/2026-era confusion can misroute a stateless-RC client into 2025 legacy SSE probing | High | MCP-PROTO-017 (legacy-transport exclusion + no-pre-negotiation-stream; counter-offer-preferred terminal `405`), MCP-PROTO-010 (no downgrade-by-fallback), MCP-INSP-009 (listener GET→`405` zero-stream, PR-5), MCP-OPS-002 (held-stream bounds, PR-5); evidence [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) | Sec/Eng |
 
-The nine **High** protocol-kernel threats (`MCP-T-058,060,063,066,067,068,069,074` plus the RPR-1
-reverse-channel threat `MCP-T-076`) carry a full
+The ten **High** protocol-kernel/transport threats (`MCP-T-058,060,063,066,067,068,069,074` plus the RPR-1
+reverse-channel threat `MCP-T-076` and the RPR-4 transport-rejection threat `MCP-T-078`) carry a full
 Threat → Requirement → Control → Test → Evidence → Owner → Gate row in
-[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1; the Medium ones are covered by the
+[`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1/§1a; the Medium ones are covered by the
 protocol-kernel fuzz + structural-limit test classes there.
 
 ## 12. Residual risk ownership
