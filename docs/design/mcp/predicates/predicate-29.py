@@ -306,7 +306,7 @@ SEEDS = [
      lambda t: _mut(t, 'evidence', lambda s: s.replace('| VERIFIED | SPEC transports.mdx@2025-11-25 L137-141 |', '| VERIFIED |  |', 1)),
      'empty source locator'),
     ('UNRESOLVED row treated as normative',
-     lambda t: _mut(t, 'evidence', lambda s: s.replace('UNRESOLVED sessionless ruling (D-1); with session/context Culvert has another way and honoring is conformant; do NOT silently admit 2025-03-26',
+     lambda t: _mut(t, 'evidence', lambda s: s.replace('D-1 CLOSED: reject sessionless missing-header with 400 (do NOT silently admit 2025-03-26); with session/context Culvert has another way and honoring is conformant. Evidence status UNRESOLVED = spec SHOULD is ambiguous; Culvert decision is closed',
                     'Silently admit 2025-03-26 as the sessionless default (binding)', 1)),
      'presents a binding Culvert decision'),
     ('2025 and 2026 semantics merged',

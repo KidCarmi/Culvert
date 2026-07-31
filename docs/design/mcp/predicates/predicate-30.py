@@ -207,14 +207,24 @@ def check(texts):
         v.append('the §2 blocker table is malformed, mis-shaped or has fewer than '
                  f'{len(BLOCKERS)} data rows (a zero/short closure table must fail)')
         rows = []
-    joined = '\n'.join(' '.join(r) for r in rows)
-    for b in BLOCKERS:
-        if not re.search(rf'#?{b}\b', joined):
-            v.append(f'blocker #{b} is not recorded in the closure blocker table')
+    # Derive the blocker identity from the FIRST (Blocker) column of each row, not
+    # a collective search over every cell — otherwise five duplicate rows for one
+    # blocker pass as long as some Evidence cell happens to mention the others.
+    row_ids = []
     for r in rows:
+        ids = re.findall(r'#(9\d\d)\b', r[0])  # the '#NNN'-prefixed id in the Blocker cell
+        if len(ids) != 1:
+            v.append(f'blocker row {r[0]!r} does not name exactly one #NNN blocker id in its Blocker column')
+            continue
+        row_ids.append(ids[0])
         state = r[3].lower()
         if 'closed' not in state or ('complete' not in state and 'completed' not in state):
             v.append(f'blocker row {r[0]!r} is not recorded closed/completed (state={r[3]!r})')
+    if sorted(set(row_ids)) != sorted(BLOCKERS):
+        v.append(f'the closure blocker rows are not exactly {sorted(BLOCKERS)} '
+                 f'(got {sorted(row_ids)}) — missing or unexpected blocker ids')
+    if len(row_ids) != len(set(row_ids)):
+        v.append('the closure blocker table has duplicate blocker rows')
 
     # (3) ADR-0024 Accepted, never Proposed (the authority file itself)
     if not re.search(r'\*\*Status:\*\*\s*Accepted', adr):
@@ -432,6 +442,11 @@ SEEDS = [
     ('malformed / short blocker table',
      lambda t: _mut(t, 'clo', lambda s: s.replace(BLK_DELIM5, BLK_DELIM4, 1)),
      'blocker table is malformed'),
+    ('duplicate blocker row (renumber #926 -> #925)',
+     lambda t: _mut(t, 'clo', lambda s: s.replace(
+         '[#926](https://github.com/KidCarmi/Culvert/issues/926) | RPR-2',
+         '[#925](https://github.com/KidCarmi/Culvert/issues/925) | RPR-2', 1)),
+     'not exactly'),
 ]
 
 NEGATIVE_CONTROLS = [

@@ -123,7 +123,7 @@ abbreviations: `SPEC` = `modelcontextprotocol/modelcontextprotocol@73763114` (re
 | 2025-era (2025-06-18 / 2025-11-25) | initial initialize | initialize failure illustrated as a JSON-RPC error | error MAY be carried; transport MAY 400 | 200 or 400 | JSON-RPC error -32602 Unsupported protocol version with data.supported and data.requested | on HTTP 400 the client MAY start the legacy probe; on HTTP 200 no HTTP-status probe trigger | spec | yes on 400 / no on 200 | no | avoid 4xx on initialize; if terminal, guarantee follow-on GET is 405 zero-stream | PR-1 | VERIFIED | SPEC lifecycle.mdx@2025-11-25 L273-283; transports.mdx L95-99 |
 | 2025-era (2025-06-18 / 2025-11-25) | GET | GET to the MCP endpoint without a valid negotiated session/context | server MUST return text/event-stream OR HTTP 405 Method Not Allowed | 405 | none (no body required) | 405 means no SSE at endpoint; a legacy-probe GET that receives 405 gets no endpoint event and terminates | spec | this row IS the probe target | no | return 405; allocate zero stream | PR-1 primitive / PR-5 listener | VERIFIED | SPEC transports.mdx@2025-11-25 L137-141 |
 | 2025-era (2025-06-18 / 2025-11-25) | protocol-version header | invalid or unsupported MCP-Protocol-Version header | server MUST respond 400 Bad Request | 400 | JSON-RPC error MAY accompany | 400 is a spec-listed probe trigger; client MAY issue the follow-on GET, which MUST be terminal 405 | spec | yes | no | adopt 400 as-is; ensure follow-on GET is 405 zero-stream | PR-1 / PR-5 | VERIFIED | SPEC transports.mdx@2025-11-25 L277-280, L299-307 |
-| 2025-era (2025-06-18 / 2025-11-25) | protocol-version header | header ABSENT and the server has no other way to identify the version | server SHOULD assume 2025-03-26 | n/a | n/a | proceeds as 2025-03-26 (sessionless first-request case) | spec | no | no | UNRESOLVED sessionless ruling (D-1); with session/context Culvert has another way and honoring is conformant; do NOT silently admit 2025-03-26 | PR-1 (D-1) | UNRESOLVED | SPEC transports.mdx@2025-11-25 L274-277 |
+| 2025-era (2025-06-18 / 2025-11-25) | protocol-version header | header ABSENT and the server has no other way to identify the version | server SHOULD assume 2025-03-26 | n/a | n/a | proceeds as 2025-03-26 (sessionless first-request case) | spec | no | no | D-1 CLOSED: reject sessionless missing-header with 400 (do NOT silently admit 2025-03-26); with session/context Culvert has another way and honoring is conformant. Evidence status UNRESOLVED = spec SHOULD is ambiguous; Culvert decision is closed | PR-1 (D-1) | UNRESOLVED | SPEC transports.mdx@2025-11-25 L274-277 |
 | 2025-era (2025-06-18 / 2025-11-25) | missing session | request (other than initialize) without MCP-Session-Id when the server requires one | server SHOULD respond 400 Bad Request | 400 | JSON-RPC error MAY accompany | 400 is a spec-listed probe trigger; follow-on GET MUST be terminal 405 zero-stream | spec | yes | no | 400; follow-on GET 405, zero stream | PR-1 / PR-5 | VERIFIED | SPEC transports.mdx@2025-11-25 L207-210, L299-307 |
 | 2025-era (2025-06-18 / 2025-11-25) | terminated session | request carrying a terminated or unknown session id | server MUST respond 404 Not Found | 404 | JSON-RPC error MAY accompany (SDKs surface Session terminated) | conformant clients re-initialize on 404; 404 is ALSO a spec-listed probe trigger, so follow-on GET MUST be terminal 405 zero-stream | spec | yes | no | 404; follow-on GET 405, zero stream | PR-1 / PR-5 | VERIFIED | SPEC transports.mdx@2025-11-25 L211-212, L299-307 |
 | 2025-era (2025-06-18 / 2025-11-25) | DELETE | client DELETE to terminate a session when termination is unsupported | server MAY respond 405 Method Not Allowed | 405 | none | client accepts that termination is not offered (benign); no stream involved | spec | 405 is a GET-probe trigger, but this DELETE follows an established session, not a pre-negotiation probe | no | 405; zero stream | PR-1 / PR-5 | VERIFIED | SPEC transports.mdx@2025-11-25 L215-219 |
@@ -197,7 +197,7 @@ preference; each carries a source, and the one genuinely open item is recorded U
 
 ---
 
-## 7. Sessionless absent-version-header ruling (D-1 — UNRESOLVED, not chosen here)
+## 7. Sessionless absent-version-header ruling (D-1 CLOSED — reject with `400`)
 
 The spec's *"SHOULD assume `2025-03-26`"* is **conditioned on the server having no other way to identify the
 version**. The distinction the board identified is preserved:
@@ -205,8 +205,12 @@ version**. The distinction the board identified is preserved:
 - **When negotiated session state — or an equivalent trusted context — identifies the version, Culvert has
   "another way,"** so honoring that identified version is **conformant, not a deviation**. This narrows Gate 3
   conflict **C-7** materially (§8).
-- **The genuine open question is the sessionless / first-request case.** This is recorded as **UNRESOLVED**
-  and left to **D-1**; this PR supplies the ruling D-1 needs but does **not** close D-1.
+- **The sessionless / first-request case was the last open D-1 question, and D-1 is now CLOSED:** a
+  sessionless / first request with **no** `MCP-Protocol-Version` is **rejected with HTTP `400`**. The **spec
+  evidence** for this path is a `SHOULD` (ambiguous), so the §4 matrix honestly records the *evidence status*
+  as `UNRESOLVED`, while **Culvert's decision is closed** — the two columns are distinct (evidence vs Culvert
+  decision; see the §4 legend). This is a deliberate, transparently-recorded deviation where the spec uses
+  `SHOULD`, not a falsely-claimed unconditional spec requirement.
 
 The record must state the consequence: **admitting `2025-03-26` is not neutral.** It can alter (a) **batch
 policy** (`2025-03-26` permits JSON-RPC batch arrays the baseline removes); (b) **version-header
@@ -236,9 +240,10 @@ edited silently):
   item A-2, which pairs with C-7, is narrowed the same way.)
 - **Status-code behavior is split by request stage and protocol era** (this document's §4 matrix), not stated
   as a single global rule.
-- **No D-1 approval is implied** and **Architecture approval remains pending.** `2025-11-25` remains the
-  current stable baseline candidate and `2026-07-28` remains excluded while non-final — unless official
-  status has changed (re-verified 2026-07-31: unchanged).
+- **D-1 is CLOSED (V1 baseline frozen).** `2025-11-25` is the selected **primary** baseline and `2025-06-18`
+  the **compatibility floor**; `2026-07-28` remains **excluded** (comparison only) — re-verified 2026-07-31,
+  official status unchanged. Admitting any 2026-era revision would require a separate future decision beyond
+  this V1 baseline.
 
 ---
 
