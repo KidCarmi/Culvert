@@ -300,6 +300,15 @@ client-controlled target tenant. Attribution comes **only** from the server-side
 credential record (§3.5 attribution, §12), so `403` is a property of that record, never
 of a body field.
 
+> **Recovery mechanism (deferred to Slice 3, not decided here).** A server-side state
+> change (an admin re-entitling the credential on TAC) cannot notify or wake the
+> appliance, so "retry only after server-side state changes" (401/403) is **not** an
+> automatic server push. The concrete recovery trigger — an explicit local re-enable
+> action and/or a bounded periodic re-probe of a stopped-on-`401`/`403` sender — is a
+> **Slice 3 sender-behavior decision** and is intentionally out of scope for this contract
+> sync (§13/§14: Slice 3 is blocked). This taxonomy fixes only what each status *means*,
+> not the sender's recovery cadence.
+
 **`422` — structurally well-formed but unsupported or unverifiable contract data.**
 Terminal for the sample. Includes, as applicable: unsupported `envelope_version`;
 unsupported `algorithm`; unsupported `schema_version`; unknown `key_id`; ciphertext
