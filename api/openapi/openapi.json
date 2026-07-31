@@ -3300,6 +3300,52 @@
         ],
         "type": "object"
       },
+      "URLCatFeedStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "saas": {
+            "$ref": "#/components/schemas/URLCatFeedStatusEntry"
+          },
+          "ut1": {
+            "$ref": "#/components/schemas/URLCatFeedStatusEntry"
+          }
+        },
+        "required": [
+          "ut1",
+          "saas"
+        ],
+        "type": "object"
+      },
+      "URLCatFeedStatusEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "type": "boolean"
+          },
+          "entries": {
+            "description": "UT1 only: total domains parsed on the last successful sync (the feed's full corpus size).",
+            "type": "integer"
+          },
+          "hostsAddedLastSync": {
+            "description": "SaaS only: hosts newly merged on the last sync. 0 is normal/healthy once the feed is fully merged - it is NOT the feed's total size.",
+            "type": "integer"
+          },
+          "intervalSeconds": {
+            "type": "integer"
+          },
+          "lastSync": {
+            "description": "RFC3339 UTC timestamp of the last successful sync, or empty if never synced.",
+            "type": "string"
+          },
+          "syncFailures": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured"
+        ],
+        "type": "object"
+      },
       "URLCategoryEntry": {
         "additionalProperties": false,
         "properties": {
@@ -3516,6 +3562,24 @@
       "UpstreamConfig": {
         "additionalProperties": false,
         "properties": {
+          "direct_fallback": {
+            "additionalProperties": false,
+            "description": "CHAOS-11 fail-open visibility — whether the pool is currently bypassed to DIRECT egress (all parents unhealthy or circuit-open) and how many requests have fallen back since startup.",
+            "properties": {
+              "active": {
+                "type": "boolean"
+              },
+              "total": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "active",
+              "total"
+            ],
+            "type": "object"
+          },
           "enabled": {
             "type": "boolean"
           },
@@ -17492,6 +17556,45 @@
         "x-culvert-idempotency": "idempotent",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "operator",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/urlcat/feed-status": {
+      "get": {
+        "description": "Freshness and failure counts for the UT1 community feed and the SaaS category feed (previously visible only via /metrics).",
+        "operationId": "getURLCatFeedStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/URLCatFeedStatus"
+                }
+              }
+            },
+            "description": "URL category feed status."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "URL category feed status",
+        "tags": [
+          "policy"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "1.0.0",
+        "x-culvert-permission": "viewer",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

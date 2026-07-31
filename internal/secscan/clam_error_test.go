@@ -7,7 +7,8 @@ package secscan
 // the same content stays admitted by hash long after ClamAV recovers.
 
 import (
-	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,21 +20,54 @@ import (
 
 // alertRecorder captures alerts.Fire events. The sink is process-global inside
 // this test binary, so install/restore around each test (no t.Parallel here).
+//
+// clamScanError fires on its OWN goroutine, so a straggler from an earlier
+// test (or an earlier -count run of the same test) can land in a later
+// test's recorder — the determinism gate caught exactly that (one run
+// observed two scan_clam_error events). Assertions therefore filter on the
+// payload Detail carrying a per-invocation unique error string (the CLAUDE.md
+// "assert on content, not count" pattern), never on the raw event tally.
+type recordedAlert struct {
+	event  string
+	detail string
+}
+
 type alertRecorder struct {
 	mu     sync.Mutex
-	events []string
+	events []recordedAlert
 }
 
-func (rec *alertRecorder) sink(event string, _ alerts.Payload) {
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	rec.events = append(rec.events, event)
+// clamErrSeq makes each test invocation's fake engine error unique across
+// -count=N reruns and shuffled orders, so straggler alert goroutines from
+// other invocations can never match this invocation's filter.
+var clamErrSeq atomic.Int64
+
+func uniqueClamErr(t *testing.T) error {
+	t.Helper()
+	return fmt.Errorf("daemon down [%s#%d]", t.Name(), clamErrSeq.Add(1))
 }
 
-func (rec *alertRecorder) get() []string {
+func (rec *alertRecorder) sink(event string, p alerts.Payload) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	return append([]string(nil), rec.events...)
+	rec.events = append(rec.events, recordedAlert{event: event, detail: p.Detail})
+}
+
+func (rec *alertRecorder) get() []recordedAlert {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]recordedAlert(nil), rec.events...)
+}
+
+// matching returns the recorded events whose detail contains marker.
+func (rec *alertRecorder) matching(marker string) []recordedAlert {
+	var out []recordedAlert
+	for _, ev := range rec.get() {
+		if strings.Contains(ev.detail, marker) {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func withAlertRecorder(t *testing.T) *alertRecorder {
@@ -44,14 +78,15 @@ func withAlertRecorder(t *testing.T) *alertRecorder {
 	return rec
 }
 
-// waitForEvents polls until the recorder has at least n events or the
-// deadline passes (the clam alert fires on its own goroutine, mirroring
-// remoteScanFail — Dispatch must never run inside ScanBody's timeout).
-func (rec *alertRecorder) waitForEvents(t *testing.T, n int) []string {
+// waitForMatching polls until the recorder has at least n events whose
+// detail contains marker, or the deadline passes (the clam alert fires on
+// its own goroutine, mirroring remoteScanFail — Dispatch must never run
+// inside ScanBody's timeout).
+func (rec *alertRecorder) waitForMatching(t *testing.T, n int, marker string) []recordedAlert {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		events := rec.get()
+		events := rec.matching(marker)
 		if len(events) >= n || time.Now().After(deadline) {
 			return events
 		}
@@ -61,7 +96,8 @@ func (rec *alertRecorder) waitForEvents(t *testing.T, n int) []string {
 
 func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 	rec := withAlertRecorder(t)
-	clam := &fakeClam{scanErr: errors.New("daemon down")}
+	clamErr := uniqueClamErr(t)
+	clam := &fakeClam{scanErr: clamErr}
 	ss := newEnabledTestScanner(Deps{
 		Clam: clam,
 		Yara: &fakeYARA{},
@@ -77,9 +113,9 @@ func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 	if got := atomic.LoadInt64(&statClamScanError) - before; got != 1 {
 		t.Fatalf("ClamScanError counter delta = %d, want 1", got)
 	}
-	events := rec.waitForEvents(t, 1)
-	if len(events) != 1 || events[0] != "scan_clam_error" {
-		t.Fatalf("want one scan_clam_error alert, got %v", events)
+	events := rec.waitForMatching(t, 1, clamErr.Error())
+	if len(events) != 1 || events[0].event != "scan_clam_error" {
+		t.Fatalf("want one scan_clam_error alert for this invocation's error, got %v", events)
 	}
 	if _, ok := ss.cache.Get(hashcache.SHA256Hex(data)); ok {
 		t.Fatal("verdict computed while ClamAV errored must NOT be cached (cache poisoning)")
@@ -87,8 +123,8 @@ func TestClamError_CountedAlertedAndCleanNotCached(t *testing.T) {
 }
 
 func TestClamError_RecoveredDaemonRescansAndBlocks(t *testing.T) {
-	rec := withAlertRecorder(t)
-	clam := &fakeClam{scanErr: errors.New("daemon down")}
+	withAlertRecorder(t)
+	clam := &fakeClam{scanErr: uniqueClamErr(t)}
 	ss := newEnabledTestScanner(Deps{
 		Clam: clam,
 		Yara: &fakeYARA{},
@@ -100,16 +136,6 @@ func TestClamError_RecoveredDaemonRescansAndBlocks(t *testing.T) {
 	// First pass: daemon down → fail-open, no cached verdict.
 	if res := ss.ScanBody(data); res != nil {
 		t.Fatalf("first scan (daemon down) should fail open, got %+v", res)
-	}
-	// Absorb this test's own async scan_clam_error before proceeding: the alert
-	// fires on its own goroutine, and a straggler left in flight past the end of
-	// the test lands in the NEXT test's freshly-installed recorder — under
-	// -shuffle it made TestClamError_CountedAlertedAndCleanNotCached count two
-	// events (determinism-gate failure). Every alert-triggering test must drain
-	// its own alerts before returning; fail on timeout so a delayed goroutine
-	// surfaces HERE, not as leakage into whichever test shuffles in next.
-	if events := rec.waitForEvents(t, 1); len(events) != 1 || events[0] != "scan_clam_error" {
-		t.Fatalf("drain: want one scan_clam_error alert before proceeding, got %v", events)
 	}
 
 	// Daemon recovers and now detects the content.

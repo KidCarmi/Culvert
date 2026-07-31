@@ -2925,6 +2925,16 @@ routes:
     audit_expected: false
     danger_level: none
     documented: true
+  - route: "/api/urlcat/feed-status"
+    method: "GET"
+    handler: "apiURLCatFeedStatus"
+    domain: "policy"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
   - route: "/auth/logout"
     method: "*"
     handler: "authLogout"

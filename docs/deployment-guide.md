@@ -2,6 +2,16 @@
 
 Culvert supports three deployment modes. Choose the one that fits your scale.
 
+> **Image tag:** the Compose examples below use `culvert/proxy:pinned` — a
+> fixed **local-only** tag that must be seeded before the first `up`. If it
+> isn't present, Compose falls back to a registry pull and fails with
+> `pull access denied for culvert/proxy` (see README.md's troubleshooting
+> entry). Seed it first via the
+> [one-line installer](../README.md#one-line-install-linux)
+> (`curl ... install.sh | bash`), which handles this for you, or build it
+> yourself: `docker build -t culvert/proxy:pinned .`. See the `proxy:` service
+> comment in `docker-compose.yml` for the full rationale (P1.4).
+
 ---
 
 ## 1. Standalone (Single Node)
@@ -15,7 +25,7 @@ This is the default and works for most deployments.
 # docker-compose.yml
 services:
   culvert:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8080:8080"   # HTTP/HTTPS proxy
       - "1080:1080"   # SOCKS5 (optional)
@@ -248,7 +258,7 @@ From the Admin UI cluster panel you can:
 # docker-compose.multi.yml
 services:
   control-plane:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "9090:9090"    # Admin UI
       - "50051:50051"  # gRPC
@@ -271,7 +281,7 @@ services:
       -threat-feed-db /data/threatfeeds.json
 
   data-plane-1:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8080:8080"
       - "1080:1080"
@@ -294,7 +304,7 @@ services:
       - control-plane
 
   data-plane-2:
-    image: culvert:latest
+    image: culvert/proxy:pinned
     ports:
       - "8081:8080"
       - "1081:1080"

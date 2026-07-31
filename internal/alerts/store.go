@@ -19,6 +19,7 @@ package alerts
 //   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
 //   "scan_clam_error"       — ClamAV scan error mid-request: content forwarded unscanned (fail-open, CHAOS-10)
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
+//   "upstream_pool_down"    — all parent proxies down: egress failing open to DIRECT (chain bypassed, CHAOS-11)
 //   "state_file_corrupt"    — corrupt state file quarantined at startup (CHAOS-05/07)
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //

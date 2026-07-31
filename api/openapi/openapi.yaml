@@ -772,6 +772,14 @@ components:
       properties:
         enabled: { type: boolean }
         proxies: { type: array, items: { type: object, additionalProperties: true }, nullable: true }
+        direct_fallback:
+          type: object
+          description: CHAOS-11 fail-open visibility — whether the pool is currently bypassed to DIRECT egress (all parents unhealthy or circuit-open) and how many requests have fallen back since startup.
+          additionalProperties: false
+          required: [active, total]
+          properties:
+            active: { type: boolean }
+            total: { type: integer, format: int64 }
 
     # ── Slice 3 tranche 6: cluster/support/diagnostics read-model schemas ──────────
     ClusterCAInfo:
@@ -1425,6 +1433,24 @@ components:
         matchedBy: { type: string }
         blocked: { type: boolean }
         blockSource: { type: string }
+    URLCatFeedStatusEntry:
+      type: object
+      required: [configured]
+      additionalProperties: false
+      properties:
+        configured: { type: boolean }
+        entries: { type: integer, description: "UT1 only: total domains parsed on the last successful sync (the feed's full corpus size)." }
+        hostsAddedLastSync: { type: integer, description: "SaaS only: hosts newly merged on the last sync. 0 is normal/healthy once the feed is fully merged - it is NOT the feed's total size." }
+        lastSync: { type: string, description: "RFC3339 UTC timestamp of the last successful sync, or empty if never synced." }
+        intervalSeconds: { type: integer }
+        syncFailures: { type: integer }
+    URLCatFeedStatus:
+      type: object
+      required: [ut1, saas]
+      additionalProperties: false
+      properties:
+        ut1: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
+        saas: { $ref: '#/components/schemas/URLCatFeedStatusEntry' }
     SetClusterLabels:
       type: object
       required: [node_id]
@@ -8826,6 +8852,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/URLCategoryLookup' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+  /api/urlcat/feed-status:
+    get:
+      operationId: getURLCatFeedStatus
+      tags: [policy]
+      summary: URL category feed status
+      description: Freshness and failure counts for the UT1 community feed and the SaaS category feed (previously visible only via /metrics).
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 1.0.0
+      responses:
+        '200':
+          description: URL category feed status.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/URLCatFeedStatus' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/alerts/webhooks/history:
     get:

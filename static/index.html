@@ -2985,6 +2985,7 @@ Firefox (all platforms):
         Manage host lists for each URL category. Built-in categories are seeded automatically.
         Categories are matched by hostname suffix (e.g. adding <code>example.com</code> also matches <code>www.example.com</code>).
       </p>
+      <div id="urlcat-feed-status" style="display:none;margin-bottom:16px;font-size:.78rem"></div>
       <!-- URL Lookup Tool - highlighted with accent border so it's easy to spot -->
       <div class="panel" style="margin-bottom:20px;border:1px solid var(--accent)">
         <div class="panel-header" style="border-bottom:1px solid var(--accent)30">
@@ -3757,6 +3758,7 @@ Firefox (all platforms):
         <div id="upstream-empty" style="padding:32px;text-align:center;color:var(--muted);font-size:.85rem">
           No upstream proxies configured. Traffic goes directly to the internet.
         </div>
+        <div id="upstream-fallback-banner" style="display:none;margin:12px 16px 0;padding:10px 14px;border:1px solid var(--red);border-radius:6px;background:rgba(239,68,68,.12);font-size:.84rem"></div>
         <div class="tbl-wrap">
           <table id="upstream-table" style="display:none">
             <thead><tr><th>URL</th><th>Health</th><th>Circuit</th><th>Actions</th></tr></thead>
@@ -6181,6 +6183,44 @@ async function loadURLCategories() {
       `<p style="color:var(--danger)">Failed to load categories: ${escHtml(err.message)}</p>`;
   }
   loadBlCat();
+  loadURLCatFeedStatus();
+}
+
+// Surfaces the UT1 + SaaS category-feed freshness/failure counts that were
+// previously visible only via /metrics (Prometheus) - an admin looking at
+// this view had no way to tell a stalled or failing feed apart from a
+// healthy one without scraping metrics or reading server logs.
+async function loadURLCatFeedStatus() {
+  const el = document.getElementById('urlcat-feed-status');
+  try {
+    const d = await api('/api/urlcat/feed-status');
+    const rows = [];
+    if (d.ut1 && d.ut1.configured) rows.push(_fmtURLCatFeedRow('UT1 Community Feed', d.ut1, `${d.ut1.entries || 0} entries`));
+    // SaaS Stats() reports hosts newly added on the LAST sync, not the feed's total
+    // size - 0 is normal and healthy once the feed is fully merged, so it gets its
+    // own label instead of being shown as "0 entries" (which reads as broken/empty).
+    if (d.saas && d.saas.configured) rows.push(_fmtURLCatFeedRow('SaaS Category Feed', d.saas, `${d.saas.hostsAddedLastSync || 0} new host(s) added on last sync`));
+    if (!rows.length) { el.style.display = 'none'; return; }
+    el.style.display = 'flex';
+    el.style.flexDirection = 'column';
+    el.style.gap = '4px';
+    el.innerHTML = rows.join('');
+  } catch (err) {
+    el.style.display = 'none'; // best-effort status strip; never blocks the view
+  }
+}
+
+function _fmtURLCatFeedRow(label, feed, countText) {
+  const failures = feed.syncFailures || 0;
+  const neverSynced = !feed.lastSync;
+  const warn = failures > 0 || neverSynced;
+  const color = warn ? 'var(--warn,#b8860b)' : 'var(--muted)';
+  const when = feed.lastSync ? new Date(feed.lastSync).toLocaleString() : 'never synced yet';
+  const failText = failures > 0 ? `, ${failures} sync failure${failures === 1 ? '' : 's'} since startup` : '';
+  const icon = warn
+    ? '<svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> '
+    : '';
+  return `<span style="color:${color}">${icon}${escHtml(label)}: ${escHtml(countText)}, last sync ${escHtml(when)}${failText}</span>`;
 }
 
 // ── Blocklist-as-category card ────────────────────────────────────────────
@@ -15227,10 +15267,12 @@ async function toggleOCSP(enabled) {
 // Upstream Proxies Panel
 // ═══════════════════════════════════════════════════════════════════════════
 let upstreamData = [];
+let upstreamFallback = null; // CHAOS-11: {active, total} direct-fallback status
 async function loadUpstream() {
   const r = await api('/api/upstream');
   if (!r) return;
   upstreamData = r.proxies || [];
+  upstreamFallback = r.direct_fallback || null;
   renderUpstream();
 }
 
@@ -15238,6 +15280,18 @@ function renderUpstream() {
   const empty = document.getElementById('upstream-empty');
   const table = document.getElementById('upstream-table');
   const tbody = document.getElementById('upstream-tbody');
+  // CHAOS-11: surface the fail-open bypass — a configured chain with every
+  // parent down silently egresses DIRECT; make that state impossible to miss.
+  const banner = document.getElementById('upstream-fallback-banner');
+  if (banner) {
+    if (upstreamData.length && upstreamFallback && upstreamFallback.active) {
+      banner.innerHTML = '<strong style="color:var(--red)">DIRECT FALLBACK ACTIVE</strong> — all parent proxies are down (unhealthy or circuit-open). Egress traffic is bypassing the parent-proxy chain. ' +
+        (upstreamFallback.total ? escHtml(String(upstreamFallback.total)) + ' request' + (upstreamFallback.total === 1 ? '' : 's') + ' egressed direct since startup.' : '');
+      banner.style.display = '';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
   if (!upstreamData.length) {
     empty.style.display = '';
     table.style.display = 'none';
@@ -16542,6 +16596,8 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
+        <!-- CHAOS-11: all parent proxies down — chain bypassed, egress is direct. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="upstream_pool_down"> Upstream pool down (direct fallback)</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>
