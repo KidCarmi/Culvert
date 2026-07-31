@@ -17,7 +17,7 @@ package main
 // the main-side response, and it deliberately mirrors the CHAOS-05/07
 // state-corruption model in state_corruption.go:
 //
-//  1. a loud, sanitised log line on the failure edge and on recovery;
+//  1. a loud, sanitised log line on every failure (and on recovery);
 //  2. a config_persist_failed alert on the TRANSITION into failing (via
 //     deferStartupAlert, so a failure during an early startup slice is not
 //     swallowed by an empty webhook list — the CHAOS-06 lesson), plus one
