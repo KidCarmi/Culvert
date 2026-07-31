@@ -436,7 +436,7 @@ D-1 (OPEN).
 
 ```mermaid
 flowchart LR
-  REJ["Security rejection (TB-1)<br/>400 unlisted version / invalid MCP-Protocol-Version / missing session<br/>404 terminated session · 405 DELETE unsupported"] --> CO
+  REJ["Security rejection (TB-1)<br/>400 unlisted version / invalid MCP-Protocol-Version / missing session<br/>404 terminated session"] --> CO
   CO{"Initialize path?"}
   CO -->|"PREFER 200 counter-offer (InitializeResult)"| CONT["Client continues — or SHOULD disconnect if it<br/>cannot support the offered version — NO probe"]
   CO -->|"terminal 4xx (header / session / malformed)"| PROBE["Spec-conformant OR catch-any SDK client<br/>concludes legacy 2024-11-05 and issues GET (endpoint-event probe)"]

@@ -101,6 +101,24 @@ C_ERA, C_STAGE, C_TRIG, C_NORM, C_HTTP, C_BODY, C_FOLLOW, C_SDK, \
 REJECT_STATUS = re.compile(r'\b(400|404|405)\b')
 
 
+def _decision_block(text, dec):
+    """The body of the `### <dec>` decision block in OPEN-DECISIONS.md (the lines
+    between its heading and the next `### D-*` heading or `## ` section), or None
+    if the heading is absent.  Lets the D-1 status be validated as a block rather
+    than by same-line proximity, which the multi-line decision format defeats."""
+    out, cur = [], False
+    for ln in text.splitlines():
+        m = re.match(r'^###\s+(D-\d+)\b', ln)
+        if m:
+            cur = (m.group(1) == dec)
+            continue
+        if cur:
+            if re.match(r'^##\s', ln):
+                break
+            out.append(ln)
+    return '\n'.join(out) if out else None
+
+
 # ── detectors ─────────────────────────────────────────────────────────────────
 def check(texts):
     ev = texts['evidence']
@@ -132,10 +150,20 @@ def check(texts):
             d = r[C_DECISION].lower()
             if not ('unresolved' in d or 'd-1' in d or 'pending' in d):
                 v.append(f'UNRESOLVED row [{stage}] presents a binding Culvert decision: {r[C_DECISION]!r}')
-        # (11) every 400/404/405 row states a client follow-on and retains zero streams
+        # (11) every 400/404/405 row states a client follow-on that TERMINATES
+        # (405 / reinitialize / disconnect / benign / no-stream / a probe trigger
+        # that resolves to the terminal 405), and retains zero streams.  A
+        # non-empty cell is NOT enough: a cell asserting a non-terminating loop
+        # ("retries forever", "never issues a follow-on GET") contradicts the
+        # very invariant this gate exists to enforce and MUST fail.
         if REJECT_STATUS.search(r[C_HTTP]):
-            if len(r[C_FOLLOW]) < 5:
+            follow = r[C_FOLLOW]
+            if len(follow) < 5:
                 v.append(f'400/404/405 row [{stage}] does not state client follow-on behavior (col 7)')
+            elif not re.search(r'\b405\b|terminal|terminates?|re-?initiali|disconnect|benign|no\b[^.\n]{0,14}stream|probe trigger', follow, re.I):
+                v.append(f'400/404/405 row [{stage}] follow-on does not resolve to the terminal 405 / zero-retention outcome (col 7 = {follow!r})')
+            elif re.search(r'\bforever\b|indefinitel|never (terminat|issu\w+ (a )?follow)|retr\w+[^.\n]{0,20}forever', follow, re.I):
+                v.append(f'400/404/405 row [{stage}] follow-on describes a non-terminating loop, contradicting the terminal invariant (col 7 = {follow!r})')
             if r[C_STREAM].lower().split()[:1] != ['no']:
                 v.append(f'400/404/405 row [{stage}] permits stream allocation — zero-retention violated (col 10 = {r[C_STREAM]!r})')
         # (6) 2025 and 2026 eras must never be collapsed into one row
@@ -204,12 +232,24 @@ def check(texts):
     if re.search(r'C-7[^.\n]{0,60}every missing', ev, re.I):
         v.append('C-7 is broadened back to every missing header')
 
-    # (13-gov) D-1 must remain OPEN in the evidence doc AND OPEN-DECISIONS
-    if not re.search(r'D-1 remains \*{0,2}OPEN', ev):
-        v.append('the evidence doc does not state that D-1 remains OPEN')
-    for doc_name, doc in (('evidence', ev), ('open', op)):
-        if re.search(r'\bD-1\b[^.\n]{0,20}\bCLOSED\b', doc) or re.search(r'\bD-1\b[^.\n]{0,25}\bis (now )?closed\b', doc, re.I):
-            v.append(f'D-1 is marked closed in {doc_name}')
+    # (13-gov) D-1 must remain OPEN in the evidence doc AND in OPEN-DECISIONS.
+    # The evidence doc states it inline; OPEN-DECISIONS keeps D-1 in a structured
+    # `### D-1` block whose status lines are on SEPARATE lines from the heading,
+    # so a same-line proximity match would miss a `Still OPEN` → `STATUS: CLOSED`
+    # flip (Codex #977 review).  Parse the whole D-1 block and validate its status.
+    if not re.search(r'D-1 remains \*{0,2}OPEN', ev) or re.search(r'\bD-1\b[^.\n]{0,20}\bCLOSED\b', ev):
+        v.append('the evidence doc does not state that D-1 remains OPEN (or marks it closed)')
+    block = _decision_block(op, 'D-1')
+    if block is None:
+        v.append('OPEN-DECISIONS.md has no `### D-1` decision block to validate')
+    else:
+        # the block is CLOSED if it carries a closure marker the sibling closed
+        # decisions use (`CLOSED`, `Status: closed`) and is not still declared OPEN.
+        closed = re.search(r'\bCLOSED\b', block) or re.search(r'status\s*[:=]\s*closed', block, re.I)
+        still_open = re.search(r'\bOPEN\b', block)
+        if closed or not still_open:
+            v.append('D-1 is not marked OPEN in its OPEN-DECISIONS `### D-1` block '
+                     '(a closure/removal of the OPEN status must fail this gate)')
 
     # (15) fixtures: version-set-dependent fixtures are D-1 BLOCKED and never pre-marked green
     if ev.count('D-1 BLOCKED') < 1:
@@ -282,7 +322,10 @@ SEEDS = [
      'C-7 is broadened back to every missing header'),
     ('D-1 marked closed',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('D-1 remains OPEN', 'D-1 is now CLOSED', 1)),
-     'D-1 is marked closed'),
+     'marks it closed'),
+    ('D-1 closed in the OPEN-DECISIONS block (separate status line)',
+     lambda t: _mut(t, 'open', lambda s: s.replace('**Still OPEN.**', '**STATUS: CLOSED.**', 1)),
+     'not marked OPEN in its OPEN-DECISIONS'),
     ('free-form fallback config added',
      lambda t: _mut(t, 'evidence', lambda s: s.replace('## Cross-references',
                     'Operators can set `mcp_transport_fallback_list: ["legacy-2024-sse"]` to re-enable legacy fallback.\n\n## Cross-references', 1)),
