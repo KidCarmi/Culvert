@@ -247,9 +247,35 @@ func rollUpVerdict(checks []OperatorContractCheck) string {
 // perform disk I/O, network probes, or any operation that mutates state.
 
 func checkStorage() OperatorContractCheck {
-	// This check reports the cached result of the one-shot writability
-	// probe that ran at startup (probeStorageWritability). The handler
-	// itself does NO disk I/O — repeated calls are free.
+	// CHAOS-45: runtime durable-write failures outrank the boot probe. The
+	// probe runs ONCE and its verdict is cached forever, so a data directory
+	// that goes read-only or full after boot would otherwise keep reporting
+	// "writable (verified once at startup)" while every save silently failed.
+	// Observed failures are authoritative evidence that persistence is broken
+	// NOW; the probe is only evidence about the state at boot.
+	if s := storageWriteFailures(); s.Total > 0 {
+		last := s.Last.UTC().Format(time.RFC3339)
+		if time.Since(s.Last) < storageDegradedWindow {
+			return OperatorContractCheck{
+				Code:   "storage_path",
+				Status: diagFail,
+				Message: fmt.Sprintf("%d durable write(s) to the data directory failed — persisted state is being LOST (last: %s at %s: %s)",
+					s.Total, s.Path, last, s.Err),
+				OperatorAction: "The data directory has become unwritable or full since startup. Check free space and inode count, confirm the volume is still mounted read-write, then re-apply any configuration changed since the first failure — admin-API changes made during this window are live in memory but did NOT reach disk and will be lost on restart.",
+			}
+		}
+		return OperatorContractCheck{
+			Code:   "storage_path",
+			Status: diagWarn,
+			Message: fmt.Sprintf("%d durable write(s) failed earlier in this process, none in the last %s (last: %s at %s)",
+				s.Total, storageDegradedWindow, s.Path, last),
+			OperatorAction: "Writes are landing again, but configuration changed during the failure window may not have reached disk. Re-save anything edited around that time, and check the host for the transient full-disk / read-only-remount event.",
+		}
+	}
+
+	// No runtime failures observed — report the cached result of the one-shot
+	// writability probe that ran at startup (probeStorageWritability). The
+	// handler itself does NO disk I/O — repeated calls are free.
 	switch storageWritability() {
 	case storageStateWritable:
 		return OperatorContractCheck{

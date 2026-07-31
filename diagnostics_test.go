@@ -22,7 +22,14 @@ func withCachedStorageState(t *testing.T) {
 	t.Helper()
 	prevDir := dataDir
 	prevState := storageWritableState.Load()
+	// CHAOS-45: checkStorage now reports observed runtime durable-write
+	// failures ahead of the cached boot probe, and that record is
+	// process-global — any earlier test in the package that provoked a real
+	// AtomicWrite failure would otherwise leak into these assertions. Clear it
+	// on both edges so storage-state tests stay order-independent.
+	resetStorageWriteHealthForTest()
 	t.Cleanup(func() {
+		resetStorageWriteHealthForTest()
 		dataDir = prevDir
 		if prevState == nil {
 			// atomic.Value cannot be cleared once written; store the

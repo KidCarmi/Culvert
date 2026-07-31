@@ -221,12 +221,22 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyConfigBackup(&target)
+	// CHAOS-27 / F-12: the apply is unconditional, but a persistence failure
+	// during it is no longer swallowed. The running config IS rolled back
+	// either way; what changes is that the operator is told when the result
+	// did not reach disk instead of receiving a 200 over a partial-durability
+	// apply that silently reverts on the next restart.
+	persistErr := applyConfigBackup(&target)
 
 	actor := sessionAdmin(r)
-	auditEvent(r, "config.rollback", "system",
-		fmt.Sprintf("rolled back to version %d (from %s by %s)",
-			req.Version, meta.CreatedAt, sanitizeLog(meta.Actor)))
+	auditDetail := fmt.Sprintf("rolled back to version %d (from %s by %s)",
+		req.Version, meta.CreatedAt, sanitizeLog(meta.Actor))
+	if persistErr != nil {
+		// The partial-durability fact belongs in the audit trail: "who rolled
+		// back to what" is incomplete without "and it did not persist".
+		auditDetail += " — NOT DURABLE: " + sanitizeLog(persistErr.Error())
+	}
+	auditEvent(r, "config.rollback", "system", auditDetail)
 
 	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
 
@@ -234,14 +244,41 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		// A rolled-back config was valid when saved; if a cap was lowered since,
 		// the commit-time rejection is logged + alerted + surfaced via
 		// LastPublishError (the local rollback still applied).
+		//
+		// Still published on a persistence failure: the DP fleet must converge
+		// on the config this node is actually ENFORCING, and the DP snapshot is
+		// a separate durability path from the local store files.
 		_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if persistErr != nil {
+		// The scope already strips control bytes; the inline ReplaceAll is kept
+		// so CodeQL sees the CWE-117 sanitiser at the call site.
+		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist: %s",
+			req.Version, strings.ReplaceAll(strings.ReplaceAll(persistErr.Error(), "\n", "_"), "\r", "_"))
+		// 500: the operation did not fully succeed. The body distinguishes it
+		// from a rollback that did not happen at all — the caller must know the
+		// running config HAS changed, so "retry the rollback" is not the fix;
+		// fixing the disk and re-saving is.
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"status":         "rolled_back_not_durable",
+			"version":        req.Version,
+			"warnings":       warnings,
+			"applied":        true,
+			"durable":        false,
+			"persist_errors": persistErr.Error(),
+			"error":          "rollback applied to the running configuration but could not be written to disk; it will be lost on restart",
+		})
+		return
+	}
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 		"status":   "rolled_back",
 		"version":  req.Version,
 		"warnings": warnings,
+		"applied":  true,
+		"durable":  true,
 	})
 }
 
@@ -308,9 +345,24 @@ func restoreBlocklistFromBackup(b *configBackup) {
 }
 
 // applyConfigBackup restores all config stores from a backup snapshot.
-func applyConfigBackup(b *configBackup) {
+//
+// It returns a non-nil error when one or more of the stores it wrote failed to
+// reach disk (CHAOS-27 / F-12). The in-memory apply is unconditional and
+// unchanged: every store is restored, and a persistence failure never aborts
+// the remaining steps — a half-applied RUNNING config would be strictly worse
+// than a fully-applied one that is not yet durable. What the error carries is
+// the fact the caller previously had no way to learn: the rolled-back state is
+// live but will NOT survive a restart.
+//
+// The stores' Save() methods return nothing and swallow their write errors, so
+// the failures are collected from the fileutil durable-write observer via a
+// scoped collector rather than from return values (see storage_health.go for
+// the scope's time-window semantics).
+func applyConfigBackup(b *configBackup) error {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
+	finishScope := beginStorageWriteScope()
+	defer finishScope()
 	restoreBlocklistFromBackup(b)
 
 	// URLCategories MUST be applied before CategoryGroups (which may
@@ -461,6 +513,15 @@ func applyConfigBackup(b *configBackup) {
 		}
 		_ = pacProfiles.Set(cur)
 	}
+
+	// Close the scope here (not only via the defer) so its result is available
+	// to the caller. finishScope is once-guarded; the deferred call above is
+	// the panic-path safety net that guarantees the scope is unregistered.
+	if failed := finishScope(); len(failed) > 0 {
+		return fmt.Errorf("rollback applied to the running config but %d file(s) failed to persist: %s",
+			len(failed), strings.Join(failed, "; "))
+	}
+	return nil
 }
 
 // configChange is a single field-level difference between two config versions.

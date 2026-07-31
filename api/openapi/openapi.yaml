@@ -4067,12 +4067,25 @@ paths:
             schema: { $ref: '#/components/schemas/CreateConfigVersionBody' }
       responses:
         '200':
-          description: Create config snapshot.
+          description: |
+            Rollback applied and persisted (`status:rolled_back`, `durable:true`).
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
         '400': { $ref: '#/components/responses/PlainBadRequest' }
         '403': { $ref: '#/components/responses/PlainForbidden' }
+        '500':
+          description: |
+            Either the stored version could not be read, or (CHAOS-27) the
+            rollback was applied to the RUNNING configuration but one or more
+            stores could not be written to disk — `status:rolled_back_not_durable`
+            with `applied:true`, `durable:false`, and `persist_errors` naming the
+            files. The running config has already changed, so the recovery is to
+            fix the data directory and re-save, not to retry the rollback.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+            text/plain: { schema: { type: string } }
 
   /api/decryption-profiles:
     get:

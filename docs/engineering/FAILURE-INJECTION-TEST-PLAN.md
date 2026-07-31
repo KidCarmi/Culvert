@@ -81,10 +81,16 @@ diff-triggered), **nightly/e2e** (`install-lifecycle-e2e.yml`, `proxy-nightly-e2
   saver seam, or point the data dir at a read-only `t.TempDir()`).
 - **Expected result (post-P1-2):** `applyConfigBackup` returns a non-nil error naming the failed store;
   handler responds 5xx/partial; alert emitted.
-- **Current expected result:** `applyConfigBackup` returns nothing, swallows the error, handler 200 —
-  **RED** (CHAOS-27).
-- **Level:** unit (package `main`). **Harness:** RO `t.TempDir()` for the data dir forces real
-  `AtomicWrite` failures — no mock needed (leverages the genuine ENOSPC-safe path). **Runtime:** <1s.
+- **Status: GREEN as of 2026-07-31** (`configversion_rollback_durability_test.go`, CHAOS-45 run).
+  `applyConfigBackup` returns an error naming the failing file; the handler answers `500` with
+  `status:"rolled_back_not_durable"`, `applied:true`, `durable:false`, `persist_errors`; the
+  `storage_write_failed` alert fires through the shared observer. The in-memory apply stays
+  unconditional by design (a half-applied running config is worse than a fully-applied
+  non-durable one) — `TestApplyConfigBackup_ReportsPersistenceFailure` pins both halves.
+- **Level:** unit (package `main`). **Harness:** a target inside a **missing parent directory**
+  forces a real `AtomicWrite` ENOENT. Note the original plan's RO-`t.TempDir()` injection does
+  **not** work in this repo's CI: containers run as root and root bypasses mode bits, so the
+  missing-directory form is the only uid-independent injection. **Runtime:** <1s.
   **Lane:** Fast. **Flakiness:** none.
 
 ### T5 — `/ready` degrades on CP-poll failure + cert expiry (F-08)
@@ -258,7 +264,7 @@ These require the real stack; put them in `install-lifecycle-e2e.yml` / a nightl
 | T1 | F-01 | P0-1 | Fast | RED |
 | T2 | F-03/04 | P0-3 | Fast | RED |
 | T3 | F-05 | P0-2 | Deep | RED |
-| T4 | F-12 | P1-2 | Fast | RED |
+| T4 | F-12 | P1-2 | Fast | **GREEN** (2026-07-31) |
 | T5 | F-08 | P1-1 | Fast | RED |
 | T6 | F-25 | P1-1 | Deep | RED |
 | T7 | F-19 | P1-3 | Deep | RED |
