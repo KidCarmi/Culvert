@@ -59,6 +59,15 @@ func (rec *alertRecorder) get() []recordedAlert {
 	return append([]recordedAlert(nil), rec.events...)
 }
 
+func (rec *alertRecorder) eventNames() []string {
+	events := rec.get()
+	out := make([]string, 0, len(events))
+	for _, ev := range events {
+		out = append(out, ev.event)
+	}
+	return out
+}
+
 // matching returns the recorded events whose detail contains marker.
 func (rec *alertRecorder) matching(marker string) []recordedAlert {
 	var out []recordedAlert
@@ -87,6 +96,18 @@ func (rec *alertRecorder) waitForMatching(t *testing.T, n int, marker string) []
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		events := rec.matching(marker)
+		if len(events) >= n || time.Now().After(deadline) {
+			return events
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (rec *alertRecorder) waitForEvents(t *testing.T, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		events := rec.eventNames()
 		if len(events) >= n || time.Now().After(deadline) {
 			return events
 		}
