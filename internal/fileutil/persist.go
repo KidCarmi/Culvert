@@ -190,9 +190,9 @@ func PersistFailureTotals() map[string]uint64 {
 	return out
 }
 
-// PersistFailuresSince returns the names of stores whose most recent failure
-// happened after the given sequence value, newest last. Used to attribute a
-// window of failures to the operation that spanned it.
+// PersistFailuresSince returns the names of stores that are CURRENTLY failing
+// (their most recent durable write failed) and whose most recent failure
+// happened after the given sequence value. Results are sorted by store name.
 //
 // Attribution is conservative by construction: a concurrent save of an
 // unrelated store that fails inside the window is reported too. That is the
