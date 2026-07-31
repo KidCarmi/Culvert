@@ -109,7 +109,7 @@ docker compose up -d
 ## Code Conventions
 
 - **Package**: Everything is `package main` (flat layout)
-- **Go version**: 1.26 (go.mod; bumped from the prior 1.25.12 govulncheck pin as a side effect of the badger/v4 v4.9.5 dependency update, which raised its own minimum Go requirement)
+- **Go version**: 1.26 (go.mod; bumped from the prior 1.25.12 govulncheck pin as a side effect of the go.etcd.io/etcd/server/v3 v3.7.1 dependency update, which raised its own minimum Go requirement)
 - **Logging**: Use `logger.Printf()`, never `log.Printf()` or `fmt.Printf()`
 - **User input in logs**: Wrap with `sanitizeLog(s)` and use `%q` format verb (CWE-117 prevention; sanitizeLog uses strings.ReplaceAll which CodeQL recognises)
 - **CodeQL compliance**: For values that flow through objects (e.g. `rl.Limit()`, `added.Priority`), inline `strings.ReplaceAll` or `fmt.Sprintf` + `strings.ReplaceAll` at the call site so CodeQL sees the sanitiser
