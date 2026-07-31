@@ -6,6 +6,8 @@ package main
 // Session→Identity conversion and the cookie-revocation HTTP helper.
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -88,4 +90,37 @@ func TestRevokeSessionCookie_MalformedCookie(t *testing.T) {
 	})
 	// Should not panic on malformed cookie value.
 	revokeSessionCookie(sessionCookieName, req)
+}
+
+// ─── initSessionSecret (env var) ─────────────────────────────────────────────
+
+// TestInitSessionSecret_TrailingNewline covers CULVERT_SESSION_SECRET sourced
+// from a file (Docker/K8s secret mounts, `EnvironmentFile=` in systemd units,
+// or `export CULVERT_SESSION_SECRET=$(cat secret-file)`-style provisioning
+// commonly leave a trailing newline). A byte-for-byte-valid 64-hex-char
+// secret must not crash the process at startup just because of incidental
+// whitespace — the documented multi-node "shared signing key" deployment
+// path depends on this env var applying cleanly on every node.
+func TestInitSessionSecret_TrailingNewline(t *testing.T) {
+	origSecret := session.SigningKey()
+	defer session.SetSigningKey(origSecret)
+
+	const hexKey = "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff0000000011111111" //nolint:gosec // test value
+	t.Setenv("CULVERT_SESSION_SECRET", hexKey+"\n")
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("initSessionSecret panicked on a valid secret with a trailing newline: %v", r)
+		}
+	}()
+	initSessionSecret()
+
+	got := session.SigningKey()
+	if len(got) != 32 {
+		t.Fatalf("session secret length = %d, want 32", len(got))
+	}
+	want, _ := hex.DecodeString(hexKey)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("session secret = %x, want %x", got, want)
+	}
 }

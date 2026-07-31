@@ -36,7 +36,7 @@ var sessionRevoked = session.Revoked
 // initSessionSecret sets the HMAC key for session cookies.
 // Priority: CULVERT_SESSION_SECRET env > config file > random.
 func initSessionSecret() {
-	if s := os.Getenv("CULVERT_SESSION_SECRET"); s != "" {
+	if s := strings.TrimSpace(os.Getenv("CULVERT_SESSION_SECRET")); s != "" {
 		key, err := hex.DecodeString(s)
 		if err != nil || len(key) < 32 {
 			panic("CULVERT_SESSION_SECRET must be at least 32 bytes of hex (64 hex chars)")
@@ -51,6 +51,7 @@ func initSessionSecret() {
 // initSessionSecretFromConfig applies a config-file session secret.
 // Called after config is loaded, before the UI starts.
 func initSessionSecretFromConfig(hexKey string) {
+	hexKey = strings.TrimSpace(hexKey)
 	if hexKey == "" {
 		return // keep env or random key
 	}
