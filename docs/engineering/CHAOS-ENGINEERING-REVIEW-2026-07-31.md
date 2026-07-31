@@ -242,6 +242,32 @@ during the window must be re-applied.
   green; `make api-verify` green after documenting the new 500 in the OpenAPI
   spec and regenerating the bundle.
 
+### An unplanned corroboration of the finding
+
+Wiring the observer made a property of the test suite visible that had been
+invisible for the same reason the production defect was: **the CI test binary
+runs with an unwritable `/data`**, so a long tail of tests has always been
+executing real, failing `AtomicWrite` calls — `ConfigVersion: write error`,
+`ControlPlane: config-version floor persist failed`, and more — and every one
+of them was swallowed. Nobody noticed, because there was nothing to notice
+with. The first CI run after this change surfaced them as log lines.
+
+That also explains a local-vs-CI divergence worth recording for future runs:
+the failures did **not** reproduce locally, because the dev container runs as
+root with a writable `/data`. Reproducing the CI determinism failure required
+removing `/data` to mirror the runner. A local `go test ./...` is therefore
+**not** a faithful check of any storage-failure-sensitive behaviour; drive it
+from a data directory the test user cannot write.
+
+The consequence for the test suite (fixed here): the aggregate diagnostics
+verdict now folds in the durable-write record, so tests asserting on it must
+isolate that global. The repo already documents this exact convention for
+`policyStore` (`resetPolicyStoreForDiag`, "any diagnostics test that asserts on
+the aggregate Verdict MUST call this"), so the fix extends that one helper —
+renamed `resetDiagVerdictGlobals` — rather than adding a second rule to
+remember. Isolation belongs on the assertion side, not in each injecting test:
+those are numerous and the list only grows.
+
 ## Open-findings register — status after this run
 
 Statuses relative to the 2026-07-26B table. Findings not listed are unchanged;
