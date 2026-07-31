@@ -187,7 +187,7 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
   test, evidence expectation, owner and gate.
 - Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §1a
   row (or the labeled cross-cutting/posture block in §1a) with an explicit test/evidence/owner/gate — **all
-  91 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
+  94 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
   generic "Unit | all" and "Integration" harness rows, which are **not** counted as requirement-specific
   proof).
 - Every abuse case `MCP-AC-*` maps to a §1 row via its threat/requirement IDs.
