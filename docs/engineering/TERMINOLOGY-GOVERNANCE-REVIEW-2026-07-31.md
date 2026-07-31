@@ -33,15 +33,17 @@ cluster).
   `validatePasswordComplexity` (`store.go:654-674`) requires ≥8 characters **and** at least one
   uppercase letter, one lowercase letter, and one digit — enforced on every credential-creation path
   (setup wizard, Add/Edit User, config-auth API). All four GUI surfaces that describe this rule to an
-  admin only mentioned the length: the setup wizard's field hint (`static/index.html:16541`, "minimum
-  8 characters") and its client-side pre-check (`:16836` era, `pass.length < 8`); the Add/Edit User
-  modal's field hint (`:16627`, "min 8 characters") and its client-side pre-check (`saveUser()`,
-  `:5494-5512`). An admin who typed an 8-character, all-lowercase password would pass every on-screen
+  admin only mentioned the length: the setup wizard's field hint (`su-pass` label, "minimum
+  8 characters") and its client-side pre-check (setup-form submit handler, only `pass.length < 8`);
+  the Add/Edit User modal's field hint (`um-pass-hint-group` label, "min 8 characters") and its
+  client-side pre-check in `saveUser()`, only a length guard. An admin who typed an 8-character,
+  all-lowercase password would pass every on-screen
   hint and every client-side check, then get rejected by the server with a rule that was never
   mentioned anywhere in the GUI. Updated both hint strings to state the real rule ("min 8 chars, incl.
   uppercase, lowercase & a digit") and added a matching client-side complexity check (mirroring the
-  server's `hasUpper`/`hasLower`/`hasDigit` logic) to both the setup wizard's submit handler and
-  `saveUser()`, using the exact same wording as the server's error (`store.go:673`) so the two surfaces
+  server's `hasUpper`/`hasLower`/`hasDigit` logic, using Unicode property classes with ASCII fallback)
+  to both the setup wizard's submit handler and
+  `saveUser()`, using the same requirement wording as the server's error (`store.go:673`) so the two surfaces
   never disagree. Copy + client-side validation only — no change to the server-enforced rule, no wire
   format change, `go build` confirmed green.
 
