@@ -89,7 +89,7 @@ jobs:
 
       # Initialise CodeQL tooling — must happen before the build.
       - name: Initialise CodeQL
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v3
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           languages: go
           # Use the extended security-and-quality query suite for maximum coverage.
@@ -101,7 +101,7 @@ jobs:
         run: CGO_ENABLED=0 go build -o /dev/null .
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v3
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: codeql-go
           # Separate upload step handles graceful failure for repos without
@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload SARIF results
         continue-on-error: true   # skip gracefully if code scanning is not enabled
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v3
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: sarif-results/go.sarif
           category: codeql-go
