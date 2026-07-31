@@ -1,6 +1,7 @@
 package urlcatfeed
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"testing"
@@ -70,7 +71,7 @@ func TestSourceDataset_GeneratesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(r1.ArtifactBytes) != string(r2.ArtifactBytes) || string(r1.ManifestBytes) != string(r2.ManifestBytes) {
+	if !bytes.Equal(r1.ArtifactBytes, r2.ArtifactBytes) || !bytes.Equal(r1.ManifestBytes, r2.ManifestBytes) {
 		t.Error("generation on the embedded dataset is not deterministic")
 	}
 }
