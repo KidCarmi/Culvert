@@ -9,12 +9,19 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 
 > **Update 2026-07-24 — five decisions closed.** **D-2, D-5, D-8, D-9, D-13 are CLOSED** and recorded in
 > the numbered ADR [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
-> (per-decision closure blocks below). **D-0** is promoted to ADR-0024 (`Status: Proposed`) — the PR-1 gate
-> closes only on ARB + Security Architecture ratification. **D-1** is **elevated to a hard PR-1 entry gate**
-> and remains OPEN. **D-14 is NEW** (protocol-kernel concrete limit values and batch support, added by the
+> (per-decision closure blocks below). **D-0** is promoted to ADR-0024. **D-1** was **elevated to a hard
+> PR-1 entry gate**. **D-14 is NEW** (protocol-kernel concrete limit values and batch support, added by the
 > same remediation). Enumerated from the diff against the merge base rather than from recollection: the
 > decision blocks this remediation touched are exactly **D-0, D-1, D-2, D-5, D-8, D-9, D-13** plus the new
 > **D-14**; every other decision block is byte-unchanged (`predicates/predicate-25.py`).
+>
+> **Update 2026-07-31 — PR-1 entry closure. ADR-0024 is `Status: Accepted`; the two hard PR-1 entry gates
+> D-1 and D-15 are CLOSED.** D-1 freezes the V1 protocol baseline (primary `2025-11-25`, floor `2025-06-18`,
+> all others rejected; Streamable HTTP only; batch rejected; the six-method surface; sessionless
+> missing-header → `400`). D-15 accepts the config anti-drift contract (`CLOSED — implementation contract
+> accepted`). There is **no** external ARB / Security Architecture / committee / role-signature step in this
+> project — closure rests on independent AI research, adversarial review, structural predicates, and CI. See
+> [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md) and tracker [#923](https://github.com/KidCarmi/Culvert/issues/923).
 >
 > **Later addition, separately attributed — NOT part of the remediation described above.** **D-15** (MCP
 > config-surface registry integration strategy) was added by the board-blocker remediation for
@@ -32,39 +39,72 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
   `docs/design/mcp/`, and a human promotes it to a numbered Accepted `docs/adr/NNNN` as a PR-1 entry gate.
 - **Recommended [REC]:** **Option B.** Option A violates the PR-0 restriction "only `docs/design/mcp/`".
 - **Evidence:** task absolute restrictions; `docs/adr/0001` ADR mandate.
-- **Owner:** Eng/Arch. **Approver:** ARB. **Due:** PR-1 gate. **Closure:** numbered ADR accepted.
+- **Owner:** Eng/Arch. **Due:** PR-1 gate. **Closure:** numbered ADR accepted.
 - **Blocking:** PR-1 gate. *(Proposal authored: [`ADR-PROPOSAL-mcp-trust-boundary.md`](ADR-PROPOSAL-mcp-trust-boundary.md).)*
-- **STATUS — PROMOTED, RATIFICATION PENDING (2026-07-24):** the proposal was promoted to a numbered ADR
-  [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md).
-  The ADR is `Status: Proposed`; the PR-1 gate closes only when ARB + Security Architecture record
-  ratification (ADR-0024 "Ratification"). The in-package proposal file is now a non-authoritative pointer.
+- **STATUS — CLOSED (ADR ACCEPTED, 2026-07-31):** the proposal was promoted to the numbered ADR
+  [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md),
+  now **`Status: Accepted`** (see ADR-0024 "Acceptance"). Acceptance rests on the merged repository state —
+  independent AI research, adversarial review, predicates, and CI — not an organizational ratification step.
+  The in-package proposal file is a non-authoritative pointer.
 
 ### D-1 — Protocol baseline
-- **Question:** which stable MCP protocol version(s) to freeze, and the adapter policy?
+- **Question:** which stable MCP protocol version(s) to freeze, and the adapter/transport/batch/method policy?
 - **Options:** single pinned version; N-latest with adapters; permissive.
 - **Recommended [REC]:** freeze a small supported set + version adapters in the protocol kernel; default-deny unknown versions.
-- **Evidence:** [EXT] — protocol versions are externally unverified ([`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md)).
-- **Owner:** Eng. **Approver:** Arch. **Due:** PR-1. **Closure:** compatibility matrix approved + tested.
-- **Blocking:** Slice (PR-1). **[EXT] EXTERNAL VERIFICATION REQUIRED.**
-- **ELEVATED TO A HARD PR-1 ENTRY GATE (2026-07-24, ADR-0024 PR-1 entry gate item 5):** because PR-1 *is*
-  the Protocol Kernel (parser, lifecycle, transport, compatibility all depend on D-1), D-1 **MUST** be
-  externally verified and human-approved **before** PR-1 implementation begins — it may **not** be left
-  for closure during implementation. **Still OPEN.**
-- **RPR-4 ([#929](https://github.com/KidCarmi/Culvert/issues/929)) transport-fallback input — does NOT
-  close D-1.** The transport-rejection posture D-1's status-code contract depends on is recorded in
-  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) and owned by `MCP-PROTO-017` /
-  `MCP-T-078`: legacy `2024-11-05` HTTP+SSE is **excluded**; a GET without a valid negotiated
-  session/context is terminal **`405`** with **no** stream; and a **`200` `initialize` counter-offer** is
-  preferred over a `4xx` hard reject (a `4xx`, or any thrown connect error under an SDK catch-any wrapper,
-  triggers the legacy probe). **Sessionless / first-request absent-`MCP-Protocol-Version` ruling (the
-  narrowed Gate 3 conflict C-7):** when negotiated session state — or equivalent trusted context —
-  identifies the version, Culvert has "another way" and honoring it is **conformant**; only the
-  **sessionless / first-request** case is a genuine deviation, recorded here as the item D-1 must decide.
-  Culvert **MUST NOT** silently admit `2025-03-26` (admitting it would alter **batch policy**,
-  **version-header expectations** and the **method/capability surface**). `2025-11-25` remains the current
-  stable baseline candidate; `2026-07-28` remains **excluded while non-final** (comparison / evidence only).
-  **D-1 remains OPEN** — this input does not select the version set. Gate 3 amendment (posted on #923): C-6
-  **withdrawn** (false positive), A-7 **removed**, C-7 / A-2 **narrowed** to the sessionless case.
+- **Evidence:** protocol posture enumerated with primary/SDK sources in
+  [`PROTOCOL-COMPATIBILITY.md`](PROTOCOL-COMPATIBILITY.md) and
+  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md); admitted method surface in
+  [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md).
+- **Owner:** Eng. **Approver:** Arch. **Due:** PR-1. **Closure:** version/transport/negotiation/batch/method baseline recorded and predicate-enforced.
+- **Blocking:** was a HARD PR-1 entry gate (elevated 2026-07-24, ADR-0024 PR-1 entry gate item 5).
+- **CLOSED — 2026-07-31. V1 protocol baseline frozen.** This is the authoritative D-1 record; the runtime
+  behavior is implemented in PR-1+ per slice ownership, and MUST match this baseline.
+
+  **Supported versions.**
+  - **Primary:** `2025-11-25`.
+  - **Compatibility floor:** `2025-06-18`.
+  - **All other revisions are rejected**, explicitly including `2024-11-05`, `2025-03-26`, and `2026-07-28`,
+    plus any unknown future revision. `2026-07-28` may remain **comparison / evidence material only** — it
+    is **not** part of V1.
+
+  **Transport.** Remote **Streamable HTTP only**. **No** stdio; **no** localhost bridge; **no** legacy
+  HTTP+SSE endpoint pair; **no** endpoint-event route; **no** automatic fallback; **no** pre-negotiation SSE
+  stream allocation. A GET without a valid negotiated context returns **`405`** and retains **zero** streams.
+
+  **Version negotiation.** `initialize` **may counter-offer** a supported version using the documented
+  successful initialize response (`200` carrying the JSON-RPC body — preferred over a `4xx` hard reject, so
+  the client is never recruited into the legacy probe). A client that cannot accept the selected version
+  **terminates**. An invalid or unsupported `MCP-Protocol-Version` header returns **`400`**. A missing
+  required session identifier returns the evidence-backed status recorded in the
+  [`TRANSPORT-FALLBACK-EVIDENCE.md`](TRANSPORT-FALLBACK-EVIDENCE.md) matrix. An unknown or terminated
+  session returns the evidence-backed **`404`**. **DELETE** unsupported returns **`405`**.
+
+  **Sessionless missing version header (the final D-1 sub-decision).** A sessionless / first request with
+  **no** `MCP-Protocol-Version` header is **rejected with HTTP `400`**. Culvert **does not** silently assume
+  `2025-03-26`. This is a deliberate security and compatibility decision: silently assuming `2025-03-26`
+  would re-admit version semantics excluded from V1, including batch and version-surface differences. The
+  upstream spec uses **SHOULD** language here (the *"SHOULD assume `2025-03-26`"* clause is conditioned on
+  the server having no other way to identify the version); with a negotiated session/trusted context Culvert
+  *has* another way and honoring it is conformant — only the sessionless / first-request case is a genuine
+  deviation, and it is recorded transparently as such, **not** as an unconditional spec requirement (the
+  narrowed Gate 3 conflict C-7; C-6 **withdrawn** as a false positive, A-7 **removed**).
+
+  **Batch.** JSON-RPC **batch arrays are unsupported in V1**. The **entire batch is rejected** — never
+  split, partially processed, or best-effort dispatched (`MCP-PROTO-004`; D-14 batch sub-decision resolved:
+  reject).
+
+  **Method surface.** The admitted set is exactly the six reviewed methods of
+  [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md): `initialize`, `notifications/initialized`,
+  `ping`, `notifications/cancelled`, `tools/list`, `tools/call`. Everything else is rejected through the
+  authoritative method registry (`MCP-PROTO-016`; #928).
+
+  **Origin and Host (frozen reviewed posture).** Host allowlisting is **mandatory**; a present invalid
+  `Origin` is **rejected**; Culvert does **not** require every non-browser client to send `Origin` unless the
+  selected protocol revision requires it. **PR-1 owns the pure validation primitive** (`MCP-INSP-008`);
+  **PR-5 owns listener enforcement** (`MCP-INSP-009`).
+
+  Owned by `MCP-PROTO-017` / `MCP-T-078` for the transport-rejection posture; recorded in
+  [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md) and enforced by `predicate-29` and `predicate-30`.
 
 ### D-2 — Authentication deployment model
 - **Question:** MCP as OAuth resource server, gateway-issued token, or enterprise-broker integration; RFC 8707 adoption?
@@ -73,7 +113,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [FACT] SWG OIDC binds audience to client_id (`auth_oidc_flow.go:523`), no RFC 8707, no replay defense (VRC §6).
 - **Owner:** IAM/Sec Arch. **Approver:** Sec Arch. **Due:** PR-3. **Closure:** threat model + interop tests approved.
 - **Blocking:** GO/NO-GO (identity) + Slice (PR-3).
-- **CLOSED — 2026-07-24 (approved by the PR-0 facilitator; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-2, pending ARB/Sec-Arch formal ratification).**
+- **CLOSED — 2026-07-24; recorded in the now-Accepted [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-2.**
   - **Decision:** **Option A** — Culvert is the OAuth protected resource server. Client token terminates at
     Culvert (no passthrough); clients request the canonical resource via RFC 8707 `resource` and Culvert
     validates the resulting audience restriction (`aud` / introspection, never a bespoke in-token claim),
@@ -85,7 +125,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     audience/resource + issuer/sig/exp/tenant/scope validation + introspection/revocation + correlation +
     rate limits/anomaly + **sender-constrained (mTLS/DPoP) tokens for high-risk/external profiles**; DPoP
     replay detection applies to the per-request DPoP proof, not the access token.
-  - **Approver role:** IAM / Security Architecture (facilitator approval recorded; ARB + Sec-Arch ratification pending).
+  - **Review lens:** IAM / Security (recorded in the now-Accepted ADR-0024; no organizational ratification step exists in this project).
   - **Evidence:** VRC §6 (no access-token replay defense; audience=client_id); AUTH-AND-CREDENTIAL-MODEL §4–§7; MCP-AUTH-001..008.
   - **Residual risk:** MCP-T-002 replay defense is net-new (must be built + tested, PR-3); DPoP/mTLS availability is deployment-profile-dependent.
 
@@ -112,7 +152,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [FACT] audit ring `MaxRing=500`; no durable pipeline exists ([`EVENT-MODEL.md`](EVENT-MODEL.md)).
 - **Owner:** SRE/Sec. **Approver:** Sec Arch. **Due:** PR-8. **Closure:** loss policy + load evidence approved.
 - **Blocking:** GO/NO-GO (events) + Slice (PR-8).
-- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-5, pending ARB/Sec-Arch ratification).**
+- **CLOSED — 2026-07-24; recorded in the now-Accepted [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-5.**
   - **Decision:** **Option C** — local encrypted durable spool on every relevant DP, bounded queues +
     backpressure + replay IDs + pluggable async exporters; message bus/SIEM is an adapter, never a
     mandatory runtime dependency. Durability-unavailable is fixed by action class (EVENT-MODEL §4a table):
@@ -125,7 +165,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     one durability domain, restart-persistent and bounded on exit. **No emergency-policy bypass exists**
     (amended for [#926](https://github.com/KidCarmi/Culvert/issues/926) / `MCP-T-075`). Design MUST specify ordering scope, dedup, replay cursor, encryption-at-rest, corruption
     recovery, tenant isolation, retention, disk-pressure, restart/failover recovery.
-  - **Approver role:** SRE / Security Architecture (facilitator approval recorded; ratification pending).
+  - **Approver role:** SRE / Security Architecture (recorded in the now-Accepted ADR-0024; no organizational ratification step exists in this project).
   - **Evidence:** VRC §5/§8 (no durable pipeline; audit ring `MaxRing=500`); EVENT-MODEL §4–§6 **and §4b** (containment, denial lane, partition contract, degraded-state machine); **MCP-EVENT-001..007** and **MCP-OPS-005**.
   - **Residual risk:** tracked as **`R-6`** in [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 — *a genuine durability
     failure may block critical operations on the affected node/capability until recovery* (`MCP-T-075`,
@@ -158,7 +198,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** [EXT] vendor connector requirements unverified ([`ON-PREM-CONNECTIVITY.md`](ON-PREM-CONNECTIVITY.md)).
 - **Owner:** Net/Sec/Privacy. **Approver:** Arch/Privacy. **Due:** PR-11. **Closure:** vendor + data-flow + failure semantics validated.
 - **Blocking:** GO/NO-GO (connectivity) + Slice (PR-11). **[EXT] EXTERNAL VERIFICATION REQUIRED.**
-- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-8, pending ARB/Privacy ratification).**
+- **CLOSED — 2026-07-24; recorded in the now-Accepted [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-8.**
   - **Decision:** **Model A (local enterprise client) is the ONLY supported V1 connectivity model.** The
     outbound connector (Model B) is a **post-V1 roadmap extension** and is **NOT** assigned to PR-11 (PR-11
     stays Shadow/Canary); it gets its **own future implementation slice + design gate** unless a
@@ -167,7 +207,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     The future connector must be customer-initiated, tenant-bound, mTLS-identified, revocable,
     cert-rotating, bounded, observable, and **must not store/receive production upstream credentials**;
     DLP/redaction/destination run before egress.
-  - **Approver role:** Network/Security + Privacy (facilitator approval recorded; ratification pending).
+  - **Approver role:** Network/Security + Privacy (recorded in the now-Accepted ADR-0024; no organizational ratification step exists in this project).
   - **Evidence:** ON-PREM-CONNECTIVITY §2–§6; MCP-CONNECT-001/002/004; MCP-PRIVACY-001; residual R-5.
   - **Residual risk:** cloud-AI clients without a local path are unserved in V1 (accepted); vendor connector semantics remain **[EXT]** unverified until per-vendor validation.
 
@@ -178,7 +218,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** threat MCP-T-052; MCP-CONNECT-003, MCP-INSP-009 (listener-side; MCP-INSP-008 is the PR-1 primitive).
 - **Owner:** Sec Arch/Exec. **Approver:** Arch + Exec. **Due:** PR-11. **Closure:** risk acceptance signed or DMZ deferred.
 - **Blocking:** GO/NO-GO (connectivity).
-- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-9, pending ARB/Exec ratification).**
+- **CLOSED — 2026-07-24; recorded in the now-Accepted [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-9.**
   - **Decision:** a publicly routable / externally reachable hardened DMZ MCP endpoint (Model C) is **NOT
     supported in V1 and is disabled by default.** Model A is **sufficient for V1** (the future connector
     need not exist first). Future DMZ needs a separate architecture + production-readiness approval, signed
@@ -192,7 +232,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     (`MCP-INSP-009`) lands with the listener — **PR-5** for Model A, the **Future DMZ gate** for Model C.
     **PR-1 binds no listener, so this decision's listener controls are NOT satisfied by PR-1 alone**
     (ADR-0024 §D-9 item 6).
-  - **Approver role:** Security Architecture + Executive (facilitator approval recorded; ratification pending).
+  - **Approver role:** Security Architecture + Executive (recorded in the now-Accepted ADR-0024; no organizational ratification step exists in this project).
   - **Evidence:** ON-PREM-CONNECTIVITY §4/§7; MCP-CONNECT-003, **MCP-INSP-009** (listener-side host
     allowlist + E2E rebinding; `MCP-INSP-008` supplies the PR-1 primitive); MCP-T-052/031.
   - **Residual risk:** connector-less cloud clients unserved in V1 (accepted); DMZ, if ever offered, carries the only public-ingress surface (explicit signed risk acceptance required).
@@ -218,7 +258,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Options:** fold (current plan); reinstate a distinct connectivity slice; reinstate a PR-12 shadow/canary split.
 - **Recommended [REC]:** keep the fold (no PR-12); revisit only if connector scope grows.
 - **Evidence:** editorial correction (PR-0..PR-11 + Production Qualification; [`IMPLEMENTATION-SLICES.md`](IMPLEMENTATION-SLICES.md)).
-- **Owner:** Staff Eng. **Approver:** ARB. **Due:** PR-5. **Closure:** slice plan ratified; if reinstated, PR-12 must be explicitly defined + justified here.
+- **Owner:** Staff Eng. **Due:** PR-5. **Closure:** slice plan recorded; if reinstated, PR-12 must be explicitly defined + justified here.
 - **Blocking:** Non-blocking (planning).
 
 ### D-13 — Management MCP scope (read-only vs draft vs controlled mutation)
@@ -228,7 +268,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 - **Evidence:** BLUEPRINT §03; MCP-MGMT-001.
 - **Owner:** Sec/Eng. **Approver:** Sec Arch. **Due:** PR-9. **Closure:** separate threat model + RBAC + plan/validate/approve/apply approved.
 - **Blocking:** GO/NO-GO (dual MCP surfaces) + Slice (PR-9).
-- **CLOSED — 2026-07-24 (facilitator-approved; ratified in [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-13, pending Sec-Arch ratification).**
+- **CLOSED — 2026-07-24; recorded in the now-Accepted [`ADR-0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) §D-13.**
   - **Decision:** V1 Management MCP = **read-only + draft/validate/simulate, NO activation.** Permitted:
     explain decision, inspect bounded effective config, desired-vs-actual, bounded health, bounded/redacted
     security-event summaries, validate policy syntax/semantics, simulate impact, generate a non-activating
@@ -241,7 +281,7 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     separation (two physical event systems NOT required when logical+security isolation is enforced +
     tested); **may** share a policy-engine library but **not** active state/rule-bundles/namespaces/
     decisions; outputs tenant-scoped, RBAC, paginated, redacted, size- and time-bounded.
-  - **Approver role:** Security Architecture (facilitator approval recorded; ratification pending).
+  - **Approver role:** Security Architecture (recorded in the now-Accepted ADR-0024; no organizational ratification step exists in this project).
   - **Evidence:** PRODUCT-SCOPE §8; RECOMMENDED-ARCHITECTURE §1; MCP-POLICY-MODEL §8; MCP-MGMT-001..004.
   - **Residual risk:** shared durable transport / shared policy-engine library must be proven logically isolated by test (MCP-T-034/035); mutation deferred to a separate post-V1 plan→validate→approve→apply ADR.
 
@@ -309,11 +349,18 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
   Security (redaction/disclosure class). **Due:** PR-1.
 - **Blocking:** **HARD PR-1 entry gate**, alongside D-1 — the wall must exist *before* the first MCP
   config field, because retrofitting after PR-4/PR-8 add credential and event rows is materially harder.
-- **Closure conditions:** (1) option selected and recorded by the named approvers; (2) the constraint
-  recorded in ADR-0024 §Decision Part 1 item 8; (3) `MCP-CFG-001` present with verification + evidence;
-  (4) the anti-omission gates in [`CI-GATES.md`](CI-GATES.md) specified as blocking, including **both**
-  omission cases (new field in a known type **and** an entirely new/nested type).
-- **Status: OPEN — recommendation recorded, NOT human-approved.**
+- **Closure conditions:** (1) option selected and recorded; (2) the constraint recorded in ADR-0024
+  §Decision Part 1 item 8; (3) `MCP-CFG-001` present with verification + evidence; (4) the anti-omission
+  gates in [`CI-GATES.md`](CI-GATES.md) specified as blocking, including **both** omission cases (new field
+  in a known type **and** an entirely new/nested type).
+- **Status: CLOSED — implementation contract accepted (2026-07-31).** The MCP configuration anti-drift
+  contract is accepted as the implementation baseline: **`MCP-CFG-001` and the config-surface matrix
+  ([`CONFIG-SURFACE-MATRIX.md`](CONFIG-SURFACE-MATRIX.md)) are authoritative**; every future MCP config
+  field MUST have complete **config / API / GUI / OpenAPI / registry / test parity**; Option A (extend the
+  existing registry) is the recorded strategy; the binding structural constraint is in ADR-0024 §Decision
+  Part 1 item 8. The **runtime binding is implemented in PR-1+ according to slice ownership** — this closure
+  accepts the contract, not a runtime implementation (none exists yet). Recorded in
+  [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).
 
 ---
 
@@ -321,14 +368,14 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
 
 | Decision | Blocking | Due | Status (2026-07-24) |
 |---|---|---|---|
-| D-0 ADR scope | PR-1 gate | PR-1 | **Promoted → ADR-0024 (`Proposed`); PR-1 gate closes on ARB/Sec-Arch ratification** |
+| D-0 ADR scope | PR-1 gate | PR-1 | **CLOSED — ADR-0024 `Status: Accepted` (2026-07-31)** |
 | D-2 auth model | GO/NO-GO + PR-3 | PR-3 | **CLOSED (Option A; ADR-0024 §D-2)** |
 | D-5 event durability | GO/NO-GO + PR-8 | PR-8 | **CLOSED (Option C; ADR-0024 §D-5)** |
 | D-8 connector model | GO/NO-GO + PR-11 | PR-11 | **CLOSED (Model A only V1; connector post-V1 own slice; ADR-0024 §D-8)** |
 | D-9 DMZ support | GO/NO-GO | PR-11 | **CLOSED (not supported V1, default-off; ADR-0024 §D-9)** |
 | D-13 Mgmt MCP scope | GO/NO-GO + PR-9 | PR-9 | **CLOSED (read-only+draft/validate/simulate; mutation excluded; ADR-0024 §D-13)** |
-| **D-1 protocol baseline** | **HARD PR-1 entry gate** (elevated; was Slice) | **PR-1** | **OPEN — [EXT] external verification + human approval required BEFORE PR-1** |
-| **D-14 protocol-kernel limit values + batch** | Slice (PR-1) — values only | PR-1 | **OPEN — `MCP-PROTO-*` requirements defined; numeric defaults/hard-caps + batch policy are the open implementation decision** |
-| **D-15 config-surface registry integration** | **HARD PR-1 entry gate** | **PR-1** | **OPEN — Option A (extend the existing registry) recommended with repository evidence; NOT human-approved. Owner Eng/platform-config; approvers Architecture + Product Security. Owning requirement `MCP-CFG-001`** |
+| **D-1 protocol baseline** | **HARD PR-1 entry gate** (elevated; was Slice) | **PR-1** | **CLOSED (2026-07-31) — V1 baseline: primary `2025-11-25`, floor `2025-06-18`, all others rejected; Streamable HTTP only; batch rejected; six-method surface; sessionless missing-header → `400`** |
+| **D-14 protocol-kernel limit values + batch** | Slice (PR-1) — values only | PR-1 | **Batch policy resolved (reject in V1); numeric limit defaults/hard-caps remain the open PR-1 implementation decision (`MCP-PROTO-*` requirements defined)** |
+| **D-15 config-surface registry integration** | **HARD PR-1 entry gate** | **PR-1** | **CLOSED — implementation contract accepted (2026-07-31). Option A (extend the existing registry); `MCP-CFG-001` + config-surface matrix authoritative; runtime binding in PR-1+ per slice ownership** |
 | D-3, D-4, D-6, D-10, D-12 | Slice | per slice | Open (slice-scoped) |
 | D-7, D-11 | Non-blocking / GA | post-V1 / GA | Open (post-V1 / GA) |

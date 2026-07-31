@@ -1,15 +1,17 @@
 # MCP Operation Registry — the Culvert-reviewed admitted-method surface
 
-**Status:** Proposed (PR-0 design artifact; part of the RPR-1 remediation for board blockers
-[#925](https://github.com/KidCarmi/Culvert/issues/925) and
-[#928](https://github.com/KidCarmi/Culvert/issues/928)). No control below is implemented; this is
-design-time authority only. Do not treat as organizationally Accepted — [ADR-0024](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
-remains **Proposed** and **PR-1 remains NO-GO**.
+**Status:** Accepted-baseline authority (PR-0 design artifact; part of the RPR-1 remediation for board
+blockers [#925](https://github.com/KidCarmi/Culvert/issues/925) and
+[#928](https://github.com/KidCarmi/Culvert/issues/928)). No control below is implemented — the runtime lands
+in PR-1+ per slice ownership. [ADR-0024](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) is
+**Accepted** and **PR-1 implementation is GO** (protocol-kernel scope only; see
+[`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md)).
 
 This document is the **single authoritative registry** of every MCP JSON-RPC method Culvert admits, on
 which leg, in which direction, and to which handling owner. It is the authority every version adapter must
 **narrow to**: a method valid in a negotiated protocol version but **absent from this registry is rejected**
-(`MCP-PROTO-016`). It does **not** choose D-1's supported-version baseline — D-1 remains OPEN.
+(`MCP-PROTO-016`). The six-method admitted surface is fixed by the **closed D-1 baseline**; this registry is
+that surface's authority.
 
 `resources/read`, `prompts/*`, `completion/*`, `sampling/*`, `elicitation/*`, `roots/*` and `tasks/*`
 appear here **only** as explicit **rejected** rows. The admitted surface is deliberately the smallest safe

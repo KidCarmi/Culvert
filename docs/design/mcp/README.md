@@ -80,13 +80,13 @@ results. Any capability is described as existing **only** if it is verified in t
 
 ```
 PR-0 authored (this package)
-      → Reviewer checklists (PR0-REVIEW-CHECKLIST.md) completed per role
-      → GO-NO-GO-CHECKLIST.md blocking conditions cleared
-      → ADR promoted to docs/adr/0024 (Proposed; DONE 2026-07-24)
-      → ARB + Security Architecture ratify ADR-0024 → Accepted  [PENDING]
-      → D-1 protocol baseline externally verified + approved     [PENDING]
-      → repository build/test baseline run + recorded            [PENDING]
-      → PR-1 may begin
+      → Reviewer evidence (PR0-REVIEW-CHECKLIST.md) complete per lens      [DONE]
+      → GO-NO-GO-CHECKLIST.md blocking conditions cleared                  [DONE]
+      → ADR promoted to docs/adr/0024, Status: Accepted                    [DONE 2026-07-31]
+      → D-1 protocol baseline CLOSED (V1 frozen)                           [DONE 2026-07-31]
+      → D-15 config anti-drift contract CLOSED                             [DONE 2026-07-31]
+      → repository build/test baseline re-anchored to main + recorded      [DONE]
+      → PR-1 implementation is GO (protocol-kernel scope only)
 ```
 
 ## The implementation gate
@@ -104,10 +104,11 @@ outbound-fetch path, a new persistence/snapshot surface), an ADR is mandatory.
   [`docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md),
   which also records the five closed PR-1 entry decisions (D-2, D-5, D-8, D-9, D-13). The in-package
   proposal file is now a **non-authoritative pointer** to ADR-0024.
-- **ADR status is `Proposed`, not yet `Accepted`.** The hard, human-controlled PR-1 entry gate closes only
-  when the **Architecture Review Board and Security Architecture record ratification** in ADR-0024's
-  "Ratification" section. In addition, **D-1 (protocol baseline) is elevated to a hard PR-1 entry gate**
-  and the **repository build/test baseline must be run and recorded** before PR-1 code begins.
+- **ADR status is `Accepted` (2026-07-31).** Acceptance rests on the merged repository state — independent
+  AI research, adversarial review, structural predicates, and CI — not on any organizational ratification
+  step (there is none in this project). The four hard PR-1 entry gates (ADR Accepted; **D-1** protocol
+  baseline CLOSED; **D-15** config anti-drift contract CLOSED; repository baseline re-anchored + recorded)
+  are all complete. See [`PR1-ENTRY-CLOSURE.md`](PR1-ENTRY-CLOSURE.md).
 
 ## Trust-boundary changes require an ADR
 

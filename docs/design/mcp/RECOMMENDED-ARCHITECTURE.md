@@ -8,11 +8,11 @@ ownership, failure ownership and prohibited couplings that PR-1 onward must resp
 threat IDs or requirement IDs — those are owned by [`THREAT-MODEL.md`](THREAT-MODEL.md) and
 [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) and are only referenced here.
 
-**Status: PR-0 design artifact (Proposed).** Package names and file boundaries in this document are
-**[REC]** — evaluated, not adopted. The trust-boundary decisions are now recorded in
-[`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) (`Status: Proposed` —
-adoption completes on ARB + Security Architecture ratification); the exact package split/naming stays
-[REC] pending that ratification. See [`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0-promoted-2026-07-24).
+**Status: PR-0 design artifact.** Package names and file boundaries in this document are
+**[REC]** — evaluated, not adopted. The trust-boundary decisions are recorded in
+[`docs/adr/0024`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md), now **`Status: Accepted`**;
+the ADR ratifies the `internal/mcp/*` namespace and boundary, while the exact package split/naming stays
+**[REC]**, subject to implementation review (not fixed by the ADR). See [`README.md`](README.md#adr-scope--option-b-adopted-for-pr-0-promoted-2026-07-24).
 
 ---
 

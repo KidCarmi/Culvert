@@ -1,10 +1,13 @@
 # MCP Transport-Fallback Evidence Matrix — terminal rejection without legacy SSE fallback
 
-**Status:** Proposed (PR-0 / RPR-4 design artifact; documentation-only remediation of board blocker
-[#929](https://github.com/KidCarmi/Culvert/issues/929), coordinated with **Gate 3 / D-1**). No control below
-is implemented; this is design-time authority only. **[ADR-0024](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
-remains Proposed. D-1 remains OPEN. PR-1 remains NO-GO.** This document does **not** select the D-1 version
-set and does **not** close D-1.
+**Status:** Accepted-baseline authority (PR-0 / RPR-4 design artifact; documentation-only remediation of
+board blocker [#929](https://github.com/KidCarmi/Culvert/issues/929), coordinated with **Gate 3 / D-1**). No
+control below is implemented — this is design-time authority only, and the runtime lands in PR-1+ per slice
+ownership. **[ADR-0024](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md) is Accepted. D-1 is
+CLOSED — the V1 baseline is frozen (see [OPEN-DECISIONS.md](OPEN-DECISIONS.md) §D-1). PR-1 implementation is
+GO (protocol-kernel scope only).** This document records the **transport portion** of the closed D-1
+baseline: primary `2025-11-25`, floor `2025-06-18`, all other revisions (incl. `2024-11-05`, `2025-03-26`,
+`2026-07-28`) rejected.
 
 This file is the **single authoritative evidence base** for every normative transport / HTTP-status /
 legacy-fallback statement the RPR-4 posture makes. Every such statement is bound to one of: (1) official MCP
@@ -32,8 +35,9 @@ fetch; the authoritative source is the specification GitHub repository, cloned a
   under `docs/specification/<revision>/` are frozen per revision.
 
 **Governance guardrail:** the `2026-07-28` RC is **comparison / evidence only** in this document. Nothing
-here makes 2026-era stateless behavior part of the V1 stable baseline; that awaits an independent D-1
-approval of a **final** revision, which has not occurred.
+here makes 2026-era stateless behavior part of the V1 stable baseline; the closed D-1 baseline **rejects**
+`2026-07-28`, and admitting any 2026-era revision would require a **separate future decision** beyond this
+V1 baseline (it is not admitted by the current closure).
 
 ---
 
@@ -59,8 +63,8 @@ protocol-level session and `Mcp-Session-Id` (removed); portions of GET/SSE serve
 by a stateless `InputRequiredResult` re-issue pattern); and the server→client interaction model (stateless
 core — *"any MCP request can land on any server instance"*). Because this revision is a **non-final RC**,
 its behavior is recorded here for comparison and forward-evidence **only**. It is **not** a V1 stable
-baseline rule and **MUST NOT** be treated as one unless and until D-1 independently approves a final
-specification revision.
+baseline rule and **MUST NOT** be treated as one unless a separate future decision (beyond the closed V1
+D-1 baseline) admits a final specification revision.
 
 ---
 
@@ -241,19 +245,20 @@ edited silently):
 ## 9. Fixture matrix and D-1 dependencies
 
 Specified, not implemented. Structural / registry / status-terminal / zero-stream properties block at
-**PR-1** (primitive) or **PR-5** (listener); properties whose expected values depend on the **final selected
-version set** are marked **`D-1 BLOCKED`** and MUST NOT be marked green until D-1 closes.
+**PR-1** (primitive) or **PR-5** (listener). D-1 is now **CLOSED**, so the selected version set is fixed;
+fixtures whose expected values depend on it are therefore no longer D-1-blocked but remain **`IMPL-PENDING`**
+(no implementation exists) and MUST NOT be marked green until implemented in PR-1/PR-5.
 
 | # | Fixture | Asserts | Source basis | Gate |
 | --- | --- | --- | --- | --- |
-| 1 | Official-SDK unsupported-version sequence | client offers an unsupported version; every HTTP request recorded; sequence terminates deterministically; zero streams retained | TS/PY/GO client transport | PR-5 (D-1 BLOCKED for the exact version set) |
-| 2 | Initialize counter-offer | server returns an evidence-backed supported-version InitializeResult at 200; compatible client continues; incompatible client disconnects; no legacy SSE probe unless an observed SDK proves otherwise | SPEC lifecycle L165-171; TS | PR-1 / PR-5 (D-1 BLOCKED for the version set) |
+| 1 | Official-SDK unsupported-version sequence | client offers an unsupported version; every HTTP request recorded; sequence terminates deterministically; zero streams retained | TS/PY/GO client transport | PR-5 (IMPL-PENDING; version set fixed by the closed D-1) |
+| 2 | Initialize counter-offer | server returns an evidence-backed supported-version InitializeResult at 200; compatible client continues; incompatible client disconnects; no legacy SSE probe unless an observed SDK proves otherwise | SPEC lifecycle L165-171; TS | PR-1 / PR-5 (IMPL-PENDING; version set fixed by the closed D-1) |
 | 3 | 400 header fallback path | invalid/unsupported MCP-Protocol-Version → 400; observed SDK follow-on; terminal GET = 405; zero streams retained | SPEC transports L277-307; SDKs | PR-1 / PR-5 |
 | 4 | 404 session path | terminated session → 404; observed SDK reinitialize/fallback; zero streams retained | SPEC transports L211-212; PY/GO | PR-1 / PR-5 |
 | 5 | DELETE / 405 path | DELETE termination unsupported → 405; observed client behavior; zero streams retained | SPEC transports L215-219 | PR-1 / PR-5 |
 | 6 | GET without valid session/context | terminal 405; no text/event-stream; no allocation | SPEC transports L137-141 | PR-1 / PR-5 |
 | 7 | Missing session identifier | missing MCP-Session-Id → 400; observed SDK behavior; no retained stream | SPEC transports L207-210 | PR-1 / PR-5 |
-| 8 | Sessionless absent-version-header | the exact D-1 ruling asserted; no silent 2025-03-26 admission | §7 | PR-1, **D-1 BLOCKED** |
+| 8 | Sessionless absent-version-header | the exact closed D-1 ruling asserted (sessionless missing header → `400`; no silent `2025-03-26` admission) | §7 | PR-1, **IMPL-PENDING** |
 | 9 | Legacy endpoint negative | no route/config pair can emit an endpoint event | §2 | PR-1 / PR-5 |
 | 10 | Load case | N rejected clients ⇒ zero retained pre-negotiation streams | §3 | **PR-5** (specified now) |
 | 11 | Protocol-era separation | 2025 initialize/session fixtures cannot be applied to a 2026-era handler; 2026 stateless/discovery fixtures cannot silently fall into 2025 legacy SSE probing | §1 | PR-1 / PR-5 |
@@ -261,7 +266,7 @@ version set** are marked **`D-1 BLOCKED`** and MUST NOT be marked green until D-
 
 The **PR-1 gate proves structural/terminal/zero-stream properties only**; it does **not** claim the PR-5
 runtime listener assertions (load, N-client zero-retention) are implemented, and it does **not** claim any
-D-1-BLOCKED fixture is green.
+IMPL-PENDING fixture is green (no MCP implementation exists).
 
 ---
 
@@ -276,5 +281,5 @@ D-1-BLOCKED fixture is green.
 - [THREAT-MODEL.md](THREAT-MODEL.md) §11 `MCP-T-078` (security-rejection-path legacy fallback + retained
   unauthenticated stream) and DFD-17.
 - [DATA-FLOW-DIAGRAMS.md](DATA-FLOW-DIAGRAMS.md) DFD-17 (probe → terminal GET → zero stream).
-- [OPEN-DECISIONS.md](OPEN-DECISIONS.md) **D-1** (remains OPEN; sessionless absent-header ruling recorded).
+- [OPEN-DECISIONS.md](OPEN-DECISIONS.md) **D-1** (CLOSED — V1 baseline frozen; sessionless absent-header → `400` ruling recorded) and [PR1-ENTRY-CLOSURE.md](PR1-ENTRY-CLOSURE.md).
 - [CI-GATES.md](CI-GATES.md) / [TEST-TRACEABILITY-MATRIX.md](TEST-TRACEABILITY-MATRIX.md) — the fixture rows above.
