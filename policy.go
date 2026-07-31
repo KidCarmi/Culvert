@@ -382,7 +382,7 @@ func (ps *PolicyStore) saveMeta() {
 
 func (ps *PolicyStore) saveMetaSnapshot(m policyMeta) {
 	data, _ := json.Marshal(m)
-	_ = atomicWriteFileTracked("policy_meta", ps.path+".meta", data, 0o600)
+	_ = atomicWriteFileTracked("policy_meta", ps.path+".meta", data)
 }
 
 // Per-rule hit counters + lastHit are persisted by the metrics-layer system
@@ -423,7 +423,7 @@ func (ps *PolicyStore) Save() {
 	// newer version than the rules on disk) but the failure was invisible —
 	// the admin's rule change survived only until the next restart. Tracked
 	// now: counted, logged, alerted, and surfaced on /readyz + /metrics.
-	if err := atomicWriteFileTracked("policy_rules", ps.path, data, 0o600); err != nil {
+	if err := atomicWriteFileTracked("policy_rules", ps.path, data); err != nil {
 		return
 	}
 	ps.saveMetaSnapshot(meta)

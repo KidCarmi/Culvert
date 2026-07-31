@@ -1204,8 +1204,8 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 // accounting: the failure is counted per logical store, logged, alerted, and
 // surfaced on /readyz + /metrics even when the caller discards the error.
 // Use it for state files whose silent loss changes enforcement after a restart.
-func atomicWriteFileTracked(store, path string, data []byte, perm os.FileMode) error {
-	return fileutil.AtomicWriteTracked(store, path, data, perm)
+func atomicWriteFileTracked(store, path string, data []byte) error {
+	return fileutil.AtomicWriteTracked(store, path, data, 0o600)
 }
 
 // applyHotReload applies safe-to-reload config values from a freshly parsed

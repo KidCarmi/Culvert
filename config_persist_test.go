@@ -82,7 +82,7 @@ func TestConfigPersist_AlertsOnTransitionEdgeOnlyThenRecovers(t *testing.T) {
 
 	bad := unwritablePath(t)
 	for i := 0; i < 3; i++ {
-		if err := atomicWriteFileTracked("policy_rules", bad, []byte("x"), 0o600); err == nil {
+		if err := atomicWriteFileTracked("policy_rules", bad, []byte("x")); err == nil {
 			t.Fatalf("write %d unexpectedly succeeded", i)
 		}
 	}
@@ -103,19 +103,19 @@ func TestConfigPersist_AlertsOnTransitionEdgeOnlyThenRecovers(t *testing.T) {
 
 	// Recovery fires exactly once, and re-arms the failure edge.
 	good := filepath.Join(t.TempDir(), "rules.json")
-	if err := atomicWriteFileTracked("policy_rules", good, []byte("ok"), 0o600); err != nil {
+	if err := atomicWriteFileTracked("policy_rules", good, []byte("ok")); err != nil {
 		t.Fatalf("recovery write: %v", err)
 	}
 	if got := eventsOf(*captured); len(got) != 2 || got[1] != "config_persist_recovered" {
 		t.Fatalf("alerts = %v, want a trailing config_persist_recovered", got)
 	}
-	if err := atomicWriteFileTracked("policy_rules", good, []byte("ok"), 0o600); err != nil {
+	if err := atomicWriteFileTracked("policy_rules", good, []byte("ok")); err != nil {
 		t.Fatalf("second healthy write: %v", err)
 	}
 	if got := eventsOf(*captured); len(got) != 2 {
 		t.Fatalf("a healthy write emitted an alert: %v", got)
 	}
-	if err := atomicWriteFileTracked("policy_rules", bad, []byte("x"), 0o600); err == nil {
+	if err := atomicWriteFileTracked("policy_rules", bad, []byte("x")); err == nil {
 		t.Fatal("want a failure")
 	}
 	if got := eventsOf(*captured); len(got) != 3 || got[2] != "config_persist_failed" {
@@ -128,7 +128,7 @@ func TestConfigPersist_HealthyWritesAreSilent(t *testing.T) {
 
 	good := filepath.Join(t.TempDir(), "state.json")
 	for i := 0; i < 5; i++ {
-		if err := atomicWriteFileTracked("blocklist", good, []byte("x"), 0o600); err != nil {
+		if err := atomicWriteFileTracked("blocklist", good, []byte("x")); err != nil {
 			t.Fatalf("healthy write %d: %v", i, err)
 		}
 	}
@@ -148,7 +148,7 @@ func TestConfigPersist_ReadinessRowIsReportOnlyAndPathFree(t *testing.T) {
 	isolatePersistTracking(t)
 
 	bad := unwritablePath(t)
-	if err := atomicWriteFileTracked("blocklist_mode", bad, []byte("allow"), 0o600); err == nil {
+	if err := atomicWriteFileTracked("blocklist_mode", bad, []byte("allow")); err == nil {
 		t.Fatal("want a failure")
 	}
 
@@ -196,7 +196,7 @@ func TestConfigPersist_MetricsExposition(t *testing.T) {
 	}
 
 	bad := unwritablePath(t)
-	if err := atomicWriteFileTracked("content_scan", bad, []byte("x"), 0o600); err == nil {
+	if err := atomicWriteFileTracked("content_scan", bad, []byte("x")); err == nil {
 		t.Fatal("want a failure")
 	}
 	var broken bytes.Buffer
@@ -214,7 +214,7 @@ func TestConfigPersist_MetricsExposition(t *testing.T) {
 
 	// After recovery the gauge drops to 0 but the counter stays monotonic.
 	good := filepath.Join(t.TempDir(), "cs.json")
-	if err := atomicWriteFileTracked("content_scan", good, []byte("ok"), 0o600); err != nil {
+	if err := atomicWriteFileTracked("content_scan", good, []byte("ok")); err != nil {
 		t.Fatalf("recovery write: %v", err)
 	}
 	var recovered bytes.Buffer
