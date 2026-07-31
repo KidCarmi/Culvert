@@ -166,6 +166,17 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 				entry["clientCertNotAfter"] = expiry.UTC().Format(time.RFC3339)
 				entry["clientCertDaysRemaining"] = daysUntil(expiry)
 			}
+			// Merge in the live pool state (circuit-breaker + poller health)
+			// so an admin can see WHY the proxy is routing around or
+			// skipping an instance without needing Prometheus or SSH.
+			if pc := cdrPool.Get(inst.Name); pc != nil {
+				stats := pc.Breaker.Stats()
+				entry["cbState"] = stats.State
+				entry["cbConsecFails"] = stats.ConsecFails
+				entry["cbTotalOpens"] = stats.TotalOpens
+				entry["cbTotalTrips"] = stats.TotalTrips
+				entry["poolHealthy"] = pc.Healthy()
+			}
 			enriched = append(enriched, entry)
 		}
 		jsonOK(w, map[string]any{
