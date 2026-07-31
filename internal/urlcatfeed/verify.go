@@ -224,53 +224,71 @@ func parseManifestPayload(b []byte) (*ManifestPayload, error) {
 	if err := requireCanonical(b, &m); err != nil {
 		return nil, fmt.Errorf("%w: manifest: %v", ErrPayload, err)
 	}
+	if err := validateManifestConstants(&m); err != nil {
+		return nil, err
+	}
+	if err := validateManifestTiming(&m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// validateManifestConstants checks the bound constants + artifact reference
+// shape (schema/protocol/feed/version, safe paths, digest, sizes, counts).
+func validateManifestConstants(m *ManifestPayload) error {
 	if m.SchemaVersion != SchemaVersion {
-		return nil, fmt.Errorf("%w: schema_version %d", ErrPayload, m.SchemaVersion)
+		return fmt.Errorf("%w: schema_version %d", ErrPayload, m.SchemaVersion)
 	}
 	if m.Protocol != Protocol {
-		return nil, fmt.Errorf("%w: protocol %q", ErrPayload, m.Protocol)
+		return fmt.Errorf("%w: protocol %q", ErrPayload, m.Protocol)
 	}
 	if m.Feed != FeedID {
-		return nil, fmt.Errorf("%w: feed %q", ErrPayload, m.Feed)
+		return fmt.Errorf("%w: feed %q", ErrPayload, m.Feed)
 	}
 	if m.FeedVersion < 1 {
-		return nil, fmt.Errorf("%w: feed_version %d", ErrPayload, m.FeedVersion)
+		return fmt.Errorf("%w: feed_version %d", ErrPayload, m.FeedVersion)
 	}
 	if !safeRelKey(m.ArtifactPath) {
-		return nil, fmt.Errorf("%w: artifact_path %q", ErrPayload, m.ArtifactPath)
+		return fmt.Errorf("%w: artifact_path %q", ErrPayload, m.ArtifactPath)
 	}
 	if m.ArtifactSigPath != m.ArtifactPath+".sigstore" {
-		return nil, fmt.Errorf("%w: artifact_sig_path %q != %q", ErrPayload, m.ArtifactSigPath, m.ArtifactPath+".sigstore")
+		return fmt.Errorf("%w: artifact_sig_path %q != %q", ErrPayload, m.ArtifactSigPath, m.ArtifactPath+".sigstore")
 	}
 	if !isSHA256Hex(m.ArtifactSHA256) {
-		return nil, fmt.Errorf("%w: artifact_sha256 %q", ErrPayload, m.ArtifactSHA256)
+		return fmt.Errorf("%w: artifact_sha256 %q", ErrPayload, m.ArtifactSHA256)
 	}
 	if m.ArtifactSize <= 0 || m.ArtifactSize > MaxArtifactSize {
-		return nil, fmt.Errorf("%w: artifact_size %d", ErrPayload, m.ArtifactSize)
+		return fmt.Errorf("%w: artifact_size %d", ErrPayload, m.ArtifactSize)
 	}
 	if m.CategoryCount < 0 || m.HostCount < 0 {
-		return nil, fmt.Errorf("%w: negative counts", ErrPayload)
+		return fmt.Errorf("%w: negative counts", ErrPayload)
 	}
+	return nil
+}
+
+// validateManifestTiming checks canonical timestamps, ordering, the 30-day
+// validity ceiling, and the artifact-path shape invariant.
+func validateManifestTiming(m *ManifestPayload) error {
 	gen, err := parseCanonicalRFC3339(m.GeneratedAt)
 	if err != nil {
-		return nil, fmt.Errorf("%w: generated_at %q: %v", ErrPayload, m.GeneratedAt, err)
+		return fmt.Errorf("%w: generated_at %q: %v", ErrPayload, m.GeneratedAt, err)
 	}
 	exp, err := parseCanonicalRFC3339(m.ExpiresAt)
 	if err != nil {
-		return nil, fmt.Errorf("%w: expires_at %q: %v", ErrPayload, m.ExpiresAt, err)
+		return fmt.Errorf("%w: expires_at %q: %v", ErrPayload, m.ExpiresAt, err)
 	}
 	if !exp.After(gen) {
-		return nil, fmt.Errorf("%w: expires_at not after generated_at", ErrPayload)
+		return fmt.Errorf("%w: expires_at not after generated_at", ErrPayload)
 	}
 	if exp.Sub(gen) > MaxValidity {
-		return nil, fmt.Errorf("%w: validity window %s exceeds %s", ErrPayload, exp.Sub(gen), MaxValidity)
+		return fmt.Errorf("%w: validity window %s exceeds %s", ErrPayload, exp.Sub(gen), MaxValidity)
 	}
 	// Artifact-path shape is a producer invariant: saas-<8-pad version>-<UTC date>.json.
 	wantPath := fmt.Sprintf("saas-%08d-%s.json", m.FeedVersion, gen.Format("20060102"))
 	if m.ArtifactPath != wantPath {
-		return nil, fmt.Errorf("%w: artifact_path %q != expected %q", ErrPayload, m.ArtifactPath, wantPath)
+		return fmt.Errorf("%w: artifact_path %q != expected %q", ErrPayload, m.ArtifactPath, wantPath)
 	}
-	return &m, nil
+	return nil
 }
 
 // parseCanonicalRFC3339 parses s and requires it to already be in the canonical
@@ -303,66 +321,92 @@ func parseArtifactPayload(b []byte) (art *ArtifactPayload, hostCount, catCount i
 	if e := requireCanonical(b, &a); e != nil {
 		return nil, 0, 0, fmt.Errorf("%w: artifact: %v", ErrPayload, e)
 	}
-	if a.SchemaVersion != SchemaVersion {
-		return nil, 0, 0, fmt.Errorf("%w: schema_version %d", ErrPayload, a.SchemaVersion)
+	if e := validateArtifactHeader(&a); e != nil {
+		return nil, 0, 0, e
 	}
-	if a.Protocol != Protocol {
-		return nil, 0, 0, fmt.Errorf("%w: protocol %q", ErrPayload, a.Protocol)
-	}
-	if a.Feed != FeedID {
-		return nil, 0, 0, fmt.Errorf("%w: feed %q", ErrPayload, a.Feed)
-	}
-	if a.FeedVersion < 1 {
-		return nil, 0, 0, fmt.Errorf("%w: feed_version %d", ErrPayload, a.FeedVersion)
-	}
-	if _, e := parseCanonicalRFC3339(a.GeneratedAt); e != nil {
-		return nil, 0, 0, fmt.Errorf("%w: generated_at %q: %v", ErrPayload, a.GeneratedAt, e)
-	}
-	if len(a.Categories) == 0 {
-		return nil, 0, 0, fmt.Errorf("%w: no categories", ErrPayload)
-	}
-	// Structural canonicality: rows and hosts must be strictly ascending (which
-	// also rejects duplicate rows / duplicate hosts), names canonical, hosts
-	// already-normalized, no empty-host category.
-	src := make([]SourceCategory, 0, len(a.Categories))
-	prevCat := ""
-	for ci := range a.Categories {
-		c := a.Categories[ci]
-		name, e := CanonicalCategoryName(c.Name)
-		if e != nil {
-			return nil, 0, 0, fmt.Errorf("%w: category: %v", ErrPayload, e)
-		}
-		if name != c.Name {
-			return nil, 0, 0, fmt.Errorf("%w: non-canonical category name %q", ErrPayload, c.Name)
-		}
-		if ci > 0 && !(prevCat < name) {
-			return nil, 0, 0, fmt.Errorf("%w: category rows not strictly sorted at %q", ErrPayload, name)
-		}
-		prevCat = name
-		if len(c.Hosts) == 0 {
-			return nil, 0, 0, fmt.Errorf("%w: %v: %q", ErrPayload, ErrEmptyCategoryHost, name)
-		}
-		prevHost := ""
-		for hi, h := range c.Hosts {
-			canonHost, e := NormalizeHost(h)
-			if e != nil {
-				return nil, 0, 0, fmt.Errorf("%w: %v", ErrPayload, e)
-			}
-			if canonHost != h {
-				return nil, 0, 0, fmt.Errorf("%w: non-canonical host %q (want %q)", ErrPayload, h, canonHost)
-			}
-			if hi > 0 && !(prevHost < h) {
-				return nil, 0, 0, fmt.Errorf("%w: hosts not strictly sorted in %q at %q", ErrPayload, name, h)
-			}
-			prevHost = h
-		}
-		src = append(src, SourceCategory{Name: c.Name, Hosts: c.Hosts})
+	src, e := validateArtifactCategories(a.Categories)
+	if e != nil {
+		return nil, 0, 0, e
 	}
 	ha, e := assignHosts(src)
 	if e != nil {
 		return nil, 0, 0, fmt.Errorf("%w: %v", ErrPayload, e)
 	}
 	return &a, len(ha.catOf), len(a.Categories), nil
+}
+
+// validateArtifactHeader checks the artifact's bound constants + timestamp.
+func validateArtifactHeader(a *ArtifactPayload) error {
+	if a.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("%w: schema_version %d", ErrPayload, a.SchemaVersion)
+	}
+	if a.Protocol != Protocol {
+		return fmt.Errorf("%w: protocol %q", ErrPayload, a.Protocol)
+	}
+	if a.Feed != FeedID {
+		return fmt.Errorf("%w: feed %q", ErrPayload, a.Feed)
+	}
+	if a.FeedVersion < 1 {
+		return fmt.Errorf("%w: feed_version %d", ErrPayload, a.FeedVersion)
+	}
+	if _, e := parseCanonicalRFC3339(a.GeneratedAt); e != nil {
+		return fmt.Errorf("%w: generated_at %q: %v", ErrPayload, a.GeneratedAt, e)
+	}
+	if len(a.Categories) == 0 {
+		return fmt.Errorf("%w: no categories", ErrPayload)
+	}
+	return nil
+}
+
+// validateArtifactCategories enforces structural canonicality: category rows and
+// host rows strictly ascending (which also rejects duplicates), canonical names,
+// already-normalized hosts, and no empty-host category. It returns the source
+// view for the cross-category collision pass (assignHosts).
+func validateArtifactCategories(cats []ArtifactCategory) ([]SourceCategory, error) {
+	src := make([]SourceCategory, 0, len(cats))
+	prevCat := ""
+	for ci := range cats {
+		c := cats[ci]
+		name, err := CanonicalCategoryName(c.Name)
+		if err != nil {
+			return nil, fmt.Errorf("%w: category: %v", ErrPayload, err)
+		}
+		if name != c.Name {
+			return nil, fmt.Errorf("%w: non-canonical category name %q", ErrPayload, c.Name)
+		}
+		if ci > 0 && prevCat >= name {
+			return nil, fmt.Errorf("%w: category rows not strictly sorted at %q", ErrPayload, name)
+		}
+		prevCat = name
+		if err := validateArtifactHosts(name, c.Hosts); err != nil {
+			return nil, err
+		}
+		src = append(src, SourceCategory(c))
+	}
+	return src, nil
+}
+
+// validateArtifactHosts checks one category's host list: non-empty, each host
+// already-canonical, strictly ascending (dedup + sort).
+func validateArtifactHosts(name string, hosts []string) error {
+	if len(hosts) == 0 {
+		return fmt.Errorf("%w: %v: %q", ErrPayload, ErrEmptyCategoryHost, name)
+	}
+	prevHost := ""
+	for hi, h := range hosts {
+		canonHost, err := NormalizeHost(h)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrPayload, err)
+		}
+		if canonHost != h {
+			return fmt.Errorf("%w: non-canonical host %q (want %q)", ErrPayload, h, canonHost)
+		}
+		if hi > 0 && prevHost >= h {
+			return fmt.Errorf("%w: hosts not strictly sorted in %q at %q", ErrPayload, name, h)
+		}
+		prevHost = h
+	}
+	return nil
 }
 
 // safeRelKey accepts a single safe relative object key: one path segment,

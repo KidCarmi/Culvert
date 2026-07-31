@@ -112,10 +112,16 @@ conflict until the ancestor is resolved. Resolving the §2 multi-category rows m
 
 ---
 
-## 4. Category names
+## 4. Category names & generator-parity structural invariants
 
 **0 violations.** All 21 category names are valid UTF-8, NFC, trimmed, control-char
 free, and within bounds under the F1 contract.
+
+`EvaluateReadiness` also enforces the generator's non-conflict structural
+invariants so `Ready` can never approve a dataset `Generate` would reject
+(case-insensitive category collision, zero-host category, empty dataset). The
+current dataset has **0** such structural issues; `Ready` is false purely because
+of the §1–§3 conflicts.
 
 ---
 

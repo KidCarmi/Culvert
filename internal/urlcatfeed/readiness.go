@@ -21,22 +21,85 @@ type ReadinessConflict struct {
 
 // ReadinessReport is the complete, deterministically-ordered evaluation result.
 type ReadinessReport struct {
-	Ready          bool
-	TotalRawHosts  int
-	UniqueHosts    int
-	InvalidHosts   []ReadinessConflict
-	MultiCategory  []ReadinessConflict
-	SuffixConflict []ReadinessConflict
-	CategoryName   []ReadinessConflict
+	Ready            bool
+	TotalRawHosts    int
+	UniqueHosts      int
+	InvalidHosts     []ReadinessConflict
+	MultiCategory    []ReadinessConflict
+	SuffixConflict   []ReadinessConflict
+	CategoryName     []ReadinessConflict
+	StructuralIssues []ReadinessConflict // generator-parity invariants (empty dataset, zero-host category, case collision)
 }
 
 // EvaluateReadiness produces the full inventory. It is pure and deterministic:
 // every list is sorted, so the same dataset always yields identical output.
 func EvaluateReadiness(ds SourceDataset) *ReadinessReport {
 	r := &ReadinessReport{}
-	// host -> set of categories it is assigned to (deduped)
-	catsOf := map[string]map[string]struct{}{}
+	catsOf := r.collectAssignments(ds)
+	r.UniqueHosts = len(catsOf)
+	r.MultiCategory = detectMultiCategory(catsOf)
+	r.SuffixConflict = detectSuffixConflicts(catsOf)
+	r.StructuralIssues = detectStructuralIssues(ds, catsOf)
 
+	sortConflicts(r.InvalidHosts)
+	sortConflicts(r.MultiCategory)
+	sortConflicts(r.SuffixConflict)
+	sortConflicts(r.CategoryName)
+	sortConflicts(r.StructuralIssues)
+
+	// Ready ⇔ Generate would succeed: every conflict list AND the generator-parity
+	// structural invariants must be clear (Codex P2 — Ready is the F5 publish gate,
+	// so it must reject any dataset Generate rejects).
+	r.Ready = len(r.InvalidHosts) == 0 && len(r.MultiCategory) == 0 &&
+		len(r.SuffixConflict) == 0 && len(r.CategoryName) == 0 &&
+		len(r.StructuralIssues) == 0
+	return r
+}
+
+// detectStructuralIssues mirrors the generator's non-conflict structural
+// rejections so Ready cannot approve a dataset Generate would reject: a
+// case-insensitive category-name collision (ErrCategoryCase), a category with no
+// valid hosts (ErrEmptyCategoryHost), and an empty dataset (ErrNoCats).
+func detectStructuralIssues(ds SourceDataset, catsOf map[string]map[string]struct{}) []ReadinessConflict {
+	var out []ReadinessConflict
+	seen := map[string]string{} // lowercase(canonical) -> canonical
+	for _, c := range ds.Categories {
+		name, err := CanonicalCategoryName(c.Name)
+		if err != nil {
+			continue // name-format issue already recorded under CategoryName
+		}
+		lc := strings.ToLower(name)
+		if prev, ok := seen[lc]; ok && prev != name {
+			out = append(out, ReadinessConflict{
+				Kind: "category_case", Detail: fmt.Sprintf("%q vs %q", prev, name),
+			})
+		}
+		seen[lc] = name
+		if countValidHosts(c.Hosts) == 0 {
+			out = append(out, ReadinessConflict{Kind: "empty_category", Detail: name})
+		}
+	}
+	if len(catsOf) == 0 {
+		out = append(out, ReadinessConflict{Kind: "empty_dataset", Detail: "no valid hosts in any category"})
+	}
+	return out
+}
+
+// countValidHosts counts how many of hosts normalize successfully.
+func countValidHosts(hosts []string) int {
+	n := 0
+	for _, h := range hosts {
+		if _, err := NormalizeHost(h); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// collectAssignments normalizes every (category, host) pair into a host→category-
+// set map, recording category-name and invalid-host conflicts as it goes.
+func (r *ReadinessReport) collectAssignments(ds SourceDataset) map[string]map[string]struct{} {
+	catsOf := map[string]map[string]struct{}{}
 	for _, c := range ds.Categories {
 		name, err := CanonicalCategoryName(c.Name)
 		if err != nil {
@@ -61,20 +124,26 @@ func EvaluateReadiness(ds SourceDataset) *ReadinessReport {
 			catsOf[host][name] = struct{}{}
 		}
 	}
-	r.UniqueHosts = len(catsOf)
+	return catsOf
+}
 
-	// Multi-category: any host assigned to >1 distinct category.
+// detectMultiCategory reports any host assigned to more than one category.
+func detectMultiCategory(catsOf map[string]map[string]struct{}) []ReadinessConflict {
+	var out []ReadinessConflict
 	for host, set := range catsOf {
 		if len(set) > 1 {
-			cats := sortedKeys(set)
-			r.MultiCategory = append(r.MultiCategory, ReadinessConflict{
-				Kind: "multi_category", Host: host, Detail: strings.Join(cats, " | "),
+			out = append(out, ReadinessConflict{
+				Kind: "multi_category", Host: host, Detail: strings.Join(sortedKeys(set), " | "),
 			})
 		}
 	}
+	return out
+}
 
-	// Suffix conflict: a host is a proper DNS suffix of another and their category
-	// SETS differ. Walk each host's ancestor suffixes.
+// detectSuffixConflicts reports any host that is a proper DNS suffix of another
+// where their category SETS differ. Walks each host's ancestor suffixes.
+func detectSuffixConflicts(catsOf map[string]map[string]struct{}) []ReadinessConflict {
+	var out []ReadinessConflict
 	for host, set := range catsOf {
 		rest := host
 		for {
@@ -91,7 +160,7 @@ func EvaluateReadiness(ds SourceDataset) *ReadinessReport {
 				continue
 			}
 			if !sameSet(set, ancSet) {
-				r.SuffixConflict = append(r.SuffixConflict, ReadinessConflict{
+				out = append(out, ReadinessConflict{
 					Kind: "suffix_conflict", Host: host,
 					Detail: fmt.Sprintf("%s{%s} under %s{%s}",
 						host, strings.Join(sortedKeys(set), ","),
@@ -100,15 +169,7 @@ func EvaluateReadiness(ds SourceDataset) *ReadinessReport {
 			}
 		}
 	}
-
-	sortConflicts(r.InvalidHosts)
-	sortConflicts(r.MultiCategory)
-	sortConflicts(r.SuffixConflict)
-	sortConflicts(r.CategoryName)
-
-	r.Ready = len(r.InvalidHosts) == 0 && len(r.MultiCategory) == 0 &&
-		len(r.SuffixConflict) == 0 && len(r.CategoryName) == 0
-	return r
+	return out
 }
 
 func sortedKeys(m map[string]struct{}) []string {

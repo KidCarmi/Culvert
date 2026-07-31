@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestSourceDatasetReadiness evaluates the REAL embedded SaaS dataset against the
@@ -25,9 +26,45 @@ func TestSourceDatasetReadiness(t *testing.T) {
 		t.Fatal("dataset now reports READY — update this test to assert readiness and wire the F5 publish gate")
 	}
 	// Pin the known conflict shape so accidental dataset edits are flagged.
-	if len(r.InvalidHosts) != 4 || len(r.MultiCategory) != 32 || len(r.SuffixConflict) != 6 || len(r.CategoryName) != 0 {
-		t.Errorf("conflict inventory drift: invalid=%d multi=%d suffix=%d catname=%d (want 4/32/6/0) — reconcile roadmap/FEEDS-SOURCE-RECONCILIATION.md",
-			len(r.InvalidHosts), len(r.MultiCategory), len(r.SuffixConflict), len(r.CategoryName))
+	if len(r.InvalidHosts) != 4 || len(r.MultiCategory) != 32 || len(r.SuffixConflict) != 6 || len(r.CategoryName) != 0 || len(r.StructuralIssues) != 0 {
+		t.Errorf("conflict inventory drift: invalid=%d multi=%d suffix=%d catname=%d structural=%d (want 4/32/6/0/0) — reconcile roadmap/FEEDS-SOURCE-RECONCILIATION.md",
+			len(r.InvalidHosts), len(r.MultiCategory), len(r.SuffixConflict), len(r.CategoryName), len(r.StructuralIssues))
+	}
+}
+
+// EvaluateReadiness must reject every dataset Generate rejects — including the
+// non-conflict structural invariants (Codex P2): Ready is the F5 publish gate.
+func TestEvaluateReadiness_GeneratorParityStructural(t *testing.T) {
+	// Empty dataset (Generate → ErrNoCats).
+	if r := EvaluateReadiness(SourceDataset{}); r.Ready || len(r.StructuralIssues) == 0 {
+		t.Errorf("empty dataset should be not-ready with a structural issue: %+v", r.StructuralIssues)
+	}
+	// Zero-host category (Generate → ErrEmptyCategoryHost).
+	zero := EvaluateReadiness(SourceDataset{Categories: []SourceCategory{
+		{Name: "AI", Hosts: []string{"anthropic.com"}},
+		{Name: "Empty", Hosts: []string{}},
+	}})
+	if zero.Ready || len(zero.StructuralIssues) == 0 {
+		t.Errorf("zero-host category should be not-ready with a structural issue: %+v", zero.StructuralIssues)
+	}
+	// Case-insensitive category collision (Generate → ErrCategoryCase).
+	caseColl := EvaluateReadiness(SourceDataset{Categories: []SourceCategory{
+		{Name: "AI", Hosts: []string{"a.example.com"}},
+		{Name: "ai", Hosts: []string{"b.example.com"}},
+	}})
+	if caseColl.Ready || len(caseColl.StructuralIssues) == 0 {
+		t.Errorf("case collision should be not-ready with a structural issue: %+v", caseColl.StructuralIssues)
+	}
+	// Cross-check: each of the above is also rejected by Generate.
+	gen := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
+	for _, ds := range []SourceDataset{
+		{},
+		{Categories: []SourceCategory{{Name: "AI", Hosts: []string{"anthropic.com"}}, {Name: "Empty", Hosts: []string{}}}},
+		{Categories: []SourceCategory{{Name: "AI", Hosts: []string{"a.example.com"}}, {Name: "ai", Hosts: []string{"b.example.com"}}}},
+	} {
+		if _, err := Generate(GenerateInput{Source: ds, FeedVersion: 1, GeneratedAt: gen, ExpiresAt: gen.Add(time.Hour)}); err == nil {
+			t.Errorf("Generate should reject a dataset the readiness gate rejects: %+v", ds)
+		}
 	}
 }
 

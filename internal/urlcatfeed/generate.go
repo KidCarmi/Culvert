@@ -17,6 +17,7 @@ import (
 // yield identical output regardless of input ordering, map iteration order,
 // locale, or timezone.
 
+// Generator error sentinels — tests assert the exact class via errors.Is.
 var (
 	ErrVersion     = errors.New("urlcatfeed: feed_version must be >= 1 and strictly greater than the previous version")
 	ErrExpiry      = errors.New("urlcatfeed: expires_at must be after generated_at (whole-second UTC)")
