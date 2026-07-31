@@ -395,12 +395,12 @@ def _mut(texts, key, fn):
 
 def seed_wrong_req_total(t):
     return _mut(t, 'traceability',
-                lambda s: s.replace('**94 requirements**', '**93 requirements**', 1))
+                lambda s: s.replace('**96 requirements**', '**95 requirements**', 1))
 
 
 def seed_wrong_family_count(t):
     return _mut(t, 'requirements',
-                lambda s: s.replace('MCP-PROTO 14', 'MCP-PROTO 13', 1))
+                lambda s: s.replace('MCP-PROTO 16', 'MCP-PROTO 15', 1))
 
 
 def seed_family_omitted(t):
@@ -417,8 +417,8 @@ def seed_family_unknown(t):
 
 def seed_duplicate_req_total(t):
     return _mut(t, 'requirements',
-                lambda s: s.replace('**Total requirements: 94**',
-                                    '**Total requirements: 94** **Total requirements: 94**', 1))
+                lambda s: s.replace('**Total requirements: 96**',
+                                    '**Total requirements: 96** **Total requirements: 96**', 1))
 
 
 def seed_add_req_row(t):
@@ -439,12 +439,12 @@ def seed_remove_req_row(t):
 
 def seed_wrong_threat_total(t):
     return _mut(t, 'traceability',
-                lambda s: s.replace('**75 threats**', '**74 threats**', 1))
+                lambda s: s.replace('**77 threats**', '**76 threats**', 1))
 
 
 def seed_duplicate_threat_total(t):
     return _mut(t, 'traceability',
-                lambda s: s.replace('**75 threats**', '**75 threats** **75 threats**', 1))
+                lambda s: s.replace('**77 threats**', '**77 threats** **77 threats**', 1))
 
 
 def seed_add_threat_row(t):
@@ -502,8 +502,8 @@ def seed_first_match_laundering(t):
     """First total correct, a second duplicate total wrong — a first-match
     reader passes on the correct one; occurrence counting catches the second."""
     return _mut(t, 'requirements',
-                lambda s: s.replace('**Total requirements: 94**',
-                                    '**Total requirements: 94** (see also **Total requirements: 91**)', 1))
+                lambda s: s.replace('**Total requirements: 96**',
+                                    '**Total requirements: 96** (see also **Total requirements: 91**)', 1))
 
 
 SEEDS = [

@@ -1,6 +1,6 @@
 # MCP Data-Flow Diagrams
 
-Fifteen numbered data-flow diagrams (DFD-1 … DFD-15) for the MCP subsystem. Each marks its **trust
+Sixteen numbered data-flow diagrams (DFD-1 … DFD-16) for the MCP subsystem. Each marks its **trust
 boundaries** (TB-1 … TB-7 from [`THREAT-MODEL.md`](THREAT-MODEL.md)) and the dominant threats. **Status:
 PR-0 design artifact (Proposed).** These are design flows; no runtime exists. Diagrams are Mermaid so they
 render on GitHub and diff cleanly. Management MCP (Capability A) and the Security Gateway (Capability B)
@@ -361,7 +361,7 @@ so the **identity half of MCP-T-069 is NOT closed by this diagram**.
 
 ```mermaid
 flowchart LR
-  BYTES["Hostile client bytes (untrusted)<br/>EITHER listener: Gateway or Management"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
+  BYTES["Hostile PEER bytes (untrusted)<br/>parameterized by PEER ROLE: client-facing OR upstream-server-facing leg<br/>EITHER listener/capability — SAME kernel (MCP-PROTO-015)"] --> FRAME["Bounded transport / framing<br/>MCP-PROTO-005/006/008<br/>evaluated against THIS listener's own bound set"]
   FRAME --> DEC[Strict JSON-RPC decode<br/>single parser, no differential<br/>MCP-PROTO-001/007]
   DEC --> CLASS["ENVELOPE classification: req / resp / notif<br/>version-INDEPENDENT; ID correlation MCP-PROTO-003<br/>MCP-PROTO-002 (envelope half)"]
   CLASS --> STRUCT[Structural validation:<br/>size/depth/fields/string/number limits<br/>MCP-PROTO-006/007]
@@ -393,6 +393,35 @@ flowchart LR
 ```
 Untrusted bytes are bounded and strictly decoded before any downstream stage. **Classification is split around version negotiation:** `CLASS` decides the JSON-RPC *envelope* (request / response / notification) and correlates IDs — both version-independent — while `ADMIT` rejects unknown methods and unadvertised capabilities/extensions **against the negotiated version's** allowlist, which is what `MCP-PROTO-002`'s "per the negotiated version" requires and what a single pre-negotiation classify stage could not implement. Rejection **branches by message class** (MCP-PROTO-013): a rejected **request** yields a bounded, non-leaky JSON-RPC error; a rejected **notification** yields **no wire response at all** (one-way — replying would recreate the notification-flood reply amplifier), only a recorded rejection and metric; a rejected **response** — uncorrelated, malformed or over-limit — is **discarded and recorded with no wire response** (answering a response is a feedback loop); the **offending message's** resources are freed, but an **outstanding-request entry is released only on trustworthy same-session correlation** — never on an ID lifted from the rejected message, since that would be a remote state-deletion primitive — and otherwise expires on its bounded timeout; an **unclassifiable** message yields at most one `id: null` error over a **rate-bounded** path. Deterministic cleanup is **unconditional across every class**. No hostile input may panic the kernel
 (MCP-PROTO-009). **No policy/credential/upstream call exists on this path** — PR-1 is the kernel only.
+The ingress is **parameterized by peer role** (client-facing vs upstream-server-facing); the `ADMIT` stage
+resolves against the Culvert-reviewed [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md), not the raw
+negotiated-version method set. DFD-16 shows the two legs and the admission/owner branches.
+
+## DFD-16 — Two-leg kernel & method admission (Capability **B**, PR-1)
+
+Crosses **TB-1, TB-2**. Threats: MCP-T-076, MCP-T-077 (reverse-channel/requestor-direction state confusion; admitted-but-unpoliced dispatch). The SAME kernel decodes both the client-facing leg (TB-1) and the upstream-server-facing leg (TB-2) with **requestor-scoped** correlation; admission resolves against [MCP-OPERATION-REGISTRY.md](MCP-OPERATION-REGISTRY.md); **no reverse-channel proxying in V1**.
+
+```mermaid
+flowchart LR
+  CBYTES["Client-facing leg (TB-1)<br/>agent → Culvert bytes"] --> KERNEL
+  UBYTES["Upstream-server-facing leg (TB-2)<br/>server ↔ Culvert bytes"] --> KERNEL
+  KERNEL["SAME protocol kernel (MCP-PROTO-001..016)<br/>peer-role parameterized; parser MUST NOT diverge<br/>correlation keyed by (session, requestor-role/direction, request-id)"] --> ADMIT
+  ADMIT{"METHOD ADMISSION<br/>Culvert-reviewed registry (MCP-OPERATION-REGISTRY.md)<br/>NOT the raw negotiated-version method set"}
+  ADMIT --> |"admitted + kernel-terminal<br/>initialize / ping / notifications/* / cancelled"| KT["Kernel handles + answers<br/>no downstream dispatch"]
+  ADMIT --> |"admitted + names ONE decision point<br/>tools/list, tools/call"| DP["Named downstream decision point<br/>catalog/discovery (DFD-4) · policy engine (DFD-5)<br/>default-deny on a representable operand"]
+  ADMIT --> |"absent from registry / rejected class<br/>resources/*, prompts/*, completion/*, tasks/*"| REJ["REJECT at admission (MCP-PROTO-013/016)<br/>no dispatch path; no wire response where class forbids"]
+  UBYTES --> |"server-originated sampling/elicitation/roots<br/>or reverse notifications/cancelled naming a client-owned id"| RCH{"Reverse-channel handling"}
+  RCH --> |"server-originated REQUEST"| REJ2["REJECTED — not proxied to the agent<br/>Culvert advertises no such client capability<br/>MCP-T-076"]
+  RCH --> |"cancellation for a Culvert-originated UPSTREAM request"| KT
+  RCH -. "names a CLIENT-leg id (opposite direction)" .-> NOOP["NO effect — never releases the other<br/>direction's state (MCP-PROTO-015)"]
+  classDef tb fill:#fee,stroke:#c00;
+  class KERNEL,ADMIT tb
+```
+
+Both legs enter the **same** kernel; admission is the single choke point where a method is either
+kernel-terminal, routed to exactly one named decision point, or rejected — never admitted-and-unpoliced and
+never dispatched from outside the registry. A reverse-direction cancellation resolves **only** against the
+same-direction outstanding set; an opposite-direction `id` match has no effect.
 
 ---
 
@@ -415,3 +444,4 @@ Untrusted bytes are bounded and strictly decoded before any downstream stage. **
 | 13 | connectivity | TB-6 | 051, 052, 010 |
 | 14 | connectivity | TB-6, TB-1 | 036, 042, 052, 031 |
 | 15 | **A and B** (both listeners, PR-1 kernel) | **TB-1, TB-7** | 057–074 (parser/framing/version/state) |
+| 16 | **B** (both legs, PR-1 kernel) | **TB-1, TB-2** | 076, 077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |

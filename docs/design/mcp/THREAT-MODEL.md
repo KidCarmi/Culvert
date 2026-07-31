@@ -56,7 +56,7 @@ implemented. Repository facts are cited from [`VERIFIED-REPOSITORY-CONTEXT.md`](
 | TB | Boundary | Primary concerns |
 |---|---|---|
 | TB-1 | Agent/client ↔ Culvert MCP listener | Token validation, Origin/Host, protocol bounds, rate limits. |
-| TB-2 | Culvert ↔ upstream MCP server | mTLS/TLS identity, SSRF/DNS, credential isolation, allowlist. |
+| TB-2 | Culvert ↔ upstream MCP server | mTLS/TLS identity, SSRF/DNS, credential isolation, allowlist. **Untrusted upstream leg carries the same MCP-PROTO obligations as TB-1** — `MCP-PROTO-001..016` decode/framing/version/state bounds and requestor-scoped correlation are enforced by the **same** kernel (`MCP-PROTO-015`, peer role = upstream-server-facing); server-originated reverse-channel requests are rejected per the admitted-method registry (`MCP-PROTO-016`). |
 | TB-3 | Control Plane ↔ Data Planes | Signed snapshot, epoch/fencing, whole-snapshot validation. |
 | TB-4 | Runtime ↔ event/export | Redaction, durability, bounded queues, loss policy. |
 | TB-5 | Admin ↔ policy publication | RBAC, four-eyes, simulation, audit. |
@@ -71,8 +71,9 @@ connector/DMZ ingress · E-7 credential-provider integration · E-8 event export
 
 ## 6. Data flows
 
-See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (15 numbered DFDs; DFD-15 — the PR-1 protocol-kernel
-decode path — added by the remediation). STRIDE-per-flow in §9 references those DFD numbers (DFD-1 … DFD-15).
+See [`DATA-FLOW-DIAGRAMS.md`](DATA-FLOW-DIAGRAMS.md) (16 numbered DFDs; DFD-15 — the PR-1 protocol-kernel
+decode path; DFD-16 — the RPR-1 two-leg kernel & method-admission flow). STRIDE-per-flow in §9 references
+those DFD numbers (DFD-1 … DFD-16).
 
 ## 7. Risk-rating methodology
 
@@ -133,6 +134,7 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-13 | Outbound-only connector | MCP-T-051, MCP-T-052, MCP-T-053 |
 | DFD-14 | Hardened DMZ endpoint | MCP-T-036, MCP-T-042, MCP-T-051 |
 | DFD-15 | Protocol-kernel decode path (PR-1) | MCP-T-057..074 (parser/framing/version/state) |
+| DFD-16 | Two-leg kernel + method admission (PR-1) | MCP-T-076, MCP-T-077 (reverse-channel/direction confusion; admitted-but-unpoliced dispatch) |
 
 ## 10. Security objectives
 
@@ -182,6 +184,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-018 | Policy bypass | High | MCP-POLICY-001,002,005 | Sec/Eng |
 | MCP-T-019 | Privilege expansion | High | MCP-TOOL-004, MCP-POLICY-003 | Sec/Eng |
 | MCP-T-046 | Confused deputy | High | MCP-POLICY-004, MCP-CRED-002 | Sec/Eng |
+| MCP-T-077 | Admitted-but-unpoliced method dispatch — a method Culvert admits (or a spec-version method absent from the Culvert registry) reaches dispatch with **no** downstream decision point, bypassing policy/catalog/credential/approval at once (e.g. `resources/read` carrying no tool identity) | Critical | MCP-POLICY-001, MCP-PROTO-016 (admitted-method registry: forward/reverse parity; registry-absent rejected), MCP-PROTO-002 (admission ordering) | Sec/Eng |
 
 ### Credentials
 
@@ -315,8 +318,10 @@ single "invalid input"). Controls are the new `MCP-PROTO-*` requirements
 | MCP-T-072 | Reconnect / replay of protocol messages (resumption abuse) | Medium | MCP-PROTO-012 | Sec/Eng |
 | MCP-T-073 | Slow-input / partial-frame buffering resource exhaustion (parse-time) | Medium | MCP-PROTO-005,008 | SRE/Sec |
 | MCP-T-074 | Panic / crash / uncontrolled allocation from hostile input | High | MCP-PROTO-009,013 | Sec/Eng |
+| MCP-T-076 | Reverse-channel / requestor-direction state confusion — a well-formed message on one leg/direction (an upstream server's `notifications/cancelled`, or a server-originated `sampling`/`elicitation`/`roots` request) mis-correlates to, cancels or deletes the **other** direction's in-flight state, or is dispatched as a client-originated operation across an unspecified second decoder | High | MCP-PROTO-015 (peer-role kernel + requestor-scoped `(session, direction, id)` state), MCP-PROTO-003, MCP-PROTO-013 | Sec/Eng |
 
-The eight **High** protocol-kernel threats (`MCP-T-058,060,063,066,067,068,069,074`) carry a full
+The nine **High** protocol-kernel threats (`MCP-T-058,060,063,066,067,068,069,074` plus the RPR-1
+reverse-channel threat `MCP-T-076`) carry a full
 Threat → Requirement → Control → Test → Evidence → Owner → Gate row in
 [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md) §1; the Medium ones are covered by the
 protocol-kernel fuzz + structural-limit test classes there.

@@ -7,7 +7,7 @@ shape reached a reviewer, and each is intended to make the same shape
 
 ## CI status — exact, per predicate
 
-**Seven of the eight now run in the required Fast PR Gate.** This changed after board
+**Eight of the nine now run in the required Fast PR Gate.** This changed after board
 blocker #927, which took three PRs and four verification rounds — and *every*
 intermediate head passed the full pipeline while still carrying a real defect,
 including one where the config-surface matrix did not parse as a table at all and
@@ -24,6 +24,7 @@ it parsed these documents.
 | `predicate-25.py` | **Manual only — deliberately excluded from CI** (see below) |
 | `predicate-26.py` | **Runs in Fast PR Gate** |
 | `predicate-27.py` | **Runs in Fast PR Gate** |
+| `predicate-28.py` | **Runs in Fast PR Gate** |
 
 The job runs when a PR touches `docs/design/mcp/**`, ADR-0024, the runner script,
 or `pr-fast-gate.yml`; it is skipped otherwise, and a skip counts as passing. A
@@ -123,6 +124,7 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
 | `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, **every delimiter cell ≥ 3 hyphens**, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals; **every declared summary label present exactly once**, no duplicate members inside a summary, and forward **and** bounded-reverse summary↔live parity for **every** summary; and **two complete, unique published censuses** (value kind *and* registry class) — every vocabulary token claimed exactly once, including zero-valued ones, no unknown tokens, plus the row and sensitive-kind totals — all reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary/census blocks |
 | `predicate-27.py` | both the **requirement** registry and the **threat** registry **parse non-vacuously**, and every published census that summarises them matches the value **derived from the live registry** — the requirement total, namespace (family) count and **complete, unique per-family** census in `SECURITY-REQUIREMENTS.md` `## Summary`; the `TEST-TRACEABILITY-MATRIX.md` final-totals `**N threats**` / `**N requirements**`, its per-family spot-claims, and the §3 `all N requirements, 0 unreachable` total; plus per-ID uniqueness in both registries. Occurrence-counted, not first-match; a statement explicitly describing an **earlier** state is not governed | the requirement rows of `SECURITY-REQUIREMENTS.md` (per-family `\| ID \| … \|` tables) and the canonical `MCP-T-###` rows of `THREAT-MODEL.md` §11 |
+| `predicate-28.py` | the MCP **operation registry** binds both protocol directions to an authorized, parity-checked admitted-method surface — non-vacuous GFM parse; unique composite `(capability, leg, direction, method)` keys; every **admitted** row names one decision point **XOR** is kernel-terminal; every **rejected** row has no dispatch owner; separate Management/Gateway rows; explicit rejection of `resources`/`prompts`/`completion`/`sampling`/`elicitation`/`roots`/`tasks` (incl. `resources/read`, `tasks/cancel`); reverse capabilities not advertised; the requestor-scoped `(session, direction, id)` correlation, same-direction cancellation, `initialize`-not-cancellable and late-cancel normative statements; no `allow_unknown_methods`; and `DATA-FLOW-DIAGRAMS.md`/`PROTOCOL-COMPATIBILITY.md` cross-references | the 16-column table + normative prose of `MCP-OPERATION-REGISTRY.md` (#925/#928) |
 
 ### `predicate-26.py` — the anti-vacuity check
 
@@ -233,6 +235,24 @@ Exit `0` = every property holds, every seed fired its intended violation, every 
 **Negative controls — each MUST stay silent**, proving the predicate governs the two registries and their explicit censuses, not prose: a **historical** statement citing an earlier total (`"88 requirements" … historical`); an **incidental** `MCP-T-###` reference in a non-first column of a §11 row; and an unrelated number in ordinary requirement prose.
 
 **Limits — read before over-claiming.** It governs two named registries and a small, explicit set of census statements about them. It is **not** a general Markdown linter and asserts nothing about any other number, table or file. It does not re-validate *reachability* (that a requirement is actually tested) — it validates that the published *counts* match the live registries; the coverage assertions themselves remain a Phase-5 concern. A statement that explicitly describes an **earlier** state is deliberately out of governance, so a corrected history note never trips it.
+
+### `predicate-28.py` — operation-registry / two-direction authorization parity
+
+**Exact property (RPR-1, #925 + #928).** The MCP operation registry must bind **both** protocol directions to an authorized, parity-checked admitted-method surface. The predicate parses [`MCP-OPERATION-REGISTRY.md`](../MCP-OPERATION-REGISTRY.md) §4 (the 16-column table) plus its normative peer-role / correlation / cancellation / configuration prose, and cross-checks that `DATA-FLOW-DIAGRAMS.md` and `PROTOCOL-COMPATIBILITY.md` reference it.
+
+**How to run** (from the repository root):
+
+```
+python3 docs/design/mcp/predicates/predicate-28.py
+```
+
+Exit `0` = every property holds, every seed fired, every negative control stayed silent. Exit `1` = at least one violation. Stdlib only; no network, no third-party imports, no repository mutation.
+
+**Enforced claims.** Non-vacuous GFM parse (delimiter cells ≥ 3 hyphens; header == delimiter == every row width; zero rows is an unconditional failure); all 16 required columns present; unique composite `(capability, leg / peer role, requestor & direction, method)` keys; **owner XOR** — every *admitted* row names exactly one `decision-point: …` **or** is `kernel-terminal` (never both, never neither), and every *rejected* row has owner `rejected` (no dispatch path for a non-admitted method — reverse parity); separate **Management and Gateway** rows, with `tools/list`/`tools/call` present for both; every rejected family (`resources`, `prompts`, `completion`, `sampling`, `elicitation`, `roots`, `tasks`) present, and `resources/read` + `tasks/cancel` specifically rejected; rejected rows are **not advertised** (advertisement never wider than the registry); the requestor-scoped `(session, requestor-role/direction, request-id)` correlation key, the no-cross-direction-release invariant, same-`id`-both-directions, same-direction-only cancellation, `initialize`-not-cancellable, late-cancel-not-a-duplicate-completion, one-kernel-for-both-legs, and no-`allow_unknown_methods` normative statements; and the two cross-document references.
+
+**Seeded positive controls (17 — each must fire its INTENDED violation):** session-only correlation key; opposite-direction cancellation deleting state; same `id` disallowed across both directions; `initialize` made cancellable; late-cancel treated as duplicate-completion; upstream bytes assigned to another decoder; server `sampling/createMessage` admitted; `resources/read` admitted with no decision point; `tasks/cancel` admitted; admitted row with no owner; admitted row with two owners; duplicate registry row; a dispatch owner on a rejected (non-admitted) method; arbitrary operator method list; capability advertisement wider than the registry; malformed / zero-row table; and first-match laundering (a session-only key added after the correct composite key). **Negative controls (3 — must stay silent):** an unrelated method name in prose; a fenced example mentioning a method; an unrelated edit to the DFD document body.
+
+**Limits.** It parses one named table and an explicit set of normative sentences in one document, plus two cross-reference checks. It is **not** a general Markdown linter, and it does not test runtime dispatch — it gates the *design* registry (the eighteen blocking fixtures are specified in `TEST-TRACEABILITY-MATRIX.md` §1b and land at PR-1/PR-6).
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the

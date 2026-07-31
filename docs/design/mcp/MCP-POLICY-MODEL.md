@@ -24,6 +24,7 @@ A single deterministic function `evaluate(input) → decision` over these inputs
 | Server | registry ID, owner, environment, TLS/workload identity |
 | Tool identity | name + canonical input/output/description hashes ([`TOOL-DISCOVERY-AND-DRIFT.md`](TOOL-DISCOVERY-AND-DRIFT.md)) |
 | Tool risk | intent, input surface, destination breadth, credential power, reversibility |
+| Method / operation | **protocol method** (admitted per [`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md)), **operation class** (read / write / destructive / discovery / control), **operation namespace** (tool name for Gateway tools; mgmt-operation for Management — **tool name is ONE operand type, not the universal authorization key**), **normalized operand identity** (the policy-visible operand extracted per the registry's resource/destination-extraction column). #928 |
 | Arguments | extracted, inspected, resource-bearing fields ([`AUTH-AND-CREDENTIAL-MODEL.md`](AUTH-AND-CREDENTIAL-MODEL.md)) |
 | Resource | repository, project, database, tenant, record scope |
 | Destination | scheme/host/IP class (SSRF policy — MCP-INSP-004) |
@@ -132,6 +133,9 @@ Remediation: review drift or request temporary approval
 ```yaml
 rule: MCP-GITHUB-DEV-WRITE
 when:
+  method: tools/call            # admitted per MCP-OPERATION-REGISTRY.md (not the raw version set)
+  operation.class: write        # read/write/destructive/discovery/control — matched, not assumed
+  operation.namespace: tool     # tool name is ONE operand type, not the universal key
   principal.group: developers
   agent.managed: true
   server.id: github-prod
@@ -148,6 +152,15 @@ else_if:
   resource.branch: main
 action: REQUIRE_APPROVAL   # reason: MCP.POLICY.APPROVAL_REQUIRED
 ```
+
+**Method/operation is a first-class match key (#928).** A rule matches only when the admitted `method` and a
+**representable** operand are present. **Default-deny (`MCP-POLICY-001`) is meaningful only after the method
+and operand have been represented and routed to the named decision point** — "no rule matched" over an
+operand the tuple cannot express is a modelling failure wearing a security outcome's clothes, not honest
+default-deny. For **rejected** V1 method classes (`resources/*` incl. `resources/read`, `prompts/*`,
+`completion/*`, server-originated `sampling`/`elicitation`/`roots`, `tasks/*`), **admission precedes policy**
+and **no policy exception can re-admit them** ([`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md),
+`MCP-PROTO-016`); they never reach this evaluator.
 
 ## 8. Management vs Gateway policy separation
 

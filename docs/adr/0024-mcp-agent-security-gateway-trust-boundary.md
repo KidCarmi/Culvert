@@ -116,8 +116,10 @@ These five decisions were the blocking GO/NO-GO items required before PR-1. They
    verifiable audience cannot be shown to target Culvert at all (fail closed; the unconditional form of
    MCP-AUTH-002).
 3. The client token **MUST NOT** use the upstream business MCP server as its recipient/audience. The
-   approved upstream MCP server, tool and enterprise resource are **policy inputs and credential-broker
-   scope attributes**. Culvert selects a separate upstream credential **only after** an ALLOW-class
+   approved upstream MCP server, **the protocol method and its operation class**, tool and enterprise
+   resource are **policy inputs and credential-broker scope attributes** — the authorization tuple is keyed
+   on the **method/operation**, not tool identity alone (**tool name is one operand type, not the universal
+   key**; #928, MCP-PROTO-016). Culvert selects a separate upstream credential **only after** an ALLOW-class
    policy decision (MCP-POLICY-004 / MCP-CRED-001).
 4. Management MCP and Gateway MCP **MUST** use separate OAuth client registrations, canonical resource
    identifiers and disjoint scope namespaces (MCP-AUTH-008).
@@ -385,10 +387,14 @@ gate (item 5). **D-3, D-4, D-6, D-10, D-12** remain slice-scoped; **D-7, D-11** 
 requirements are defined; only their numeric values are open.
 
 **PR-1 Protocol-Kernel scope (post-remediation).** The PR-1 attack surface — MCP parser, JSON-RPC framing,
-version adapters and protocol state — is modeled by threats **MCP-T-057..074**, bounded by requirements
-**MCP-PROTO-001..014**, and gated by blocking PR-1 fuzz + structural/differential/protocol-state suites plus
-a **D-1-gated** compatibility gate (see `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`, `CI-GATES.md`, and
-`PR1-READINESS-REMEDIATION.md`). Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
+version adapters and protocol state — is modeled by threats **MCP-T-057..074** (plus RPR-1 **MCP-T-076/077**),
+bounded by requirements **MCP-PROTO-001..016**, and gated by blocking PR-1 fuzz +
+structural/differential/protocol-state suites plus a **D-1-gated** compatibility gate. **The kernel is
+peer-role parameterized (one decoder for BOTH the client-facing and upstream-server-facing legs; #925,
+MCP-PROTO-015) with requestor-scoped `(session, direction, id)` correlation, and admits methods only from
+the Culvert-reviewed [`MCP-OPERATION-REGISTRY.md`](../design/mcp/MCP-OPERATION-REGISTRY.md), not the raw
+negotiated-version method set (#928, MCP-PROTO-016).** (See `THREAT-MODEL.md`, `SECURITY-REQUIREMENTS.md`,
+`CI-GATES.md`, and `PR1-READINESS-REMEDIATION.md`.) Item 8's `internal/mcp/*` decision ratifies the **namespace and boundary**;
 the exact leaf-package names remain `[REC]`, subject to implementation review (not fixed by this ADR).
 
 ## Ratification

@@ -243,8 +243,8 @@ those PRs can carry its own gate as a **hard entry condition**, not a follow-up.
 
 **[FACT] One exception now exists, and it is deliberately narrow.** A standalone CI-hardening change wired
 the **document-structure predicates** into the required Fast PR Gate as
-`Gate · MCP design predicates` — an explicit allowlist of **seven**
-(`predicate-19`, `-21`, `-22`, `-23`, `-24`, `-26`, `-27`), run by
+`Gate · MCP design predicates` — an explicit allowlist of **eight**
+(`predicate-19`, `-21`, `-22`, `-23`, `-24`, `-26`, `-27`, `-28`), run by
 [`.github/scripts/mcp-doc-predicates.sh`](../../../.github/scripts/mcp-doc-predicates.sh) when a PR touches
 `docs/design/mcp/**`, ADR-0024, that script, or `pr-fast-gate.yml`. A failure blocks the
 `✅ Fast PR Gate — APPROVED` aggregate; a skip (irrelevant PR) counts as passing. `predicate-25` is
@@ -261,11 +261,29 @@ coverage total — is missing, duplicated, incomplete, stale or internally incon
 recount-vs-increment drift that recurred during RPR-2, where a document published an old total (a stale
 "91 requirements") while every existing check stayed green because nothing recounted the registry.
 
+`predicate-28` is the RPR-1 (#925/#928) member: it parses the Culvert-reviewed
+[`MCP-OPERATION-REGISTRY.md`](MCP-OPERATION-REGISTRY.md) and fails when the admitted-method surface drifts —
+non-vacuous GFM parse; unique composite `(capability, leg, direction, method)` keys; every **admitted** row
+names exactly one downstream decision point **XOR** is kernel-terminal (never both, never neither); every
+**rejected** row has no dispatch owner; separate Management and Gateway rows; explicit rejection of
+`resources/*` (incl. `resources/read`), `prompts/*`, `completion/*`, `sampling`/`elicitation`/`roots` and
+`tasks/*` (incl. `tasks/cancel`); reverse capabilities not advertised; the requestor-scoped
+`(session, direction, id)` correlation, same-direction-only cancellation, `initialize`-not-cancellable and
+late-cancel-tolerated normative statements; no `allow_unknown_methods`; and cross-references from
+`DATA-FLOW-DIAGRAMS.md` and `PROTOCOL-COMPATIBILITY.md`. Seventeen seeds (session-only key,
+opposite-direction cancel deleting state, `initialize` made cancellable, late-cancel-as-duplicate, upstream
+bytes to another decoder, sampling/`resources/read`/`tasks/cancel` admitted, no-owner/two-owner/duplicate
+rows, dispatch-for-absent-method, arbitrary method list, advertisement wider than the registry, zero-row
+table, first-match laundering) each fire their intended violation; three negative controls stay silent. The
+eighteen RPR-1 blocking fixtures are enumerated in [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md)
+§1b — the registry/parity and protocol-state fixtures blocking at **PR-1**, the two business-policy
+enforcement fixtures at **PR-6**, without weakening the PR-1 registry gate.
+
 This exception exists because blocker #927 took three PRs and four verification rounds in which **every**
 intermediate head passed the full pipeline while still carrying a real defect — once because the
 config-surface matrix did not parse as a table at all, making every assertion over it vacuous. No CI job
 parsed these documents, so green carried no signal. **It changes nothing else:** every "Proposed" gate in
-the table above remains proposed and belongs to PR-1 or later, the seven predicates check **design
+the table above remains proposed and belongs to PR-1 or later, the eight predicates check **design
 documents** and not the runtime `configSurfaces` registry, and `MCP-CFG-001`(7)'s registry-side binding
 stays **specified but unenforced** until PR-1.
 

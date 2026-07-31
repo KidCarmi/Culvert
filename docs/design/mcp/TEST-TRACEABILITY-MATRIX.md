@@ -29,9 +29,11 @@ mixed-version/stale-epoch/corrupt-snapshot, MCP-off overhead) are **missing**; t
 >   **MCP-EVENT-007** (isolated denial lane) and **MCP-OPS-005** (restart-persistent, bounded, scoped
 >   degraded-state machine) — one new threat, two new requirements.
 > - **Final totals (independently recomputed against the live registries, not carried forward):**
->   **75 threats**; **94 requirements** (MCP-PROTO **14**, MCP-INSP **9**, MCP-ID **8**, MCP-EVENT **7**,
+>   **77 threats**; **96 requirements** (MCP-PROTO **16**, MCP-INSP **9**, MCP-ID **8**, MCP-EVENT **7**,
 >   MCP-OPS **5**, MCP-CFG **1**; the other families unchanged). No ID was removed; no duplicates; no
->   orphans. *(The previously published "**91 requirements**" was stale: it predated `MCP-CFG-001`, which
+>   orphans. The RPR-1 remediation for [#925](https://github.com/KidCarmi/Culvert/issues/925) and
+>   [#928](https://github.com/KidCarmi/Culvert/issues/928) added `MCP-PROTO-015`/`MCP-PROTO-016` (two
+>   requirements) and `MCP-T-076`/`MCP-T-077` (two threats). *(The previously published "**91 requirements**" was stale: it predated `MCP-CFG-001`, which
 >   #927 added without updating this line. Recounting from the registry rather than incrementing the
 >   published figure is what surfaced that — the same class of drift these matrices exist to catch.)*
 
@@ -85,6 +87,36 @@ Gate = slice/CI gate that must be green.
 | MCP-T-069 identity rebind | MCP-ID-008 | One resolved identity bound per session; mid-session rebind denied | Identity-binding + no-rebind + cross-session tests | No mid-session identity rebind | IAM/Eng | PR-3 |
 | MCP-T-074 hostile-input crash/panic | MCP-PROTO-009, MCP-PROTO-013 | Crash-resistant parse/adapter; bounded error + cleanup | Fuzz (panic/crash detection) + race | No panic/crash on corpus; bounded error | Sec/Eng | PR-1 |
 | MCP-T-057/065 UTF-8 / protocol-token handling | MCP-PROTO-014 | Reject invalid UTF-8; **exact** method-token comparison; reject non-ASCII method names (pending D-1); opaque identifiers not globally normalized by the kernel | Invalid-UTF-8 rejection + exact-comparison + non-ASCII-method-rejection (D-1-gated) + no-global-normalization fixtures | Invalid UTF-8 rejected; method tokens compared exactly; non-ASCII methods rejected; opaque IDs untouched by kernel normalization | Sec/Eng | PR-1 |
+| MCP-T-076 reverse-channel / requestor-direction state confusion | MCP-PROTO-015, MCP-PROTO-003, MCP-PROTO-013 | Peer-role kernel; requestor-scoped `(session, direction, id)` correlation; direction-scoped cancellation; no cross-direction state release | Opposite-direction-cancel-rejected + same-id-both-directions + initialize-not-cancellable + late-cancel-tolerated + upstream-corpus-same-kernel fixtures | Correlation direction-scoped; other direction's state never released; one kernel over both legs | Sec/Eng | PR-1 |
+| MCP-T-077 admitted-but-unpoliced method dispatch | MCP-PROTO-016, MCP-POLICY-001 | Culvert-reviewed admitted-method registry; forward/reverse parity; registry-absent rejected; representable operand before default-deny | Forward/reverse-parity (predicate-28) + resources/read-rejected + registry-absent-rejected + no-config-re-admission + advertisement-matches-registry fixtures | Every admitted method owned once; absent rejected; no unpoliced dispatch | Sec/Eng | PR-1 (parity) / PR-6 (enforcement) |
+
+### 1b. RPR-1 protocol-direction & method-registry blocking fixtures (#925 + #928)
+
+The eighteen fixtures below are **blocking**: the registry/parity and protocol-state fixtures at **PR-1**,
+and the two business-policy-enforcement fixtures (#15, #16) at **PR-6** — without weakening the PR-1
+registry gate. Mirrored in [`CI-GATES.md`](CI-GATES.md); the parity fixtures are executable now as
+`predicates/predicate-28.py`.
+
+| # | Blocking fixture | Requirement | Gate |
+|---|---|---|---|
+| 1 | Same-session **opposite-direction** cancellation is rejected and the owning entry is retained | MCP-PROTO-015 | PR-1 |
+| 2 | The same `id` is outstanding **concurrently in both directions** with no cross-correlation | MCP-PROTO-015 | PR-1 |
+| 3 | Cancellation of `initialize` is rejected | MCP-PROTO-015 | PR-1 |
+| 4 | A **late** post-response cancellation is tolerated, not a duplicate-completion fault | MCP-PROTO-012, MCP-PROTO-015 | PR-1 |
+| 5 | **Wrong-requestor** cancellation (right direction, wrong owner) is rejected | MCP-PROTO-015 | PR-1 |
+| 6 | Server-originated `sampling`/`elicitation`/`roots` request is rejected (no wire response where the class forbids) | MCP-PROTO-016, MCP-PROTO-013 | PR-1 |
+| 7 | `tasks/*` (incl. `tasks/cancel`) is rejected under capability admission | MCP-PROTO-016 | PR-1 |
+| 8 | Hostile **upstream-leg** corpus runs through the **same** kernel — identical classification and bounds on both legs | MCP-PROTO-015 | PR-1 |
+| 9 | Every admitted method resolves to **one** decision point **or** is kernel-terminal | MCP-PROTO-016 | PR-1 |
+| 10 | A registry row with **neither** owner fails the build | MCP-PROTO-016 | PR-1 |
+| 11 | A registry row with **both** owners fails the build | MCP-PROTO-016 | PR-1 |
+| 12 | **No** dispatch path exists for a method absent from the registry (reverse parity) | MCP-PROTO-016 | PR-1 |
+| 13 | A spec-valid but **registry-absent** method is rejected | MCP-PROTO-016 | PR-1 |
+| 14 | `resources/read` is **explicitly rejected** (never admitted-and-unpoliced) | MCP-PROTO-016 | PR-1 |
+| 15 | Each admitted **business** method reaches default-deny with a **representable** operand | MCP-POLICY-001, MCP-PROTO-016 | PR-6 |
+| 16 | Credential scope and audit category resolve for every admitted business method | MCP-CRED-002 | PR-6 |
+| 17 | Arbitrary config **cannot** re-admit an unsupported method (no `allow_unknown_methods`) | MCP-PROTO-016, MCP-CFG-001 | PR-1 |
+| 18 | Capability advertisement **exactly matches** the admitted registry | MCP-PROTO-016 | PR-1 |
 
 ### 1a. Requirement-specific coverage (completeness — do not rely on the "Unit | all" row)
 
@@ -187,7 +219,7 @@ test, evidence, owner and gate, per the completeness rule — a fake threat is N
   test, evidence expectation, owner and gate.
 - Every requirement in [`SECURITY-REQUIREMENTS.md`](SECURITY-REQUIREMENTS.md) is reachable from a §1 or §1a
   row (or the labeled cross-cutting/posture block in §1a) with an explicit test/evidence/owner/gate — **all
-  94 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
+  96 requirements, 0 unreachable** (independently recomputed with exact/comma/range expansion, excluding the
   generic "Unit | all" and "Integration" harness rows, which are **not** counted as requirement-specific
   proof).
 - Every abuse case `MCP-AC-*` maps to a §1 row via its threat/requirement IDs.
