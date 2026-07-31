@@ -10,17 +10,30 @@ import (
 //
 //	go test -bench 'BenchmarkNormalizeHost' -benchmem ./internal/hostutil/
 //
-// Measured on the CI reference box (Intel Xeon @ 2.80GHz, linux/amd64):
+// Measured on Intel Xeon @ 2.80GHz, linux/amd64, -count=5. "before" is
+// BenchmarkNormalizeHostStrict_Baseline, which runs the pre-fast-path body in
+// the same binary, so the comparison needs no checkout of the parent commit.
 //
-//	                          before (idna.ToASCII)   after (fast path)
-//	  ASCII hostname            333 ns/op  96 B  2      46 ns/op   0 B  0
-//	  IP literal                 55 ns/op   0 B  0      55 ns/op   0 B  0   (unchanged)
-//	  IDN / ACE label           ~1.4 µs/op          unchanged (slow path)
+//	                       before                 after
+//	  ShortASCII           238 ns/op  96 B  2      27 ns/op   0 B  0
+//	  TypicalASCII         343 ns/op  96 B  2      79 ns/op   0 B  0
+//	  LongASCII            384 ns/op  96 B  2     103 ns/op   0 B  0
+//	  IPv4Literal           53 ns/op   0 B  0      32 ns/op   0 B  0
+//	  IPv6Literal          149 ns/op  48 B  1      34 ns/op   0 B  0
+//	  MixedCaseASCII       391 ns/op 120 B  3     114 ns/op  24 B  1
+//	  ACELabel             833 ns/op 256 B  7     unchanged (slow path)
+//	  UnicodeIDN           674 ns/op 192 B  5     unchanged (slow path)
+//
+// IP literals are NOT unchanged: they now take the fast path too (every IP
+// literal is pure ASCII and ACE-free), which skips the net.ParseIP probe that
+// allocated on the bracketed-IPv6 shape.
 //
 // The win compounds on the proxy hot path: the SAME destination host is
 // normalized ~10x per request by engines that each defensively normalize their
 // own input (strict dispatch gate, blocklist, threat feed, policy FQDN matching,
-// category lookup, SSL-bypass matcher, autoexclude, auth policy).
+// category lookup, SSL-bypass matcher, autoexclude, auth policy). Confirmed
+// end-to-end by the policy benchgate, where policyStore.Evaluate went from
+// 2 allocs/op to 0 and 767ns to 404ns at 10 rules.
 
 var (
 	benchNorm string
