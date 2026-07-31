@@ -138,7 +138,7 @@ func TestP3S5_SSO_AmbiguousIdP(t *testing.T) {
 
 // End-to-end: a no-IdP SSO FAIL drives the operator-contract verdict to fail.
 func TestP3S5_SSO_EndToEnd_FailVerdict(t *testing.T) {
-	resetPolicyStoreForDiag(t)
+	resetDiagVerdictGlobals(t)
 	withSSORegistry(t) // empty registry
 	policyStore.Add(validSSORule())
 

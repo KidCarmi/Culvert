@@ -96,12 +96,15 @@ func init() {
 // so it does memory-only work and hands the alert off to a goroutine.
 func noteStorageWriteFailure(path string, err error) {
 	base := filepath.Base(path)
-	// Inline ReplaceAll so CodeQL sees the CWE-117 sanitiser at the call site
-	// (the path and the error text both embed caller-influenced content).
-	safeBase := strings.ReplaceAll(strings.ReplaceAll(base, "\n", "_"), "\r", "_")
+	// CWE-117: the path and the error text both embed admin-configurable store
+	// paths. Sanitise ONCE here, at the point the values enter shared state, so
+	// every downstream sink (log line, alert detail, operator-contract message,
+	// rollback API response) is fed already-clean text. sanitizeLog is the
+	// project-standard barrier CodeQL recognises.
+	safeBase := sanitizeLog(base)
 	safeErr := ""
 	if err != nil {
-		safeErr = strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\n", "_"), "\r", "_")
+		safeErr = sanitizeLog(err.Error())
 	}
 	now := time.Now()
 
@@ -128,7 +131,7 @@ func noteStorageWriteFailure(path string, err error) {
 	// The observer is installed at init, which can precede initLogger for a
 	// write that fails during very early startup.
 	if logger != nil {
-		logger.Printf("Storage: DURABLE WRITE FAILED for %q (%d since boot) — persisted state is being lost: %s",
+		logger.Printf("Storage: DURABLE WRITE FAILED for %q (%d since boot) — persisted state is being lost: %q",
 			safeBase, total, safeErr)
 	}
 	if base == alertRetryQueueBase {

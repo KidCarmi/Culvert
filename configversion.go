@@ -253,16 +253,19 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if persistErr != nil {
-		// The scope already strips control bytes; the inline ReplaceAll is kept
-		// so CodeQL sees the CWE-117 sanitiser at the call site.
-		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist: %s",
-			req.Version, strings.ReplaceAll(strings.ReplaceAll(persistErr.Error(), "\n", "_"), "\r", "_"))
+		// CWE-117: the error text embeds store paths, which are ultimately
+		// admin-configurable. sanitizeLog + %q is the project-standard pattern
+		// (CLAUDE.md) — CodeQL recognises sanitizeLog's strings.ReplaceAll as
+		// the barrier, and %q quotes what survives. The scope already strips
+		// control bytes upstream; this is the defence-in-depth copy at the sink.
+		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist: %q",
+			req.Version, sanitizeLog(persistErr.Error()))
 		// 500: the operation did not fully succeed. The body distinguishes it
 		// from a rollback that did not happen at all — the caller must know the
 		// running config HAS changed, so "retry the rollback" is not the fix;
 		// fixing the disk and re-saving is.
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 			"status":         "rolled_back_not_durable",
 			"version":        req.Version,
 			"warnings":       warnings,
@@ -273,7 +276,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 		"status":   "rolled_back",
 		"version":  req.Version,
 		"warnings": warnings,
@@ -429,35 +432,7 @@ func applyConfigBackup(b *configBackup) error {
 	// Rewrite rules: replace all.
 	rewriter.SetRules(b.RewriteRules)
 
-	// SSL bypass + content scan: replace all.
-	_ = sslBypass.Set(b.SSLBypass)
-	sslBypass.Save()
-	// dpiScanner bypass hosts + content scan patterns share a single
-	// content_scan.json envelope (scanner.go Save). Apply both
-	// in-memory first, then ONE Save() so the on-disk file is written
-	// once and never persists an intermediate (bypass-restored,
-	// patterns-stale) state.
-	//
-	// Patterns are applied (and validated) FIRST: dpiScanner.Set
-	// returns an error and leaves the existing patterns unchanged when
-	// a snapshot carries an invalid regex. Only on success do we mutate
-	// bypass hosts and persist — otherwise a bad-pattern snapshot would
-	// leave patterns at the old runtime value while bypass hosts were
-	// already replaced, a silent mixed state matching neither the
-	// snapshot nor the prior state. In-memory order does not affect the
-	// single-envelope Save (both halves are applied before the one
-	// Save). See roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md §8.
-	//
-	// ContentScanBypassHosts is nil-skip:
-	//   - nil   → old/absent snapshot; leave bypass list untouched.
-	//   - []    → snapshot recorded zero bypass hosts; wipe.
-	//   - [...] → wholesale replace.
-	if err := dpiScanner.Set(b.ContentScanPatterns); err == nil {
-		if b.ContentScanBypassHosts != nil {
-			dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
-		}
-		dpiScanner.Save()
-	}
+	applyScanStoresFromBackup(b)
 
 	// File block extensions: remove all, then add.
 	for _, ext := range fileBlocker.List() {
@@ -493,6 +468,58 @@ func applyConfigBackup(b *configBackup) error {
 		rl.ReplaceExemptions(b.RateLimitExempt)
 	}
 
+	applyPACFromBackup(b)
+
+	// Close the scope here (not only via the defer) so its result is available
+	// to the caller. finishScope is once-guarded; the deferred call above is
+	// the panic-path safety net that guarantees the scope is unregistered.
+	if failed := finishScope(); len(failed) > 0 {
+		return fmt.Errorf("rollback applied to the running config but %d file(s) failed to persist: %s",
+			len(failed), strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+// applyScanStoresFromBackup restores the SSL-bypass matcher and the content
+// scanner from a snapshot. Split out of applyConfigBackup for cyclop only —
+// the behaviour, and critically the ordering, is unchanged. Callers must keep
+// invoking it at the same point in the apply sequence.
+func applyScanStoresFromBackup(b *configBackup) {
+	// SSL bypass + content scan: replace all.
+	_ = sslBypass.Set(b.SSLBypass)
+	sslBypass.Save()
+	// dpiScanner bypass hosts + content scan patterns share a single
+	// content_scan.json envelope (scanner.go Save). Apply both
+	// in-memory first, then ONE Save() so the on-disk file is written
+	// once and never persists an intermediate (bypass-restored,
+	// patterns-stale) state.
+	//
+	// Patterns are applied (and validated) FIRST: dpiScanner.Set
+	// returns an error and leaves the existing patterns unchanged when
+	// a snapshot carries an invalid regex. Only on success do we mutate
+	// bypass hosts and persist — otherwise a bad-pattern snapshot would
+	// leave patterns at the old runtime value while bypass hosts were
+	// already replaced, a silent mixed state matching neither the
+	// snapshot nor the prior state. In-memory order does not affect the
+	// single-envelope Save (both halves are applied before the one
+	// Save). See roadmap/SCANNER-ROLLBACK-EXTENSION-SPEC.md §8.
+	//
+	// ContentScanBypassHosts is nil-skip:
+	//   - nil   → old/absent snapshot; leave bypass list untouched.
+	//   - []    → snapshot recorded zero bypass hosts; wipe.
+	//   - [...] → wholesale replace.
+	if err := dpiScanner.Set(b.ContentScanPatterns); err == nil {
+		if b.ContentScanBypassHosts != nil {
+			dpiScanner.SetBypassHosts(b.ContentScanBypassHosts)
+		}
+		dpiScanner.Save()
+	}
+}
+
+// applyPACFromBackup restores PAC configuration and the PAC profile/pool set
+// from a snapshot. Split out of applyConfigBackup for cyclop only — behaviour
+// and ordering are unchanged.
+func applyPACFromBackup(b *configBackup) {
 	// PAC configuration: replace entirely from snapshot.
 	_ = pacStore.Set(PACConfig{
 		ProxyHost:  b.PACProxyHost,
@@ -513,15 +540,6 @@ func applyConfigBackup(b *configBackup) error {
 		}
 		_ = pacProfiles.Set(cur)
 	}
-
-	// Close the scope here (not only via the defer) so its result is available
-	// to the caller. finishScope is once-guarded; the deferred call above is
-	// the panic-path safety net that guarantees the scope is unregistered.
-	if failed := finishScope(); len(failed) > 0 {
-		return fmt.Errorf("rollback applied to the running config but %d file(s) failed to persist: %s",
-			len(failed), strings.Join(failed, "; "))
-	}
-	return nil
 }
 
 // configChange is a single field-level difference between two config versions.
