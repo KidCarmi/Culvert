@@ -371,3 +371,32 @@ func TestBenchGate_TracingIDAllocs(t *testing.T) {
 		}
 	}
 }
+
+// TestBenchGate_PolicyEvalScheduledAllocs locks in the O(1)-allocation scan
+// over scheduled rulesets. Before the minutes-of-day comparison, every rule
+// with a time-of-day window ran fmt.Sprintf("%02d:%02d", ...) per request
+// (1 alloc/rule — 1002 allocs/op measured at 1000 rules, ~35% of the scan's
+// wall time), and each scheduled rule paid its own time.Now() inside the scan.
+// The scan now reads the clock once (lazily) and compares integer minutes; the
+// bound is a constant, not a function of rule count — any reintroduction of
+// per-rule formatting fails this gate.
+func TestBenchGate_PolicyEvalScheduledAllocs(t *testing.T) {
+	const maxAllocs int64 = 4 // steady state 2 (host normalization + client-IP parse)
+	for _, rules := range []int{10, 100, 1000} {
+		ps := buildScheduledPolicyStore(rules)
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = ps.Evaluate("203.0.113.7", "", "unauth", "target.example.com", nil)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("Evaluate scheduled rules=%d: %d allocs/op (bound %d), %d ns/op", rules, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: Evaluate scheduled rules=%d allocates %d/op, exceeds constant bound %d — "+
+				"per-rule time formatting has returned to the schedule check on the policy hot path "+
+				"(fmt.Sprintf in matchSchedule / parseClockMinutes fallback engaged on well-formed bounds?)",
+				rules, allocs, maxAllocs)
+		}
+	}
+}
