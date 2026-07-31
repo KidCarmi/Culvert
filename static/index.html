@@ -5502,9 +5502,14 @@ async function saveUser() {
                            : document.getElementById('um-pass').value;
   const role     = document.getElementById('um-role').value;
 
+  const complexityErr = 'Password must contain at least one uppercase letter, one lowercase letter, and one digit.';
+  const meetsComplexity = p => /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p);
+
   if (!username)                           return showUserErr('Username is required.');
   if (!isEdit && password.length < 8)      return showUserErr('Password must be at least 8 characters.');
+  if (!isEdit && !meetsComplexity(password)) return showUserErr(complexityErr);
   if (isEdit && password && password.length < 8) return showUserErr('New password must be at least 8 characters.');
+  if (isEdit && password && !meetsComplexity(password)) return showUserErr(complexityErr);
 
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
@@ -16538,7 +16543,7 @@ function resetBlockPage() {
     <form id="setup-form" autocomplete="on">
       <label for="su-user">Admin username</label>
       <input id="su-user" type="text" value="admin" autocomplete="username" maxlength="64" required>
-      <label for="su-pass">Password <span style="color:var(--muted)">(minimum 8 characters)</span></label>
+      <label for="su-pass">Password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
       <input id="su-pass" type="password" autocomplete="new-password" minlength="8" required>
       <label for="su-pass2">Confirm password</label>
       <input id="su-pass2" type="password" autocomplete="new-password" minlength="8" required>
@@ -16624,7 +16629,7 @@ function resetBlockPage() {
       <input id="um-username" type="text" class="input" style="width:100%" maxlength="64" autocomplete="off">
     </div>
     <div class="form-group" id="um-pass-group">
-      <label class="form-label">Password <span style="color:var(--muted)">(min 8 characters)</span></label>
+      <label class="form-label">Password <span style="color:var(--muted)">(min 8 chars, incl. uppercase, lowercase &amp; a digit)</span></label>
       <input id="um-pass" type="password" class="input" style="width:100%" autocomplete="new-password">
     </div>
     <div class="form-group" id="um-pass-hint-group" style="display:none">
@@ -16834,6 +16839,8 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 
         if (!user)            return showErr('Username cannot be empty.');
         if (pass.length < 8)  return showErr('Password must be at least 8 characters.');
+        if (!/[A-Z]/.test(pass) || !/[a-z]/.test(pass) || !/[0-9]/.test(pass))
+          return showErr('Password must contain at least one uppercase letter, one lowercase letter, and one digit.');
         if (pass !== pass2)   return showErr('Passwords do not match.');
 
         btn.disabled = true; btn.textContent = 'Saving\u2026';
