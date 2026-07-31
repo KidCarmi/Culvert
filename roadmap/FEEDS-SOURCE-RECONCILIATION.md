@@ -50,9 +50,22 @@ READY=false  raw=662  unique=625  | invalid=4  multi=32  suffix=6  catname=0  st
 | Category-name violations | 0 | ✅ |
 | Generator-parity structural issues | 0 | ✅ |
 
-**No discrepancy.** Counts are byte-for-byte identical to the committed inventory
-(the pinned test `TestSourceDatasetReadiness` asserts 4/32/6/0/0). Reproduce with
-`go test ./internal/urlcatfeed/ -run TestSourceDatasetReadiness -v`.
+**No discrepancy.** These are the **pre-reconciliation** counts, measured on the
+dataset **before** this PR's edits (parent of the dataset commit) — they matched
+the prior report exactly. They are **historical**: after the dataset edits in this
+PR, `TestSourceDatasetReadiness` asserts `Ready == true` (see §5), so it no longer
+reproduces the 4/32/6/0/0 inventory. To reproduce the pre-change baseline, evaluate
+the **parent** dataset, e.g.:
+
+```bash
+# pre-reconciliation baseline (Ready=false, 4/32/6/0/0):
+git show HEAD~1:internal/urlcat/default_categories.json > /tmp/pre.json
+# then run EvaluateReadiness over /tmp/pre.json (see the disposable harness used to
+# produce §1), or check out the dataset commit's parent.
+
+# post-reconciliation (this tree — Ready=true, 0/0/0/0/0):
+go test ./internal/urlcatfeed/ -run TestSourceDatasetReadiness -v
+```
 
 ---
 
