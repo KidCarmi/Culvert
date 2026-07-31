@@ -247,17 +247,54 @@ def _demands_lockout(seg):
     negation exempts it only when ATTACHED (within NEG_WINDOW chars before the
     positive phrase).  Sentence-wide negation matching was too loose and let a
     real lockout demand pass on an unrelated upstream 'cannot'.
+
+    EVERY occurrence is checked, not the first.  `re.search` returns only the
+    leftmost match, so a sentence carrying a NEGATED occurrence followed by a
+    POSITIVE one — "no operations are blocked, but operations are blocked until
+    recovery" — had its first, exempt match end the scan for that pattern and
+    the real demand went unreported.  One laundered occurrence must not grant
+    the whole sentence immunity, so the loop is over `finditer`.
     """
     for sentence in re.split(r'(?<=[.;])\s+', seg):
         if any(re.search(h, sentence) for h in HISTORICAL):
             continue
         for pat in LOCKOUT_POSITIVE:
-            m = re.search(pat, sentence)
-            if not m:
-                continue
-            near = sentence[max(0, m.start() - NEG_WINDOW):m.start()]
-            if not any(re.search(n, near) for n in NEGATED_NEAR):
-                return sentence.strip()
+            prev_end = 0
+            for m in re.finditer(pat, sentence):
+                # The window must not reach back ACROSS a previous occurrence:
+                # in "no operations are blocked, but operations are blocked
+                # until recovery" a plain 45-char lookback around the SECOND
+                # match still swallows the FIRST match's "no", so the negation
+                # attached to one occurrence would exempt the next.  Each
+                # occurrence gets its own window, bounded by the prior match.
+                start = max(m.start() - NEG_WINDOW, prev_end)
+                near = sentence[start:m.start()]
+                prev_end = m.end()
+                if not any(re.search(n, near) for n in NEGATED_NEAR):
+                    return sentence.strip()
+    return None
+
+
+TM = pathlib.Path('docs/design/mcp/THREAT-MODEL.md')
+
+
+def _r6_status():
+    """R-6's CURRENT acceptance state, parsed from THREAT-MODEL §12.
+
+    Returns 'pending', 'accepted', or None when the row cannot be classified.
+    None is a violation, not a pass: an unclassifiable authority means the
+    cross-document comparison below cannot be made, and a check that cannot be
+    made must not report success.
+    """
+    for line in TM.read_text().splitlines():
+        s = line.strip()
+        if not s.startswith('| R-6 |'):
+            continue
+        if re.search(r'NOT accepted by a named human|acceptance PENDING', s):
+            return 'pending'
+        if re.search(r'\bACCEPTED\b|accepted by \*\*|accepted on \d{4}-\d{2}-\d{2}', s):
+            return 'accepted'
+        return None
     return None
 
 
@@ -299,13 +336,29 @@ def ac016_d5_drift():
     else:
         if not re.search(r'`?R-6`?', residual):
             v.append('D-5 residual does not reference R-6')
-        if not re.search(r'PENDING', residual):
-            v.append('D-5 residual does not reproduce R-6\'s PENDING status')
-        # "accepted" is allowed only as an explicit denial of acceptance.
-        for sentence in re.split(r'(?<=[.;])\s+', residual):
-            if re.search(r'\baccepted\b', sentence) and \
-               not re.search(r'NOT accepted|not accepted|does \*\*not\*\* accept|does not accept|stale|never inferred', sentence):
-                v.append(f'D-5 residual claims acceptance while R-6 is PENDING -> {sentence.strip()[:130]!r}')
+        # The required status is READ FROM R-6, never hard-coded.  Hard-coding
+        # `PENDING` here would break in both directions the moment R-6 is
+        # accepted: a correctly-updated D-5 would fail CI, and a STALE D-5 still
+        # claiming PENDING would pass — which is precisely the cross-document
+        # drift this check exists to catch.  The authority is THREAT-MODEL §12.
+        r6 = _r6_status()
+        if r6 is None:
+            v.append('R-6 status not parseable from THREAT-MODEL §12 — predicate not sound')
+        elif r6 == 'pending':
+            if not re.search(r'PENDING', residual):
+                v.append("D-5 residual does not reproduce R-6's PENDING status")
+            # "accepted" is allowed only as an explicit denial of acceptance.
+            for sentence in re.split(r'(?<=[.;])\s+', residual):
+                if re.search(r'\baccepted\b', sentence) and \
+                   not re.search(r'NOT accepted|not accepted|does \*\*not\*\* accept|does not accept|stale|never inferred', sentence):
+                    v.append(f'D-5 residual claims acceptance while R-6 is PENDING -> {sentence.strip()[:130]!r}')
+        elif r6 == 'accepted':
+            # R-6 has been accepted by a named human: D-5 must no longer assert
+            # the pending state, and must not still deny acceptance.
+            for sentence in re.split(r'(?<=[.;])\s+', residual):
+                if re.search(r'PENDING|NOT accepted by a named human', sentence) and \
+                   not re.search(r'stale|\bformer\b|\bwas\b', sentence):
+                    v.append(f'D-5 residual still claims R-6 is PENDING, but R-6 is ACCEPTED -> {sentence.strip()[:130]!r}')
     ev = d5[d5.find('**Evidence:**', d5.find('CLOSED —')):]
     ev = ev[:ev.find('\n  - **')] if ev.find('\n  - **') > 0 else ev
     for need in ('MCP-EVENT-001..007', 'MCP-OPS-005'):
@@ -488,8 +541,22 @@ if __name__ == '__main__':
             AC,
             ('and **no authenticated operation is blocked anywhere**',
              'and subsequent allowed write/high-risk operations are blocked')),
+        # Codex P2 on #971: `re.search` inspects only the LEFTMOST match, so a
+        # negated occurrence followed by a positive one exempted the whole
+        # pattern for that sentence.  This seed is that exact shape.
+        'NEGATED-THEN-POSITIVE: an exempt occurrence must not immunise a later demand': (
+            AC,
+            ('and **no authenticated operation is blocked anywhere**',
+             'and no operations are blocked, but operations are blocked until recovery')),
+        # Codex P2 on #971: the required status must be READ from R-6, not
+        # hard-coded.  Flipping R-6 to ACCEPTED while D-5 still says PENDING is
+        # the stale-D-5 direction, which a hard-coded PENDING check passes.
+        'R-6 ACCEPTED while D-5 still claims PENDING (stale cross-document state)': (
+            TM,
+            ('**SRE / Reliability** (proposed owner — **acceptance PENDING approval, NOT accepted by a named human**)',
+             '**SRE / Reliability** — **ACCEPTED** 2026-08-01')),
     }
-    originals = {AC: AC.read_text(), OD: OD.read_text()}
+    originals = {AC: AC.read_text(), OD: OD.read_text(), TM: TM.read_text()}
     try:
         for label, (target, (old, new)) in arm4_seeds.items():
             if old not in originals[target]:

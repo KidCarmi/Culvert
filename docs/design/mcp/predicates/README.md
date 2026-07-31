@@ -44,8 +44,10 @@ linter and must not become one.
 2. **`MCP-AC-016`'s five fields agree** — Expected control, Expected event, Expected policy result, Test and
    Closure must all take the denial-lane stance, and the Closure must assert the lockout **attack FAILED**
    rather than that a lockout was established.
-3. **`D-5`'s residual references `R-6` and reproduces its PENDING status**, and never claims acceptance
-   while `R-6` is un-accepted.
+3. **`D-5`'s residual is consistent with `R-6`'s CURRENT status, read from `THREAT-MODEL.md` §12** — never
+   hard-coded. While `R-6` is `pending`, `D-5` must reproduce that and must not claim acceptance; once
+   `R-6` is accepted, `D-5` must stop asserting the pending state. An unparseable `R-6` row is a
+   violation, not a pass.
 4. **`D-5`'s evidence names `MCP-EVENT-001..007` and `MCP-OPS-005`**, not the stale `..006` range.
 
 **Why this arm exists.** The #926 remediation updated *some* fields of these two blocks and not others. The
@@ -57,11 +59,20 @@ the session that wrote the change — because nothing quantified over those bloc
 seeds restore the **actual surviving text**, so the arm is pinned to a defect that really occurred rather
 than to a hypothetical one.
 
-**A negation must be attached, not merely nearby.** The first version of this arm exempted a sentence when
-any negation appeared anywhere in it, and a genuine lockout demand passed because an unrelated `cannot`
-sat ~110 characters upstream in the same sentence. The fifth seed reproduces exactly that, and the window
-is 45 characters for this reason — the same "a check that can be laundered is not a check" lesson that
-`predicate-22` and `predicate-26` each learned in their own way.
+**A negation must be attached, and it must belong to ITS OWN occurrence.** This exemption logic leaked
+three times, each caught by a seed rather than by reading:
+
+1. Sentence-wide negation matching let a genuine lockout demand pass because an unrelated `cannot` sat
+   ~110 characters upstream in the same sentence → the window was narrowed to 45 characters.
+2. `re.search` returns only the **leftmost** match, so a negated occurrence followed by a positive one
+   ended the scan for that pattern → the loop is over `finditer`, so every occurrence is inspected.
+3. A plain 45-character lookback around the *second* occurrence still swallowed the *first* occurrence's
+   `no` → each window is bounded by the end of the previous match, so one occurrence's negation can never
+   exempt the next.
+
+The seeds pin all three. This is the same "a check that can be laundered is not a check" lesson
+`predicate-22` and `predicate-26` each learned in their own way — and it took three rounds here because
+each fix opened the next hole, which is exactly why the seeds exist rather than a careful reading.
 
 **Why `predicate-25.py` is excluded.** It is remediation/provenance-specific: it
 diffs against a **fixed historical base commit** (`1203e04b`, overridable via
