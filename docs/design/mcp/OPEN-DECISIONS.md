@@ -111,8 +111,14 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     (amended for [#926](https://github.com/KidCarmi/Culvert/issues/926) / `MCP-T-075`). Design MUST specify ordering scope, dedup, replay cursor, encryption-at-rest, corruption
     recovery, tenant isolation, retention, disk-pressure, restart/failover recovery.
   - **Approver role:** SRE / Security Architecture (facilitator approval recorded; ratification pending).
-  - **Evidence:** VRC §5/§8 (no durable pipeline; audit ring `MaxRing=500`); EVENT-MODEL §4–§6; MCP-EVENT-001..006.
-  - **Residual risk:** critical-event blocking of new writes during a persistence outage is an availability trade-off (accepted, alertable); exporter-adapter integrations verified per deployment.
+  - **Evidence:** VRC §5/§8 (no durable pipeline; audit ring `MaxRing=500`); EVENT-MODEL §4–§6 **and §4b** (containment, denial lane, partition contract, degraded-state machine); **MCP-EVENT-001..007** and **MCP-OPS-005**.
+  - **Residual risk:** tracked as **`R-6`** in [`THREAT-MODEL.md`](THREAT-MODEL.md) §12 — *a genuine durability
+    failure may block critical operations on the affected node/capability until recovery* (`MCP-T-075`,
+    `MCP-T-044`). **Status: proposed owner `SRE / Reliability`; acceptance PENDING approval; NOT accepted by a
+    named human.** This decision block does **not** accept it, and the earlier wording here — which called the
+    trade-off "accepted, alertable" — was **stale**: it asserted an acceptance no named human had given, and
+    contradicted `R-6`'s own pending state. Acceptance is recorded in `THREAT-MODEL.md` §12 by the accepting
+    owner, never inferred from this block. Exporter-adapter integrations verified per deployment.
 
 ### D-6 — Inspection depth
 - **Question:** built-in patterns vs external DLP/AI-security service?
