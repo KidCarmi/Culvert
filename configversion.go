@@ -253,17 +253,24 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if persistErr != nil {
-		// CWE-117: this line interpolates INTEGERS ONLY. Neither an inline
-		// strings.ReplaceAll nor sanitizeLog cleared CodeQL's log-injection
-		// query here (the value reaches the sink through the request-scoped
-		// handler, so the barrier is not recognised on this path), and arguing
-		// with the query is worse than not needing it: the file names are
-		// already delivered to the operator by three other surfaces that
-		// sanitise at their own sink — the audit entry above, the API response
-		// below, and the storage_path row of /api/diagnostics. The log line
-		// only has to say "it happened, to N files, on this version".
-		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist %d file(s) — see the audit entry and the storage_path row of /api/diagnostics for the file names",
-			req.Version, persistFailureCount(persistErr))
+		// CWE-117: nothing request-derived reaches this sink. The only
+		// interpolated value is a count computed from the persistence failures
+		// themselves (store paths, not request data).
+		//
+		// The version number is deliberately NOT logged here. CodeQL's
+		// log-injection query flags any value that flows from the decoded
+		// request body — it kept flagging this line through an inline
+		// strings.ReplaceAll, through sanitizeLog, and finally through a plain
+		// `%d` on the `int` version field, which cannot carry a control
+		// character at all. Rather than carry a permanently-open security alert
+		// for a value that provably cannot inject, the version is dropped from
+		// this line: it is already recorded, for the same incident, in the
+		// audit entry above ("rolled back to version N … NOT DURABLE") and in
+		// the API response below. The file names likewise reach the operator
+		// via the audit entry, the response, and the storage_path row of
+		// /api/diagnostics — each sanitising at its own sink.
+		logger.Printf("Config rollback applied in memory but FAILED to persist %d file(s) — see the config.rollback audit entry for the version and the storage_path row of /api/diagnostics for the file names",
+			persistFailureCount(persistErr))
 		// 500: the operation did not fully succeed. The body distinguishes it
 		// from a rollback that did not happen at all — the caller must know the
 		// running config HAS changed, so "retry the rollback" is not the fix;
