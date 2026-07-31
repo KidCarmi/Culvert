@@ -243,8 +243,8 @@ those PRs can carry its own gate as a **hard entry condition**, not a follow-up.
 
 **[FACT] One exception now exists, and it is deliberately narrow.** A standalone CI-hardening change wired
 the **document-structure predicates** into the required Fast PR Gate as
-`Gate · MCP design predicates` — an explicit allowlist of **six**
-(`predicate-19`, `-21`, `-22`, `-23`, `-24`, `-26`), run by
+`Gate · MCP design predicates` — an explicit allowlist of **seven**
+(`predicate-19`, `-21`, `-22`, `-23`, `-24`, `-26`, `-27`), run by
 [`.github/scripts/mcp-doc-predicates.sh`](../../../.github/scripts/mcp-doc-predicates.sh) when a PR touches
 `docs/design/mcp/**`, ADR-0024, that script, or `pr-fast-gate.yml`. A failure blocks the
 `✅ Fast PR Gate — APPROVED` aggregate; a skip (irrelevant PR) counts as passing. `predicate-25` is
@@ -252,11 +252,20 @@ the **document-structure predicates** into the required Fast PR Gate as
 a general gate it would fail unrelated valid PRs; it stays manual. The membership is an allowlist rather
 than a `predicate-*.py` glob so a future predicate cannot become blocking without review.
 
+`predicate-27` is the newest allowlist member: it mechanically derives the live **requirement** registry
+(`SECURITY-REQUIREMENTS.md`) and the live **threat** registry (`THREAT-MODEL.md` §11) and fails when any
+published census that summarises them — the `SECURITY-REQUIREMENTS.md` `## Summary` total, namespace count
+and complete per-family census; the `TEST-TRACEABILITY-MATRIX.md` final-totals `**N threats**` /
+`**N requirements**` and its per-family spot-claims; and the §3 `all N requirements, 0 unreachable`
+coverage total — is missing, duplicated, incomplete, stale or internally inconsistent. It closes the
+recount-vs-increment drift that recurred during RPR-2, where a document published an old total (a stale
+"91 requirements") while every existing check stayed green because nothing recounted the registry.
+
 This exception exists because blocker #927 took three PRs and four verification rounds in which **every**
 intermediate head passed the full pipeline while still carrying a real defect — once because the
 config-surface matrix did not parse as a table at all, making every assertion over it vacuous. No CI job
 parsed these documents, so green carried no signal. **It changes nothing else:** every "Proposed" gate in
-the table above remains proposed and belongs to PR-1 or later, the six predicates check **design
+the table above remains proposed and belongs to PR-1 or later, the seven predicates check **design
 documents** and not the runtime `configSurfaces` registry, and `MCP-CFG-001`(7)'s registry-side binding
 stays **specified but unenforced** until PR-1.
 

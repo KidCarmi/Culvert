@@ -7,7 +7,7 @@ shape reached a reviewer, and each is intended to make the same shape
 
 ## CI status — exact, per predicate
 
-**Six of the seven now run in the required Fast PR Gate.** This changed after board
+**Seven of the eight now run in the required Fast PR Gate.** This changed after board
 blocker #927, which took three PRs and four verification rounds — and *every*
 intermediate head passed the full pipeline while still carrying a real defect,
 including one where the config-surface matrix did not parse as a table at all and
@@ -23,6 +23,7 @@ it parsed these documents.
 | `predicate-24.py` | **Runs in Fast PR Gate** |
 | `predicate-25.py` | **Manual only — deliberately excluded from CI** (see below) |
 | `predicate-26.py` | **Runs in Fast PR Gate** |
+| `predicate-27.py` | **Runs in Fast PR Gate** |
 
 The job runs when a PR touches `docs/design/mcp/**`, ADR-0024, the runner script,
 or `pr-fast-gate.yml`; it is skipped otherwise, and a skip counts as passing. A
@@ -121,6 +122,7 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class **irreversible-action** table agree cell-for-cell; (arm 3) the two copies of the per-**action-class** durability table agree cell-for-cell, **header included** (#926); (arm 4) **`MCP-AC-016` and `OPEN-DECISIONS` `D-5` carry no stale denial-lockout or residual-acceptance semantics** (#926 post-merge) | `EVENT-MODEL.md` §4a's per-class table; `ABUSE-CASES.md` `MCP-AC-016`; `OPEN-DECISIONS.md` `D-5` |
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
 | `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, **every delimiter cell ≥ 3 hyphens**, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals; **every declared summary label present exactly once**, no duplicate members inside a summary, and forward **and** bounded-reverse summary↔live parity for **every** summary; and **two complete, unique published censuses** (value kind *and* registry class) — every vocabulary token claimed exactly once, including zero-valued ones, no unknown tokens, plus the row and sensitive-kind totals — all reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary/census blocks |
+| `predicate-27.py` | both the **requirement** registry and the **threat** registry **parse non-vacuously**, and every published census that summarises them matches the value **derived from the live registry** — the requirement total, namespace (family) count and **complete, unique per-family** census in `SECURITY-REQUIREMENTS.md` `## Summary`; the `TEST-TRACEABILITY-MATRIX.md` final-totals `**N threats**` / `**N requirements**`, its per-family spot-claims, and the §3 `all N requirements, 0 unreachable` total; plus per-ID uniqueness in both registries. Occurrence-counted, not first-match; a statement explicitly describing an **earlier** state is not governed | the requirement rows of `SECURITY-REQUIREMENTS.md` (per-family `\| ID \| … \|` tables) and the canonical `MCP-T-###` rows of `THREAT-MODEL.md` §11 |
 
 ### `predicate-26.py` — the anti-vacuity check
 
@@ -177,6 +179,60 @@ Seeds 1–3, 6–8 and 11–14 were added after the third verification round; se
 **Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), plus the summary and census blocks of that same document, against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. Summary membership must use **full field names**: the snapshot summary originally abbreviated them (`_credential_revision`), which silently defeated mechanical parity and is why the expanded form is now required. `EXPECTED_ROWS`, the summary bindings and the two vocabularies are deliberate constants: a legitimate row addition, a new summary row or a new class token is expected to fail this predicate until the constant is updated under review.
 
 **It now runs in the required Fast PR Gate** for PRs touching the MCP design surface (see §CI status above) — a failure blocks the aggregate. That closes the "green CI while the document does not parse" gap that produced it, but it does **not** extend its reach: it still checks the design matrix, never the runtime registry.
+
+### `predicate-27.py` — requirement/threat census parity
+
+**Exact property.** Every published census that summarises the MCP requirement or threat registries must be **mechanically derived from the live registry** and must fail CI when it is missing, duplicated, incomplete, stale or internally inconsistent. This closes the **recount-vs-increment** drift that recurred during RPR-2: a document publishes an old total (a stale `91 requirements` that predated a later-added ID) while every existing check stays green, because nothing in CI recounts the live registry and compares it to the published figure. A published prose number is never the authority here — it is the thing under test.
+
+**The two authorities, and only these two.**
+
+- **Requirement registry** — `SECURITY-REQUIREMENTS.md`: the requirement rows of the per-family GFM tables (header `| ID | Statement | … |` or `| ID | Normative statement | … |`). Live facts derived: total ID count, per-family counts, per-ID uniqueness, and the complete family set. The family of an ID is taken from the **row**, never a heading — `## MCP-CPDP / MCP-HA` names two families in one heading, so heading parsing would miscount.
+- **Threat registry** — `THREAT-MODEL.md` §11 "Risk register (canonical threat IDs)": the canonical `MCP-T-###` values in the **first column** of the §11 sub-tables. Live facts: total ID count, per-ID uniqueness. Incidental `MCP-T-###` references elsewhere in the file (STRIDE tables, control columns, residual-risk prose) are **not** the registry and are not counted — negative control 2 pins that.
+
+**Governed censuses — every enforced claim.** Each is compared against the value **derived from the live registry**, occurrence-counted (not first-match):
+
+1. `SECURITY-REQUIREMENTS.md` `## Summary` — `**Total requirements: N**` equals the live total; `across N namespaces` equals the number of live families; the per-family parenthetical `(MCP-PROTO N, …)` is a **complete, unique** family census (forward parity: no unknown family; reverse parity: no live family omitted; uniqueness: no family claimed twice; each count equals live); and the per-family counts **sum** to the live total (internal consistency).
+2. `TEST-TRACEABILITY-MATRIX.md` final-totals bullet — `**N threats**` equals the live threat total; `**N requirements**` (anchored to the adjacent `**N threats**;` so a historical `"**91 requirements**" was stale` sentence is **not** matched) equals the live requirement total; and each per-family spot-claim `MCP-FAM **N**` (a deliberately *partial* list — "the other families unchanged") equals live for the families it names.
+3. `TEST-TRACEABILITY-MATRIX.md` §3 coverage — `all N requirements, 0 unreachable` equals the live requirement total.
+4. Both registries parse **non-vacuously** (a registry that parses to zero rows is an unconditional failure) with a valid GFM table shape (every delimiter cell ≥ 3 hyphens; header width == delimiter width == every data-row width), and every live ID in each registry is **unique**.
+
+The cell splitter is **inline-code aware**: a pipe inside backticks (e.g. a cell reading `` `RC-1|RC-2` ``) is not a column separator, exactly as GitHub renders it — a splitter that ignored code spans would over-count that row and silently drop a live requirement.
+
+**Drift fixed in the same change.** The §3 coverage assertion still read `all 91 requirements, 0 unreachable` — the stale figure the #927 recount corrected in the final-totals bullet but missed here. It is corrected to `94` (the live total, matching the document's own authoritative final-totals census). No requirement, threat or decision text is otherwise touched.
+
+**How to run** (from the repository root):
+
+```
+python3 docs/design/mcp/predicates/predicate-27.py
+```
+
+Exit `0` = every property holds, every seed fired its intended violation, every negative control stayed silent. Exit `1` = at least one violation, printed. Stdlib only; no network, no third-party imports, no repository mutation.
+
+**Seeded positive controls — each of the 17 mutations MUST fire its INTENDED violation** (the harness checks that the seed's new violation contains a target substring, so a seed that trips only a *different* check — e.g. anti-vacuity — is reported `MISSED`, not laundered into a pass):
+
+1. wrong total requirement count;
+2. wrong count for one live requirement family (`PROTO`);
+3. one live family omitted from the family census (`TOOL`) — reverse parity;
+4. duplicate family census claim (`ID`) — uniqueness;
+5. unknown family census claim (`FOO`) — forward parity;
+6. duplicate total requirement claim — uniqueness;
+7. **add** one valid live requirement row without updating any census;
+8. **remove** one valid live requirement row without updating any census;
+9. wrong total threat count;
+10. duplicate total threat claim;
+11. **add** one valid live threat row without updating any census;
+12. **remove** one valid live threat row without updating any census;
+13. the requirement registry table parses to **zero** rows — anti-vacuity;
+14. a malformed requirement-registry delimiter/header width;
+15. **first-match laundering** — a correct total followed by a wrong duplicate; a first-match reader passes on the correct one, occurrence counting catches the second;
+16. a requirement row whose first cell is a **malformed ID** (`MCP-OPS-0O5`) — a row inside a matched registry table must be *reported*, not silently dropped, or a recount-and-reduce hides an untracked requirement *(added in response to Codex review)*;
+17. a stale **duplicate total in a later paragraph** of `## Summary` — census claims are counted over the whole bounded section, not just its first paragraph *(added in response to Codex review)*.
+
+**Enforced but not covered by a dedicated seed** (each is either exercised transitively by the add/remove-row seeds, or shares the exact code path of a seeded case): **per-ID uniqueness** in both registries (a duplicate requirement or threat ID); the **namespace-count** claim and the **family-census internal-sum** consistency (both move under seeds 7/8); the **threat registry's** own anti-vacuity and delimiter/width validation (same parser as the requirement registry, whose zero-row and malformed cases are seeded — 13, 14); and the `TEST-TRACEABILITY-MATRIX.md` **§3 coverage total** and **per-family spot-claims** (both move under seeds 7/8/11/12 — e.g. removing `MCP-OPS-005` makes the `MCP-OPS **5**` spot-claim and the §3 total disagree with the live registry).
+
+**Negative controls — each MUST stay silent**, proving the predicate governs the two registries and their explicit censuses, not prose: a **historical** statement citing an earlier total (`"88 requirements" … historical`); an **incidental** `MCP-T-###` reference in a non-first column of a §11 row; and an unrelated number in ordinary requirement prose.
+
+**Limits — read before over-claiming.** It governs two named registries and a small, explicit set of census statements about them. It is **not** a general Markdown linter and asserts nothing about any other number, table or file. It does not re-validate *reachability* (that a requirement is actually tested) — it validates that the published *counts* match the live registries; the coverage assertions themselves remain a Phase-5 concern. A statement that explicitly describes an **earlier** state is deliberately out of governance, so a corrected history note never trips it.
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the
