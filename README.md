@@ -242,7 +242,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 
 ### Post-Quantum key exchange
 
-Culvert runs on Go 1.25, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
+Culvert runs on Go 1.26, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
 
 ### Supply-chain integrity
 
@@ -321,7 +321,7 @@ Detailed single-node, multi-node, and upstream-chaining topologies are in the **
 
 ## Development
 
-Requires **Go 1.25+**.
+Requires **Go 1.26+**.
 
 ```bash
 go build -o culvert .                        # build
@@ -330,7 +330,7 @@ go test -coverprofile=cover.out ./...        # coverage
 go test -fuzz FuzzIsPrivateHost -fuzztime=30s  # fuzz the SSRF guard
 ```
 
-**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in ~48 packages under `internal/`. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
+**Repository layout:** everything is `package main` at the root (composition roots and thin shims); logic/state/persistence live in 58 packages under `internal/`. Coding conventions, the `internal/` decomposition, and the admin-API route-metadata contract are documented in [`CLAUDE.md`](CLAUDE.md).
 
 **Fuzz targets:** `FuzzIsPrivateHost`, `FuzzIsSafeRedirectURL`, `FuzzParseClamResponse`, `FuzzNormaliseFeedURL`, `FuzzMatchDest`, `FuzzParseYARALiteral`.
 
@@ -348,7 +348,7 @@ Stated plainly, because a security product should be honest about its edges:
 
 - **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
-- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.25); certificate signing remains classical ECDSA P-256.
+- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.26); certificate signing remains classical ECDSA P-256.
 - **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
 - **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.

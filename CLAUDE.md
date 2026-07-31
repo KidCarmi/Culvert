@@ -7,7 +7,7 @@ Single binary, zero runtime dependencies.
 
 ```
 *.go          — package main: composition roots, HTTP/API handlers, and thin shims over internal/
-internal/     — 50 packages (ADR-0002 decomposition, COMPLETE, plus post-decomposition additions): 45 extracted/added engines (incl. autoexclude — the adaptive decryption-exclusion cache) + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
+internal/     — 58 packages (ADR-0002 decomposition, COMPLETE, plus post-decomposition additions): 53 extracted/added engines (incl. autoexclude — the adaptive decryption-exclusion cache) + 4 seams (obs, fileutil, hostutil, ssrf) + halease (ADR-0005 fencing lease). Engines own logic/state/persistence; main keeps singletons, aliases, and wiring. New engines go here with a recorded design; do not re-inline them.
 main.go       — Composition root: entrypoint, flag parsing, the 24 init* startup shims, proxy-server wiring, signal handling (DEBT-003 split; the file is the startup orchestrator only)
 main_shutdown.go — Graceful-shutdown sequence: runShutdownSequence, shutdown-order constants, registerEarly/LateShutdownHooks, drainActiveTunnels
 healthcheck.go — /healthz + /readyz handlers: handleHealth, handleReady, configSnapshotValidatorOK
@@ -109,7 +109,7 @@ docker compose up -d
 ## Code Conventions
 
 - **Package**: Everything is `package main` (flat layout)
-- **Go version**: 1.25 (go.mod pinned to 1.25.12 for govulncheck — fixes GO-2026-5856 in crypto/tls (ECH); previously 1.25.11 for GO-2026-5039 in net/textproto and GO-2026-5037 in crypto/x509, 1.25.10 for GO-2026-4982 in html/template)
+- **Go version**: 1.26 (go.mod; bumped from the prior 1.25.12 govulncheck pin as a side effect of the badger/v4 v4.9.5 dependency update, which raised its own minimum Go requirement)
 - **Logging**: Use `logger.Printf()`, never `log.Printf()` or `fmt.Printf()`
 - **User input in logs**: Wrap with `sanitizeLog(s)` and use `%q` format verb (CWE-117 prevention; sanitizeLog uses strings.ReplaceAll which CodeQL recognises)
 - **CodeQL compliance**: For values that flow through objects (e.g. `rl.Limit()`, `added.Priority`), inline `strings.ReplaceAll` or `fmt.Sprintf` + `strings.ReplaceAll` at the call site so CodeQL sees the sanitiser
