@@ -22,7 +22,10 @@
 // alters the release-catalog trust path; the feed identity is its own pin.
 package urlcatfeed
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Wire constants. These are bound INSIDE the signed bytes and re-checked on
 // verify, so a manifest/artifact for a different schema, protocol, or feed is
@@ -39,6 +42,25 @@ const (
 	// FeedID is the canonical identifier for this feed. A manifest/artifact
 	// whose "feed" differs is rejected (cross-feed substitution guard).
 	FeedID = "url-categories/saas"
+)
+
+// Protocol ceilings (Finding 3 / additional hardening). MaxValidity is the HARD
+// producer + structural-verify ceiling on a signed manifest's validity window
+// (expires_at - generated_at). It is defense-in-depth, distinct from the normal
+// 14-day publisher value (F5) and from the client's current-time freshness /
+// checkpoint enforcement (F3b). MaxArtifactBytes / MaxBundleBytes bound the
+// in-memory inputs the verifier will accept; the F3 downloader MUST enforce the
+// same read bounds on the wire as a precondition.
+const (
+	MaxValidity     = 30 * 24 * time.Hour // 30 days
+	MaxArtifactSize = 8 << 20             // 8 MiB — manifest.artifact_size ceiling
+	MaxBundleBytes  = 1 << 20             // 1 MiB — cosign bundle ceiling
+)
+
+// Category-name contract bounds (Finding 4).
+const (
+	MaxCategoryNameCodePoints = 64
+	MaxCategoryNameBytes      = 255
 )
 
 // SourceCategory is one category of the APPROVED input dataset: a display name

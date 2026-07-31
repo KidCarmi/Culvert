@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -104,8 +103,13 @@ func (v *Verifier) verifyEntity(signed []byte, entity verify.SignedEntity) error
 	return nil
 }
 
-// bundleEntity parses an UNTRUSTED cosign bundle JSON into a signed entity.
+// bundleEntity parses an UNTRUSTED cosign bundle JSON into a signed entity. The
+// input is size-bounded; protojson.Unmarshal rejects unknown fields by default,
+// so a non-bundle blob (even valid JSON) fails here rather than being accepted.
 func bundleEntity(bundleJSON []byte) (verify.SignedEntity, error) {
+	if len(bundleJSON) > MaxBundleBytes {
+		return nil, fmt.Errorf("%w: bundle %d bytes", ErrOversize, len(bundleJSON))
+	}
 	pb := new(protobundle.Bundle)
 	if err := protojson.Unmarshal(bundleJSON, pb); err != nil {
 		return nil, fmt.Errorf("%w: bundle: %v", ErrMalformed, err)
@@ -128,11 +132,10 @@ func (v *Verifier) VerifyEnvelope(envelopeBytes []byte) (*ManifestPayload, error
 		return nil, fmt.Errorf("%w: envelope %d bytes", ErrOversize, len(envelopeBytes))
 	}
 	// Untrusted outer wrapper: ONLY payload_b64 + bundle. No manifest field is
-	// touched here.
+	// touched here. Strict decode = unknown fields, duplicate keys, and trailing
+	// data all rejected (single value + EOF).
 	var env Envelope
-	dec := json.NewDecoder(bytes.NewReader(envelopeBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&env); err != nil {
+	if err := strictUnmarshal(envelopeBytes, &env); err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
 	if env.PayloadB64 == "" || len(env.Bundle) == 0 {
@@ -197,6 +200,9 @@ func (v *Verifier) verifyArtifactWithEntity(artifactBytes []byte, entity verify.
 	if art.FeedVersion != manifest.FeedVersion {
 		return nil, fmt.Errorf("%w: artifact feed_version %d != manifest %d", ErrBinding, art.FeedVersion, manifest.FeedVersion)
 	}
+	if art.GeneratedAt != manifest.GeneratedAt {
+		return nil, fmt.Errorf("%w: artifact generated_at %q != manifest %q", ErrBinding, art.GeneratedAt, manifest.GeneratedAt)
+	}
 	if hostCount != manifest.HostCount || catCount != manifest.CategoryCount {
 		return nil, fmt.Errorf("%w: counts artifact(%d hosts,%d cats) != manifest(%d,%d)",
 			ErrBinding, hostCount, catCount, manifest.HostCount, manifest.CategoryCount)
@@ -204,13 +210,18 @@ func (v *Verifier) verifyArtifactWithEntity(artifactBytes []byte, entity verify.
 	return art, nil
 }
 
-// parseManifestPayload validates the manifest structure and its bound constants.
-// The manifest bytes are already signature-verified when this runs.
+// parseManifestPayload validates the manifest: strict decode (no unknown fields,
+// no duplicate keys, no trailing data), CANONICAL byte-equality, canonical
+// timestamps, the 30-day validity ceiling, and the producer's cross-field
+// invariants (sig-path and artifact-path shape). It runs on
+// signature-verified bytes; current-time freshness enforcement is the client
+// slice (F0 §10), deliberately not done here.
 func parseManifestPayload(b []byte) (*ManifestPayload, error) {
 	var m ManifestPayload
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
+	if err := strictUnmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("%w: manifest: %v", ErrPayload, err)
+	}
+	if err := requireCanonical(b, &m); err != nil {
 		return nil, fmt.Errorf("%w: manifest: %v", ErrPayload, err)
 	}
 	if m.SchemaVersion != SchemaVersion {
@@ -228,41 +239,68 @@ func parseManifestPayload(b []byte) (*ManifestPayload, error) {
 	if !safeRelKey(m.ArtifactPath) {
 		return nil, fmt.Errorf("%w: artifact_path %q", ErrPayload, m.ArtifactPath)
 	}
-	if !safeRelKey(m.ArtifactSigPath) {
-		return nil, fmt.Errorf("%w: artifact_sig_path %q", ErrPayload, m.ArtifactSigPath)
+	if m.ArtifactSigPath != m.ArtifactPath+".sigstore" {
+		return nil, fmt.Errorf("%w: artifact_sig_path %q != %q", ErrPayload, m.ArtifactSigPath, m.ArtifactPath+".sigstore")
 	}
 	if !isSHA256Hex(m.ArtifactSHA256) {
 		return nil, fmt.Errorf("%w: artifact_sha256 %q", ErrPayload, m.ArtifactSHA256)
 	}
-	if m.ArtifactSize <= 0 {
+	if m.ArtifactSize <= 0 || m.ArtifactSize > MaxArtifactSize {
 		return nil, fmt.Errorf("%w: artifact_size %d", ErrPayload, m.ArtifactSize)
 	}
 	if m.CategoryCount < 0 || m.HostCount < 0 {
 		return nil, fmt.Errorf("%w: negative counts", ErrPayload)
 	}
-	gen, err := time.Parse(time.RFC3339, m.GeneratedAt)
+	gen, err := parseCanonicalRFC3339(m.GeneratedAt)
 	if err != nil {
-		return nil, fmt.Errorf("%w: generated_at %q", ErrPayload, m.GeneratedAt)
+		return nil, fmt.Errorf("%w: generated_at %q: %v", ErrPayload, m.GeneratedAt, err)
 	}
-	exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
+	exp, err := parseCanonicalRFC3339(m.ExpiresAt)
 	if err != nil {
-		return nil, fmt.Errorf("%w: expires_at %q", ErrPayload, m.ExpiresAt)
+		return nil, fmt.Errorf("%w: expires_at %q: %v", ErrPayload, m.ExpiresAt, err)
 	}
-	// Structural sanity only — freshness/expiry ENFORCEMENT is the client slice
-	// (F0 §10), deliberately not done here.
 	if !exp.After(gen) {
 		return nil, fmt.Errorf("%w: expires_at not after generated_at", ErrPayload)
+	}
+	if exp.Sub(gen) > MaxValidity {
+		return nil, fmt.Errorf("%w: validity window %s exceeds %s", ErrPayload, exp.Sub(gen), MaxValidity)
+	}
+	// Artifact-path shape is a producer invariant: saas-<8-pad version>-<UTC date>.json.
+	wantPath := fmt.Sprintf("saas-%08d-%s.json", m.FeedVersion, gen.Format("20060102"))
+	if m.ArtifactPath != wantPath {
+		return nil, fmt.Errorf("%w: artifact_path %q != expected %q", ErrPayload, m.ArtifactPath, wantPath)
 	}
 	return &m, nil
 }
 
-// parseArtifactPayload validates the artifact structure, re-runs integrity
-// rejection independently of the producer, and returns recomputed counts.
+// parseCanonicalRFC3339 parses s and requires it to already be in the canonical
+// form the producer emits: UTC, whole seconds, "Z" offset. A same-instant string
+// with a numeric offset or fractional seconds re-formats differently and is
+// rejected, so a signed payload cannot smuggle a non-canonical timestamp.
+func parseCanonicalRFC3339(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if t.UTC().Format(time.RFC3339) != s {
+		return time.Time{}, fmt.Errorf("non-canonical timestamp %q", s)
+	}
+	return t.UTC(), nil
+}
+
+// parseArtifactPayload validates the artifact and returns recomputed counts. It
+// accepts the artifact ONLY if it is already in the EXACT canonical form the
+// producer emits: strict + canonical bytes, canonical UTC timestamp, canonical
+// category names, strictly-ascending (deduplicated) category rows and host rows,
+// already-normalized hosts, no empty-host category, and no multi-category or
+// ancestor/descendant suffix collision. A signed-but-non-canonical or colliding
+// artifact is rejected as a WHOLE candidate (§7.4) — no winner is picked.
 func parseArtifactPayload(b []byte) (art *ArtifactPayload, hostCount, catCount int, err error) {
 	var a ArtifactPayload
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if e := dec.Decode(&a); e != nil {
+	if e := strictUnmarshal(b, &a); e != nil {
+		return nil, 0, 0, fmt.Errorf("%w: artifact: %v", ErrPayload, e)
+	}
+	if e := requireCanonical(b, &a); e != nil {
 		return nil, 0, 0, fmt.Errorf("%w: artifact: %v", ErrPayload, e)
 	}
 	if a.SchemaVersion != SchemaVersion {
@@ -277,25 +315,46 @@ func parseArtifactPayload(b []byte) (art *ArtifactPayload, hostCount, catCount i
 	if a.FeedVersion < 1 {
 		return nil, 0, 0, fmt.Errorf("%w: feed_version %d", ErrPayload, a.FeedVersion)
 	}
-	if _, e := time.Parse(time.RFC3339, a.GeneratedAt); e != nil {
-		return nil, 0, 0, fmt.Errorf("%w: generated_at %q", ErrPayload, a.GeneratedAt)
+	if _, e := parseCanonicalRFC3339(a.GeneratedAt); e != nil {
+		return nil, 0, 0, fmt.Errorf("%w: generated_at %q: %v", ErrPayload, a.GeneratedAt, e)
 	}
 	if len(a.Categories) == 0 {
 		return nil, 0, 0, fmt.Errorf("%w: no categories", ErrPayload)
 	}
-	// Independent integrity re-check: every host must ALREADY be canonical, and
-	// assignHosts re-detects multi-category + ancestor/descendant collisions. A
-	// signed-but-colliding artifact is rejected as a whole candidate (§7.4).
+	// Structural canonicality: rows and hosts must be strictly ascending (which
+	// also rejects duplicate rows / duplicate hosts), names canonical, hosts
+	// already-normalized, no empty-host category.
 	src := make([]SourceCategory, 0, len(a.Categories))
-	for _, c := range a.Categories {
-		for _, h := range c.Hosts {
-			norm, e := NormalizeHost(h)
+	prevCat := ""
+	for ci := range a.Categories {
+		c := a.Categories[ci]
+		name, e := CanonicalCategoryName(c.Name)
+		if e != nil {
+			return nil, 0, 0, fmt.Errorf("%w: category: %v", ErrPayload, e)
+		}
+		if name != c.Name {
+			return nil, 0, 0, fmt.Errorf("%w: non-canonical category name %q", ErrPayload, c.Name)
+		}
+		if ci > 0 && !(prevCat < name) {
+			return nil, 0, 0, fmt.Errorf("%w: category rows not strictly sorted at %q", ErrPayload, name)
+		}
+		prevCat = name
+		if len(c.Hosts) == 0 {
+			return nil, 0, 0, fmt.Errorf("%w: %v: %q", ErrPayload, ErrEmptyCategoryHost, name)
+		}
+		prevHost := ""
+		for hi, h := range c.Hosts {
+			canonHost, e := NormalizeHost(h)
 			if e != nil {
 				return nil, 0, 0, fmt.Errorf("%w: %v", ErrPayload, e)
 			}
-			if norm != h {
-				return nil, 0, 0, fmt.Errorf("%w: non-canonical host %q (want %q)", ErrPayload, h, norm)
+			if canonHost != h {
+				return nil, 0, 0, fmt.Errorf("%w: non-canonical host %q (want %q)", ErrPayload, h, canonHost)
 			}
+			if hi > 0 && !(prevHost < h) {
+				return nil, 0, 0, fmt.Errorf("%w: hosts not strictly sorted in %q at %q", ErrPayload, name, h)
+			}
+			prevHost = h
 		}
 		src = append(src, SourceCategory{Name: c.Name, Hosts: c.Hosts})
 	}

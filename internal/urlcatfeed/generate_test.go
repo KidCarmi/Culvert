@@ -187,24 +187,9 @@ func TestGenerate_EmptyDatasetRejected(t *testing.T) {
 	}
 }
 
-func TestAssembleEnvelope(t *testing.T) {
-	man := []byte(`{"schema_version":1}`)
-	bundle := []byte(`{"mediaType":"x"}`)
-	env, err := AssembleEnvelope(man, bundle)
-	if err != nil {
-		t.Fatalf("AssembleEnvelope: %v", err)
-	}
-	var e Envelope
-	if err := json.Unmarshal(env, &e); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
-	if e.PayloadB64 == "" || len(e.Bundle) == 0 {
-		t.Fatalf("envelope missing parts")
-	}
-	if _, err := AssembleEnvelope(nil, bundle); !errors.Is(err, ErrEnvelope) {
-		t.Errorf("empty payload: err = %v; want ErrEnvelope", err)
-	}
-	if _, err := AssembleEnvelope(man, []byte("not json")); !errors.Is(err, ErrEnvelope) {
-		t.Errorf("bad bundle: err = %v; want ErrEnvelope", err)
-	}
-}
+// AssembleEnvelope's rejection contract is covered by
+// TestAssembleEnvelope_RejectsNonCanonicalManifest (hardening_test.go). Its
+// happy path (a canonical manifest + a REAL cosign bundle → an envelope that
+// VerifyEnvelope accepts) requires a serialized cosign bundle, exercised at F5
+// with real keyless signing — the same documented boundary as the F2 envelope-
+// bytes path.

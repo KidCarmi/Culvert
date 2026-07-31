@@ -18,10 +18,12 @@ import (
 // locale, or timezone.
 
 var (
-	ErrVersion  = errors.New("urlcatfeed: feed_version must be >= 1 and strictly greater than the previous version")
-	ErrExpiry   = errors.New("urlcatfeed: expires_at must be after generated_at")
-	ErrNoCats   = errors.New("urlcatfeed: dataset has no categories with hosts")
-	ErrEnvelope = errors.New("urlcatfeed: envelope assembly failed")
+	ErrVersion     = errors.New("urlcatfeed: feed_version must be >= 1 and strictly greater than the previous version")
+	ErrExpiry      = errors.New("urlcatfeed: expires_at must be after generated_at (whole-second UTC)")
+	ErrNoCats      = errors.New("urlcatfeed: dataset has no categories with hosts")
+	ErrEnvelope    = errors.New("urlcatfeed: envelope assembly failed")
+	ErrZeroTime    = errors.New("urlcatfeed: generated_at/expires_at must be non-zero")
+	ErrMaxValidity = errors.New("urlcatfeed: validity window exceeds the protocol maximum (30d)")
 )
 
 // GenerateInput is the full, explicit input to Generate. Timestamps are supplied
@@ -55,9 +57,21 @@ func Generate(in GenerateInput) (*GenerateResult, error) {
 	if in.FeedVersion < 1 || in.FeedVersion <= in.PrevFeedVersion {
 		return nil, fmt.Errorf("%w: got %d (prev %d)", ErrVersion, in.FeedVersion, in.PrevFeedVersion)
 	}
-	if !in.ExpiresAt.After(in.GeneratedAt) {
+	if in.GeneratedAt.IsZero() || in.ExpiresAt.IsZero() {
+		return nil, ErrZeroTime
+	}
+	// Canonical timestamps: UTC, whole seconds. Truncate BEFORE the ordering and
+	// window checks so validation runs on the EXACT values that will be serialized
+	// — a sub-second-only gap that would collapse to a single RFC3339 second (and
+	// make the emitted manifest fail its own parse) is rejected here (Finding 2).
+	genT := in.GeneratedAt.UTC().Truncate(time.Second)
+	expT := in.ExpiresAt.UTC().Truncate(time.Second)
+	if !expT.After(genT) {
 		return nil, fmt.Errorf("%w: generated=%s expires=%s", ErrExpiry,
-			in.GeneratedAt.UTC().Format(time.RFC3339), in.ExpiresAt.UTC().Format(time.RFC3339))
+			genT.Format(time.RFC3339), expT.Format(time.RFC3339))
+	}
+	if expT.Sub(genT) > MaxValidity {
+		return nil, fmt.Errorf("%w: window=%s", ErrMaxValidity, expT.Sub(genT))
 	}
 
 	ha, err := assignHosts(in.Source.Categories)
@@ -68,7 +82,7 @@ func Generate(in GenerateInput) (*GenerateResult, error) {
 		return nil, ErrNoCats
 	}
 
-	genAt := in.GeneratedAt.UTC().Format(time.RFC3339)
+	genAt := genT.Format(time.RFC3339)
 	cats := groupSorted(ha)
 
 	artifact := ArtifactPayload{
@@ -86,7 +100,7 @@ func Generate(in GenerateInput) (*GenerateResult, error) {
 	sum := sha256.Sum256(artBytes)
 	digest := hex.EncodeToString(sum[:])
 
-	artPath := fmt.Sprintf("saas-%08d-%s.json", in.FeedVersion, in.GeneratedAt.UTC().Format("20060102"))
+	artPath := fmt.Sprintf("saas-%08d-%s.json", in.FeedVersion, genT.Format("20060102"))
 	sigPath := artPath + ".sigstore"
 
 	manifest := ManifestPayload{
@@ -95,7 +109,7 @@ func Generate(in GenerateInput) (*GenerateResult, error) {
 		Feed:            FeedID,
 		FeedVersion:     in.FeedVersion,
 		GeneratedAt:     genAt,
-		ExpiresAt:       in.ExpiresAt.UTC().Format(time.RFC3339),
+		ExpiresAt:       expT.Format(time.RFC3339),
 		ArtifactPath:    artPath,
 		ArtifactSHA256:  digest,
 		ArtifactSize:    int64(len(artBytes)),
@@ -142,33 +156,30 @@ func groupSorted(ha *hostAssignments) []ArtifactCategory {
 	return out
 }
 
-// canonicalJSON marshals with a deterministic, HTML-escape-free encoder. The
-// input types use structs with pre-sorted slices and NO maps, so field and
-// element order are fixed — the bytes are stable across runs and platforms.
-func canonicalJSON(v any) ([]byte, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("urlcatfeed: marshal: %w", err)
-	}
-	return b, nil
-}
-
 // AssembleEnvelope builds the single self-contained manifest envelope object
 // from the EXACT manifest-payload bytes and the cosign bundle produced over those
 // same bytes (F0 §4.2). payload_b64 is standard base64 of manifestBytes, so the
 // verifier decodes back to the exact bytes the bundle signed.
+//
+// Hardening: the payload must be a CANONICAL, structurally-valid manifest (not
+// merely non-empty), and the bundle must parse as a real cosign bundle (not any
+// valid JSON) — so a producer defect can never wrap a malformed manifest or a
+// non-bundle blob into a shippable envelope.
 func AssembleEnvelope(manifestBytes, bundleJSON []byte) ([]byte, error) {
-	if len(manifestBytes) == 0 {
-		return nil, fmt.Errorf("%w: empty manifest payload", ErrEnvelope)
+	if _, err := parseManifestPayload(manifestBytes); err != nil {
+		return nil, fmt.Errorf("%w: payload is not a canonical manifest: %v", ErrEnvelope, err)
 	}
-	if !json.Valid(bundleJSON) {
-		return nil, fmt.Errorf("%w: bundle is not valid JSON", ErrEnvelope)
+	if len(bundleJSON) > MaxBundleBytes {
+		return nil, fmt.Errorf("%w: bundle exceeds %d bytes", ErrEnvelope, MaxBundleBytes)
+	}
+	if _, err := bundleEntity(bundleJSON); err != nil {
+		return nil, fmt.Errorf("%w: bundle is not a valid cosign bundle: %v", ErrEnvelope, err)
 	}
 	env := Envelope{
 		PayloadB64: base64.StdEncoding.EncodeToString(manifestBytes),
 		Bundle:     json.RawMessage(bundleJSON),
 	}
-	out, err := json.Marshal(env)
+	out, err := canonicalJSON(&env)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEnvelope, err)
 	}

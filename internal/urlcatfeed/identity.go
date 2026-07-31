@@ -11,17 +11,21 @@ package urlcatfeed
 //
 // These constants are the single source of truth in the binary. The repo-root
 // feeds_identity.env carries the SAME two strings for CI's cosign verify, and
-// feeds_identity_ssot_test.go (package main) pins them byte-equal so CI and the
+// feeds_identity_test.go (package main) pins them byte-equal so CI and the
 // binary can never drift.
 const (
 	// OfficialIssuer is the EXACT GitHub Actions OIDC issuer (no regex).
 	OfficialIssuer = "https://token.actions.githubusercontent.com"
 
 	// OfficialSANRegex anchors the SAN to a TAGGED release run of THIS repo's
-	// dedicated feed signing workflow (publish-feeds.yml) on a feeds-v* tag —
-	// exact repo + exact workflow file + tag ref, no wildcard. Only that run can
-	// mint a feed-valid identity.
-	OfficialSANRegex = `^https://github\.com/KidCarmi/Culvert/\.github/workflows/publish-feeds\.yml@refs/tags/feeds-v.*$`
+	// dedicated feed signing workflow (publish-feeds.yml) on a feeds-vX.Y.Z
+	// SemVer tag — exact repo + exact workflow file + a strict SemVer tag ref, no
+	// wildcard tail (Finding 6). Only that run can mint a feed-valid identity;
+	// arbitrary tag names after "feeds-v" (e.g. feeds-vgarbage) are rejected.
+	// Prerelease/build-metadata tags are intentionally NOT accepted; adding them
+	// requires an explicit grammar update here + feeds_identity.env + the SSOT
+	// test, together.
+	OfficialSANRegex = `^https://github\.com/KidCarmi/Culvert/\.github/workflows/publish-feeds\.yml@refs/tags/feeds-v[0-9]+\.[0-9]+\.[0-9]+$`
 )
 
 // Identity is a pinned certificate identity policy: an exact OIDC issuer and an

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Normalization + integrity rejection (F0 §7.4, §7.5). Every rule fails CLOSED:
@@ -19,25 +22,54 @@ import (
 
 // Rejection sentinels — tests assert the exact class via errors.Is.
 var (
-	ErrEmptyHost      = errors.New("urlcatfeed: empty host")
-	ErrBadChars       = errors.New("urlcatfeed: host contains scheme/port/path/userinfo or illegal characters")
-	ErrWildcard       = errors.New("urlcatfeed: wildcard host not allowed")
-	ErrIPLiteral      = errors.New("urlcatfeed: IP literal not allowed (DNS names only)")
-	ErrEmptyLabel     = errors.New("urlcatfeed: empty DNS label")
-	ErrLabelLength    = errors.New("urlcatfeed: DNS label length out of range (1..63)")
-	ErrHostLength     = errors.New("urlcatfeed: host length exceeds 253 octets")
-	ErrIDNA           = errors.New("urlcatfeed: host failed IDNA/UTS-46 normalization")
-	ErrPublicSuffix   = errors.New("urlcatfeed: bare public-suffix host not allowed")
-	ErrEmptyCategory  = errors.New("urlcatfeed: empty category name")
-	ErrCategoryCase   = errors.New("urlcatfeed: category names collide case-insensitively")
-	ErrMultiCategory  = errors.New("urlcatfeed: host assigned to more than one category")
-	ErrSuffixConflict = errors.New("urlcatfeed: ancestor/descendant hosts in different categories")
+	ErrEmptyHost         = errors.New("urlcatfeed: empty host")
+	ErrBadChars          = errors.New("urlcatfeed: host contains scheme/port/path/userinfo or illegal characters")
+	ErrWildcard          = errors.New("urlcatfeed: wildcard host not allowed")
+	ErrIPLiteral         = errors.New("urlcatfeed: IP literal not allowed (DNS names only)")
+	ErrEmptyLabel        = errors.New("urlcatfeed: empty DNS label")
+	ErrLabelLength       = errors.New("urlcatfeed: DNS label length out of range (1..63)")
+	ErrHostLength        = errors.New("urlcatfeed: host length exceeds 253 octets")
+	ErrIDNA              = errors.New("urlcatfeed: host failed IDNA/UTS-46 normalization")
+	ErrPublicSuffix      = errors.New("urlcatfeed: bare public-suffix host not allowed")
+	ErrEmptyCategory     = errors.New("urlcatfeed: empty category name")
+	ErrCategoryCase      = errors.New("urlcatfeed: category names collide case-insensitively")
+	ErrMultiCategory     = errors.New("urlcatfeed: host assigned to more than one category")
+	ErrSuffixConflict    = errors.New("urlcatfeed: ancestor/descendant hosts in different categories")
+	ErrCategoryUTF8      = errors.New("urlcatfeed: category name is not valid UTF-8")
+	ErrCategoryChar      = errors.New("urlcatfeed: category name has control/format/separator characters")
+	ErrCategoryLength    = errors.New("urlcatfeed: category name exceeds length bound")
+	ErrEmptyCategoryHost = errors.New("urlcatfeed: category has no hosts")
 )
 
 const (
 	maxHostOctets = 253
 	maxLabelLen   = 63
 )
+
+// CanonicalCategoryName returns the canonical category name for raw, or an error
+// if raw cannot be a valid category name (Finding 4). Canonical form is: valid
+// UTF-8, NFC-normalized, surrounding whitespace trimmed, no control/format/line-
+// separator/paragraph-separator characters, non-empty, and within the length
+// bounds. The producer applies this to source names; the verifier requires an
+// artifact's name to ALREADY equal its canonical form.
+func CanonicalCategoryName(raw string) (string, error) {
+	if !utf8.ValidString(raw) {
+		return "", ErrCategoryUTF8
+	}
+	name := norm.NFC.String(strings.TrimSpace(raw))
+	if name == "" {
+		return "", ErrEmptyCategory
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return "", fmt.Errorf("%w: %q", ErrCategoryChar, raw)
+		}
+	}
+	if utf8.RuneCountInString(name) > MaxCategoryNameCodePoints || len(name) > MaxCategoryNameBytes {
+		return "", fmt.Errorf("%w: %q", ErrCategoryLength, raw)
+	}
+	return name, nil
+}
 
 // NormalizeHost reduces raw to a canonical DNS A-label host or rejects it. The
 // result is parity-equal in spirit to the policy engine's hostutil.NormalizeHost
@@ -115,24 +147,31 @@ func assignHosts(cats []SourceCategory) (*hostAssignments, error) {
 	// lowercase(name), so "AI" and "ai" would fuse).
 	seenCat := make(map[string]string)
 	for _, c := range cats {
-		name := strings.TrimSpace(c.Name)
-		if name == "" {
-			return nil, ErrEmptyCategory
+		name, err := CanonicalCategoryName(c.Name)
+		if err != nil {
+			return nil, err
 		}
 		lc := strings.ToLower(name)
 		if prev, ok := seenCat[lc]; ok && prev != name {
 			return nil, fmt.Errorf("%w: %q vs %q", ErrCategoryCase, prev, name)
 		}
 		seenCat[lc] = name
+		hostsInCat := 0
 		for _, raw := range c.Hosts {
 			host, err := NormalizeHost(raw)
 			if err != nil {
 				return nil, err
 			}
+			hostsInCat++
 			if prev, ok := ha.catOf[host]; ok && prev != name {
 				return nil, fmt.Errorf("%w: %q in %q and %q", ErrMultiCategory, host, prev, name)
 			}
 			ha.catOf[host] = name
+		}
+		// A category that contributes zero hosts is rejected rather than silently
+		// dropped (Finding 4).
+		if hostsInCat == 0 {
+			return nil, fmt.Errorf("%w: %q", ErrEmptyCategoryHost, name)
 		}
 	}
 	if err := ha.checkSuffixConflicts(); err != nil {

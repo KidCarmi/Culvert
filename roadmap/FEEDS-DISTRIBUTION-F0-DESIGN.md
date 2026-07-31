@@ -237,10 +237,13 @@ transport.
 - **Signing:** keyless cosign (Fulcio short-lived cert + Rekor), by a **dedicated
   feed signing workflow** distinct from the catalog's `ci.yml`.
 - **Pinned identity (feed-specific):** separate certificate-identity + issuer
-  policy anchored to the exact feed signing workflow file + tag ref pattern (issuer
-  `https://token.actions.githubusercontent.com`; SAN e.g.
-  `^https://github\.com/KidCarmi/Culvert/\.github/workflows/publish-feeds\.yml@refs/tags/feeds-v.*$`).
-  A **separate pinned identity, NOT a separate cryptographic root.**
+  policy anchored to the exact feed signing workflow file + a STRICT SemVer tag ref
+  (issuer `https://token.actions.githubusercontent.com`; SAN
+  `^https://github\.com/KidCarmi/Culvert/\.github/workflows/publish-feeds\.yml@refs/tags/feeds-v[0-9]+\.[0-9]+\.[0-9]+$`
+  — exact `feeds-vX.Y.Z`, no wildcard tail so arbitrary tag names after `feeds-v`
+  are rejected; Finding 6). A **separate pinned identity, NOT a separate
+  cryptographic root.** Prerelease tags are not accepted; changing the grammar is a
+  coordinated update to `feeds_identity.env` + the Go constant + the SSOT test.
 - **Trusted root:** the **shared Sigstore public-good `trusted_root.json`** already
   baked for the catalog (`release_catalog_sigstore.go:52-53`). No separate crypto
   root is claimed or provisioned. Overridable (public material only) via a
