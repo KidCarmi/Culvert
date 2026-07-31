@@ -375,12 +375,33 @@ critical operation to run in a degraded domain without a durable event.
 `critical-durability-degraded` **MAY** exit **only** after **all** of:
 
 1. **durable storage is writable** (a probe write to the domain's partition succeeds);
-2. **critical reserved capacity is above the recovery watermark** (`P-CRIT` free ≥ the configured low
-   watermark for the reserve);
+2. **critical reserved capacity is above the reserve recovery watermark** — `P-CRIT` free bytes ≥
+   `reserve_recovery` × `mcp_{gateway,mgmt}_event_critical_reserve_bytes`, measured **on disk**;
 3. **a recovery/health marker is durably committed and read back** — commit-confirmed, not merely enqueued
    (this is the same "confirmed commit, not an enqueue" rule the fail-closed gate uses, applied to
    recovery, so a spool that accepts writes but loses them cannot clear the state); and
-4. **pending critical records are within the stated safe bound** (backlog ≤ the configured pending bound).
+4. **pending critical records are within the derived safe bound** — the **in-process** backlog of critical
+   records accepted but not yet commit-confirmed occupies no more than
+   `(100% − reserve_recovery)` × `mcp_{gateway,mgmt}_event_critical_reserve_bytes`.
+
+> **The recovery watermark is a fraction OF THE RESERVE, never of the spool — and this is load-bearing.**
+> `event_spool_watermarks.high`/`.low` govern **reclamation** and are expressed against
+> `event_spool_max_bytes`. Criterion (2) is expressed against `event_critical_reserve_bytes` via a
+> **third, separate member** `event_spool_watermarks.reserve_recovery`, validated `0 < reserve_recovery ≤
+> 100%`. Reusing the spool-relative `.low` here would admit configurations whose exit condition is
+> **unreachable by construction**: with a reserve of 10% of the spool and `.low` at 50%, `P-CRIT` free
+> space can never reach 50% *of the spool*, so the domain would stay `critical-durability-degraded`
+> forever even on perfectly healthy storage — a permanent lockout produced by valid configuration, which
+> is the exact failure class §4b exists to remove. Because `reserve_recovery` is a fraction of the reserve
+> and the reserve is non-zero by validation, **every accepted configuration has a reachable exit.**
+>
+> **Criteria (2) and (4) are complementary, not redundant, and both MUST hold.** They partition the same
+> reserve budget but are **observed by different probes**: (2) is free space **on disk**, (4) is the
+> **in-process** queue of records that have been accepted but whose commit is not yet confirmed. A spool
+> reporting ample free space while the process still holds unflushed critical records is precisely the
+> disagreement worth catching — clearing the state on (2) alone would re-admit critical operations into a
+> runtime that is still behind on the evidence for the previous ones. The **pending bound is derived, not
+> separately configured**, so the two can never be set to contradict each other.
 
 Exit **MUST** occur **within one bounded probe interval** after all four hold
 (`mcp_{gateway,mgmt}_durability_recovery_probe_interval`). A degraded state that outlives the condition

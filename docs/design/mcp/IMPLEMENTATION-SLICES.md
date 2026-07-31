@@ -140,7 +140,7 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** reusing the 500-entry audit ring as production evidence.
 - **Trust boundary:** TB-4.
 - **Dependencies:** PR-6.
-- **Security requirements:** MCP-EVENT-001..006; MCP-PRIVACY-002.
+- **Security requirements:** MCP-EVENT-001..**007**; **MCP-OPS-005**; MCP-PRIVACY-002. *(`MCP-EVENT-007` — the isolated denial lane — and `MCP-OPS-005` — the restart-persistent, bounded, scoped degraded-state machine — are the requirements the nine `MCP-T-075` containment tests below implement. Omitting them here would let an implementer scoping from this slice treat both as unassigned despite the acceptance text demanding them.)*
 - **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
   **nine blocking `MCP-T-075` containment tests** ([CI-GATES.md](CI-GATES.md)), headed by the **attacker test**:
   saturate the denial lane with unauthenticated auth failures and assert authenticated allowed critical work in
