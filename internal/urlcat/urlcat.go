@@ -160,7 +160,9 @@ func (s *Store) Save() {
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	_ = fileutil.AtomicWrite(s.path, data, 0o600)
+	// CHAOS-27: tracked so a full/read-only data dir cannot silently keep the
+	// on-disk categories stale while the API reports success.
+	_ = fileutil.AtomicWriteTracked("url_categories", s.path, data, 0o600)
 }
 
 // All returns a copy of all category entries.

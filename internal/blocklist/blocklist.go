@@ -95,7 +95,10 @@ func (b *Store) saveMode() {
 	if b.path == "" {
 		return
 	}
-	_ = fileutil.AtomicWrite(b.path+".mode", []byte(b.mode), 0o600)
+	// CHAOS-27: tracked. A lost .mode write is the highest-consequence silent
+	// revert in this file — it flips the list between allow (default-deny) and
+	// block (default-allow) semantics on the next restart.
+	_ = fileutil.AtomicWriteTracked("blocklist_mode", b.path+".mode", []byte(b.mode), 0o600)
 }
 
 // loadHostSidecar reads a one-host-per-line sidecar (".manual" /
@@ -250,9 +253,11 @@ func (b *Store) Save() {
 	// unique tmp + chmod + fsync(file) + rename + best-effort
 	// fsync(parent dir) — replaces the previous os.OpenFile+os.Rename
 	// path which was atomic-via-rename but NOT fsynced.
-	_ = fileutil.AtomicWrite(path, []byte(buf.String()), 0o600)
+	// CHAOS-27: both writes tracked so a full/read-only disk cannot silently
+	// leave the enforced list and its feed attribution stale on disk.
+	_ = fileutil.AtomicWriteTracked("blocklist", path, []byte(buf.String()), 0o600)
 	if data, err := json.Marshal(sources); err == nil {
-		_ = fileutil.AtomicWrite(path+".sources", data, 0o600)
+		_ = fileutil.AtomicWriteTracked("blocklist_sources", path+".sources", data, 0o600)
 	}
 }
 
@@ -351,7 +356,10 @@ func (b *Store) saveExceptions() {
 	for h := range b.exceptions {
 		fmt.Fprintln(&sb, h)
 	}
-	_ = fileutil.AtomicWrite(b.path+".exceptions", []byte(sb.String()), 0o600)
+	// CHAOS-27: tracked (see Save). Note the caller holds b.mu.RLock across
+	// this write — the reporter installed by package main only logs/alerts and
+	// never re-enters the store.
+	_ = fileutil.AtomicWriteTracked("blocklist_exceptions", b.path+".exceptions", []byte(sb.String()), 0o600)
 }
 
 // looksLikeHostname returns true if s plausibly resembles a hostname.
@@ -573,7 +581,8 @@ func (b *Store) saveManual() {
 	for h := range b.manual {
 		fmt.Fprintln(&sb, h)
 	}
-	_ = fileutil.AtomicWrite(b.path+".manual", []byte(sb.String()), 0o600)
+	// CHAOS-27: tracked (see Save).
+	_ = fileutil.AtomicWriteTracked("blocklist_manual", b.path+".manual", []byte(sb.String()), 0o600)
 }
 
 // Remove deletes host from the enforcement maps, the manual set, and the

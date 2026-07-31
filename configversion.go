@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/configver"
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/pac"
 )
 
@@ -221,12 +222,11 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applyConfigBackup(&target)
+	persistFailures := applyConfigBackup(&target)
 
 	actor := sessionAdmin(r)
 	auditEvent(r, "config.rollback", "system",
-		fmt.Sprintf("rolled back to version %d (from %s by %s)",
-			req.Version, meta.CreatedAt, sanitizeLog(meta.Actor)))
+		rollbackAuditDetail(req.Version, meta, persistFailures))
 
 	saveConfigVersion(actor, fmt.Sprintf("rollback to v%d", req.Version))
 
@@ -237,11 +237,44 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	}
 
+	writeRollbackResult(w, req.Version, warnings, persistFailures)
+}
+
+// rollbackAuditDetail builds the config.rollback audit line. CHAOS-27: the
+// audit trail is the compliance record of what the operator was told, so a
+// partial-durability rollback must not read as a clean one.
+func rollbackAuditDetail(version int, meta ConfigVersion, persistFailures []string) string {
+	detail := fmt.Sprintf("rolled back to version %d (from %s by %s)",
+		version, meta.CreatedAt, sanitizeLog(meta.Actor))
+	if len(persistFailures) > 0 {
+		detail += fmt.Sprintf(" — NOT DURABLE: %d config store(s) failed to persist (%s)",
+			len(persistFailures), sanitizeLog(strings.Join(persistFailures, ", ")))
+	}
+	return detail
+}
+
+// writeRollbackResult writes the rollback response. CHAOS-27: a rollback whose
+// stores could not be written is applied in memory but will be silently undone
+// by the next restart. Answering 200 "rolled_back" there is exactly the
+// silent-failure mode this path was fixed for, so the response carries the
+// failing store names AND a 500 — the operator must treat the rollback as
+// incomplete and fix the filesystem. `applied` stays true either way, because
+// the running config really did change; the UI relies on that to distinguish
+// "rollback failed" from "rollback applied but not saved".
+func writeRollbackResult(w http.ResponseWriter, version int, warnings, persistFailures []string) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"status":   "rolled_back",
-		"version":  req.Version,
-		"warnings": warnings,
+	status, code := "rolled_back", http.StatusOK
+	if len(persistFailures) > 0 {
+		status, code = "rolled_back_not_durable", http.StatusInternalServerError
+	}
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
+		"status":          status,
+		"version":         version,
+		"warnings":        warnings,
+		"applied":         true,
+		"persist_errors":  persistFailures,
+		"persist_durable": len(persistFailures) == 0,
 	})
 }
 
@@ -308,9 +341,23 @@ func restoreBlocklistFromBackup(b *configBackup) {
 }
 
 // applyConfigBackup restores all config stores from a backup snapshot.
-func applyConfigBackup(b *configBackup) {
+//
+// CHAOS-27: the return value names the config stores whose durable write FAILED
+// while the snapshot was being applied (empty on a fully durable rollback). Each
+// store's Save() persists best-effort and cannot report upward without a
+// signature change across ~60 call sites, so attribution comes from the
+// fileutil durable-write registry: the global failure sequence is sampled either
+// side of the apply and any store that failed inside that window is named. The
+// in-memory apply is unconditional either way — the running config is correct
+// and strictly newer than disk; what the caller must not do is report an
+// unqualified success, which is exactly what this path did before.
+func applyConfigBackup(b *configBackup) []string {
 	configRollbackMu.Lock()
 	defer configRollbackMu.Unlock()
+	// The window opens here and is read at the single exit below — this
+	// function has no early returns, so a deferred capture would only add a
+	// closure (and a cyclomatic branch) for no benefit.
+	seq := fileutil.PersistFailureSeq()
 	restoreBlocklistFromBackup(b)
 
 	// URLCategories MUST be applied before CategoryGroups (which may
@@ -407,6 +454,19 @@ func applyConfigBackup(b *configBackup) {
 		dpiScanner.Save()
 	}
 
+	applyFileBlockIPFilterRateLimitFromBackup(b)
+	applyPACFromBackup(b)
+
+	// CHAOS-27: name every store whose durable write failed inside the window
+	// opened above. Read while configRollbackMu is still held.
+	return fileutil.PersistFailuresSince(seq)
+}
+
+// applyFileBlockIPFilterRateLimitFromBackup restores the file-block extension
+// set, the IP filter, and the rate limiter. Split out of applyConfigBackup for
+// complexity only — the call order inside and relative to its caller is
+// unchanged and load-bearing.
+func applyFileBlockIPFilterRateLimitFromBackup(b *configBackup) {
 	// File block extensions: remove all, then add.
 	for _, ext := range fileBlocker.List() {
 		fileBlocker.Remove(ext)
@@ -440,7 +500,11 @@ func applyConfigBackup(b *configBackup) {
 	if b.RateLimitExempt != nil {
 		rl.ReplaceExemptions(b.RateLimitExempt)
 	}
+}
 
+// applyPACFromBackup restores PAC configuration and, when the snapshot carries
+// them, PAC profiles/pools. Split out of applyConfigBackup for complexity only.
+func applyPACFromBackup(b *configBackup) {
 	// PAC configuration: replace entirely from snapshot.
 	_ = pacStore.Set(PACConfig{
 		ProxyHost:  b.PACProxyHost,
@@ -451,16 +515,17 @@ func applyConfigBackup(b *configBackup) {
 	// PAC profiles/pools (PAC initiative PR 2): nil → snapshot predates the
 	// feature, skip; [] → explicit wipe; populated → wholesale replace.
 	// Tolerant Set — rollback must never reject historical data.
-	if b.PACProfiles != nil || b.PACPools != nil {
-		cur := pacProfiles.Get()
-		if b.PACProfiles != nil {
-			cur.Profiles = b.PACProfiles
-		}
-		if b.PACPools != nil {
-			cur.Pools = b.PACPools
-		}
-		_ = pacProfiles.Set(cur)
+	if b.PACProfiles == nil && b.PACPools == nil {
+		return
 	}
+	cur := pacProfiles.Get()
+	if b.PACProfiles != nil {
+		cur.Profiles = b.PACProfiles
+	}
+	if b.PACPools != nil {
+		cur.Pools = b.PACPools
+	}
+	_ = pacProfiles.Set(cur)
 }
 
 // configChange is a single field-level difference between two config versions.

@@ -163,7 +163,9 @@ func (s *ContentScanner) Save() {
 	}
 	// Bucket-4 durability hardening: AtomicWrite gives unique tmp + chmod +
 	// fsync(file) + rename + best-effort fsync(parent dir).
-	_ = fileutil.AtomicWrite(path, data, 0o600)
+	// CHAOS-27: tracked — content-scan patterns and bypass hosts share this
+	// envelope; a lost write silently reverts both.
+	_ = fileutil.AtomicWriteTracked("content_scan", path, data, 0o600)
 }
 
 // SetBypassHosts atomically replaces the DPI bypass host list. Hosts are

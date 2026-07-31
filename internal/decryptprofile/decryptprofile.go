@@ -348,7 +348,9 @@ func (s *Store) Save() {
 	if err != nil {
 		return
 	}
-	_ = fileutil.AtomicWrite(path, data, 0o600)
+	// CHAOS-27: tracked — a lost profile write silently reverts decryption
+	// posture (incl. OnInspectError fail-open/closed) on the next restart.
+	_ = fileutil.AtomicWriteTracked("decryption_profiles", path, data, 0o600)
 }
 
 // List returns a copy of all profiles (safe for JSON serialization).

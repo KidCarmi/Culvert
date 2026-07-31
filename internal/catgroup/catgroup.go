@@ -162,7 +162,9 @@ func (s *Store) Save() {
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced (P6.1 UC-1).
-	_ = fileutil.AtomicWrite(path, data, 0o600)
+	// CHAOS-27: tracked — a discarded write error here silently reverts every
+	// category group on the next restart.
+	_ = fileutil.AtomicWriteTracked("category_groups", path, data, 0o600)
 }
 
 // List returns a copy of all groups (safe for JSON serialization).

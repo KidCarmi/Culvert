@@ -8156,6 +8156,17 @@
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The rollback was applied to the running configuration but one or more config stores could not be written to disk (full, read-only, or permission-broken data directory). The JSON body carries applied=true, persist_durable=false and persist_errors (the failing store names); the change is live but will be lost on restart."
           }
         },
         "security": [

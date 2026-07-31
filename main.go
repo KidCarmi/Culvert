@@ -1200,6 +1200,14 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return fileutil.AtomicWrite(path, data, perm)
 }
 
+// atomicWriteFileTracked is atomicWriteFile plus CHAOS-27 durable-write
+// accounting: the failure is counted per logical store, logged, alerted, and
+// surfaced on /readyz + /metrics even when the caller discards the error.
+// Use it for state files whose silent loss changes enforcement after a restart.
+func atomicWriteFileTracked(store, path string, data []byte, perm os.FileMode) error {
+	return fileutil.AtomicWriteTracked(store, path, data, perm)
+}
+
 // applyHotReload applies safe-to-reload config values from a freshly parsed
 // FileConfig. It only touches settings that can be changed without restarting
 // listeners (blocklist, policy, rewrite rules, rate limit, default action, etc.).

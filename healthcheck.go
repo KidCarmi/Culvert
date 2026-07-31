@@ -199,10 +199,12 @@ func computeReadiness() (report readinessReport, code int) {
 		allOK = false
 	}
 
-	// 8+9. Quarantined state files (CHAOS-05/07) and DP dependency health
-	// (CHAOS-09, cp_poll + node_cert, DP mode only): report-only rows like ca.
+	// 8+9+10. Quarantined state files (CHAOS-05/07), DP dependency health
+	// (CHAOS-09, cp_poll + node_cert, DP mode only), and config stores whose
+	// last durable write failed (CHAOS-27): report-only rows like ca.
 	appendStateFileChecks(checks)
 	appendDPHealthChecks(checks)
+	appendConfigPersistChecks(checks)
 
 	status, code := "ready", http.StatusOK
 	if !allOK {

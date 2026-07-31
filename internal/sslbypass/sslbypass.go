@@ -119,7 +119,9 @@ func (m *Matcher) Save() {
 	// tmp + chmod + fsync(file) + rename + best-effort fsync(parent
 	// dir) — replaces the previous os.WriteFile+os.Rename which was
 	// atomic-via-rename but NOT fsynced.
-	_ = fileutil.AtomicWrite(m.path, data, 0o600)
+	// CHAOS-27: tracked — a lost write silently restores the old bypass set,
+	// changing which traffic is inspected after a restart.
+	_ = fileutil.AtomicWriteTracked("ssl_bypass", m.path, data, 0o600)
 }
 
 // Add appends a single pattern. No-ops if the pattern is already present.

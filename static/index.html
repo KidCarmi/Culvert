@@ -6629,12 +6629,29 @@ function fmtDiffCell(v) {
 async function rollbackConfigVersion(version) {
   if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? This will replace ALL current settings with the snapshot from v${version}. A new version will be created to record this rollback.`, 'Rollback')) return;
   try {
-    const data = await api('/api/config/versions', {
+    // CHAOS-27: the rollback can be APPLIED in memory yet fail to reach disk
+    // (full / read-only / permission-broken data dir), in which case the API
+    // answers 500 with applied:true + persist_errors. That is not a plain
+    // failure and must not be reported as one — the running config DID change,
+    // it just will not survive a restart. apiFetch (not api) so the response
+    // body is available on a non-2xx.
+    const r = await apiFetch('/api/config/versions', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({version})
     });
-    toast(`Rolled back to v${version} successfully.`, 'ok');
+    if (r.status === 401) return;
+    const raw = await r.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch (_) { /* non-JSON error body */ }
+    if (!r.ok && !(data && data.applied)) throw new Error(raw || ('HTTP ' + r.status));
+
+    if (data && data.persist_durable === false) {
+      const stores = (data.persist_errors || []).join(', ');
+      toast(`Rolled back to v${version} in memory, but it was NOT saved to disk (${stores}) — the rollback will be LOST on restart. Check the data directory for a full, read-only, or permission-broken filesystem.`, 'error');
+    } else {
+      toast(`Rolled back to v${version} successfully.`, 'ok');
+    }
     loadConfigVersions();
     fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
   } catch (err) {
@@ -16598,6 +16615,11 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
         <!-- CHAOS-11: all parent proxies down — chain bypassed, egress is direct. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="upstream_pool_down"> Upstream pool down (direct fallback)</label>
+        <!-- CHAOS-27: a config state file could not be written (full / read-only /
+             permission-broken data dir). The change is live in memory but will be
+             LOST on restart; _recovered fires when the store persists again. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_persist_failed"> Config not saved to disk</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_persist_recovered"> Config persistence recovered</label>
         <!-- P1 commit-time validation: the CP refused to publish an over-cap config
              to the fleet (fleet stays on the last valid snapshot until trimmed). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="config_snapshot_rejected"> Config publish rejected (over cap)</label>

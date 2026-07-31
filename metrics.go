@@ -643,6 +643,8 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
+	writeConfigPersistMetrics(w)
+
 	// Decryption-profile success delta: which protocol inspected tunnels negotiated
 	// on the upstream leg (h2 = Inspect-as-HTTP/2 working; http/1.1 = strip/downgrade).
 	_, _ = fmt.Fprintf(w, `# HELP culvert_inspect_upstream_alpn_total Inspected-tunnel upstream (origin) leg negotiated protocol

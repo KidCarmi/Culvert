@@ -72,7 +72,9 @@ func (fb *FileBlocker) save() {
 		exts = append(exts, ext)
 	}
 	data, _ := json.Marshal(exts)
-	_ = fileutil.AtomicWrite(fb.path, data, 0o600)
+	// CHAOS-27: tracked — silently losing this list re-admits blocked
+	// executable/archive extensions after a restart.
+	_ = fileutil.AtomicWriteTracked("file_block", fb.path, data, 0o600)
 }
 
 // DefaultBlockedExts is loaded at startup when no config override is provided.
