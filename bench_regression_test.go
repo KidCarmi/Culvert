@@ -32,10 +32,19 @@ import (
 // regardless of rule count. The bound is therefore a constant, not a function of
 // rule count — any reintroduction of per-rule allocation fails this gate.
 func TestBenchGate_PolicyEvalAllocs(t *testing.T) {
-	// Post-optimization: 2 allocs/op (the per-request host normalization + the
-	// per-request client-IP parse feeding the precomputed-CIDR fast path),
-	// independent of rule count. Headroom of a few absorbs runtime noise while
-	// still catching an O(rules) regression immediately.
+	// Measured: 0 allocs/op, independent of rule count. This was 2/op (the
+	// per-request host normalization + the per-request client-IP parse feeding
+	// the precomputed-CIDR fast path) until the hostutil already-canonical fast
+	// path removed the normalization pair — NormalizeHostStrict no longer calls
+	// idna.ToASCII or net.ParseIP for an ordinary ASCII hostname, so Evaluate is
+	// now allocation-free end to end.
+	//
+	// The bound stays at 4 rather than tightening to the measured 0: its job is to
+	// catch an O(rules) regression, and leaving headroom keeps the gate immune to
+	// escape-analysis differences across Go releases and architectures (the
+	// client-IP parse can legitimately return to 1 alloc). The exact per-shape
+	// allocation contract for normalization is pinned where it belongs, in
+	// internal/hostutil's TestNormalizeHostStrict_AllocRegression.
 	const maxAllocs int64 = 4
 	for _, rules := range []int{10, 100, 1000, 10000} {
 		ps := buildPolicyStore(rules)
