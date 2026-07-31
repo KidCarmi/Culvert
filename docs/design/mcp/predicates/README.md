@@ -5,10 +5,47 @@ Executable structural checks written during the PR-1 readiness remediation
 shape reached a reviewer, and each is intended to make the same shape
 **enumerable** rather than re-checked from memory.
 
-They are **not wired to CI.** PR-0 and this remediation are documentation-only
-and modify no workflow file (see [`../CI-GATES.md`](../CI-GATES.md) §Scope note).
-Promoting these into executed gates is recorded work for PR-0/PR-1, not something
-this PR does.
+## CI status — exact, per predicate
+
+**Six of the seven now run in the required Fast PR Gate.** This changed after board
+blocker #927, which took three PRs and four verification rounds — and *every*
+intermediate head passed the full pipeline while still carrying a real defect,
+including one where the config-surface matrix did not parse as a table at all and
+every assertion over it passed vacuously. CI carried no signal because nothing in
+it parsed these documents.
+
+| Predicate | CI status |
+|---|---|
+| `predicate-19.py` | **Runs in Fast PR Gate** — `Gate · MCP design predicates` |
+| `predicate-21.py` | **Runs in Fast PR Gate** (gated arm only; the advisory arm stays report-only) |
+| `predicate-22.py` | **Runs in Fast PR Gate** |
+| `predicate-23.py` | **Runs in Fast PR Gate** |
+| `predicate-24.py` | **Runs in Fast PR Gate** |
+| `predicate-25.py` | **Manual only — deliberately excluded from CI** (see below) |
+| `predicate-26.py` | **Runs in Fast PR Gate** |
+
+The job runs when a PR touches `docs/design/mcp/**`, ADR-0024, the runner script,
+or `pr-fast-gate.yml`; it is skipped otherwise, and a skip counts as passing. A
+**failure blocks** the `✅ Fast PR Gate — APPROVED` aggregate, so a relevant MCP
+docs PR cannot go green while a selected predicate fails. Runner:
+[`.github/scripts/mcp-doc-predicates.sh`](../../../../.github/scripts/mcp-doc-predicates.sh),
+which carries the membership as an **explicit allowlist** — not a
+`predicate-*.py` glob, so a future predicate does not become blocking without
+review.
+
+**Why `predicate-25.py` is excluded.** It is remediation/provenance-specific: it
+diffs against a **fixed historical base commit** (`1203e04b`, overridable via
+`CULVERT_PROVENANCE_BASE`) to check that one remediation's provenance claims match
+its actual diff. Run as a general gate it would fail an unrelated, perfectly valid
+PR merely for changing a requirement or decision *after* that historical point —
+a false block on correct work. It stays manual, and should be run by hand when
+auditing a remediation's provenance claims.
+
+**What passing still does not prove.** These predicates check **design documents**.
+The runtime `configSurfaces` registry does not exist yet, so `MCP-CFG-001`(7)'s
+registry-side binding and registry↔matrix parity remain **specified but
+unenforced** until PR-1 — `predicate-26` passing green says nothing about them.
+Nothing here promotes PR-1 or discharges any remaining board blocker.
 
 ## Running them
 
@@ -42,6 +79,63 @@ authority changes. That failure has happened four times in this remediation
 | `predicate-23.py` | every owner named in a gate-status row's `Target PR` cell also appears in that row's `Blocking?` cell | the cells themselves (`PR-<n>`, `PR-C`, `Future … Gate`, `D-nn`) |
 | `predicate-24.py` | (arm 1) every per-class absence enumeration carries the action-keys that class requires; (arm 2) the two copies of the per-class table agree cell-for-cell | `EVENT-MODEL.md` §4a's per-class table |
 | `predicate-25.py` | every **provenance** claim ("what this remediation changed") matches the actual diff — added/rewritten requirement IDs (both directions), touched decision blocks (both directions), and every repository-context row added, removed or changed without cover | the diff against the **recorded pre-remediation commit** `1203e04b` (`CULVERT_PROVENANCE_BASE` overrides) |
+| `predicate-26.py` | the config-surface matrix **parses as a table at all**, is **non-empty**, and every `MCP-CFG-001` row invariant holds over the **parsed** rows — header/delimiter/data widths equal, **every delimiter cell ≥ 3 hyphens**, expected row count, no duplicate field IDs, known registry classes and value kinds, sensitive value kinds only in `RC-1`/`RC-2`, `RC-X` empty, the `RC-0 ⇔ none` and `snapshot-meta ⇔ RC-5` biconditionals; **every declared summary label present exactly once**, no duplicate members inside a summary, and forward **and** bounded-reverse summary↔live parity for **every** summary; and **two complete, unique published censuses** (value kind *and* registry class) — every vocabulary token claimed exactly once, including zero-valued ones, no unknown tokens, plus the row and sensitive-kind totals — all reproduced from parsed rows | `CONFIG-SURFACE-MATRIX.md` §"The matrix" + its own class/vocabulary/summary/census blocks |
+
+### `predicate-26.py` — the anti-vacuity check
+
+**Exact property.** Every `MCP-CFG-001` assertion is quantified over the rows of one table. *A check quantified over a set it failed to build is not a check — it is a green tick.* PR #947 shipped exactly that: a 17-cell header against a 16-cell delimiter row. Per GFM, *"The header row must match the delimiter row in the number of cells. If not, a table will not be recognized"* — so a conformant parser yields **zero** rows, `count(RC-X) == 0` holds trivially, the value-kind invariant has nothing to quantify over, and every downstream assertion passes while asserting nothing. This predicate's **first duty is to refuse to be vacuous**: an unparseable or empty table is an unconditional failure, never a silent pass.
+
+**How to run** (from the repository root):
+
+```
+python3 docs/design/mcp/predicates/predicate-26.py
+```
+
+Exit `0` = every property holds, every seed fired, every negative control stayed silent. Exit `1` = at least one violation, printed. Stdlib only; no network, no third-party imports, no repository mutation.
+
+**Two ways a summary row is bound, and why it matters.** A summary that enumerates *every* live row of a class (`RC-1`, `RC-2`, `RC-3`, `RC-4`, `RC-5`) is checked by **class-level reverse parity** — drop a member and the missing live row is named. A summary that is a deliberately **bounded subset** of a large class cannot be checked that way: `Snapshot publication settings` names two of the 38 `RC-7` rows, so demanding class-level reverse parity there would demand all 38. Its membership is instead **pinned to an explicit name list** in the predicate, which is the stronger constraint — it fixes the set exactly, so neither a dropped nor an added name passes. The earlier mixed `{RC-5, RC-7}` row was checked exhaustively for `RC-5` only, which left both `RC-7` publication settings deletable with the predicate green; that is why the row was split in two.
+
+**Seeded positive controls — each of the 22 mutations MUST be detected** (the run prints `DETECTED`/`MISSED` per seed, and a `MISSED` fails the predicate, so a decorative check cannot pass):
+
+*Parse validity (4)*
+1. a delimiter cell containing **one** hyphen;
+2. a delimiter cell containing **two** hyphens;
+3. a delimiter cell with **malformed alignment syntax** (`:-:-:`);
+4. a 17-column header with a 16-column delimiter — *the #947 defect itself*.
+
+*Anti-vacuity (1)*
+5. a table that parses to **zero** rows.
+
+*Summary integrity (5)*
+6. an `RC-7` publication setting **dropped from its bounded summary** — the case class-level parity cannot reach;
+7. the same field named **twice inside one summary row** — invisible once the member list is collapsed to a set;
+8. **two summary rows carrying the same label** — invisible to a first-match reader;
+9. an **RC-1** summary disagreeing with the live rows — parity is enforced for *every* summary, not only `RC-2`;
+10. a live `RC-0` row named in the `RC-2` summary — *the D-2 defect itself*.
+
+*Census completeness and uniqueness (7)*
+11. the **registry-class** census omitting `RC-3`;
+12. the **registry-class** census stating the wrong `RC-7` count;
+13. the **registry-class** census claiming `RC-2` **twice**;
+14. the **registry-class** census stating `RC-X` as `1` — the forbidden class published as non-empty;
+15. a published value-kind census count **deleted** — an omitted claim must not hide a stale one;
+16. a **zero-valued** census claim falsified (`pinned-identity 0 → 99`) — kinds with no live rows are still checked;
+17. the published **row total** falsified.
+
+*Row invariants (5)*
+18. a live `RC-2` row missing from its summary — the class-exhaustive reverse direction;
+19. `provider-ref → RC-6` — a sensitive value kind in a non-sensitive class;
+20. a duplicate field ID;
+21. an unknown value-kind token;
+22. a live row classified `RC-X`.
+
+Seeds 1–3, 6–8 and 11–14 were added after the third verification round; seeds 9, 15–17 after the second. Each round found the same shape of hole — a check that quantified over what the document happened to mention rather than over the declared vocabulary, or that took a first match instead of counting occurrences. Two further failure conditions are enforced but not separately seeded: a census claiming a token **outside** the declared vocabulary (no parsed count could ever confirm or refute it), and a bounded summary gaining a name outside its pinned list.
+
+**Negative controls — each MUST stay silent**, proving the predicate is bound to this one table and does not police unrelated prose: an unrelated prose table gaining a row; a fenced code example containing `mcp_`-shaped pipe rows; an ordinary prose edit outside any table. Valid GFM alignment syntax (`:---:`) is also accepted without complaint — the three-hyphen minimum constrains cell *length*, not alignment.
+
+**Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), plus the summary and census blocks of that same document, against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. Summary membership must use **full field names**: the snapshot summary originally abbreviated them (`_credential_revision`), which silently defeated mechanical parity and is why the expanded form is now required. `EXPECTED_ROWS`, the summary bindings and the two vocabularies are deliberate constants: a legitimate row addition, a new summary row or a new class token is expected to fail this predicate until the constant is updated under review.
+
+**It now runs in the required Fast PR Gate** for PRs touching the MCP design surface (see §CI status above) — a failure blocks the aggregate. That closes the "green CI while the document does not parse" gap that produced it, but it does **not** extend its reach: it still checks the design matrix, never the runtime registry.
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the

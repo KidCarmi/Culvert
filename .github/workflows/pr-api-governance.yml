@@ -63,7 +63,7 @@ jobs:
           cache: true
       - name: Cache pinned oasdiff
         if: steps.changed.outputs.api == '1'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tools
           key: oasdiff-v1.11.7-${{ runner.os }}
@@ -137,7 +137,7 @@ jobs:
           cache: true
       - name: Cache pinned oapi-codegen
         if: steps.changed.outputs.api == '1'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tools
           key: oapi-codegen-v2.4.1-${{ runner.os }}
