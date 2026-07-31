@@ -47,6 +47,7 @@ jobs:
     outputs:
       code: ${{ steps.classify.outputs.code }}
       agent: ${{ steps.classify.outputs.agent }}
+      mcp_docs: ${{ steps.classify.outputs.mcp_docs }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -58,18 +59,33 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             # workflow_dispatch: no diff to classify — run everything.
-            echo "code=true"  >> "$GITHUB_OUTPUT"
-            echo "agent=true" >> "$GITHUB_OUTPUT"
+            echo "code=true"     >> "$GITHUB_OUTPUT"
+            echo "agent=true"    >> "$GITHUB_OUTPUT"
+            echo "mcp_docs=true" >> "$GITHUB_OUTPUT"
             echo "Manual run — all jobs enabled."
             exit 0
           fi
-          git diff --name-only HEAD^1 HEAD > changed.txt
+          # --no-renames is load-bearing, not stylistic. With rename detection
+          # on (the default), `--name-only` emits ONLY the destination of a
+          # rename — so moving a file OUT of a classified directory hides the
+          # source path from every `case` below. Concretely: moving
+          # docs/design/mcp/DATA-FLOW-DIAGRAMS.md to an archive dir would list
+          # only the archive path, leave mcp_docs=false, skip the predicate job,
+          # and the aggregate would count that skip as passing — while the
+          # predicates themselves would have failed outright on the missing
+          # input. A gate that does not run is a green tick, which is the exact
+          # failure class this job exists to close. --no-renames reports the
+          # move as delete+add, so BOTH paths are classified. It can only ever
+          # add paths, never remove them, so it stays consistent with this
+          # classifier's fail-toward-running-the-gate posture.
+          git diff --no-renames --name-only HEAD^1 HEAD > changed.txt
           echo "── Changed files ──"; cat changed.txt
 
           # Docs-only = every file matches a documentation pattern.
           # Anything else counts as code (fail toward running the gate).
           code=false
           agent=false
+          mcp_docs=false
           while IFS= read -r f; do
             case "$f" in
               # Load-bearing docs: docs_saml_test.go reads this file at test
@@ -82,10 +98,22 @@ jobs:
             case "$f" in
               cmd/culvert-maint/*) agent=true ;;
             esac
+            # MCP design surface. Its OWN `case` on purpose: the docs/code
+            # classifier above is first-match-wins, so folding these patterns
+            # into it would silently change `code` for MCP paths. This one is
+            # narrow by design — an ordinary unrelated Markdown change must
+            # NOT drag the predicate job in.
+            case "$f" in
+              docs/design/mcp/*) mcp_docs=true ;;
+              docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md) mcp_docs=true ;;
+              .github/scripts/mcp-doc-predicates.sh) mcp_docs=true ;;
+              .github/workflows/pr-fast-gate.yml) mcp_docs=true ;;
+            esac
           done < changed.txt
-          echo "code=$code"   >> "$GITHUB_OUTPUT"
-          echo "agent=$agent" >> "$GITHUB_OUTPUT"
-          echo "code=$code agent=$agent"
+          echo "code=$code"         >> "$GITHUB_OUTPUT"
+          echo "agent=$agent"       >> "$GITHUB_OUTPUT"
+          echo "mcp_docs=$mcp_docs" >> "$GITHUB_OUTPUT"
+          echo "code=$code agent=$agent mcp_docs=$mcp_docs"
 
   # ─── 1. Hygiene: fmt + vet + build (incl. arm64 compile + static assert) ──
   hygiene:
@@ -312,7 +340,36 @@ jobs:
           go install honnef.co/go/tools/cmd/staticcheck@2025.1
           staticcheck ./...
 
-  # ─── 8. Proxy traffic smoke — ADVISORY (promotion criteria in doc) ────────
+  # ─── 8. MCP design-document predicates — gated on the MCP doc surface ─────
+  # Board blocker #927 took three PRs and four verification rounds, and EVERY
+  # intermediate head passed this pipeline while still carrying a real defect
+  # — including one where the config-surface matrix did not parse as a table
+  # at all, so every assertion over it passed vacuously. CI carried no signal
+  # because nothing here parsed those documents. This job closes that gap.
+  #
+  # Explicit allowlist (19, 21, 22, 23, 24, 26) lives in the runner script,
+  # NOT a `predicate-*.py` glob: a future predicate must not become blocking
+  # without review. predicate-25 is excluded by design — it is provenance-
+  # specific and diffs against a fixed historical base commit, so as a general
+  # gate it would fail unrelated valid PRs. It stays manual.
+  #
+  # Stdlib Python only: no installs, no network, no document mutation.
+  mcp-predicates:
+    name: "Gate · MCP design predicates"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.mcp_docs == 'true'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Python version
+        run: python3 --version
+
+      - name: Run MCP design-document predicates
+        run: .github/scripts/mcp-doc-predicates.sh
+
+  # ─── 9. Proxy traffic smoke — ADVISORY (promotion criteria in doc) ────────
   # Hermetic in-process traffic-plane e2e (HTTP forward, CONNECT relay,
   # SOCKS5, policy allow/block/default-deny). Advisory until it shows a
   # stable flake-free record on the nightly lane (see roadmap/CI-REDESIGN.md);
@@ -360,6 +417,7 @@ jobs:
       - security-fast
       - gitleaks
       - agent
+      - mcp-predicates
     if: always()
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

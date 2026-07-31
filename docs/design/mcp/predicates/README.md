@@ -5,10 +5,47 @@ Executable structural checks written during the PR-1 readiness remediation
 shape reached a reviewer, and each is intended to make the same shape
 **enumerable** rather than re-checked from memory.
 
-They are **not wired to CI.** PR-0 and this remediation are documentation-only
-and modify no workflow file (see [`../CI-GATES.md`](../CI-GATES.md) §Scope note).
-Promoting these into executed gates is recorded work for PR-0/PR-1, not something
-this PR does.
+## CI status — exact, per predicate
+
+**Six of the seven now run in the required Fast PR Gate.** This changed after board
+blocker #927, which took three PRs and four verification rounds — and *every*
+intermediate head passed the full pipeline while still carrying a real defect,
+including one where the config-surface matrix did not parse as a table at all and
+every assertion over it passed vacuously. CI carried no signal because nothing in
+it parsed these documents.
+
+| Predicate | CI status |
+|---|---|
+| `predicate-19.py` | **Runs in Fast PR Gate** — `Gate · MCP design predicates` |
+| `predicate-21.py` | **Runs in Fast PR Gate** (gated arm only; the advisory arm stays report-only) |
+| `predicate-22.py` | **Runs in Fast PR Gate** |
+| `predicate-23.py` | **Runs in Fast PR Gate** |
+| `predicate-24.py` | **Runs in Fast PR Gate** |
+| `predicate-25.py` | **Manual only — deliberately excluded from CI** (see below) |
+| `predicate-26.py` | **Runs in Fast PR Gate** |
+
+The job runs when a PR touches `docs/design/mcp/**`, ADR-0024, the runner script,
+or `pr-fast-gate.yml`; it is skipped otherwise, and a skip counts as passing. A
+**failure blocks** the `✅ Fast PR Gate — APPROVED` aggregate, so a relevant MCP
+docs PR cannot go green while a selected predicate fails. Runner:
+[`.github/scripts/mcp-doc-predicates.sh`](../../../../.github/scripts/mcp-doc-predicates.sh),
+which carries the membership as an **explicit allowlist** — not a
+`predicate-*.py` glob, so a future predicate does not become blocking without
+review.
+
+**Why `predicate-25.py` is excluded.** It is remediation/provenance-specific: it
+diffs against a **fixed historical base commit** (`1203e04b`, overridable via
+`CULVERT_PROVENANCE_BASE`) to check that one remediation's provenance claims match
+its actual diff. Run as a general gate it would fail an unrelated, perfectly valid
+PR merely for changing a requirement or decision *after* that historical point —
+a false block on correct work. It stays manual, and should be run by hand when
+auditing a remediation's provenance claims.
+
+**What passing still does not prove.** These predicates check **design documents**.
+The runtime `configSurfaces` registry does not exist yet, so `MCP-CFG-001`(7)'s
+registry-side binding and registry↔matrix parity remain **specified but
+unenforced** until PR-1 — `predicate-26` passing green says nothing about them.
+Nothing here promotes PR-1 or discharges any remaining board blocker.
 
 ## Running them
 
@@ -98,7 +135,7 @@ Seeds 1–3, 6–8 and 11–14 were added after the third verification round; se
 
 **Limits — read before over-claiming.** It parses **one named table**, located by its exact heading (`## The matrix`) and its exact first header cell (`Field ID`), plus the summary and census blocks of that same document, against a documented schema. It is **not** a general Markdown validator and proves nothing about any other table, document or file — including the other tables in the same document. It checks the *design matrix*; it cannot check the runtime `configSurfaces` registry, which does not exist yet, so `MCP-CFG-001`(7)'s registry-side binding and registry↔matrix parity remain **specified but unenforced** until PR-1. Summary membership must use **full field names**: the snapshot summary originally abbreviated them (`_credential_revision`), which silently defeated mechanical parity and is why the expanded form is now required. `EXPECTED_ROWS`, the summary bindings and the two vocabularies are deliberate constants: a legitimate row addition, a new summary row or a new class token is expected to fail this predicate until the constant is updated under review.
 
-**Like every predicate here, it is not wired into CI.** It passes only when run by hand.
+**It now runs in the required Fast PR Gate** for PRs touching the MCP design surface (see §CI status above) — a failure blocks the aggregate. That closes the "green CI while the document does not parse" gap that produced it, but it does **not** extend its reach: it still checks the design matrix, never the runtime registry.
 
 `predicate-21.py` has a second, **advisory** arm reporting DFD-header vs
 `THREAT-MODEL.md` STRIDE-row divergences. It is deliberately **not** gated: the
