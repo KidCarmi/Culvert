@@ -81,14 +81,40 @@ M7 builds it; **CROSS-REPO** = must be built in `tac-platform`; **DEFERRED** = l
 | Scoped support-metric registry (`supportMetricRegistry`) | **NEW** (§6) | — |
 | Telemetry consent switch + config + preview + sender + spool | **NEW** (§4/§5/§14) | — |
 | Proactive degradation state machine + durable ledger | **NEW** (§11) | — |
-| Telemetry ingestion gateway (`/v1/telemetry/samples`), TAC decryption, idempotency, retention | **CROSS-REPO** — confirmed absent in `tac-platform` (`internal/`: approval/audit/domain/executor/fsm/opsvc/plan/policy/provider/releasemanifest/store/validator; no telemetry/ingest/upload route) | `KidCarmi/tac-platform` (§13) |
+| Telemetry ingestion gateway (`/v1/telemetry/samples`), TAC decryption, idempotency, retention | **CROSS-REPO — partial:** TAC 2.5-0 gateway skeleton + 2.5-A strict contract/fixture consumption shipped (PRs #10/#11/#12); **still owed:** telemetry route, authentication, crypto/decryption, persistence/ingestion (2.5-B/C/D) | `KidCarmi/tac-platform` (§13) |
 | mTLS transport auth; canonical repo-wide metrics architecture | **DEFERRED** (§4, §6) | — |
 
 ---
 
 ## 3. Telemetry wire protocol v1 (`application/vnd.culvert.telemetry-sealed+json`)
 
-The complete appliance→TAC contract. Versioned; additive-only within a major.
+The complete appliance→TAC contract. Versioned, with a **closed** top-level member
+set per schema version (the binding schema-evolution rule below).
+
+**Schema-evolution rule (binding — this supersedes any earlier "additive-only within
+a major" wording).** For the current wire schema, `schema_version == 3`:
+
+1. For `schema_version == 3`, the **outer** top-level member set is **closed**.
+2. For `schema_version == 3`, the **inner** top-level member set is **closed**.
+3. Adding **any** new top-level member requires a **new `schema_version`** — it is not
+   an additive extension of version 3.
+4. Additive evolution within schema version 3 is allowed **only inside the governed
+   `metrics` map** (a new governed metric descriptor, §6/§7).
+5. Any metric-set evolution changes `registry_hash` (§8).
+6. A gateway that knows schema version 3 MAY accept different governed metric sets only
+   according to its supported registry-hash policy (§8).
+7. A newer, unsupported `schema_version` is rejected **cleanly** (`422`, §3.5) — it is
+   **not** parsed optimistically.
+
+Consequently the two failure cases are **distinct and not equivalent**:
+
+- An **unknown top-level member under a known `schema_version`** is a **malformed
+  request** (`400`, §3.5) — never an additive extension.
+- A **newer, unsupported `schema_version`** is an **unsupported-version failure**
+  (`422`, §3.5).
+
+The exact closed member sets for `schema_version == 3` are pinned in §3.2 (outer,
+exactly eight members) and §3.3 (inner, exactly six members).
 
 ### 3.1 Request
 
@@ -114,53 +140,118 @@ User-Agent: culvert/<major.minor>
 
 ### 3.2 Outer transport envelope (plaintext JSON; carries NO telemetry values)
 
+For `schema_version == 3` the outer top-level member set is **closed** — **exactly
+these eight members**, no more and no fewer:
+
+```
+envelope_version
+key_id
+algorithm
+ciphertext
+ciphertext_sha256
+sample_id
+schema_version
+registry_hash
+```
+
 ```json
 {
   "envelope_version": 1,
   "key_id": "tac-prod-2026-01",
   "algorithm": "x25519-sealbox",
-  "ciphertext": "<base64-std of the sealbox blob>",
-  "ciphertext_sha256": "<lowercase hex sha256 of the RAW sealbox blob (pre-base64)>",
-  "sample_id": "<128-bit random hex, = Idempotency-Key>",
+  "ciphertext": "<standard padded base64 of the sealbox blob>",
+  "ciphertext_sha256": "<64 lowercase hex chars: sha256 of the RAW sealbox blob (pre-base64)>",
+  "sample_id": "<32 lowercase hex chars (128-bit random), = Idempotency-Key>",
   "schema_version": 3,
-  "registry_hash": "<lowercase hex sha256 of the governed eligibility schema, §8>"
+  "registry_hash": "<64 lowercase hex chars: sha256 of the governed eligibility schema, §8>"
 }
 ```
+
+An **unknown outer member under `schema_version == 3` is a malformed request (`400`)**,
+not an additive extension; adding a ninth member requires a new `schema_version` (§3).
 
 - `key_id` — the `key_id` of the TAC recipient key the ciphertext is sealed to
   (from `sealBundleToTAC`/`activeTACTrustKey`, §10). TAC selects the matching private
   key.
 - `algorithm` — fixed `"x25519-sealbox"` (the `CVRTSB01` `box.SealAnonymous` scheme).
   A reader that does not recognize it rejects (`422`).
-- `ciphertext` — std-base64 of the raw `sealbox` blob (`CVRTSB01` magic + version +
-  anonymous-box bytes).
-- `ciphertext_sha256` — integrity digest over the **raw** blob; TAC recomputes after
-  base64-decode and rejects on mismatch (`422`) before attempting decryption.
+- `ciphertext` — **standard padded base64** (the RFC 4648 standard alphabet) of the raw
+  `sealbox` blob (`CVRTSB01` magic + version + anonymous-box bytes). **No** URL-safe
+  alphabet, **no** whitespace, carriage returns, or line breaks — none of those are part
+  of the producer format.
+- `ciphertext_sha256` — integrity digest over the **raw** blob; exactly **64 lowercase
+  hex** characters. TAC recomputes after base64-decode and rejects on mismatch (`422`)
+  before attempting decryption.
+- `sample_id` — exactly **32 lowercase hex** characters (128-bit random); equals the
+  `Idempotency-Key` header.
+- `registry_hash` — exactly **64 lowercase hex** characters.
 - `sample_id`, `schema_version`, `registry_hash` — delivery metadata; **non-identifying**
   (§5/§8). These live in the *outer* envelope (not sealed) so the gateway can dedupe,
   size-check, and route without decrypting.
 
 ### 3.3 Inner sealed plaintext (what `ciphertext` decrypts to — TAC-only)
 
+For `schema_version == 3` the inner top-level member set is **closed** — **exactly
+these six members**, no more and no fewer:
+
+```
+schema_version
+registry_hash
+generated_at
+sample_epoch
+sequence
+metrics
+```
+
 ```json
 {
   "schema_version": 3,
-  "registry_hash": "<same hex as outer>",
-  "generated_at": "<RFC3339 UTC>",
-  "sample_epoch": "<128-bit random hex, per process/reset epoch, §5>",
+  "registry_hash": "<same 64 lowercase hex as outer>",
+  "generated_at": "<canonical UTC RFC3339Nano, e.g. 2026-07-24T12:00:00Z>",
+  "sample_epoch": "<32 lowercase hex chars (128-bit random), per process/reset epoch, §5>",
   "sequence": 42,
   "metrics": { "support_health_ca_ready": 1, "support_health_clamav_ready": 0, "...": 0 }
 }
 ```
 
+An **unknown inner member under `schema_version == 3` is a malformed request (`400`)**,
+not an additive extension; adding a seventh member requires a new `schema_version` (§3).
+
 - `metrics` — **label-free scalar** name→number map, ONLY the registry's
-  telemetry-eligible descriptors (§6/§7). No labels, no strings, no identifiers.
+  telemetry-eligible descriptors (§6/§7). No labels, no strings, no identifiers. **This
+  is the sole surface that may grow additively within schema version 3** (a new governed
+  descriptor, §6/§7), and any such change moves `registry_hash` (§8).
+- `metrics` **values** are Go `float64` values serialized through `encoding/json`
+  (§3.3.1); the accepted literal for a value is exactly what that encoder produces.
+- `generated_at` — **canonical UTC**, formatted `t.UTC().Format(time.RFC3339Nano)`, so a
+  whole-second instant renders as `2026-07-24T12:00:00Z` with a trailing `Z`. Alternate
+  spellings that decode to the same instant (`+00:00`, a fixed `.000Z` fractional field)
+  are **not** producer-canonical. Clock plausibility is a separate concern — TAC does not
+  reject on `generated_at` clock skew (§3.5).
+- `sample_epoch` — exactly **32 lowercase hex** characters (128-bit random).
 - `sample_epoch` + `sequence` — let TAC order/dedup within an epoch and detect counter
   resets **without** a stable appliance id in the body (§5). Both are inside the seal
   so a MITM sees neither.
 - The **outer `registry_hash`/`schema_version` MUST equal the inner values**; TAC
   rejects a mismatch (`422`) — this binds the unencrypted routing metadata to the
   sealed content.
+
+#### 3.3.1 Canonical `metrics` number literals
+
+Culvert's producer serializes each metric value as a Go `float64` through
+`encoding/json`. The binding accepted literal is the **exact representation that encoder
+produces**, e.g.:
+
+- `100` is canonical; `1e2` is not.
+- `0` is canonical; `0.0` and `0e10` are not.
+- `-0` is distinct and **is** emitted canonically by Go for a negative-zero `float64`.
+- A literal that silently changes value when parsed as `float64` is outside the producer
+  contract.
+
+This is **not** an invitation to introduce decimal or arbitrary-precision metric
+semantics — Culvert does not produce those. (`v1` metrics happen to be small integral
+`float64`, but a consumer parses `metrics` values as floating-point JSON numbers, not
+integers — see `testdata/telemetry/v1/README.md`.)
 
 ### 3.4 Success response
 
@@ -174,26 +265,74 @@ User-Agent: culvert/<major.minor>
 
 ### 3.5 Error taxonomy + retry classification
 
+These are the **final gateway semantics** the sender is built against (later TAC slices
+implement the checks; §13). Each status has one precise meaning:
+
 | HTTP | Meaning | Sender action |
 |---|---|---|
 | `200` | accepted (incl. `duplicate:true`) | **success** — delete pending sample |
-| `400` | malformed envelope / bad base64 / missing field | **terminal** — drop sample, log, surface status; do not retry |
-| `401`/`403` | bad/expired credential, wrong tenant, not entitled | **terminal-until-reconfig** — stop sending, surface "auth failed"; retry only after a config change |
-| `409` | idempotency conflict (same `sample_id`, different bytes) | **terminal** — drop; must never happen (seal-once), indicates a bug |
-| `413` | body over size cap | **terminal** — drop; bug-guard |
-| `422` | unknown `envelope_version`/`algorithm`/`schema_version`, digest mismatch, unknown `key_id`, registry-hash mismatch | **terminal for this sample** — drop; if `schema_version`/`registry_hash` unknown, surface "schema unsupported by gateway" (the appliance is newer than TAC) |
+| `400` | malformed request (see below) | **terminal** — drop sample, log, surface status; do not retry |
+| `401` | credential authentication failed (see below) | **terminal-until-reconfig** — stop sending; retry only after credential/config state changes |
+| `403` | authenticated, but the credential's server-side state forbids telemetry (see below) | **terminal-until-reconfig** — stop sending; retry only after server-side state changes |
+| `409` | dedupe key already exists with **different raw request bytes** | **terminal** — drop; must never happen under seal-once (§5), indicates a bug |
+| `413` | serialized request body exceeds 64 KiB | **terminal** — drop; bug-guard |
+| `422` | structurally well-formed but unsupported/unverifiable contract data (see below) | **terminal for this sample** — drop; if `schema_version`/`registry_hash` unsupported, surface "schema unsupported by gateway" (the appliance is newer than TAC) |
 | `429` | rate-limited | **transient** — honor `Retry-After`, back off |
 | `5xx`, timeout, connection error, DNS failure | gateway/transport | **transient** — exponential backoff + jitter, capped (§5) |
 
-- **Schema compatibility:** additive-only within a major `schema_version`; the gateway
-  accepts a `schema_version` it knows and `422`s a newer one (fail-clean, not silent).
-  A newer gateway tolerates an older appliance's known schema.
+**`400` — malformed request.** Terminal for the sample. Includes: malformed JSON;
+duplicate members; a missing required member; an **unknown top-level member under the
+current known `schema_version`**; an invalid JSON type; malformed base64; a malformed
+fixed-width field (e.g. a hex id of the wrong length). An unknown member under a known
+schema is a `400` malformed request — it is **not** an additive extension and is **not**
+the same as an unsupported version (§3, §3.5 `422`).
+
+**`401` — credential authentication failed.** The sender stops until configuration or
+credential state changes. Causes: missing credential; unknown credential; expired
+credential; revoked credential.
+
+**`403` — authenticated, but administratively forbidden.** The credential authenticated
+successfully, but its **server-side appliance/tenant state** is: not entitled for
+telemetry; suspended; quarantined; or otherwise administratively forbidden. There is **no
+"wrong tenant" case in the sense of the request selecting a tenant** — the request body
+carries **no trusted tenant or appliance identity**, so a sender cannot submit a
+client-controlled target tenant. Attribution comes **only** from the server-side
+credential record (§3.5 attribution, §12), so `403` is a property of that record, never
+of a body field.
+
+> **Recovery mechanism (deferred to Slice 3, not decided here).** A server-side state
+> change (an admin re-entitling the credential on TAC) cannot notify or wake the
+> appliance, so "retry only after server-side state changes" (401/403) is **not** an
+> automatic server push. The concrete recovery trigger — an explicit local re-enable
+> action and/or a bounded periodic re-probe of a stopped-on-`401`/`403` sender — is a
+> **Slice 3 sender-behavior decision** and is intentionally out of scope for this contract
+> sync (§13/§14: Slice 3 is blocked). This taxonomy fixes only what each status *means*,
+> not the sender's recovery cadence.
+
+**`422` — structurally well-formed but unsupported or unverifiable contract data.**
+Terminal for the sample. Includes, as applicable: unsupported `envelope_version`;
+unsupported `algorithm`; unsupported `schema_version`; unknown `key_id`; ciphertext
+digest mismatch; outer/inner schema mismatch; outer/inner registry-hash mismatch;
+unsupported governed registry hash. These are the **final** gateway semantics for later
+slices — TAC 2.5-A does **not** yet perform crypto verification, key resolution, or
+decryption (§13), so the digest/decrypt/key `422` cases are the receive-path contract
+they will satisfy, not a claim that they exist today.
+
+- **Schema compatibility (binding, §3).** The top-level member set is **closed** per
+  `schema_version`; within schema version 3 only the governed `metrics` map grows. The
+  gateway accepts a `schema_version` it knows and rejects a newer one **cleanly** with
+  `422` (fail-clean, not silent, not optimistic). A newer gateway tolerates an older
+  appliance's known schema. An unknown top-level member under a known schema is a `400`
+  (malformed), **distinct** from the `422` unsupported-version case.
 - **Clock-skew policy:** TAC does not reject on `generated_at` skew (the appliance
-  clock may drift); ordering uses `sample_epoch`+`sequence`, not wall-clock. TAC MAY
-  record skew for diagnostics.
-- **Replay handling:** dedupe key is `(authenticated appliance identity, sample_id)`;
-  a replayed identical sample returns `duplicate:true`. A different-bytes replay of a
-  used `sample_id` is `409`.
+  clock may drift); ordering uses `sample_epoch`+`sequence`, not wall-clock. Canonical
+  representation (§3.3) and clock plausibility are separate concerns. TAC MAY record skew
+  for diagnostics.
+- **Replay handling (raw-byte idempotency, §5.2):** dedupe key is
+  `(authenticated appliance identity, sample_id)`. A replay with the **identical raw
+  request-body SHA-256** returns `200 duplicate:true`; a replay of the same dedupe key
+  with a **different raw-body SHA-256** is `409`. Idempotency is over the **exact
+  serialized request bytes**, never over semantic JSON equivalence.
 - **Gateway attribution:** the appliance/tenant is derived **only** from the
   authenticated transport (bearer credential → tenant+appliance mapping at the
   gateway). Nothing in the body identifies the appliance.
@@ -229,22 +368,51 @@ revocation, or tenant attribution).
 
 | Field | Where | Rule |
 |---|---|---|
-| `sample_id` | outer + `Idempotency-Key` | 128-bit random per **logical sample**; **reused verbatim across retries** of that sample; NOT a stable appliance id (fresh each sample) |
-| `sample_epoch` | inner (sealed) | 128-bit random per **process start / counter-reset epoch**; lets TAC detect resets without an appliance id |
+| `sample_id` | outer + `Idempotency-Key` | 32 lowercase hex (128-bit random) per **logical sample**; **reused verbatim across retries** of that sample; NOT a stable appliance id (fresh each sample) |
+| `sample_epoch` | inner (sealed) | 32 lowercase hex (128-bit random) per **process start / counter-reset epoch**; lets TAC detect resets without an appliance id |
 | `sequence` | inner (sealed) | monotonic uint within an epoch; resets to 0 on a new epoch |
-| `generated_at` | inner | RFC3339 UTC; advisory (§3.5 skew) |
-| `schema_version`, `registry_hash` | outer + inner | governed-schema identity (§8) |
+| `generated_at` | inner | canonical UTC `t.UTC().Format(time.RFC3339Nano)` (trailing `Z`, §3.3); advisory (§3.5 skew) |
+| `schema_version`, `registry_hash` | outer + inner | governed-schema identity (§8); `registry_hash` is 64 lowercase hex |
 
 TAC deduplicates by **(authenticated appliance identity, `sample_id`)** — the identity
 comes from the transport, the `sample_id` from the body; neither alone is a stable
 appliance fingerprint in the payload.
 
-### 5.2 Seal-once + retry
+### 5.2 Seal-once + raw-byte idempotency (binding — not an open decision)
 
-- A sample is **built once**, **sealed once**, and the **same ciphertext bytes are
-  retried** until acknowledged or dropped. Retries reuse the same `sample_id` and the
-  same sealed blob — so a lost ack (TAC accepted but the response was lost) resolves as
-  `duplicate:true` on retry.
+Idempotency is defined over the **exact raw serialized request bytes**, not over semantic
+JSON equivalence. This is a **settled, non-negotiable** rule and **not** an undecided
+2.5-D question: there is no alternative under which the request is canonicalized before
+hashing — the SHA-256 is always over the exact raw bytes.
+
+```
+dedupe key = (authenticated appliance identity, sample_id)
+
+same dedupe key + identical SHA-256 of the exact raw serialized request body
+    => 200 accepted, duplicate:true
+
+same dedupe key + different raw-body SHA-256
+    => 409 conflict
+```
+
+Semantic JSON equivalence is **irrelevant** to idempotency. Whitespace changes, member
+reordering, or alternate JSON escapes produce **different request bytes** even when they
+decode to equal values — and therefore a different SHA-256 and a `409` on the same dedupe
+key. The Culvert sender must therefore:
+
+1. build **one** complete sealed request;
+2. persist the **exact serialized bytes**;
+3. retry **those exact bytes**;
+4. reuse the **same** `sample_id` and `Idempotency-Key`;
+5. **never** rebuild, reseal, or reserialize a pending sample between attempts.
+
+That is the binding meaning of **seal-once**.
+
+- A sample is **built once**, **sealed once**, and the **same request bytes are retried**
+  until acknowledged or dropped. Retries reuse the same `sample_id`, the same
+  `Idempotency-Key`, and the same sealed blob — so a lost ack (TAC accepted but the
+  response was lost) resolves as `duplicate:true` on retry (identical raw bytes → same
+  SHA-256 → duplicate, never `409`).
 - **Cumulative-counter reset:** counters are read at build time; a process restart
   starts a new `sample_epoch` (counters reset to their post-restart values). TAC
   interprets a lower `sequence`/new `epoch` as a reset, never as a rollback.
@@ -333,7 +501,7 @@ not customer traffic/posture, and do not fingerprint a tenant.
 | `support_health_session_ready` (0/1) | session subsystem key present | Aggregate | exact bit | **Yes** | own health; no secret material |
 | `support_health_config_snapshot_valid` (0/1) | last config snapshot validated | Aggregate | exact bit | **Yes** | own health; not config content |
 | `support_health_ca_expiry_bucket` (0..3) | CA cert nearing expiry | Aggregate | bucketed (`>90d/≤90/≤30/≤7`) | **Yes** | proactive renewal signal; bucketed to avoid a precise cert-timeline fingerprint |
-| `support_health_uptime_bucket` (0..3) | restart cadence | Aggregate | bucketed (`<1d/<7/<30/≥30`) | **Yes** | coarse stability signal; **exact uptime rejected** (fingerprint/correlation); named `support_health_*` to match the rest of this scoped registry (§6) |
+| `support_uptime_bucket` (0..3) | restart cadence | Aggregate | bucketed (`<1d/<7/<30/≥30`) | **Yes** | coarse stability signal; **exact uptime rejected** (fingerprint/correlation). The shipped registry id is `support_uptime_bucket` (see `support_telemetry_registry.go` and the golden fixture `testdata/telemetry/v1/inner_sample.json`) — it deliberately does **not** carry the `support_health_*` prefix the health-bit metrics use, because uptime is a stability signal, not a subsystem-health bit |
 | `culvert_requests_total` | traffic volume | LocalOnly | — | **No** | reveals customer scale |
 | `culvert_requests_blocked`/`allowed`/`auth_fail` | policy/auth outcomes | LocalOnly | — | **No** | security posture + attack signal (auth failures) |
 | `culvert_bytes_sent_total`/`recv_total` | throughput | LocalOnly | — | **No** | customer scale |
@@ -520,11 +688,37 @@ M7 is not appliance-only; the receiving side has obligations. Minimum requiremen
 
 ## 13. Cross-repo gateway checkpoint — **Slice 3 is BLOCKED until this exists**
 
-**Confirmed:** `KidCarmi/tac-platform` has **no** telemetry ingestion gateway today
-(inspected `internal/`, `cmd/`; telemetry appears only under `docs/design/`). Slice 3
-(the only egress slice) **must not** be built against an imaginary gateway.
+**Current cross-repository state (as of this contract sync).** `KidCarmi/tac-platform`
+has landed **TAC M7 Slice 2.5-0** (gateway service skeleton) and **Slice 2.5-A** (the
+strict contract layer + producer-fixture consumption + a stabilized public opaque-carrier
+API), through TAC PRs #10, #11, and #12. TAC 2.5-A enforces: strict bounded outer and
+inner JSON decoding; **closed** top-level member sets for `schema_version == 3`; additive
+metric growth only inside the governed `metrics` map; producer-canonical metric number
+literals; raw-request-byte idempotency; and a producer-owned inner fixture copied
+byte-for-byte from Culvert. What TAC has **not** yet built: **no telemetry route yet, no
+authentication, no crypto/decryption, no persistence.** So the receive path is **not yet
+functional**, and Slice 3 (the only egress slice) still **must not** be built against it.
 
-**Prerequisite — before Slice 3 begins, `tac-platform` must ship:**
+| Milestone | Status |
+|---|---|
+| Culvert Slice 1 — inner-sample producer registry | **Complete** |
+| Culvert Slice 2 — consent/configuration (zero egress) | **Complete** |
+| Culvert A1 — producer-owned golden fixture (§3.3) | **Complete** |
+| TAC F0 — versioned migration foundation | **Complete** |
+| TAC 2.5-0 — gateway service skeleton | **Complete** |
+| TAC 2.5-A — strict contract, fixture consumption, stabilized opaque carrier API | **Complete** |
+| TAC 2.5-B — credential identity + server-side attribution | **Not implemented** |
+| TAC 2.5-C — key resolution, digest verification, decryption, sealed interop vectors | **Not implemented** |
+| TAC 2.5-D — idempotent transactional ingestion | **Not implemented** |
+| Retention / deletion / read-side operations | **Not implemented** |
+| Culvert Slice 3 — sender, spool, retry, egress | **Blocked** (this checkpoint) |
+
+The telemetry gateway is therefore **not yet functional**. Culvert Slice 3 remains
+**blocked** until the relevant TAC receive path (2.5-B/C/D) **and** the cross-repository
+sealed interoperability gate exist.
+
+**Prerequisite — before Slice 3 begins, `tac-platform` must ship (the still-owed 2.5-B/C/D
+work above):**
 - versioned `POST /v1/telemetry/samples` (or the final agreed equivalent),
 - bearer authentication + tenant/appliance attribution,
 - sealed-envelope parsing + TAC-side decryption,
@@ -538,9 +732,36 @@ must verify:
   plaintext,
 - an invalid `key_id` fails closed (`422`),
 - modified ciphertext is rejected (`422`, digest/AEAD),
-- a duplicate sample returns `200 duplicate:true`,
-- a wrong-tenant credential cannot submit as another appliance (`403`),
+- a duplicate sample (identical raw request bytes) returns `200 duplicate:true`,
+- attribution is **credential-derived only**: the request body carries no tenant/appliance
+  identity, so there is **no client-selected target tenant** to spoof; a credential whose
+  server-side state forbids telemetry is rejected with `403` (§3.5),
 - an unsupported `schema_version`/`envelope_version` is rejected cleanly (`422`).
+
+**Producer-contract record (the cross-repository fixture identity).** The inner-plaintext
+golden fixture has one producing repository and one cross-repository identity — the
+SHA-256 over its original raw bytes:
+
+```
+producer repository: KidCarmi/Culvert
+producer fixture:    testdata/telemetry/v1/inner_sample.json
+producer PR:         #938
+producer merge:      c612b63e45681f9b2926793de7586077841d5170
+producer head:       c7889223bb22b7cebdcf54cefa2c08f816cc0394
+exact size:          476 bytes
+SHA-256:             22df6ee3b323b46332e0073be7925886d6d15121a781165f8ba79b6657549005
+schema_version:      3
+registry_hash:       061fe684aaabb895e87130943649ef37e450cc62e9d63c6c9d7fddfce73b15a7
+```
+
+- **Culvert owns the inner plaintext fixture; TAC carries an exact copied fixture.** The
+  SHA-256 over the **original raw bytes** is the cross-repository identity both sides
+  verify (never a re-normalized/re-serialized copy — §5.2).
+- **TAC sealed outer-envelope fixtures are still deferred to `2.5-C`** (§3.2).
+- **This fixture alone does not unblock Culvert Slice 3** (the sealed interop gate + the
+  functional TAC receive path are still owed).
+- The record above is contract metadata, **not** wire content — none of it goes inside the
+  telemetry wire JSON (the inner plaintext is exactly the six §3.3 members).
 
 **Fixture ownership (clarification, no design change).** The golden fixtures above are
 **copied**, so each one has exactly one producing repository:
@@ -591,6 +812,11 @@ endpoint-canonicalization tests (§15), credential redaction.
 ### Slice 2.5 — TAC telemetry gateway contract (CROSS-REPO, in `tac-platform`)
 The §13 gateway + golden fixtures. **Blocks Slice 3.** Ships in `tac-platform`; Culvert
 side is the shared golden vectors + `TestTelemetryGatewayGoldenVector`.
+**Status (§13 matrix):** TAC 2.5-0 (skeleton) and 2.5-A (strict contract + fixture
+consumption + stabilized opaque-carrier API) are **complete** (PRs #10/#11/#12); 2.5-B
+(credential identity/attribution), 2.5-C (key resolution/digest verify/decryption + sealed
+interop vectors), and 2.5-D (idempotent transactional ingestion) are **not implemented**.
+So the receive path is not yet functional and Slice 3 stays blocked.
 
 ### Slice 3 — Bounded telemetry delivery (ONLY EGRESS SLICE)
 Seal-once sample (§5.2), fixed envelope (§3), one-slot bounded spool (§5.3), idempotent
@@ -675,8 +901,10 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
    non-identifying routing metadata); §5 seal-once + idempotency; the endpoint is
    operator-set and origin-pinned.
 4. **Multi-tenant SaaS reviewer** — *"cross-tenant leakage / attribution spoofing."* →
-   Folded: §3/§12 attribution from **authenticated transport only**, tenant isolation
-   [TAC], `403` on wrong-tenant, golden vector for it (§13).
+   Folded: §3/§12 attribution from **authenticated transport only** — the body carries no
+   tenant/appliance identity, so there is no client-selected target tenant to spoof; tenant
+   isolation [TAC], `403` when the authenticated credential's server-side state forbids
+   telemetry, golden vector for it (§13).
 5. **SRE (retries/restart/outage)** — *"lost acks, restart dupes, counter resets,
    backlog."* → Folded: §5 seal-once + `duplicate:true` + `sample_epoch`/`sequence` +
    one-slot bounded spool + latest-wins + cooldown/pending survive restart.
@@ -709,8 +937,10 @@ Plus: `route-classification.yaml` rows + `uiRoutes` metadata for the new endpoin
    `proactive_degradations.json`, staged bundles) lives under `<dataDir>/support` and is
    bounded. The telemetry payload carries **no** identifier; staged bundles keep their
    normal manifest node identity (redaction-governed; never sent without upload consent).
-4. Additive-only wire/schema within a major; telemetry + proactive independent, both
-   default-off (clean rollback).
+4. Closed top-level member set per `schema_version` (§3): within schema version 3 only the
+   governed `metrics` map grows additively; any new top-level member requires a new
+   `schema_version`, and a newer unsupported version is rejected cleanly (§3.5 `422`).
+   Telemetry + proactive independent, both default-off (clean rollback).
 
 ---
 
