@@ -50,6 +50,71 @@ func readM7Plan(t *testing.T) (raw, norm string) {
 	return raw, norm
 }
 
+// parseFencedMemberBlock extracts the member names from the plain (no-language)
+// fenced code block that immediately follows `anchor` in the design. The design
+// pins each envelope's closed set as a one-member-per-line fence right after the
+// "exactly these N members" sentence, so parsing THAT scoped block — rather than
+// searching the whole document — is what lets the wall detect (a) a member
+// dropped from the list that still appears elsewhere in the doc (e.g. `algorithm`
+// in the error taxonomy) and (b) a member placed in the wrong envelope. Both are
+// invisible to a global substring scan.
+func parseFencedMemberBlock(t *testing.T, doc, anchor string) []string {
+	t.Helper()
+	ai := strings.Index(doc, anchor)
+	if ai < 0 {
+		t.Fatalf("member-set anchor %q not found in design", anchor)
+	}
+	rest := doc[ai+len(anchor):]
+	open := strings.Index(rest, "```")
+	if open < 0 {
+		t.Fatalf("no fenced code block after anchor %q", anchor)
+	}
+	rest = rest[open+3:]
+	// Skip the rest of the fence's opening line (an optional language tag).
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[nl+1:]
+	}
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		t.Fatalf("unterminated fenced code block after anchor %q", anchor)
+	}
+	var members []string
+	for _, line := range strings.Split(rest[:end], "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			members = append(members, s)
+		}
+	}
+	return members
+}
+
+// assertExactMemberSet compares a parsed member block against the expected set,
+// order-independent, with exact membership (no missing, no extra, no wrong-set).
+func assertExactMemberSet(t *testing.T, envelope string, got, want []string) {
+	t.Helper()
+	gotSet := map[string]bool{}
+	for _, m := range got {
+		if gotSet[m] {
+			t.Errorf("%s member set lists %q more than once", envelope, m)
+		}
+		gotSet[m] = true
+	}
+	wantSet := map[string]bool{}
+	for _, m := range want {
+		wantSet[m] = true
+		if !gotSet[m] {
+			t.Errorf("%s member set is missing required member %q (removed from the scoped list)", envelope, m)
+		}
+	}
+	for m := range gotSet {
+		if !wantSet[m] {
+			t.Errorf("%s member set contains unexpected member %q (wrong envelope or an undeclared addition)", envelope, m)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("%s member set has %d members, want exactly %d", envelope, len(got), len(want))
+	}
+}
+
 // mustContain / mustNotContain are the positive-control / mutation-seed halves.
 func mustContain(t *testing.T, hay, needle, why string) {
 	t.Helper()
@@ -79,15 +144,24 @@ func TestM7Contract_ClosedMemberSetsNotArbitraryAdditivity(t *testing.T) {
 	// A newer unsupported version is rejected cleanly, not parsed optimistically.
 	mustContain(t, norm, "is rejected **cleanly**", "schema evolution")
 
-	// The exact closed member sets must be pinned literally.
-	for _, m := range []string{
-		"envelope_version", "key_id", "algorithm", "ciphertext",
-		"ciphertext_sha256", "sample_id", "schema_version", "registry_hash",
-	} {
-		mustContain(t, raw, m, "outer member set")
-	}
 	mustContain(t, norm, "**exactly these eight members**", "outer member count")
 	mustContain(t, norm, "**exactly these six members**", "inner member count")
+
+	// The exact closed member sets must be pinned in their OWN scoped fenced
+	// block — parsed and compared as a set, not searched across the whole doc.
+	// This detects a member dropped from a list but still present elsewhere
+	// (e.g. `algorithm` in the error taxonomy) and a member in the wrong
+	// envelope — both invisible to a global substring scan (Codex #973 P2).
+	outer := parseFencedMemberBlock(t, raw, "these eight members**, no more and no fewer:")
+	assertExactMemberSet(t, "outer envelope", outer, []string{
+		"envelope_version", "key_id", "algorithm", "ciphertext",
+		"ciphertext_sha256", "sample_id", "schema_version", "registry_hash",
+	})
+	inner := parseFencedMemberBlock(t, raw, "these six members**, no more and no fewer:")
+	assertExactMemberSet(t, "inner plaintext", inner, []string{
+		"schema_version", "registry_hash", "generated_at",
+		"sample_epoch", "sequence", "metrics",
+	})
 
 	// Mutation seeds — the three exact pre-decision spellings that presented
 	// version 3 as arbitrarily additive. None may return as an ACTIVE claim.
