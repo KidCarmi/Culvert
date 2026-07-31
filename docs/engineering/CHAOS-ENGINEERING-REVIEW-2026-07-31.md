@@ -259,6 +259,16 @@ removing `/data` to mirror the runner. A local `go test ./...` is therefore
 **not** a faithful check of any storage-failure-sensitive behaviour; drive it
 from a data directory the test user cannot write.
 
+**Reproducing the CI condition locally requires a read-only MOUNT, not a moved
+directory.** Moving `/data` aside is not enough when the dev container runs as
+root: the first test that calls `MkdirAll("/data/…")` recreates it and the
+failures stop, so a genuinely broken tree comes back green. A kernel-enforced
+read-only mount (`mount -t tmpfs -o ro tmpfs /data`) cannot be recreated by any
+uid and reproduced the failure on the first run. This asymmetry concealed a
+real defect twice in this change — the same asymmetry that let the production
+bug survive in the first place. Any future work touching storage-failure
+behaviour should use the mount.
+
 The consequence for the test suite (fixed here): the aggregate diagnostics
 verdict now folds in the durable-write record, so tests asserting on it must
 isolate that global. The repo already documents this exact convention for
@@ -300,6 +310,30 @@ the 2026-07-05 review remains the authority for detailed write-ups.
 4. **CHAOS-27 ID collision** — renumber the surviving relay finding (double
    write-block escapes the idle reaper) so the register stops carrying one ID
    for two unrelated defects.
+
+### A defect this change introduced, and the guardrail that caught it
+
+Worth recording because it is the exact hazard this review is about, turned on
+its author. The first implementation put `AtomicWrite`'s raw error text into
+the `storage_path` row of the operator contract — and that text embeds the
+absolute target *and* temp paths. `/api/diagnostics` is a **viewer-role**
+surface with a standing no-sensitive-values guardrail
+(`TestApiDiagnostics_NoSensitiveValues`, which forbids `"/data/"`), so on a
+real appliance the first failed durable write would have disclosed the
+data-directory layout to every viewer.
+
+The fix redacts at the **recording boundary** (`noteStorageWriteFailure`),
+not at each sink, so the rollback API's `persist_errors` — fed from the same
+record — is covered by the same barrier, and a future consumer cannot
+reintroduce the leak by reading the record and formatting it somewhere new.
+The general guardrail found it; a dedicated regression test
+(`TestStorageWriteFailure_NeverLeaksAbsolutePaths`) now pins it directly.
+
+The lesson generalises: **adding an error string to an operator-visible
+surface is a disclosure decision.** Error text from the filesystem layer
+carries paths; from the TLS layer, peer identities; from the auth layer,
+subjects. The observability work this review advocates has to redact on the
+way in, or it trades a silent failure for a loud disclosure.
 
 ## Residual Risk
 
