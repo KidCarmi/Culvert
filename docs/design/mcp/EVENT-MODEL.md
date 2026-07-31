@@ -164,7 +164,7 @@ are **required**, each grounded in a stable requirement ID from
 | Mandatory local encrypted durable spool (+ additive export) | MCP-EVENT-001 | Every relevant Data Plane **MUST** have a **local, encrypted, bounded, durable spool** (survives process restart); on sustained backpressure events are persisted there before being considered committed. An external durable sink (SIEM / message bus / object store) is an **additive exporter**, **never a substitute** for the local spool — the spool is required even when an exporter is configured, and export being unavailable does not by itself constitute durability. |
 | Replay / correlation IDs | MCP-EVENT-004 | Every event carries a unique `event_id` plus a `correlation_id` linking related events (e.g. a `REQUIRE_APPROVAL` event and its later `approval_granted` follow-up) so an investigator or a replay tool can reconstruct a full decision sequence deterministically. |
 | Explicit loss policy | MCP-EVENT-001, -002 | The system states, in advance, what happens when the bounded queue and the spool/export path are both saturated — see the CRITICAL constraint below. Silence is not an acceptable answer. |
-| Degraded mode | MCP-EVENT-002 | A named, alertable state (distinct from normal operation) that the gateway enters when event durability cannot be guaranteed, so operators are not silently blind. §4a additionally defines a **critical** degraded state for a non-persistable denial event, which carries the **durability lockout** (new *allowed* write/high-risk operations blocked until durability returns) — the two states are distinct and **MUST NOT** be collapsed into one. |
+| Degraded mode | MCP-EVENT-002 | A named, alertable state (distinct from normal operation) that the gateway enters when event durability cannot be guaranteed, so operators are not silently blind. §4b defines the **normative state machine**: `denial-lane-degraded` (the attacker-mintable lane failed — **blocks nothing authenticated**) and `critical-durability-degraded` (an **authenticated** critical event failed to commit — blocks further critical operations **in that one durability domain only**). The two states are distinct, carry different blast radii, and **MUST NOT** be collapsed into one. |
 | Integrity fields | MCP-EVENT-005 | `event_id`, `timestamp`, `dp_id`, `snapshot_hash`, `correlation_id` are present on every event and the event stream **SHOULD** be tamper-evident (e.g. hash-chained or append-only-store backed) so post-hoc tampering is detectable, not merely inconvenient. |
 | Retention | MCP-PRIVACY-003 | Retention is a documented, per-deployment policy (`retention_class` in §1), not an implicit function of queue/disk size. |
 | Tenant separation | MCP-EVENT-006, MCP-PRIVACY-002 | Events are partitioned by `tenant` at rest and in any export path; no query or export primitive may return events across tenants. |
@@ -227,12 +227,16 @@ Per [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.
 | Action class | Behavior when the decision event cannot be durably persisted |
 |---|---|
 | Read-only / low-risk `ALLOW` or `MONITOR` | May proceed **only** when an explicit degraded-mode policy permits it; raise a health alarm; increment an **integrity-protected loss/degradation counter**; keep retrying persistence/export within bounded budgets; **never fail silently**. |
-| Write action | **Fail closed** (deny the operation) **AND** enter the defined degraded mode + alert + integrity-protected loss counter. |
-| Destructive / production action | **Fail closed AND** enter degraded mode + alert + loss counter. |
-| Configuration publication | **Fail closed AND** enter degraded mode + alert — do not publish a configuration change without a durable change event. |
-| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** enter degraded mode + alert + loss counter. |
-| State-affecting Management MCP operation | **Fail closed AND** degraded mode + alert (and out of V1 regardless — see [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)). |
-| Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. If the denial event cannot be persisted, enter a **critical degraded state**, alert, increment integrity-protected loss counters, and **block new write/high-risk allowed operations until critical-event durability is restored**, unless an explicitly approved emergency policy states otherwise. |
+| Write action | **Fail closed** (deny the operation) **AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + integrity-protected loss counter. |
+| Destructive / production action | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + loss counter. |
+| Configuration publication | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert — do not publish a configuration change without a durable change event. |
+| Credential issue / rotation / revoke / selection for a high-risk operation | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert + loss counter. |
+| State-affecting Management MCP operation | **Fail closed AND** enter `critical-durability-degraded` **scoped to the affected durability domain only** + alert (and out of V1 regardless — see ADR-0024 §D-13). |
+| Authentication failure **or** authorization denial | The request is **already denied** — this is **not** relabeled as an additional "fail closed" action. These events are **attacker-mintable**, so they **MUST NOT** enter `critical-durability-degraded` and **MUST NOT** block any authenticated operation. They travel the **separate denial lane**: pre-queue admission control → attacker-rate-independent coalescing → the denial partition `P-DEN`, which **MUST NOT** consume the reserved critical partition `P-CRIT`. If the coalesced aggregate cannot be committed, enter **`denial-lane-degraded`** for that capability on that node only, alert, increment a **distinct** integrity-protected denial-loss counter, and **continue rejecting** the request. **No fleet-wide, cross-tenant or cross-capability lockout, and no emergency-policy bypass.** |
+
+> **This table is one authority with two copies.** [`ADR-0024 §D-5`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
+> carries a byte-identical copy, and `predicate-24` fails the build if the two diverge in any cell — including
+> the header. Edit both or neither.
 
 **Required design coverage (PR-8).** The durable-event design **MUST** specify, in addition to the §4
 elements: event-**ordering scope**, **deduplication**, **replay cursor**, **encryption at rest**,
@@ -242,6 +246,186 @@ transport only when events are separated by authorization domain, tenant, catego
 retention and query policy — [`ADR-0024 §D-13`](../../adr/0024-mcp-agent-security-gateway-trust-boundary.md)
 items 4–5; two physically separate event systems are not required when logical + security isolation is
 enforced and tested.)
+
+---
+
+## 4b. Degradation containment, the denial lane, and the durable-partition contract (MCP-T-075)
+
+> **Preserved guarantee, stated first because nothing below may erode it.** For an **authenticated**
+> operation in the write, destructive/production, configuration-publication, credential
+> issue/rotate/revoke, or state-affecting-Management classes, if **that operation's own required decision
+> event cannot be durably committed**, the operation **MUST fail closed BEFORE THAT CLASS'S OWN irreversible action**
+> — under **queue/admission saturation** and equally under a **separate post-admission commit
+> failure** (`fsync` error, `ENOSPC`, encryption failure, storage I/O error). §4b narrows the *blast
+> radius* of the degraded state that failure produces. It does **not** narrow, condition or bypass the
+> fail-closed guarantee itself.
+
+### 4b.1 Why the previous rule was a vulnerability
+
+The superseded §4a denial row said: if an **authentication-failure or authorization-denial** event cannot
+be persisted, block new allowed write/high-risk operations **until durability is restored**. Those events
+are **mintable by an unauthenticated attacker at will** — a single unauthenticated host that fails
+authentication faster than the spool can commit drives the spool to saturation and, by the rule itself,
+halts allowed writes for **every tenant on every node**. The evidence mechanism was reachable by the actor
+it existed to record, and it amplified into a fleet-wide outage. Containment therefore has two independent
+halves that **MUST NOT** be recombined: a **narrow** degraded scope for authenticated commit failure
+(§4b.2), and a **separate, quota-isolated lane** for the attacker-mintable class (§4b.3).
+
+### 4b.2 The durability domain — the maximum automatic scope
+
+A degraded state is **always** scoped to a **durability domain**, never global:
+
+```
+durability domain  ::=  (node / DP runtime)  ×  (MCP capability: gateway | management)  ×  (durable partition)
+```
+
+- **Management and Gateway degradation states are independent.** A Management commit failure **MUST NOT**
+  degrade Gateway on the same node, and vice versa.
+- **One node never automatically degrades another.** There is no cluster-wide propagation of a degraded
+  state, and no CP→DP snapshot field carries one.
+- **One tenant, listener or capability MUST NOT automatically block another.** Where tenant or principal
+  identity is available on the failing path, the domain is narrowed further to that identity's scope.
+- **Fleet-wide escalation is not a protocol or runtime side effect.** Broader action is a separately
+  authorized **incident-response decision by a human**, taken through the runbook in
+  [`OPERATIONS-AND-SUPPORT.md`](OPERATIONS-AND-SUPPORT.md), never an automatic consequence of a lost event.
+
+While `critical-durability-degraded` is active, **new critical operations in that same domain fail closed**.
+Low-risk reads may continue **only** under the already-defined explicit degraded-read policy
+(`mcp_{gateway,mgmt}_event_loss_policy`) — §4b changes nothing about that policy.
+
+### 4b.3 The denial lane (attacker-mintable events)
+
+Authentication failures and authorization denials **MUST NOT** trigger `critical-durability-degraded` and
+**MUST NOT** block any authenticated operation. They travel a **separate lane** with:
+
+| Property | Requirement |
+|---|---|
+| Pre-queue admission control | Denial records are admission-controlled **before** they occupy the shared queue, so an attacker cannot convert request rate into queue depth in the critical path. |
+| Attacker-rate-independent coalescing | `N` equivalent denials in one bucket/window **MUST** cost **O(1)** durable records — the durable cost is a function of *distinct buckets × windows*, never of `N`. |
+| Counted durable aggregates | Each aggregate retains a **count** plus **first-seen** and **last-seen** timestamps, so evidence is preserved while volume is not. |
+| Separate quota | The denial lane has its **own** quota, separate from authenticated critical events. |
+| No access to the critical reserve | The denial lane **MUST NOT** consume `P-CRIT` reserved capacity under any condition. |
+
+**Aggregation scope.** A denial aggregate is keyed by **at least**: `capability/listener` ×
+`normalized source bucket` × `denial reason` × `bounded time window`. Where tenant or principal identity
+**exists** (an authenticated-but-unauthorized denial), that identity is **included** in the key. **Before
+identity exists** — the pre-authentication case — the key carries **no tenant attribution**: inventing one
+from an attacker-controlled hint would let the attacker write into another tenant's evidence scope, which
+is the same class of defect this section closes. Source normalization follows the existing repository
+precedent for client-evidence tokens (IPv6 collapsed to /64, IPv4 raw).
+
+**When the denial aggregate itself cannot be committed**, the system **MUST**:
+
+1. increment a **distinct** integrity-protected **denial-loss counter** (never the authenticated critical
+   loss counter — conflating them destroys the signal that distinguishes an attack from a disk fault);
+2. alert as **`denial-lane-degraded`**, at a severity distinct from critical durability degradation;
+3. **continue rejecting** the unauthenticated/unauthorized request (the request was already denied — its
+   denial is never contingent on the evidence being stored);
+4. **NOT** block authenticated critical work in any other durability domain; and
+5. **NOT** convert the condition into a fleet-wide write lockout — there is no state transition from
+   `denial-lane-degraded` to `critical-durability-degraded`.
+
+### 4b.4 The durable-partition contract
+
+Three **logically separate** partitions are required, even when one physical encrypted spool, file or
+transport is shared:
+
+| Partition | Holds | Capacity rule |
+|---|---|---|
+| `P-CRIT` | Authenticated **critical** decision events (write, destructive, configuration publication, credential materialization, state-affecting Management) | **Reserved capacity** that `P-ORD` and `P-DEN` **MUST NOT** consume, sized by `mcp_{gateway,mgmt}_event_critical_reserve_bytes`. |
+| `P-ORD` | Ordinary authenticated events (low-risk allow/monitor decisions, outcome events) | Shares the non-reserved remainder. |
+| `P-DEN` | Coalesced unauthenticated / authorization-denial aggregates | Bounded by its **own** quota (`mcp_{gateway,mgmt}_denial_lane_quota_bytes`); exhausting it degrades **only** the denial lane. |
+
+**Deterministic reclamation order.** When the spool crosses its high watermark, records are reclaimed in a
+fixed priority order until the low watermark is reached:
+
+```
+1. exported  P-DEN   (oldest first)      4. unexported P-ORD  (oldest first)
+2. exported  P-ORD   (oldest first)      5. exported   P-CRIT (oldest first)
+3. unexported P-DEN  (oldest first)      6. — UNEXPORTED P-CRIT IS NEVER RECLAIMED —
+```
+
+**An unexported critical record MUST NOT be reclaimed while any lower-priority denial or ordinary record
+remains.** If reclamation exhausts steps 1–5 and the spool is still above the high watermark, the runtime
+enters `critical-durability-degraded` for that domain rather than discarding unexported critical evidence.
+Dropping critical evidence to make room is never a reclamation outcome.
+
+**Storage-failure behavior.**
+
+| Condition | Required behavior |
+|---|---|
+| **Encryption-key failure** | Treated as a **commit FAILURE**, never a plaintext fallback. Authenticated critical operations in the domain fail closed; the domain enters `critical-durability-degraded`. Writing an unencrypted record is **prohibited**. |
+| **`fsync` failure** | A **commit FAILURE** — admission is not durability. The record is **not** acknowledged as committed; the triggering critical operation fails closed. |
+| **`ENOSPC`** | Reclamation runs in the order above. If it cannot free space without reclaiming unexported critical records, the domain enters `critical-durability-degraded`. On a **shared volume**, `ENOSPC` caused by a co-tenant process is still a local commit failure and is still contained to the domain — it **MUST NOT** propagate to other nodes. |
+
+### 4b.5 Normative degraded-state machine
+
+| State | Entry condition | Allowed operations | Alert severity | Exit |
+|---|---|---|---|---|
+| `normal` | Default; all partitions writable and below the high watermark | All | — | — |
+| `denial-lane-degraded` | A coalesced denial aggregate could not be committed, **or** `P-DEN` reached its quota | **Everything authenticated continues**, including all critical classes. Denials are still enforced; denial evidence is counted-but-lossy. | **Warning** | Denial-lane commits succeed again **and** `P-DEN` is below its low watermark |
+| `critical-durability-degraded` | An **authenticated** critical decision event failed to commit in this domain (saturation **or** post-admission commit failure), **or** reclamation could not free space without reclaiming unexported critical records, **or** recovery metadata was ambiguous/corrupt at startup | **New critical operations in this domain fail closed.** Low-risk reads only under the explicit degraded-read policy. **Other domains are unaffected.** | **Critical** | All four §4b.6 criteria hold, then via `recovering` |
+| `recovering` | All §4b.6 exit criteria observed true by a probe | Same restrictions as the state being left, until the transition completes | **Warning** | Recovery marker commit **confirmed and read back**; transition to `normal` within one bounded probe interval |
+
+There is **no** `emergency-bypass` state, and no transition — automatic or operator-invoked — that permits a
+critical operation to run in a degraded domain without a durable event.
+
+### 4b.6 Exit criteria (bounded, and all four required)
+
+`critical-durability-degraded` **MAY** exit **only** after **all** of:
+
+1. **durable storage is writable** (a probe write to the domain's partition succeeds);
+2. **critical reserved capacity is above the reserve recovery watermark** — `P-CRIT` free bytes ≥
+   `reserve_recovery` × `mcp_{gateway,mgmt}_event_critical_reserve_bytes`, measured **on disk**;
+3. **a recovery/health marker is durably committed and read back** — commit-confirmed, not merely enqueued
+   (this is the same "confirmed commit, not an enqueue" rule the fail-closed gate uses, applied to
+   recovery, so a spool that accepts writes but loses them cannot clear the state); and
+4. **pending critical records are within the derived safe bound** — the **in-process** backlog of critical
+   records accepted but not yet commit-confirmed occupies no more than
+   `(100% − reserve_recovery)` × `mcp_{gateway,mgmt}_event_critical_reserve_bytes`.
+
+> **The recovery watermark is a fraction OF THE RESERVE, never of the spool — and this is load-bearing.**
+> `event_spool_watermarks.high`/`.low` govern **reclamation** and are expressed against
+> `event_spool_max_bytes`. Criterion (2) is expressed against `event_critical_reserve_bytes` via a
+> **third, separate member** `event_spool_watermarks.reserve_recovery`, validated `0 < reserve_recovery ≤
+> 100%`. Reusing the spool-relative `.low` here would admit configurations whose exit condition is
+> **unreachable by construction**: with a reserve of 10% of the spool and `.low` at 50%, `P-CRIT` free
+> space can never reach 50% *of the spool*, so the domain would stay `critical-durability-degraded`
+> forever even on perfectly healthy storage — a permanent lockout produced by valid configuration, which
+> is the exact failure class §4b exists to remove. Because `reserve_recovery` is a fraction of the reserve
+> and the reserve is non-zero by validation, **every accepted configuration has a reachable exit.**
+>
+> **Criteria (2) and (4) are complementary, not redundant, and both MUST hold.** They partition the same
+> reserve budget but are **observed by different probes**: (2) is free space **on disk**, (4) is the
+> **in-process** queue of records that have been accepted but whose commit is not yet confirmed. A spool
+> reporting ample free space while the process still holds unflushed critical records is precisely the
+> disagreement worth catching — clearing the state on (2) alone would re-admit critical operations into a
+> runtime that is still behind on the evidence for the previous ones. The **pending bound is derived, not
+> separately configured**, so the two can never be set to contradict each other.
+
+Exit **MUST** occur **within one bounded probe interval** after all four hold
+(`mcp_{gateway,mgmt}_durability_recovery_probe_interval`). A degraded state that outlives the condition
+that caused it is an availability bug, not a safety margin: recovery is **bounded**, not best-effort.
+
+### 4b.7 Restart persistence
+
+- The degraded state **and its scope** **MUST survive process restart**. A restart is **not** a recovery
+  mechanism.
+- **Restart MUST NOT erase or bypass the lockout.** An operator who cannot clear a degraded domain by
+  fixing durability **MUST NOT** be able to clear it by bouncing the process — that would make the whole
+  control advisory.
+- **Startup reconstructs the state** from **integrity-protected local metadata** plus observed spool state,
+  in the same durable location as the spool (`mcp_{gateway,mgmt}_event_spool_path`).
+- **Ambiguous or corrupt recovery metadata fails toward the narrow local `critical-durability-degraded`
+  state** for that node/capability — never toward `normal` (which would be a restart bypass), and never
+  toward a fleet-wide state (which would be the amplification this section removes).
+- The state clears **only** through the §4b.6 criteria.
+
+**Owner/operator action.** `critical-durability-degraded` is an **SRE / Reliability** page: restore durable
+storage in the affected domain (free space, repair the volume, restore the encryption key), then let the
+bounded probe clear the state. `denial-lane-degraded` is a **Security** signal, not a storage page — it
+usually means an authentication-flood attack is in progress and the coalescer is doing its job. The runbook
+procedure for both is [`OPERATIONS-AND-SUPPORT.md`](OPERATIONS-AND-SUPPORT.md) §"Durability degradation".
 
 ---
 
@@ -279,13 +463,14 @@ flowchart TD
     SAT{"Saturated?"}
     CRIT{"Critical class?\n(auth / deny / config / high-risk)"}
     KIND{"Is the event an\nauth-failure / authz-DENIAL?\n(request already denied)"}
-    SPOOL["Mandatory local encrypted\ndurable spool (per DP)"]
+    ADM["DENIAL LANE — pre-queue admission control\n+ attacker-rate-independent coalescing\nN equivalent denials ⇒ O(1) durable records"]
+    PDEN["P-DEN partition (own quota)\nCANNOT consume the P-CRIT reserve"]
+    SPOOL["Mandatory local encrypted durable spool (per DP)\nP-CRIT (reserved) · P-ORD · P-DEN"]
     EXPORT["Additive export\n(SIEM / bus / object store)\n— never a substitute"]
     INT["Integrity + replay ID\n(event_id, correlation_id,\nsnapshot_hash, dp_id, timestamp)"]
     FAIL["Fail closed\nthe triggering operation"]
-    DEG["Enter degraded mode\n+ alert + loss counter\n(MCP-EVENT-002)"]
-    CDEG["CRITICAL degraded state\n+ alert + loss counter"]
-    LOCK["DURABILITY LOCKOUT:\nblock NEW allowed write/high-risk ops\nuntil durability is restored"]
+    DEG["critical-durability-degraded\nSCOPED TO THIS DOMAIN ONLY\n(node × capability × partition)\n+ alert + loss counter"]
+    DDEG["denial-lane-degraded\n+ alert + DISTINCT denial-loss counter\nrequest STILL rejected\nBLOCKS NOTHING AUTHENTICATED"]
 
     D --> Q
     Q --> SAT
@@ -297,15 +482,19 @@ flowchart TD
     CRIT -- "yes" --> KIND
     KIND -- "no\n(write / destructive / config-publication /\ncredential / state-affecting Mgmt)" --> FAIL
     KIND -- "no (AND, not either)" --> DEG
-    KIND -- "yes\n(already denied — fail-closed is vacuous)" --> CDEG
-    CDEG --> LOCK
+    KIND -- "yes\n(already denied — NEVER enters the critical lane)" --> ADM
+    ADM --> PDEN
+    PDEN -- "aggregate commit CONFIRMED" --> INT
+    PDEN -- "aggregate commit FAILED\nor P-DEN quota reached" --> DDEG
     CRIT -- "no\n(low-risk ALLOW/MONITOR)" --> LP{"configured loss policy?\nmcp_{gateway,mgmt}_event_loss_policy"}
     LP -- "degrade-and-alert\n(operation still proceeds)" --> DEG
     LP -- "fail-closed\n(deny the triggering low-risk call)" --> FAIL
     LP -- "fail-closed: AND, not either\ndegradation is recorded for BOTH policies" --> DEG
 ```
 
-**Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded / denial-lockout posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.
+**Admission is not a commit.** `SAT -- no` means the event was *admitted* to the queue; the spool must still **confirm** the write. A commit failure after admission (`ENOSPC`, `fsync` error, encryption-key failure) routes into the **same** `CRIT` class decision as saturation, so it reaches the identical fail-closed / degraded posture — for **both** critical-action and denial-event handling. A diagram in which `FAIL`/`DEG` are reachable only via `SAT -- yes` contradicts §4a and `MCP-EVENT-002`.
+
+**The two lanes never join, and only one of them can block anything** (§4b). The authenticated critical path reaches `FAIL` + `DEG`, where `DEG` is scoped to **one durability domain**. The attacker-mintable denial path leaves the critical lane at `KIND -- yes` and terminates at `DDEG`, which **blocks nothing authenticated** and has **no edge back** into `FAIL`, `DEG` or any lockout node. There is deliberately **no** `LOCK` node in this diagram any more: an unauthenticated actor must not be able to reach a state that stops authenticated work.
 
 **Two distinct critical-class outcomes — do not conflate them** (§4a,
 [MCP-EVENT-002](SECURITY-REQUIREMENTS.md#mcp-event--durable-decision-events),
@@ -313,15 +502,17 @@ flowchart TD
 [MCP-T-044](THREAT-MODEL.md)):
 
 1. **Write / destructive / configuration-publication / credential / state-affecting-Management** — the
-   triggering operation **fails closed AND** the system enters degraded mode with alert + integrity-protected
-   loss counter. Both, never either.
+   triggering operation **fails closed AND** the system enters `critical-durability-degraded` with alert +
+   integrity-protected loss counter. Both, never either. The degraded state is **scoped to the affected
+   durability domain** (`node × capability × partition`, §4b.2) — it does **not** extend to another
+   capability, another node or the fleet.
 2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
-   "fail closed" is **vacuous** and this case is **NOT** relabeled as fail-closed. Instead the system enters
-   the **critical degraded state**, alerts, increments the loss counter, and applies a **durability
-   lockout**: **new *allowed* write/high-risk operations are blocked until critical-event durability is
-   restored** (unless an explicitly approved emergency policy states otherwise). Entering degraded mode
-   **alone is not sufficient** — without the lockout, privileged work could continue after denial evidence
-   was lost.
+   "fail closed" is **vacuous** and this case is **NOT** relabeled as fail-closed. Because these events are
+   **mintable by an unauthenticated attacker**, they are handled entirely in the **denial lane** (§4b.3):
+   admission control, coalescing, the `P-DEN` quota, and — on aggregate-commit failure —
+   **`denial-lane-degraded`** with a **distinct** loss counter. The request stays rejected. **No write
+   lockout is applied, and none may be**: the superseded rule let an unauthenticated flood halt allowed
+   writes fleet-wide (`MCP-T-075`), which made the evidence control reachable by the actor it was recording.
 
 **The low-risk class follows the configured loss policy, and both values must have a route.** Saturation (or a
 commit failure) on a low-risk `ALLOW`/`MONITOR` event always triggers degraded mode and an alert; whether it

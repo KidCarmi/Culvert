@@ -47,7 +47,10 @@ DOC = pathlib.Path('docs/design/mcp/CONFIG-SURFACE-MATRIX.md')
 # ── documented schema ────────────────────────────────────────────────────────
 SECTION = '## The matrix'
 FIRST_HEADER_CELL = 'Field ID'
-EXPECTED_ROWS = 89                 # live rows; update deliberately, with review
+EXPECTED_ROWS = 105                # live rows; update deliberately, with review
+#   89 -> 105: the #926 durability-containment remediation added 16 rows (8 concepts x
+#   Mgmt/Gateway) for the spool bound, critical reserve, watermarks, retention, rotation,
+#   denial-aggregation window, denial-lane quota and recovery probe interval.
 
 REGISTRY_CLASSES = {'RC-0', 'RC-1', 'RC-2', 'RC-3',
                     'RC-4', 'RC-5', 'RC-6', 'RC-7', 'RC-X'}
@@ -518,7 +521,7 @@ def seed_rc1_summary_corrupt(t):
 
 def seed_census_claim_deleted(t):
     """A published value-kind census count silently removed."""
-    return t.replace('`tunable` 56 · ', '')
+    return t.replace('`tunable` 72 · ', '')
 
 
 def seed_zero_kind_census_wrong(t):
@@ -528,7 +531,7 @@ def seed_zero_kind_census_wrong(t):
 
 def seed_census_total_wrong(t):
     """The published row total falsified."""
-    return t.replace('**89 rows, 5 sensitive-kind rows', '**88 rows, 5 sensitive-kind rows')
+    return t.replace('**105 rows, 5 sensitive-kind rows', '**104 rows, 5 sensitive-kind rows')
 
 
 def seed_class_census_missing_rc3(t):

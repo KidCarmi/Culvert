@@ -126,7 +126,7 @@ Severity = f(Impact, Likelihood), each rated Low/Medium/High.
 | DFD-6 | Credential selection | MCP-T-022..025 |
 | DFD-7 | Input inspection | MCP-T-026, MCP-T-036, MCP-T-037, MCP-T-041 |
 | DFD-8 | Output inspection | MCP-T-027, MCP-T-038, MCP-T-039 |
-| DFD-9 | Decision event publication | MCP-T-028, MCP-T-044, MCP-T-045 |
+| DFD-9 | Decision event publication | MCP-T-028, MCP-T-044, MCP-T-045, MCP-T-075 |
 | DFD-10 | CP→DP snapshot publication | MCP-T-047..050 |
 | DFD-11 | Rollback | MCP-T-047, MCP-T-048 |
 | DFD-12 | Local enterprise client connectivity | MCP-T-036, MCP-T-037, MCP-T-030 |
@@ -239,6 +239,7 @@ reference [`TEST-TRACEABILITY-MATRIX.md`](TEST-TRACEABILITY-MATRIX.md). Owner = 
 | MCP-T-042 | SSE exhaustion | High | MCP-OPS-002 | SRE/Sec |
 | MCP-T-043 | Slow-client attacks | Medium | MCP-OPS-002 | SRE/Sec |
 | MCP-T-044 | Queue saturation / event-loss | Critical | MCP-EVENT-001,002,004 | SRE/Sec |
+| MCP-T-075 | **Unauthenticated denial-event flood → durability-lockout DoS.** An unauthenticated attacker mints authentication-failure / authorization-denial events at will. Under the superseded ADR-0024 §D-5 rule, a **non-persistable denial event blocked new allowed write/high-risk operations until durability returned** — so flooding auth failures faster than the spool commits them **converted an evidence control into a fleet-wide write outage**, triggerable by the very actor it existed to record. Sub-cases, all in scope: (a) **denial flood exhausting event durability**; (b) **cross-tenant / cross-capability availability coupling** — one tenant's or capability's degradation halting another's authenticated work; (c) **restart bypass** — clearing a degraded state by bouncing the process instead of restoring durability; (d) **shared-volume `ENOSPC`** — a co-tenant process filling the volume, or denial traffic filling it, starving the critical partition; (e) **starvation of authenticated critical records** — denial/ordinary records consuming the capacity a critical decision event needs to commit, so authenticated critical work fails closed on attacker-induced pressure. | **Critical** | MCP-EVENT-007 (separate denial lane: pre-queue admission control, attacker-rate-independent coalescing, own quota, no access to the `P-CRIT` reserve), MCP-EVENT-001 (three logically separate partitions + reserved critical capacity + deterministic reclamation order that never reclaims unexported critical records first), MCP-EVENT-002 (degraded state **scoped to one durability domain**; the attacker-mintable class removed from it entirely), MCP-OPS-005 (restart-persistent, bounded, scoped degraded-state machine), MCP-OPS-002 (runtime admission bounds) | SRE/Sec |
 
 ### Integrity & audit
 
@@ -329,6 +330,7 @@ protocol-kernel fuzz + structural-limit test classes there.
 | R-3 | Approved server later compromised (MCP-T-021) | Sec/Eng | Drift + destination + output controls; accepted. |
 | R-4 | Human approval social engineering (MCP-T-032,033) | Product Sec | Explicit, auditable approval UX; accepted. |
 | R-5 | Cloud AI vendor data handling (MCP-T-053) | Privacy/Legal | Customer contract + allowlist + DLP-before-egress; accepted per deployment. |
+| R-6 | **A genuine durability failure may block critical operations on the affected node/capability until recovery (MCP-T-075, MCP-T-044)** | **SRE / Reliability** (proposed owner — **acceptance PENDING approval, NOT accepted by a named human**) | **Proposed acceptance:** when the durable spool genuinely cannot commit an **authenticated** critical decision event, critical operations in that one durability domain **fail closed until recovery** — this is the preserved fail-closed guarantee working as designed, and it is **not** removed by #926. What #926 removes is the **attacker's ability to expand it**: the failure is contained to `(one node/DP runtime) × (one capability) × (the affected partition)`, cannot be induced by unauthenticated traffic (MCP-EVENT-007), cannot starve the critical reserve (MCP-EVENT-001), cannot survive a restored spool beyond one bounded probe interval, and cannot be cleared by a restart (MCP-OPS-005). **The accepted residual is a bounded local availability cost on real storage failure; the rejected risk is an attacker-expandable fleet-wide outage.** Mitigations: reserved critical capacity, bounded recovery, per-domain alerting, and the [`OPERATIONS-AND-SUPPORT.md`](OPERATIONS-AND-SUPPORT.md) durability-degradation runbook. |
 
 ## 13. Closure criteria
 

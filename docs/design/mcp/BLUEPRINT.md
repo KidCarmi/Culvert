@@ -687,9 +687,11 @@ identifiers and an explicit loss policy (D-5 / `ADR-0024 §D-5`, `MCP-EVENT-001`
 >    and an integrity-protected loss counter. Degraded mode is **not** an alternative to fail-closed.
 > 2. **Authentication-failure / authorization-DENIAL** — the triggering request is **already denied**, so
 >    fail-closed is vacuous and this case is **NOT** relabeled as fail-closed. The system **MUST** enter the
->    **critical degraded state**, alert, increment the loss counter, and apply a **durability lockout**:
->    **new *allowed* write/high-risk operations are blocked until critical-event durability is restored**
->    (absent an explicitly approved emergency policy). Degraded mode **alone is not sufficient**.
+>    isolated **denial lane** (`MCP-EVENT-007`: pre-queue admission control, attacker-rate-independent
+>    coalescing, its own `P-DEN` quota, no access to the `P-CRIT` reserve) and, on aggregate-commit failure,
+>    **`denial-lane-degraded`** with a distinct loss counter. **No write lockout is applied, and none may be** —
+>    these events are attacker-mintable, so gating authenticated work on them yields a fleet-wide DoS
+>    (`MCP-T-075`). There is **no emergency-policy bypass**.
 >
 > Read-only / low-risk operations may proceed **only** under an explicitly approved degraded-mode policy
 > (`MCP-EVENT-002`, EVENT-MODEL §4a, `ADR-0024 §D-5`).
@@ -941,7 +943,7 @@ boundary, acceptance criteria, tests and rollback. PR-1 does not begin before PR
 | PR-5 — Observe Runtime | Dedicated listener, bounded pools and test/observe mode. | MCP disabled causes no measurable SWG regression. |
 | PR-6 — Policy Engine | Rules, actions, reason codes and simulator. | Deterministic pure evaluation and traceable tests. |
 | PR-7 — Inspection | Schema, secret/DLP, destination and redaction. | Abuse corpus and latency budgets. |
-| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions, **and** the denial-event durability lockout observed (a non-persistable auth-failure/authz-denial blocks new allowed write/high-risk operations until durability returns). |
+| PR-8 — Events | Durable decision events, exporters and backpressure. | Zero loss for critical classes under tested conditions, **and** the nine `MCP-T-075` containment tests green — headed by the attacker test: a saturated denial lane must leave authenticated allowed critical work in another tenant/listener/capability succeeding throughout. |
 | PR-9 — API / GUI | Inventory, policies, simulator, approvals and health. | RBAC, OpenAPI and GUI parity. |
 | PR-10 — CP/DP & HA | Immutable snapshots, fencing, acknowledgements and rollback. | Mixed-version, corrupt-snapshot and rollback tests. |
 | PR-11 — Shadow / Canary | Modes, scope controls, dashboards and rollout guardrails. | Production-readiness evidence complete. |

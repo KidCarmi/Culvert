@@ -121,6 +121,8 @@ rather than introducing a second metrics convention:
 | SLO burn — availability/latency | Error budget burn rate exceeds a fast/slow multi-window threshold against §1 targets. | Sev-2 | On-call SRE |
 | Lost auth/deny/config event | Any observed drop of a durable decision or config-apply event (target is zero). | Sev-1 | On-call SRE + Sec |
 | Event pipeline saturation | Queue depth / spool size approaching capacity bound (§2). | Sev-2 (Sev-1 if evidence loss risk) | On-call SRE |
+| `critical-durability-degraded` | An **authenticated** critical decision event failed to commit in this durability domain. | **Sev-1** — critical operations in that domain are failing closed. | On-call SRE / Reliability |
+| `denial-lane-degraded` | Coalesced denial aggregates cannot commit, or `P-DEN` reached its quota. | **Sev-3** — nothing authenticated is blocked; usually an authentication flood, and the coalescer working as designed. | Security (not a storage page) |
 | Credential-leak signal | Secret pattern detected in an inspected payload, or a credential-cache compromise indicator. | Sev-1 | On-call Sec |
 | CP/DP split-brain or stale snapshot | Fencing epoch conflict or snapshot age beyond bound. | Sev-1 | On-call SRE + Cluster owner |
 | Server compromise / drift | Registered-server identity change, tool schema/description drift, or unknown-tool auto-allow attempt. | Sev-1 | On-call Sec |
@@ -153,7 +155,8 @@ rollout-stage machine or the emergency-disable procedure; it only maps operation
 | Credential leak (MCP-T-023, MCP-T-024) | Secret-pattern hit in inspected payload/event, or credential-cache compromise indicator. | Revoke/rotate the credential, block the credential profile, identify all calls and resources reached with it via decision events. | IAM/PAM |
 | Policy regression | Post-deploy anomaly in decision distribution, false-positive/negative spike, or SLO burn tied to a policy change. | Pause rollout stage advance, compare current vs. prior policy snapshot/revision, roll back per [`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md), export affected decisions for review. | Product Security / Engineering |
 | Data Plane lag / split (MCP-T-047..050) | Fencing-epoch conflict, stale-snapshot detection, or DP/CP heartbeat loss. | Fence the stale Control Plane, block partial config apply, route traffic to a healthy DP, recover from the last known-good snapshot. | SRE / Cluster |
-| Event pipeline saturation (MCP-T-042..044) | Queue-depth/spool-size alert from §3.3. | Apply the configured loss policy, protect high-risk evidence classes first (auth/deny/config over routine monitor events), alert, and scale or spool. | SRE |
+| **Durability degradation (MCP-T-075, MCP-T-044)** | `critical-durability-degraded` **or** `denial-lane-degraded` alert, scoped to one node × capability. | See §5.8a — the two states have **different owners and different actions**: `critical-durability-degraded` is an **SRE / Reliability** storage page; `denial-lane-degraded` is a **Security** signal that an authentication flood is in progress. | SRE / Reliability (+ Security for the denial lane) |
+| Event pipeline saturation (MCP-T-042..044) | Queue-depth/spool-size alert from §3.3. | Apply the configured loss policy and alert. **Reclamation is deterministic and already specified — it is not an operator judgement call:** the runtime frees `exported P-DEN → exported P-ORD → unexported P-DEN → unexported P-ORD → exported P-CRIT`, and **never** reclaims an unexported `P-CRIT` record while any lower-priority record remains ([EVENT-MODEL.md](EVENT-MODEL.md) §4b.4). The operator action is therefore to **add capacity, drain the export path, or reduce ingress** — *not* to choose which evidence to drop. If reclamation cannot free space without discarding unexported critical records, the domain enters `critical-durability-degraded` and §5.8a applies. *(The former remedy, "scale or spool", was circular: the spool was the thing that was full.)* | SRE |
 | Protocol incompatibility | Compatibility-matrix failure or adapter error for a client/server version. | Use the adapter/compatibility status surface, disable the unsupported capability safely (fail closed, not open), notify affected tenants. | Engineering |
 | Connector outage (MCP-T-051, MCP-T-052) | Outbound connector or DMZ endpoint health-check failure. | Maintain local enforcement where possible, fail according to the documented connectivity failure mode, alert, and prevent unsafe Management-MCP mutations during the outage. | SRE / Network |
 
@@ -224,6 +227,63 @@ Handled per the "Event pipeline saturation" runbook (§4). Support-facing framin
 risks the "lost auth/deny/config events = 0" target (§1); it is never treated as a purely capacity/
 performance ticket — Sec is looped in whenever the loss policy is invoked, even if no loss has yet
 occurred.
+
+### 5.8a Durability degradation — `critical-durability-degraded` / `denial-lane-degraded`
+
+**These two states are NOT the same incident and MUST NOT share a response.** Treating a denial-lane
+alert as a storage page wastes an on-call rotation on an attack; treating a critical-durability page as
+"just noisy denials" leaves critical operations failing closed. The distinguishing question is
+**whose event failed to commit**: an **authenticated** critical event, or an **attacker-mintable** denial
+aggregate.
+
+| | `critical-durability-degraded` | `denial-lane-degraded` |
+|---|---|---|
+| **Means** | An authenticated critical decision event could not be durably committed in this domain | Coalesced denial aggregates could not commit, or `P-DEN` hit its quota |
+| **Blast radius** | Critical operations **in that one durability domain** fail closed (`node × capability × partition`) | **Nothing authenticated is blocked** — anywhere |
+| **Owner** | **SRE / Reliability** | **Security** |
+| **Severity** | Sev-1 | Sev-3 |
+| **Usually caused by** | Real storage failure: `ENOSPC` (including a co-tenant filling a shared volume), `fsync` errors, an unavailable encryption key | An authentication flood; the coalescer and quota are containing it |
+
+**Procedure — `critical-durability-degraded`:**
+
+1. **Read the scope off the alert.** It names one node/DP runtime, one capability and one partition. Other
+   nodes, the other capability and other tenants are **unaffected by design** — do not widen the incident
+   on assumption. Confirm rather than assume: check whether the paired capability is still `normal`.
+2. **Restore durable commitment in that domain.** Free space (respecting the reclamation order — the
+   runtime will not discard unexported critical records for you), repair the volume, or restore the
+   encryption key.
+3. **Do not restart to clear the state.** Restart is **not** a recovery path: the state and its scope are
+   restart-persistent by design (`MCP-OPS-005`), and a restart on ambiguous metadata deliberately resolves
+   to the **narrow local degraded state**, not to `normal`. If you find yourself restarting to clear it,
+   the underlying durability fault is still present.
+4. **Let the bounded probe clear it.** Once all four exit criteria hold (storage writable; `P-CRIT` reserve
+   above the recovery watermark; recovery marker committed **and read back**; pending critical records
+   within the safe bound), the state exits within one
+   `mcp_{gateway,mgmt}_durability_recovery_probe_interval`. **A state that does not clear within one
+   interval after the criteria hold is a bug — escalate it as one**, do not work around it.
+5. **There is no bypass to reach for.** V1 has no emergency policy, no break-glass flag and no
+   configuration that permits a critical operation to run without a durable event. Recovery means
+   restoring durability. If the business impact of failing closed is unacceptable in a specific incident,
+   that is an **incident-command decision to take the capability out of service**, not a control to
+   disable.
+
+**Procedure — `denial-lane-degraded`:**
+
+1. **Do not page storage.** By construction this state blocks nothing authenticated, cannot enter
+   `critical-durability-degraded`, and cannot consume the `P-CRIT` reserve.
+2. **Treat it as attack telemetry.** Read the aggregate counts and first/last-seen per
+   `capability/listener × normalized source bucket × denial reason`. Volume is intentionally coalesced —
+   the **count**, not the record count, is the signal.
+3. **Respond at the network/identity layer** (block or rate-limit the source, investigate the targeted
+   principal) — not by enlarging the denial quota, which only buys the attacker more durable footprint.
+4. **Escalate to Sev-1 only if** `critical-durability-degraded` **also** appears. That combination means a
+   real storage fault is present as well; the denial flood did not cause it, and the two are handled
+   separately.
+
+**Fleet-wide action is a human decision, never an automatic one.** No lost event — of any class — escalates
+beyond its durability domain automatically. If an incident genuinely warrants fleet-wide action, that is an
+authorized incident-response decision taken through this runbook and recorded as such
+([`ROLLOUT-AND-ROLLBACK.md`](ROLLOUT-AND-ROLLBACK.md) emergency procedures).
 
 ### 5.9 CP/DP drift
 

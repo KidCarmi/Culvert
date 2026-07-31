@@ -222,9 +222,15 @@ if __name__ == '__main__':
         'drop MCP-INSP-009 from the requirements provenance note': (
             'docs/design/mcp/SECURITY-REQUIREMENTS.md',
             [('`MCP-PROTO-001..014`, `MCP-ID-008`, `MCP-INSP-009`', '`MCP-PROTO-001..014`, `MCP-ID-008`')]),
-        'drop MCP-OPS-002 from the rewritten-statements list': (
+        # The note names MCP-OPS-002 TWICE since #926 rewrote its statement a second
+        # time (denial-lane admission control).  The seed must remove BOTH mentions:
+        # dropping one leaves the ID still named, so the check correctly stays silent
+        # and a one-mention seed would MISS for the right reason.
+        'drop MCP-OPS-002 from the rewritten-statements list (both mentions)': (
             'docs/design/mcp/SECURITY-REQUIREMENTS.md',
-            [('and `MCP-OPS-002` (runtime bounds', 'and (runtime bounds')]),
+            [('and `MCP-OPS-002` (runtime bounds', 'and (runtime bounds'),
+             ('and `MCP-OPS-002` (denial-lane admission control named as a runtime bound)',
+              'and (denial-lane admission control named as a runtime bound)')]),
         'drop D-14 from the decisions note': (
             'docs/design/mcp/OPEN-DECISIONS.md',
             [('**D-14 is NEW**', '**A further decision is NEW**'),

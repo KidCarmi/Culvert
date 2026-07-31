@@ -140,14 +140,17 @@ rollback. **PR-1 does not begin before PR-0 approval AND a numbered, Accepted AD
 - **Non-goals:** reusing the 500-entry audit ring as production evidence.
 - **Trust boundary:** TB-4.
 - **Dependencies:** PR-6.
-- **Security requirements:** MCP-EVENT-001..006; MCP-PRIVACY-002.
+- **Security requirements:** MCP-EVENT-001..**007**; **MCP-OPS-005**; MCP-PRIVACY-002. *(`MCP-EVENT-007` — the isolated denial lane — and `MCP-OPS-005` — the restart-persistent, bounded, scoped degraded-state machine — are the requirements the nine `MCP-T-075` containment tests below implement. Omitting them here would let an implementer scoping from this slice treat both as unassigned despite the acceptance text demanding them.)*
 - **Tests:** queue-saturation **and a distinct post-admission spool-commit-failure case** (`ENOSPC` / `fsync` error / encryption-key failure — admission is not a commit), event-durability, integrity/tamper, replay-id, export-authz, secret-scan, and the
-  **denial-event durability-lockout** test (drop a denial event under saturation; assert the critical degraded state
-  **and** that a subsequent *allowed* write/high-risk operation is blocked until durability returns).
+  **nine blocking `MCP-T-075` containment tests** ([CI-GATES.md](CI-GATES.md)), headed by the **attacker test**:
+  saturate the denial lane with unauthenticated auth failures and assert authenticated allowed critical work in
+  another tenant/listener/capability **succeeds throughout**. These REPLACE the superseded denial-event
+  durability-lockout test, which asserted the vulnerability succeeded.
   **Per-class commit-before-side-effect assertions are mandatory**: for each critical class the test MUST assert the ABSENCE OF EVERY IRREVERSIBLE ACTION DOWNSTREAM OF THAT FLOW'S COMMIT GATE — **not only the action the class is named after**, since one flow can carry two classes' side effects — write/destructive: **no upstream call occurred AND no broker-side materialization occurred** (DFD-5's `WAL` gates both, and its fail-closed node names both); configuration publication: **no new revision, nothing signed or pushed, every DP on the prior epoch**; credential: **broker state unchanged — nothing minted, rotated or revoked — AND no upstream call occurred**; state-affecting Management: **no state change AND no revision created, nothing signed or pushed, every DP on the prior epoch** (DFD-3 publishes a signed snapshot, so the state-change assertion alone passes a handler that publishes anyway). **SLICE TIMING — `state-affecting Management` has NO V1 mechanism** (ADR-0024 §D-13 defers every Management mutation to a post-V1 decision), so PR-8 can only **stub** this class; the **real-path** assertion is assigned to the ****Future Management-Mutation Gate** (IMPLEMENTATION-SLICES, D-13), which MUST NOT be marked green without it** (amendment 18's dual ownership, as for the PR-10 publication re-run). Observing fail-closed plus degraded state is NOT sufficient — an act-first implementation that reports `ENOSPC` after the side effect satisfies that and is rejected by `MCP-EVENT-002`.
-- **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert); for a
-  non-persistable auth-failure/authz-denial event, the **critical degraded state + durability lockout** is observed —
-  fail-closed-plus-alert alone does **not** satisfy this slice.
+- **Acceptance:** zero loss for critical classes under tested conditions (or **fail closed AND** degrade+alert), with the
+  degraded state **scoped to one durability domain**, **restart-persistent** and **bounded on exit**; for a
+  non-persistable auth-failure/authz-denial event, the isolated **denial lane** absorbs it and **no authenticated
+  operation anywhere is blocked** — a system-wide block is a FAILING result, not a passing one.
 - **Rollback:** degraded mode → fail-closed for write/high-risk.
   **Additionally: for every critical class the side effect is proven not to have occurred**, and a spool-commit failure after admission fails closed identically to saturation.
 - **Owner:** SRE/Sec. **Reviewer:** Sec Arch. **Release gate:** durability-under-saturation green **+ the spool-commit-failure case green + every per-class side-effect-absence assertion green** (`MCP-EVENT-002`).

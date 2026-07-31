@@ -122,6 +122,62 @@ def table_drift():
     return v
 
 
+ACTION_CLASS_HEADER = 'Action class'
+
+
+def action_class_table(path):
+    """The DURABILITY-UNAVAILABLE per-ACTION-CLASS table (2 columns), as
+    {action-class: behaviour}, plus its header cell.
+
+    Distinct from `perclass_table` above: that one is the 4-column
+    irreversible-action table.  This is the 2-column table whose denial row
+    #926 rewrote — the row that previously let an UNAUTHENTICATED attacker
+    trigger a fleet-wide write lockout.  Both documents carry a copy, and
+    before #926 nothing mechanically compared them: the two copies had already
+    drifted in the header ('a decision event' vs 'the decision event') and in
+    four row bodies, unnoticed.  A safety rule with two copies and no equality
+    check is one edit away from meaning two different things.
+    """
+    rows, header, in_table = {}, None, False
+    for line in pathlib.Path(path).read_text().splitlines():
+        raw = line.strip()
+        if not raw.startswith('|'):
+            in_table = False
+            continue
+        cells = [c.strip() for c in raw.strip('|').split('|')]
+        if len(cells) != 2:
+            in_table = False
+            continue
+        if cells[0] == ACTION_CLASS_HEADER:
+            in_table, header = True, tuple(cells)
+            continue
+        if not in_table or set(cells[1]) <= set('-: '):
+            continue
+        rows[cells[0]] = cells[1]
+    return header, rows
+
+
+def action_class_drift():
+    """The two copies of the action-class table must be cell-for-cell identical,
+    header included (#926 closure item 9)."""
+    ha, a = action_class_table('docs/design/mcp/EVENT-MODEL.md')
+    hb, b = action_class_table('docs/adr/0024-mcp-agent-security-gateway-trust-boundary.md')
+    v = []
+    if not a or not b:
+        return ['action-class table not found in one of the two copies — predicate not sound']
+    if ha != hb:
+        v.append(f'HEADER differs:\n      EVENT-MODEL: {ha}\n      ADR-0024   : {hb}')
+    for k in sorted(set(a) | set(b)):
+        if k not in a:
+            v.append(f'action class {k!r} in ADR-0024 only')
+        elif k not in b:
+            v.append(f'action class {k!r} in EVENT-MODEL only')
+        elif a[k] != b[k]:
+            v.append(f'action class {k!r} behaviour differs:\n'
+                     f'      EVENT-MODEL: {a[k]}\n      ADR-0024   : {b[k]}')
+    return v
+
+
 def clauses(text):
     """Per-class ABSENCE clauses: the text introduced by `<class> ⇒ | : | →`, up to
     the next `;` or the end of the sentence.
@@ -232,7 +288,42 @@ if __name__ == '__main__':
     d = table_drift()
     print('\n'.join('  ' + x for x in d) if d else '  NONE (EVENT-MODEL §4a == ADR-0024 §D-5)')
 
+    print('\n=== ARM 3: the two copies of the ACTION-CLASS table must agree (#926) ===')
+    d3 = action_class_drift()
+    print('\n'.join('  ' + x for x in d3) if d3
+          else '  NONE (EVENT-MODEL §4a == ADR-0024 §D-5, header + every row)')
+
+    print('\n=== ARM 3 seeded known-positives (each MUST fire) ===')
+    _src = pathlib.Path('docs/design/mcp/EVENT-MODEL.md')
+    _orig = _src.read_text()
+    arm3_seeds = {
+        'drop the denial row from EVENT-MODEL only':
+            ('| Authentication failure **or** authorization denial |', '| Authentication failure REWORDED |'),
+        'reinstate the emergency-policy bypass in EVENT-MODEL only':
+            ('and no emergency-policy bypass.**',
+             'unless an explicitly approved emergency policy states otherwise.**'),
+        'widen the EVENT-MODEL write row past its durability domain':
+            ('| Write action | **Fail closed** (deny the operation) **AND** enter `critical-durability-degraded` **scoped to the affected durability domain only**',
+             '| Write action | **Fail closed** (deny the operation) **AND** enter `critical-durability-degraded` **fleet-wide**'),
+        'silently change the shared header in EVENT-MODEL only':
+            ('| Action class | Behavior when the decision event cannot be durably persisted |',
+             '| Action class | Behavior when a decision event cannot be durably persisted |'),
+    }
+    try:
+        for label, (old, new) in arm3_seeds.items():
+            if old not in _orig:
+                print(f'  SEED-DID-NOT-APPLY: {label}')
+                ok = False
+                continue
+            _src.write_text(_orig.replace(old, new, 1))
+            got = action_class_drift()
+            print(f'  {"FIRES" if got else "MISSED"}: {label}'
+                  + (f' -> {got[0].splitlines()[0][:90]}' if got else ''))
+            ok &= bool(got)
+    finally:
+        _src.write_text(_orig)
+
     print('\n=== residual on the live documents ===')
     v = run(SITES)
     print('\n'.join('  ' + x for x in v) if v else '  NONE')
-    sys.exit(0 if ok and not v and not d else 1)
+    sys.exit(0 if ok and not v and not d and not d3 else 1)
