@@ -104,9 +104,11 @@ start; **Slice** = blocks the named slice; **Non-blocking** = can trail.
     read-only/low-risk → proceed only under explicit degraded-mode policy + alarm + integrity-protected
     loss counter + bounded retry, never silent; write/destructive/config-publication/credential/
     state-affecting-Mgmt → **fail closed**; auth-failure/authz-denial → request already denied (not
-    relabeled), but on non-persistable denial enter **critical degraded state**, alert, and **block new
-    write/high-risk operations until critical-event durability is restored** (unless approved emergency
-    policy). Design MUST specify ordering scope, dedup, replay cursor, encryption-at-rest, corruption
+    relabeled) and, because such events are ATTACKER-MINTABLE, handled in a **separate denial lane**
+    (admission control + coalescing + own quota + no access to the critical reserve) whose worst outcome is
+    `denial-lane-degraded` — it blocks **no** authenticated operation. Critical-class degradation is scoped to
+    one durability domain, restart-persistent and bounded on exit. **No emergency-policy bypass exists**
+    (amended for [#926](https://github.com/KidCarmi/Culvert/issues/926) / `MCP-T-075`). Design MUST specify ordering scope, dedup, replay cursor, encryption-at-rest, corruption
     recovery, tenant isolation, retention, disk-pressure, restart/failover recovery.
   - **Approver role:** SRE / Security Architecture (facilitator approval recorded; ratification pending).
   - **Evidence:** VRC §5/§8 (no durable pipeline; audit ring `MaxRing=500`); EVENT-MODEL §4–§6; MCP-EVENT-001..006.
