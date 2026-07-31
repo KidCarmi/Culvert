@@ -10,6 +10,7 @@ package main
 //   - /metrics carried no persistence-health series at all
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +20,23 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
+
+// hasScopeEntry / countScopeEntries inspect a scope result by CONTENT. Scope
+// entries are formatted "<base>: <error>", so the file is matched on the
+// prefix.
+func hasScopeEntry(entries []string, base string) bool {
+	return countScopeEntries(entries, base) > 0
+}
+
+func countScopeEntries(entries []string, base string) int {
+	n := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e, base+":") {
+			n++
+		}
+	}
+	return n
+}
 
 // renderMetrics scrapes /metrics through the real handler.
 func renderMetrics(t *testing.T) string {
@@ -44,6 +62,17 @@ func failingWrite(t *testing.T, name string) string {
 }
 
 // withCleanStorageWriteHealth isolates the process-global failure record.
+//
+// NOTE on assertion style below: clearing the record at test start is NOT
+// enough to make an exact-count assertion safe. The record is process-global
+// and the observer fires from whatever goroutine performed the write, so a
+// goroutine leaked by an earlier test (a CP publish, an alert retry, a
+// heartbeat) can increment it in the middle of this test — and in CI, where
+// /data is unwritable, those background writes DO fail. Assertions here
+// therefore follow the convention CLAUDE.md already documents for the audit
+// ring: assert on CONTENT and on monotonic direction, never on an exact global
+// count. The alert seam is swapped for a synchronous recorder, so alert counts
+// (unlike failure counts) are scoped to this test and can be exact.
 func withCleanStorageWriteHealth(t *testing.T) {
 	t.Helper()
 	resetStorageWriteHealthForTest()
@@ -70,8 +99,8 @@ func TestStorageWriteFailure_CountedAlertedAndSurfaced(t *testing.T) {
 	failingWrite(t, "policy.json")
 
 	snap := storageWriteFailures()
-	if snap.Total != 1 {
-		t.Fatalf("failure total = %d, want 1", snap.Total)
+	if snap.Total < 1 {
+		t.Fatalf("failure total = %d, want at least the one we injected", snap.Total)
 	}
 	if snap.Path != "policy.json" {
 		t.Errorf("last path = %q, want the base name policy.json", snap.Path)
@@ -169,8 +198,8 @@ func TestStorageWriteAlert_RateGated(t *testing.T) {
 		failingWrite(t, "policy.json")
 	}
 
-	if got := storageWriteFailures().Total; got != 25 {
-		t.Errorf("failure total = %d, want all 25 counted (the COUNTER is not gated)", got)
+	if got := storageWriteFailures().Total; got < 25 {
+		t.Errorf("failure total = %d, want at least 25 — every failure counts, the COUNTER is not gated", got)
 	}
 	if len(*alerts) != 1 {
 		t.Fatalf("fired %d alerts for 25 failures, want 1 (rate-gated at %s)", len(*alerts), storageWriteAlertInterval)
@@ -197,8 +226,8 @@ func TestStorageWriteAlert_RetryQueueNeverAlerts(t *testing.T) {
 
 	failingWrite(t, alertRetryQueueBase)
 
-	if got := storageWriteFailures().Total; got != 1 {
-		t.Errorf("failure total = %d, want 1 (retry-queue failures are still COUNTED)", got)
+	if got := storageWriteFailures().Total; got < 1 {
+		t.Errorf("failure total = %d, want the retry-queue failure to still be COUNTED", got)
 	}
 	if len(*alerts) != 0 {
 		t.Fatalf("fired %d alerts for an alert-retry-queue write failure, want 0 (recursion guard)", len(*alerts))
@@ -227,19 +256,30 @@ func TestStorageWriteScope_CollectsFailuresWhileOpen(t *testing.T) {
 	// After the scope closes.
 	failingWrite(t, "after.json")
 
-	if len(got) != 1 {
-		t.Fatalf("scope collected %v, want exactly one entry for inside.json", got)
+	// Content assertions, not a count: a leaked goroutine's failing write can
+	// legitimately land in the scope window (that is the documented, deliberate
+	// over-reporting semantic — see storageWriteScope). What must hold is the
+	// WINDOW boundary: what happened inside is in, what happened outside is not.
+	if !hasScopeEntry(got, "inside.json") {
+		t.Errorf("scope = %v, missing the failure that happened while it was open", got)
 	}
-	if !strings.HasPrefix(got[0], "inside.json:") {
-		t.Errorf("scope entry = %q, want it to name inside.json", got[0])
+	if hasScopeEntry(got, "before.json") {
+		t.Errorf("scope = %v, captured a failure from BEFORE it opened", got)
+	}
+	if hasScopeEntry(got, "after.json") {
+		t.Errorf("scope = %v, captured a failure from AFTER it closed", got)
+	}
+	// Per-file dedup: inside.json failed twice, it must appear once.
+	if n := countScopeEntries(got, "inside.json"); n != 1 {
+		t.Errorf("inside.json appears %d times, want 1 (per-file dedup)", n)
 	}
 	// finish() is once-guarded: the deferred second call in applyConfigBackup
 	// must not clear or duplicate the result.
 	if again := finish(); len(again) != len(got) {
 		t.Errorf("second finish() returned %v, want the same %v", again, got)
 	}
-	if total := storageWriteFailures().Total; total != 4 {
-		t.Errorf("global total = %d, want 4 (the scope filters, it does not suppress)", total)
+	if total := storageWriteFailures().Total; total < 4 {
+		t.Errorf("global total = %d, want at least 4 (the scope filters, it does not suppress)", total)
 	}
 }
 
@@ -248,23 +288,36 @@ func TestMetrics_StorageWriteSeries(t *testing.T) {
 	captureStorageWriteAlerts(t)
 
 	// Clean state: the age gauge must be ABSENT, never 0 (a 0 would read as
-	// "a write just failed" on every healthy node in the fleet).
+	// "a write just failed" on every healthy node in the fleet). Guarded on a
+	// re-read of the record rather than assumed: a leaked goroutine's failing
+	// write can dirty it between the reset and the scrape, and that would make
+	// the absence assertion wrong for a legitimate reason.
 	body := renderMetrics(t)
-	if !strings.Contains(body, "culvert_storage_write_failures_total 0") {
+	if !strings.Contains(body, "culvert_storage_write_failures_total ") {
 		t.Error("culvert_storage_write_failures_total missing from /metrics")
 	}
-	if !strings.Contains(body, "culvert_storage_write_degraded 0") {
+	if !strings.Contains(body, "culvert_storage_write_degraded ") {
 		t.Error("culvert_storage_write_degraded missing from /metrics")
 	}
-	if strings.Contains(body, "culvert_storage_write_last_failure_age_seconds") {
-		t.Error("age gauge exported with no failure recorded — 0 would look like a fresh failure")
+	if storageWriteFailures().Total == 0 {
+		if !strings.Contains(body, "culvert_storage_write_failures_total 0") {
+			t.Error("counter is not 0 on /metrics despite a clean record")
+		}
+		if strings.Contains(body, "culvert_storage_write_last_failure_age_seconds") {
+			t.Error("age gauge exported with no failure recorded — 0 would look like a fresh failure")
+		}
 	}
 
+	before := storageWriteFailures().Total
 	failingWrite(t, "policy.json")
 
 	body = renderMetrics(t)
-	if !strings.Contains(body, "culvert_storage_write_failures_total 1") {
-		t.Error("failure counter did not move on /metrics")
+	after := storageWriteFailures().Total
+	if after <= before {
+		t.Fatalf("failure record did not move: %d -> %d", before, after)
+	}
+	if !strings.Contains(body, fmt.Sprintf("culvert_storage_write_failures_total %d", after)) {
+		t.Errorf("failure counter on /metrics does not match the record (%d)", after)
 	}
 	if !strings.Contains(body, "culvert_storage_write_degraded 1") {
 		t.Error("degraded gauge did not move on /metrics")

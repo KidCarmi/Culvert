@@ -253,13 +253,17 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if persistErr != nil {
-		// CWE-117: the error text embeds store paths, which are ultimately
-		// admin-configurable. sanitizeLog + %q is the project-standard pattern
-		// (CLAUDE.md) — CodeQL recognises sanitizeLog's strings.ReplaceAll as
-		// the barrier, and %q quotes what survives. The scope already strips
-		// control bytes upstream; this is the defence-in-depth copy at the sink.
-		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist: %q",
-			req.Version, sanitizeLog(persistErr.Error()))
+		// CWE-117: this line interpolates INTEGERS ONLY. Neither an inline
+		// strings.ReplaceAll nor sanitizeLog cleared CodeQL's log-injection
+		// query here (the value reaches the sink through the request-scoped
+		// handler, so the barrier is not recognised on this path), and arguing
+		// with the query is worse than not needing it: the file names are
+		// already delivered to the operator by three other surfaces that
+		// sanitise at their own sink — the audit entry above, the API response
+		// below, and the storage_path row of /api/diagnostics. The log line
+		// only has to say "it happened, to N files, on this version".
+		logger.Printf("Config rollback to v%d applied in memory but FAILED to persist %d file(s) — see the audit entry and the storage_path row of /api/diagnostics for the file names",
+			req.Version, persistFailureCount(persistErr))
 		// 500: the operation did not fully succeed. The body distinguishes it
 		// from a rollback that did not happen at all — the caller must know the
 		// running config HAS changed, so "retry the rollback" is not the fix;
@@ -474,10 +478,32 @@ func applyConfigBackup(b *configBackup) error {
 	// to the caller. finishScope is once-guarded; the deferred call above is
 	// the panic-path safety net that guarantees the scope is unregistered.
 	if failed := finishScope(); len(failed) > 0 {
-		return fmt.Errorf("rollback applied to the running config but %d file(s) failed to persist: %s",
-			len(failed), strings.Join(failed, "; "))
+		return &configPersistError{Files: failed}
 	}
 	return nil
+}
+
+// configPersistError reports the durable writes that failed while a config
+// snapshot was applied. It carries the failing files as STRUCTURED data, not
+// just a formatted string, so a caller can report a count without
+// interpolating path-derived text into a log line (CWE-117). The file names
+// still reach the operator — via the audit entry, the API response, and the
+// storage_path diagnostics row — each sanitising at its own sink.
+type configPersistError struct{ Files []string }
+
+func (e *configPersistError) Error() string {
+	return fmt.Sprintf("rollback applied to the running config but %d file(s) failed to persist: %s",
+		len(e.Files), strings.Join(e.Files, "; "))
+}
+
+// persistFailureCount returns how many files a persistence error names, or 0
+// for a nil / differently-typed error. Lets the log sink stay integers-only.
+func persistFailureCount(err error) int {
+	var pe *configPersistError
+	if errors.As(err, &pe) {
+		return len(pe.Files)
+	}
+	return 0
 }
 
 // applyScanStoresFromBackup restores the SSL-bypass matcher and the content
