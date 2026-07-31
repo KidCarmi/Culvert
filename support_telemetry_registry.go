@@ -101,6 +101,7 @@ var supportMetricRegistry = supportmetrics.Registry{
 		TelemetryReason:   "coarse stability signal; exact uptime rejected (fingerprint/correlation)",
 		Buckets:           supportmetrics.UptimeBucketLadder,
 		Read:              readSupportHealthUptimeBucket,
+		DeprecatedAlias:   "support_uptime_bucket",
 	},
 }
 

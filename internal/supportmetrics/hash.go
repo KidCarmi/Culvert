@@ -65,6 +65,7 @@ func (r Registry) Hash() string {
 			writeField("0")
 		}
 		writeBucketLadder(h, d.Buckets)
+		writeField(d.DeprecatedAlias)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -134,7 +134,9 @@ func TestSupportTelemetrySampleMetricsIsImmutable(t *testing.T) {
 }
 
 // TestSupportTelemetrySampleBuildIsSideEffectFree proves BuildSample performs
-// no I/O of its own: it only ever calls each eligible Read() exactly once.
+// no I/O of its own: it only ever calls each eligible Read() exactly once
+// (even when the descriptor has a deprecated alias — the alias reuses the
+// same value, Read is not called twice).
 func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 	calls := 0
 	r := Registry{{
@@ -147,6 +149,36 @@ func TestSupportTelemetrySampleBuildIsSideEffectFree(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("Read called %d times, want exactly 1", calls)
+	}
+}
+
+// TestSupportTelemetrySample_DeprecatedAliasEmitted verifies that BuildSample
+// emits both the canonical ID and the deprecated alias key with identical
+// values, and that the alias does not cause Read() to be called more than once.
+func TestSupportTelemetrySample_DeprecatedAliasEmitted(t *testing.T) {
+	calls := 0
+	r := Registry{{
+		ID: "support_health_ca_ready", Type: Gauge, PrivacyClass: Aggregate,
+		InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health",
+		Read: func() float64 { calls++; return 5 }, DeprecatedAlias: "support_ca_ready",
+	}}
+	sample, err := r.BuildSample(fixedNow(), fixedTestEpoch(), 0)
+	if err != nil {
+		t.Fatalf("BuildSample: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("Read called %d times with alias set, want exactly 1", calls)
+	}
+	m := sample.Metrics()
+	if m["support_health_ca_ready"] != 5 {
+		t.Errorf("canonical id value: got %v, want 5", m["support_health_ca_ready"])
+	}
+	if m["support_ca_ready"] != 5 {
+		t.Errorf("deprecated alias value: got %v, want 5", m["support_ca_ready"])
+	}
+	// 2 keys: canonical + alias.
+	if len(m) != 2 {
+		t.Errorf("metrics map has %d entries, want 2 (canonical + alias)", len(m))
 	}
 }
 

@@ -72,12 +72,37 @@ func TestBuildSupportTelemetrySample_EmitsExactlyEligibleIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSupportTelemetrySample: %v", err)
 	}
-	if len(sample.Metrics()) != len(supportMetricRegistry.Eligible()) {
-		t.Fatalf("sample has %d metrics, want %d", len(sample.Metrics()), len(supportMetricRegistry.Eligible()))
+	eligible := supportMetricRegistry.Eligible()
+
+	// Expected key count is eligible descriptors + their deprecated aliases.
+	expectedCount := len(eligible)
+	for _, d := range eligible {
+		if d.DeprecatedAlias != "" {
+			expectedCount++
+		}
 	}
-	for _, d := range supportMetricRegistry.Eligible() {
+	if len(sample.Metrics()) != expectedCount {
+		t.Fatalf("sample has %d metrics, want %d (eligible + deprecated aliases)", len(sample.Metrics()), expectedCount)
+	}
+
+	// Every eligible canonical ID must appear.
+	for _, d := range eligible {
 		if _, ok := sample.Metrics()[d.ID]; !ok {
 			t.Errorf("sample missing eligible metric %q", d.ID)
+		}
+	}
+	// Every deprecated alias must also appear with the same value as its canonical ID.
+	for _, d := range eligible {
+		if d.DeprecatedAlias == "" {
+			continue
+		}
+		aliasVal, ok := sample.Metrics()[d.DeprecatedAlias]
+		if !ok {
+			t.Errorf("sample missing deprecated alias %q for metric %q", d.DeprecatedAlias, d.ID)
+			continue
+		}
+		if aliasVal != sample.Metrics()[d.ID] {
+			t.Errorf("deprecated alias %q value %v differs from canonical %q value %v", d.DeprecatedAlias, aliasVal, d.ID, sample.Metrics()[d.ID])
 		}
 	}
 }

@@ -186,3 +186,107 @@ func TestSupportTelemetryRegistryBundleSnapshotRejectsInvalidRegistry(t *testing
 		t.Fatal("BundleSnapshot must reject an invalid registry")
 	}
 }
+
+// TestSupportTelemetryRegistryDeprecatedAlias_Validate covers the structural
+// invariants of DeprecatedAlias: valid idPattern, not same as canonical ID,
+// and no collision with other canonical IDs or aliases.
+func TestSupportTelemetryRegistryDeprecatedAlias_Validate(t *testing.T) {
+	good := func() Descriptor {
+		return Descriptor{
+			ID: "support_health_ca_ready", Type: Gauge, PrivacyClass: Aggregate,
+			InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "own health",
+			Read: func() float64 { return 1 },
+		}
+	}
+
+	t.Run("valid alias accepted", func(t *testing.T) {
+		d := good()
+		d.DeprecatedAlias = "support_ca_ready"
+		r := Registry{d}
+		if err := r.Validate(); err != nil {
+			t.Fatalf("valid deprecated_alias must be accepted: %v", err)
+		}
+	})
+
+	t.Run("alias same as canonical id rejected", func(t *testing.T) {
+		d := good()
+		d.DeprecatedAlias = d.ID
+		r := Registry{d}
+		if err := r.Validate(); err == nil {
+			t.Fatal("deprecated_alias same as canonical id must fail validation")
+		}
+	})
+
+	t.Run("alias with invalid pattern rejected", func(t *testing.T) {
+		for _, bad := range []string{"UPPER", "has-dash", "has space", "1start"} {
+			d := good()
+			d.DeprecatedAlias = bad
+			r := Registry{d}
+			if err := r.Validate(); err == nil {
+				t.Errorf("invalid alias %q must fail validation", bad)
+			}
+		}
+	})
+
+	t.Run("alias collides with canonical id of another descriptor", func(t *testing.T) {
+		d1 := good()
+		d1.DeprecatedAlias = "support_health_clamav_ready"
+		d2 := Descriptor{
+			ID: "support_health_clamav_ready", Type: Gauge, PrivacyClass: Aggregate,
+			Read: func() float64 { return 0 },
+		}
+		if err := (Registry{d1, d2}).Validate(); err == nil {
+			t.Fatal("alias colliding with another canonical id must fail validation")
+		}
+	})
+
+	t.Run("alias collides with alias of another descriptor", func(t *testing.T) {
+		d1 := good()
+		d1.DeprecatedAlias = "support_old_name"
+		d2 := Descriptor{
+			ID: "support_health_clamav_ready", Type: Gauge, PrivacyClass: Aggregate,
+			Read:            func() float64 { return 0 },
+			DeprecatedAlias: "support_old_name",
+		}
+		if err := (Registry{d1, d2}).Validate(); err == nil {
+			t.Fatal("two descriptors sharing the same deprecated_alias must fail validation")
+		}
+	})
+}
+
+// TestSupportTelemetryRegistryDeprecatedAlias_BundleSnapshot verifies that
+// BundleSnapshot emits both the canonical ID and the deprecated alias key with
+// the same value, while a descriptor without an alias emits only its canonical
+// ID.
+func TestSupportTelemetryRegistryDeprecatedAlias_BundleSnapshot(t *testing.T) {
+	r := Registry{
+		{
+			ID: "support_health_a", Type: Gauge, PrivacyClass: Aggregate,
+			InSupportBundle: true, TelemetryEligible: true, TelemetryReason: "x",
+			Read: func() float64 { return 42 }, DeprecatedAlias: "support_a_old",
+		},
+		{
+			ID: "support_health_b", Type: Gauge, PrivacyClass: Aggregate,
+			InSupportBundle: true, TelemetryEligible: false,
+			Read: func() float64 { return 7 },
+		},
+	}
+	snap, err := r.BundleSnapshot()
+	if err != nil {
+		t.Fatalf("BundleSnapshot: %v", err)
+	}
+	if snap["support_health_a"] != 42 {
+		t.Errorf("canonical id value: got %v, want 42", snap["support_health_a"])
+	}
+	if snap["support_a_old"] != 42 {
+		t.Errorf("deprecated alias value: got %v, want 42", snap["support_a_old"])
+	}
+	if snap["support_health_b"] != 7 {
+		t.Errorf("non-aliased id value: got %v, want 7", snap["support_health_b"])
+	}
+	// 3 keys: canonical A, alias A, canonical B.
+	if len(snap) != 3 {
+		t.Errorf("snapshot has %d entries, want 3", len(snap))
+	}
+}
+

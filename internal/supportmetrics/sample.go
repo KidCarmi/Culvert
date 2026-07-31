@@ -136,6 +136,9 @@ func (r Registry) BuildSample(now time.Time, epoch string, sequence uint64) (Sam
 			return Sample{}, fmt.Errorf("supportmetrics: metric %q returned a non-finite value (%v)", d.ID, v)
 		}
 		metrics[d.ID] = v
+		if d.DeprecatedAlias != "" {
+			metrics[d.DeprecatedAlias] = v
+		}
 	}
 	return Sample{
 		schemaVersion: SchemaVersion,

@@ -166,12 +166,31 @@ func TestSupportTelemetryRegistryHashChangesOnSchemaChange(t *testing.T) {
 			t.Fatal("hash unchanged after renaming a metric id")
 		}
 	})
+
+	t.Run("add deprecated alias", func(t *testing.T) {
+		r := fixedTestRegistry()
+		r[0].DeprecatedAlias = "support_ca_ready"
+		if r.Hash() == baseHash {
+			t.Fatal("hash unchanged after adding a deprecated alias (alias affects wire output)")
+		}
+	})
+
+	t.Run("change deprecated alias", func(t *testing.T) {
+		r := fixedTestRegistry()
+		r[0].DeprecatedAlias = "support_ca_ready"
+		h1 := r.Hash()
+		r[0].DeprecatedAlias = "support_ca_usable"
+		if r.Hash() == h1 {
+			t.Fatal("hash unchanged after changing a deprecated alias")
+		}
+	})
 }
 
 // TestSupportTelemetryPayloadNoDrift — the eligible set the hash covers is
 // exactly the same set BuildSample emits (both are derived from
 // Registry.Eligible()), so there is exactly one source of truth for "what is
-// eligible."
+// eligible." Deprecated aliases add extra keys alongside canonical IDs for
+// backward compatibility, and are verified separately.
 func TestSupportTelemetryPayloadNoDrift(t *testing.T) {
 	r := fixedTestRegistry()
 	eligible := r.Eligible()
@@ -184,24 +203,37 @@ func TestSupportTelemetryPayloadNoDrift(t *testing.T) {
 		t.Fatalf("BuildSample: %v", err)
 	}
 	metrics := sample.Metrics()
-	if len(metrics) != len(eligible) {
-		t.Fatalf("sample has %d metrics, want exactly %d eligible", len(metrics), len(eligible))
+
+	// Compute expected count: eligible + their deprecated aliases.
+	expectedCount := len(eligible)
+	for _, d := range eligible {
+		if d.DeprecatedAlias != "" {
+			expectedCount++
+		}
 	}
+	if len(metrics) != expectedCount {
+		t.Fatalf("sample has %d metrics, want exactly %d (eligible + deprecated aliases)", len(metrics), expectedCount)
+	}
+
+	// Every eligible canonical ID must appear.
 	for _, d := range eligible {
 		if _, ok := metrics[d.ID]; !ok {
 			t.Errorf("sample missing eligible metric %q", d.ID)
 		}
 	}
+
+	// Every metric key must be either a canonical ID or a deprecated alias of
+	// an eligible descriptor.
 	for id := range metrics {
 		found := false
 		for _, d := range eligible {
-			if d.ID == id {
+			if d.ID == id || d.DeprecatedAlias == id {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("sample contains metric %q that is not in the eligible set", id)
+			t.Errorf("sample contains metric %q that is not in the eligible set (canonical or alias)", id)
 		}
 	}
 }

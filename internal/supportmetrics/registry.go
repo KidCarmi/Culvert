@@ -90,6 +90,14 @@ var idPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // (see buckets.go) — it participates in registry_hash so a threshold change
 // is a governed schema change, not a silent behavior change.
 //
+// DeprecatedAlias, when non-empty, is a wire-compatibility alias: the metric
+// value is emitted under BOTH ID and DeprecatedAlias in BuildSample and
+// BundleSnapshot output. Use this exclusively to retain backward compatibility
+// when a metric ID is renamed, for a planned transition window. The alias
+// must be a valid idPattern string, must differ from the canonical ID, and
+// must not collide with any other canonical ID or alias in the registry. It
+// participates in the registry_hash because it affects wire output.
+//
 // Descriptors are read-only after Registry construction: nothing in this
 // package mutates a Descriptor once assembled into a Registry.
 type Descriptor struct {
@@ -101,6 +109,7 @@ type Descriptor struct {
 	TelemetryReason   string
 	Buckets           *BucketLadder
 	Read              func() float64
+	DeprecatedAlias   string
 }
 
 // Registry is a scoped, immutable-after-construction set of support-health
@@ -117,8 +126,13 @@ type Registry []Descriptor
 // NOT be PrivacyClass LocalOnly (a LocalOnly classification is a positive
 // declaration that the value must never leave the box; TelemetryEligible on
 // such an entry is a contradiction, not a policy choice).
+// DeprecatedAlias, when non-empty, must be a valid idPattern string, must
+// differ from the canonical ID, and must not collide with any canonical ID
+// or other alias in the registry.
 func (r Registry) Validate() error {
-	seen := make(map[string]bool, len(r))
+	// seen tracks every wire key (canonical IDs and deprecated aliases)
+	// that has been claimed, to detect any collision across the whole registry.
+	seen := make(map[string]bool, len(r)*2)
 	for _, d := range r {
 		if d.ID == "" {
 			return fmt.Errorf("supportmetrics: descriptor with empty ID")
@@ -152,6 +166,18 @@ func (r Registry) Validate() error {
 			if d.PrivacyClass == LocalOnly {
 				return fmt.Errorf("supportmetrics: metric %q is telemetry-eligible but classified LocalOnly (LocalOnly must never leave the box)", d.ID)
 			}
+		}
+		if d.DeprecatedAlias != "" {
+			if !idPattern.MatchString(d.DeprecatedAlias) {
+				return fmt.Errorf("supportmetrics: metric %q deprecated_alias %q is not a label-free scalar id (must match %s)", d.ID, d.DeprecatedAlias, idPattern.String())
+			}
+			if d.DeprecatedAlias == d.ID {
+				return fmt.Errorf("supportmetrics: metric %q deprecated_alias must differ from the canonical id", d.ID)
+			}
+			if seen[d.DeprecatedAlias] {
+				return fmt.Errorf("supportmetrics: metric %q deprecated_alias %q collides with an existing metric id or alias", d.ID, d.DeprecatedAlias)
+			}
+			seen[d.DeprecatedAlias] = true
 		}
 	}
 	return nil
@@ -189,6 +215,9 @@ func (r Registry) InBundle() []Descriptor {
 // use — so a metric present in the bundle is provably the same metric (and
 // the same live value) telemetry would show, not a separately-maintained
 // mirror. Side-effect-free, like BuildSample.
+// When a descriptor carries a DeprecatedAlias, the value is emitted under
+// both the canonical ID and the alias to retain backward compatibility with
+// consumers still using the old key.
 func (r Registry) BundleSnapshot() (map[string]float64, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -196,7 +225,11 @@ func (r Registry) BundleSnapshot() (map[string]float64, error) {
 	inBundle := r.InBundle()
 	out := make(map[string]float64, len(inBundle))
 	for _, d := range inBundle {
-		out[d.ID] = d.Read()
+		v := d.Read()
+		out[d.ID] = v
+		if d.DeprecatedAlias != "" {
+			out[d.DeprecatedAlias] = v
+		}
 	}
 	return out, nil
 }
