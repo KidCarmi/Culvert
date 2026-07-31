@@ -7,11 +7,12 @@ import (
 	"time"
 )
 
-// TestSourceDatasetReadiness evaluates the REAL embedded SaaS dataset against the
-// F1 rules. It currently pins a CONTROLLED not-ready result (see
-// roadmap/FEEDS-SOURCE-RECONCILIATION.md). F5's publisher MUST call
-// EvaluateReadiness and refuse to publish unless Ready == true; flipping this test
-// to assert Ready is the reconciliation milestone.
+// TestSourceDatasetReadiness proves the embedded SaaS dataset is
+// PUBLICATION-READY after the source reconciliation
+// (roadmap/FEEDS-SOURCE-RECONCILIATION.md): zero invalid hosts, zero
+// multi-category assignments, zero suffix conflicts, and every host in exactly
+// one category. This is the F5 publish precondition — if it regresses, an edit
+// re-introduced a conflict and the feed must not publish.
 func TestSourceDatasetReadiness(t *testing.T) {
 	b, err := os.ReadFile("../urlcat/default_categories.json")
 	if err != nil {
@@ -22,13 +23,55 @@ func TestSourceDatasetReadiness(t *testing.T) {
 		t.Fatalf("unmarshal dataset: %v", err)
 	}
 	r := EvaluateReadiness(SourceDataset{Categories: cats})
-	if r.Ready {
-		t.Fatal("dataset now reports READY — update this test to assert readiness and wire the F5 publish gate")
-	}
-	// Pin the known conflict shape so accidental dataset edits are flagged.
-	if len(r.InvalidHosts) != 4 || len(r.MultiCategory) != 32 || len(r.SuffixConflict) != 6 || len(r.CategoryName) != 0 || len(r.StructuralIssues) != 0 {
-		t.Errorf("conflict inventory drift: invalid=%d multi=%d suffix=%d catname=%d structural=%d (want 4/32/6/0/0) — reconcile roadmap/FEEDS-SOURCE-RECONCILIATION.md",
+	if !r.Ready {
+		t.Fatalf("embedded dataset must be publication-ready: invalid=%d multi=%d suffix=%d catname=%d structural=%d — reconcile roadmap/FEEDS-SOURCE-RECONCILIATION.md",
 			len(r.InvalidHosts), len(r.MultiCategory), len(r.SuffixConflict), len(r.CategoryName), len(r.StructuralIssues))
+	}
+	if len(r.InvalidHosts) != 0 || len(r.MultiCategory) != 0 || len(r.SuffixConflict) != 0 || len(r.CategoryName) != 0 || len(r.StructuralIssues) != 0 {
+		t.Errorf("dataset must have zero conflicts: invalid=%d multi=%d suffix=%d catname=%d structural=%d",
+			len(r.InvalidHosts), len(r.MultiCategory), len(r.SuffixConflict), len(r.CategoryName), len(r.StructuralIssues))
+	}
+	// Every host is in exactly one category (raw == unique) and already canonical.
+	if r.TotalRawHosts != r.UniqueHosts {
+		t.Errorf("every host must be in exactly one category: raw=%d unique=%d", r.TotalRawHosts, r.UniqueHosts)
+	}
+	for i := range cats {
+		for _, h := range cats[i].Hosts {
+			if n, err := NormalizeHost(h); err != nil || n != h {
+				t.Errorf("non-canonical host %q in %q: %v", h, cats[i].Name, err)
+			}
+		}
+	}
+}
+
+// TestSourceDataset_GeneratesEndToEnd proves the reconciled dataset actually
+// produces a valid signed-feed artifact + manifest through the real generator
+// (not just that readiness is true), with deterministic bytes.
+func TestSourceDataset_GeneratesEndToEnd(t *testing.T) {
+	b, err := os.ReadFile("../urlcat/default_categories.json")
+	if err != nil {
+		t.Fatalf("read embedded dataset: %v", err)
+	}
+	var cats []SourceCategory
+	if err := json.Unmarshal(b, &cats); err != nil {
+		t.Fatalf("unmarshal dataset: %v", err)
+	}
+	gen := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
+	in := GenerateInput{Source: SourceDataset{Categories: cats}, FeedVersion: 1, GeneratedAt: gen, ExpiresAt: gen.Add(14 * 24 * time.Hour)}
+	r1, err := Generate(in)
+	if err != nil {
+		t.Fatalf("Generate on reconciled dataset failed: %v", err)
+	}
+	if r1.CategoryCount != len(cats) {
+		t.Errorf("category_count = %d; want %d", r1.CategoryCount, len(cats))
+	}
+	// Deterministic: a second generation is byte-identical.
+	r2, err := Generate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(r1.ArtifactBytes) != string(r2.ArtifactBytes) || string(r1.ManifestBytes) != string(r2.ManifestBytes) {
+		t.Error("generation on the embedded dataset is not deterministic")
 	}
 }
 

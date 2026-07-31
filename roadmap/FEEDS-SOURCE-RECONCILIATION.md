@@ -1,10 +1,9 @@
 # Feed Source Reconciliation — Decision Package
 
-**Status:** ✅ **APPROVED — owner decisions recorded (2026-07-31).** Dispositions
-below are the approved plan; the dataset edits are applied in the following
-implementation commit. This document turns the readiness conflicts in the embedded
-SaaS dataset (`internal/urlcat/default_categories.json`) into an explicit,
-per-conflict decision table that makes the dataset `Ready == true`.
+**Status:** ✅ **APPLIED (2026-07-31).** The owner-approved dispositions below are
+applied to the embedded SaaS dataset (`internal/urlcat/default_categories.json`);
+`EvaluateReadiness` now reports `Ready == true` with zero conflicts. The pinned
+regression test `TestSourceDatasetReadiness` asserts publication-readiness.
 
 > **Scope:** dataset-source reconciliation only. No runtime wiring, no F3a/F3b/F5,
 > no engine change, no Sigstore/protocol change, no publication.
@@ -252,20 +251,34 @@ F–M (the recommendation is the default if you approve without changes).
 
 ---
 
-## 5. Projected post-resolution readiness
+## 5. Applied result (matches projection)
 
-Assuming every recommendation is accepted:
+Measured after applying the approved dispositions (`EvaluateReadiness` on the
+edited dataset):
 
-| Metric | Current | Projected | Δ |
-|---|---|---|---|
-| Invalid hosts | 4 | **0** | −4 |
-| Multi-category hosts | 32 | **0** | −32 |
-| Suffix conflicts | 6 | **0** | −6 |
-| Category-name / structural | 0 / 0 | 0 / 0 | 0 |
-| Unique valid hosts | 625 | **≈625** | ≈0 |
-| Raw entries | 662 | **≈625** | −37 |
-| Categories | 21 | 21 | 0 |
-| **`Ready`** | **false** | **true** | ✅ |
+| Metric | Before | Projected | **Applied (actual)** | Δ |
+|---|---|---|---|---|
+| Invalid hosts | 4 | 0 | **0** | −4 |
+| Multi-category hosts | 32 | 0 | **0** | −32 |
+| Suffix conflicts | 6 | 0 | **0** | −6 |
+| Category-name / structural | 0 / 0 | 0 / 0 | **0 / 0** | 0 |
+| Unique valid hosts | 625 | ≈625 | **625** | 0 |
+| Raw entries | 662 | ≈625 | **625** | −37 |
+| Categories | 21 | 21 | **21** | 0 |
+| **`Ready`** | **false** | true | **true** | ✅ |
+
+Raw == unique (625) → **every host is in exactly one category**; all 625 entries are
+canonical under `NormalizeHost`. The applied result **matches the projection
+exactly**.
+
+### Deviation from the original §4 recommendation
+
+- **`elastic.co` → Security Tools** (not `Analytics`). §4 originally recommended
+  `Analytics`; the owner's explicit "security-oriented" instruction for
+  Elastic/Splunk/SonarQube governs, so all three are **Security Tools**. This is the
+  only deviation from the §4 recommendation table; it has **no** readiness/breadth
+  impact (a specific host, no children) — purely a taxonomy choice. Flip to Analytics
+  is a one-line change if desired.
 
 Unique-host arithmetic: −1 `amazon.com` +1 `www.amazon.com` (replace) · +1
 `www.nhs.uk` (replaces invalid `nhs.uk`) · −1 `copilot.github.com` (remove) · path
