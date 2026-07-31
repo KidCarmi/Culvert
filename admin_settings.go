@@ -250,6 +250,9 @@ func applyAdminSecurity(s *AdminSettings) {
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
 	if s.SyslogAddr != "" {
+		// Record intent even if the connect fails so checkSyslogFeed surfaces a
+		// silently-down SIEM feed (see syslogConfiguredAddr).
+		syslogConfiguredAddr = s.SyslogAddr
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err == nil {
 			syslogConfigured = s.SyslogAddr
 		}
