@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,6 +154,50 @@ func TestCheckStorage_RuntimeFailureOutranksBootProbe(t *testing.T) {
 	// The boot probe itself is untouched — the two signals stay distinct.
 	if got := storageWritability(); got != storageStateWritable {
 		t.Errorf("boot-probe cache = %q, want it left at writable (checkStorage must not re-probe)", got)
+	}
+}
+
+// TestStorageWriteFailure_NeverLeaksAbsolutePaths pins the redaction boundary.
+//
+// Regression: the first version of this change put AtomicWrite's raw error
+// text into the storage_path row of the operator contract. That endpoint is
+// VIEWER-role, and its standing guardrail (TestApiDiagnostics_NoSensitiveValues)
+// forbids raw filesystem paths — so on a real appliance, the first failed
+// durable write would have handed every viewer the data-directory layout.
+// The cause must survive; the path must not.
+func TestStorageWriteFailure_NeverLeaksAbsolutePaths(t *testing.T) {
+	withCachedStorageState(t)
+	captureStorageWriteAlerts(t)
+
+	// Mirror the production shape that triggered it: a file under /data.
+	dir := filepath.Join(t.TempDir(), "data", "config_versions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(dir, "missing-subdir", "v9.json")
+	if err := fileutil.AtomicWrite(target, []byte("{}"), 0o600); err == nil {
+		t.Fatal("AtomicWrite unexpectedly succeeded")
+	}
+
+	snap := storageWriteFailures()
+	if strings.Contains(snap.Err, dir) {
+		t.Errorf("recorded error still carries the directory %q: %q", dir, snap.Err)
+	}
+	if strings.Contains(snap.Path, string(filepath.Separator)) {
+		t.Errorf("recorded path %q is not a bare base name", snap.Path)
+	}
+	// The cause must still be actionable: the file and the errno survive.
+	if !strings.Contains(snap.Err, "v9.json") {
+		t.Errorf("redaction removed the file name too: %q", snap.Err)
+	}
+	if !strings.Contains(snap.Err, "no such file or directory") {
+		t.Errorf("redaction removed the errno: %q", snap.Err)
+	}
+
+	// End-to-end: the rendered contract row carries no separator-prefixed path.
+	ck := checkStorage()
+	if strings.Contains(ck.Message, dir) {
+		t.Errorf("storage_path message leaked the directory: %q", ck.Message)
 	}
 }
 

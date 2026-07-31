@@ -96,15 +96,23 @@ func init() {
 // so it does memory-only work and hands the alert off to a goroutine.
 func noteStorageWriteFailure(path string, err error) {
 	base := filepath.Base(path)
-	// CWE-117: the path and the error text both embed admin-configurable store
-	// paths. Sanitise ONCE here, at the point the values enter shared state, so
-	// every downstream sink (log line, alert detail, operator-contract message,
-	// rollback API response) is fed already-clean text. sanitizeLog is the
-	// project-standard barrier CodeQL recognises.
+	// Two barriers applied ONCE here, at the point the values enter shared
+	// state, so every downstream sink (log line, alert detail,
+	// operator-contract message, rollback API response) is fed clean text:
+	//
+	//  1. CWE-117 — sanitizeLog is the project-standard control-character
+	//     barrier CodeQL recognises.
+	//  2. Path redaction — the operator contract (/api/diagnostics) is a
+	//     VIEWER-role surface with a standing no-sensitive-values guardrail
+	//     that forbids raw filesystem paths (diagnostics_test.go's
+	//     TestApiDiagnostics_NoSensitiveValues). AtomicWrite's error text
+	//     embeds the absolute target and temp paths, so reporting the cause
+	//     verbatim would leak the data-directory layout to every viewer the
+	//     moment a write failed. Only base names survive.
 	safeBase := sanitizeLog(base)
 	safeErr := ""
 	if err != nil {
-		safeErr = sanitizeLog(err.Error())
+		safeErr = sanitizeLog(redactWritePath(err.Error(), path))
 	}
 	now := time.Now()
 
@@ -140,6 +148,30 @@ func noteStorageWriteFailure(path string, err error) {
 	}
 	fireStorageWriteAlert(fmt.Sprintf("durable write to %s failed (%d failures since boot): %s",
 		safeBase, total, safeErr))
+}
+
+// redactWritePath strips the directory prefix from every occurrence of the
+// failing path inside msg, leaving base names only.
+//
+// AtomicWrite's error text names both the target and the temp file it created
+// beside it — e.g.
+//
+//	atomic write /data/config_versions/v9.json: create temp: open
+//	/data/config_versions/v9.json.tmp.24: no such file or directory
+//
+// Both live in the same directory, so removing that one prefix redacts every
+// path in the message while preserving the operator-actionable part (which
+// file, which syscall, which errno). Applied at the recording boundary, not at
+// each sink, so a future consumer of the record cannot reintroduce the leak.
+func redactWritePath(msg, path string) string {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." || dir == string(filepath.Separator) {
+		return msg
+	}
+	msg = strings.ReplaceAll(msg, dir+string(filepath.Separator), "")
+	// A trailing reference to the bare directory (no separator) can remain,
+	// e.g. a mkdir/permission error naming the parent.
+	return strings.ReplaceAll(msg, dir, "")
 }
 
 // storageWriteSnapshot is a consistent read of the failure record.
